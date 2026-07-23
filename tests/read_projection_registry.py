@@ -554,6 +554,10 @@ ALLOWLIST: "dict[str, str]" = {
         "set[tuple[str,str]] (username, filename) membership keys — "
         "scalar set, no row projection; fake<->PG semantics pinned by "
         "mirrored tests in test_fakes.py + test_pipeline_db.py",
+    "get_retained_failure_paths":
+        "set[str] retained paths — scalar set, no row projection; "
+        "measurement-failure and quarantine semantics are pinned by mirrored "
+        "tests in test_fakes.py + test_pipeline_db.py",
     "get_recent_successful_uploader":
         "str | None username — scalar, no row projection",
     "get_request_current_evidence_id":

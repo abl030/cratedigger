@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import ssl
+import subprocess
 import tempfile
 import unittest
 import urllib.error
@@ -93,9 +94,21 @@ class TestRepairMp3Headers(unittest.TestCase):
 
 class TestValidateAudio(unittest.TestCase):
 
-    def test_ffmpeg_uses_audio_only_map(self):
-        """Ensure ffmpeg decodes only audio streams, ignoring embedded art."""
+    def test_disabled_mode_is_explicitly_skipped_without_touching_disk(self):
         from lib.util import validate_audio
+
+        with patch("lib.util.sp.run") as mock_run:
+            result = validate_audio("/path/does/not/exist", "off")
+
+        mock_run.assert_not_called()
+        self.assertTrue(result.valid)
+        self.assertEqual(result.report.outcome, "skipped")
+        self.assertEqual(result.report.files_checked, 0)
+        self.assertEqual(result.report.diagnostics, [])
+
+    def test_ffmpeg_uses_strict_audio_only_policy(self):
+        """The validator maps only audio and counts every decoder failure."""
+        from lib.util import build_audio_validation_argv, validate_audio
         tmpdir = tempfile.mkdtemp()
         try:
             open(os.path.join(tmpdir, "track.flac"), "w").close()
@@ -103,48 +116,90 @@ class TestValidateAudio(unittest.TestCase):
                 mock_run.return_value = MagicMock(returncode=0, stderr="")
                 validate_audio(tmpdir)
                 call_args = mock_run.call_args[0][0]
-                # Must have -map 0:a to skip non-audio streams
-                self.assertIn("-map", call_args)
-                map_idx = call_args.index("-map")
-                self.assertEqual(call_args[map_idx + 1], "0:a")
+                self.assertEqual(
+                    call_args,
+                    build_audio_validation_argv(
+                        os.path.join(tmpdir, "track.flac"),
+                    ),
+                )
+                self.assertIn("-max_error_rate", call_args)
+                self.assertEqual(
+                    call_args[call_args.index("-max_error_rate") + 1],
+                    "0",
+                )
+                self.assertIn("-err_detect:a", call_args)
+                self.assertNotIn("-xerror", call_args)
+                self.assertEqual(
+                    call_args[call_args.index("-map") + 1],
+                    "0:a",
+                )
+                self.assertIn("-vn", call_args)
+                self.assertIn("-sn", call_args)
+                self.assertIn("-dn", call_args)
+                self.assertEqual(
+                    call_args[call_args.index("-map_metadata") + 1],
+                    "-1",
+                )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-    def test_ffmpeg_retest_after_md5_fix_uses_audio_only(self):
-        """The MD5-fix retest path should also use -map 0:a."""
+    def test_validator_never_runs_flac_or_mutates_unset_md5_source(self):
+        """FLAC metadata is outside the audio-integrity boundary."""
         from lib.util import validate_audio
         tmpdir = tempfile.mkdtemp()
         try:
-            open(os.path.join(tmpdir, "track.flac"), "w").close()
-            first_call = MagicMock(returncode=1, stderr="cannot check MD5 signature")
-            fix_call = MagicMock(returncode=0, stderr="")
-            retest_call = MagicMock(returncode=0, stderr="")
-            with patch("lib.util.sp.run", side_effect=[first_call, fix_call, retest_call]):
-                validate_audio(tmpdir)
-            # Third call is the retest — check it has -map 0:a
-            with patch("lib.util.sp.run", side_effect=[first_call, fix_call, retest_call]) as mock_run:
-                validate_audio(tmpdir)
-                retest_args = mock_run.call_args_list[2][0][0]
-                self.assertIn("-map", retest_args)
-                map_idx = retest_args.index("-map")
-                self.assertEqual(retest_args[map_idx + 1], "0:a")
-        finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
-    def test_flac_md5_repair_still_runs_when_ffmpeg_exits_zero(self):
-        """FLAC MD5 repair is driven by the stderr signature, not exit status."""
-        from lib.util import validate_audio
-        tmpdir = tempfile.mkdtemp()
-        try:
-            open(os.path.join(tmpdir, "track.flac"), "w").close()
-            first_call = MagicMock(returncode=0, stderr="cannot check MD5 signature")
-            fix_call = MagicMock(returncode=0, stderr="")
-            retest_call = MagicMock(returncode=0, stderr="")
-            with patch("lib.util.sp.run", side_effect=[first_call, fix_call, retest_call]) as mock_run:
+            path = os.path.join(tmpdir, "track.flac")
+            original = b"fLaC\x00\x00\x00\x22" + (b"\x00" * 34)
+            with open(path, "wb") as stream:
+                stream.write(original)
+            with patch("lib.util.sp.run") as mock_run:
+                mock_run.return_value = MagicMock(
+                    returncode=0,
+                    stderr="cannot check MD5 signature",
+                )
                 result = validate_audio(tmpdir)
             self.assertTrue(result.valid)
-            self.assertEqual(mock_run.call_count, 3)
-            self.assertEqual(mock_run.call_args_list[1][0][0][0], "flac")
+            self.assertEqual(result.report.diagnostics, [])
+            self.assertEqual(mock_run.call_count, 1)
+            self.assertEqual(mock_run.call_args[0][0][0], "ffmpeg")
+            with open(path, "rb") as stream:
+                self.assertEqual(stream.read(), original)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_exit_69_is_typed_decode_error_with_bounded_audit(self):
+        from lib.util import validate_audio
+        tmpdir = tempfile.mkdtemp()
+        try:
+            path = os.path.join(tmpdir, "track.flac")
+            with open(path, "wb") as stream:
+                stream.write(b"readable source")
+            stderr = "decode_frame() failed\n" + ("x" * 5000)
+            with patch("lib.util.sp.run") as mock_run:
+                mock_run.return_value = MagicMock(
+                    returncode=69,
+                    stderr=stderr,
+                )
+                with self.assertLogs(
+                    "cratedigger",
+                    level="WARNING",
+                ) as captured:
+                    result = validate_audio(tmpdir)
+            self.assertFalse(result.valid)
+            self.assertEqual(result.report.outcome, "audio_corrupt")
+            diagnostic = result.report.diagnostics[0]
+            self.assertEqual(diagnostic.category, "decode_error")
+            self.assertEqual(diagnostic.return_code, 69)
+            self.assertEqual(diagnostic.stderr_bytes, len(stderr.encode()))
+            self.assertLessEqual(
+                len(diagnostic.stderr_excerpt.encode()),
+                2048,
+            )
+            self.assertTrue(diagnostic.stderr_truncated)
+            self.assertEqual(len(diagnostic.stderr_sha256), 64)
+            self.assertEqual(len(captured.output), 1)
+            self.assertNotIn("decode_frame", captured.output[0])
+            self.assertNotIn("\n", captured.output[0])
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -163,6 +218,7 @@ class TestValidateAudio(unittest.TestCase):
                 result = validate_audio(tmpdir)
             self.assertTrue(result.valid)
             self.assertEqual(result.failed_files, [])
+            self.assertEqual(result.report.diagnostics, [])
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -179,7 +235,7 @@ class TestValidateAudio(unittest.TestCase):
             bad = MagicMock(returncode=1, stderr="Header missing")
 
             def side_effect(cmd, **kw):
-                filepath = cmd[4]  # ffmpeg -v error -i <filepath> ...
+                filepath = cmd[cmd.index("-i") + 1]
                 if os.path.basename(filepath) == "bad.mp3":
                     return bad
                 return good
@@ -191,17 +247,220 @@ class TestValidateAudio(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_positive_failure_with_readable_source_is_bad_audio(self):
+        from lib.util import validate_audio
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "track.flac")
+            with open(path, "wb") as stream:
+                stream.write(b"readable")
+            with patch("lib.util.sp.run") as mock_run:
+                mock_run.return_value = MagicMock(
+                    returncode=1,
+                    stderr="Invalid data found when processing input",
+                )
+                result = validate_audio(tmpdir)
+
+        self.assertEqual(result.report.outcome, "audio_corrupt")
+        self.assertEqual(
+            result.report.diagnostics[0].category,
+            "ffmpeg_failed_unclassified",
+        )
+
+    def test_missing_ffmpeg_is_measurement_failure_not_clean_audio(self):
+        from lib.util import validate_audio
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, "track.flac"), "wb") as stream:
+                stream.write(b"readable")
+            with patch("lib.util.sp.run", side_effect=FileNotFoundError):
+                result = validate_audio(tmpdir)
+
+        self.assertFalse(result.valid)
+        self.assertTrue(result.measurement_failed)
+        self.assertEqual(result.report.outcome, "measurement_failed")
+        self.assertEqual(
+            result.report.diagnostics[0].category,
+            "process_unavailable",
+        )
+
+    def test_negative_signal_is_measurement_failure(self):
+        from lib.util import validate_audio
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, "track.flac"), "wb") as stream:
+                stream.write(b"readable")
+            with patch("lib.util.sp.run") as mock_run:
+                mock_run.return_value = MagicMock(
+                    returncode=-9,
+                    stderr="",
+                )
+                result = validate_audio(tmpdir)
+
+        self.assertTrue(result.measurement_failed)
+        self.assertEqual(
+            result.report.diagnostics[0].category,
+            "process_interrupted",
+        )
+
+    def test_timeout_on_readable_source_is_bad_audio(self):
+        from lib.util import validate_audio
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, "track.flac"), "wb") as stream:
+                stream.write(b"readable")
+            timeout = subprocess.TimeoutExpired(
+                ["ffmpeg"],
+                300,
+                stderr=b"decoder stalled",
+            )
+            with patch("lib.util.sp.run", side_effect=timeout):
+                result = validate_audio(tmpdir)
+
+        self.assertEqual(result.report.outcome, "audio_corrupt")
+        self.assertEqual(
+            result.report.diagnostics[0].category,
+            "decode_timeout",
+        )
+
+    def test_read_failure_is_measurement_failure(self):
+        from lib.util import validate_audio
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "track.flac")
+            with open(path, "wb") as stream:
+                stream.write(b"readable")
+            read_probe = MagicMock(side_effect=PermissionError("denied"))
+            with patch("lib.util.sp.run") as mock_run:
+                result = validate_audio(tmpdir, read_probe=read_probe)
+
+        mock_run.assert_not_called()
+        self.assertTrue(result.measurement_failed)
+        self.assertEqual(
+            result.report.diagnostics[0].category,
+            "read_error",
+        )
+
+    def test_non_regular_audio_path_is_measurement_failure_without_blocking(self):
+        from lib.util import validate_audio
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.mkfifo(os.path.join(tmpdir, "track.flac"))
+            with patch("lib.util.sp.run") as mock_run:
+                result = validate_audio(tmpdir)
+
+        mock_run.assert_not_called()
+        self.assertTrue(result.measurement_failed)
+        self.assertEqual(
+            result.report.diagnostics[0].category,
+            "read_error",
+        )
+
+    def test_read_failure_after_positive_exit_prevents_peer_blame(self):
+        from lib.util import _source_snapshot, validate_audio
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "track.flac")
+            with open(path, "wb") as stream:
+                stream.write(b"readable")
+            snapshot = _source_snapshot(path)
+            read_probe = MagicMock(
+                side_effect=[snapshot, PermissionError("read lost")],
+            )
+            with patch("lib.util.sp.run") as mock_run:
+                mock_run.return_value = MagicMock(
+                    returncode=69,
+                    stderr="decode failed",
+                )
+                result = validate_audio(tmpdir, read_probe=read_probe)
+
+        self.assertTrue(result.measurement_failed)
+        self.assertEqual(result.report.files_failed, 0)
+        self.assertEqual(
+            result.report.diagnostics[0].category,
+            "read_error",
+        )
+
+    def test_source_change_during_success_is_measurement_failure(self):
+        from lib.util import validate_audio
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "track.flac")
+            with open(path, "wb") as stream:
+                stream.write(b"readable")
+
+            def mutate_source(_cmd, **_kwargs):
+                with open(path, "ab") as stream:
+                    stream.write(b" changed")
+                return MagicMock(returncode=0, stderr="")
+
+            with patch("lib.util.sp.run", side_effect=mutate_source):
+                result = validate_audio(tmpdir)
+
+        self.assertTrue(result.measurement_failed)
+        self.assertEqual(
+            result.report.diagnostics[0].category,
+            "source_changed",
+        )
+
+    def test_audio_file_set_change_is_measurement_failure(self):
+        from lib.util import validate_audio
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "track.flac")
+            with open(path, "wb") as stream:
+                stream.write(b"readable")
+
+            def add_track(_cmd, **_kwargs):
+                with open(
+                    os.path.join(tmpdir, "late.flac"),
+                    "wb",
+                ) as stream:
+                    stream.write(b"late")
+                return MagicMock(returncode=0, stderr="")
+
+            with patch("lib.util.sp.run", side_effect=add_track):
+                result = validate_audio(tmpdir)
+
+        self.assertTrue(result.measurement_failed)
+        self.assertEqual(
+            result.report.diagnostics[0].category,
+            "source_changed",
+        )
+
+    def test_album_diagnostics_are_bounded_without_losing_failed_paths(self):
+        from lib.util import validate_audio
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for index in range(18):
+                with open(
+                    os.path.join(tmpdir, f"{index:02d}.flac"),
+                    "wb",
+                ) as stream:
+                    stream.write(b"readable")
+            with (
+                patch("lib.util.sp.run") as mock_run,
+                self.assertLogs("cratedigger", level="WARNING"),
+            ):
+                mock_run.return_value = MagicMock(
+                    returncode=1,
+                    stderr="decoder failed",
+                )
+                result = validate_audio(tmpdir)
+
+        self.assertEqual(result.report.files_failed, 18)
+        self.assertEqual(len(result.report.diagnostics), 16)
+        self.assertEqual(result.report.omitted_diagnostics, 2)
+        self.assertEqual(len(result.failed_files), 18)
+
 
 class TestValidateAudioStderrPolicy(unittest.TestCase):
-    """#251 regressions: stderr is informational; only ffmpeg rc != 0 rejects.
+    """#251 regressions: exit-zero stderr has no policy or audit meaning.
 
-    ffmpeg's exit code is the authoritative signal that the audio stream failed
-    to decode. Demuxer/parser warnings about metadata, attached pictures, or
-    recoverable frame-level glitches are emitted to stderr but ffmpeg still
-    returns rc=0 — those albums decode fine and must not be flagged as
-    ``audio_corrupt``. Each false-positive case below is sourced from issue
-    #251's matrix; the real-corruption cases pair them with documented
-    rc != 0 stderr we MUST still reject.
+    Demuxer/parser warnings about metadata and attached pictures can be emitted
+    while FFmpeg returns zero; they must be discarded. Positive exits on
+    stable readable bytes are bad audio. Negative signal exits are separately
+    covered as measurement failures.
     """
 
     # (description, returncode, stderr) — rc=0 cases must produce corrupt_files=[]
@@ -238,7 +497,7 @@ class TestValidateAudioStderrPolicy(unittest.TestCase):
         ),
     ]
 
-    # (description, returncode, stderr) — rc != 0 cases MUST still reject
+    # (description, returncode, stderr) — positive exits MUST still reject
     REAL_CORRUPTION_CASES = [
         (
             "invalid_sync_code_decode_failure",
@@ -298,6 +557,143 @@ class TestValidateAudioStderrPolicy(unittest.TestCase):
                     len(result.failed_files), 1,
                     f"{desc}: expected one failed file",
                 )
+
+
+class TestAudioValidationWireBoundary(unittest.TestCase):
+
+    def test_report_round_trips_every_diagnostic_field(self):
+        import msgspec
+        from lib.quality import (
+            AudioToolDiagnostic,
+            AudioValidationReport,
+        )
+
+        report = AudioValidationReport(
+            tool_version="ffmpeg version 8.1.1",
+            outcome="audio_corrupt",
+            files_checked=18,
+            files_failed=17,
+            diagnostics=[
+                AudioToolDiagnostic(
+                    relative_path="CD1/01.flac",
+                    category="decode_error",
+                    return_code=69,
+                    stderr_excerpt="decode_frame() failed",
+                    stderr_bytes=4096,
+                    stderr_sha256="a" * 64,
+                    stderr_truncated=True,
+                ),
+            ],
+            omitted_diagnostics=16,
+        )
+
+        decoded = msgspec.json.decode(msgspec.json.encode(report))
+        restored = msgspec.convert(decoded, type=AudioValidationReport)
+
+        self.assertEqual(restored, report)
+
+    def test_report_coherence_checker_rejects_failure_on_pass(self):
+        from lib.quality import (
+            AudioToolDiagnostic,
+            AudioValidationReport,
+            validate_audio_validation_report,
+        )
+
+        known_bad = AudioValidationReport(
+            outcome="passed",
+            files_checked=1,
+            diagnostics=[
+                AudioToolDiagnostic(
+                    relative_path="01.flac",
+                    category="decode_error",
+                ),
+            ],
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "passed audio validation carries failure state",
+        ):
+            validate_audio_validation_report(known_bad)
+
+    def test_legacy_unrecorded_default_does_not_fabricate_a_pass(self):
+        from lib.quality import (
+            legacy_unrecorded_audio_validation_report,
+            validate_audio_validation_report,
+        )
+
+        report = legacy_unrecorded_audio_validation_report()
+
+        self.assertEqual(report.outcome, "legacy_unrecorded")
+        self.assertEqual(report.policy_id, "pre-audio-integrity-v2")
+        self.assertEqual(report.tool, "legacy")
+        self.assertEqual(report.files_checked, 0)
+        self.assertEqual(report.diagnostics, [])
+        validate_audio_validation_report(report)
+
+    def test_legacy_failure_accepts_truthful_unknown_checked_count(self):
+        from lib.quality import (
+            AudioToolDiagnostic,
+            AudioValidationReport,
+            validate_audio_validation_report,
+        )
+
+        report = AudioValidationReport(
+            policy_id="pre-audio-integrity-v2",
+            tool="legacy",
+            outcome="legacy_failure",
+            files_checked=0,
+            files_failed=1,
+            diagnostics=[
+                AudioToolDiagnostic(
+                    relative_path="",
+                    category="legacy_failure",
+                    stderr_excerpt="historical scalar diagnostic",
+                ),
+            ],
+        )
+
+        validate_audio_validation_report(report)
+
+    def test_measurement_failure_is_not_projected_as_corrupt_audio(self):
+        from lib.config import CratediggerConfig
+        from lib.measurement import measure_preimport_state
+        from lib.quality import (
+            AudioToolDiagnostic,
+            AudioValidationMeasurementError,
+            AudioValidationReport,
+            AudioValidationResult,
+        )
+
+        report = AudioValidationReport(
+            outcome="measurement_failed",
+            diagnostics=[
+                AudioToolDiagnostic(
+                    relative_path="01.flac",
+                    category="read_error",
+                    stderr_excerpt="permission denied",
+                ),
+            ],
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, "01.flac"), "wb") as stream:
+                stream.write(b"readable")
+            with patch(
+                "lib.measurement.validate_audio",
+                return_value=AudioValidationResult(report),
+            ), self.assertRaises(
+                AudioValidationMeasurementError,
+            ) as raised:
+                measure_preimport_state(
+                    path=tmpdir,
+                    mb_release_id="release-id",
+                    label="Artist - Album",
+                    download_filetype="flac",
+                    download_min_bitrate_bps=None,
+                    download_is_vbr=None,
+                    cfg=CratediggerConfig(audio_check_mode="normal"),
+                )
+
+        self.assertIs(raised.exception.report, report)
 
 
 class TestTriggerPlexScan(unittest.TestCase):

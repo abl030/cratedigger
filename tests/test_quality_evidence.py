@@ -38,7 +38,11 @@ from lib.quality_evidence import (
     snapshot_audio_files,
 )
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_album_quality_evidence, make_request_row
+from tests.helpers import (
+    make_album_quality_evidence,
+    make_audio_corrupt_validation_report,
+    make_request_row,
+)
 
 
 class TestQualityEvidenceConstruction(unittest.TestCase):
@@ -171,11 +175,13 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         self.assertEqual(result.status, "empty_fileset")
 
     def test_measurement_only_reject_evidence_has_no_target_policy(self):
+        report = make_audio_corrupt_validation_report("01.mp3")
         result = evidence_from_measurement(
             mb_release_id="mb-early-reject",
             source_path=self.root,
             measurement=PreimportMeasurement(
                 audio_corrupt=True,
+                audio_validation=report,
                 corrupt_files=["01.mp3"],
                 folder_layout="flat",
                 audio_file_count=2,
@@ -189,6 +195,47 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         assert result.evidence is not None
         self.assertIsNone(result.evidence.target_format)
         self.assertIsNone(result.evidence.target_is_cbr)
+
+    def test_corrupt_path_matching_never_falls_back_to_duplicate_basename(self):
+        """Only the exact disc-relative path gets decode_ok=false."""
+        files = [
+            AlbumQualityEvidenceFile(
+                relative_path=f"CD{disc}/01.flac",
+                size_bytes=disc,
+                mtime_ns=disc,
+                extension="flac",
+                container="flac",
+                codec="flac",
+            )
+            for disc in (1, 2)
+        ]
+        result = evidence_from_measurement(
+            mb_release_id="mb-duplicate-basenames",
+            source_path=self.root,
+            measurement=PreimportMeasurement(
+                audio_corrupt=True,
+                audio_validation=make_audio_corrupt_validation_report(
+                    "CD2/01.flac",
+                    files_checked=2,
+                ),
+                corrupt_files=["CD2/01.flac"],
+                folder_layout="nested",
+                audio_file_count=2,
+                filetype_band="flac",
+                min_bitrate_kbps=900,
+            ),
+            files=files,
+        )
+
+        self.assertEqual(result.status, "ready")
+        assert result.evidence is not None
+        self.assertEqual(
+            {
+                file.relative_path: file.decode_ok
+                for file in result.evidence.files
+            },
+            {"CD1/01.flac": True, "CD2/01.flac": False},
+        )
 
     def test_current_backfill_does_not_seed_request_scalar_proof(self):
         db = FakePipelineDB()

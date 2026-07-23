@@ -597,13 +597,26 @@ class TestMeasurePreimportState(unittest.TestCase):
         short-circuit, but the audio facts must be intact."""
         from lib.config import CratediggerConfig
         from lib.measurement import measure_preimport_state
+        from lib.quality import AudioToolDiagnostic, AudioValidationReport
         from lib.util import AudioValidationResult
 
         db = FakePipelineDB()
         cfg = CratediggerConfig(audio_check_mode="normal")
         bad_result = AudioValidationResult(
-            valid=False, error="decode failed",
-            failed_files=[("track01.mp3", "decode error")],
+            AudioValidationReport(
+                outcome="audio_corrupt",
+                files_checked=1,
+                files_failed=1,
+                diagnostics=[
+                    AudioToolDiagnostic(
+                        relative_path="track01.mp3",
+                        category="decode_error",
+                        return_code=69,
+                        stderr_excerpt="decode error",
+                    ),
+                ],
+            ),
+            failed_paths=("track01.mp3",),
         )
         with patch("lib.measurement.validate_audio", return_value=bad_result):
             m = measure_preimport_state(

@@ -20,6 +20,7 @@ from lib.pipeline_db.rows import (
     download_log_with_request_row,
     wrong_match_candidate_row,
 )
+from lib.dispatch.types import PostCommitQuarantineAudit
 
 # Canonical ``download_log.outcome`` taxonomy — the Python mirror of the
 # ``download_log_outcome_check`` CHECK constraint (latest definition:
@@ -70,6 +71,73 @@ class LatestDownloadSummary(TypedDict):
 
 class _DownloadLogMixin(_PipelineDBBase):
     """download_log audit rows and wrong-match bookkeeping."""
+
+    def get_retained_failure_paths(self) -> set[str]:
+        """Return source paths whose persisted failure audit requires retention.
+
+        ``measurement_failed`` means Cratedigger could not establish an audio
+        fact because the surrounding world failed (for example permissions,
+        a vanished path, or a tool/process failure).  The source is therefore
+        audit evidence, not an ordinary abandoned download, and the disk
+        reaper must never remove it.
+
+        A post-commit corrupt-audio quarantine audit is also retained.  This is
+        redundant after a successful move into ``failed_imports/`` but
+        load-bearing if the move failed and the only copy remains at staging.
+        There is intentionally no age or request-status filter: the persisted
+        terminal audit row is the retention authority for as long as it
+        exists.
+        """
+        cur = self._execute(
+            """
+            SELECT DISTINCT retained_path
+            FROM (
+                SELECT staged_path AS retained_path
+                FROM download_log
+                WHERE outcome = 'measurement_failed'
+                UNION ALL
+                SELECT validation_result->>'failed_path' AS retained_path
+                FROM download_log
+                WHERE validation_result ? 'post_commit_quarantine'
+            ) retained
+            WHERE retained_path IS NOT NULL
+              AND BTRIM(retained_path) <> ''
+            """,
+        )
+        return {str(row["retained_path"]) for row in cur.fetchall()}
+
+    def record_post_commit_quarantine(
+        self,
+        log_id: int,
+        audit: PostCommitQuarantineAudit,
+    ) -> bool:
+        """Attach the exact retained source/move result to one terminal row."""
+        failed_path = audit.quarantine_path or audit.source_path
+        cur = self._execute(
+            """
+            UPDATE download_log
+            SET validation_result = (
+                CASE
+                    WHEN jsonb_typeof(validation_result) = 'object'
+                    THEN validation_result
+                    ELSE '{}'::jsonb
+                END
+                || jsonb_build_object(
+                    'post_commit_quarantine',
+                    %s::jsonb
+                )
+                || jsonb_build_object('failed_path', %s::text)
+            )
+            WHERE id = %s
+            """,
+            (
+                msgspec.json.encode(audit).decode(),
+                failed_path,
+                log_id,
+            ),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
 
     def get_download_log_counts(self) -> DownloadLogCounts:
         """One-query aggregate: download_log totals plus found-search

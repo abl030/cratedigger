@@ -27,6 +27,7 @@ from lib.quality import (
     ImportResult,
     V0ProbeEvidence,
     VerifiedLosslessProof,
+    legacy_unrecorded_audio_validation_report,
 )
 
 if TYPE_CHECKING:
@@ -384,15 +385,10 @@ def _apply_measurement_facts_to_files(
     """
     if not measurement.corrupt_files:
         return files
-    corrupt_set = {os.path.basename(name) for name in measurement.corrupt_files}
-    # Also accept full relative paths if measurement reported them that way.
-    corrupt_set.update(measurement.corrupt_files)
+    corrupt_set = set(measurement.corrupt_files)
     out: list[AlbumQualityEvidenceFile] = []
     for f in files:
-        if (
-            f.relative_path in corrupt_set
-            or os.path.basename(f.relative_path) in corrupt_set
-        ):
+        if f.relative_path in corrupt_set:
             out.append(AlbumQualityEvidenceFile(
                 relative_path=f.relative_path,
                 size_bytes=f.size_bytes,
@@ -531,6 +527,11 @@ def evidence_from_import_result(
             neutral_v0_metric_from_probe(import_result.v0_probe)
         ),
         verified_lossless_proof=proof,
+        audio_validation=(
+            measurement.audio_validation
+            if measurement is not None
+            else None
+        ) or legacy_unrecorded_audio_validation_report(),
         audio_corrupt=audio_corrupt,
         audio_error=audio_error,
         folder_layout=folder_layout,
@@ -639,6 +640,7 @@ def evidence_from_measurement(
         lineage_version=4,
         v0_metric=None,
         verified_lossless_proof=None,
+        audio_validation=measurement.audio_validation,
         audio_corrupt=measurement.audio_corrupt,
         audio_error=measurement.audio_error,
         folder_layout=measurement.folder_layout,

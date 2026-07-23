@@ -20,6 +20,7 @@ from lib.quality import (
     AudioQualityMeasurement,
     QualityRankConfig,
     VerifiedLosslessProof,
+    legacy_unrecorded_audio_validation_report,
 )
 from lib.import_preview import (
     PREVIEW_VERDICT_EVIDENCE_READY,
@@ -49,7 +50,10 @@ from lib.wrong_match_cleanup_service import (
     cleanup_wrong_match,
 )
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_request_row
+from tests.helpers import (
+    make_audio_corrupt_validation_report,
+    make_request_row,
+)
 from web.classify import LogEntry, classify_log_entry
 
 
@@ -94,6 +98,11 @@ def _evidence(
 ) -> AlbumQualityEvidence:
     if files is None:
         files = _evidence_files(source)
+    if audio_corrupt and files:
+        files = [
+            msgspec.structs.replace(file, decode_ok=index != 0)
+            for index, file in enumerate(files)
+        ]
     return AlbumQualityEvidence(
         mb_release_id=mb_release_id,
         snapshot_fingerprint=snapshot_fingerprint(files),
@@ -112,6 +121,14 @@ def _evidence(
         codec="mp3",
         container="mp3",
         storage_format="MP3",
+        audio_validation=(
+            make_audio_corrupt_validation_report(
+                files[0].relative_path if files else "",
+                files_checked=max(1, len(files)),
+            )
+            if audio_corrupt
+            else legacy_unrecorded_audio_validation_report()
+        ),
         audio_corrupt=audio_corrupt,
         audio_file_count=len(files),
         filetype_band="mp3",

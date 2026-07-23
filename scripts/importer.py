@@ -10,7 +10,7 @@ import socket
 import sys
 import time
 from collections.abc import Callable
-from typing import Any, assert_never
+from typing import Any, Protocol, assert_never
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
@@ -24,7 +24,10 @@ from lib.dispatch import (
     DISPATCH_CODE_REQUEUED_FOR_PREVIEW,
     DispatchOutcome,
 )
-from lib.dispatch.types import PostCommitCleanup
+from lib.dispatch.types import (
+    PostCommitCleanup,
+    PostCommitQuarantineAudit,
+)
 from lib.download_processing import (
     Completed,
     CompletionDeferred,
@@ -68,13 +71,66 @@ def _job_result(outcome: DispatchOutcome) -> dict[str, Any]:
     }
 
 
-def _run_post_commit_cleanup(outcome: DispatchOutcome) -> dict[str, object] | None:
-    """Run narrow destructive convergence only after terminal acknowledgement."""
+class _PostCommitCleanupDB(Protocol):
+    """Narrow persistence seam used after the terminal transaction."""
+
+    def record_post_commit_quarantine(
+        self,
+        log_id: int,
+        audit: PostCommitQuarantineAudit,
+    ) -> bool: ...
+
+
+def _run_post_commit_cleanup(
+    db: _PostCommitCleanupDB,
+    outcome: DispatchOutcome,
+    *,
+    download_log_id: int | None = None,
+) -> dict[str, object] | None:
+    """Run narrow convergence only after terminal acknowledgement."""
     plan = outcome.post_commit_cleanup
     if plan is None:
         return None
 
     details: dict[str, object] = {}
+    if plan.audio_quarantine_source_path is not None:
+        if download_log_id is None:
+            details["audio_quarantine"] = {
+                "source_path": plan.audio_quarantine_source_path,
+                "moved": False,
+                "error": (
+                    "terminal download_log id unavailable; source retained "
+                    "at staging"
+                ),
+            }
+        else:
+            from lib.dispatch.quarantine import (
+                quarantine_corrupt_audio_source,
+            )
+
+            audit = quarantine_corrupt_audio_source(
+                source_path=plan.audio_quarantine_source_path,
+                quarantine_root=plan.audio_quarantine_root or "",
+            )
+            audit_payload = msgspec.to_builtins(audit)
+            assert isinstance(audit_payload, dict)
+            try:
+                audit_persisted = db.record_post_commit_quarantine(
+                    download_log_id,
+                    audit,
+                )
+            except Exception as exc:  # noqa: BLE001 - commit already stands
+                logger.exception(
+                    "Failed to persist post-commit audio quarantine audit"
+                )
+                audit_payload["audit_persisted"] = False
+                audit_payload["audit_error"] = (
+                    f"{type(exc).__name__}: {exc}"
+                )[:1024]
+            else:
+                audit_payload["audit_persisted"] = audit_persisted
+            details["audio_quarantine"] = audit_payload
+
     if plan.duplicate_guard_source_path is not None:
         try:
             from lib.duplicate_remove_guard import (
@@ -143,6 +199,23 @@ def _cleanup_failed_force_import(
     if force_payload is None:
         return None
     download_log_id, failed_path_hint = force_payload
+    cleanup_plan = outcome.post_commit_cleanup
+    if (
+        cleanup_plan is not None
+        and cleanup_plan.audio_quarantine_source_path is not None
+    ):
+        # Corrupt candidates are archival evidence. The post-commit
+        # quarantine either moved the source or left it in place and recorded
+        # why; both states must bypass Wrong Matches deletion.
+        return {
+            "success": True,
+            "download_log_id": download_log_id,
+            "failed_path_hint": failed_path_hint,
+            "outcome": "skipped_archival_audio_quarantine",
+            "skipped": True,
+            "dispatch_code": outcome.code,
+            "dispatch_message": outcome.message,
+        }
     if outcome.code != DISPATCH_CODE_QUALITY_PIPELINE_REJECTED:
         return {
             "success": False,
@@ -545,20 +618,39 @@ def _cleanup_committed_wrong_match_rejection(
     db: PipelineDB,
     job: ImportJob,
     download_log_id: int,
-    scenario: str | None,
+    outcome: DispatchOutcome,
+    *,
+    cleanup_wrong_match_fn: Callable[..., object] | None = None,
 ) -> None:
     """Run Wrong Matches convergence only after the terminal bundle commits."""
     from lib.wrong_match_policy import rejection_scenario_is_wrong_match_candidate
 
-    if not rejection_scenario_is_wrong_match_candidate(scenario):
+    cleanup_plan = outcome.post_commit_cleanup
+    archival_quarantine = (
+        cleanup_plan is not None
+        and cleanup_plan.audio_quarantine_source_path is not None
+    )
+    wrong_match_candidate = rejection_scenario_is_wrong_match_candidate(
+        outcome.post_commit_wrong_match_scenario
+    )
+    if not archival_quarantine and not wrong_match_candidate:
         return
     try:
-        from lib.wrong_match_cleanup_service import cleanup_wrong_match
-
         evidence_id = db.get_import_job_candidate_evidence_id(job.id)
         if evidence_id is not None:
             db.set_download_log_candidate_evidence(download_log_id, evidence_id)
-        cleanup_wrong_match(
+        if archival_quarantine:
+            # The source is now protected archival evidence, whether
+            # quarantine moved it or failed closed at the original path.
+            # Never hand either location to the independent Wrong Matches
+            # deletion reducer.
+            return
+        if cleanup_wrong_match_fn is None:
+            from lib.wrong_match_cleanup_service import cleanup_wrong_match
+
+            cleanup_wrong_match_fn = cleanup_wrong_match
+
+        cleanup_wrong_match_fn(
             db,
             download_log_id,
             ignore_import_job_id=job.id,
@@ -615,7 +707,11 @@ def process_claimed_job(
                 ))
             )
             terminal_job = terminal.job
-            post_commit_cleanup = _run_post_commit_cleanup(outcome)
+            post_commit_cleanup = _run_post_commit_cleanup(
+                db,
+                outcome,
+                download_log_id=terminal.download_log_id,
+            )
             if post_commit_cleanup is not None:
                 merged = db.merge_import_job_result(
                     job.id,
@@ -635,7 +731,7 @@ def process_claimed_job(
                 db,
                 job,
                 terminal.download_log_id,
-                outcome.post_commit_wrong_match_scenario,
+                outcome,
             )
             return terminal_job
         recovery = db.mark_import_job_recovery_required(
@@ -705,7 +801,11 @@ def process_claimed_job(
             ))
         )
         terminal_job = terminal.job
-        post_commit_cleanup = _run_post_commit_cleanup(outcome)
+        post_commit_cleanup = _run_post_commit_cleanup(
+            db,
+            outcome,
+            download_log_id=terminal.download_log_id,
+        )
         if post_commit_cleanup is not None:
             merged = db.merge_import_job_result(
                 job.id,
@@ -722,7 +822,7 @@ def process_claimed_job(
             db,
             job,
             terminal.download_log_id,
-            outcome.post_commit_wrong_match_scenario,
+            outcome,
         )
         return terminal_job
     recovery = db.mark_import_job_recovery_required(
@@ -740,7 +840,7 @@ def process_claimed_job(
     if failed is None:
         return None
     terminal_job = failed
-    post_commit_cleanup = _run_post_commit_cleanup(outcome)
+    post_commit_cleanup = _run_post_commit_cleanup(db, outcome)
     if post_commit_cleanup is not None:
         merged = db.merge_import_job_result(
             job.id,

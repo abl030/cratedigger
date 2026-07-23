@@ -26,6 +26,8 @@ from lib.quality import (
     AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
+    AudioToolDiagnostic,
+    AudioValidationReport,
     CodecRankBands,
     ConversionInfo,
     DisambiguationFailure,
@@ -40,6 +42,7 @@ from lib.quality import (
     VerifiedLosslessProof,
     V0ProbeEvidence,
     ValidationResult,
+    legacy_unrecorded_audio_validation_report,
 )
 from lib.quality_evidence import snapshot_fingerprint
 from lib.slskd_client import DownloadDirectory, DownloadUser, TransferSnapshot
@@ -148,6 +151,7 @@ def make_album_quality_evidence(
     current_enrichment_required: bool = False,
     audio_corrupt: bool = False,
     audio_error: str | None = None,
+    audio_validation: AudioValidationReport | None = None,
 ) -> AlbumQualityEvidence:
     """Build production-shaped active album-quality evidence.
 
@@ -188,6 +192,17 @@ def make_album_quality_evidence(
             spectral_subject=EVIDENCE_SUBJECT_INSTALLED,
             spectral_provenance=EVIDENCE_PROVENANCE_MEASURED,
         )
+    if audio_validation is None and audio_corrupt:
+        audio_validation = make_audio_corrupt_validation_report(
+            files[0].relative_path if files else "",
+            detail=audio_error or "synthetic decode failure",
+            files_checked=len(files),
+        )
+        if files:
+            files = [
+                msgspec.structs.replace(file, decode_ok=index != 0)
+                for index, file in enumerate(files)
+            ]
     return AlbumQualityEvidence(
         mb_release_id=mb_release_id,
         snapshot_fingerprint=snapshot_fingerprint(files),
@@ -213,8 +228,36 @@ def make_album_quality_evidence(
         on_disk_v0_research_attempted=on_disk_v0_research_attempted,
         current_enrichment_required=current_enrichment_required,
         verified_lossless_proof=verified_lossless_proof,
+        audio_validation=(
+            audio_validation
+            if audio_validation is not None
+            else legacy_unrecorded_audio_validation_report()
+        ),
         audio_corrupt=audio_corrupt,
         audio_error=audio_error,
+    )
+
+
+def make_audio_corrupt_validation_report(
+    relative_path: str,
+    *,
+    detail: str = "synthetic decode failure",
+    return_code: int = 69,
+    files_checked: int = 1,
+) -> AudioValidationReport:
+    """Build one production-shaped corrupt-audio report for tests."""
+    return AudioValidationReport(
+        outcome="audio_corrupt",
+        files_checked=files_checked,
+        files_failed=1,
+        diagnostics=[
+            AudioToolDiagnostic(
+                relative_path=relative_path,
+                category="decode_error",
+                return_code=return_code,
+                stderr_excerpt=detail,
+            ),
+        ],
     )
 
 
@@ -337,6 +380,12 @@ def build_parity_candidate_evidence(
         size_bytes=1, mtime_ns=1,
         extension=container, container=container, codec=codec,
     )]
+    audio_validation = legacy_unrecorded_audio_validation_report()
+    if audio_corrupt:
+        files = [msgspec.structs.replace(files[0], decode_ok=False)]
+        audio_validation = make_audio_corrupt_validation_report(
+            files[0].relative_path,
+        )
     # ``audio_file_count`` defaults to len(files) for the standard
     # parity scenarios. Tests covering empty_fileset explicitly pass
     # ``audio_file_count=0`` and override ``files`` separately.
@@ -351,6 +400,7 @@ def build_parity_candidate_evidence(
         container=container,
         storage_format=storage_format,
         v0_metric=v0_metric,
+        audio_validation=audio_validation,
         audio_corrupt=audio_corrupt,
         folder_layout=folder_layout,
         audio_file_count=(

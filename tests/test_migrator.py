@@ -30,6 +30,19 @@ from lib.migrator import (  # noqa: E402
 
 TEST_DSN: str = os.environ.get("TEST_DB_DSN") or ""
 
+LEGACY_UNRECORDED_AUDIO_VALIDATION_SQL = """
+jsonb_build_object(
+    'policy_id', 'pre-audio-integrity-v2',
+    'tool', 'legacy',
+    'tool_version', '',
+    'outcome', 'legacy_unrecorded',
+    'files_checked', 0,
+    'files_failed', 0,
+    'diagnostics', '[]'::jsonb,
+    'omitted_diagnostics', 0
+)
+"""
+
 
 def requires_postgres(cls):
     if not TEST_DSN:
@@ -715,12 +728,15 @@ class TestAlbumQualityEvidenceSchema(unittest.TestCase):
         # mb_release_id is NOT NULL with a length>0 CHECK after 021. The
         # empty string therefore triggers a CHECK violation.
         with self.assertRaises(psycopg2.errors.CheckViolation):
-            self._exec("""
+            self._exec(f"""
                 INSERT INTO album_quality_evidence (
                     mb_release_id, snapshot_fingerprint, source_path,
-                    measured_at, format, verified_lossless
+                    measured_at, format, verified_lossless, audio_validation
                 )
-                VALUES ('', 'fp', '', NOW(), 'mp3 v0', FALSE)
+                VALUES (
+                    '', 'fp', '', NOW(), 'mp3 v0', FALSE,
+                    {LEGACY_UNRECORDED_AUDIO_VALIDATION_SQL}
+                )
             """)
 
     def test_relational_file_rows_and_verified_proof_constraints(self):
@@ -736,27 +752,33 @@ class TestAlbumQualityEvidenceSchema(unittest.TestCase):
         try:
             # verified_lossless=TRUE without proof columns must still raise.
             with self.assertRaises(psycopg2.errors.CheckViolation):
-                self._exec("""
+                self._exec(f"""
                     INSERT INTO album_quality_evidence (
                         mb_release_id, snapshot_fingerprint, source_path,
-                        measured_at, format, verified_lossless
+                        measured_at, format, verified_lossless,
+                        audio_validation
                     )
-                    VALUES ('aqe-schema-mbid', 'fp-1', '/p/1', NOW(), 'flac', TRUE)
+                    VALUES (
+                        'aqe-schema-mbid', 'fp-1', '/p/1', NOW(), 'flac', TRUE,
+                        {LEGACY_UNRECORDED_AUDIO_VALIDATION_SQL}
+                    )
                 """)
 
-            self._exec("""
+            self._exec(f"""
                 INSERT INTO album_quality_evidence (
                     mb_release_id, snapshot_fingerprint, source_path,
                     measured_at, format,
                     verified_lossless, verified_lossless_provenance,
                     verified_lossless_source, verified_lossless_classifier,
-                    v0_avg_bitrate_kbps, v0_subject, v0_provenance
+                    v0_avg_bitrate_kbps, v0_subject, v0_provenance,
+                    audio_validation
                 )
                 VALUES (
                     'aqe-schema-mbid', 'fp-2', '/p/2', NOW(), 'flac',
                     TRUE, 'measured',
                     'lossless candidate', 'spectral+v0', 228,
-                    'source', 'measured'
+                    'source', 'measured',
+                    {LEGACY_UNRECORDED_AUDIO_VALIDATION_SQL}
                 )
             """)
             evidence_id = self._query(
@@ -803,11 +825,12 @@ class TestAlbumQualityEvidenceSchema(unittest.TestCase):
                         INSERT INTO album_quality_evidence (
                             mb_release_id, snapshot_fingerprint, source_path,
                             measured_at, format, lineage_version,
-                            {fact_columns}
+                            {fact_columns}, audio_validation
                         )
                         VALUES (
                             'aqe-two-axis-invalid', %s, '/p/invalid',
-                            NOW(), 'MP3', 4, %s, %s, %s
+                            NOW(), 'MP3', 4, %s, %s, %s,
+                            {LEGACY_UNRECORDED_AUDIO_VALIDATION_SQL}
                         )
                         """,
                         (fact_columns, *fact_values),
@@ -817,15 +840,17 @@ class TestAlbumQualityEvidenceSchema(unittest.TestCase):
         mbid = "aqe-two-axis-legacy"
         try:
             self._exec(
-                """
+                f"""
                 INSERT INTO album_quality_evidence (
                     mb_release_id, snapshot_fingerprint, source_path,
                     measured_at, format, lineage_version,
-                    v0_avg_bitrate_kbps, v0_subject, v0_provenance
+                    v0_avg_bitrate_kbps, v0_subject, v0_provenance,
+                    audio_validation
                 )
                 VALUES (
                     %s, 'legacy-fp', '/p/legacy', NOW(), 'MP3', 3,
-                    245, 'unknown-live-subject', 'unknown-live-provenance'
+                    245, 'unknown-live-subject', 'unknown-live-provenance',
+                    {LEGACY_UNRECORDED_AUDIO_VALIDATION_SQL}
                 )
                 """,
                 (mbid,),
@@ -958,14 +983,16 @@ class TestPreviewEvidenceFactsSchema(unittest.TestCase):
         )[0][0]
         try:
             with self.assertRaises(psycopg2.errors.CheckViolation):
-                self._exec("""
+                self._exec(f"""
                     INSERT INTO album_quality_evidence (
                         mb_release_id, snapshot_fingerprint, source_path,
-                        measured_at, format, verified_lossless, folder_layout
+                        measured_at, format, verified_lossless, folder_layout,
+                        audio_validation
                     )
                     VALUES (
                         'mig019-folder-mbid', 'fp-folder', '', NOW(), 'flac',
-                        FALSE, 'tree'
+                        FALSE, 'tree',
+                        {LEGACY_UNRECORDED_AUDIO_VALIDATION_SQL}
                     )
                 """)
         finally:
@@ -1064,17 +1091,18 @@ class TestPreviewEvidenceFactsSchema(unittest.TestCase):
                   AND audio_format = 'flac'
             """)
             bad_id = bad_id_rows[0][0]
-            self._exec("""
+            self._exec(f"""
                 INSERT INTO album_quality_evidence (
                     mb_release_id, snapshot_fingerprint, source_path,
                     measured_at, format,
                     verified_lossless, matched_bad_audio_hash_id,
-                    matched_bad_audio_hash_path
+                    matched_bad_audio_hash_path, audio_validation
                 )
                 VALUES (
                     'mig019-fk-mbid', 'fp-bad-hash', '', NOW(), 'flac',
                     FALSE, %s,
-                    '01 - Track.flac'
+                    '01 - Track.flac',
+                    {LEGACY_UNRECORDED_AUDIO_VALIDATION_SQL}
                 )
             """, (bad_id,))
             self._exec("DELETE FROM bad_audio_hashes WHERE id = %s", (bad_id,))
@@ -3666,13 +3694,15 @@ class TestQualityEvidenceLineageVersionMigration(unittest.TestCase):
         try:
             with conn.cursor() as cur:
                 with self.assertRaises(psycopg2.errors.CheckViolation):
-                    cur.execute("""
+                    cur.execute(f"""
                         INSERT INTO album_quality_evidence (
                             mb_release_id, snapshot_fingerprint,
-                            source_path, measured_at, lineage_version
+                            source_path, measured_at, lineage_version,
+                            audio_validation
                         ) VALUES (
                             'invalid-050', 'snapshot-invalid-050', '/invalid',
-                            NOW(), 2
+                            NOW(), 2,
+                            {LEGACY_UNRECORDED_AUDIO_VALIDATION_SQL}
                         )
                     """)
         finally:
@@ -4754,6 +4784,124 @@ class TestDropRequestImportedPathCurrentSchema(unittest.TestCase):
                 ])
         finally:
             conn.close()
+
+
+@requires_postgres
+class TestAudioValidationReportMigration(unittest.TestCase):
+    """Migration 064 backfills legacy truth without inventing a clean pass."""
+
+    def _copy_through(self, target: str, version: int) -> None:
+        for migration in discover_migrations(DEFAULT_MIGRATIONS_DIR):
+            if migration.version <= version:
+                shutil.copy2(migration.path, target)
+
+    def test_replays_pre064_rows_and_enforces_the_new_audit_shape(self) -> None:
+        name = "cratedigger_test_audio_validation_064"
+        dsn = _create_fresh_database(name)
+        try:
+            with tempfile.TemporaryDirectory() as migrations_dir:
+                self._copy_through(migrations_dir, 63)
+                apply_migrations(dsn, migrations_dir)
+
+                legacy_error = "x" * 600
+                conn = psycopg2.connect(dsn)
+                conn.autocommit = True
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            INSERT INTO album_quality_evidence (
+                                mb_release_id, snapshot_fingerprint,
+                                source_path, measured_at, audio_corrupt,
+                                audio_error
+                            ) VALUES
+                                (
+                                    'legacy-corrupt-064', 'fp-corrupt',
+                                    '/corrupt', NOW(), TRUE, %s
+                                ),
+                                (
+                                    'legacy-unknown-064', 'fp-unknown',
+                                    '/unknown', NOW(), FALSE, NULL
+                                )
+                            """,
+                            (legacy_error,),
+                        )
+                finally:
+                    conn.close()
+
+                self._copy_through(migrations_dir, 64)
+                applied = apply_migrations(dsn, migrations_dir)
+                self.assertEqual(
+                    [migration.version for migration in applied],
+                    [64],
+                )
+
+                conn = psycopg2.connect(dsn)
+                conn.autocommit = True
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            SELECT mb_release_id, audio_validation
+                            FROM album_quality_evidence
+                            ORDER BY mb_release_id
+                            """
+                        )
+                        reports = {
+                            mbid: report for mbid, report in cur.fetchall()
+                        }
+                        corrupt = reports["legacy-corrupt-064"]
+                        unknown = reports["legacy-unknown-064"]
+                        self.assertEqual(corrupt["outcome"], "legacy_failure")
+                        self.assertEqual(
+                            len(
+                                corrupt["diagnostics"][0][
+                                    "stderr_excerpt"
+                                ].encode("utf-8")
+                            ),
+                            512,
+                        )
+                        self.assertTrue(
+                            corrupt["diagnostics"][0]["stderr_truncated"]
+                        )
+                        self.assertEqual(
+                            unknown["outcome"],
+                            "legacy_unrecorded",
+                        )
+
+                        with self.assertRaises(
+                            psycopg2.errors.NotNullViolation
+                        ):
+                            cur.execute(
+                                """
+                                INSERT INTO album_quality_evidence (
+                                    mb_release_id, snapshot_fingerprint,
+                                    source_path, measured_at
+                                ) VALUES (
+                                    'missing-audit-064', 'fp-missing',
+                                    '/missing', NOW()
+                                )
+                                """
+                            )
+                        cur.execute(
+                            """
+                            SELECT indexname
+                            FROM pg_indexes
+                            WHERE schemaname = 'public'
+                              AND indexname =
+                                  'download_log_measurement_failed_staged_path_idx'
+                            """
+                        )
+                        self.assertEqual(
+                            cur.fetchone(),
+                            (
+                                "download_log_measurement_failed_staged_path_idx",
+                            ),
+                        )
+                finally:
+                    conn.close()
+        finally:
+            _drop_database(name)
 
 
 @requires_postgres

@@ -3852,9 +3852,8 @@ class TestFrontGateSourcePathYoutubeImport(unittest.TestCase):
         # Returns the payload path, not the active_download_state path.
         self.assertEqual(result, "/Incoming/auto-import/Artist - Album")
 
-    def test_automation_branch_is_independent_of_youtube_branch(self):
-        """Sanity: the automation branch still reads active_download_state.
-        The YT branch was added without altering automation behaviour."""
+    def test_automation_branch_uses_authoritative_current_path(self):
+        """Automation keeps using active_download_state, not YT payload."""
         from scripts import import_preview_worker
         from lib.import_queue import ImportJob, automation_import_dedupe_key
 
@@ -3883,20 +3882,11 @@ class TestFrontGateSourcePathYoutubeImport(unittest.TestCase):
             "payload": {},
         })
 
-        # The automation branch derives from active_download_state +
-        # canonical path computation. Patch out the canonical
-        # derivation to a deterministic value (we just want to prove
-        # the branch was taken, not retest the derivation logic).
-        with patch(
-            "scripts.import_preview_worker.derive_canonical_import_folder",
-            return_value="/derived/from/active_download_state",
-        ) as derive:
-            result = import_preview_worker._front_gate_source_path(
-                cast(Any, db), job,
-            )
+        result = import_preview_worker._front_gate_source_path(
+            cast(Any, db), job,
+        )
 
-        derive.assert_called_once()
-        self.assertEqual(result, "/derived/from/active_download_state")
+        self.assertEqual(result, "/slskd/Test Artist - Test Album")
 
     def test_youtube_job_malformed_payload_falls_through(self):
         """Malformed YT payload → front-gate returns None so the worker

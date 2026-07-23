@@ -46,6 +46,7 @@ from lib.import_queue import (
     youtube_import_payload,
 )
 from lib.quality import (
+    ActiveDownloadState,
     AlbumQualityEvidence,
     AudioQualityMeasurement,
     MeasurementFailure,
@@ -177,6 +178,7 @@ class PreviewFailureObservation:
     current_evidence: AlbumQualityEvidence | None
     expected_mbid: str
     expected_path: str
+    expected_failure_source_path: str
     expected_format: str
     expected_minimum: int
     expected_average: int
@@ -206,6 +208,9 @@ def assert_preview_failure_have_contract(
     detail = json.loads(raw_validation).get("detail")
     if not isinstance(detail, str) or not detail:
         raise AssertionError("terminal audit lost the diagnostic detail")
+    validation = json.loads(raw_validation)
+    if validation.get("source_path") != observation.expected_failure_source_path:
+        raise AssertionError("terminal audit lost the authoritative source path")
     if audit.get("beets_detail") != detail or audit.get("error_message") != detail:
         raise AssertionError("terminal failure sinks disagree on the diagnostic")
     preview_result = observation.preview_result
@@ -219,6 +224,8 @@ def assert_preview_failure_have_contract(
         or preview_result.get("detail") != detail
         or not isinstance(preview_failure, dict)
         or preview_failure.get("detail") != detail
+        or preview_failure.get("source_path")
+            != observation.expected_failure_source_path
     ):
         raise AssertionError("job preview result disagrees on the diagnostic")
 
@@ -392,6 +399,14 @@ def _run_world(world: PreviewFailureWorld) -> PreviewFailureObservation:
                     if world.job_type == IMPORT_JOB_AUTOMATION
                     else "unsearchable"
                 ),
+                active_download_state=msgspec.to_builtins(
+                    ActiveDownloadState(
+                        files=[],
+                        filetype=extension,
+                        enqueued_at="2026-07-23T00:00:00+00:00",
+                        current_path=candidate_path,
+                    )
+                ),
             ))
 
         fake_beets: FakeBeetsDB
@@ -541,6 +556,7 @@ def _run_world(world: PreviewFailureWorld) -> PreviewFailureObservation:
             current_evidence=current_evidence,
             expected_mbid=mbid,
             expected_path=installed_path,
+            expected_failure_source_path=candidate_path,
             expected_format=world.storage_format,
             expected_minimum=world.minimum,
             expected_average=world.average,
@@ -615,10 +631,16 @@ class TestPreviewFailureEvidenceCheckerKnownBad(unittest.TestCase):
             "preview_status": "measurement_failed",
             "preview_result": {
                 "detail": "decoder failed",
-                "failure": {"detail": "decoder failed"},
+                "failure": {
+                    "detail": "decoder failed",
+                    "source_path": "/candidate",
+                },
             },
             "audit": {
-                "validation_result": json.dumps({"detail": "decoder failed"}),
+                "validation_result": json.dumps({
+                    "detail": "decoder failed",
+                    "source_path": "/candidate",
+                }),
                 "beets_detail": "decoder failed",
                 "error_message": "decoder failed",
                 "_current_evidence_id": 7,
@@ -627,6 +649,7 @@ class TestPreviewFailureEvidenceCheckerKnownBad(unittest.TestCase):
             "current_evidence": evidence,
             "expected_mbid": "generated-preview-failure-mbid",
             "expected_path": "/library/installed",
+            "expected_failure_source_path": "/candidate",
             "expected_format": "Opus",
             "expected_minimum": 90,
             "expected_average": 97,
@@ -641,7 +664,10 @@ class TestPreviewFailureEvidenceCheckerKnownBad(unittest.TestCase):
                 after_current_id=None,
                 current_evidence=None,
                 audit={
-                    "validation_result": json.dumps({"detail": "decoder failed"}),
+                    "validation_result": json.dumps({
+                        "detail": "decoder failed",
+                        "source_path": "/candidate",
+                    }),
                     "beets_detail": "decoder failed",
                     "error_message": "decoder failed",
                     "_current_evidence_id": None,
@@ -661,6 +687,21 @@ class TestPreviewFailureEvidenceCheckerKnownBad(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "sinks disagree"):
             assert_preview_failure_have_contract(self._observation(
                 audit={**audit, "error_message": None},
+            ))
+
+    def test_trips_when_authoritative_source_path_is_lost(self) -> None:
+        observed_audit = self._observation().audit
+        assert observed_audit is not None
+        audit = dict(observed_audit)
+        with self.assertRaisesRegex(AssertionError, "authoritative source path"):
+            assert_preview_failure_have_contract(self._observation(
+                audit={
+                    **audit,
+                    "validation_result": json.dumps({
+                        "detail": "decoder failed",
+                        "source_path": "",
+                    }),
+                },
             ))
 
     def test_trips_when_successful_enrichment_remains_partial(self) -> None:
