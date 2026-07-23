@@ -141,7 +141,7 @@ def _claim_dispatch_job(
     job = db.enqueue_import_job(
         IMPORT_JOB_FORCE if force else IMPORT_JOB_AUTOMATION,
         request_id=request_id,
-        payload={"failed_path": path} if force else {},
+        payload={"download_log_id": 1, "failed_path": path} if force else {},
     )
     evidence = make_album_quality_evidence(
         mb_release_id=release_id,
@@ -1327,7 +1327,7 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
             job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE if force else IMPORT_JOB_AUTOMATION,
                 request_id=42,
-                payload={"failed_path": tmpdir} if force else {},
+                payload={"download_log_id": 1, "failed_path": tmpdir} if force else {},
             )
             candidate = msgspec.structs.replace(
                 candidate,
@@ -1627,7 +1627,7 @@ class TestDispatchImport(unittest.TestCase):
             job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE if force else IMPORT_JOB_AUTOMATION,
                 request_id=42,
-                payload={"failed_path": tmpdir} if force else {},
+                payload={"download_log_id": 1, "failed_path": tmpdir} if force else {},
             )
             evidence = make_album_quality_evidence(
                 mb_release_id="test-mbid",

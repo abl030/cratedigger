@@ -258,7 +258,7 @@ class TestFakePipelineDB(unittest.TestCase):
         job = db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=42,
-            payload={"failed_path": "/tmp/candidate"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/candidate"},
         )
         evidence = make_album_quality_evidence(mb_release_id="mb-import-fk-1")
 
@@ -2352,6 +2352,7 @@ class TestFakeGetWantedSearchable(unittest.TestCase):
                 staged_path="/tmp/yt-import",
                 request_id=rid_import,
                 browse_id="MPREb_import",
+                download_log_id=1,
             ),
         )
 
@@ -3483,13 +3484,13 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             IMPORT_JOB_FORCE,
             request_id=42,
             dedupe_key="force:42",
-            payload={"failed_path": "/tmp/force"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/force"},
         )
         duplicate = db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=42,
             dedupe_key="force:42",
-            payload={"failed_path": "/tmp/force"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/force"},
         )
         self.assertEqual(first.id, duplicate.id)
         self.assertTrue(duplicate.deduped)
@@ -3532,7 +3533,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             IMPORT_JOB_FORCE,
             request_id=42,
             dedupe_key="force:42",
-            payload={"failed_path": "/tmp/force"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/force"},
         )
         self.assertNotEqual(first.id, later.id)
         failed = db.mark_import_job_failed(
@@ -3551,7 +3552,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             IMPORT_JOB_FORCE,
             request_id=42,
             dedupe_key="force:requeue-fake",
-            payload={"failed_path": "/tmp/force"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/force"},
         )
         db.mark_import_job_preview_importable(
             job.id,
@@ -3595,7 +3596,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             IMPORT_JOB_FORCE,
             request_id=42,
             dedupe_key="force:requeue-fake-idem",
-            payload={"failed_path": "/tmp/force"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/force"},
         )
         # Not yet claimed by importer (preview_status='waiting', status='queued').
         result = db.requeue_import_job_for_preview(
@@ -3612,7 +3613,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             IMPORT_JOB_FORCE,
             request_id=42,
             dedupe_key="force:fresh",
-            payload={"failed_path": "/tmp/force"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/force"},
         )
 
         self.assertEqual(queued.preview_status, "waiting")
@@ -3805,7 +3806,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             IMPORT_JOB_FORCE,
             request_id=42,
             dedupe_key="force:preview",
-            payload={"failed_path": "/tmp/force"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/force"},
         )
         self.assertEqual(queued.preview_status, "waiting")
 
@@ -3831,7 +3832,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             IMPORT_JOB_FORCE,
             request_id=43,
             dedupe_key="force:preview-reject",
-            payload={"failed_path": "/tmp/reject"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/reject"},
         )
         failed = db.mark_import_job_preview_failed(
             rejected.id,
@@ -4738,7 +4739,7 @@ class TestFakeActiveImportJobForRequest(unittest.TestCase):
             IMPORT_JOB_FORCE,
             request_id=request_id,
             dedupe_key=dedupe_key,
-            payload={"failed_path": "/tmp/x"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/x"},
         )
 
     def test_returns_none_when_no_jobs(self):

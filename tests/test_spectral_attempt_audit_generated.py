@@ -716,7 +716,7 @@ def _run_dispatch_finalization_world(
             job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
-                payload={"failed_path": source},
+                payload={"download_log_id": 1, "failed_path": source},
             )
             preview_result: dict[str, Any] = {}
             if audit is not None:

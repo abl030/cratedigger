@@ -390,7 +390,7 @@ class TestWrongMatchDeleteService(unittest.TestCase):
             db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=1,
-                payload={"failed_path": source},
+                payload={"download_log_id": 1, "failed_path": source},
             )
 
             result = delete_wrong_match(db, log_id, require_visible=True)

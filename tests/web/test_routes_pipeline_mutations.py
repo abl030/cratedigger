@@ -1776,7 +1776,7 @@ class TestBanSourceBadRipExtensions(_FakeDbWebServerCase):
         self.db.enqueue_import_job(
             "force_import", request_id=1704,
             dedupe_key="force_import:download_log:99",
-            payload={"failed_path": "/tmp/Busy Album"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/Busy Album"},
         )
 
         status, data = self._post(

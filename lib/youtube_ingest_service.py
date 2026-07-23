@@ -44,7 +44,8 @@ from typing import TYPE_CHECKING, Any, Callable, Literal, Optional, Protocol
 import msgspec
 
 from lib.import_queue import (
-    IMPORT_JOB_YOUTUBE,
+    ImportJob,
+    YoutubeImportPayload,
     youtube_import_dedupe_key,
     youtube_import_payload,
 )
@@ -172,21 +173,6 @@ class YoutubeIngestMetadata(msgspec.Struct, kw_only=True):
     worker_claimed_at: Optional[str] = None
     worker_id: Optional[str] = None
     cleanup_error: Optional[str] = None
-
-
-class YoutubeImportPayload(msgspec.Struct, kw_only=True):
-    """Typed view of ``import_jobs.payload`` for ``youtube_import`` rows.
-
-    The dispatcher (U9) reads this off ``ImportJob.payload``. The fields
-    mirror the keys produced by ``lib.import_queue.youtube_import_payload``.
-    """
-
-    staged_path: str
-    request_id: int
-    browse_id: str
-    # Added after the original queue payload shipped. Optional so legacy
-    # queued rows still decode; new rows always carry it.
-    download_log_id: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------
@@ -1402,27 +1388,11 @@ def _per_track_video_ids(mapping_row: dict[str, Any]) -> Optional[list[str]]:
     return ids or None
 
 
-def _download_log_id_from_import_job(job: Any) -> Optional[int]:
-    payload = getattr(job, "payload", None)
-    if _is_dict_like(payload):
-        raw = _json_dict(payload).get("download_log_id")
-        if isinstance(raw, int):
-            return raw
-        if isinstance(raw, (str, float)):
-            try:
-                return int(raw)
-            except (TypeError, ValueError):
-                pass
-    dedupe_key = getattr(job, "dedupe_key", None)
-    if not isinstance(dedupe_key, str):
-        return None
-    prefix = f"{IMPORT_JOB_YOUTUBE}:download_log:"
-    if not dedupe_key.startswith(prefix):
-        return None
-    try:
-        return int(dedupe_key[len(prefix):])
-    except ValueError:
-        return None
+def _download_log_id_from_import_job(job: ImportJob) -> Optional[int]:
+    """Read the typed audit ancestor from a decoded YouTube queue job."""
+    if isinstance(job.payload, YoutubeImportPayload):
+        return job.payload.download_log_id
+    return None
 
 
 def _cleanup_metadata(cleanup_error: Optional[str]) -> Optional[dict[str, Any]]:

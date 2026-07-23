@@ -1,12 +1,15 @@
 """Import-queue + preview-queue lifecycle."""
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
+import msgspec
 import psycopg2
 import psycopg2.extras
 
 from lib.import_queue import (
+    ForceImportPayload,
     IMPORT_JOB_PREVIEW_WAITING,
     ImportJob,
+    YoutubeImportPayload,
     validate_job_type,
     validate_payload,
     validate_preview_failure_status,
@@ -438,9 +441,13 @@ class _ImportJobsMixin(_PipelineDBBase):
                         else None
                     )
                 elif original.job_type == "force_import":
-                    expected_source = original.payload.get("failed_path")
+                    if not isinstance(original.payload, ForceImportPayload):
+                        raise AssertionError("force_import payload type mismatch")
+                    expected_source = original.payload.failed_path
                 elif original.job_type == "youtube_import":
-                    expected_source = original.payload.get("staged_path")
+                    if not isinstance(original.payload, YoutubeImportPayload):
+                        raise AssertionError("youtube_import payload type mismatch")
+                    expected_source = original.payload.staged_path
                 else:
                     self.conn.rollback()
                     return None
@@ -536,7 +543,7 @@ class _ImportJobsMixin(_PipelineDBBase):
                     original.job_type,
                     original.request_id,
                     original.dedupe_key,
-                    psycopg2.extras.Json(original.payload),
+                    psycopg2.extras.Json(msgspec.to_builtins(original.payload)),
                     f"Operator-authorized retry of recovery job {original.id}",
                     original.preview_status,
                     (

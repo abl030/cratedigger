@@ -37,10 +37,12 @@ from lib.download_processing import (
     ProcessAlbumFn,
 )
 from lib.import_queue import (
+    ForceImportPayload,
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
     IMPORT_JOB_YOUTUBE,
     ImportJob,
+    YoutubeImportPayload,
 )
 from lib.terminal_outcomes import ImportJobTerminal
 from lib.pipeline_db import (
@@ -52,7 +54,6 @@ from lib.import_manifest import audio_relative_paths
 from lib.quality import ActiveDownloadFileState, ActiveDownloadState
 from lib.youtube_ingest_service import (
     YOUTUBE_IMPORT_ALLOWED_REQUEST_STATUSES,
-    YoutubeImportPayload,
 )
 
 logger = logging.getLogger("cratedigger-importer")
@@ -180,12 +181,9 @@ def _run_post_commit_cleanup(
 def _force_job_wrong_match_payload(job: ImportJob) -> tuple[int, str | None] | None:
     if job.job_type != IMPORT_JOB_FORCE:
         return None
-    payload = job.payload or {}
-    download_log_id = payload.get("download_log_id")
-    if not isinstance(download_log_id, int):
-        return None
-    failed_path = payload.get("failed_path")
-    return download_log_id, failed_path if isinstance(failed_path, str) else None
+    if not isinstance(job.payload, ForceImportPayload):
+        raise AssertionError("force_import payload type mismatch")
+    return job.payload.download_log_id, job.payload.failed_path
 
 
 def _cleanup_failed_force_import(
@@ -232,19 +230,13 @@ def _cleanup_failed_force_import(
         # Dispatch already made the canonical import decision via
         # full_pipeline_decision_from_evidence; this step only removes the
         # reviewed source from Wrong Matches.
-        payload = job.payload or {}
-        # ``job.payload`` is ``dict[str, Any]`` (lib/import_queue.py, out of
-        # this migration's scope); declaring ``source_dirs``'s own type here
-        # recovers a parameterized value for the ``isinstance`` narrow below
-        # without widening ``ImportJob``.
-        source_dirs: list[str] | None = payload.get("source_dirs")
+        if not isinstance(job.payload, ForceImportPayload):
+            raise AssertionError("force_import payload type mismatch")
         result = delete_wrong_match(
             db,
             download_log_id,
             failed_path_hint=failed_path_hint,
-            source_dirs_hint=(
-                source_dirs if isinstance(source_dirs, list) else ()
-            ),
+            source_dirs_hint=job.payload.source_dirs,
             ignore_import_job_id=job.id,
             require_visible=False,
         )
@@ -318,40 +310,20 @@ def execute_import_job(
         # further.
         from lib.dispatch import dispatch_import_from_db
 
+        if not isinstance(job.payload, ForceImportPayload):
+            raise AssertionError("force_import payload type mismatch")
         payload = job.payload
-        failed_path = str(payload.get("failed_path") or "")
-        if not failed_path:
-            return DispatchOutcome(
-                success=False,
-                message="Import job payload is missing failed_path",
-            )
-        source_username = payload.get("source_username")
-        # See the analogous annotation in ``_cleanup_failed_force_import``:
-        # ``payload`` is ``dict[str, Any]`` (out of scope), so this local
-        # declaration recovers a parameterized type for the ``isinstance``
-        # narrow in the comprehension below.
-        source_dirs: list[object] | None = payload.get("source_dirs")
-        download_log_id = payload.get("download_log_id")
         return dispatch_import_from_db(
             db,
             request_id=job.request_id,
-            failed_path=failed_path,
-            source_username=(
-                str(source_username)
-                if source_username is not None
-                else None
-            ),
+            failed_path=payload.failed_path,
+            source_username=payload.source_username,
             source_dirs=(
-                [str(source_dir) for source_dir in source_dirs if source_dir]
-                if isinstance(source_dirs, list)
-                else None
+                [source_dir for source_dir in payload.source_dirs if source_dir]
+                or None
             ),
             import_job_id=job.id,
-            download_log_id=(
-                int(download_log_id)
-                if isinstance(download_log_id, int)
-                else None
-            ),
+            download_log_id=payload.download_log_id,
         )
 
     if job.job_type == IMPORT_JOB_AUTOMATION:
@@ -492,9 +464,8 @@ def execute_youtube_import_job(
     """Run completed-staging processing for a YouTube-rescue import job.
 
     Mirrors ``execute_automation_import_job`` structurally but sources the
-    staged path from ``job.payload['staged_path']`` (decoded via
-    ``msgspec.convert(...)`` into ``YoutubeImportPayload`` at the wire
-    boundary) rather than from ``album_requests.active_download_state``.
+    staged path from the typed payload decoded at ``ImportJob.from_row`` rather
+    than from ``album_requests.active_download_state``.
 
     KTD1: this path never reads from nor writes to ``active_download_state``.
     The YT staged dir lives under ``/Incoming/auto-import`` already (the
@@ -522,21 +493,9 @@ def execute_youtube_import_job(
     if request_id is None:
         return DispatchOutcome(False, "YouTube import job has no request_id")
 
-    try:
-        payload = msgspec.convert(job.payload, type=YoutubeImportPayload)
-    except msgspec.ValidationError as exc:
-        # Malformed payload — surface as a failed DispatchOutcome rather
-        # than crashing the worker. The orphan/retry machinery is the
-        # importer's existing concern; we just refuse to act on garbage.
-        logger.error(
-            "YouTube import job %s payload validation failed: %s",
-            job.id,
-            exc,
-        )
-        return DispatchOutcome(
-            success=False,
-            message=f"YouTube import payload is malformed: {exc}",
-        )
+    if not isinstance(job.payload, YoutubeImportPayload):
+        raise AssertionError("youtube_import payload type mismatch")
+    payload = job.payload
 
     row = db.get_request(request_id)
     if not row:

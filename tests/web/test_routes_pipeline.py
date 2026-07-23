@@ -1492,7 +1492,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         job = self.db.enqueue_import_job(
             "force_import", request_id=100,
             dedupe_key=force_import_dedupe_key(log_id),
-            payload={"failed_path": "/tmp/Test Album"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/Test Album"},
             message="Import queued",
         )
         return job.id
@@ -1568,7 +1568,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
             self.db.enqueue_import_job(
                 "force_import", request_id=100,
                 dedupe_key=f"force_import:download_log:{i}",
-                payload={"failed_path": f"/tmp/a{i}"},
+                payload={"download_log_id": 1, "failed_path": f"/tmp/a{i}"},
             )
         status, data = self._get("/api/import-jobs/timeline")
         self.assertEqual(status, 200)

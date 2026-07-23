@@ -164,7 +164,7 @@ class TestTerminalOutcomeGenerated(unittest.TestCase):
         job = db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=42,
-            payload={"failed_path": "/tmp/generated"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/generated"},
         )
         db.mark_import_job_preview_importable(job.id, preview_result={})
         claimed = db.claim_next_import_job(worker_id="generated-stop")
@@ -290,7 +290,7 @@ class TestTerminalOutcomeGenerated(unittest.TestCase):
         job = db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=42,
-            payload={"failed_path": "/tmp/generated"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/generated"},
         )
         db.mark_import_job_preview_importable(job.id, preview_result={})
         claimed = db.claim_next_import_job(worker_id="generated-stop")
@@ -364,7 +364,7 @@ class TestTerminalOutcomeGenerated(unittest.TestCase):
         job = db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=42,
-            payload={"failed_path": "/tmp/generated"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/generated"},
         )
         db.mark_import_job_preview_importable(job.id, preview_result={"ready": True})
         claimed = db.claim_next_import_job(worker_id="generated")

@@ -353,7 +353,7 @@ def _seed_get_active_import_job_for_request(db: Any) -> "list[dict[str, Any]]":
         IMPORT_JOB_FORCE,
         request_id=rid,
         dedupe_key=f"manual:{rid}",
-        payload={"failed_path": "/tmp/parity"},
+        payload={"download_log_id": 1, "failed_path": "/tmp/parity"},
     )
     job = db.get_active_import_job_for_request(rid)
     return _one(job.to_dict() if job is not None else None)

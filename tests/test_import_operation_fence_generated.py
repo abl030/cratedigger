@@ -87,12 +87,13 @@ def _exercise_world(
     if world.job_type == IMPORT_JOB_AUTOMATION:
         payload: dict[str, object] = {}
     elif world.job_type == IMPORT_JOB_FORCE:
-        payload = {"failed_path": source_path}
+        payload = {"download_log_id": request_id, "failed_path": source_path}
     else:
         payload = youtube_import_payload(
             staged_path=source_path,
             request_id=request_id,
             browse_id="MPREb_fence",
+            download_log_id=request_id,
         )
     job = db.enqueue_import_job(
         world.job_type,

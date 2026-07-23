@@ -312,7 +312,11 @@ class TestServerEndpoints(_FakeDbWebServerCase):
 
     @patch("web.routes.pipeline_mutations.resolve_failed_path", return_value="/tmp/Test Album")
     def test_post_force_import_passes_source_username(self, _mock_resolve):
-        from lib.import_queue import IMPORT_JOB_FORCE, force_import_dedupe_key
+        from lib.import_queue import (
+            ForceImportPayload,
+            IMPORT_JOB_FORCE,
+            force_import_dedupe_key,
+        )
 
         log_id = self.db.log_download(
             100, outcome="rejected", soulseek_username="baduser",
@@ -338,9 +342,10 @@ class TestServerEndpoints(_FakeDbWebServerCase):
         self.assertEqual(job.job_type, IMPORT_JOB_FORCE)
         self.assertEqual(job.request_id, 100)
         self.assertEqual(job.dedupe_key, force_import_dedupe_key(log_id))
-        self.assertEqual(job.payload["failed_path"], "/tmp/Test Album")
-        self.assertEqual(job.payload["source_username"], "baduser")
-        self.assertEqual(job.payload["source_dirs"], ["baduser\\Artist\\Album"])
+        assert isinstance(job.payload, ForceImportPayload)
+        self.assertEqual(job.payload.failed_path, "/tmp/Test Album")
+        self.assertEqual(job.payload.source_username, "baduser")
+        self.assertEqual(job.payload.source_dirs, ["baduser\\Artist\\Album"])
 
     def test_post_set_intent_default_clears_stale_lossless_override(self):
         self.db.seed_request(make_request_row(

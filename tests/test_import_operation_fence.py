@@ -12,6 +12,7 @@ from lib.dispatch import DispatchOutcome
 from lib.dispatch.types import PostCommitCleanup
 from lib.import_evidence import ensure_candidate_evidence_for_action
 from lib.import_queue import (
+    ForceImportPayload,
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
     IMPORT_JOB_RECOVERY_REQUIRED,
@@ -70,7 +71,7 @@ class TestImportOperationFence(unittest.TestCase):
             IMPORT_JOB_FORCE,
             request_id=42,
             dedupe_key="force:recovery",
-            payload={"failed_path": source_path},
+            payload={"download_log_id": 1, "failed_path": source_path},
         )
         _seed_candidate(
             db,
@@ -188,7 +189,8 @@ class TestImportOperationFence(unittest.TestCase):
             assert candidate.evidence is not None
             self.assertEqual(candidate.evidence.source_path, capture_path)
 
-            active_job_path = str(claimed.payload["failed_path"])
+            assert isinstance(claimed.payload, ForceImportPayload)
+            active_job_path = claimed.payload.failed_path
             authorized = db.authorize_import_job_launch(
                 claimed.id,
                 request_id=42,
@@ -220,7 +222,7 @@ class TestImportOperationFence(unittest.TestCase):
                 IMPORT_JOB_FORCE,
                 request_id=request_id,
                 dedupe_key=f"force:{request_id}",
-                payload={"failed_path": source_path},
+                payload={"download_log_id": 1, "failed_path": source_path},
             )
             _seed_candidate(
                 db,
@@ -269,7 +271,7 @@ class TestImportOperationFence(unittest.TestCase):
             IMPORT_JOB_FORCE,
             request_id=42,
             dedupe_key="force:exception",
-            payload={"failed_path": source_path},
+            payload={"download_log_id": 1, "failed_path": source_path},
         )
         fingerprint = _seed_candidate(
             db,
@@ -317,7 +319,7 @@ class TestImportOperationFence(unittest.TestCase):
             IMPORT_JOB_FORCE,
             request_id=42,
             dedupe_key="force:acknowledged",
-            payload={"failed_path": source_path},
+            payload={"download_log_id": 1, "failed_path": source_path},
         )
         _seed_candidate(
             db,
@@ -464,7 +466,7 @@ class TestImportOperationFence(unittest.TestCase):
             IMPORT_JOB_FORCE,
             request_id=42,
             dedupe_key="force:cleanup-order",
-            payload={"failed_path": "/tmp/operator-copy"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/operator-copy"},
         )
         db.mark_import_job_preview_importable(job.id, preview_result={"ready": True})
         claimed = db.claim_next_import_job(worker_id="worker")
@@ -519,7 +521,7 @@ class TestImportOperationFence(unittest.TestCase):
         job = db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=42,
-            payload={"failed_path": "/tmp/operator-copy"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/operator-copy"},
         )
         db.mark_import_job_preview_importable(job.id, preview_result={"ready": True})
         claimed = db.claim_next_import_job(worker_id="worker")
@@ -601,6 +603,7 @@ class TestImportOperationFence(unittest.TestCase):
                     staged_path=staged_path,
                     request_id=42,
                     browse_id="MPREb_fence",
+                    download_log_id=600,
                 ),
             )
             db.mark_import_job_preview_importable(
@@ -652,6 +655,7 @@ class TestImportOperationFence(unittest.TestCase):
                     staged_path=staged_path,
                     request_id=42,
                     browse_id="MPREb_fence",
+                    download_log_id=651,
                 ),
             )
             db.mark_import_job_preview_importable(
@@ -743,7 +747,7 @@ class TestImportOperationFencePostgres(unittest.TestCase):
             IMPORT_JOB_FORCE,
             request_id=request_id,
             dedupe_key="force:postgres-relocated",
-            payload={"failed_path": source_path},
+            payload={"download_log_id": 1, "failed_path": source_path},
         )
         evidence = make_album_quality_evidence(
             mb_release_id="release-pg-relocated",
@@ -789,7 +793,7 @@ class TestImportOperationFencePostgres(unittest.TestCase):
             IMPORT_JOB_FORCE,
             request_id=request_id,
             dedupe_key="force:postgres-fence",
-            payload={"failed_path": source_path},
+            payload={"download_log_id": 1, "failed_path": source_path},
         )
         evidence = make_album_quality_evidence(
             mb_release_id="release-pg",
@@ -856,7 +860,7 @@ class TestImportOperationFencePostgres(unittest.TestCase):
             IMPORT_JOB_FORCE,
             request_id=request_id,
             dedupe_key="force:postgres-unlaunched",
-            payload={"failed_path": "/tmp/unlaunched"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/unlaunched"},
         )
         db.mark_import_job_preview_importable(job.id, preview_result={"ready": True})
         claimed = db.claim_next_import_job(worker_id="postgres-worker")
@@ -895,7 +899,7 @@ class TestImportOperationFencePostgres(unittest.TestCase):
             IMPORT_JOB_FORCE,
             request_id=request_id,
             dedupe_key="force:postgres-terminal-rollback",
-            payload={"failed_path": source_path},
+            payload={"download_log_id": 1, "failed_path": source_path},
         )
         evidence = make_album_quality_evidence(
             mb_release_id="release-terminal-rollback",

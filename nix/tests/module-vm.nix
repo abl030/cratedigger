@@ -132,6 +132,35 @@ pkgs.testers.nixosTest {
     configHoldGate = pkgs.writeShellScript "cratedigger-test-config-hold" ''
       test ! -e /run/cratedigger-test-config-hold
     '';
+    importerSandboxProbe = pkgs.writeShellScript "cratedigger-importer-sandbox-probe" ''
+      set -euo pipefail
+      probe_dir=/var/lib/cratedigger/processing/sandbox-probe
+      ${pkgs.coreutils}/bin/install -d -m 0700 "$probe_dir"
+      test -f /var/lib/cratedigger/config.ini
+
+      # Run representative shipped media/Beets tools inside the importer's
+      # actual service sandbox and @system-service syscall filter.
+      ${pkgs.sox}/bin/sox \
+        -n -r 44100 -c 1 "$probe_dir/tone.wav" synth 0.05 sine 440
+      ${pkgs.ffmpeg}/bin/ffmpeg \
+        -nostdin -loglevel error -y -i "$probe_dir/tone.wav" \
+        -codec:a libmp3lame "$probe_dir/tone.mp3"
+      ${pkgs.mp3val}/bin/mp3val "$probe_dir/tone.mp3" >/dev/null
+      /run/current-system/sw/bin/cratedigger-beet version >/dev/null
+
+      # Each importer authority root must remain writable inside the mount
+      # namespace. A world-writable directory outside ReadWritePaths must not.
+      touch /var/lib/cratedigger/.sandbox-probe
+      touch /var/lib/cratedigger/processing/.sandbox-probe
+      touch /var/lib/cratedigger-downloads/.sandbox-probe
+      touch /var/lib/cratedigger-music/.sandbox-probe
+      touch /var/lib/cratedigger-staging/.sandbox-probe
+      touch /var/lib/cratedigger-tracking/.sandbox-probe
+      if touch /var/lib/cratedigger-world-writable/escape 2>/dev/null; then
+        echo "sandbox allowed a write outside ReadWritePaths" >&2
+        exit 1
+      fi
+    '';
     deployHoldTool = pkgs.writeShellScriptBin "cratedigger-deploy-hold" ''
       exec ${pkgs.python3}/bin/python3 \
         ${cratediggerSrc}/scripts/cratedigger_deploy_hold.py "$@"
@@ -219,7 +248,9 @@ pkgs.testers.nixosTest {
       beets.validation = {
         enable = true;
         stagingDir = "/var/lib/cratedigger-staging";
-        trackingFile = "/var/lib/cratedigger-staging/tracking.jsonl";
+        # Keep the tracking parent distinct from staging so the sandbox
+        # contract proves it is derived from its own option.
+        trackingFile = "/var/lib/cratedigger-tracking/tracking.jsonl";
       };
       beets.package = {
         discogsTokenFile = "/etc/cratedigger/discogs-token";
@@ -268,6 +299,9 @@ pkgs.testers.nixosTest {
     systemd.tmpfiles.rules = [
       "d /var/lib/cratedigger-music 2775 cratedigger beets-library -"
       "d /var/lib/cratedigger-downloads 0770 slskd-writer slskd-writer -"
+      "d /var/lib/cratedigger-staging 2775 cratedigger beets-library -"
+      "d /var/lib/cratedigger-tracking 0755 cratedigger beets-library -"
+      "d /var/lib/cratedigger-world-writable 0777 root root -"
       "f /run/cratedigger-test-config-hold 0644 root root - held"
     ];
     systemd.services = lib.mkMerge [
@@ -282,6 +316,9 @@ pkgs.testers.nixosTest {
         serviceConfig.ExecCondition = [configHoldGate];
       }))
       {
+        # The probe is test-only and ordered after the module's config render.
+        cratedigger-importer.serviceConfig.ExecStartPre =
+          lib.mkAfter [importerSandboxProbe];
         # The blocker has no dependency edge from the application units. Its
         # ordering matters only while the VM test has explicitly queued both
         # jobs, which gives us a deterministic real systemd `start/waiting`.
@@ -478,6 +515,134 @@ pkgs.testers.nixosTest {
     )
     machine.succeed("systemctl reset-failed cratedigger.service || true")
     machine.succeed("systemctl start cratedigger-importer.service cratedigger-import-preview-worker.service cratedigger-youtube-ingest.service cratedigger-web.service")
+    # CD-SEC-04: the four long-running services which process untrusted
+    # network/media input share a portable hardening baseline, while each
+    # retains only the writable roots its real workflow needs.  This checks
+    # systemd's rendered properties, not the Nix source shape.
+    def _unit_properties(unit):
+        out = machine.succeed(
+            f"systemctl show {unit} --no-pager "
+            "--property=NoNewPrivileges --property=PrivateTmp "
+            "--property=ProtectSystem --property=ProtectHome "
+            "--property=RestrictAddressFamilies --property=SystemCallFilter "
+            "--property=ReadWritePaths"
+        )
+        return dict(line.split("=", 1) for line in out.splitlines())
+
+    def _assert_sandbox_properties(unit, properties, expected_paths):
+        assert properties["NoNewPrivileges"] == "yes", (unit, properties)
+        assert properties["PrivateTmp"] == "yes", (unit, properties)
+        assert properties["ProtectSystem"] == "strict", (unit, properties)
+        assert properties["ProtectHome"] == "yes", (unit, properties)
+        assert set(properties["RestrictAddressFamilies"].split()) == {
+            "AF_UNIX", "AF_INET", "AF_INET6",
+        }, (unit, properties)
+        # systemctl expands the @system-service shorthand when reporting the
+        # effective filter. Pin representative workflow syscalls and a small
+        # set of prohibited privileged syscalls instead of relying on how
+        # systemd chooses to render the shorthand.
+        allowed_syscalls = set(properties["SystemCallFilter"].split())
+        assert {"execve", "fchownat", "openat", "socket", "unlinkat"} <= allowed_syscalls, (
+            unit, properties,
+        )
+        assert not allowed_syscalls.intersection({
+            "bpf", "kexec_load", "mount", "ptrace", "reboot", "umount2",
+        }), (unit, properties)
+        assert set(properties["ReadWritePaths"].split()) == set(expected_paths), (
+            unit, properties,
+        )
+
+    def _assert_sandbox_contract(unit, expected_paths):
+        _assert_sandbox_properties(unit, _unit_properties(unit), expected_paths)
+        rendered_lines = machine.succeed(f"systemctl cat {unit}").splitlines()
+        assert "SystemCallFilter=@system-service" in rendered_lines, (
+            unit, rendered_lines,
+        )
+
+    # Checker qualification: a disabled protection must fail the same checker
+    # before the actual rendered units are trusted.
+    known_bad = _unit_properties("cratedigger-web.service")
+    known_bad["NoNewPrivileges"] = "no"
+    try:
+        _assert_sandbox_properties("known-bad.service", known_bad, ["/ignored"])
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("sandbox checker accepted NoNewPrivileges=no")
+
+    known_bad = _unit_properties("cratedigger-web.service")
+    known_bad["SystemCallFilter"] += " mount"
+    try:
+        _assert_sandbox_properties(
+            "known-bad-syscall.service", known_bad,
+            [
+                "/var/lib/cratedigger",
+                "/var/lib/cratedigger/processing",
+                "/var/lib/cratedigger-downloads",
+                "/var/lib/cratedigger-music",
+                "/var/lib/cratedigger-staging",
+            ],
+        )
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("sandbox checker accepted mount syscall")
+
+    _assert_sandbox_contract("cratedigger-web.service", [
+        "/var/lib/cratedigger",
+        "/var/lib/cratedigger/processing",
+        "/var/lib/cratedigger-downloads",
+        "/var/lib/cratedigger-music",
+        "/var/lib/cratedigger-staging",
+    ])
+    _assert_sandbox_contract("cratedigger-importer.service", [
+        "/var/lib/cratedigger",
+        "/var/lib/cratedigger/processing",
+        "/var/lib/cratedigger-downloads",
+        "/var/lib/cratedigger-music",
+        "/var/lib/cratedigger-staging",
+        "/var/lib/cratedigger-tracking",
+    ])
+    _assert_sandbox_contract("cratedigger-import-preview-worker.service", [
+        "/var/lib/cratedigger",
+        "/var/lib/cratedigger/processing",
+        "/var/lib/cratedigger-downloads",
+    ])
+    _assert_sandbox_contract("cratedigger-youtube-ingest.service", [
+        "/var/lib/cratedigger",
+        "/var/lib/cratedigger/youtube-ingest-temp",
+        "/var/lib/cratedigger-staging",
+    ])
+    for unit in (
+        "cratedigger.service",
+        "cratedigger-unfindable.service",
+        "cratedigger-db-migrate.service",
+    ):
+        properties = _unit_properties(unit)
+        assert properties["NoNewPrivileges"] == "no", (unit, properties)
+        assert properties["PrivateTmp"] == "no", (unit, properties)
+        assert properties["ProtectSystem"] == "no", (unit, properties)
+        assert properties["ProtectHome"] == "no", (unit, properties)
+        assert properties["RestrictAddressFamilies"] == "~", (unit, properties)
+        assert properties["SystemCallFilter"] == "~", (unit, properties)
+        assert properties["ReadWritePaths"] == "", (unit, properties)
+
+    # The importer probe ran inside the unit's sandbox. These pins prove every
+    # configured authority root was writable while the world-writable sibling
+    # remained effectively read-only despite its Unix mode.
+    machine.succeed("test \"$(stat -c %a /var/lib/cratedigger-world-writable)\" = 777")
+    machine.fail("test -e /var/lib/cratedigger-world-writable/escape")
+    machine.succeed("test -s /var/lib/cratedigger/processing/sandbox-probe/tone.mp3")
+    for root in (
+        "/var/lib/cratedigger",
+        "/var/lib/cratedigger/processing",
+        "/var/lib/cratedigger-downloads",
+        "/var/lib/cratedigger-music",
+        "/var/lib/cratedigger-staging",
+        "/var/lib/cratedigger-tracking",
+    ):
+        machine.succeed(f"test -f {root}/.sandbox-probe")
+
     # #663: this is a real non-root service identity, not merely a rendered
     # User= value.  Its private processing descendants must be writable by it
     # and inaccessible to the unrelated VM user.

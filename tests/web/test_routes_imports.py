@@ -21,6 +21,7 @@ from urllib.error import HTTPError
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
+from lib.import_queue import ForceImportPayload
 from tests.web._harness import (
     _DEFAULT_WRONG_MATCH_VALIDATION,
     _assert_required_fields,
@@ -1404,11 +1405,9 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
             vr = entry["validation_result"]
             assert vr is not None
             self.assertEqual(vr["failed_path"], path)
-        self.assertEqual(
-            jobs["force_import:download_log:100"]
-            .payload["source_dirs"],
-            ["u1\\Artist\\Album"],
-        )
+        job = jobs["force_import:download_log:100"]
+        assert isinstance(job.payload, ForceImportPayload)
+        self.assertEqual(job.payload.source_dirs, ["u1\\Artist\\Album"])
         self.mock_manual_cleanup.assert_called_once_with(self.db, 102, require_visible=True)
         self.mock_cleanup.assert_not_called()
 

@@ -5819,7 +5819,7 @@ class TestPollActiveDownloads(unittest.TestCase):
                 IMPORT_JOB_FORCE,
                 request_id=1,
                 dedupe_key="manual:1",
-                payload={"failed_path": resumed_path},
+                payload={"download_log_id": 1, "failed_path": resumed_path},
             )
 
             poll_active_downloads(ctx)

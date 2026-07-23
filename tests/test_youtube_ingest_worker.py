@@ -34,12 +34,9 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import patch
 
-import msgspec
-
-from lib.import_queue import IMPORT_JOB_YOUTUBE
+from lib.import_queue import IMPORT_JOB_YOUTUBE, YoutubeImportPayload
 from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_YOUTUBE_INGEST
 from lib.youtube_ingest_service import (
-    YoutubeImportPayload,
     YoutubeIngestService,
     YtdlpRunResult,
 )
@@ -248,7 +245,8 @@ class TestDrainLoopHappyPath(unittest.TestCase):
             if j.job_type == IMPORT_JOB_YOUTUBE
         ]
         self.assertEqual(len(jobs), 1)
-        payload = msgspec.convert(jobs[0].payload, type=YoutubeImportPayload)
+        assert isinstance(jobs[0].payload, YoutubeImportPayload)
+        payload = jobs[0].payload
         self.assertEqual(payload.request_id, 42)
         self.assertEqual(payload.browse_id, BROWSE)
         self.assertTrue(payload.staged_path)

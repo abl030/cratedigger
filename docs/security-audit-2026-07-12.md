@@ -54,7 +54,7 @@ against that reality, not against a hypothetical public exposure.
 | CD-SEC-01 | High | Historical credentials committed to a public repo | deleted notifier docs, git history |
 | CD-SEC-02 | High | No auth + wildcard CORS on file-destructive endpoints | `web/server.py` |
 | CD-SEC-03 | Medium | Remediated: HTTP import-preview is path-free and snapshots authorized DB paths | `web/routes/imports.py`, `lib/import_preview.py` |
-| CD-SEC-04 | Medium | No systemd sandboxing on services that process attacker-controlled bytes | `nix/module.nix` |
+| CD-SEC-04 | Medium | Module hardening added for services that process attacker-controlled bytes; pending merge/deploy proof | `nix/module.nix` |
 | CD-SEC-05 | Low | Internal exception strings reflected in HTTP 500 bodies | `web/server.py` |
 | CD-SEC-06 | Medium | Removed: notifier TLS fallback now fails closed | `lib/util.py` |
 | CD-SEC-07 | Low | Unbounded request body read + JSON parse (memory-exhaustion DoS) | `web/server.py` |
@@ -68,8 +68,8 @@ against that reality, not against a hypothetical public exposure.
 | CD-SEC-15 | High | Remediated: typed fail-closed transitions and source-status CAS freeze `replaced` rows | `lib/transitions.py`, `lib/pipeline_db/requests.py` |
 | CD-SEC-16 | High | Remediated: destructive operations share importer locks | `lib/destructive_release_service.py` |
 | CD-SEC-17 | High | Remediated: job-backed terminal import outcomes commit atomically | `lib/pipeline_db/terminal_outcomes.py`, `scripts/importer.py` |
-| CD-SEC-18 | Medium | Track replacement is non-atomic | `lib/pipeline_db/misc.py` |
-| CD-SEC-19 | Medium | Import-job JSONB payloads bypass the strict wire-boundary policy | `lib/import_queue.py`, `scripts/importer.py` |
+| CD-SEC-18 | Medium | Remediated: transactional track replacement is qualified by real-PostgreSQL rollback coverage | `lib/pipeline_db/misc.py`, `tests/test_track_replacement_generated.py` |
+| CD-SEC-19 | Medium | Remediated: job-specific JSONB payloads decode strictly at the row boundary | `lib/import_queue.py`, `tests/test_import_job_payload_generated.py` |
 
 **Clean (no exploitable issue found):** SQL injection (every attacker-influenced
 value is `%s`-parameterized), command/subprocess injection (all argv is
@@ -302,55 +302,84 @@ check — this endpoint omits it.
   `failed_imports` roots with the same within-root check the wrong-match service
   uses, and route import-preview through `parse_body`.
 
-### CD-SEC-04 — No systemd sandboxing on untrusted-input services (Medium)
+### CD-SEC-04 — Sandboxed untrusted-input services (Medium; pending deploy proof)
 
-Every long-running unit rendered by `nix/module.nix` (web, importer,
-import-preview-worker, youtube-ingest) sets only `User`/`Group`/`ExecStart`/
-`WorkingDirectory`/`Restart`. There is **no** `ProtectSystem=strict`,
-`ReadWritePaths`, `PrivateTmp`, `ProtectHome`, `NoNewPrivileges`,
-`RestrictAddressFamilies`, or `SystemCallFilter`. These services drive yt-dlp,
-ffmpeg, beets, mp3val, and sox over attacker-controlled bytes. Running as a
-non-root system user is the only current mitigation — a memory-safety bug in any
-of those tools yields the full service-user capability set: write access to the
-entire music library plus read access to every secret the user can read.
+The four long-running units that process network/media input —
+`cratedigger-web`, `cratedigger-importer`,
+`cratedigger-import-preview-worker`, and `cratedigger-youtube-ingest` — now
+share a module-owned systemd baseline: `NoNewPrivileges=yes`, `PrivateTmp=yes`,
+`ProtectSystem=strict`, `ProtectHome=yes`, and
+`RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6`. Their syscall surface is
+the portable `@system-service` allowlist. It retains `fchownat`, needed by the
+explicit operator-group secret handoff in the config renderer, rather than
+claiming a narrower filter that would prevent the real services from starting.
 
-- **Remediation:** add a hardening block to the untrusted-input units (start
-  with `NoNewPrivileges`, `ProtectSystem=strict` + an explicit `ReadWritePaths`
-  allowlist for the state/library/staging dirs, `PrivateTmp`, `ProtectHome`,
-  `RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX`). Gate the change with the
-  existing module VM check, since over-tight confinement would break real file
-  access. This is a module change and is deferred to its own PR.
+Each unit receives a `ReadWritePaths` list derived from its own authority
+roots rather than a shared blanket grant. All four get `stateDir`; importer,
+preview worker, and web get `processingDir`; only importer and web get the
+Beets root and library-DB parent; importer and web get the validation staging
+root, with importer additionally getting the tracking-file parent; and the
+YouTube worker gets only `youtubeIngest.tempDir` plus validation staging. The
+slskd download directory is writable only for web, importer, and preview
+worker. The module VM starts all four services, pins every rendered hardening
+property and per-unit writable root, qualifies the checker with known-bad
+properties, and runs a test-only importer pre-start inside the real sandbox.
+That probe exercises Beets, ffmpeg, sox, and mp3val, writes every importer
+authority root, and proves a deliberately world-writable sibling outside
+`ReadWritePaths` remains effectively read-only. Direct negative pins keep the
+main, unfindable, and migrate units outside this hardening scope.
 
-### CD-SEC-18 — Track replacement is non-atomic (Medium)
+This boundary intentionally does **not** apply to the main pipeline,
+unfindable, or migrate oneshots: CD-SEC-04 is scoped to those four
+untrusted-input long-running units. It is defense in depth, not a replacement
+for POSIX ownership, path-authority checks, secret permissions, or downstream
+mount review. In particular, a downstream writable `BindPaths` can reopen a
+target beyond the upstream list; private namespaces must use narrow per-unit
+binds and verify the effective mount behavior. With a private `/mnt`, expose
+broad shared-tree visibility using `BindReadOnlyPaths`, then add writable binds
+only for the unit-specific roots listed above. On doc2, the metadata gate used
+by web, importer, and import-preview-worker writes under
+`/run/cratedigger-metadata-gate`, so that exact directory must appear in those
+units' `ReadWritePaths`; the YouTube worker does not run the gate. This module
+does not grant generic `/run` write access. The issue remains open until this
+module change and the downstream mount/runtime-path configuration are merged,
+deployed, and verified on the live units.
 
-`PipelineDB.set_tracks` deletes the current release tracklist, then inserts the
-replacement one row at a time under autocommit. A malformed later track,
-connection failure, or concurrent reader can observe or leave zero/partial
-tracks. Those rows feed exact-pressing matching and persisted search plans, so
-partial replacement corrupts identity evidence rather than merely degrading a
-display. `FakePipelineDB` replaces its list atomically, while the real-PG write
-audit explicitly leaves `set_tracks` on a TODO exemption and covers only the
-successful path.
+### CD-SEC-18 — Transactional track replacement (Medium)
 
-- **Remediation:** perform delete + bulk insert in one DB transaction. Seed an
-  old tracklist, force a later-row constraint failure, and prove the old set
-  survives. Pair the deterministic pin with an all-or-nothing generated
-  property.
+`PipelineDB.set_tracks` already holds the delete and every replacement insert
+inside its shared `_atomic()` transaction. The missing proof is now supplied:
+a real-PostgreSQL round trip checks every track field, then a seeded old
+tracklist is subjected to a later-row `NOT NULL` violation. The old list
+survives unchanged, so a failed replacement cannot expose an empty or partial
+pressing manifest. The generated companion varies the preserved fields and
+repeats that same real database failure boundary; both invariant checkers carry
+known-bad self-tests. `set_tracks` is no longer exempted from the real-PG write
+audit.
 
-### CD-SEC-19 — Import-job JSONB payloads bypass strict boundary validation (Medium)
+### CD-SEC-19 — Strict import-job payload boundary (Medium)
 
-`ImportJob` is a dataclass containing `dict[str, Any]` payload/result fields,
-and `from_row` manually coerces outer scalars rather than decoding job-specific
-wire contracts. Force-import consumers then use permissive `.get()` checks. A
-drifted `download_log_id: "42"`, for example, silently becomes `None`; the job
-continues without its wrong-match/audit ancestor instead of failing at the DB
-boundary. This violates the repository's `msgspec.Struct` policy for JSONB and
-subprocess wire data.
+`ImportJob.from_row` now selects exactly one strict, unknown-field-forbidding
+`msgspec.Struct` from the row's `job_type`: `ForceImportPayload`,
+`AutomationImportPayload`, or `YoutubeImportPayload`. A force payload with
+`download_log_id: "37206"`, an extra automation field, or a misspelled YouTube
+field raises `msgspec.ValidationError`. The same decoder now runs before either
+the ordinary queue INSERT or the atomic YouTube handoff, then serializes its
+Struct to JSON builtins; malformed input cannot leave an active row or poison a
+dedupe key. Force jobs require a positive download-log ID and nonempty failed
+path. YouTube jobs require positive request/download-log IDs and nonempty
+staged-path/browse-ID strings; booleans are not integers at this boundary.
+Importer, preview, recovery, route, and YouTube consumers then read typed fields
+rather than permissive payload dictionaries.
 
-- **Remediation:** define strict payload Structs discriminated by job type and
-  decode once when reading the DB row. Reject wrong-type IDs with a boundary
-  test, then remove legacy preview-status compatibility after confirming the
-  migration-swept values are absent live.
+A 2026-07-23 live qualification found zero active jobs and every one of the
+2,309 terminal force payloads and 40 terminal YouTube payloads already satisfied
+those contracts, so the tightening needs no backfill or compatibility shim.
+
+`preview_status` continues to admit the historical `would_import` and
+`uncertain` values, while `result` and `preview_result` intentionally remain
+broad display/audit JSON. This strict-input change does not remove or
+reinterpret terminal display compatibility.
 
 ## Additional hardening findings
 
@@ -540,35 +569,33 @@ cleanup, transition and audit logic directly in the route.
 
 ### CD-QUAL-02 — Forward-only cleanup and documentation drift
 
-The status-documentation portion is remediated alongside CD-SEC-15: the shared
-Pipeline DB rule and schema guide now include terminal, frozen `replaced`.
-The production legacy preview-status cohorts are nonempty, so their
-compatibility and `scripts/populate_tracks.py` are deliberately untouched by
-this workstream rather than being removed on an untrue empty-cohort premise.
-
+The original audit identified three forward-only hygiene failures:
 `scripts/populate_tracks.py` is an obsolete committed one-shot that passes an
-old SQLite path to the PostgreSQL `PipelineDB` and can no longer run. The import
-queue retains `would_import`/`uncertain` compatibility even though migration 018
-is documented as having swept those values. The pipeline DB rule still lists
-four statuses and omits terminal `replaced`. These are three instances of the
-same forward-only hygiene failure: one-shot/compatibility residue outliving its
-deployment window and prose no longer matching the authoritative schema.
+old SQLite path to the PostgreSQL `PipelineDB`; the import queue retains
+`would_import`/`uncertain` compatibility; and the status prose omitted terminal,
+frozen `replaced`. The status-documentation portion is now corrected alongside
+CD-SEC-15. The nonempty legacy preview-status cohort and the obsolete one-shot
+are deliberately untouched by this workstream rather than being removed on an
+untrue empty-cohort premise.
+
+CD-SEC-19 deliberately preserves the historical terminal display values: its
+strict decoder applies to job input, not `preview_status` or result/
+preview-result audit data. Removing compatibility remains separate work only
+after a fresh live cohort check proves that it is safe.
 
 - **Remediation:** delete the dead one-shot, confirm the legacy preview-status
   cohort is empty before removing compatibility, and update the status docs in
-  the same PR that fixes CD-SEC-15/CD-SEC-19.
+  that separate cleanup.
 
-### CD-QUAL-03 — The real-PostgreSQL write audit overstates its coverage
+### CD-QUAL-03 — The real-PostgreSQL write audit has remaining exemptions
 
-The write-contract audit describes universal coverage but still allowlists
-several writers with `TODO` rationales, including `set_tracks`. A green suite
-therefore does not establish the repository's documented rule that every DB
-write preserves every field and failure boundary through real PostgreSQL.
+`set_tracks` is no longer exempt: its real-PG round trip covers every track
+field and its deterministic and generated failure pins prove atomic rollback.
+Several other writers still have `TODO` rationales, so the audit is not yet
+universal.
 
-- **Remediation:** replace TODO exemptions with named real-PG round trips or
-  narrowly document why a method is structurally inapplicable. CD-SEC-18 should
-  remove the `set_tracks` exemption first and qualify the failure path with a
-  planted later-row violation.
+- **Remediation:** replace the remaining TODO exemptions with named real-PG
+  round trips or narrowly document why a method is structurally inapplicable.
 
 ## Considered and dismissed (refuted)
 
@@ -609,14 +636,17 @@ Priority data-loss / audit-integrity work:
 Priority containment / integrity work:
 
 - [x] CD-SEC-03 — path-free HTTP contract plus no-follow authorized snapshots.
-- [ ] CD-SEC-04 — systemd hardening block (gated by the module VM check).
+- [ ] CD-SEC-04 — module hardening is VM-gated; merge, deployment, and live
+      service-property proof remain before closure.
 - [x] CD-SEC-06 — remove the unreachable `CERT_NONE` fallback; notifier leaves
       use default CA-verified TLS and fail closed (tracking issue remains open
       pending deploy/live proof).
 - [x] CD-SEC-11 — no-follow descriptor authority, private atomic materialize,
       and same-descriptor stream reads.
-- [ ] CD-SEC-18 — transactional track replacement + real-PG failure pin/property.
-- [ ] CD-SEC-19 — strict job-specific JSONB payload Structs at the DB boundary.
+- [x] CD-SEC-18 — transactional track replacement, real-PG every-field round
+      trip, and deterministic/generated rollback pins.
+- [x] CD-SEC-19 — strict job-specific JSONB payload Structs at the row boundary;
+      terminal display/audit result compatibility remains intentionally broad.
 
 Safe hardening fixes (candidate single PR):
 
@@ -634,10 +664,10 @@ Auth, dependency and quality follow-through:
       consider moving local-only gates into CI.
 - [ ] CD-QUAL-01 — add missing CLI/API twins while extracting the shared
       destructive/identity services for CD-SEC-14/CD-SEC-16.
-- [ ] CD-QUAL-02 — delete the dead one-shot, retire proven-empty compatibility,
-      and correct status docs alongside CD-SEC-15/CD-SEC-19.
-- [ ] CD-QUAL-03 — eliminate TODO write-audit exemptions, starting with
-      `set_tracks` in CD-SEC-18.
+- [ ] CD-QUAL-02 — delete the dead one-shot, retire compatibility only after a
+      fresh empty-cohort proof, and correct the remaining status docs.
+- [ ] CD-QUAL-03 — eliminate the remaining TODO write-audit exemptions;
+      `set_tracks` is now covered by CD-SEC-18.
 
 ## Appendix — audit method
 
