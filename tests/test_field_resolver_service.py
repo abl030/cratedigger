@@ -956,7 +956,6 @@ class TestResolveAll(unittest.TestCase):
         self.assertEqual(result.catalog_number, "CAT-1234")
         self.assertEqual(result.track_artists, ["A1"])
         self.assertFalse(result.is_va_compilation)
-        self.assertEqual(result.timed_out_fields, [])
         # Side-table rows recorded for every resolver.
         self.assertIsNotNone(
             db.get_field_resolution(10, FIELD_RELEASE_GROUP_YEAR))
@@ -1319,8 +1318,13 @@ class TestResolveAll(unittest.TestCase):
         self.assertIsNone(result.release_group_id)
         self.assertIsNone(result.catalog_number)
         # Side-table records timed-out fields.
-        self.assertGreater(len(result.timed_out_fields), 0)
-        for field in result.timed_out_fields:
+        timed_out_fields = [
+            field
+            for (request_id, field), row in db.field_resolutions.items()
+            if request_id == 15 and row.status == "unresolved_timeout"
+        ]
+        self.assertGreater(len(timed_out_fields), 0)
+        for field in timed_out_fields:
             row = db.get_field_resolution(15, field)
             assert row is not None
             self.assertEqual(row["status"], "unresolved_timeout")

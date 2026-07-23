@@ -1289,10 +1289,6 @@ class ResolveAllResult(msgspec.Struct, kw_only=True):
     # Total wall-clock seconds the orchestrator spent. Useful for the
     # operator triage surface and the latency-budget regression test.
     elapsed_seconds: float = 0.0
-    # Names (the FIELD_* constants) of resolvers that hit the budget
-    # ceiling and were marked as unresolved_timeout. Empty in the happy
-    # path. The test guard reads this directly.
-    timed_out_fields: list[str] = msgspec.field(default_factory=list[str])
 
 
 class _DeferredRecorder:
@@ -1455,7 +1451,6 @@ def resolve_all(
 
     futures: dict[str, concurrent.futures.Future[Any]] = {}
     outputs: dict[str, Any] = {}
-    timed_out: list[str] = []
 
     # Manage the pool by hand so we can return at budget exhaustion
     # without waiting on stuck workers (the default
@@ -1499,7 +1494,6 @@ def resolve_all(
                         status="unresolved_timeout",
                         reason_code="budget_exhausted",
                     )
-                    timed_out.append(field_name)
                 continue
             try:
                 outputs[key] = fut.result(timeout=remaining)
@@ -1512,7 +1506,6 @@ def resolve_all(
                         status="unresolved_timeout",
                         reason_code="budget_exhausted",
                     )
-                    timed_out.append(field_name)
             except Exception as exc:  # noqa: BLE001
                 # The four resolvers handle their own exception
                 # classification internally — anything escaping here is
@@ -1604,7 +1597,6 @@ def resolve_all(
         track_artists=track_artists,
         is_va_compilation=is_va,
         elapsed_seconds=time.monotonic() - start,
-        timed_out_fields=timed_out,
     )
 
 
