@@ -8,11 +8,21 @@ import {
   buildDeleteConfirmHtml,
   describeBanSourceSuccess,
   describeBeetsDeletion,
+  renderLibraryAlbumRow,
   renderLibraryDetailBody,
 } from '../web/js/library.js';
+import { esc } from '../web/js/util.js';
 
 let passed = 0;
 let failed = 0;
+
+function assert(condition, msg) {
+  if (condition) passed++;
+  else {
+    failed++;
+    console.error(`  FAIL: ${msg}`);
+  }
+}
 
 function assertContains(haystack, needle, msg) {
   if (haystack.includes(needle)) {
@@ -38,6 +48,10 @@ function assertEqual(actual, expected, msg) {
     failed++;
     console.error(`  FAIL: ${msg} — expected '${expected}', got '${actual}'`);
   }
+}
+
+function metadataHtmlIsEscaped(html, value) {
+  return !html.includes(value) && html.includes(esc(value));
 }
 
 console.log('buildDeleteConfirmHtml() escapes user-visible text and JS args');
@@ -190,6 +204,52 @@ console.log('Library quality controls — adversarial deterministic release-id p
   assertContains(html, `window.setLibQuality(${arg}, 'unsearchable', null)`, 'unsearchable control encodes release id');
   assertContains(html, `window.setLibQuality(${arg}, null, parseInt(v))`, 'min-bitrate control encodes release id');
   assertExcludes(html, `window.setLibQuality('${id}'`, 'known-bad raw single-quoted interpolation is absent');
+}
+
+console.log('renderLibraryAlbumRow() preserves ordinary metadata presentation');
+{
+  const html = renderLibraryAlbumRow({
+    id: 42,
+    album: 'Let Love Rule',
+    year: 1989,
+    country: 'US',
+    type: 'Album',
+    track_count: 13,
+    in_library: false,
+    pipeline_id: 17,
+  });
+  assertContains(html, '<span>1989</span>', 'ordinary year remains visible');
+  assertContains(html, '<span>US</span>', 'ordinary country remains visible');
+  assertContains(html, '<span>Album</span>', 'ordinary release type remains visible');
+}
+
+console.log('renderLibraryAlbumRow() escapes controlled metadata at the live HTML sink');
+{
+  const knownBad = '<span><script>alert(1)</script></span>';
+  assert(!metadataHtmlIsEscaped(knownBad, '<script>alert(1)</script>'),
+    'metadata escape checker rejects known-bad raw HTML');
+
+  const atoms = ['<', '>', '&', '"', "'", '\\'];
+  for (const left of atoms) {
+    for (const right of atoms) {
+      const year = `year${left}${right}tail`;
+      const country = `country${left}${right}tail`;
+      const type = `type${left}${right}tail`;
+      const html = renderLibraryAlbumRow({
+        id: 42,
+        album: 'Album',
+        year,
+        country,
+        type,
+        track_count: 1,
+        in_library: false,
+        pipeline_id: 17,
+      });
+      assert(metadataHtmlIsEscaped(html, year), `year escaped: ${JSON.stringify(year)}`);
+      assert(metadataHtmlIsEscaped(html, country), `country escaped: ${JSON.stringify(country)}`);
+      assert(metadataHtmlIsEscaped(html, type), `type escaped: ${JSON.stringify(type)}`);
+    }
+  }
 }
 
 console.log('Library quality controls — generated critical-character property sweep');

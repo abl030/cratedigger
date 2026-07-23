@@ -92,9 +92,9 @@ export function renderLibraryAlbumRow(a) {
         </div>
       </div>
       <div class="p-meta">
-        <span>${a.year || '?'}</span>
-        ${a.country ? `<span>${a.country}</span>` : ''}
-        ${a.type ? `<span>${a.type}</span>` : ''}
+        <span>${esc(a.year || '?')}</span>
+        ${a.country ? `<span>${esc(a.country)}</span>` : ''}
+        ${a.type ? `<span>${esc(a.type)}</span>` : ''}
         <span>added ${added}</span>
       </div>
     </div>

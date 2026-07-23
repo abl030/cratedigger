@@ -1079,7 +1079,7 @@ function renderEntryDetail(e, job) {
   html += '</div>';
 
   if (c) {
-    html += `<div class="p-detail-row"><span class="p-detail-label">Matched</span><span class="p-detail-value">${esc(c.artist || '?')} — ${esc(c.album || '?')}${c.year ? ` (${c.year})` : ''}${c.country ? ` [${esc(c.country)}]` : ''}</span></div>`;
+    html += `<div class="p-detail-row"><span class="p-detail-label">Matched</span><span class="p-detail-value">${esc(c.artist || '?')} — ${esc(c.album || '?')}${c.year ? ` (${esc(c.year)})` : ''}${c.country ? ` [${esc(c.country)}]` : ''}</span></div>`;
     if (c.label) html += `<div class="p-detail-row"><span class="p-detail-label">Label</span><span class="p-detail-value">${esc(c.label)}${c.catalognum ? ` / ${esc(c.catalognum)}` : ''}</span></div>`;
   }
   if (sourceDirs.length > 0) {
@@ -1118,7 +1118,7 @@ function renderEntryDetail(e, job) {
       const mbLen = m.track?.length ? fmtLen(m.track.length) : '';
       const localTitle = m.item?.title || m.item?.path || '?';
       const localLen = m.item?.length ? fmtLen(m.item.length) : '';
-      const localFmt = m.item?.format ? ` ${m.item.format}` : '';
+      const localFmt = m.item?.format ? ` ${esc(m.item.format)}` : '';
       const localBr = m.item?.bitrate ? ` ${Math.round(m.item.bitrate / 1000)}k` : '';
       const titleMatch = mbTitle.toLowerCase().replace(/\s*\(demo\)\s*/g, '').trim() === (localTitle || '').toLowerCase().trim();
       const mismatchStyle = titleMatch ? '' : 'color:#f88;';
