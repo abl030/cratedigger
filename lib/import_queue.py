@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any, cast
 
 import msgspec
 
@@ -77,11 +77,15 @@ IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES = frozenset({
 })
 
 
+_PositiveInt = Annotated[int, msgspec.Meta(gt=0)]
+_NonEmptyStr = Annotated[str, msgspec.Meta(min_length=1)]
+
+
 class ForceImportPayload(msgspec.Struct, kw_only=True, forbid_unknown_fields=True):
     """The strict JSONB contract for a ``force_import`` queue row."""
 
-    failed_path: str
-    download_log_id: int | None = None
+    download_log_id: _PositiveInt
+    failed_path: _NonEmptyStr
     source_username: str | None = None
     source_dirs: list[str] = msgspec.field(default_factory=list)
 
@@ -97,10 +101,10 @@ class AutomationImportPayload(
 class YoutubeImportPayload(msgspec.Struct, kw_only=True, forbid_unknown_fields=True):
     """The strict JSONB contract for a ``youtube_import`` queue row."""
 
-    staged_path: str
-    request_id: int
-    browse_id: str
-    download_log_id: int | None = None
+    staged_path: _NonEmptyStr
+    request_id: _PositiveInt
+    browse_id: _NonEmptyStr
+    download_log_id: _PositiveInt
 
 
 ImportJobPayload = (
@@ -118,6 +122,11 @@ def decode_import_job_payload(job_type: str, value: Any) -> ImportJobPayload:
     if job_type == IMPORT_JOB_YOUTUBE:
         return msgspec.convert(value, type=YoutubeImportPayload)
     raise AssertionError(f"validated unknown import job type: {job_type}")
+
+
+def _payload_to_builtins(payload: ImportJobPayload) -> dict[str, Any]:
+    """Serialize one canonical payload Struct to its JSONB object shape."""
+    return cast(dict[str, Any], msgspec.to_builtins(payload))
 
 
 @dataclass(frozen=True)
@@ -277,7 +286,7 @@ class ImportJob:
             "status": self.status,
             "request_id": self.request_id,
             "dedupe_key": self.dedupe_key,
-            "payload": msgspec.to_builtins(self.payload),
+            "payload": _payload_to_builtins(self.payload),
             "result": self.result,
             "message": self.message,
             "error": self.error,
@@ -380,28 +389,8 @@ def validate_preview_failure_status(status: str) -> str:
 
 
 def validate_payload(job_type: str, payload: dict[str, Any]) -> dict[str, Any]:
-    validate_job_type(job_type)
-    payload = _json_dict(payload)
-    if job_type == IMPORT_JOB_FORCE:
-        failed_path = payload.get("failed_path")
-        if not isinstance(failed_path, str) or not failed_path:
-            raise ValueError(f"{job_type} payload requires failed_path")
-    if job_type == IMPORT_JOB_YOUTUBE:
-        staged_path = payload.get("staged_path")
-        if not isinstance(staged_path, str) or not staged_path:
-            raise ValueError(f"{job_type} payload requires staged_path")
-        request_id = payload.get("request_id")
-        if not isinstance(request_id, int):
-            raise ValueError(f"{job_type} payload requires request_id (int)")
-        browse_id = payload.get("browse_id")
-        if not isinstance(browse_id, str) or not browse_id:
-            raise ValueError(f"{job_type} payload requires browse_id")
-        download_log_id = payload.get("download_log_id")
-        if download_log_id is not None and not isinstance(download_log_id, int):
-            raise ValueError(
-                f"{job_type} payload download_log_id must be int when present"
-            )
-    return payload
+    """Validate and serialize the canonical job-specific JSONB contract."""
+    return _payload_to_builtins(decode_import_job_payload(job_type, payload))
 
 
 def force_import_dedupe_key(download_log_id: int) -> str:
@@ -431,19 +420,16 @@ def force_import_payload(
     source_username: str | None = None,
     source_dirs: list[str] | None = None,
 ) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "download_log_id": int(download_log_id),
-        "failed_path": failed_path,
-    }
-    if source_username:
-        payload["source_username"] = source_username
-    if source_dirs:
-        payload["source_dirs"] = [str(source_dir) for source_dir in source_dirs]
-    return payload
+    return _payload_to_builtins(ForceImportPayload(
+        download_log_id=download_log_id,
+        failed_path=failed_path,
+        source_username=source_username,
+        source_dirs=source_dirs or [],
+    ))
 
 
 def automation_import_payload() -> dict[str, Any]:
-    return {}
+    return _payload_to_builtins(AutomationImportPayload())
 
 
 def youtube_import_payload(
@@ -451,7 +437,7 @@ def youtube_import_payload(
     staged_path: str,
     request_id: int,
     browse_id: str,
-    download_log_id: int | None = None,
+    download_log_id: int,
 ) -> dict[str, Any]:
     """Build the payload for a ``youtube_import`` job.
 
@@ -460,14 +446,12 @@ def youtube_import_payload(
     payload — the importer dispatcher (U9) reads ``staged_path``
     instead of the slskd-shaped ``active_download_state``.
 
-    The database row is decoded into ``YoutubeImportPayload`` before any
-    consumer acts on it.
+    The positive request/download-log IDs and nonempty path/browse ID are
+    validated from the same Struct immediately before either queue write.
     """
-    payload: dict[str, Any] = {
-        "staged_path": str(staged_path),
-        "request_id": int(request_id),
-        "browse_id": str(browse_id),
-    }
-    if download_log_id is not None:
-        payload["download_log_id"] = int(download_log_id)
-    return payload
+    return _payload_to_builtins(YoutubeImportPayload(
+        staged_path=staged_path,
+        request_id=request_id,
+        browse_id=browse_id,
+        download_log_id=download_log_id,
+    ))

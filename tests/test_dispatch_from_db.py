@@ -180,7 +180,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
-                payload={"failed_path": tmpdir},
+                payload={"download_log_id": 1, "failed_path": tmpdir},
             )
             from lib.quality import SpectralAnalysisDetail, SpectralDetail
             preview_ir = ImportResult(spectral=SpectralDetail(
@@ -440,7 +440,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
-                payload={"failed_path": tmpdir},
+                payload={"download_log_id": 1, "failed_path": tmpdir},
             )
             _seed_candidate_for_import_job(
                 db,
@@ -539,7 +539,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
-                payload={"failed_path": tmpdir},
+                payload={"download_log_id": 1, "failed_path": tmpdir},
                 dedupe_key="manual:requeue-stale",
             )
             db.mark_import_job_preview_importable(
@@ -620,7 +620,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
-                payload={"failed_path": tmpdir},
+                payload={"download_log_id": 1, "failed_path": tmpdir},
                 dedupe_key="manual:requeue-missing",
             )
             db.mark_import_job_preview_importable(
@@ -683,7 +683,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
-                payload={"failed_path": tmpdir},
+                payload={"download_log_id": 1, "failed_path": tmpdir},
                 dedupe_key="manual:requeue-fail",
             )
             db.mark_import_job_preview_importable(
@@ -757,7 +757,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
-                payload={"failed_path": tmpdir},
+                payload={"download_log_id": 1, "failed_path": tmpdir},
                 dedupe_key="manual:zero-rows",
             )
 
@@ -869,7 +869,7 @@ class TestDispatchFromDbAdvisoryLock(unittest.TestCase):
             job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
-                payload={"failed_path": tmpdir},
+                payload={"download_log_id": 1, "failed_path": tmpdir},
             )
             with patch_dispatch_externals() as ext, \
                  patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir), \
@@ -928,7 +928,7 @@ class TestDispatchFromDbAdvisoryLock(unittest.TestCase):
             job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
-                payload={"failed_path": tmpdir},
+                payload={"download_log_id": 1, "failed_path": tmpdir},
             )
             with patch(
                 "lib.dispatch.entry_points.ensure_candidate_evidence_for_action"
@@ -975,7 +975,7 @@ class TestDispatchFromDbRuntimeConfigSeam(unittest.TestCase):
             job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
-                payload={"failed_path": tmpdir},
+                payload={"download_log_id": 1, "failed_path": tmpdir},
             )
             _seed_candidate_for_import_job(
                 db, job.id,

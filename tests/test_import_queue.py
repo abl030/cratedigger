@@ -31,6 +31,7 @@ from lib.import_queue import (
     automation_import_dedupe_key,
     force_import_dedupe_key,
     force_import_payload,
+    validate_payload,
 )
 from lib.import_preview import ImportPreviewResult
 from lib.quality import (
@@ -150,6 +151,7 @@ class TestImportJobPayloadBoundary(unittest.TestCase):
                     "staged_path": "/tmp/staged",
                     "request_id": 42,
                     "browse_id": "MPREb_boundary",
+                    "download_log_id": 37207,
                 },
                 YoutubeImportPayload,
             ),
@@ -167,26 +169,69 @@ class TestImportJobPayloadBoundary(unittest.TestCase):
                 self.assertIsInstance(job.to_dict()["payload"], dict)
                 self.assertIsInstance(job.to_json_dict()["payload"], dict)
 
-    def test_from_row_rejects_wrong_typed_or_extra_job_payload_values(self):
-        cases = [
-            (
-                IMPORT_JOB_FORCE,
-                {"download_log_id": "37206", "failed_path": "/tmp/failed"},
-            ),
+    def test_canonical_boundaries_reject_every_malformed_payload_shape(self):
+        force_valid: dict[str, object] = {
+            "download_log_id": 37206,
+            "failed_path": "/tmp/failed",
+        }
+        youtube_valid: dict[str, object] = {
+            "staged_path": "/tmp/staged",
+            "request_id": 42,
+            "browse_id": "MPREb_boundary",
+            "download_log_id": 37207,
+        }
+        cases: list[tuple[str, dict[str, object]]] = [
+            (IMPORT_JOB_FORCE, {"failed_path": "/tmp/failed"}),
+            (IMPORT_JOB_FORCE, {**force_valid, "download_log_id": None}),
+            (IMPORT_JOB_FORCE, {**force_valid, "download_log_id": 0}),
+            (IMPORT_JOB_FORCE, {**force_valid, "download_log_id": -1}),
+            (IMPORT_JOB_FORCE, {**force_valid, "download_log_id": True}),
+            (IMPORT_JOB_FORCE, {**force_valid, "download_log_id": "37206"}),
+            (IMPORT_JOB_FORCE, {"download_log_id": 37206}),
+            (IMPORT_JOB_FORCE, {**force_valid, "failed_path": None}),
+            (IMPORT_JOB_FORCE, {**force_valid, "failed_path": ""}),
+            (IMPORT_JOB_FORCE, {**force_valid, "failed_path": 1}),
+            (IMPORT_JOB_FORCE, {**force_valid, "unexpected": True}),
             (IMPORT_JOB_AUTOMATION, {"unexpected": True}),
-            (
-                IMPORT_JOB_YOUTUBE,
-                {
-                    "staged_path": "/tmp/staged",
-                    "request_id": 42,
-                    "browse_id": "MPREb_boundary",
-                    "unexpected": True,
-                },
-            ),
+            (IMPORT_JOB_YOUTUBE, {
+                key: value for key, value in youtube_valid.items()
+                if key != "request_id"
+            }),
+            (IMPORT_JOB_YOUTUBE, {**youtube_valid, "request_id": None}),
+            (IMPORT_JOB_YOUTUBE, {**youtube_valid, "request_id": 0}),
+            (IMPORT_JOB_YOUTUBE, {**youtube_valid, "request_id": -1}),
+            (IMPORT_JOB_YOUTUBE, {**youtube_valid, "request_id": True}),
+            (IMPORT_JOB_YOUTUBE, {**youtube_valid, "request_id": "42"}),
+            (IMPORT_JOB_YOUTUBE, {
+                key: value for key, value in youtube_valid.items()
+                if key != "download_log_id"
+            }),
+            (IMPORT_JOB_YOUTUBE, {**youtube_valid, "download_log_id": None}),
+            (IMPORT_JOB_YOUTUBE, {**youtube_valid, "download_log_id": 0}),
+            (IMPORT_JOB_YOUTUBE, {**youtube_valid, "download_log_id": -1}),
+            (IMPORT_JOB_YOUTUBE, {**youtube_valid, "download_log_id": True}),
+            (IMPORT_JOB_YOUTUBE, {**youtube_valid, "download_log_id": "37207"}),
+            (IMPORT_JOB_YOUTUBE, {
+                key: value for key, value in youtube_valid.items()
+                if key != "staged_path"
+            }),
+            (IMPORT_JOB_YOUTUBE, {**youtube_valid, "staged_path": None}),
+            (IMPORT_JOB_YOUTUBE, {**youtube_valid, "staged_path": ""}),
+            (IMPORT_JOB_YOUTUBE, {**youtube_valid, "staged_path": 1}),
+            (IMPORT_JOB_YOUTUBE, {
+                key: value for key, value in youtube_valid.items()
+                if key != "browse_id"
+            }),
+            (IMPORT_JOB_YOUTUBE, {**youtube_valid, "browse_id": None}),
+            (IMPORT_JOB_YOUTUBE, {**youtube_valid, "browse_id": ""}),
+            (IMPORT_JOB_YOUTUBE, {**youtube_valid, "browse_id": 1}),
+            (IMPORT_JOB_YOUTUBE, {**youtube_valid, "unexpected": True}),
         ]
 
         for job_type, payload in cases:
             with self.subTest(job_type=job_type, payload=payload):
+                with self.assertRaises(msgspec.ValidationError):
+                    validate_payload(job_type, payload)
                 with self.assertRaises(msgspec.ValidationError):
                     ImportJob.from_row({
                         "id": 1,
@@ -1128,7 +1173,7 @@ class TestImporterWorker(unittest.TestCase):
                 IMPORT_JOB_FORCE,
                 request_id=42,
                 dedupe_key="force_import:other-active-job",
-                payload={"failed_path": source},
+                payload={"download_log_id": 1, "failed_path": source},
             )
 
             with patch(
@@ -1197,7 +1242,7 @@ class TestImporterWorker(unittest.TestCase):
             IMPORT_JOB_FORCE,
             request_id=42,
             dedupe_key="force_import:startup-recovery",
-            payload={"failed_path": "/tmp/force"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/force"},
         )
         self._mark_importable(db, job)
         claimed = db.claim_next_import_job(worker_id="old-worker")
@@ -1230,7 +1275,7 @@ class TestImporterWorker(unittest.TestCase):
             IMPORT_JOB_FORCE,
             request_id=42,
             dedupe_key="force_import:waiting-preview",
-            payload={"failed_path": "/tmp/force"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/force"},
         )
 
         self.assertIsNone(importer.run_once(cast(Any, db), worker_id="worker"))
@@ -1793,7 +1838,7 @@ class TestImportPreviewWorker(unittest.TestCase):
                 IMPORT_JOB_FORCE,
                 request_id=42,
                 dedupe_key="force_import:evidence-readiness-fallback",
-                payload={"failed_path": source},
+                payload={"download_log_id": 1, "failed_path": source},
             )
             claimed = db.claim_next_import_preview_job(worker_id="preview")
             assert claimed is not None
@@ -2039,7 +2084,7 @@ class TestImportPreviewWorker(unittest.TestCase):
             IMPORT_JOB_FORCE,
             request_id=42,
             dedupe_key="force_import:failure-have-lifecycle",
-            payload={"failed_path": "/tmp/corrupt-audio"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/corrupt-audio"},
         )
         claimed = db.claim_next_import_preview_job(worker_id="preview")
         assert claimed is not None
@@ -2108,7 +2153,7 @@ class TestImportPreviewWorker(unittest.TestCase):
                     IMPORT_JOB_FORCE,
                     request_id=42,
                     dedupe_key=f"force_import:failure-have-{failing_stage}",
-                    payload={"failed_path": "/tmp/corrupt-audio"},
+                    payload={"download_log_id": 1, "failed_path": "/tmp/corrupt-audio"},
                 )
                 claimed = db.claim_next_import_preview_job(worker_id="preview")
                 assert claimed is not None
@@ -2163,7 +2208,7 @@ class TestImportPreviewWorker(unittest.TestCase):
             IMPORT_JOB_FORCE,
             request_id=42,
             dedupe_key="force_import:failure-have-no-mbid",
-            payload={"failed_path": "/tmp/corrupt-audio"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/corrupt-audio"},
         )
         claimed = db.claim_next_import_preview_job(worker_id="preview")
         assert claimed is not None
@@ -3304,19 +3349,21 @@ class TestYoutubeImportJobType(unittest.TestCase):
             staged_path="/Incoming/auto-import/Artist - Album",
             request_id=42,
             browse_id="MPREb_abc",
+            download_log_id=99,
         )
         self.assertEqual(payload, {
             "staged_path": "/Incoming/auto-import/Artist - Album",
             "request_id": 42,
             "browse_id": "MPREb_abc",
+            "download_log_id": 99,
         })
         self.assertEqual(validate_payload(IMPORT_JOB_YOUTUBE, payload), payload)
 
-    def test_youtube_import_payload_coerces_request_id_to_int(self):
+    def test_youtube_import_payload_preserves_positive_ids(self):
         from lib.import_queue import youtube_import_payload
         payload = youtube_import_payload(
             staged_path="/Incoming/auto-import/Artist - Album",
-            request_id=42,  # already int
+            request_id=42,
             browse_id="MPREb_abc",
             download_log_id=99,
         )
@@ -3325,48 +3372,61 @@ class TestYoutubeImportJobType(unittest.TestCase):
 
     def test_validate_payload_youtube_rejects_missing_staged_path(self):
         from lib.import_queue import validate_payload, IMPORT_JOB_YOUTUBE
-        with self.assertRaises(ValueError):
+        with self.assertRaises(msgspec.ValidationError):
             validate_payload(IMPORT_JOB_YOUTUBE, {
                 "request_id": 42, "browse_id": "MPREb_abc",
+                "download_log_id": 99,
             })
 
     def test_validate_payload_youtube_rejects_empty_staged_path(self):
         from lib.import_queue import validate_payload, IMPORT_JOB_YOUTUBE
-        with self.assertRaises(ValueError):
+        with self.assertRaises(msgspec.ValidationError):
             validate_payload(IMPORT_JOB_YOUTUBE, {
                 "staged_path": "",
                 "request_id": 42,
                 "browse_id": "MPREb_abc",
+                "download_log_id": 99,
             })
 
     def test_validate_payload_youtube_rejects_missing_request_id(self):
         from lib.import_queue import validate_payload, IMPORT_JOB_YOUTUBE
-        with self.assertRaises(ValueError):
+        with self.assertRaises(msgspec.ValidationError):
             validate_payload(IMPORT_JOB_YOUTUBE, {
                 "staged_path": "/Incoming/auto-import/x",
                 "browse_id": "MPREb_abc",
+                "download_log_id": 99,
             })
 
     def test_validate_payload_youtube_rejects_non_int_request_id(self):
         from lib.import_queue import validate_payload, IMPORT_JOB_YOUTUBE
-        with self.assertRaises(ValueError):
+        with self.assertRaises(msgspec.ValidationError):
             validate_payload(IMPORT_JOB_YOUTUBE, {
                 "staged_path": "/Incoming/auto-import/x",
                 "request_id": "42",  # str, not int
                 "browse_id": "MPREb_abc",
+                "download_log_id": 99,
             })
 
     def test_validate_payload_youtube_rejects_missing_browse_id(self):
         from lib.import_queue import validate_payload, IMPORT_JOB_YOUTUBE
-        with self.assertRaises(ValueError):
+        with self.assertRaises(msgspec.ValidationError):
             validate_payload(IMPORT_JOB_YOUTUBE, {
                 "staged_path": "/Incoming/auto-import/x",
                 "request_id": 42,
+                "download_log_id": 99,
+            })
+
+    def test_validate_payload_youtube_rejects_missing_download_log_id(self):
+        with self.assertRaises(msgspec.ValidationError):
+            validate_payload(IMPORT_JOB_YOUTUBE, {
+                "staged_path": "/Incoming/auto-import/x",
+                "request_id": 42,
+                "browse_id": "MPREb_abc",
             })
 
     def test_validate_payload_youtube_rejects_non_int_download_log_id(self):
         from lib.import_queue import validate_payload, IMPORT_JOB_YOUTUBE
-        with self.assertRaises(ValueError):
+        with self.assertRaises(msgspec.ValidationError):
             validate_payload(IMPORT_JOB_YOUTUBE, {
                 "staged_path": "/Incoming/auto-import/x",
                 "request_id": 42,
@@ -3904,6 +3964,7 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
                 "staged_path": "/Incoming/auto-import/x",
                 "request_id": 1,
                 "browse_id": "MPREb_abc",
+                "download_log_id": 99,
             },
         })
 
@@ -3984,6 +4045,7 @@ class TestFrontGateSourcePathYoutubeImport(unittest.TestCase):
                 staged_path="/Incoming/auto-import/Artist - Album",
                 request_id=42,
                 browse_id="MPREb_abc",
+                download_log_id=99,
             ),
         })
 
@@ -4026,6 +4088,7 @@ class TestFrontGateSourcePathYoutubeImport(unittest.TestCase):
                 staged_path="/Incoming/auto-import/Artist - Album",
                 request_id=42,
                 browse_id="MPREb_abc",
+                download_log_id=99,
             ),
         })
 
@@ -4108,6 +4171,7 @@ class TestFrontGateSourcePathYoutubeImport(unittest.TestCase):
                 staged_path="/Incoming/auto-import/Artist - Album",
                 request_id=42,
                 browse_id="MPREb_abc",
+                download_log_id=99,
             ),
         })
 

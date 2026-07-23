@@ -339,10 +339,18 @@ audit.
 `msgspec.Struct` from the row's `job_type`: `ForceImportPayload`,
 `AutomationImportPayload`, or `YoutubeImportPayload`. A force payload with
 `download_log_id: "37206"`, an extra automation field, or a misspelled YouTube
-field raises `msgspec.ValidationError` at that database boundary. Importer,
-preview, recovery, route, and YouTube consumers then read typed fields rather
-than permissive payload dictionaries; serialization converts the Struct back to
-ordinary JSON values at the API/write boundary.
+field raises `msgspec.ValidationError`. The same decoder now runs before either
+the ordinary queue INSERT or the atomic YouTube handoff, then serializes its
+Struct to JSON builtins; malformed input cannot leave an active row or poison a
+dedupe key. Force jobs require a positive download-log ID and nonempty failed
+path. YouTube jobs require positive request/download-log IDs and nonempty
+staged-path/browse-ID strings; booleans are not integers at this boundary.
+Importer, preview, recovery, route, and YouTube consumers then read typed fields
+rather than permissive payload dictionaries.
+
+A 2026-07-23 live qualification found zero active jobs and every one of the
+2,309 terminal force payloads and 40 terminal YouTube payloads already satisfied
+those contracts, so the tightening needs no backfill or compatibility shim.
 
 `preview_status` continues to admit the historical `would_import` and
 `uncertain` values, while `result` and `preview_result` intentionally remain

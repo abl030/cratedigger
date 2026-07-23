@@ -1931,7 +1931,7 @@ class TestImportPreviewPath(unittest.TestCase):
             "force_import",
             request_id=42,
             dedupe_key="force:42:/tmp/source",
-            payload={"failed_path": "/tmp/source"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/source"},
         )
         source = self._source_dir()
         try:
@@ -2384,7 +2384,7 @@ class TestImportPreviewPath(unittest.TestCase):
             "force_import",
             request_id=42,
             dedupe_key="force:42:/tmp/source",
-            payload={"failed_path": "/tmp/source"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/source"},
         )
         source = self._source_dir()
 

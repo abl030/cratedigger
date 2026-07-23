@@ -138,7 +138,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE if force else IMPORT_JOB_AUTOMATION,
                 request_id=42,
-                payload={"failed_path": tmpdir} if force else {},
+                payload={"download_log_id": 1, "failed_path": tmpdir} if force else {},
             )
             candidate = _seed_candidate_for_import_job(
                 db,
@@ -322,7 +322,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
-                payload={"failed_path": tmpdir},
+                payload={"download_log_id": 1, "failed_path": tmpdir},
             )
             candidate = _seed_candidate_for_import_job(
                 db,
@@ -425,7 +425,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         job = db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=42,
-            payload={"failed_path": "/tmp/pending"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/pending"},
         )
 
         tmpdir = tempfile.mkdtemp()
@@ -554,7 +554,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
-                payload={"failed_path": tmpdir},
+                payload={"download_log_id": 1, "failed_path": tmpdir},
             )
             import_job_id = job.id
             files = snapshot_audio_files(tmpdir)
@@ -720,7 +720,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
-                payload={"failed_path": tmpdir},
+                payload={"download_log_id": 1, "failed_path": tmpdir},
             )
             _seed_candidate_for_import_job(
                 db, job.id,
@@ -805,7 +805,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
-                payload={"failed_path": tmpdir},
+                payload={"download_log_id": 1, "failed_path": tmpdir},
             )
             _seed_candidate_for_import_job(
                 db, job.id,
@@ -892,7 +892,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
-                payload={"failed_path": tmpdir},
+                payload={"download_log_id": 1, "failed_path": tmpdir},
             )
             _seed_candidate_for_import_job(
                 db, job.id,
@@ -952,7 +952,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
-                payload={"failed_path": tmpdir},
+                payload={"download_log_id": 1, "failed_path": tmpdir},
             )
             _seed_candidate_for_import_job(
                 db, job.id,
@@ -1125,7 +1125,7 @@ class TestDispatchCoreSeams(unittest.TestCase):
             job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE if force else IMPORT_JOB_AUTOMATION,
                 request_id=42,
-                payload={"failed_path": tmpdir} if force else {},
+                payload={"download_log_id": 1, "failed_path": tmpdir} if force else {},
             )
             candidate = _seed_candidate_for_import_job(
                 db,

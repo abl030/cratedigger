@@ -1087,6 +1087,41 @@ class TestImportJobQueueAPI(unittest.TestCase):
         )
         self.assertNotEqual(first.id, later.id)
 
+    def test_malformed_force_payload_cannot_insert_or_poison_dedupe(self):
+        from lib.import_queue import (
+            IMPORT_JOB_FORCE,
+            force_import_dedupe_key,
+            force_import_payload,
+        )
+
+        dedupe = force_import_dedupe_key(37206)
+        valid = force_import_payload(
+            download_log_id=37206,
+            failed_path="/tmp/failed",
+        )
+        malformed = {**valid, "unexpected": True}
+
+        with self.assertRaises(msgspec.ValidationError):
+            self.db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=self.req_id,
+                dedupe_key=dedupe,
+                payload=malformed,
+            )
+
+        self.assertFalse(any(
+            job.dedupe_key == dedupe
+            for job in self.db.list_import_jobs(limit=100)
+        ))
+        job = self.db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=self.req_id,
+            dedupe_key=dedupe,
+            payload=valid,
+        )
+        self.assertEqual(job.dedupe_key, dedupe)
+        self.assertFalse(job.deduped)
+
     def test_enqueue_youtube_import_is_allowed_by_pg_constraint(self):
         from lib.import_queue import (
             IMPORT_JOB_YOUTUBE,
@@ -1103,6 +1138,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
                 staged_path="/tmp/youtube-staged",
                 request_id=self.req_id,
                 browse_id="MPREb_pg_constraint",
+                download_log_id=17,
             ),
         )
 
@@ -1118,7 +1154,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
             IMPORT_JOB_FORCE,
             request_id=self.req_id,
             dedupe_key="manual:1",
-            payload={"failed_path": "/tmp/manual"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/manual"},
         )
         self.db.mark_import_job_preview_importable(
             job.id,
@@ -1155,7 +1191,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
         job = self.db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=self.req_id,
-            payload={"failed_path": source_path},
+            payload={"download_log_id": 1, "failed_path": source_path},
         )
         evidence = make_album_quality_evidence(
             mb_release_id="queue-api-mbid",
@@ -1214,7 +1250,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
             IMPORT_JOB_FORCE,
             request_id=self.req_id,
             dedupe_key="manual:claim-once",
-            payload={"failed_path": "/tmp/manual"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/manual"},
         )
         self.db.mark_import_job_preview_importable(
             job.id,
@@ -1237,7 +1273,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
             IMPORT_JOB_FORCE,
             request_id=self.req_id,
             dedupe_key="manual:restart-retry",
-            payload={"failed_path": "/tmp/manual"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/manual"},
         )
         self.db.mark_import_job_preview_importable(
             job.id,
@@ -1271,7 +1307,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
             IMPORT_JOB_FORCE,
             request_id=self.req_id,
             dedupe_key="manual:preview-gate",
-            payload={"failed_path": "/tmp/manual"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/manual"},
         )
         self.assertIsNone(self.db.claim_next_import_job(worker_id="too-early"))
 
@@ -1292,13 +1328,13 @@ class TestImportJobQueueAPI(unittest.TestCase):
             IMPORT_JOB_FORCE,
             request_id=self.req_id,
             dedupe_key="manual:timeline-waiting",
-            payload={"failed_path": "/tmp/waiting"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/waiting"},
         )
         importable = self.db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=self.req_id,
             dedupe_key="manual:timeline-importable",
-            payload={"failed_path": "/tmp/importable"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/importable"},
         )
         self.db.mark_import_job_preview_importable(
             importable.id,
@@ -1318,7 +1354,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
             IMPORT_JOB_FORCE,
             request_id=self.req_id,
             dedupe_key="manual:timeline-active",
-            payload={"failed_path": "/tmp/active"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/active"},
         )
         self.db.mark_import_job_preview_importable(
             importable.id,
@@ -1329,13 +1365,13 @@ class TestImportJobQueueAPI(unittest.TestCase):
             IMPORT_JOB_FORCE,
             request_id=self.req_id,
             dedupe_key="manual:timeline-old-terminal",
-            payload={"failed_path": "/tmp/old"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/old"},
         )
         newer = self.db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=self.req_id,
             dedupe_key="manual:timeline-new-terminal",
-            payload={"failed_path": "/tmp/new"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/new"},
         )
         self.db.mark_import_job_failed(
             older.id,
@@ -1359,7 +1395,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
             IMPORT_JOB_FORCE,
             request_id=self.req_id,
             dedupe_key="manual:preview",
-            payload={"failed_path": "/tmp/manual"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/manual"},
         )
         self.assertEqual(queued.preview_status, "waiting")
         self.assertEqual(queued.preview_attempts, 0)
@@ -1407,7 +1443,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
             IMPORT_JOB_FORCE,
             request_id=self.req_id,
             dedupe_key="manual:preview-reject",
-            payload={"failed_path": "/tmp/manual"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/manual"},
         )
 
         failed = self.db.mark_import_job_preview_failed(
@@ -1436,7 +1472,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
             IMPORT_JOB_FORCE,
             request_id=self.req_id,
             dedupe_key="manual:preview-claim-once",
-            payload={"failed_path": "/tmp/manual"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/manual"},
         )
         other = pipeline_db.PipelineDB(TEST_DSN)
         try:
@@ -1472,7 +1508,7 @@ class TestRequeueImportJobForPreview(unittest.TestCase):
             IMPORT_JOB_FORCE,
             request_id=self.req_id,
             dedupe_key="manual:requeue-for-preview",
-            payload={"failed_path": "/tmp/manual"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/manual"},
         )
         self.db.mark_import_job_preview_importable(
             job.id,
@@ -1561,7 +1597,7 @@ class TestRequeueImportJobForPreview(unittest.TestCase):
             IMPORT_JOB_FORCE,
             request_id=self.req_id,
             dedupe_key="manual:unrelated",
-            payload={"failed_path": "/tmp/other"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/other"},
         )
 
         self.db.requeue_import_job_for_preview(claimed.id, reason="x")
@@ -1608,7 +1644,7 @@ class TestRequeueRunningImportPreviewJobs(unittest.TestCase):
             IMPORT_JOB_FORCE,
             request_id=self.req_id,
             dedupe_key="manual:requeue-running-preview",
-            payload={"failed_path": "/tmp/manual"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/manual"},
         )
         claimed = self.db.claim_next_import_preview_job(worker_id="preview-old")
         assert claimed is not None
@@ -1655,7 +1691,7 @@ class TestRequeueRunningImportPreviewJobs(unittest.TestCase):
             IMPORT_JOB_FORCE,
             request_id=self.req_id,
             dedupe_key="manual:waiting",
-            payload={"failed_path": "/tmp/waiting"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/waiting"},
         )
 
         result = self.db.requeue_running_import_preview_jobs(message="restart")
@@ -5181,7 +5217,7 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         job = self.db.enqueue_import_job(
             "force_import",
             request_id=self.req_id,
-            payload={"failed_path": "/tmp/candidate"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/candidate"},
         )
         evidence = self._seed(mb_release_id="mbid-fk-job")
         self.db.upsert_album_quality_evidence(evidence)
@@ -7344,7 +7380,7 @@ class TestActiveImportJobForRequest(unittest.TestCase):
             IMPORT_JOB_FORCE,
             request_id=request_id,
             dedupe_key=dedupe_key,
-            payload={"failed_path": "/tmp/x"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/x"},
         )
 
     def test_returns_none_when_no_jobs(self):
@@ -7470,13 +7506,13 @@ class TestActiveImportJobsForWrongMatch(unittest.TestCase):
             IMPORT_JOB_FORCE,
             request_id=self.req_id,
             dedupe_key="wm:request",
-            payload={"failed_path": "/tmp/unrelated"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/unrelated"},
         )
         by_path = self.db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=self.other_req_id,
             dedupe_key="wm:path",
-            payload={"failed_path": path},
+            payload={"download_log_id": 1, "failed_path": path},
         )
         by_source_dir = self.db.enqueue_import_job(
             IMPORT_JOB_FORCE,
@@ -8510,6 +8546,7 @@ class TestGetWantedSearchable(unittest.TestCase):
                 staged_path="/tmp/yt-import",
                 request_id=rid_import,
                 browse_id="MPREb_import",
+                download_log_id=1,
             ),
         )
 
@@ -10649,6 +10686,54 @@ class TestYoutubeIngestDownloadLog(unittest.TestCase):
         self.assertEqual(entry["outcome"], "youtube_success")
         self.assertEqual(
             cast(dict, entry["youtube_metadata"])["observed_track_count"], 10)
+
+    def test_malformed_youtube_handoff_cannot_mutate_or_poison_dedupe(self):
+        from lib.import_queue import (
+            youtube_import_dedupe_key,
+            youtube_import_payload,
+        )
+
+        log_id = self.db.insert_youtube_running(**self._yt_payload())
+        dedupe = youtube_import_dedupe_key(log_id)
+        valid = youtube_import_payload(
+            staged_path="/tmp/yt-staged",
+            request_id=self.request_id,
+            browse_id="MPREb_default",
+            download_log_id=log_id,
+        )
+        malformed = {**valid, "unexpected": True}
+
+        with self.assertRaises(msgspec.ValidationError):
+            self.db.enqueue_youtube_import_and_mark_success(
+                download_log_id=log_id,
+                request_id=self.request_id,
+                dedupe_key=dedupe,
+                payload=malformed,
+                message="invalid yt handoff",
+                terminal_metadata={"observed_track_count": 10},
+            )
+
+        self.assertFalse(any(
+            job.dedupe_key == dedupe
+            for job in self.db.list_import_jobs(limit=100)
+        ))
+        entry = self.db.get_download_log_entry(log_id)
+        assert entry is not None
+        self.assertEqual(entry["outcome"], "youtube_running")
+
+        job = self.db.enqueue_youtube_import_and_mark_success(
+            download_log_id=log_id,
+            request_id=self.request_id,
+            dedupe_key=dedupe,
+            payload=valid,
+            message="valid yt handoff",
+            terminal_metadata={"observed_track_count": 10},
+        )
+        self.assertEqual(job.dedupe_key, dedupe)
+        self.assertFalse(job.deduped)
+        entry = self.db.get_download_log_entry(log_id)
+        assert entry is not None
+        self.assertEqual(entry["outcome"], "youtube_success")
 
     def test_read_seam_includes_source_and_youtube_metadata(self):
         """Every download_log read seam surfaces the new columns."""

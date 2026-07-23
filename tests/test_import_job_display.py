@@ -27,7 +27,10 @@ def _job(
         status=status,
         request_id=100,
         dedupe_key="force_import:download_log:575",
-        payload=ForceImportPayload(failed_path="/tmp/album"),
+        payload=ForceImportPayload(
+            download_log_id=575,
+            failed_path="/tmp/album",
+        ),
         result=None,
         message=message,
         error=error,

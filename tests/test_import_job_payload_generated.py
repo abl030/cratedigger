@@ -16,6 +16,7 @@ from lib.import_queue import (
     IMPORT_JOB_YOUTUBE,
     ImportJob,
     YoutubeImportPayload,
+    validate_payload,
 )
 import tests._hypothesis_profiles  # noqa: F401
 
@@ -61,12 +62,115 @@ def valid_payload_rows(draw: st.DrawFn) -> tuple[str, dict[str, object]]:
         "staged_path": "/tmp/" + draw(_TEXT),
         "request_id": draw(st.integers(min_value=1, max_value=1_000_000)),
         "browse_id": draw(_TEXT),
+        "download_log_id": draw(st.integers(min_value=1, max_value=1_000_000)),
     }
-    download_log_id = draw(st.one_of(
-        st.none(), st.integers(min_value=1, max_value=1_000_000),
-    ))
-    if download_log_id is not None:
-        payload["download_log_id"] = download_log_id
+    return job_type, payload
+
+
+@st.composite
+def invalid_payload_rows(draw: st.DrawFn) -> tuple[str, dict[str, object]]:
+    job_type, payload = draw(valid_payload_rows())
+    if job_type == IMPORT_JOB_AUTOMATION:
+        payload["unexpected"] = draw(st.booleans())
+        return job_type, payload
+
+    if job_type == IMPORT_JOB_FORCE:
+        defect = draw(st.sampled_from((
+            "download_missing",
+            "download_none",
+            "download_zero",
+            "download_negative",
+            "download_bool",
+            "download_wrong_type",
+            "path_missing",
+            "path_none",
+            "path_empty",
+            "path_wrong_type",
+            "extra",
+        )))
+        if defect == "download_missing":
+            payload.pop("download_log_id")
+        elif defect == "download_none":
+            payload["download_log_id"] = None
+        elif defect == "download_zero":
+            payload["download_log_id"] = 0
+        elif defect == "download_negative":
+            payload["download_log_id"] = draw(st.integers(max_value=-1))
+        elif defect == "download_bool":
+            payload["download_log_id"] = draw(st.booleans())
+        elif defect == "download_wrong_type":
+            payload["download_log_id"] = draw(_TEXT)
+        elif defect == "path_missing":
+            payload.pop("failed_path")
+        elif defect == "path_none":
+            payload["failed_path"] = None
+        elif defect == "path_empty":
+            payload["failed_path"] = ""
+        elif defect == "path_wrong_type":
+            payload["failed_path"] = draw(st.integers())
+        else:
+            payload["unexpected"] = draw(st.booleans())
+        return job_type, payload
+
+    defect = draw(st.sampled_from((
+        "request_missing",
+        "request_none",
+        "request_zero",
+        "request_negative",
+        "request_bool",
+        "request_wrong_type",
+        "download_missing",
+        "download_none",
+        "download_zero",
+        "download_negative",
+        "download_bool",
+        "download_wrong_type",
+        "path_missing",
+        "path_none",
+        "path_empty",
+        "path_wrong_type",
+        "browse_missing",
+        "browse_none",
+        "browse_empty",
+        "browse_wrong_type",
+        "extra",
+    )))
+    field, _, failure = defect.partition("_")
+    key = {
+        "request": "request_id",
+        "download": "download_log_id",
+        "path": "staged_path",
+        "browse": "browse_id",
+    }.get(field)
+    if defect == "extra":
+        payload["unexpected"] = draw(st.booleans())
+    elif failure == "missing":
+        assert key is not None
+        payload.pop(key)
+    elif failure == "none":
+        assert key is not None
+        payload[key] = None
+    elif failure == "zero":
+        assert key is not None
+        payload[key] = 0
+    elif failure == "negative":
+        assert key is not None
+        payload[key] = draw(st.integers(max_value=-1))
+    elif failure == "bool":
+        assert key is not None
+        payload[key] = draw(st.booleans())
+    elif failure == "empty":
+        assert key is not None
+        payload[key] = ""
+    elif failure == "wrong_type":
+        assert key is not None
+        payload[key] = (
+            draw(_TEXT)
+            if key in ("request_id", "download_log_id")
+            else draw(st.integers())
+        )
+    else:
+        raise AssertionError(f"unhandled generated defect: {defect}")
     return job_type, payload
 
 
@@ -84,6 +188,23 @@ def assert_job_payload_matches_type(job: ImportJob) -> None:
         )
 
 
+def assert_payload_rejected_at_read_and_prewrite(
+    job_type: str,
+    payload: dict[str, object],
+) -> None:
+    """Malformed payloads fail at both canonical boundary entry points."""
+    boundaries = (
+        ("ImportJob.from_row", lambda: ImportJob.from_row(_row(job_type, payload))),
+        ("validate_payload", lambda: validate_payload(job_type, payload)),
+    )
+    for name, invoke in boundaries:
+        try:
+            invoke()
+        except msgspec.ValidationError:
+            continue
+        raise AssertionError(f"{name} accepted malformed {job_type} payload")
+
+
 class TestPayloadCheckerTripsOnKnownBadJobs(unittest.TestCase):
     def test_rejects_payload_struct_from_a_different_job_type(self) -> None:
         job = ImportJob.from_row(_row(
@@ -93,6 +214,13 @@ class TestPayloadCheckerTripsOnKnownBadJobs(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "force_import decoded"):
             assert_job_payload_matches_type(
                 replace(job, payload=AutomationImportPayload()),
+            )
+
+    def test_rejects_a_valid_payload_planted_as_known_bad(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "accepted malformed"):
+            assert_payload_rejected_at_read_and_prewrite(
+                IMPORT_JOB_FORCE,
+                {"download_log_id": 1, "failed_path": "/tmp/valid"},
             )
 
 
@@ -109,32 +237,24 @@ class TestImportJobPayloadBoundaryGenerated(unittest.TestCase):
         job_type, payload = row
         job = ImportJob.from_row(_row(job_type, payload))
         assert_job_payload_matches_type(job)
+        self.assertEqual(
+            validate_payload(job_type, payload),
+            job.to_dict()["payload"],
+        )
 
-    @given(
-        job_type=st.sampled_from((
-            IMPORT_JOB_FORCE,
-            IMPORT_JOB_AUTOMATION,
-            IMPORT_JOB_YOUTUBE,
-        )),
-        unexpected=_TEXT,
-    )
-    @example(job_type=IMPORT_JOB_FORCE, unexpected="unexpected")
-    def test_extra_fields_fail_closed_for_every_job_type(
+    @given(row=invalid_payload_rows())
+    @example(row=(IMPORT_JOB_FORCE, {
+        "download_log_id": "37206",
+        "failed_path": "/tmp/failed",
+    }))
+    @example(row=(IMPORT_JOB_YOUTUBE, {
+        "staged_path": "/tmp/staged",
+        "request_id": True,
+        "browse_id": "MPREb_generated",
+        "download_log_id": 1,
+    }))
+    def test_malformed_values_fail_at_read_and_prewrite_boundaries(
         self,
-        job_type: str,
-        unexpected: str,
+        row: tuple[str, dict[str, object]],
     ) -> None:
-        payload: dict[str, object]
-        if job_type == IMPORT_JOB_FORCE:
-            payload = {"download_log_id": 1, "failed_path": "/tmp/failed"}
-        elif job_type == IMPORT_JOB_AUTOMATION:
-            payload = {}
-        else:
-            payload = {
-                "staged_path": "/tmp/staged",
-                "request_id": 1,
-                "browse_id": "MPREb_generated",
-            }
-        payload[unexpected] = True
-        with self.assertRaises(msgspec.ValidationError):
-            ImportJob.from_row(_row(job_type, payload))
+        assert_payload_rejected_at_read_and_prewrite(*row)
