@@ -42,8 +42,14 @@ def assert_published_request_complete(
         row.get("search_filetype_override") != "upgrade" or row.get("min_bitrate") != 320
     ):
         raise AssertionError("wanted upgrade request lost its publication policy")
+    persisted_tracks = db.get_tracks(request_id)
+    if (
+        not resolved
+        and [track.get("track_artist") for track in persisted_tracks]
+        != [None] * len(persisted_tracks)
+    ):
+        raise AssertionError("wanted unresolved request gained a track artist")
     if resolved:
-        persisted_tracks = db.get_tracks(request_id)
         if discogs:
             # Direct Add does not pre-seed a Discogs master in the request;
             # the flattened browse payload can still resolve the release
@@ -134,12 +140,19 @@ class _FaultDB(FakePipelineDB):
 def _creation(release_id: str, *, discogs: bool, tracks: list[dict[str, object]],
               upgrade: bool, resolved: bool, artist_name: str = "A",
               album_title: str = "B") -> RequestCreationInput:
-    mb_raw: dict[str, object] = {"artist-credit": [], "media": []}
-    discogs_raw: dict[str, object] = {"artist_id": "1", "artists": [], "tracklist": []}
     payload_tracks = [
         {"title": str(track.get("title", ""))}
         for track in tracks
     ]
+    # The canonical tracks and resolver payload always come from the same
+    # source release response. ``resolved`` changes optional metadata, never
+    # whether that response carries tracks.
+    mb_raw: dict[str, object] = {
+        "artist-credit": [], "media": [{"tracks": payload_tracks}],
+    }
+    discogs_raw: dict[str, object] = {
+        "artist_id": "1", "artists": [], "tracks": payload_tracks,
+    }
     if resolved:
         mb_raw = {
             # This is the direct MB release shape. The creation input below
