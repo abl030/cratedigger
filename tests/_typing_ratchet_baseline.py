@@ -68,7 +68,7 @@ TYPING_RATCHET_BASELINE: dict[str, dict[str, int]] = {
     "lib/transitions.py": {"any": 7},
     "lib/triage_service.py": {"any": 16},
     "lib/unfindable_detection_service.py": {"any": 9},
-    "lib/util.py": {"any": 11},
+    "lib/util.py": {"any": 10},
     "lib/validation_envelope.py": {"any": 5},
     "lib/world_audit_service.py": {"any": 4},
     "lib/world_invariants.py": {"any": 4},
