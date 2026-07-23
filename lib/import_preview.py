@@ -54,6 +54,8 @@ from lib.quality import (
     AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
+    AudioValidationMeasurementError,
+    AudioValidationReport,
     ImportResult,
     MeasurementFailure,
     MeasurementFailureReason,
@@ -1430,48 +1432,24 @@ def _preview_result(
     )
 
 
-# Bound on how much of a subprocess's stderr we fold into a persisted
-# MeasurementFailure.detail / the journal — this is diagnostic breadcrumb,
-# not a log dump. Individual import_one.py [FAIL] lines are themselves
-# already bounded to a ~230-char ffmpeg-stderr tail (see
-# harness/import_one.py::convert_lossless), so a handful of them fits
-# comfortably; this is a hard ceiling against pathological inputs.
+# Bound on the legacy subprocess-stderr fallback used when the harness fails
+# before returning a typed result. Conversion failures use ConversionInfo's
+# bounded diagnostics instead; this fallback remains a breadcrumb, not a log.
 _STDERR_DIAGNOSTIC_MAX_CHARS = 2000
 
 
 def _diagnostic_from_stderr(stderr: str, max_chars: int = _STDERR_DIAGNOSTIC_MAX_CHARS) -> str:
-    """Extract the useful per-file failure signal from an import_one.py stderr blob.
-
-    ``convert_lossless`` (``harness/import_one.py``) prints one
-    ``[FAIL] <file>: <ffmpeg tail>`` line per failed conversion to stderr,
-    but the aggregate ``ImportResult.error`` on a ``conversion_failed`` /
-    ``target_conversion_failed`` result only ever says e.g. "11 FLAC files
-    failed to convert" — the per-file *why* was otherwise dropped on the
-    floor (never persisted, never streamed to the journal on the preview
-    path, unlike the importer's ``dispatch_import_core``). This pulls every
-    ``[FAIL]`` line back out so the true tool-level reason survives.
-
-    Falls back to a bounded tail of the raw stderr when no ``[FAIL]`` marker
-    is present (e.g. a crash before the per-file loop even started), so a
-    non-empty stderr never yields an empty diagnostic.
-
-    Keeps whole lines (never slices a line in half) so a captured ``[FAIL]``
-    marker is never partially truncated; only hard-truncates as a last
-    resort for a single line that alone exceeds ``max_chars``. Never raises
-    — this runs on arbitrary subprocess output.
-    """
+    """Return a bounded recent-line breadcrumb from arbitrary stderr."""
     if not stderr or not stderr.strip():
         return ""
 
     lines = [ln.strip() for ln in stderr.splitlines() if ln.strip()]
-    fail_lines = [ln for ln in lines if "[FAIL]" in ln]
-    source_lines = fail_lines if fail_lines else lines
 
-    # Keep the most recent lines within the char budget (newest failures are
-    # the most actionable), without truncating a kept line mid-string.
+    # Keep recent whole lines within the budget. A single oversized line is
+    # hard-truncated below so arbitrary subprocess output stays bounded.
     kept: list[str] = []
     total = 0
-    for line in reversed(source_lines):
+    for line in reversed(lines):
         joiner_cost = 3 if kept else 0  # " / "
         added = len(line) + joiner_cost
         if total + added > max_chars and kept:
@@ -1499,19 +1477,13 @@ def _measurement_failed_result(
     import_result: ImportResult | None = None,
     stage_chain: list[str] | None = None,
     subprocess_stderr: str | None = None,
+    audio_validation: AudioValidationReport | None = None,
 ) -> ImportPreviewResult:
     """Build a ``verdict='measurement_failed'`` preview result with typed payload.
 
-    ``subprocess_stderr``, when supplied, is the raw ``ImportOneRun.stderr``
-    from the ``run_import_one`` call that triggered this failure. The
-    per-file tool diagnostic it carries (e.g. the real ffmpeg decode error
-    behind a "conversion_failed") is folded into ``detail`` (so it reaches
-    both the persisted ``MeasurementFailure`` payload and the operator-
-    facing preview result) and logged at WARNING so it is visible in the
-    journal without needing to reproduce the failure. This closes the gap
-    where a conversion failure's only DB/journal trace was an aggregate
-    count ("11 FLAC files failed to convert") with the actual per-file
-    reason discarded.
+    ``subprocess_stderr`` is only the bounded fallback for a harness failure
+    that returned no typed result. Normal validation and conversion failures
+    carry ``AudioValidationReport`` / ``ConversionInfo`` instead.
     """
     full_detail = detail
     if subprocess_stderr:
@@ -1526,6 +1498,7 @@ def _measurement_failed_result(
         reason=reason,
         detail=full_detail,
         source_path=source_path or "",
+        audio_validation=audio_validation,
     )
     return _preview_result(
         mode=mode,
@@ -1890,6 +1863,17 @@ def measure_and_persist_candidate_evidence(
             )
             if spectral_result.evidence is not None:
                 current_evidence = spectral_result.evidence
+        except AudioValidationMeasurementError as exc:
+            return _measurement_failed_result(
+                mode="path",
+                reason="measurement_crashed",
+                decision="audio_validation_measurement_failed",
+                detail=exc.report.diagnostics[0].category,
+                request_id=request_id,
+                download_log_id=download_log_id,
+                source_path=path,
+                audio_validation=exc.report,
+            )
         except Exception as exc:
             return _measurement_failed_result(
                 mode="path",
@@ -2039,6 +2023,17 @@ def measure_and_persist_candidate_evidence(
                 existing_v0_probe=existing_v0_probe,
                 quality_evidence_action_file=preview_spectral_file,
             )
+        except AudioValidationMeasurementError as exc:
+            return _measurement_failed_result(
+                mode="path",
+                reason="measurement_crashed",
+                decision="audio_validation_measurement_failed",
+                detail=exc.report.diagnostics[0].category,
+                request_id=request_id,
+                download_log_id=download_log_id,
+                source_path=path,
+                audio_validation=exc.report,
+            )
         except Exception as exc:
             return _measurement_failed_result(
                 mode="path",
@@ -2071,6 +2066,101 @@ def measure_and_persist_candidate_evidence(
             measurement.spectral_audit,
             run.import_result.spectral,
         )
+        conversion_validation = run.import_result.conversion.source_validation
+        if (
+            run.import_result.decision
+            in {"conversion_failed", "target_conversion_failed"}
+            and conversion_validation is not None
+            and conversion_validation.outcome == "audio_corrupt"
+        ):
+            diagnostics = conversion_validation.diagnostics
+            first_diagnostic = diagnostics[0] if diagnostics else None
+            failed_paths = (
+                run.import_result.conversion.source_validation_failed_paths
+                or [
+                    diagnostic.relative_path
+                    for diagnostic in diagnostics
+                    if diagnostic.relative_path
+                ]
+            )
+            measurement = msgspec.structs.replace(
+                measurement,
+                corrupt_files=failed_paths,
+                audio_validation=conversion_validation,
+                audio_corrupt=True,
+                audio_error=(
+                    first_diagnostic.stderr_excerpt
+                    if (
+                        first_diagnostic is not None
+                        and first_diagnostic.stderr_excerpt
+                    )
+                    else (
+                        first_diagnostic.category
+                        if first_diagnostic is not None
+                        else "strict source revalidation failed"
+                    )
+                ),
+            )
+            if not audio_snapshot_matches(path, source_snapshot):
+                return _measurement_failed_result(
+                    mode="path",
+                    reason="snapshot_stale",
+                    decision="source_changed_during_conversion",
+                    detail="source files changed while conversion was running",
+                    request_id=request_id,
+                    download_log_id=download_log_id,
+                    source_path=path,
+                    import_result=run.import_result,
+                )
+            try:
+                evidence_result = (
+                    persist_measurement_fn
+                    or persist_candidate_evidence_from_measurement
+                )(
+                    db,
+                    mb_release_id=mbid,
+                    source_path=path,
+                    measurement=measurement,
+                    download_log_id=download_log_id,
+                    import_job_id=import_job_id,
+                    files=source_snapshot,
+                )
+            except Exception as exc:
+                return _measurement_failed_result(
+                    mode="path",
+                    reason="evidence_persist_failed",
+                    decision="evidence_persist_failed",
+                    detail=f"{type(exc).__name__}: {exc}",
+                    request_id=request_id,
+                    download_log_id=download_log_id,
+                    source_path=path,
+                    import_result=run.import_result,
+                )
+            if evidence_result.status != "ready":
+                return _measurement_failed_result(
+                    mode="path",
+                    reason="evidence_persist_failed",
+                    decision=f"evidence_{evidence_result.status}",
+                    detail=(
+                        evidence_result.reason
+                        or f"evidence_{evidence_result.status}"
+                    ),
+                    request_id=request_id,
+                    download_log_id=download_log_id,
+                    source_path=path,
+                    import_result=run.import_result,
+                )
+            return _evidence_ready_result(
+                mode="path",
+                decision="audio_corrupt",
+                reason="audio_corrupt",
+                detail="strict conversion-source validation failed",
+                stage_chain=["conversion_source:audio_corrupt"],
+                request_id=request_id,
+                download_log_id=download_log_id,
+                source_path=path,
+                import_result=run.import_result,
+            )
         if run.import_result.decision in (
             "conversion_failed",
             "target_conversion_failed",
@@ -2091,7 +2181,15 @@ def measure_and_persist_candidate_evidence(
                 download_log_id=download_log_id,
                 source_path=audit_path,
                 import_result=run.import_result,
-                subprocess_stderr=run.stderr,
+                audio_validation=(
+                    conversion_validation
+                    if (
+                        conversion_validation is not None
+                        and conversion_validation.outcome
+                        == "measurement_failed"
+                    )
+                    else None
+                ),
             )
         if run.import_result.source_measurement is None:
             return _measurement_failed_result(
@@ -2395,6 +2493,17 @@ def preview_import_from_path(
             )
             if spectral_result.evidence is not None:
                 current_evidence = spectral_result.evidence
+        except AudioValidationMeasurementError as exc:
+            return _measurement_failed_result(
+                mode="path",
+                reason="measurement_crashed",
+                decision="audio_validation_measurement_failed",
+                detail=exc.report.diagnostics[0].category,
+                request_id=request_id,
+                download_log_id=download_log_id,
+                source_path=path,
+                audio_validation=exc.report,
+            )
         except Exception as exc:
             return _measurement_failed_result(
                 mode="path",

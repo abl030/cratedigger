@@ -8,6 +8,12 @@ from datetime import datetime
 from typing import Literal, Optional
 import msgspec
 
+from lib.quality.audio_validation import (
+    AudioValidationReport,
+    legacy_unrecorded_audio_validation_report,
+    validate_audio_validation_report,
+)
+
 
 V0_PROBE_LOSSLESS_SOURCE = "lossless_source_v0"
 V0_PROBE_NATIVE_LOSSY_RESEARCH = "native_lossy_research_v0"
@@ -332,6 +338,9 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
     # spectral/V0 facts either survive as source facts or are measured anew.
     current_enrichment_required: bool = False
     verified_lossless_proof: VerifiedLosslessProof | None = None
+    audio_validation: AudioValidationReport = msgspec.field(
+        default_factory=legacy_unrecorded_audio_validation_report,
+    )
     # U1 (migration 019) preview-evidence facts. The unified decider
     # ``full_pipeline_decision_from_evidence`` reads these as typed facts
     # via its four-fact early-exit reject branches (U11) — never derives
@@ -369,6 +378,7 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
             ),
             current_enrichment_required=self.current_enrichment_required,
             verified_lossless_proof=self.verified_lossless_proof,
+            audio_validation=self.audio_validation,
             audio_corrupt=self.audio_corrupt,
             audio_error=self.audio_error,
             folder_layout=self.folder_layout,
@@ -380,6 +390,42 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
 
     def storage_validation_errors(self) -> list[str]:
         errors: list[str] = []
+        try:
+            validate_audio_validation_report(self.audio_validation)
+        except ValueError as exc:
+            errors.append(str(exc))
+        if self.audio_validation.outcome == "measurement_failed":
+            errors.append(
+                "measurement_failed cannot be stored as content evidence"
+            )
+        report_is_corrupt = self.audio_validation.outcome in {
+            "audio_corrupt",
+            "legacy_failure",
+        }
+        if self.audio_corrupt != report_is_corrupt:
+            errors.append(
+                "audio_corrupt must agree with audio_validation outcome"
+            )
+        failed_snapshot_paths = {
+            file.relative_path for file in self.files if not file.decode_ok
+        }
+        for diagnostic in self.audio_validation.diagnostics:
+            if (
+                self.audio_validation.outcome == "audio_corrupt"
+                and diagnostic.relative_path
+                and diagnostic.relative_path not in failed_snapshot_paths
+            ):
+                errors.append(
+                    "audio validation diagnostic path is not marked "
+                    f"decode_ok=false: {diagnostic.relative_path}"
+                )
+        if (
+            self.audio_validation.outcome == "passed"
+            and failed_snapshot_paths
+        ):
+            errors.append(
+                "passed audio validation cannot carry decode_ok=false files"
+            )
         if not self.mb_release_id:
             errors.append("mb_release_id must be a non-empty string")
         if not self.snapshot_fingerprint:

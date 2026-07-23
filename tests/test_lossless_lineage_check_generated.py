@@ -193,13 +193,18 @@ class TestGeneratedLosslessLineageCheck(unittest.TestCase):
                         verified_lossless, verified_lossless_provenance,
                         verified_lossless_source,
                         verified_lossless_classifier,
-                        was_converted_from
+                        was_converted_from, audio_validation
                     ) VALUES (
                         'generated-lineage', 'generated-lineage-fingerprint',
                         '/generated', NOW(), %s,
                         %s, %s, %s,
                         %s, %s, %s,
-                        %s, %s, %s, %s, %s
+                        %s, %s, %s, %s, %s,
+                        '{"policy_id":"pre-audio-integrity-v2",'
+                        '"tool":"legacy","tool_version":"",'
+                        '"outcome":"legacy_unrecorded","files_checked":0,'
+                        '"files_failed":0,"diagnostics":[],'
+                        '"omitted_diagnostics":0}'::jsonb
                     )
                     """,
                     (

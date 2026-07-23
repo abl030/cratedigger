@@ -91,6 +91,7 @@ class TestMeasurementFailureRoundTrip(unittest.TestCase):
             "reason": "materialization_error",
             "detail": "shutil.copytree failed: No space left",
             "source_path": "/tmp/measure-12",
+            "audio_validation": None,
         })
         restored = msgspec.convert(payload, type=MeasurementFailure)
         self.assertEqual(restored, f)

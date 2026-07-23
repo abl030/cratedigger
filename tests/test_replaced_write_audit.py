@@ -78,20 +78,24 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "hash unchanged since this call sits outside every edited scope — "
         "no SQL change)"
     ),
-    ("lib/pipeline_db/download_log.py", 782, "8fea92f576d79b49"): (
+    ("lib/pipeline_db/download_log.py", 850, "8fea92f576d79b49"): (
         "validation key is selected from a closed server-owned vocabulary "
         "(issue #762: the removed request imported-path projection changed "
-        "the enclosing query fingerprint; dynamic validation-key grammar is "
-        "unchanged)"
+        "the enclosing query fingerprint; issue #835 inserted static retained-"
+        "failure queries above, shifting this line only; dynamic validation-key "
+        "grammar is unchanged)"
     ),
-    ("lib/pipeline_db/download_log.py", 839, "e0154e89026dc8ef"): (
-        "validation key is selected from a closed server-owned vocabulary"
+    ("lib/pipeline_db/download_log.py", 907, "e0154e89026dc8ef"): (
+        "validation key is selected from a closed server-owned vocabulary "
+        "(issue #835 shifted this line only)"
     ),
-    ("lib/pipeline_db/download_log.py", 857, "1ca75e0c21fa6d7e"): (
-        "validation key is closed vocabulary and IN list is value placeholders"
+    ("lib/pipeline_db/download_log.py", 925, "1ca75e0c21fa6d7e"): (
+        "validation key is closed vocabulary and IN list is value placeholders "
+        "(issue #835 shifted this line only)"
     ),
-    ("lib/pipeline_db/download_log.py", 874, "d87a36ba1d1768e7"): (
-        "JSON path key is selected from a closed server-owned vocabulary"
+    ("lib/pipeline_db/download_log.py", 942, "d87a36ba1d1768e7"): (
+        "JSON path key is selected from a closed server-owned vocabulary "
+        "(issue #835 shifted this line only)"
     ),
     ("lib/pipeline_db/import_jobs.py", 111, "ecf3d1844c67f653"): (
         "optional job filter is a fixed literal WHERE clause"
@@ -187,8 +191,9 @@ _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/pipeline_db/terminal_outcomes.py", 387, "0a9c4396d1185b94"): (
         "atomic terminal typed transition CASes the source status selected by the DAG"
     ),
-    ("lib/pipeline_db/download_log.py", 428, "6c7d7519e8c91827"): (
-        "atomic abandoned-import recovery performs downloading-to-wanted CAS"
+    ("lib/pipeline_db/download_log.py", 496, "6c7d7519e8c91827"): (
+        "atomic abandoned-import recovery performs downloading-to-wanted CAS "
+        "(issue #835 shifted this unchanged lifecycle scope)"
     ),
     ("lib/pipeline_db/requests.py", 299, "b3d1cf06b29bd1d6"): (
         "Replace holds the row lock and CASes the captured active source status "

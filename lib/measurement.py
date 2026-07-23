@@ -38,10 +38,13 @@ from lib.json_narrow import json_dict as _json_dict, json_list as _json_list
 _BAD_HASH_SUPPORTED_EXTS: frozenset[str] = frozenset({"flac", "mp3", "m4a", "aac", "ogg", "opus"})
 from lib.pipeline_db import RequestSpectralStateUpdate
 from lib.quality import (
+    AudioValidationMeasurementError,
+    AudioValidationReport,
     SpectralAnalysisDetail,
     SpectralDetail,
     SpectralMeasurement,
     SpectralTrackDetail,
+    legacy_unrecorded_audio_validation_report,
 )
 from lib.util import validate_audio
 
@@ -264,6 +267,9 @@ class PreimportMeasurement(msgspec.Struct, frozen=True):
     harness routing reuse the exact classification that selected the scan.
     """
     corrupt_files: list[str] = msgspec.field(default_factory=lambda: [])
+    audio_validation: AudioValidationReport = msgspec.field(
+        default_factory=legacy_unrecorded_audio_validation_report,
+    )
     audio_corrupt: bool = False
     audio_error: str | None = None
     matched_bad_hash_id: int | None = None
@@ -702,44 +708,44 @@ def measure_preimport_state(
     corrupt_files: list[str] = []
     audio_corrupt = False
     audio_error: str | None = None
-    if cfg.audio_check_mode != "off":
-        audio_result = validate_audio(path, cfg.audio_check_mode)
-        if not audio_result.valid:
-            audio_corrupt = True
-            audio_error = audio_result.error
-            corrupt_files = [name for name, _ in audio_result.failed_files]
-            logger.warning(
-                f"AUDIO CORRUPT: {label} "
-                f"({len(corrupt_files)} files failed ffmpeg decode)")
-            spectral_audit, existing_lookup = collect_release_attempt_spectral_audit(
-                path,
-                mb_release_id,
-                existing_spectral_evidence=persisted_existing,
-                preserve_existing_source_spectral=(
-                    preserve_existing_source_spectral
-                ),
-                analyzer=audit_analyzer,
-                existing_resolver=audit_resolver,
-            )
-            existing_spectral_path = existing_lookup.path
-            return PreimportMeasurement(
-                corrupt_files=corrupt_files,
-                audio_corrupt=audio_corrupt,
-                audio_error=audio_error,
-                folder_layout=folder_layout,
-                audio_file_count=audio_file_count,
-                filetype_band=filetype_band,
-                lossless_candidate=lossless_candidate,
-                min_bitrate_kbps=(
-                    download_min_bitrate_bps // 1000
-                    if download_min_bitrate_bps
-                    and download_min_bitrate_bps >= 1000 else
-                    download_min_bitrate_bps
-                ),
-                is_vbr=download_is_vbr,
-                existing_spectral_path=existing_spectral_path,
-                spectral_audit=spectral_audit,
-            )
+    audio_result = validate_audio(path, cfg.audio_check_mode)
+    audio_validation = audio_result.report
+    if audio_result.measurement_failed:
+        raise AudioValidationMeasurementError(audio_validation)
+    if not audio_result.valid:
+        audio_corrupt = True
+        audio_error = audio_result.error
+        corrupt_files = [name for name, _ in audio_result.failed_files]
+        spectral_audit, existing_lookup = collect_release_attempt_spectral_audit(
+            path,
+            mb_release_id,
+            existing_spectral_evidence=persisted_existing,
+            preserve_existing_source_spectral=(
+                preserve_existing_source_spectral
+            ),
+            analyzer=audit_analyzer,
+            existing_resolver=audit_resolver,
+        )
+        existing_spectral_path = existing_lookup.path
+        return PreimportMeasurement(
+            corrupt_files=corrupt_files,
+            audio_validation=audio_validation,
+            audio_corrupt=audio_corrupt,
+            audio_error=audio_error,
+            folder_layout=folder_layout,
+            audio_file_count=audio_file_count,
+            filetype_band=filetype_band,
+            lossless_candidate=lossless_candidate,
+            min_bitrate_kbps=(
+                download_min_bitrate_bps // 1000
+                if download_min_bitrate_bps
+                and download_min_bitrate_bps >= 1000 else
+                download_min_bitrate_bps
+            ),
+            is_vbr=download_is_vbr,
+            existing_spectral_path=existing_spectral_path,
+            spectral_audit=spectral_audit,
+        )
 
     # --- Bad-audio-hash gate (plan 2026-04-29-005 / U5) ---
     # Hash candidate tracks and compare against the curator-reported
@@ -777,6 +783,7 @@ def measure_preimport_state(
                 existing_spectral_path = existing_lookup.path
                 return PreimportMeasurement(
                     corrupt_files=[],
+                    audio_validation=audio_validation,
                     audio_corrupt=False,
                     matched_bad_hash_id=matched_bad_hash_id,
                     matched_bad_track_path=matched_bad_track_path,
@@ -916,6 +923,7 @@ def measure_preimport_state(
 
     return PreimportMeasurement(
         corrupt_files=corrupt_files,
+        audio_validation=audio_validation,
         audio_corrupt=audio_corrupt,
         audio_error=audio_error,
         matched_bad_hash_id=matched_bad_hash_id,

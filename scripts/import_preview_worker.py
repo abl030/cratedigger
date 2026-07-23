@@ -257,6 +257,8 @@ def _front_gate_source_path(db: Any, job: ImportJob) -> str | None:
             state = ActiveDownloadState.from_raw(state_raw)
         except ValueError:
             return None
+        if state.current_path:
+            return state.current_path
         try:
             return derive_canonical_import_folder(row, state)
         except Exception:
@@ -337,9 +339,15 @@ def _front_gate_check(
     result with ``status == 'ready'`` means measurement can be skipped.
     """
     if job.job_type == IMPORT_JOB_FORCE:
+        raw_path: str | None = None
         try:
             download_log_id, raw_path = _force_download_log_failed_path(db, job)
-            cfg = runtime_config or read_runtime_config()
+            if runtime_config is None:
+                from lib.config import read_runtime_config
+
+                cfg = read_runtime_config()
+            else:
+                cfg = runtime_config
             snapshot = snapshot_configured_quarantine_directory(raw_path, cfg)
             try:
                 load_candidate = (
@@ -361,7 +369,10 @@ def _front_gate_check(
                 job.id,
                 exc_info=True,
             )
-            return None, None
+            # The front gate has already recovered the persisted force source.
+            # Keep it for a later failure audit even when its isolated snapshot
+            # was not available; only the evidence-reuse optimization failed.
+            return None, raw_path
 
     source_path = _front_gate_source_path(db, job)
     if not source_path:
@@ -436,6 +447,10 @@ def execute_preview_job(db: Any, job: ImportJob) -> ImportPreviewResult:
         if job.request_id is None:
             raise ValueError("Import job has no request_id")
         download_log_id, raw_path = _force_download_log_failed_path(db, job)
+        # Import at the runtime boundary so the worker and the preview service
+        # consult the same configured authority roots for this job.
+        from lib.config import read_runtime_config
+
         cfg = read_runtime_config()
         snapshot = snapshot_configured_quarantine_directory(raw_path, cfg)
         try:
@@ -790,7 +805,7 @@ def process_claimed_preview_job(
         crash_payload = MeasurementFailure(
             reason="measurement_crashed",
             detail=f"{type(exc).__name__}: {exc}",
-            source_path="",
+            source_path=front_gate_source or "",
         )
         crash_result = ImportPreviewResult(
             mode="path",
@@ -800,6 +815,8 @@ def process_claimed_preview_job(
             reason="measurement_crashed",
             detail=f"{type(exc).__name__}: {exc}",
             request_id=job.request_id,
+            download_log_id=_download_log_id_from_job(job),
+            source_path=front_gate_source,
             failure=crash_payload,
         )
         return handle_measurement_failed(crash_result)

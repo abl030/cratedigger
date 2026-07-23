@@ -25,10 +25,13 @@ invariants ship as deterministic pins and generated properties:
    ``active_download_state`` is missing or undecodable, the sweep
    aborts with ZERO deletions for the cycle: partial ownership
    knowledge must never make an unparseable row's files reap-eligible.
-7. **Good-citizen positive ownership** — a file with no ledgered,
+7. **Good-citizen positive ownership (#571)** — a file with no ledgered,
    event-stamped ``local_path`` is NEVER removed, whatever its age.
+8. **Measurement-failure retention (#835)** — every source path persisted
+   by a ``measurement_failed`` download audit survives regardless of ledger
+   ownership, request status, or age.
 
-Invariant 8 is the flip's headline change and inverts the pre-#571
+Invariant 7 is the flip's headline change and inverts the pre-#571
 ORPHAN-zone doctrine this file used to pin: an aged file with NO
 recognised owner used to be reaped (issue #550 defect 3's original
 "anything unrecognised and old enough goes" rule) — now it must
@@ -258,6 +261,18 @@ def _make_ctx(
     return make_ctx_with_fake_db(fake_db, cfg=cfg)
 
 
+def assert_retained_measurement_failure_survived(
+    path: str,
+    *,
+    survived: bool,
+) -> None:
+    """Invariant 9 checker shared by the deterministic and generated tests."""
+    if not survived:
+        raise AssertionError(
+            f"persisted measurement_failed source was reaped: {path}"
+        )
+
+
 # ============================================================================
 # Deterministic pins
 # ============================================================================
@@ -363,6 +378,61 @@ class TestDiskReaperDeterministicPins(unittest.TestCase):
             summary = reap_disk_orphans(ctx)
 
             self.assertTrue(os.path.exists(target))
+            self.assertEqual(summary.removed, 0)
+
+    def test_persisted_measurement_failure_source_is_never_reaped(self):
+        """#835 pin: audit retention beats positive ledger ownership + age."""
+        with tempfile.TemporaryDirectory() as root:
+            fake_db = FakePipelineDB()
+            retained = _seed_owned_inactive(
+                fake_db,
+                request_id=27,
+                artist="Retained Artist",
+                title="Measurement Failure",
+                year="2026",
+                file_pairs=[("peer", "peer\\Album\\01.flac")],
+                root=root,
+                status="wanted",
+            )
+            target = os.path.join(retained, "01.flac")
+            _write_aged_file(target, age_days=_OLD_DAYS * 10)
+            fake_db.log_download(
+                request_id=27,
+                outcome="measurement_failed",
+                staged_path=retained,
+            )
+
+            summary = reap_disk_orphans(_make_ctx(root, fake_db=fake_db))
+
+            assert_retained_measurement_failure_survived(
+                target,
+                survived=os.path.exists(target),
+            )
+            self.assertEqual(summary.removed, 0)
+
+    def test_measurement_failure_retention_read_failure_aborts_sweep(self):
+        with tempfile.TemporaryDirectory() as root:
+            fake_db = FakePipelineDB()
+            target = _seed_owned_inactive(
+                fake_db,
+                request_id=28,
+                artist="Fail Closed",
+                title="Retention Read",
+                year="2026",
+                file_pairs=[("peer", "peer\\Album\\01.flac")],
+                root=root,
+                status="wanted",
+            )
+            track = os.path.join(target, "01.flac")
+            _write_aged_file(track, age_days=_OLD_DAYS * 10)
+            fake_db.get_retained_failure_paths = MagicMock(
+                side_effect=RuntimeError("database unavailable"),
+            )
+
+            summary = reap_disk_orphans(_make_ctx(root, fake_db=fake_db))
+
+            self.assertTrue(summary.aborted)
+            self.assertTrue(os.path.exists(track))
             self.assertEqual(summary.removed, 0)
 
     def test_wrong_matches_quarantine_never_touched(self):
@@ -1025,10 +1095,10 @@ _PINNED_ABORT_WORLD = DiskReaperWorld(
 
 
 class TestGeneratedDiskReaperInvariants(unittest.TestCase):
-    """Properties 1-6 and 8: within-root, active protection, quarantine,
+    """Properties 1-6, 8, and 9: within-root, active protection, quarantine,
     age, owned-only empty-dir pruning, fail-closed ownership, and
-    good-citizen positive ownership -- patrolled together over
-    generated worlds."""
+    good-citizen positive ownership -- plus permanent protection for
+    persisted measurement-failure sources."""
 
     @given(world=_disk_reaper_worlds())
     @example(world=_PINNED_WORLD)
@@ -1036,6 +1106,59 @@ class TestGeneratedDiskReaperInvariants(unittest.TestCase):
     def test_reaper_respects_ownership_quarantine_age_and_root(self, world):
         result = _materialize_and_run(world)
         assert_disk_reaper_invariants(result)
+
+    @given(
+        component=st.text(
+            alphabet="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_ ",
+            min_size=1,
+            max_size=30,
+        ),
+        age_days=st.integers(
+            min_value=ORPHAN_MIN_AGE_DAYS + 1,
+            max_value=3650,
+        ),
+        retain_directory=st.booleans(),
+    )
+    @example(
+        component="Syro corrupt source",
+        age_days=ORPHAN_MIN_AGE_DAYS + 1,
+        retain_directory=True,
+    )
+    def test_measurement_failure_retention_over_generated_paths(
+        self,
+        component: str,
+        age_days: int,
+        retain_directory: bool,
+    ):
+        with tempfile.TemporaryDirectory() as root:
+            fake_db = FakePipelineDB()
+            fake_db.seed_request(make_request_row(id=835, status="wanted"))
+            target = os.path.join(root, f"retained-{component}", "01.flac")
+            pair = ("peer", "peer\\Album\\01.flac")
+            _ledger_seed(
+                fake_db,
+                request_id=835,
+                file_pairs=[pair],
+                local_paths={pair: target},
+                with_fingerprint=False,
+            )
+            _write_aged_file(target, age_days=age_days)
+            fake_db.log_download(
+                request_id=835,
+                outcome="measurement_failed",
+                staged_path=(
+                    os.path.dirname(target)
+                    if retain_directory
+                    else target
+                ),
+            )
+
+            reap_disk_orphans(_make_ctx(root, fake_db=fake_db))
+
+            assert_retained_measurement_failure_survived(
+                target,
+                survived=os.path.exists(target),
+            )
 
 
 # ============================================================================
@@ -1153,6 +1276,13 @@ class TestDiskReaperCheckerTripsOnViolations(unittest.TestCase):
             summary=DiskReapSummary(aborted=True))
         with self.assertRaises(AssertionError):
             assert_disk_reaper_invariants(result)
+
+    def test_trips_when_measurement_failure_source_is_removed(self):
+        with self.assertRaises(AssertionError):
+            assert_retained_measurement_failure_survived(
+                "/downloads/retained-measurement-failure/01.flac",
+                survived=False,
+            )
 
 
 # ============================================================================

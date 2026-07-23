@@ -69,6 +69,7 @@ def _reject_import_from_evidence_decision(
     import_job_id: int | None = None,
     source_download_log_id: int | None = None,
     quality_ranks: QualityRankConfig | None = None,
+    audio_quarantine_root: str | None = None,
 ) -> DispatchOutcome:
     """Record a persisted-evidence rejection before beets can mutate files.
 
@@ -176,10 +177,35 @@ def _reject_import_from_evidence_decision(
                 if cooled_down_users is not None:
                     if db.check_and_apply_cooldown(username):
                         cooled_down_users.add(username)
-    cleanup_path = None
-    if action.cleanup and _should_cleanup_path(source_path_cleanup_scenario, action):
+    cleanup_plan: PostCommitCleanup | None = None
+    if action.cleanup and decision == "audio_corrupt":
+        # Corrupt audio is retained for audit in every caller mode. Force
+        # imports deliberately do not satisfy ``_should_cleanup_path`` until
+        # they succeed, because ordinary force cleanup deletes the reviewed
+        # Wrong Matches source. Quarantine is a separate, archival ownership
+        # transfer and must not inherit that destructive gate.
         if import_job_id is not None:
-            cleanup_path = staged_path
+            cleanup_plan = PostCommitCleanup(
+                audio_quarantine_source_path=staged_path,
+                audio_quarantine_root=audio_quarantine_root,
+            )
+        else:
+            from lib.dispatch.quarantine import (
+                quarantine_corrupt_audio_source,
+            )
+
+            audit = quarantine_corrupt_audio_source(
+                source_path=staged_path,
+                quarantine_root=audio_quarantine_root or "",
+            )
+            if isinstance(terminal_outcome, int):
+                db.record_post_commit_quarantine(terminal_outcome, audit)
+    elif action.cleanup and _should_cleanup_path(
+        source_path_cleanup_scenario,
+        action,
+    ):
+        if import_job_id is not None:
+            cleanup_plan = PostCommitCleanup(staged_path=staged_path)
         else:
             _cleanup_staged_dir(staged_path)
     return DispatchOutcome(
@@ -191,11 +217,8 @@ def _reject_import_from_evidence_decision(
             if isinstance(terminal_outcome, PendingImportTerminalOutcome)
             else None
         ),
-        post_commit_cleanup=(
-            PostCommitCleanup(staged_path=cleanup_path)
-            if cleanup_path is not None
-            else None
-        ),
+        post_commit_wrong_match_scenario=decision,
+        post_commit_cleanup=cleanup_plan,
     )
 
 
@@ -562,8 +585,6 @@ def _record_preview_measurement_failed(
     request_id: int | None,
     import_job_id: int,
     payload: MeasurementFailure,
-    denylist_username: str | None = None,
-    denylist_reason: str | None = None,
     import_result: ImportResult | None = None,
     preview_result: dict[str, object] | None = None,
     requeue_to_wanted: bool = True,
@@ -587,7 +608,8 @@ def _record_preview_measurement_failed(
         ``MeasurementFailure`` JSON as ``validation_result``; its detail is
         also persisted as the operator-facing ``error_message``.
       * Parent request → ``wanted`` for automation, otherwise unchanged.
-      * Optional denylist write when ``denylist_username`` is supplied.
+      * No denylist write: this is a measurement-world failure, not evidence
+        that the source audio itself is bad.
       * ``import_jobs.status='failed'`` via ``mark_import_job_failed`` so
         the poll loop's active-import-job guard releases on the next tick.
 
@@ -605,11 +627,6 @@ def _record_preview_measurement_failed(
     job_result: dict[str, object] = msgspec.to_builtins(payload)
     assert isinstance(job_result, dict), \
         "msgspec.to_builtins on a Struct returns a dict"
-    denylists = (
-        (TerminalDenylist(denylist_username, denylist_reason),)
-        if denylist_username
-        else ()
-    )
     result = db.persist_preview_terminal_outcome(PreviewTerminalOutcome(
         request_id=request_id,
         import_job_id=import_job_id,
@@ -636,7 +653,7 @@ def _record_preview_measurement_failed(
         preview_result=preview_result or job_result,
         message=payload.detail,
         error=payload.reason,
-        denylists=denylists,
+        denylists=(),
     ))
     return result.download_log_id
 

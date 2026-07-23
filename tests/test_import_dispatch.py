@@ -407,6 +407,395 @@ class TestCleanupStagedDir(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+class TestAudioCorruptPostCommitQuarantine(unittest.TestCase):
+    def test_moves_source_to_standard_bad_files_and_persists_exact_audit(self):
+        from lib.dispatch.types import DispatchOutcome, PostCommitCleanup
+        from scripts.importer import _run_post_commit_cleanup
+
+        with tempfile.TemporaryDirectory() as parent:
+            staging = os.path.join(parent, "incoming", "Artist - Album")
+            download_root = os.path.join(parent, "slskd")
+            os.makedirs(staging)
+            os.makedirs(download_root)
+            with open(os.path.join(staging, "01.flac"), "wb") as handle:
+                handle.write(b"corrupt audio")
+
+            db = FakePipelineDB()
+            log_id = db.log_download(
+                request_id=835,
+                outcome="rejected",
+                validation_result=json.dumps({"scenario": "audio_corrupt"}),
+            )
+            outcome = DispatchOutcome(
+                success=False,
+                message="audio_corrupt",
+                post_commit_cleanup=PostCommitCleanup(
+                    audio_quarantine_source_path=staging,
+                    audio_quarantine_root=download_root,
+                ),
+            )
+
+            result = _run_post_commit_cleanup(
+                db,
+                outcome,
+                download_log_id=log_id,
+            )
+
+            assert result is not None
+            audit = result["audio_quarantine"]
+            assert isinstance(audit, dict)
+            target = audit["quarantine_path"]
+            assert isinstance(target, str)
+            self.assertTrue(audit["moved"])
+            self.assertTrue(audit["audit_persisted"])
+            self.assertFalse(os.path.exists(staging))
+            self.assertTrue(os.path.exists(os.path.join(target, "01.flac")))
+            self.assertEqual(
+                os.path.dirname(target),
+                os.path.join(download_root, "failed_imports", "bad_files"),
+            )
+            persisted = msgspec.json.decode(
+                db.download_logs[0].validation_result,
+            )
+            self.assertEqual(persisted["failed_path"], target)
+            self.assertEqual(
+                persisted["post_commit_quarantine"]["source_path"],
+                staging,
+            )
+
+    def test_atomic_move_failure_retains_complete_source_and_exact_audit(self):
+        from lib.dispatch.types import DispatchOutcome, PostCommitCleanup
+        from scripts.importer import _run_post_commit_cleanup
+
+        with tempfile.TemporaryDirectory() as parent:
+            staging = os.path.join(parent, "incoming", "Artist - Album")
+            download_root = os.path.join(parent, "slskd")
+            os.makedirs(os.path.join(staging, "Disc 1"))
+            os.makedirs(download_root)
+            track = os.path.join(staging, "Disc 1", "01.flac")
+            cover = os.path.join(staging, "cover.jpg")
+            with open(track, "wb") as handle:
+                handle.write(b"corrupt audio")
+            with open(cover, "wb") as handle:
+                handle.write(b"cover")
+
+            db = FakePipelineDB()
+            log_id = db.log_download(
+                request_id=835,
+                outcome="rejected",
+                validation_result=json.dumps({"scenario": "audio_corrupt"}),
+            )
+            outcome = DispatchOutcome(
+                success=False,
+                message="audio_corrupt",
+                post_commit_cleanup=PostCommitCleanup(
+                    audio_quarantine_source_path=staging,
+                    audio_quarantine_root=download_root,
+                ),
+            )
+
+            with patch(
+                "lib.import_manifest.os.rename",
+                side_effect=OSError("simulated atomic rename failure"),
+            ):
+                result = _run_post_commit_cleanup(
+                    db,
+                    outcome,
+                    download_log_id=log_id,
+                )
+
+            assert result is not None
+            audit = result["audio_quarantine"]
+            assert isinstance(audit, dict)
+            self.assertFalse(audit["moved"])
+            self.assertEqual(audit["source_path"], staging)
+            self.assertIsNone(audit["quarantine_path"])
+            self.assertTrue(os.path.exists(track))
+            self.assertTrue(os.path.exists(cover))
+            persisted = msgspec.json.decode(
+                db.download_logs[0].validation_result,
+            )
+            self.assertEqual(persisted["failed_path"], staging)
+            self.assertEqual(
+                persisted["post_commit_quarantine"]["source_path"],
+                staging,
+            )
+
+    def test_quarantine_failure_retains_and_audits_staged_source(self):
+        from lib.dispatch.types import DispatchOutcome, PostCommitCleanup
+        from scripts.importer import _run_post_commit_cleanup
+
+        with tempfile.TemporaryDirectory() as parent:
+            staging = os.path.join(parent, "incoming", "Artist - Album")
+            os.makedirs(staging)
+            track = os.path.join(staging, "01.flac")
+            with open(track, "wb") as handle:
+                handle.write(b"corrupt audio")
+
+            db = FakePipelineDB()
+            log_id = db.log_download(
+                request_id=835,
+                outcome="rejected",
+                validation_result=json.dumps({"scenario": "audio_corrupt"}),
+            )
+            outcome = DispatchOutcome(
+                success=False,
+                message="audio_corrupt",
+                post_commit_cleanup=PostCommitCleanup(
+                    audio_quarantine_source_path=staging,
+                    audio_quarantine_root=os.path.join(parent, "missing-root"),
+                ),
+            )
+
+            result = _run_post_commit_cleanup(
+                db,
+                outcome,
+                download_log_id=log_id,
+            )
+
+            assert result is not None
+            audit = result["audio_quarantine"]
+            assert isinstance(audit, dict)
+            self.assertFalse(audit["moved"])
+            self.assertTrue(os.path.exists(track))
+            self.assertIn(staging, db.get_retained_failure_paths())
+
+    def test_post_commit_evidence_link_failure_cannot_escape_or_delete_archive(
+        self,
+    ):
+        from lib.dispatch.types import DispatchOutcome, PostCommitCleanup
+        from lib.import_queue import IMPORT_JOB_FORCE
+        from scripts.importer import (
+            _cleanup_committed_wrong_match_rejection,
+            _run_post_commit_cleanup,
+        )
+
+        with tempfile.TemporaryDirectory() as parent:
+            source = os.path.join(parent, "wrong_matches", "Artist - Album")
+            download_root = os.path.join(parent, "slskd")
+            os.makedirs(source)
+            os.makedirs(download_root)
+            with open(os.path.join(source, "01.flac"), "wb") as handle:
+                handle.write(b"corrupt audio")
+
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=835,
+                status="unsearchable",
+                mb_release_id="test-mbid",
+            ))
+            log_id = db.log_download(
+                request_id=835,
+                outcome="rejected",
+                validation_result=json.dumps({"scenario": "audio_corrupt"}),
+                staged_path=source,
+            )
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=835,
+                payload={
+                    "download_log_id": log_id,
+                    "failed_path": source,
+                },
+            )
+            outcome = DispatchOutcome(
+                success=False,
+                message="audio_corrupt",
+                post_commit_wrong_match_scenario="audio_corrupt",
+                post_commit_cleanup=PostCommitCleanup(
+                    audio_quarantine_source_path=source,
+                    audio_quarantine_root=download_root,
+                ),
+            )
+            cleanup_result = _run_post_commit_cleanup(
+                db,
+                outcome,
+                download_log_id=log_id,
+            )
+            assert cleanup_result is not None
+            quarantine = cleanup_result["audio_quarantine"]
+            assert isinstance(quarantine, dict)
+            target = quarantine["quarantine_path"]
+            assert isinstance(target, str)
+
+            cleanup_wrong_match = MagicMock()
+            with patch.object(
+                db,
+                "get_import_job_candidate_evidence_id",
+                side_effect=RuntimeError("transient post-commit DB failure"),
+            ), patch(
+                "scripts.importer.logger.exception",
+            ) as log_exception:
+                _cleanup_committed_wrong_match_rejection(
+                    db,  # pyright: ignore[reportArgumentType]
+                    job,
+                    log_id,
+                    outcome,
+                    cleanup_wrong_match_fn=cleanup_wrong_match,
+                )
+
+            log_exception.assert_called_once()
+            cleanup_wrong_match.assert_not_called()
+            self.assertTrue(os.path.exists(os.path.join(target, "01.flac")))
+            persisted = msgspec.json.decode(
+                db.download_logs[-1].validation_result,
+            )
+            self.assertEqual(persisted["failed_path"], target)
+            self.assertTrue(
+                persisted["post_commit_quarantine"]["moved"],
+            )
+            self.assertNotIn("wrong_match_triage", persisted)
+
+    def test_force_corrupt_source_is_quarantined_and_never_deleted(self):
+        from lib.dispatch import _reject_import_from_evidence_decision
+        from lib.dispatch.types import ImportAttemptResult
+        from lib.import_queue import IMPORT_JOB_FORCE
+        from lib.quality import AudioQualityMeasurement
+        from lib.quality_evidence import snapshot_audio_files
+        from scripts.importer import process_claimed_job
+
+        with tempfile.TemporaryDirectory() as parent:
+            source = os.path.join(parent, "wrong_matches", "Artist - Album")
+            download_root = os.path.join(parent, "slskd")
+            os.makedirs(source)
+            os.makedirs(download_root)
+            with open(os.path.join(source, "01.flac"), "wb") as handle:
+                handle.write(b"corrupt audio")
+
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=835,
+                status="unsearchable",
+                mb_release_id="test-mbid",
+            ))
+            original_log_id = db.log_download(
+                request_id=835,
+                outcome="rejected",
+                validation_result=json.dumps({
+                    "scenario": "strong_mismatch",
+                    "failed_path": source,
+                }),
+                staged_path=source,
+            )
+            queued = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=835,
+                payload={
+                    "download_log_id": original_log_id,
+                    "failed_path": source,
+                },
+            )
+            candidate = make_album_quality_evidence(
+                mb_release_id="test-mbid",
+                source_path=source,
+                files=snapshot_audio_files(source),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=900,
+                    avg_bitrate_kbps=900,
+                    median_bitrate_kbps=900,
+                    format="FLAC",
+                ),
+                codec="flac",
+                container="flac",
+                storage_format="FLAC",
+                audio_corrupt=True,
+                audio_error="decoder rejected source",
+            )
+            db.upsert_album_quality_evidence(candidate)
+            persisted_candidate = db.find_album_quality_evidence(
+                mb_release_id=candidate.mb_release_id,
+                snapshot_fingerprint=candidate.snapshot_fingerprint,
+            )
+            assert (
+                persisted_candidate is not None
+                and persisted_candidate.id is not None
+            )
+            db.set_import_job_candidate_evidence(
+                queued.id,
+                persisted_candidate.id,
+            )
+            db.mark_import_job_preview_importable(
+                queued.id,
+                preview_result={"ready": True},
+            )
+            claimed = db.claim_next_import_job(worker_id="force-corrupt")
+            assert claimed is not None
+
+            import_result = make_import_result(decision="audio_corrupt")
+            import_result.source_measurement = AudioQualityMeasurement(
+                min_bitrate_kbps=900,
+                avg_bitrate_kbps=900,
+                median_bitrate_kbps=900,
+                format="FLAC",
+            )
+            attempt = ImportAttemptResult(None)
+            attempt.merge(import_result)
+            outcome = _reject_import_from_evidence_decision(
+                db=db,  # pyright: ignore[reportArgumentType]
+                request_id=835,
+                dl_info=DownloadInfo(filetype="flac", username="bad-peer"),
+                attempt_result=attempt,
+                distance=0.0,
+                decision="audio_corrupt",
+                detail="decoder rejected source",
+                requeue_on_failure=False,
+                validation_result=None,
+                staged_path=source,
+                scenario="force_import",
+                files=[],
+                source_path_cleanup_scenario="force_import",
+                cooled_down_users=None,
+                import_job_id=claimed.id,
+                source_download_log_id=original_log_id,
+                audio_quarantine_root=download_root,
+            )
+            self.assertEqual(
+                outcome.post_commit_wrong_match_scenario,
+                "audio_corrupt",
+            )
+
+            completed = process_claimed_job(
+                db,  # pyright: ignore[reportArgumentType]
+                claimed,
+                execute_fn=lambda *_args, **_kwargs: outcome,
+            )
+
+            assert completed is not None and completed.result is not None
+            cleanup = completed.result["cleanup"]
+            assert isinstance(cleanup, dict)
+            self.assertEqual(
+                cleanup["outcome"],
+                "skipped_archival_audio_quarantine",
+            )
+            quarantine = completed.result["post_commit_cleanup"][
+                "audio_quarantine"
+            ]
+            assert isinstance(quarantine, dict)
+            target = quarantine["quarantine_path"]
+            assert isinstance(target, str)
+            self.assertFalse(os.path.exists(source))
+            self.assertTrue(os.path.exists(os.path.join(target, "01.flac")))
+            self.assertEqual(
+                os.path.dirname(target),
+                os.path.join(download_root, "failed_imports", "bad_files"),
+            )
+            terminal_log = db.download_logs[-1]
+            self.assertEqual(
+                terminal_log.candidate_evidence_id,
+                persisted_candidate.id,
+            )
+            terminal_audit = msgspec.json.decode(
+                terminal_log.validation_result,
+            )
+            self.assertEqual(terminal_audit["failed_path"], target)
+            self.assertEqual(
+                terminal_audit["post_commit_quarantine"]["source_path"],
+                source,
+            )
+            self.assertNotIn("wrong_match_triage", terminal_audit)
+            self.assertEqual(db.request(835)["status"], "unsearchable")
+
+
 class TestRecordRejectionAndRequeueSeam(unittest.TestCase):
     """Seam tests for the shared rejection finalizer."""
 
@@ -1769,7 +2158,7 @@ class TestDispatchImport(unittest.TestCase):
                 )
                 assert outcome.terminal_outcome is not None
                 from lib.terminal_outcomes import ImportJobTerminal
-                db.persist_import_terminal_outcome(
+                terminal = db.persist_import_terminal_outcome(
                     outcome.terminal_outcome.with_job(ImportJobTerminal(
                         status="failed",
                         error=outcome.message,
@@ -1778,7 +2167,11 @@ class TestDispatchImport(unittest.TestCase):
                     ))
                 )
                 from scripts.importer import _run_post_commit_cleanup
-                cleanup_result = _run_post_commit_cleanup(outcome)
+                cleanup_result = _run_post_commit_cleanup(
+                    db,
+                    outcome,
+                    download_log_id=terminal.download_log_id,
+                )
                 if cleanup_result is not None:
                     db.merge_import_job_result(
                         claimed.id,

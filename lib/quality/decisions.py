@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Literal, Optional
 import msgspec
 
+from lib.quality.audio_validation import AudioValidationReport
 from lib.quality.evidence_types import (
     AudioQualityMeasurement,
     EVIDENCE_PROVENANCE_MEASURED,
@@ -75,6 +76,7 @@ class MeasurementFailure(msgspec.Struct, frozen=True):
     reason: MeasurementFailureReason
     detail: str
     source_path: str = ""
+    audio_validation: AudioValidationReport | None = None
 
 
 # ---------------------------------------------------------------------------

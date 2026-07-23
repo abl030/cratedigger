@@ -176,9 +176,16 @@ Beets enforces this structure:
 
 ### Library Format
 
-**MP3 VBR V0** — all imports are converted from FLAC before beets import. The conversion happens in `import_one.py` via ffmpeg (`-codec:a libmp3lame -q:a 0`). FLAC files are deleted after successful conversion.
+Lossless sources first produce a temporary MP3 VBR V0 quality probe, then use
+the configured storage target (commonly Opus) before Beets import. Conversion
+maps only audio and strips source metadata; Beets applies fresh canonical tags
+after matching. Every album derivative is staged before commit, so the source
+is removed only after all files converted successfully with nonempty outputs.
+On any conversion failure every source is retained and the typed failure audit
+is returned to preview.
 
-Some legacy imports are m4a, ogg, opus, wma, or even ape — these came from the original `/Me` library and weren't converted. New imports should always be MP3 V0.
+Legacy formats remain in the library where no later managed import replaced
+them. The active target is configuration, not a hard-coded MP3-only invariant.
 
 ### Library Stats (as of 2026-03-24)
 
@@ -335,16 +342,17 @@ The one-shot import script used by Cratedigger for auto-importing `source='reque
 
 ```
 1. Pre-flight: is this MBID already in beets? → exit 0 if yes
-2. Convert FLAC → MP3 VBR V0 (ffmpeg, -q:a 0)
-3. Drive harness: --search-id MBID --noincremental
+2. Strictly validate mapped audio and collect spectral/source evidence
+3. Stage the V0 probe and configured storage conversion as an album transaction
+4. Drive harness: --search-id MBID --noincremental
    → Find candidate matching MBID
    → Check distance ≤ 0.5
    → If Beets reports duplicates, inspect the exact duplicate candidate set
    → Answer remove only for exactly one same-release duplicate
    → Apply match
-4. Post-flight: verify MBID appeared in beets DB
-5. Cleanup: remove staged files (beets moved them to /Beets)
-6. Update pipeline DB: status → imported
+5. Post-flight: verify MBID appeared in beets DB
+6. Cleanup: remove staged files (beets moved them to /Beets)
+7. Update pipeline DB: status → imported
 ```
 
 ### Guarded Beets Replacement
@@ -626,7 +634,12 @@ A full library health check found:
 | `mp3val` | MP3 | Frame headers, Xing headers, stream structure | Fast (header only) |
 | `mp3val -f` | MP3 | Same + auto-fix (rewrite headers, trim garbage) | Fast |
 | `flac -t -s` | FLAC | CRC-verified full decode (FLAC has built-in checksums) | Fast |
-| `ffmpeg -v error -i FILE -f null -` | All | Full decode — proves audio data is valid | Slow (~18 files/s) |
+| Cratedigger strict FFmpeg policy (`-max_error_rate 0`, audio-scoped error detection, `-map 0:a`, null output) | All | Complete mapped-audio decode with typed outcomes; positive exit on stable readable bytes is bad audio | Slow (~18 files/s) |
+
+Plain FFmpeg defaults can print recoverable decoder errors and still return
+zero, so `ffmpeg -v error -i FILE -f null -` alone is not an integrity proof.
+Cratedigger also ignores tags, pictures, chapters, and exit-zero stderr at this
+boundary; metadata is stripped during conversion and Beets writes it fresh.
 
 ### Validation Script
 

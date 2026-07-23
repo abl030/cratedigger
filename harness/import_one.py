@@ -2,15 +2,16 @@
 """One-shot beets import for a single album with a known MBID.
 
 Designed for the pipeline DB auto-import path (source='request').
-Pre-flight checks beets DB, converts FLAC→V0, imports via harness,
-post-flight verifies exact MBID in beets DB.
+Pre-flight checks beets DB, strictly validates audio, stages the configured
+lossless-source conversion transaction, imports via the harness, and
+post-flight verifies the exact MBID in beets DB.
 
 Usage:
     python3 import_one.py <album_path> <mb_release_id> [--request-id N] [--dry-run]
 
 Exit codes:
     0 = imported (or already in beets)
-    1 = FLAC conversion failed
+    1 = audio conversion failed
     2 = beets import failed (harness error, post-flight verification failed)
     3 = album path not found
     4 = MBID not found in beets candidates
@@ -52,7 +53,7 @@ from lib.beets_db import AlbumInfo, BeetsDB, validate_beets_storage_pair
 from lib.measurement import ffprobe_audio_codec_name
 from lib.permissions import fix_library_modes, reset_umask
 from lib.release_identity import ReleaseIdentity
-from lib.util import beets_subprocess_env
+from lib.util import beets_subprocess_env, validate_audio
 from lib import transitions
 
 # Module-level DI seam for ``transitions.finalize_request`` — see
@@ -60,6 +61,10 @@ from lib import transitions
 finalize_request = transitions.finalize_request
 from lib.quality import (AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS,
                          AudioQualityMeasurement, DuplicateRemoveCandidate,
+                         AudioToolDiagnostic,
+                         AudioToolDiagnosticCategory,
+                         AudioValidationReport,
+                         ConversionInfo,
                          DuplicateRemoveGuardInfo, ImportResult,
                          EVIDENCE_PROVENANCE_MEASURED,
                          EVIDENCE_SUBJECT_SOURCE,
@@ -86,6 +91,7 @@ from lib.quality import (AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS,
                          measured_import_decision,
                          provisional_lossless_decision, transcode_detection,
                          v0_probe_overrides_spectral)
+from lib.quality import bounded_audio_tool_diagnostic
 from lib.v0_probe import (
     V0_CODEC,
     V0_CODEC_ARGS,
@@ -526,7 +532,10 @@ class ConversionSpec:
     codec_args: tuple[str, ...] = ()        # quality/bitrate args: ("-q:a", "0") or ("-b:a", "128k")
     extension: str = "mp3"                  # output file extension (without dot)
     label: str = "mp3 v0"                   # human-readable label for logging/display
-    metadata_args: tuple[str, ...] = ("-map_metadata", "0")  # metadata handling
+    metadata_args: tuple[str, ...] = (
+        "-map_metadata", "-1",
+        "-map_chapters", "-1",
+    )
 
 
 # FLAC normalization spec — converts ALAC/WAV → FLAC when keeping lossless on disk
@@ -593,7 +602,11 @@ def parse_verified_lossless_target(spec: str) -> ConversionSpec:
                 codec_args=("-q:a", str(q_num)),
                 extension="mp3",
                 label=spec,
-                metadata_args=("-map_metadata", "0", "-id3v2_version", "3"),
+                metadata_args=(
+                    "-map_metadata", "-1",
+                    "-map_chapters", "-1",
+                    "-id3v2_version", "3",
+                ),
             )
         elif quality.isdigit():
             # CBR bitrate
@@ -605,7 +618,11 @@ def parse_verified_lossless_target(spec: str) -> ConversionSpec:
                 codec_args=("-b:a", f"{quality}k"),
                 extension="mp3",
                 label=spec,
-                metadata_args=("-map_metadata", "0", "-id3v2_version", "3"),
+                metadata_args=(
+                    "-map_metadata", "-1",
+                    "-map_chapters", "-1",
+                    "-id3v2_version", "3",
+                ),
             )
         else:
             raise ValueError(f"mp3 quality must be 'vN' or numeric bitrate, got: {quality!r}")
@@ -811,10 +828,87 @@ def _probe_source_channels(path: str) -> int | None:
     return None
 
 
+@dataclass
+class _StagedConversion:
+    """One conversion output staged for an album-wide commit."""
+
+    relative_path: str
+    source_path: str
+    output_path: str
+    temporary_output_path: str
+    same_path_output: bool
+    source_backup_path: str | None = None
+    final_installed: bool = False
+
+
+def _conversion_temp_path(output_path: str) -> str:
+    """Allocate an absent same-filesystem path for one staged output."""
+    descriptor, path = tempfile.mkstemp(
+        prefix=".cratedigger-convert-",
+        suffix=os.path.splitext(output_path)[1],
+        dir=os.path.dirname(output_path),
+    )
+    os.close(descriptor)
+    os.remove(path)
+    return path
+
+
+def _conversion_source_backup_path(source_path: str) -> str:
+    """Allocate an absent same-filesystem rollback path."""
+    descriptor, path = tempfile.mkstemp(
+        prefix=".cratedigger-source-",
+        suffix=".cratedigger-source-backup",
+        dir=os.path.dirname(source_path),
+    )
+    os.close(descriptor)
+    os.remove(path)
+    return path
+
+
+def _kept_source_path(source_path: str) -> str:
+    """Return a collision-free visible source backup for same-extension output."""
+    stem, extension = os.path.splitext(source_path)
+    candidate = f"{stem}.source{extension}"
+    ordinal = 2
+    while os.path.exists(candidate):
+        candidate = f"{stem}.source-{ordinal}{extension}"
+        ordinal += 1
+    return candidate
+
+
+def _cleanup_conversion_paths(paths: Sequence[str]) -> None:
+    """Best-effort removal for Cratedigger-owned conversion temporaries."""
+    for path in paths:
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            pass
+
+
+def _rollback_staged_conversions(staged: Sequence[_StagedConversion]) -> None:
+    """Best-effort rollback of an interrupted album commit."""
+    for item in reversed(staged):
+        try:
+            if item.final_installed and os.path.exists(item.output_path):
+                os.remove(item.output_path)
+            if (
+                item.source_backup_path is not None
+                and os.path.exists(item.source_backup_path)
+            ):
+                os.replace(item.source_backup_path, item.source_path)
+        except OSError:
+            pass
+    _cleanup_conversion_paths(
+        [item.temporary_output_path for item in staged]
+    )
+
+
 def convert_lossless(album_path: str, spec: ConversionSpec,
                      dry_run: bool = False,
                      keep_source: bool = False,
-                     lossless_files: list[str] | None = None
+                     lossless_files: list[str] | None = None,
+                     audit: ConversionInfo | None = None,
                      ) -> tuple[int, int, str | None, int | None]:
     """Convert all lossless files using the given ConversionSpec.
 
@@ -833,10 +927,10 @@ def convert_lossless(album_path: str, spec: ConversionSpec,
       outright (Mott /r3852) and the library is stereo-only by user
       policy.
 
-    When keep_source=True, original lossless files are preserved (used when
-    a second conversion pass will run from the originals). If the target uses
-    the same path as the source (ALAC .m4a → AAC .m4a), conversion runs through
-    a temporary file first so the source is not silently skipped.
+    Every output is written to a same-filesystem temporary path first. No
+    original is moved or removed until every conversion succeeds; a failed
+    batch deletes only Cratedigger-owned temporaries and retains every source.
+    ``audit`` receives bounded typed failures and a strict source revalidation.
     """
     if lossless_files is None:
         lossless_files = _lossless_filenames(album_path)
@@ -856,14 +950,12 @@ def convert_lossless(album_path: str, spec: ConversionSpec,
 
     converted = 0
     failed = 0
+    diagnostics: list[AudioToolDiagnostic] = []
+    staged: list[_StagedConversion] = []
     for fname in lossless_files:
         src_path = os.path.join(album_path, fname)
         out_path = os.path.splitext(src_path)[0] + "." + spec.extension
         same_path_output = os.path.normpath(src_path) == os.path.normpath(out_path)
-        temp_out_path = (
-            os.path.splitext(src_path)[0] + ".tmp." + spec.extension
-            if same_path_output else out_path
-        )
 
         if not same_path_output and os.path.exists(out_path):
             continue
@@ -874,12 +966,28 @@ def convert_lossless(album_path: str, spec: ConversionSpec,
             converted += 1
             continue
 
+        try:
+            temp_out_path = _conversion_temp_path(out_path)
+        except OSError as exc:
+            diagnostics.append(bounded_audio_tool_diagnostic(
+                relative_path=fname,
+                category="read_error",
+                stderr=str(exc),
+            ))
+            failed += 1
+            break
         # ``-ac 2`` forces stereo on every output. libopus rejects
         # ``5.1(side)`` with mapping family -1 *and* 1, and the library
         # is stereo-only by user policy — downmix universally. Codecs
         # that already auto-downmix (libmp3lame, aac) ignore the
         # redundant flag.
-        cmd = ["ffmpeg", "-i", src_path,
+        cmd = [
+               "ffmpeg",
+               "-hide_banner", "-nostdin", "-v", "error",
+               "-max_error_rate", "0",
+               "-abort_on", "empty_output_stream",
+               "-err_detect:a", "crccheck+bitstream+buffer+explode",
+               "-i", src_path,
                "-map", "0:a",
                "-ac", "2",
                "-c:a", spec.codec, *spec.codec_args,
@@ -894,34 +1002,136 @@ def convert_lossless(album_path: str, spec: ConversionSpec,
             # whole import — request 580 (78 Saab — Crossed Lines) hit this.
             result = subprocess.run(cmd, capture_output=True, text=True,
                                     errors="replace", timeout=conv_timeout)
-        except subprocess.TimeoutExpired:
-            print(f"  [FAIL] {fname}: ffmpeg timed out after {conv_timeout}s",
-                  file=sys.stderr)
-            if os.path.exists(temp_out_path):
-                os.remove(temp_out_path)
+        except subprocess.TimeoutExpired as exc:
+            diagnostic = bounded_audio_tool_diagnostic(
+                relative_path=fname,
+                category="decode_timeout",
+                stderr=exc.stderr or f"ffmpeg timed out after {conv_timeout}s",
+            )
+            diagnostics.append(diagnostic)
+            _cleanup_conversion_paths([temp_out_path])
             failed += 1
             continue
+        except OSError as exc:
+            diagnostic = bounded_audio_tool_diagnostic(
+                relative_path=fname,
+                category="process_unavailable",
+                stderr=str(exc),
+            )
+            diagnostics.append(diagnostic)
+            _cleanup_conversion_paths([temp_out_path])
+            failed += 1
+            break
 
         if (result.returncode != 0 or not os.path.exists(temp_out_path)
                 or os.path.getsize(temp_out_path) == 0):
-            print(f"  [FAIL] {fname}: {result.stderr[-200:]}",
-                  file=sys.stderr)
-            if os.path.exists(temp_out_path):
-                os.remove(temp_out_path)
+            category: AudioToolDiagnosticCategory = (
+                "process_interrupted"
+                if result.returncode < 0
+                else (
+                    "decode_error"
+                    if result.returncode == 69
+                    else "ffmpeg_failed_unclassified"
+                )
+            )
+            detail = result.stderr
+            if result.returncode == 0:
+                detail = "ffmpeg produced no non-empty output"
+            diagnostics.append(bounded_audio_tool_diagnostic(
+                relative_path=fname,
+                category=category,
+                return_code=result.returncode,
+                stderr=detail,
+            ))
+            _cleanup_conversion_paths([temp_out_path])
             failed += 1
         else:
-            if same_path_output:
-                backup_path = os.path.splitext(src_path)[0] + ".source" + os.path.splitext(src_path)[1]
-                if keep_source:
-                    os.replace(src_path, backup_path)
-                else:
-                    os.remove(src_path)
-                os.replace(temp_out_path, out_path)
-            elif not keep_source:
-                os.remove(src_path)
-            converted += 1
+            staged.append(_StagedConversion(
+                relative_path=fname,
+                source_path=src_path,
+                output_path=out_path,
+                temporary_output_path=temp_out_path,
+                same_path_output=same_path_output,
+            ))
 
-    return converted, failed, original_ext, source_channels
+    if dry_run:
+        return converted, 0, original_ext, source_channels
+
+    if failed:
+        _cleanup_conversion_paths(
+            [item.temporary_output_path for item in staged]
+        )
+        source_validation: AudioValidationReport | None = None
+        source_validation_failed_paths: list[str] = []
+        try:
+            validation_result = validate_audio(album_path, "normal")
+            source_validation = validation_result.report
+            source_validation_failed_paths = list(validation_result.failed_paths)
+        except Exception as exc:
+            diagnostics.append(bounded_audio_tool_diagnostic(
+                relative_path=".",
+                category="read_error",
+                stderr=f"source revalidation crashed: {type(exc).__name__}: {exc}",
+            ))
+        if audit is not None:
+            audit.diagnostics.extend(diagnostics[:16])
+            audit.omitted_diagnostics += max(0, len(diagnostics) - 16)
+            audit.source_validation = source_validation
+            audit.source_validation_failed_paths = source_validation_failed_paths
+        first = diagnostics[0]
+        _log(
+            f"  [CONVERT] target={spec.label} outcome=failed "
+            f"failed={failed} first={first.relative_path} "
+            f"category={first.category}"
+        )
+        return 0, failed, original_ext, source_channels
+
+    try:
+        for item in staged:
+            if item.same_path_output or not keep_source:
+                item.source_backup_path = _conversion_source_backup_path(
+                    item.source_path
+                )
+                os.replace(item.source_path, item.source_backup_path)
+            os.replace(item.temporary_output_path, item.output_path)
+            item.final_installed = True
+        for item in staged:
+            if item.source_backup_path is None:
+                continue
+            if keep_source and item.same_path_output:
+                visible_source_path = _kept_source_path(item.source_path)
+                os.replace(item.source_backup_path, visible_source_path)
+                item.source_backup_path = visible_source_path
+    except OSError as exc:
+        _rollback_staged_conversions(staged)
+        diagnostic = bounded_audio_tool_diagnostic(
+            relative_path=".",
+            category="read_error",
+            stderr=f"album conversion commit failed: {exc}",
+        )
+        if audit is not None:
+            audit.diagnostics.append(diagnostic)
+            audit.source_validation = validate_audio(
+                album_path,
+                "normal",
+            ).report
+        _log(
+            f"  [CONVERT] target={spec.label} outcome=failed "
+            "failed=1 first=. category=read_error"
+        )
+        return 0, 1, original_ext, source_channels
+
+    for item in staged:
+        if item.source_backup_path is None:
+            continue
+        if keep_source and item.same_path_output:
+            item.source_backup_path = None
+            continue
+        _cleanup_conversion_paths([item.source_backup_path])
+        item.source_backup_path = None
+
+    converted = len(staged)
+    return converted, 0, original_ext, source_channels
 
 
 # ---------------------------------------------------------------------------
@@ -1297,7 +1507,11 @@ def _materialize_quality_evidence_action(
             stage_start = time.monotonic()
             try:
                 converted, failed, original_ext, source_channels = convert_lossless(
-                    work_path, FLAC_SPEC, lossless_files=lossless_files)
+                    work_path,
+                    FLAC_SPEC,
+                    lossless_files=lossless_files,
+                    audit=r.conversion,
+                )
             finally:
                 _log_timing("evidence_lossless_normalization", stage_start)
             r.conversion.converted = converted
@@ -1327,6 +1541,7 @@ def _materialize_quality_evidence_action(
             target_spec,
             keep_source=True,
             lossless_files=lossless_files,
+            audit=r.conversion,
         )
     finally:
         _log_timing("evidence_materialization", stage_start)
@@ -1818,7 +2033,9 @@ def main():
         try:
             converted, failed, original_ext, source_channels = convert_lossless(
                 work_path, V0_SPEC,
-                keep_source=has_target or args.preserve_source)
+                keep_source=has_target or args.preserve_source,
+                audit=r.conversion,
+            )
         finally:
             _log_timing("primary_conversion", stage_start)
         r.conversion.converted = converted
@@ -1872,7 +2089,7 @@ def main():
             stage_start = time.monotonic()
             try:
                 converted, failed, original_ext, source_channels = convert_lossless(
-                    work_path, FLAC_SPEC)
+                    work_path, FLAC_SPEC, audit=r.conversion)
             finally:
                 _log_timing("lossless_normalization", stage_start)
             r.conversion.converted = converted
@@ -2167,7 +2384,11 @@ def main():
             _remove_files_by_ext(work_path, "." + V0_SPEC.extension)
         try:
             target_converted, target_failed, _, target_source_channels = convert_lossless(
-                work_path, target_spec, keep_source=True)
+                work_path,
+                target_spec,
+                keep_source=True,
+                audit=r.conversion,
+            )
             if (
                 target_source_channels is not None
                 and r.conversion.source_channels is None

@@ -38,7 +38,14 @@ from lib.pipeline_db import (  # noqa: E402
     TransferLedgerRow,
 )
 from lib.pipeline_db._shared import REQUEST_METADATA_RESERVED_FIELDS  # noqa: E402
-from lib.quality import AudioQualityMeasurement  # noqa: E402
+from lib.json_narrow import json_dict  # noqa: E402
+from lib.quality import (  # noqa: E402
+    AlbumQualityEvidenceFile,
+    AudioQualityMeasurement,
+    AudioToolDiagnostic,
+    AudioValidationReport,
+    legacy_unrecorded_audio_validation_report,
+)
 
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
@@ -2283,6 +2290,71 @@ class TestDownloadLog(unittest.TestCase):
         self.assertIsNone(history[0]["beets_distance"])
         vr = cast(dict, history[0]["validation_result"])
         self.assertEqual(vr["reason"], "measurement_crashed")
+
+    def test_measurement_failure_paths_round_trip_as_permanent_retention_set(self):
+        retained = "/mnt/music/slskd/retained-measurement-failure"
+        self.db.log_download(
+            request_id=self.req_id,
+            outcome="measurement_failed",
+            staged_path=retained,
+        )
+        self.db.log_download(
+            request_id=self.req_id,
+            outcome="measurement_failed",
+            staged_path=retained,
+        )
+        self.db.log_download(
+            request_id=self.req_id,
+            outcome="measurement_failed",
+            staged_path="",
+        )
+        self.db.log_download(
+            request_id=self.req_id,
+            outcome="rejected",
+            staged_path="/mnt/music/slskd/not-retained-by-this-rule",
+        )
+
+        self.assertEqual(
+            self.db.get_retained_failure_paths(),
+            {retained},
+        )
+
+    def test_post_commit_quarantine_audit_round_trips_on_exact_terminal_row(self):
+        from lib.dispatch.types import PostCommitQuarantineAudit
+
+        log_id = self.db.log_download(
+            request_id=self.req_id,
+            outcome="rejected",
+            validation_result=json.dumps({"scenario": "audio_corrupt"}),
+        )
+        target = "/mnt/music/slskd/failed_imports/bad_files/Album"
+        audit = PostCommitQuarantineAudit(
+            source_path="/mnt/music/incoming/Album",
+            quarantine_path=target,
+            moved=True,
+        )
+
+        self.assertTrue(
+            self.db.record_post_commit_quarantine(log_id, audit)
+        )
+
+        row = self.db._execute(
+            """
+            SELECT validation_result
+            FROM download_log
+            WHERE id = %s
+            """,
+            (log_id,),
+        ).fetchone()
+        assert row is not None
+        payload = json_dict(row["validation_result"])
+        self.assertEqual(payload["failed_path"], target)
+        quarantine = json_dict(payload["post_commit_quarantine"])
+        self.assertEqual(quarantine["moved"], True)
+        self.assertEqual(
+            self.db.get_retained_failure_paths(),
+            {target},
+        )
 
     def test_log_download_rejects_duplicate_validation_projection_inputs(self):
         """There is no precedence rule between evidence and denormalized args."""
@@ -4837,19 +4909,24 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
                 measured_at, format, lineage_version,
                 spectral_grade, spectral_bitrate_kbps,
                 spectral_subject, spectral_provenance,
-                v0_avg_bitrate_kbps, v0_subject, v0_provenance
+                v0_avg_bitrate_kbps, v0_subject, v0_provenance,
+                audio_validation
             )
             VALUES (
                 %s, %s, %s, NOW(), 'MP3', 3,
                 'genuine', 192,
                 'unknown-live-subject', 'unknown-live-provenance',
-                245, 'unknown-live-subject', 'unknown-live-provenance'
+                245, 'unknown-live-subject', 'unknown-live-provenance',
+                %s::jsonb
             )
             """,
             (
                 evidence.mb_release_id,
                 evidence.snapshot_fingerprint,
                 evidence.source_path,
+                msgspec.json.encode(
+                    legacy_unrecorded_audio_validation_report()
+                ).decode(),
             ),
         )
 
@@ -5074,6 +5151,10 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
 
         evidence = self._seed(
             mb_release_id="mbid-preview-facts",
+            audio_corrupt=True,
+            audio_error=(
+                "01 - Track.mp3: Invalid data found when processing input"
+            ),
             files=[
                 AlbumQualityEvidenceFile(
                     relative_path="01 - Track.mp3",
@@ -5088,8 +5169,6 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         )
         evidence = msgspec.structs.replace(
             evidence,
-            audio_corrupt=True,
-            audio_error="01 - Track.mp3: Invalid data found when processing input",
             folder_layout="nested",
             audio_file_count=1,
             filetype_band="mp3",
@@ -5116,6 +5195,208 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         self.assertEqual(loaded.matched_bad_audio_hash_path, "01 - Track.mp3")
         self.assertEqual(len(loaded.files), 1)
         self.assertFalse(loaded.files[0].decode_ok)
+
+    def test_audio_validation_round_trip_and_weak_writer_preservation(self):
+        """Every diagnostic field survives PG and stale writers lose."""
+        files = [
+            AlbumQualityEvidenceFile(
+                relative_path="disc-1/01.flac",
+                size_bytes=123,
+                mtime_ns=456,
+                extension="flac",
+                container="flac",
+                codec="flac",
+                decode_ok=False,
+            ),
+        ]
+        report = AudioValidationReport(
+            tool_version="8.1.1",
+            outcome="audio_corrupt",
+            files_checked=1,
+            files_failed=1,
+            diagnostics=[
+                AudioToolDiagnostic(
+                    relative_path="disc-1/01.flac",
+                    category="decode_error",
+                    return_code=69,
+                    stderr_excerpt="Invalid data",
+                    stderr_bytes=4096,
+                    stderr_sha256="b" * 64,
+                    stderr_truncated=True,
+                ),
+            ],
+        )
+        evidence = self._seed(
+            mb_release_id="mbid-audio-validation-round-trip",
+            files=files,
+            audio_corrupt=True,
+            audio_error="disc-1/01.flac: Invalid data",
+            audio_validation=report,
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+
+        loaded = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert loaded is not None
+        self.assertEqual(loaded.audio_validation, report)
+        self.assertFalse(loaded.files[0].decode_ok)
+
+        self.db.upsert_album_quality_evidence(msgspec.structs.replace(
+            evidence,
+            audio_validation=legacy_unrecorded_audio_validation_report(),
+            audio_corrupt=False,
+            audio_error=None,
+            files=[msgspec.structs.replace(files[0], decode_ok=True)],
+        ))
+        preserved = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert preserved is not None
+        self.assertEqual(preserved.audio_validation, report)
+        self.assertTrue(preserved.audio_corrupt)
+        self.assertEqual(preserved.audio_error, evidence.audio_error)
+        self.assertFalse(preserved.files[0].decode_ok)
+
+    def test_audio_validation_database_constraint_rejects_bad_shape(self):
+        """Migration 064 enforces the complete typed bounded audit contract."""
+        evidence = self._seed(mb_release_id="mbid-audio-validation-check")
+        self.db.upsert_album_quality_evidence(evidence)
+
+        diagnostic_struct = AudioToolDiagnostic(
+            relative_path="01.flac",
+            category="decode_error",
+            return_code=69,
+            stderr_excerpt="Invalid data",
+            stderr_bytes=12,
+            stderr_sha256="b" * 64,
+            stderr_truncated=False,
+        )
+        diagnostic: dict[str, object] = msgspec.to_builtins(
+            diagnostic_struct
+        )
+        valid: dict[str, object] = msgspec.to_builtins(AudioValidationReport(
+            outcome="audio_corrupt",
+            files_checked=1,
+            files_failed=1,
+            diagnostics=[diagnostic_struct],
+        ))
+
+        malformed: list[tuple[str, dict[str, object], bool]] = [
+            ("missing required fields", {"outcome": "passed"}, False),
+            (
+                "negative count",
+                {**valid, "files_checked": -1},
+                True,
+            ),
+            (
+                "decimal count",
+                {**valid, "files_checked": 1.5},
+                True,
+            ),
+            (
+                "failure count mismatch",
+                {**valid, "files_failed": 2},
+                True,
+            ),
+            (
+                "wrong diagnostic category",
+                {
+                    **valid,
+                    "diagnostics": [{
+                        **diagnostic,
+                        "category": "read_error",
+                    }],
+                },
+                True,
+            ),
+            (
+                "diagnostic cap exceeded",
+                {
+                    **valid,
+                    "files_checked": 17,
+                    "files_failed": 17,
+                    "diagnostics": [diagnostic] * 17,
+                },
+                True,
+            ),
+            (
+                "missing diagnostic field",
+                {
+                    **valid,
+                    "diagnostics": [{
+                        key: value
+                        for key, value in diagnostic.items()
+                        if key != "stderr_truncated"
+                    }],
+                },
+                True,
+            ),
+            (
+                "noninteger return code",
+                {
+                    **valid,
+                    "diagnostics": [{
+                        **diagnostic,
+                        "return_code": 69.5,
+                    }],
+                },
+                True,
+            ),
+            (
+                "negative stderr size",
+                {
+                    **valid,
+                    "diagnostics": [{
+                        **diagnostic,
+                        "stderr_bytes": -1,
+                    }],
+                },
+                True,
+            ),
+            (
+                "oversize stderr excerpt",
+                {
+                    **valid,
+                    "diagnostics": [{
+                        **diagnostic,
+                        "stderr_excerpt": "é" * 1025,
+                    }],
+                },
+                True,
+            ),
+            (
+                "scalar disagreement",
+                {**valid, "outcome": "passed", "files_failed": 0,
+                 "diagnostics": []},
+                True,
+            ),
+        ]
+        for label, payload, scalar_corrupt in malformed:
+            with self.subTest(label=label):
+                with self.assertRaises(
+                    psycopg2.errors.CheckViolation
+                ) as raised:
+                    self.db._execute(
+                        """
+                        UPDATE album_quality_evidence
+                        SET audio_validation = %s::jsonb,
+                            audio_corrupt = %s
+                        WHERE mb_release_id = %s
+                        """,
+                        (
+                            json.dumps(payload),
+                            scalar_corrupt,
+                            evidence.mb_release_id,
+                        ),
+                    )
+                self.assertEqual(
+                    raised.exception.diag.constraint_name,
+                    "album_quality_evidence_audio_validation_shape_check",
+                )
+                self.db.conn.rollback()
 
     def test_empty_fileset_is_storable_when_audio_file_count_is_zero(self):
         """U1 AE4: audio_file_count=0 + files=[] round-trips without error."""

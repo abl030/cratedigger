@@ -20,6 +20,7 @@ import msgspec
 
 if TYPE_CHECKING:
     from cratedigger import TrackRecord
+    from lib.dispatch.types import PostCommitQuarantineAudit
     from lib.quality import CandidateScore
     from lib.pipeline_db import (
         AlbumRequestRow,
@@ -3187,6 +3188,33 @@ class FakePipelineDB:
                 evidence,
                 source_path=existing.source_path,
             )
+        if (
+            existing is not None
+            and evidence.audio_validation.outcome
+                in {"legacy_unrecorded", "skipped"}
+            and existing.audio_validation.outcome
+                not in {"legacy_unrecorded", "skipped"}
+        ):
+            existing_decode_by_path = {
+                file.relative_path: file.decode_ok
+                for file in existing.files
+            }
+            evidence = msgspec.structs.replace(
+                evidence,
+                audio_validation=existing.audio_validation,
+                audio_corrupt=existing.audio_corrupt,
+                audio_error=existing.audio_error,
+                files=[
+                    msgspec.structs.replace(
+                        file,
+                        decode_ok=existing_decode_by_path.get(
+                            file.relative_path,
+                            file.decode_ok,
+                        ),
+                    )
+                    for file in evidence.files
+                ],
+            )
         if existing is not None and existing.id is not None:
             evidence_id = existing.id
         else:
@@ -3413,6 +3441,53 @@ class FakePipelineDB:
             return None
         val = row.get("current_evidence_id")
         return int(val) if val is not None else None
+
+    def get_retained_failure_paths(self) -> set[str]:
+        retained: set[str] = set()
+        for row in self.download_logs:
+            if (
+                row.outcome == "measurement_failed"
+                and row.staged_path is not None
+                and row.staged_path.strip()
+            ):
+                retained.add(row.staged_path)
+            raw = row.validation_result
+            if isinstance(raw, (str, bytes)):
+                try:
+                    raw = msgspec.json.decode(raw)
+                except msgspec.DecodeError:
+                    raw = None
+            if (
+                isinstance(raw, dict)
+                and "post_commit_quarantine" in raw
+                and isinstance(raw.get("failed_path"), str)
+                and raw["failed_path"].strip()
+            ):
+                retained.add(raw["failed_path"])
+        return retained
+
+    def record_post_commit_quarantine(
+        self,
+        log_id: int,
+        audit: "PostCommitQuarantineAudit",
+    ) -> bool:
+        for row in self.download_logs:
+            if row.id != log_id:
+                continue
+            raw = row.validation_result
+            if isinstance(raw, (str, bytes)):
+                try:
+                    raw = msgspec.json.decode(raw)
+                except msgspec.DecodeError:
+                    raw = None
+            payload = dict(raw) if isinstance(raw, dict) else {}
+            payload["post_commit_quarantine"] = msgspec.to_builtins(audit)
+            payload["failed_path"] = (
+                audit.quarantine_path or audit.source_path
+            )
+            row.validation_result = msgspec.json.encode(payload).decode()
+            return True
+        return False
 
     def clear_on_disk_quality_fields(self, request_id: int) -> None:
         self.clear_on_disk_quality_fields_calls.append(request_id)
