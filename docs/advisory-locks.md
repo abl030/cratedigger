@@ -108,7 +108,10 @@ album's files vanish.
 **Scope**: Held for the duration of every `import_one.py` subprocess
 — that is, in every path that runs the harness. `dispatch_import_core`
 is the funnel; both the auto path and the force-import path go through
-it.
+it. It also serializes direct request creation in `RequestCreationService`:
+Add and new-row Upgrade hold the exact release lock while rechecking identity,
+persisting their provisional row, and nesting the per-request PLAN lock before
+the final publication CAS.
 
 **Key**: `release_id_to_lock_key(mb_release_id)` — a 31-bit
 `zlib.crc32` mask of the (`.strip()`-normalised) release id string.
@@ -385,6 +388,7 @@ session and returns False — revisit the ordering rules.
 |---|---|---|---|---|
 | Auto-import outer | `lib/download_validation.py` | `_handle_valid_result` | RELEASE | `release_id_to_lock_key(album_data.mb_release_id)` |
 | Auto + force-import inner | `lib/dispatch/core.py` | `dispatch_import_core` | RELEASE | `release_id_to_lock_key(mb_release_id)` |
+| Direct Add / new-row Upgrade | `lib/request_creation_service.py` | `RequestCreationService.create_or_resume` | RELEASE then PLAN | `release_id_to_lock_key(creation.release_id)`; `request_id` |
 | Force-import outer | `lib/dispatch/entry_points.py` | `dispatch_import_from_db` | IMPORT | `request_id` |
 | Ban-source destructive action | `lib/destructive_release_service.py` | `ban_source` | IMPORT then RELEASE | `request_id`; `release_id_to_lock_key(server release id)` |
 | Library-delete destructive action | `lib/destructive_release_service.py` | `delete_release_from_library` | IMPORT then RELEASE, or RELEASE only without a pipeline row; ambiguous dual or malformed-nonempty album identity rejects before locks | server-derived pipeline request id; `release_id_to_lock_key(server release id)` |

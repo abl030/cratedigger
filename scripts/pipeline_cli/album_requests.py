@@ -523,6 +523,13 @@ def _cmd_add_mb(db: _AlbumRequestsDB, mbid: str, source: str) -> int | None:
     if result.outcome == "initialization_failed":
         print(f"  Initialization failed for id={result.request_id}: {result.detail}", file=sys.stderr)
         return 4
+    if result.outcome == "exists":
+        authoritative = db.get_request(result.request_id or 0)
+        if authoritative is None:
+            print("  Existing request disappeared; retry shortly.", file=sys.stderr)
+            return 4
+        print(f"  Already in DB: id={authoritative['id']} status={authoritative['status']}")
+        return None
     print(f"  {result.outcome.title()}: id={result.request_id} {artist_name} - {title} ({len(tracks)} tracks)")
     return None
 
@@ -579,6 +586,13 @@ def _cmd_add_discogs(
     if result.outcome == "initialization_failed":
         print(f"  Initialization failed for id={result.request_id}: {result.detail}", file=sys.stderr)
         return 4
+    if result.outcome == "exists":
+        authoritative = db.get_request(result.request_id or 0)
+        if authoritative is None:
+            print("  Existing request disappeared; retry shortly.", file=sys.stderr)
+            return 4
+        print(f"  Already in DB: id={authoritative['id']} status={authoritative['status']}")
+        return None
     print(f"  {result.outcome.title()}: id={result.request_id} {artist_name} - {title} ({len(tracks)} tracks)")
     return None
 

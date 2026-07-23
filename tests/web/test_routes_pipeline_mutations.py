@@ -27,6 +27,7 @@ from lib.beets_delete import (
     BeetsDeleteFailed,
     BeetsDeleteRequest,
 )
+from lib.request_creation_service import RequestCreationResult
 from lib.transitions import TransitionConflict, TransitionConflictKind
 
 
@@ -200,6 +201,108 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, self.EXISTS_REQUIRED_FIELDS,
                                 "pipeline add exists response")
+
+    @patch("web.routes.pipeline_mutations._create_or_resume")
+    @patch("web.routes.pipeline_mutations.mb_api.get_release")
+    def test_pipeline_add_mb_preflight_race_reports_authoritative_exists(
+        self, mock_release, mock_create,
+    ):
+        mock_release.return_value = {
+            "artist_name": "Race", "title": "MB", "tracks": [],
+        }
+
+        def race(_creation: object) -> RequestCreationResult:
+            self.db.seed_request(make_request_row(
+                id=7911, status="imported", mb_release_id="mb-add-race",
+            ))
+            return RequestCreationResult("exists", request_id=7911)
+
+        mock_create.side_effect = race
+        status, data = self._post(
+            "/api/pipeline/add", {"mb_release_id": "mb-add-race"},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data, {
+            "status": "exists", "id": 7911, "current_status": "imported",
+        })
+
+    @patch("web.routes.pipeline_mutations._create_or_resume")
+    @patch("web.routes.pipeline_mutations.discogs_api.get_release")
+    def test_pipeline_add_discogs_preflight_race_reports_authoritative_exists(
+        self, mock_release, mock_create,
+    ):
+        mock_release.return_value = {
+            "artist_name": "Race", "title": "Discogs", "tracks": [],
+        }
+
+        def race(_creation: object) -> RequestCreationResult:
+            self.db.seed_request(make_request_row(
+                id=7912, status="imported", mb_release_id="7912",
+                discogs_release_id="7912",
+            ))
+            return RequestCreationResult("exists", request_id=7912)
+
+        mock_create.side_effect = race
+        status, data = self._post(
+            "/api/pipeline/add", {"discogs_release_id": "7912"},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data, {
+            "status": "exists", "id": 7912, "current_status": "imported",
+        })
+
+    @patch("web.routes.pipeline_mutations._create_or_resume")
+    @patch("web.routes.pipeline_mutations.mb_api.get_release")
+    def test_pipeline_upgrade_mb_preflight_race_uses_existing_row_policy(
+        self, mock_release, mock_create,
+    ):
+        mock_release.return_value = {
+            "artist_name": "Race", "title": "MB", "tracks": [],
+        }
+
+        def race(_creation: object) -> RequestCreationResult:
+            self.db.seed_request(make_request_row(
+                id=7913, status="imported", mb_release_id="mb-upgrade-race",
+            ))
+            return RequestCreationResult("exists", request_id=7913)
+
+        mock_create.side_effect = race
+        status, data = self._post(
+            "/api/pipeline/upgrade", {"mb_release_id": "mb-upgrade-race"},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["status"], "upgrade_queued")
+        self.assertNotIn("created", data)
+        self.assertEqual(self.db.request(7913)["status"], "wanted")
+
+    @patch("web.routes.pipeline_mutations._create_or_resume")
+    @patch("web.routes.pipeline_mutations.discogs_api.get_release")
+    def test_pipeline_upgrade_discogs_preflight_race_uses_existing_row_policy(
+        self, mock_release, mock_create,
+    ):
+        mock_release.return_value = {
+            "artist_name": "Race", "title": "Discogs", "tracks": [],
+        }
+
+        def race(_creation: object) -> RequestCreationResult:
+            self.db.seed_request(make_request_row(
+                id=7914, status="imported", mb_release_id="7914",
+                discogs_release_id="7914",
+            ))
+            return RequestCreationResult("exists", request_id=7914)
+
+        mock_create.side_effect = race
+        status, data = self._post(
+            "/api/pipeline/upgrade", {"mb_release_id": "7914"},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["status"], "upgrade_queued")
+        self.assertNotIn("created", data)
+        self.assertEqual(self.db.request(7914)["status"], "wanted")
 
     @patch("web.routes.pipeline_mutations.mb_api.get_release_raw")
     @patch("web.routes.pipeline_mutations.mb_api.get_release")

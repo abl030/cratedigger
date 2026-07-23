@@ -14,6 +14,7 @@ import msgspec
 from pydantic import BaseModel, Field, model_validator
 
 from lib.pipeline_db import PipelineDB
+from lib.pipeline_db.rows import AlbumRequestRow
 from lib.config import read_runtime_config
 from lib.request_creation_service import (
     RequestCreationInput,
@@ -150,10 +151,10 @@ def _initializing_mutation_rejected(h: RouteHandler, req: Mapping[str, object]) 
 
 def _creation_result_or_respond(
     h: RouteHandler, result: RequestCreationResult,
-) -> int | None:
-    """Map the shared create-or-resume result to the HTTP contract."""
+) -> RequestCreationResult | None:
+    """Map failures while preserving the authoritative creation outcome."""
     if result.outcome in {"created", "resumed", "exists"}:
-        return result.request_id
+        return result
     if result.outcome == "busy":
         h._json({"error": "creation_busy", "detail": result.detail}, status=409)
         return None
@@ -162,6 +163,55 @@ def _creation_result_or_respond(
         "detail": result.detail,
     }, status=500)
     return None
+
+
+def _add_exists_response(h: RouteHandler, db: PipelineDB,
+                         request_id: int | None) -> None:
+    """Return the established Add exists response from the in-lock identity."""
+    if request_id is None:
+        h._error("Request creation returned no request id", 500)
+        return
+    existing = db.get_request(request_id)
+    if existing is None:
+        h._error("Request disappeared during creation", 409)
+        return
+    payload: dict[str, object] = {
+        "status": "exists",
+        "id": existing["id"],
+        "current_status": existing["status"],
+    }
+    if existing["status"] == "replaced":
+        descendant = db.get_request_by_replaces_request_id(existing["id"])
+        if descendant is not None:
+            payload["descendant_request_id"] = descendant["id"]
+            payload["descendant_status"] = descendant.get("status")
+    h._json(payload)
+
+
+def _queue_existing_upgrade(h: RouteHandler, db: PipelineDB,
+                            existing: AlbumRequestRow,
+                            min_bitrate: int | None) -> None:
+    """Apply the sole existing-row Upgrade policy and report its result."""
+    quality = resolve_user_requeue_override(existing.get("search_filetype_override"))
+    req_id = int(existing["id"])
+    transition_fields: dict[str, object] = {"search_filetype_override": quality}
+    if min_bitrate is not None:
+        transition_fields["min_bitrate"] = min_bitrate
+    result = finalize_request(
+        db,
+        req_id,
+        transitions.RequestTransition.to_wanted_fields(
+            from_status=str(existing["status"]), fields=transition_fields,
+        ),
+    )
+    if not _transition_applied_or_respond(h, result):
+        return
+    h._json({
+        "status": "upgrade_queued",
+        "id": req_id,
+        "min_bitrate": min_bitrate,
+        "search_filetype_override": quality,
+    })
 
 
 def _create_or_resume(creation: RequestCreationInput) -> RequestCreationResult:
@@ -205,18 +255,7 @@ def post_pipeline_add(h: RouteHandler, body: dict[str, object]) -> None:
         # Discogs flow: store discogs ID in both columns for pipeline compat
         existing = s._db().get_request_by_release_id(discogs_id)
         if existing and existing["status"] != "initializing":
-            payload: dict[str, object] = {
-                "status": "exists",
-                "id": existing["id"],
-                "current_status": existing["status"],
-            }
-            if existing["status"] == "replaced":
-                descendant = s._db().get_request_by_replaces_request_id(
-                    existing["id"])
-                if descendant is not None:
-                    payload["descendant_request_id"] = descendant["id"]
-                    payload["descendant_status"] = descendant.get("status")
-            h._json(payload)
+            _add_exists_response(h, s._db(), existing["id"])
             return
 
         # Bypass the 24h meta cache — this write path persists artist /
@@ -226,7 +265,7 @@ def post_pipeline_add(h: RouteHandler, body: dict[str, object]) -> None:
         release = discogs_api.get_release(int(discogs_id), fresh=True)
 
         discogs_tracks = _release_tracks(release)
-        req_id = _creation_result_or_respond(h, _create_or_resume(
+        creation_result = _creation_result_or_respond(h, _create_or_resume(
             RequestCreationInput(
                 release_id=discogs_id,
                 mb_release_id=discogs_id,
@@ -241,8 +280,13 @@ def post_pipeline_add(h: RouteHandler, body: dict[str, object]) -> None:
                 discogs_release_payload=release,
             ),
         ))
-        if req_id is None:
+        if creation_result is None:
             return
+        if creation_result.outcome == "exists":
+            _add_exists_response(h, s._db(), creation_result.request_id)
+            return
+        req_id = creation_result.request_id
+        assert req_id is not None
 
         h._json({
             "status": "added",
@@ -256,23 +300,7 @@ def post_pipeline_add(h: RouteHandler, body: dict[str, object]) -> None:
     # MusicBrainz flow
     existing = s._db().get_request_by_release_id(mbid)
     if existing and existing["status"] != "initializing":
-        payload: dict[str, object] = {
-            "status": "exists",
-            "id": existing["id"],
-            "current_status": existing["status"],
-        }
-        # R33 / U10: when the existing row is a frozen audit row from a
-        # past Replace, surface the descendant id so the UI can render a
-        # "previously abandoned — active request is at /pipeline/<id>"
-        # forward-link instead of the generic "already in pipeline"
-        # message.
-        if existing["status"] == "replaced":
-            descendant = s._db().get_request_by_replaces_request_id(
-                existing["id"])
-            if descendant is not None:
-                payload["descendant_request_id"] = descendant["id"]
-                payload["descendant_status"] = descendant.get("status")
-        h._json(payload)
+        _add_exists_response(h, s._db(), existing["id"])
         return
 
     # Bypass the 24h meta cache — same reason as the Discogs branch
@@ -290,7 +318,7 @@ def post_pipeline_add(h: RouteHandler, body: dict[str, object]) -> None:
     rg_id = _release_str_or_none(release, "release_group_id")
 
     mb_tracks = _release_tracks(release)
-    req_id = _creation_result_or_respond(h, _create_or_resume(
+    creation_result = _creation_result_or_respond(h, _create_or_resume(
         RequestCreationInput(
             release_id=mbid,
             mb_release_id=mbid,
@@ -305,8 +333,13 @@ def post_pipeline_add(h: RouteHandler, body: dict[str, object]) -> None:
             mb_release_payload=release_raw,
         ),
     ))
-    if req_id is None:
+    if creation_result is None:
         return
+    if creation_result.outcome == "exists":
+        _add_exists_response(h, s._db(), creation_result.request_id)
+        return
+    req_id = creation_result.request_id
+    assert req_id is not None
 
     h._json({
         "status": "added",
@@ -406,35 +439,7 @@ def post_pipeline_upgrade(h: RouteHandler, body: dict[str, object]) -> None:
 
     existing = s._db().get_request_by_release_id(mbid)
     if existing and existing["status"] != "initializing":
-        # Preserve a stricter existing override (e.g. "lossless" set by
-        # the quality gate after a CBR 320 import) so clicking Upgrade
-        # doesn't re-open tiers the gate already closed, which would
-        # re-enqueue same-quality MP3 sources that get rejected as
-        # downgrades in a loop.
-        quality = resolve_user_requeue_override(
-            existing.get("search_filetype_override"))
-        req_id = existing["id"]
-        transition_fields: dict[str, object] = {
-            "search_filetype_override": quality,
-        }
-        if min_bitrate is not None:
-            transition_fields["min_bitrate"] = min_bitrate
-        result = finalize_request(
-            s._db(),
-            req_id,
-            transitions.RequestTransition.to_wanted_fields(
-                from_status=existing["status"],
-                fields=transition_fields,
-            ),
-        )
-        if not _transition_applied_or_respond(h, result):
-            return
-        h._json({
-            "status": "upgrade_queued",
-            "id": req_id,
-            "min_bitrate": min_bitrate,
-            "search_filetype_override": quality,
-        })
+        _queue_existing_upgrade(h, s._db(), existing, min_bitrate)
     else:
         # Brand-new request — no prior override to preserve.
         quality = QUALITY_UPGRADE_TIERS
@@ -499,9 +504,18 @@ def post_pipeline_upgrade(h: RouteHandler, body: dict[str, object]) -> None:
                     "min_bitrate": min_bitrate,
                 },
             )
-        req_id = _creation_result_or_respond(h, _create_or_resume(creation))
-        if req_id is None:
+        creation_result = _creation_result_or_respond(h, _create_or_resume(creation))
+        if creation_result is None:
             return
+        if creation_result.outcome == "exists":
+            existing_after_race = s._db().get_request(creation_result.request_id or 0)
+            if existing_after_race is None:
+                h._error("Request disappeared during creation", 409)
+                return
+            _queue_existing_upgrade(h, s._db(), existing_after_race, min_bitrate)
+            return
+        req_id = creation_result.request_id
+        assert req_id is not None
         h._json({
             "status": "upgrade_queued",
             "id": req_id,
