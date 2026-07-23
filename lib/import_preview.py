@@ -254,16 +254,21 @@ def _snapshot_opened_directory(
                                 dir_fd=destination_dir_fd,
                             )
                             try:
+                                def assert_space_before_write(count: int) -> None:
+                                    _assert_preview_space(
+                                        preview_fd,
+                                        count,
+                                        free_reserve_bytes=(
+                                            effective_limits.free_reserve_bytes
+                                        ),
+                                        available_bytes_fn=effective_available_bytes,
+                                    )
+
                                 copied = effective_copy(
                                     opened.fd,
                                     destination_fd,
                                     max_bytes=declared_size,
-                                    before_write=lambda count: _assert_preview_space(
-                                        preview_fd,
-                                        count,
-                                        free_reserve_bytes=effective_limits.free_reserve_bytes,
-                                        available_bytes_fn=effective_available_bytes,
-                                    ),
+                                    before_write=assert_space_before_write,
                                 )
                             finally:
                                 os.close(destination_fd)
