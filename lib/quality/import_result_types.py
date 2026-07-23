@@ -51,10 +51,14 @@ class ConversionInfo(msgspec.Struct):
     # 5.1(side) FLAC otherwise breaks libopus outright (Mott / r3852). None
     # for legacy rows or when the probe fails.
     source_channels: Optional[int] = None
-    diagnostics: list[AudioToolDiagnostic] = msgspec.field(default_factory=list)
+    diagnostics: list[AudioToolDiagnostic] = msgspec.field(
+        default_factory=list[AudioToolDiagnostic]
+    )
     omitted_diagnostics: int = 0
     source_validation: AudioValidationReport | None = None
-    source_validation_failed_paths: list[str] = msgspec.field(default_factory=list)
+    source_validation_failed_paths: list[str] = msgspec.field(
+        default_factory=list[str]
+    )
 
 
 class SpectralTrackDetail(msgspec.Struct, frozen=True):
