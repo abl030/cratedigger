@@ -11,6 +11,7 @@ import os
 import tempfile
 import unittest
 from collections.abc import Callable
+from typing import Any, cast
 
 import tests._hypothesis_profiles  # noqa: F401
 from hypothesis import example, given
@@ -657,6 +658,70 @@ class TestGeneratedForceFrontGateAuthority(unittest.TestCase):
                 snapshot_root=os.path.join(processing, "preview"),
                 preview_children=os.listdir(os.path.join(processing, "preview")),
             )
+
+    @given(
+        db_leaf=_SAFE_COMPONENTS,
+        payload_leaf=_SAFE_COMPONENTS,
+        payload_outside_authority=st.booleans(),
+    )
+    def test_real_execute_path_keeps_configured_db_authority(
+        self,
+        db_leaf: str,
+        payload_leaf: str,
+        payload_outside_authority: bool,
+    ) -> None:
+        """The public worker reaches real force execution without a preview hook."""
+        from scripts import import_preview_worker
+
+        parent, source, processing, cfg = _private_world()
+        with parent:
+            db_path = os.path.join(source, "failed_imports", db_leaf, "Album")
+            payload_root = parent.name if payload_outside_authority else source
+            payload_path = os.path.join(
+                payload_root,
+                "payload",
+                payload_leaf,
+                "Album",
+            )
+            os.makedirs(db_path)
+            os.makedirs(payload_path)
+            with open(os.path.join(db_path, "01.mp3"), "wb") as handle:
+                handle.write(b"database authority")
+            with open(os.path.join(payload_path, "01.mp3"), "wb") as handle:
+                handle.write(b"payload metadata")
+
+            db = FakePipelineDB()
+            log_id = db.log_download(
+                42,
+                outcome="rejected",
+                validation_result={"scenario": "high_distance", "failed_path": db_path},
+            )
+            db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(log_id),
+                payload=force_import_payload(
+                    download_log_id=log_id,
+                    failed_path=payload_path,
+                ),
+            )
+
+            # No preview_fn: this reaches execute_preview_job through the
+            # public worker pathway, and exercises its configured snapshot.
+            updated = import_preview_worker.run_once(
+                cast(Any, db),
+                worker_id="generated-preview",
+                runtime_config=cfg,
+            )
+
+            self.assertIsNotNone(updated)
+            assert updated is not None and updated.preview_result is not None
+            self.assertEqual(updated.status, "failed")
+            self.assertEqual(updated.preview_status, "measurement_failed")
+            self.assertEqual(updated.preview_result["reason"], "request_not_found")
+            self.assertEqual(updated.preview_result["source_path"], db_path)
+            self.assertNotEqual(updated.preview_result["source_path"], payload_path)
+            self.assertEqual(os.listdir(os.path.join(processing, "preview")), [])
 
 
 class TestGeneratedRootRelocation(unittest.TestCase):

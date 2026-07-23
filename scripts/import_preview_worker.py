@@ -935,10 +935,15 @@ def process_claimed_preview_job_with_heartbeat(
     job: ImportJob,
     *,
     heartbeat_interval: float = PREVIEW_HEARTBEAT_INTERVAL_SECONDS,
+    runtime_config: CratediggerConfig | None = None,
 ) -> ImportJob | None:
     dsn = getattr(db, "dsn", None)
     if not dsn:
-        return process_claimed_preview_job(db, job)
+        return process_claimed_preview_job(
+            db,
+            job,
+            runtime_config=runtime_config,
+        )
 
     stop = threading.Event()
     heartbeat_thread = threading.Thread(
@@ -955,7 +960,11 @@ def process_claimed_preview_job_with_heartbeat(
     )
     heartbeat_thread.start()
     try:
-        return process_claimed_preview_job(db, job)
+        return process_claimed_preview_job(
+            db,
+            job,
+            runtime_config=runtime_config,
+        )
     finally:
         stop.set()
         heartbeat_thread.join(timeout=5.0)
@@ -966,6 +975,7 @@ def run_once(
     *,
     worker_id: str,
     heartbeat_interval: float = PREVIEW_HEARTBEAT_INTERVAL_SECONDS,
+    runtime_config: CratediggerConfig | None = None,
 ) -> ImportJob | None:
     job = db.claim_next_import_preview_job(worker_id=worker_id)
     if job is None:
@@ -975,6 +985,7 @@ def run_once(
         db,
         job,
         heartbeat_interval=heartbeat_interval,
+        runtime_config=runtime_config,
     )
 
 
