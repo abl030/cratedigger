@@ -122,7 +122,7 @@ Two repo scripts:
 # 1. Audit
 mkdir -p /tmp/plex-asciify-cleanup
 TOKEN=$(ssh doc2 'sudo cat /run/cratedigger-secrets/PLEX_TOKEN')
-curl -sk "https://plex.ablz.au/library/sections/3/all?type=9&X-Plex-Token=$TOKEN" \
+curl -sS "https://plex.ablz.au/library/sections/3/all?type=9&X-Plex-Token=$TOKEN" \
   -o /tmp/plex-asciify-cleanup/plex_albums.xml
 PLEX_TOKEN=$TOKEN python3 scripts/plex_dupes_audit.py \
   /tmp/plex-asciify-cleanup/plex_albums.xml \
@@ -141,7 +141,7 @@ PLEX_TOKEN=$TOKEN python3 scripts/plex_dupes_merge.py \
   /tmp/plex-asciify-cleanup/dupes.json --commit
 
 # 5. Re-audit; expect dup_groups to drop to the legit-edition floor
-curl -sk "https://plex.ablz.au/library/sections/3/all?type=9&X-Plex-Token=$TOKEN" \
+curl -sS "https://plex.ablz.au/library/sections/3/all?type=9&X-Plex-Token=$TOKEN" \
   -o /tmp/plex-asciify-cleanup/plex_albums.final.xml
 PLEX_TOKEN=$TOKEN python3 scripts/plex_dupes_audit.py \
   /tmp/plex-asciify-cleanup/plex_albums.final.xml \
