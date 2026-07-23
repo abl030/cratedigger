@@ -8,7 +8,7 @@ requests-by-rg, active-rgs, import-jobs) stay in ``web/routes/pipeline.py``.
 
 import logging
 import urllib.error
-from typing import Any, Literal, Mapping
+from typing import Literal, Mapping
 
 import msgspec
 from pydantic import BaseModel, Field, model_validator

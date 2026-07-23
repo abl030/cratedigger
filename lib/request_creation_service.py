@@ -32,6 +32,10 @@ CreationOutcome = Literal[
 ]
 
 
+def _empty_final_fields() -> dict[str, object]:
+    return {}
+
+
 @dataclass(frozen=True)
 class RequestCreationInput:
     """Normalised source payload required to create or resume one request.
@@ -57,7 +61,7 @@ class RequestCreationInput:
     mb_release_payload: dict[str, Any] | None = None
     discogs_release_payload: dict[str, Any] | None = None
     # New-row Upgrade carries its policy into the same CAS that publishes.
-    final_fields: dict[str, object] = field(default_factory=dict)
+    final_fields: dict[str, object] = field(default_factory=_empty_final_fields)
 
 
 @dataclass(frozen=True)
