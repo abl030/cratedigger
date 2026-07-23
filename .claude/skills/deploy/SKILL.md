@@ -15,6 +15,13 @@ revision, migrations, services, and source.
 the current host. doc1 alone has both the Forgejo push token/signing key and the
 private locked-sibling trigger key.
 
+Every SSH command below runs without `SSH_AUTH_SOCK`. The fleet trigger already
+selects its private key explicitly, so this prevents that forced-command key
+from being cached in the shared agent; ordinary operator commands likewise
+cannot offer a previously cached trigger key. The tracked cycle verifier also
+sets `IdentityAgent=none` internally. Do not simplify these boundaries back to
+plain `ssh` / `fleet-deploy` calls.
+
 ## Steps
 
 1. If the cratedigger revision is not already pushed, commit the final reviewed
@@ -79,15 +86,15 @@ PRE_SWITCH_CRATEDIGGER_INVOCATION=$(
 )
 printf 'PRE_SWITCH_CRATEDIGGER_INVOCATION=%s\n' \
   "$PRE_SWITCH_CRATEDIGGER_INVOCATION"
-before_state=$(ssh doc2 'systemctl show nixos-upgrade.service \
+before_state=$(env -u SSH_AUTH_SOCK ssh doc2 'systemctl show nixos-upgrade.service \
   --property=InvocationID')
 PREVIOUS_INVOCATION=$(sed -n 's/^InvocationID=//p' <<<"$before_state")
-fleet-deploy doc2
+env -u SSH_AUTH_SOCK fleet-deploy doc2
 deadline=$((SECONDS + 1800))
 triggered_invocation=""
 deploy_complete=0
 while ((SECONDS < deadline)); do
-  if ! upgrade_state=$(ssh doc2 'systemctl show nixos-upgrade.service \
+  if ! upgrade_state=$(env -u SSH_AUTH_SOCK ssh doc2 'systemctl show nixos-upgrade.service \
     --property=InvocationID --property=ActiveState \
     --property=SubState --property=Result'); then
     echo 'could not read doc2 nixos-upgrade state' >&2
@@ -122,7 +129,7 @@ while ((SECONDS < deadline)); do
     break
   fi
   if [[ "$active" == failed || "$active" == inactive ]]; then
-    ssh doc2 'journalctl -u nixos-upgrade.service -n 100 --no-pager' || true
+    env -u SSH_AUTH_SOCK ssh doc2 'journalctl -u nixos-upgrade.service -n 100 --no-pager' || true
     exit 1
   fi
   if [[ "$active" != activating && "$active" != active \
@@ -134,7 +141,7 @@ while ((SECONDS < deadline)); do
 done
 if [[ "$deploy_complete" != 1 ]]; then
   echo 'timed out waiting for the triggered nixos-upgrade invocation' >&2
-  ssh doc2 'journalctl -u nixos-upgrade.service -n 100 --no-pager' || true
+  env -u SSH_AUTH_SOCK ssh doc2 'journalctl -u nixos-upgrade.service -n 100 --no-pager' || true
   exit 1
 fi
 ```
@@ -145,16 +152,17 @@ asynchronous fleet build is still running.
 `fleet-deploy` is asynchronous. It starts doc2's verified
 `nixos-upgrade.service`, which fetches Forgejo, verifies every new commit
 against `hosts.nix`, builds from its root-owned clone, switches, and runs
-`cratedigger-db-migrate.service`. Direct `ssh doc2 'sudo fleet-update'` is not
-the normal path and bypasses the locked-sibling trigger boundary. Do not use
-`nixos-rebuild switch --flake github:...`; GitHub is stale.
+`cratedigger-db-migrate.service`. Direct
+`env -u SSH_AUTH_SOCK ssh doc2 'sudo fleet-update'` is not the normal path and
+bypasses the locked-sibling trigger boundary. Do not use `nixos-rebuild switch
+--flake github:...`; GitHub is stale.
 
 4. Verify the fleet trust anchor equals the exact signed Forgejo commit printed
 in step 2. A green unit with a stale anchor is not a successful deployment:
 ```bash
 set -euo pipefail
 EXPECTED_NIXOSCONFIG_REV=<full signed SHA printed by step 2>
-DEPLOYED_REV=$(ssh doc2 'sudo cat /var/lib/fleet-update/last-verified-rev')
+DEPLOYED_REV=$(env -u SSH_AUTH_SOCK ssh doc2 'sudo cat /var/lib/fleet-update/last-verified-rev')
 test "$DEPLOYED_REV" = "$EXPECTED_NIXOSCONFIG_REV"
 ```
 
@@ -164,7 +172,7 @@ oneshot uses `RemainAfterExit`, so it must report `ActiveState=active`,
 individually rather than assuming a successful switch made them healthy:
 ```bash
 set -euo pipefail
-migration_state=$(ssh doc2 'systemctl show cratedigger-db-migrate.service \
+migration_state=$(env -u SSH_AUTH_SOCK ssh doc2 'systemctl show cratedigger-db-migrate.service \
   --property=ActiveState --property=SubState --property=Result'
 )
 migration_active=$(sed -n 's/^ActiveState=//p' <<<"$migration_state")
@@ -174,7 +182,7 @@ printf '%s\n' "$migration_state"
 test "$migration_active" = active
 test "$migration_sub" = exited
 test "$migration_result" = success
-migration_rows=$(ssh doc2 'set -euo pipefail; \
+migration_rows=$(env -u SSH_AUTH_SOCK ssh doc2 'set -euo pipefail; \
   export PGPASSWORD=$(sudo cat /run/secrets/cratedigger-pgpass \
     | grep "^PGPASSWORD=" | cut -d= -f2); \
   test -n "$PGPASSWORD"; pipeline-cli query "$(cat)"' <<'SQL'
@@ -186,7 +194,7 @@ SQL
 )
 test -n "$migration_rows"
 printf '%s\n' "$migration_rows"
-service_states=$(ssh doc2 'set -euo pipefail
+service_states=$(env -u SSH_AUTH_SOCK ssh doc2 'set -euo pipefail
   for unit in cratedigger-web.service cratedigger-importer.service \
     cratedigger-import-preview-worker.service cratedigger-youtube-ingest.service; do
     state=$(systemctl is-active "$unit")
@@ -216,14 +224,14 @@ short-lived failed invocation from vanishing between state polls:
 ```bash
 set -euo pipefail
 CRATEDIGGER_REPO=$(git rev-parse --show-toplevel)
-CRATEDIGGER_BIN=$(ssh doc2 "systemctl show cratedigger.service \
+CRATEDIGGER_BIN=$(env -u SSH_AUTH_SOCK ssh doc2 "systemctl show cratedigger.service \
   --property=ExecStart --value | grep -o '/nix/store/[^ ;]*/bin/cratedigger' \
   | head -1")
 test -n "$CRATEDIGGER_BIN"
-CRATEDIGGER_SOURCE=$(ssh doc2 "grep -o '/nix/store/[^ ]*-source/cratedigger.py' \
+CRATEDIGGER_SOURCE=$(env -u SSH_AUTH_SOCK ssh doc2 "grep -o '/nix/store/[^ ]*-source/cratedigger.py' \
   '$CRATEDIGGER_BIN' | head -1 | sed 's#/cratedigger.py##'")
 test -n "$CRATEDIGGER_SOURCE"
-ssh doc2 "grep '<something unique>' '$CRATEDIGGER_SOURCE/<changed-file>.py'"
+env -u SSH_AUTH_SOCK ssh doc2 "grep '<something unique>' '$CRATEDIGGER_SOURCE/<changed-file>.py'"
 POST_SWITCH_CRATEDIGGER_CURSOR=$(
   "$CRATEDIGGER_REPO/scripts/verify_cratedigger_cycle.sh" capture-cursor
 )
@@ -236,8 +244,8 @@ TARGET_CRATEDIGGER_INVOCATION=$(
 "$CRATEDIGGER_REPO/scripts/verify_cratedigger_cycle.sh" verify-exact \
   "$TARGET_CRATEDIGGER_INVOCATION" "$CRATEDIGGER_SOURCE"
 # For nix/module.nix changes:
-ssh doc2 'systemctl cat cratedigger.service'
-ssh doc2 'grep "<rendered setting>" /var/lib/cratedigger/config.ini'
+env -u SSH_AUTH_SOCK ssh doc2 'systemctl cat cratedigger.service'
+env -u SSH_AUTH_SOCK ssh doc2 'grep "<rendered setting>" /var/lib/cratedigger/config.ini'
 ```
 
 7. After live verification of a non-trivial series, run the **post-ship
@@ -267,14 +275,14 @@ DEPLOY_HOLD="$CRATEDIGGER_REPO/scripts/cratedigger_deploy_hold.py"
 CYCLE_VERIFY="$CRATEDIGGER_REPO/scripts/verify_cratedigger_cycle.sh"
 
 # Before fleet-deploy: acquire authoritative masks and stable quiescence.
-ssh doc2 'sudo python3 - acquire' < "$DEPLOY_HOLD"
+env -u SSH_AUTH_SOCK ssh doc2 'sudo python3 - acquire' < "$DEPLOY_HOLD"
 ```
 
 After the exact `nixos-upgrade.service` invocation succeeds, re-prove the same
 receipt-owned boundary before any strict one-shot or state rewrite:
 
 ```bash
-ssh doc2 'sudo python3 - verify-held' < "$DEPLOY_HOLD"
+env -u SSH_AUTH_SOCK ssh doc2 'sudo python3 - verify-held' < "$DEPLOY_HOLD"
 # Run and reconcile the reviewed maintenance operation here.
 ```
 
@@ -284,7 +292,7 @@ active wrapper as in step 6 before capturing either cycle:
 ```bash
 # All three timers remain masked for one controlled main cycle.
 CONTROLLED_CURSOR=$("$CYCLE_VERIFY" capture-cursor)
-ssh doc2 'sudo python3 - prepare-controlled' < "$DEPLOY_HOLD"
+env -u SSH_AUTH_SOCK ssh doc2 'sudo python3 - prepare-controlled' < "$DEPLOY_HOLD"
 CONTROLLED_ID=$(
   "$CYCLE_VERIFY" capture-target "$CONTROLLED_CURSOR" "$CRATEDIGGER_SOURCE"
 )
@@ -293,13 +301,13 @@ CONTROLLED_ID=$(
 # Only the main timer opens. Capture its first ordinary successor before
 # releasing the watchdog/unfindable timers and metadata gate.
 ORDINARY_CURSOR=$("$CYCLE_VERIFY" capture-cursor)
-ssh doc2 'sudo python3 - open-main-timer' < "$DEPLOY_HOLD"
+env -u SSH_AUTH_SOCK ssh doc2 'sudo python3 - open-main-timer' < "$DEPLOY_HOLD"
 ORDINARY_ID=$(
   "$CYCLE_VERIFY" capture-target "$ORDINARY_CURSOR" "$CRATEDIGGER_SOURCE"
 )
-ssh doc2 sudo python3 - finish-release "$ORDINARY_ID" < "$DEPLOY_HOLD"
+env -u SSH_AUTH_SOCK ssh doc2 sudo python3 - finish-release "$ORDINARY_ID" < "$DEPLOY_HOLD"
 "$CYCLE_VERIFY" verify-exact "$ORDINARY_ID" "$CRATEDIGGER_SOURCE"
-ssh doc2 sudo python3 - complete "$ORDINARY_ID" < "$DEPLOY_HOLD"
+env -u SSH_AUTH_SOCK ssh doc2 sudo python3 - complete "$ORDINARY_ID" < "$DEPLOY_HOLD"
 ```
 
 Every helper phase fails closed on an unexpected phase, pre-existing unowned
@@ -307,7 +315,7 @@ hold/link, changed owned link, surviving job, or wrong invocation ID. On
 failure, leave the receipt and remaining masks in place and inspect the exact
 reported boundary. Rerun an interrupted `acquire`; after a failed release
 phase, return safely to the strict boundary with
-`ssh doc2 'sudo python3 - recover-held' < "$DEPLOY_HOLD"` before restarting
+`env -u SSH_AUTH_SOCK ssh doc2 'sudo python3 - recover-held' < "$DEPLOY_HOLD"` before restarting
 release. Rerun an interrupted `complete` to finish its atomic retired-receipt
 cleanup. Do not remove `/run/cratedigger-deploy-hold` or its
 `system.control` links by hand; they are the recovery ownership record. See
@@ -334,7 +342,7 @@ surface it for a decision; do not let the deploy discover it.
 First inspect the schema:
 
 ```bash
-ssh doc2 'export PGPASSWORD=$(sudo cat /run/secrets/cratedigger-pgpass \
+env -u SSH_AUTH_SOCK ssh doc2 'export PGPASSWORD=$(sudo cat /run/secrets/cratedigger-pgpass \
   | grep "^PGPASSWORD=" | cut -d= -f2); pipeline-cli query "$(cat)"' <<'SQL'
 SELECT column_name, data_type
 FROM information_schema.columns
@@ -347,7 +355,7 @@ Then inspect the persisted vocabulary in a separate invocation so both result
 sets are rendered:
 
 ```bash
-ssh doc2 'export PGPASSWORD=$(sudo cat /run/secrets/cratedigger-pgpass \
+env -u SSH_AUTH_SOCK ssh doc2 'export PGPASSWORD=$(sudo cat /run/secrets/cratedigger-pgpass \
   | grep "^PGPASSWORD=" | cut -d= -f2); pipeline-cli query "$(cat)"' <<'SQL'
 SELECT <persisted_column>, COUNT(*)
 FROM <table>
@@ -358,17 +366,17 @@ SQL
 
 For destructive changes, backup first:
 ```bash
-ssh doc2 'pg_dump -h 10.20.0.11 -U cratedigger cratedigger' > /tmp/cratedigger_backup_$(date +%Y%m%d_%H%M%S).sql
+env -u SSH_AUTH_SOCK ssh doc2 'pg_dump -h 10.20.0.11 -U cratedigger cratedigger' > /tmp/cratedigger_backup_$(date +%Y%m%d_%H%M%S).sql
 ```
 
 To run the migrator manually (e.g. after editing `migrations/` and pulling the flake on doc2 without a full rebuild):
 ```bash
-ssh doc2 'sudo systemctl restart cratedigger-db-migrate.service'
-ssh doc2 'sudo journalctl -u cratedigger-db-migrate.service -n 30'
+env -u SSH_AUTH_SOCK ssh doc2 'sudo systemctl restart cratedigger-db-migrate.service'
+env -u SSH_AUTH_SOCK ssh doc2 'sudo journalctl -u cratedigger-db-migrate.service -n 30'
 ```
 
 ## IMPORTANT
 - `restartIfChanged = false` on `cratedigger.service` — deploys don't restart cratedigger itself. The back-to-back timer picks up new code on the next cycle.
 - `restartIfChanged = true` on `cratedigger-db-migrate.service` — deploys DO re-run the migrator. Fast no-op if nothing changed.
-- To force a run: `ssh doc2 'sudo systemctl start cratedigger --no-block'` (don't block — it's a oneshot)
+- To force a run: `env -u SSH_AUTH_SOCK ssh doc2 'sudo systemctl start cratedigger --no-block'` (don't block — it's a oneshot)
 - Flake updates MUST happen on doc1 (has the Forgejo token at `/run/secrets/forgejo/nixbot-token` and the signing key). NEVER from doc2 or Windows.

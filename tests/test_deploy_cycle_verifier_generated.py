@@ -66,6 +66,20 @@ def assert_exact_cycle_invariants(
     assert not failed, "failure evidence present"
 
 
+def assert_operator_ssh_isolated(events: list[list[str]]) -> None:
+    """Require every verifier SSH call to ignore the shared agent."""
+    assert events, "no SSH calls observed"
+    for event in events:
+        assert event[0] == "ssh"
+        args = event[1:]
+        assert any(
+            args[index] == "-o"
+            and index + 1 < len(args)
+            and args[index + 1] == "IdentityAgent=none"
+            for index in range(len(args))
+        ) or "-oIdentityAgent=none" in args
+
+
 class TestExactCycleCheckerKnownBad(unittest.TestCase):
     def test_checker_rejects_next_invocation_as_target_proof(self) -> None:
         fake = FakeDeployCycleCommands
@@ -110,6 +124,12 @@ class TestExactCycleCheckerKnownBad(unittest.TestCase):
                 invocation=fake.TARGET,
                 expected_source=fake.SOURCE,
             )
+
+    def test_ssh_checker_rejects_a_plain_agent_eligible_call(self) -> None:
+        with self.assertRaises(AssertionError):
+            assert_operator_ssh_isolated([
+                ["ssh", "doc2", "systemctl show cratedigger.service"],
+            ])
 
 
 class TestGeneratedExactCycleVerifier(unittest.TestCase):
@@ -199,6 +219,7 @@ class TestGeneratedExactCycleVerifier(unittest.TestCase):
         finished=st.booleans(),
         explicit_failure=st.booleans(),
         rolled_over=st.booleans(),
+        forced_agent_present=st.booleans(),
     )
     @example(
         source=True,
@@ -207,6 +228,7 @@ class TestGeneratedExactCycleVerifier(unittest.TestCase):
         finished=True,
         explicit_failure=False,
         rolled_over=True,
+        forced_agent_present=True,
     )
     @example(
         source=True,
@@ -215,6 +237,7 @@ class TestGeneratedExactCycleVerifier(unittest.TestCase):
         finished=False,
         explicit_failure=False,
         rolled_over=True,
+        forced_agent_present=False,
     )
     @example(
         source=True,
@@ -223,6 +246,7 @@ class TestGeneratedExactCycleVerifier(unittest.TestCase):
         finished=True,
         explicit_failure=False,
         rolled_over=True,
+        forced_agent_present=False,
     )
     @example(
         source=True,
@@ -231,6 +255,7 @@ class TestGeneratedExactCycleVerifier(unittest.TestCase):
         finished=False,
         explicit_failure=False,
         rolled_over=True,
+        forced_agent_present=False,
     )
     def test_real_script_accepts_exactly_complete_successful_target_worlds(
         self,
@@ -240,6 +265,7 @@ class TestGeneratedExactCycleVerifier(unittest.TestCase):
         finished: bool,
         explicit_failure: bool,
         rolled_over: bool,
+        forced_agent_present: bool,
     ) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             fake = FakeDeployCycleCommands(Path(tempdir))
@@ -285,6 +311,7 @@ class TestGeneratedExactCycleVerifier(unittest.TestCase):
             fake.write_state(
                 system_states=[fake.system_state(current)],
                 journal_snapshots={fake.TARGET: [records]},
+                forced_agent_present=forced_agent_present,
             )
             proc = fake.run(
                 SCRIPT,
@@ -299,6 +326,8 @@ class TestGeneratedExactCycleVerifier(unittest.TestCase):
                 checker_accepts,
                 proc.stdout + proc.stderr,
             )
+            self.assertEqual(fake.state["forced_command_hits"], 0)
+            assert_operator_ssh_isolated(fake.state["events"])
 
 
 if __name__ == "__main__":
