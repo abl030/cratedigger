@@ -66,3 +66,75 @@ WMA DROPPED from Phase 2 matrix (ffmpeg wmav2 ≠ the real WMP9 encoder); bare c
 blind to clean same-codec transcodes. Plan deltas + prediction tables: issue comment
 5052550261. Overnight corpus: 25/39 imported (337 FLACs, 11GB), 13 hunting, 53 rejected-FLAC
 harvest pile across 21 albums. NEXT: Phase 2 encode matrix on doc1 + harvest promotion pass.
+
+**validate_audio gap found via #829 corpus sweep (2026-07-23):** ffmpeg rc=0 conceals
+recoverable frame corruption (Syro tr08 imported corrupt; flac -t fails it) — filed #835 with
+invariant + fix directions + prod-library sweep remediation. Corrupt track excluded from matrix.
+
+**Phase 2 COMPLETE (2026-07-23 09:26):** 19,698 encodes (402 tracks x 49 variants, 0 failures,
+157GB) at calibration-tmp/encodes/ + manifest.tsv. Corpus 34 albums: 27 Beets (Flux + Taboo VI
+landed mid-shutdown, verified) + 7 fingerprint-attributed quarantine harvests. Wrong-match
+retention HELD (my deletion claim was wrong — all 53 in failed_imports; #833 is operator issue
+on the move-to-quarantine behavior). Da Drought 3 = fake FLAC (caught, dropped). Syro tr08
+corrupt (excluded, #835). NEXT: Phase 3 measurement over the matrix + prediction scoring.
+
+**Phase 3 COMPLETE (2026-07-23):** 19,698/19,698 measured, 0 errors; tables+scorecard = issue
+comment 5053754812; raw = calibration-tmp/measurements/results.tsv (incl. 16-slice vectors).
+HEADLINES: fdk 17k cap CONFIRMED (fdk 192-320 all read "MP3 128"); detect_cliff reports first
+steep slice ~1 tier BELOW encoder lowpass (LAME 192→est 160 @75%) — rebuckets must be derived
+in DETECTOR space from this corpus; window truncation starts at LAME-224 (not 320) + misses
+below 12k (CBR-64); HE-AACv1-64 reads AS LOSSLESS (100% no-cliff, mandatory SBR gate);
+opus→flac fakes invisible; HF_DEFICIT thresholds flag 61%/14% of genuine lossless as
+marginal/suspect (metric mis-thresholded for real music — trap albums did their job).
+NEXT: Phase 4 synthesis/model design (quality-core PR series, fable review, operator holds).
+
+**Verification plan (2026-07-23, operator):** ground truth ultrasonic-audited CLEAN (0/34
+ceiling signatures; 4 albums are true 96k hi-res); 24-album HOLDOUT cohort seeding (blind —
+sealed until verifier built; incl. web-native provenance-murky picks); prod failed_imports =
+read-only adversarial test set for the new verifier; VL stamps recorded as old-model-relative.
+Ultrasonic 20-22k band = prototyped Phase 4 feature (kills invisible-launder family).
+
+**Holdout SEEDED (2026-07-23): 25 albums rids 40-64** (list said 24, enumerated 25 — all in),
+calib re-armed on rotated prod store paths, 4 downloading at sign-off, blind protocol active
+(sealed until verifier built). Manifest: issue comment. Prod healthy.
+
+**Phase 4 DESIGN FORMALIZED (2026-07-23, issue comment):** 3 operator decisions recorded
+verbatim — (1) Apple AAC gap closes via nixosconfig#46 (qaac on wsl host, hermes token used,
+old claude-token memory path fixed); (2) VL stamps RE-MEASURED under new model, policy after
+failure totals known; (3) zero-false-accept holdout bar (leaning, confirm post-measurement).
+Model: per-codec verdict table + cliff_hz primitive + window/ultrasonic extension + deficit
+re-threshold + codec-aware seam + parity extension + VL proof-version. Phase 5 = 4-PR series,
+fable review, operator merge holds.
+
+**Apple arm COMPLETE (2026-07-23 14:0x):** VM qaac-encoder (192.168.1.135, nixosconfig#46,
+prom VM 122) delivered 1608 genuine Apple encodes; measured. HEADLINE: apple-cvbr256 invisible
+in-window (98% no-cliff, control-like grades) AND carries real 20-22k energy → defeats the
+ultrasonic band too = the ONE known residual launder blind spot (lowest perceptual severity;
+402 paired examples banked for discriminator experiments). apple-cbr128 visible + correctly
+bucketed. Manifest 21,306 rows. AAC content-floor verdict unchanged. bash IFS-in-mode-loop bug
++ empty-shard-resume bug caught by smoke test (apple_matrix.sh).
+
+**Phase 4 ANALYSIS COMPLETE (2026-07-23, issue comment):** derived constants — MP3 detector-
+space buckets (<15000→96|16000→128|17250→160|18250→192|19250→256|≥19250→320-class), Vorbis own
+ladder, AAC floor table (13-18k floors at 96-128 → never accuse), deficit 65/69 (control FP
+5.5/1.5% track, ~0 album), window→22k ADOPTED with SPLIT SEMANTICS (10% genuine false-cliffs
+at 20k → high-band cliffs = tier-up info only; lossless launder test = ultrasonic hard-floor
+≥75dB — catches t-opus96-flac 88%). Apple-256 residual confirmed no cheap separator. Phase 5
+re-derives exact numbers jointly (window+buckets+thresholds = one unit). AWAITING: operator go
+for Phase 5 PR series; holdout still acquiring.
+
+**BLIND ROUND 1: FAIL (2026-07-23):** launder arm collapsed on opus/vorbis→flac (2/15, 1/15) —
+75dB ultra-floor never validated vs training frauds (sinc leakage = 35-60dB apparent energy above
+codec ceilings) + split semantics excluded the ≥19250 cliffs where ceilings live. Controls
+PERFECT (0/15 false flags). REWORK: ceiling-step detector + two-signal flagging + band-assert
+buckets, training-data only; round-2 blind = remaining 10 holdout albums (calib still pulling).
+Phase 5 PARKED until fresh blind PASS. Lesson: validate every derived constant against training
+frauds before freezing the scorer.
+
+**REWORK DERIVED (2026-07-23 eve):** album-mean-profile ceiling step + position consistency →
+opus-flac 34/34; 4 control flags = REAL ceilings (Gould 1982 early-digital, Loveless, FMWT,
+Taboo VI) — mastering ceilings physically identical to codec ceilings, fundamental ambiguity.
+→ SEMANTICS REFRAME proposed on issue (needs operator nod): ceiling/no-affirmative-ultrasonic
+content WITHHOLDS VL PROOF (never rejects/accuses); bar becomes zero-frauds-RECEIVE-PROOF.
+vq5 caught via affirmative-content leg; apple-256 residual unchanged. NEXT: operator nod →
+threshold qualification → scorer v2 freeze → round-2 blind (cohort seeding).
