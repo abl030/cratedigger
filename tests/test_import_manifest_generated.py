@@ -10,7 +10,7 @@ on-disk manifest guard
 ``tracked_audio_paths_for_downloads`` / ``audio_relative_paths``) used by
 ``_check_staged_audio_manifest`` at validation.
 
-Two properties:
+Three properties:
 
 1. **State round-trip preserves the manifest** — a ``GrabListEntry`` with
    1..3 discs of ``DownloadFile`` rows (multiple ``file_dir``s, ``disk_no``
@@ -30,6 +30,10 @@ Two properties:
    no embedded backslashes) so the oracle can be computed directly from what
    the test wrote to disk instead of re-deriving ``_safe_relpath``'s
    normalization rules.
+3. **Rejection destination** — candidate/pressing failures route to
+   ``wrong_matches/`` while integrity and quality failures remain under
+   ``failed_imports/``; every routed Wrong Match path remains accepted by the
+   existing cleanup safety boundary.
 
 Profiles and promotion policy: tests/_hypothesis_profiles.py and
 docs/generated-testing.md.
@@ -60,10 +64,16 @@ from lib.import_manifest import (
     ManifestCheck,
     audio_relative_paths,
     check_audio_manifest,
+    move_failed_import_curated,
     tracked_audio_paths_for_downloads,
 )
 from lib.quality import ActiveDownloadState
 from lib.staged_album import StagedAlbum
+from lib.wrong_match_policy import (
+    WRONG_MATCH_EXCLUDED_REJECTION_SCENARIOS,
+    rejection_scenario_is_wrong_match_candidate,
+)
+from lib.wrong_matches import unsafe_failed_import_path_reason
 from tests.helpers import make_grab_list_entry, make_request_row
 
 # ============================================================================
@@ -378,7 +388,69 @@ class TestGeneratedManifestDiskOracle(unittest.TestCase):
 
 
 # ============================================================================
-# Property 3 — known-bad self-tests for the invariant checkers
+# Property 3 — rejection destination follows the Wrong Matches taxonomy
+# ============================================================================
+
+_PINNED_REJECTION_SCENARIOS = (
+    None,
+    "high_distance",
+    "mbid_not_found",
+    *sorted(WRONG_MATCH_EXCLUDED_REJECTION_SCENARIOS),
+)
+
+
+def assert_rejection_destination(
+    scenario: str | None,
+    failed_path: str,
+) -> None:
+    """Rejected candidates and genuine failures occupy distinct roots."""
+    parts = os.path.normpath(failed_path).split(os.sep)
+    is_wrong_match = rejection_scenario_is_wrong_match_candidate(scenario)
+    expected = "wrong_matches" if is_wrong_match else "failed_imports"
+    unexpected = "failed_imports" if is_wrong_match else "wrong_matches"
+    if expected not in parts or unexpected in parts:
+        raise AssertionError(
+            f"scenario={scenario!r} routed to {failed_path!r}; "
+            f"expected root {expected!r}"
+        )
+    if is_wrong_match and unsafe_failed_import_path_reason(failed_path) is not None:
+        raise AssertionError(
+            f"wrong-match cleanup rejected its routed path: {failed_path!r}"
+        )
+
+
+@st.composite
+def rejection_scenarios(draw) -> str | None:
+    if draw(st.booleans()):
+        return draw(st.sampled_from(_PINNED_REJECTION_SCENARIOS))
+    candidate = draw(st.text(min_size=1, max_size=40))
+    if candidate in WRONG_MATCH_EXCLUDED_REJECTION_SCENARIOS:
+        return "high_distance"
+    return candidate
+
+
+class TestGeneratedRejectionDestination(unittest.TestCase):
+    @given(scenario=rejection_scenarios())
+    @example(scenario="high_distance")
+    @example(scenario="spectral_reject")
+    def test_rejection_roots_remain_disjoint(self, scenario):
+        with tempfile.TemporaryDirectory() as parent:
+            source = os.path.join(parent, "Album")
+            os.mkdir(source)
+            _write_relative(source, "01.flac")
+
+            failed_path = move_failed_import_curated(
+                source,
+                allowed_audio=["01.flac"],
+                scenario=scenario,
+            )
+
+            assert failed_path is not None
+            assert_rejection_destination(scenario, failed_path)
+
+
+# ============================================================================
+# Property 4 — known-bad self-tests for the invariant checkers
 # ============================================================================
 
 class TestManifestCheckersTripOnViolations(unittest.TestCase):
@@ -461,6 +533,13 @@ class TestManifestCheckersTripOnViolations(unittest.TestCase):
         check = ManifestCheck(extra_audio=[], missing_audio=[])
         with self.assertRaises(AssertionError):
             assert_manifest_check_oracle(world, check, {"01.flac"}, False)
+
+    def test_rejection_destination_checker_trips_on_conflated_root(self):
+        with self.assertRaises(AssertionError):
+            assert_rejection_destination(
+                "high_distance",
+                "/downloads/failed_imports/Album",
+            )
 
 
 if __name__ == "__main__":

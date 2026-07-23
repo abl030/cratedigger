@@ -380,7 +380,7 @@ def cmd_triage_list(db: _TriagePipelineDB, args: argparse.Namespace) -> int:
 def cmd_triage_quarantine(
     db: _QuarantineWrongMatchesDB, args: argparse.Namespace,
 ) -> int:
-    """List unreferenced immediate folders under ``failed_imports``.
+    """List unreferenced immediate folders under both quarantine roots.
 
     Exit codes:
       * 0 — complete read-only scan (including an empty result)
@@ -405,7 +405,8 @@ def cmd_triage_quarantine(
         ))
         return 0
 
-    print(f"  Quarantine root: {result.quarantine_root}")
+    print(f"  Failed-import root: {result.quarantine_root}")
+    print(f"  Wrong-matches root: {result.wrong_matches_root}")
     if not result.folders:
         print("  No unreferenced quarantine folders.")
         return 0
@@ -477,8 +478,8 @@ def add_triage_subparser(
 
     p_tr_quarantine = tr_sub.add_parser(
         "quarantine",
-        help="Read-only list of immediate failed_imports album folders with "
-             "no visible Wrong Matches reference",
+        help="Read-only list of immediate failed_imports and wrong_matches "
+             "album folders with no visible Wrong Matches reference",
     )
     p_tr_quarantine.add_argument(
         "--json", action="store_true",

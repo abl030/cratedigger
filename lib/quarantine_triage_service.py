@@ -1,9 +1,10 @@
-"""Read-only lifecycle triage for unreferenced ``failed_imports`` folders.
+"""Read-only lifecycle triage for unreferenced quarantine folders.
 
-The disk reaper protects the whole quarantine tree forever. This service closes
-that lifecycle loop without making an irreversible decision: it compares the
-immediate album directories on disk with the currently visible Wrong Matches
-projection and surfaces only those that have no reference.
+The disk reaper protects both ``failed_imports`` and ``wrong_matches`` forever.
+This service closes that lifecycle loop without making an irreversible
+decision: it compares the immediate album directories on disk with the
+currently visible Wrong Matches projection and surfaces only those that have no
+reference.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from typing import Protocol, TYPE_CHECKING
 import msgspec
 
 from lib.validation_envelope import decode_validation_envelope
+from lib.wrong_match_policy import WRONG_MATCH_QUARANTINE_DIR
 from lib.wrong_matches import wrong_match_row_is_visible
 
 if TYPE_CHECKING:
@@ -43,6 +45,7 @@ class QuarantineTriageResult(msgspec.Struct, frozen=True):
     """Stable wire result shared by CLI and HTTP adapters."""
 
     quarantine_root: str
+    wrong_matches_root: str
     folders: list[QuarantineFolder]
     special_buckets: list[str]
 
@@ -73,6 +76,7 @@ def _immediate_quarantine_root_for_reference(
     *,
     download_dir: str,
     quarantine_root: str,
+    special_buckets: tuple[str, ...] = (),
 ) -> str | None:
     """Map a relative/absolute reference to its immediate album root.
 
@@ -95,7 +99,7 @@ def _immediate_quarantine_root_for_reference(
             or relative.startswith(os.pardir + os.sep):
         return None
     first_component = relative.split(os.sep, 1)[0]
-    if first_component in SPECIAL_QUARANTINE_BUCKETS:
+    if first_component in special_buckets:
         return None
     return os.path.join(quarantine_root, first_component)
 
@@ -104,7 +108,7 @@ def _visible_wrong_match_roots(
     db: _WrongMatchesDB,
     *,
     download_dir: str,
-    quarantine_root: str,
+    quarantine_roots: tuple[tuple[str, tuple[str, ...]], ...],
 ) -> set[str]:
     try:
         rows = db.get_wrong_matches()
@@ -123,13 +127,16 @@ def _visible_wrong_match_roots(
             ).failed_path
             if not failed_path:
                 continue
-            album_root = _immediate_quarantine_root_for_reference(
-                failed_path,
-                download_dir=download_dir,
-                quarantine_root=quarantine_root,
-            )
-            if album_root is not None:
-                referenced.add(album_root)
+            for quarantine_root, special_buckets in quarantine_roots:
+                album_root = _immediate_quarantine_root_for_reference(
+                    failed_path,
+                    download_dir=download_dir,
+                    quarantine_root=quarantine_root,
+                    special_buckets=special_buckets,
+                )
+                if album_root is not None:
+                    referenced.add(album_root)
+                    break
     except Exception as exc:
         raise QuarantineScanError(
             "Could not decode visible Wrong Matches references"
@@ -139,6 +146,8 @@ def _visible_wrong_match_roots(
 
 def _immediate_quarantine_folders(
     quarantine_root: str,
+    *,
+    special_buckets: tuple[str, ...] = (),
 ) -> list[QuarantineFolder]:
     try:
         entries_context = os.scandir(quarantine_root)
@@ -154,7 +163,7 @@ def _immediate_quarantine_folders(
         with entries_context as entries:
             folders: list[QuarantineFolder] = []
             for entry in entries:
-                if entry.name in SPECIAL_QUARANTINE_BUCKETS:
+                if entry.name in special_buckets:
                     continue
                 if not entry.is_dir(follow_symlinks=False):
                     continue
@@ -188,18 +197,31 @@ def list_unreferenced_quarantine_folders(
     quarantine_root = os.path.join(
         configured_dir, FAILED_IMPORTS_DIRECTORY,
     )
+    wrong_matches_root = os.path.join(
+        configured_dir, WRONG_MATCH_QUARANTINE_DIR,
+    )
+    quarantine_roots = (
+        (quarantine_root, SPECIAL_QUARANTINE_BUCKETS),
+        (wrong_matches_root, ()),
+    )
     referenced = _visible_wrong_match_roots(
         db,
         download_dir=configured_dir,
-        quarantine_root=quarantine_root,
+        quarantine_roots=quarantine_roots,
     )
     folders = [
         folder
-        for folder in _immediate_quarantine_folders(quarantine_root)
+        for root, special_buckets in quarantine_roots
+        for folder in _immediate_quarantine_folders(
+            root,
+            special_buckets=special_buckets,
+        )
         if folder.path not in referenced
     ]
+    folders.sort(key=lambda folder: (folder.name, folder.path))
     return QuarantineTriageResult(
         quarantine_root=quarantine_root,
+        wrong_matches_root=wrong_matches_root,
         folders=folders,
         special_buckets=list(SPECIAL_QUARANTINE_BUCKETS),
     )
