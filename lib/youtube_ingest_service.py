@@ -44,7 +44,6 @@ from typing import TYPE_CHECKING, Any, Callable, Literal, Optional, Protocol
 import msgspec
 
 from lib.import_queue import (
-    IMPORT_JOB_YOUTUBE,
     ImportJob,
     YoutubeImportPayload,
     youtube_import_dedupe_key,

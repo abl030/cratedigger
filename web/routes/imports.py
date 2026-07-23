@@ -267,8 +267,7 @@ def _build_wrong_match_groups(
         if isinstance(request_id, int):
             active_jobs_by_request_id.setdefault(request_id, []).append(job)
         if isinstance(job.payload, (ForceImportPayload, YoutubeImportPayload)):
-            if job.payload.download_log_id is not None:
-                active_jobs_by_log_id[job.payload.download_log_id] = job
+            active_jobs_by_log_id[job.payload.download_log_id] = job
     mbids = [
         mbid for row in rows
         for mbid in [row.get("mb_release_id")]

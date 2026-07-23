@@ -183,8 +183,6 @@ def _force_job_wrong_match_payload(job: ImportJob) -> tuple[int, str | None] | N
         return None
     if not isinstance(job.payload, ForceImportPayload):
         raise AssertionError("force_import payload type mismatch")
-    if job.payload.download_log_id is None:
-        return None
     return job.payload.download_log_id, job.payload.failed_path
 
 

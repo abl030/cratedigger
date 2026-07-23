@@ -87,7 +87,7 @@ class ForceImportPayload(msgspec.Struct, kw_only=True, forbid_unknown_fields=Tru
     download_log_id: _PositiveInt
     failed_path: _NonEmptyStr
     source_username: str | None = None
-    source_dirs: list[str] = msgspec.field(default_factory=list)
+    source_dirs: list[str] = msgspec.field(default_factory=list[str])
 
 
 class AutomationImportPayload(
