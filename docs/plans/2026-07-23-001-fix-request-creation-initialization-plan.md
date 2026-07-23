@@ -189,9 +189,10 @@ boundary, even though it adds one lifecycle value.
 `tests/test_request_lifecycle_generated.py`, `docs/pipeline-db-schema.md`.
 
 - Extend the status CHECK with `initializing`; do not alter existing rows.
-- Add exactly one creation edge, `initializing -> wanted`, through the canonical
-  transition/finalization boundary. `initializing` has no transition to
-  downloading/imported/unsearchable/replaced through ordinary lifecycle APIs.
+- Reserve the `initializing -> wanted` compare-and-set to
+  `RequestCreationService`; do not add it to the ordinary transition table.
+  `initializing` has no transition to wanted/downloading/imported/
+  unsearchable/replaced through generic lifecycle APIs.
 - Preserve the existing active-status graph for all other states.
 - Ensure `count_by_status`, unfiltered reads, and typed row conversion accept the
   new stored value without treating it as active work.
