@@ -3,8 +3,10 @@
 import json
 import os
 import shutil
+import ssl
 import tempfile
 import unittest
+import urllib.error
 from unittest.mock import patch, MagicMock
 
 
@@ -1034,6 +1036,55 @@ class TestJellyfinDateCreatedClient(unittest.TestCase):
         self.assertEqual(req.get_header("X-emby-token"), "tok")
         self.assertEqual(req.get_header("Content-type"), "application/json")
         self.assertEqual(req.data, b'{"Id": "alb-1"}')
+
+
+class TestNotifierTlsFailClosed(unittest.TestCase):
+    """The four token-bearing notifier leaves make one verified attempt."""
+
+    def _cfg(self):
+        from lib.config import CratediggerConfig
+        return CratediggerConfig(
+            plex_url="https://plex.example.test",
+            plex_token="plex-token",
+            jellyfin_url="https://jellyfin.example.test",
+            jellyfin_token="jellyfin-token",
+        )
+
+    def test_certificate_verification_error_escapes_each_leaf_once(self):
+        """A production-shaped urllib TLS failure must not emit a token retry."""
+        from lib import util
+
+        self.assertFalse(
+            hasattr(util, "_urlopen_ssl_fallback"),
+            "the insecure retry helper must be removed, not left dormant",
+        )
+
+        cfg = self._cfg()
+        leaves = (
+            ("plex XML", lambda: util._plex_fetch_xml(
+                cfg, "/library/sections/1/search", query="album")),
+            ("plex PUT", lambda: util._plex_put(
+                cfg, "/library/sections/1/all", id="album")),
+            ("Jellyfin JSON", lambda: util._jellyfin_get_json(
+                cfg, "/Items", searchTerm="album")),
+            ("Jellyfin POST", lambda: util._jellyfin_post_json(
+                cfg, "/Items/album", {"Id": "album"})),
+        )
+        for label, leaf in leaves:
+            with self.subTest(leaf=label), patch(
+                "lib.util.urllib.request.urlopen"
+            ) as urlopen:
+                error = urllib.error.URLError(ssl.SSLCertVerificationError(
+                    1, "certificate verify failed"))
+                urlopen.side_effect = error
+
+                with self.assertRaises(urllib.error.URLError) as raised:
+                    leaf()
+
+                self.assertIs(raised.exception, error)
+                urlopen.assert_called_once()
+                _request, = urlopen.call_args.args
+                self.assertEqual(urlopen.call_args.kwargs, {"timeout": 15})
 
 
 class TestBeetsSubprocessEnv(unittest.TestCase):
