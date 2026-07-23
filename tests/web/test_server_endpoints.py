@@ -46,6 +46,7 @@ def _post_reader(length: str | None, body: BytesIO):
         headers["Content-Length"] = length
     handler.headers = headers
     handler.rfile = body
+    handler.close_connection = False
     errors: list[tuple[str, int]] = []
     def record_error(msg: str, status: int = 400) -> None:
         errors.append((msg, status))
@@ -57,6 +58,7 @@ def _post_reader(length: str | None, body: BytesIO):
 def assert_rejected_length_result(
     body: object,
     errors: list[tuple[str, int]],
+    close_connection: bool,
     expected_error: str,
     expected_status: int,
 ) -> None:
@@ -65,6 +67,8 @@ def assert_rejected_length_result(
         raise AssertionError(f"rejected body unexpectedly parsed: {body!r}")
     if errors != [(expected_error, expected_status)]:
         raise AssertionError(f"unexpected body-length rejection: {errors!r}")
+    if not close_connection:
+        raise AssertionError("rejected body-length connection stayed open")
 
 
 def assert_clean_generic_failure(
@@ -461,7 +465,7 @@ class TestServerEndpoints(_FakeDbWebServerCase):
             with self.subTest(length=length):
                 handler, errors = _post_reader(length, _UnreadableBody())
                 assert_rejected_length_result(
-                    handler._read_post_body(), errors,
+                    handler._read_post_body(), errors, handler.close_connection,
                     expected_error, expected_status,
                 )
 
@@ -469,7 +473,15 @@ class TestServerEndpoints(_FakeDbWebServerCase):
         """Fault qualification: the checker rejects a missing rejection."""
         with self.assertRaisesRegex(AssertionError, "unexpected body-length"):
             assert_rejected_length_result(
-                None, [], "Request body too large", 413,
+                None, [], True, "Request body too large", 413,
+            )
+
+    def test_rejected_length_checker_rejects_an_open_connection(self):
+        """Fault qualification: the checker requires framing-safe closure."""
+        with self.assertRaisesRegex(AssertionError, "connection stayed open"):
+            assert_rejected_length_result(
+                None, [("Request body too large", 413)], False,
+                "Request body too large", 413,
             )
 
     @given(st.one_of(
@@ -493,7 +505,8 @@ class TestServerEndpoints(_FakeDbWebServerCase):
         length, expected_error, expected_status = case
         handler, errors = _post_reader(length, _UnreadableBody())
         assert_rejected_length_result(
-            handler._read_post_body(), errors, expected_error, expected_status,
+            handler._read_post_body(), errors, handler.close_connection,
+            expected_error, expected_status,
         )
 
     def test_post_body_reader_accepts_valid_json(self):
@@ -501,6 +514,7 @@ class TestServerEndpoints(_FakeDbWebServerCase):
 
         self.assertEqual(handler._read_post_body(), {"id": 100, "x": 1})
         self.assertEqual(errors, [])
+        self.assertFalse(handler.close_connection)
 
     # --- datetime serialization ---
 

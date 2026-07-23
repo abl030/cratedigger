@@ -403,14 +403,17 @@ class Handler(BaseHTTPRequestHandler):
         if raw_length is None:
             return {}
         if not raw_length.isascii() or not raw_length.isdecimal():
+            self.close_connection = True
             self._error("Invalid Content-Length")
             return None
         normalized_length = raw_length.lstrip("0") or "0"
         if len(normalized_length) > len(str(MAX_POST_BODY_BYTES)):
+            self.close_connection = True
             self._error("Request body too large", 413)
             return None
         length = int(normalized_length)
         if length > MAX_POST_BODY_BYTES:
+            self.close_connection = True
             self._error("Request body too large", 413)
             return None
         body: object = json.loads(self.rfile.read(length)) if length else {}
