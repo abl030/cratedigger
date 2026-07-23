@@ -5251,24 +5251,142 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         self.assertFalse(preserved.files[0].decode_ok)
 
     def test_audio_validation_database_constraint_rejects_bad_shape(self):
-        """Migration 064 rejects structurally invalid audit JSON."""
+        """Migration 064 enforces the complete typed bounded audit contract."""
         evidence = self._seed(mb_release_id="mbid-audio-validation-check")
         self.db.upsert_album_quality_evidence(evidence)
 
-        with self.assertRaises(psycopg2.errors.CheckViolation) as raised:
-            self.db._execute(
-                """
-                UPDATE album_quality_evidence
-                SET audio_validation = '{"outcome":"passed"}'::jsonb
-                WHERE mb_release_id = %s
-                """,
-                (evidence.mb_release_id,),
-            )
-        self.assertEqual(
-            raised.exception.diag.constraint_name,
-            "album_quality_evidence_audio_validation_shape_check",
+        diagnostic_struct = AudioToolDiagnostic(
+            relative_path="01.flac",
+            category="decode_error",
+            return_code=69,
+            stderr_excerpt="Invalid data",
+            stderr_bytes=12,
+            stderr_sha256="b" * 64,
+            stderr_truncated=False,
         )
-        self.db.conn.rollback()
+        diagnostic: dict[str, object] = msgspec.to_builtins(
+            diagnostic_struct
+        )
+        valid: dict[str, object] = msgspec.to_builtins(AudioValidationReport(
+            outcome="audio_corrupt",
+            files_checked=1,
+            files_failed=1,
+            diagnostics=[diagnostic_struct],
+        ))
+
+        malformed: list[tuple[str, dict[str, object], bool]] = [
+            ("missing required fields", {"outcome": "passed"}, False),
+            (
+                "negative count",
+                {**valid, "files_checked": -1},
+                True,
+            ),
+            (
+                "decimal count",
+                {**valid, "files_checked": 1.5},
+                True,
+            ),
+            (
+                "failure count mismatch",
+                {**valid, "files_failed": 2},
+                True,
+            ),
+            (
+                "wrong diagnostic category",
+                {
+                    **valid,
+                    "diagnostics": [{
+                        **diagnostic,
+                        "category": "read_error",
+                    }],
+                },
+                True,
+            ),
+            (
+                "diagnostic cap exceeded",
+                {
+                    **valid,
+                    "files_checked": 17,
+                    "files_failed": 17,
+                    "diagnostics": [diagnostic] * 17,
+                },
+                True,
+            ),
+            (
+                "missing diagnostic field",
+                {
+                    **valid,
+                    "diagnostics": [{
+                        key: value
+                        for key, value in diagnostic.items()
+                        if key != "stderr_truncated"
+                    }],
+                },
+                True,
+            ),
+            (
+                "noninteger return code",
+                {
+                    **valid,
+                    "diagnostics": [{
+                        **diagnostic,
+                        "return_code": 69.5,
+                    }],
+                },
+                True,
+            ),
+            (
+                "negative stderr size",
+                {
+                    **valid,
+                    "diagnostics": [{
+                        **diagnostic,
+                        "stderr_bytes": -1,
+                    }],
+                },
+                True,
+            ),
+            (
+                "oversize stderr excerpt",
+                {
+                    **valid,
+                    "diagnostics": [{
+                        **diagnostic,
+                        "stderr_excerpt": "é" * 1025,
+                    }],
+                },
+                True,
+            ),
+            (
+                "scalar disagreement",
+                {**valid, "outcome": "passed", "files_failed": 0,
+                 "diagnostics": []},
+                True,
+            ),
+        ]
+        for label, payload, scalar_corrupt in malformed:
+            with self.subTest(label=label):
+                with self.assertRaises(
+                    psycopg2.errors.CheckViolation
+                ) as raised:
+                    self.db._execute(
+                        """
+                        UPDATE album_quality_evidence
+                        SET audio_validation = %s::jsonb,
+                            audio_corrupt = %s
+                        WHERE mb_release_id = %s
+                        """,
+                        (
+                            json.dumps(payload),
+                            scalar_corrupt,
+                            evidence.mb_release_id,
+                        ),
+                    )
+                self.assertEqual(
+                    raised.exception.diag.constraint_name,
+                    "album_quality_evidence_audio_validation_shape_check",
+                )
+                self.db.conn.rollback()
 
     def test_empty_fileset_is_storable_when_audio_file_count_is_zero(self):
         """U1 AE4: audio_file_count=0 + files=[] round-trips without error."""

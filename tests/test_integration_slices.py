@@ -6684,6 +6684,44 @@ class TestU5PreviewWorkerLifecycleSlice(unittest.TestCase):
         self.assertEqual(updated.preview_status, "measurement_failed")
         self.assertEqual(db.request(43)["status"], "unsearchable")
 
+    def test_outer_worker_crash_persists_force_source_path(self):
+        """A raised preview still protects the authoritative force source."""
+        from scripts import import_preview_worker
+
+        db = FakePipelineDB()
+        claimed = self._setup_worker_job(db, request_id=44)
+        assert claimed is not None
+
+        def crash(_db: Any, _job: Any):
+            raise RuntimeError("simulated worker envelope crash")
+
+        with patch(
+            "scripts.import_preview_worker.logger.exception",
+        ):
+            updated = import_preview_worker.process_claimed_preview_job(
+                cast(Any, db),
+                claimed,
+                preview_fn=crash,
+            )
+
+        assert updated is not None and updated.preview_result is not None
+        self.assertEqual(updated.preview_status, "measurement_failed")
+        self.assertEqual(
+            updated.preview_result["source_path"],
+            "/tmp/u5-vanished",
+        )
+        failure = updated.preview_result["failure"]
+        assert isinstance(failure, dict)
+        self.assertEqual(failure["source_path"], "/tmp/u5-vanished")
+        measurement_log = next(
+            log for log in db.download_logs
+            if log.outcome == "measurement_failed"
+        )
+        self.assertEqual(measurement_log.staged_path, "/tmp/u5-vanished")
+        import json as _json
+        persisted = _json.loads(measurement_log.validation_result)
+        self.assertEqual(persisted["source_path"], "/tmp/u5-vanished")
+
     def test_request_not_found_no_finalize_subcase(self):
         """request_id=None subcase: the self-heal helper raises (the
         audit row cannot carry a NULL request_id), the worker's

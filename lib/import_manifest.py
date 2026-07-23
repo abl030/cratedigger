@@ -263,3 +263,30 @@ def move_failed_import_curated(
 
     logger.info("Curated rejected import moved to: %s", target_path)
     return target_path
+
+
+def move_failed_import_whole(
+    src_path: str,
+    *,
+    scenario: str,
+    quarantine_root: str,
+) -> str | None:
+    """Atomically retain one complete rejected source directory.
+
+    Unlike curated Wrong Matches moves, corrupt-audio quarantine has no
+    untracked-file distinction: the complete source is audit evidence. A
+    directory rename is therefore both simpler and safer. ``os.rename`` never
+    falls back to a cross-filesystem copy, so failure leaves the authoritative
+    source untouched instead of creating a split retained state.
+    """
+    src_path = os.path.abspath(src_path)
+    if not os.path.isdir(src_path):
+        return None
+    target_path = _allocate_target(
+        src_path,
+        scenario=scenario,
+        quarantine_root=quarantine_root,
+    )
+    os.rename(src_path, target_path)
+    logger.info("Complete rejected import moved to: %s", target_path)
+    return target_path

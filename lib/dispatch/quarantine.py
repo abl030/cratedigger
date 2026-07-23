@@ -6,7 +6,7 @@ import logging
 import os
 
 from lib.dispatch.types import PostCommitQuarantineAudit
-from lib.import_manifest import audio_relative_paths, move_failed_import_curated
+from lib.import_manifest import move_failed_import_whole
 
 logger = logging.getLogger("cratedigger")
 
@@ -43,9 +43,8 @@ def quarantine_corrupt_audio_source(
             error="configured slskd download root is missing or not a directory",
         )
     try:
-        quarantine_path = move_failed_import_curated(
+        quarantine_path = move_failed_import_whole(
             source_path,
-            allowed_audio=audio_relative_paths(source_path),
             scenario="audio_corrupt",
             quarantine_root=quarantine_root,
         )

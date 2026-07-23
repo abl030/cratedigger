@@ -178,29 +178,36 @@ def _reject_import_from_evidence_decision(
                     if db.check_and_apply_cooldown(username):
                         cooled_down_users.add(username)
     cleanup_plan: PostCommitCleanup | None = None
-    if action.cleanup and _should_cleanup_path(source_path_cleanup_scenario, action):
-        if decision == "audio_corrupt":
-            if import_job_id is not None:
-                cleanup_plan = PostCommitCleanup(
-                    audio_quarantine_source_path=staged_path,
-                    audio_quarantine_root=audio_quarantine_root,
-                )
-            else:
-                from lib.dispatch.quarantine import (
-                    quarantine_corrupt_audio_source,
-                )
-
-                audit = quarantine_corrupt_audio_source(
-                    source_path=staged_path,
-                    quarantine_root=audio_quarantine_root or "",
-                )
-                if isinstance(terminal_outcome, int):
-                    db.record_post_commit_quarantine(terminal_outcome, audit)
+    if action.cleanup and decision == "audio_corrupt":
+        # Corrupt audio is retained for audit in every caller mode. Force
+        # imports deliberately do not satisfy ``_should_cleanup_path`` until
+        # they succeed, because ordinary force cleanup deletes the reviewed
+        # Wrong Matches source. Quarantine is a separate, archival ownership
+        # transfer and must not inherit that destructive gate.
+        if import_job_id is not None:
+            cleanup_plan = PostCommitCleanup(
+                audio_quarantine_source_path=staged_path,
+                audio_quarantine_root=audio_quarantine_root,
+            )
         else:
-            if import_job_id is not None:
-                cleanup_plan = PostCommitCleanup(staged_path=staged_path)
-            else:
-                _cleanup_staged_dir(staged_path)
+            from lib.dispatch.quarantine import (
+                quarantine_corrupt_audio_source,
+            )
+
+            audit = quarantine_corrupt_audio_source(
+                source_path=staged_path,
+                quarantine_root=audio_quarantine_root or "",
+            )
+            if isinstance(terminal_outcome, int):
+                db.record_post_commit_quarantine(terminal_outcome, audit)
+    elif action.cleanup and _should_cleanup_path(
+        source_path_cleanup_scenario,
+        action,
+    ):
+        if import_job_id is not None:
+            cleanup_plan = PostCommitCleanup(staged_path=staged_path)
+        else:
+            _cleanup_staged_dir(staged_path)
     return DispatchOutcome(
         success=False,
         message=f"Rejected by persisted quality evidence: {decision}",

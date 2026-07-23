@@ -59,7 +59,9 @@ Preview persists completed content facts in
 `album_quality_evidence.audio_validation`, then the importer alone decides via
 `full_pipeline_decision_from_evidence`. Corrupt audio follows the standard
 denylist plus post-terminal `failed_imports/bad_files` quarantine path and
-resumes searching. A `measurement_failed` attempt writes no denylist and its
+resumes searching. Quarantine atomically renames the complete source directory
+and fails closed with the original untouched when that rename is unavailable.
+A `measurement_failed` attempt writes no denylist and its
 retained source path is protected from the disk reaper. Diagnostics are capped
 at 16 files and 2 KiB per normalized stderr excerpt; success carries no
 stderr.

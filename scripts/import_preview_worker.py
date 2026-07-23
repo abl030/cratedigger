@@ -255,6 +255,8 @@ def _front_gate_source_path(db: Any, job: ImportJob) -> str | None:
             state = ActiveDownloadState.from_raw(state_raw)
         except ValueError:
             return None
+        if state.current_path:
+            return state.current_path
         try:
             return derive_canonical_import_folder(row, state)
         except Exception:
@@ -739,7 +741,7 @@ def process_claimed_preview_job(
         crash_payload = MeasurementFailure(
             reason="measurement_crashed",
             detail=f"{type(exc).__name__}: {exc}",
-            source_path="",
+            source_path=front_gate_source or "",
         )
         crash_result = ImportPreviewResult(
             mode="path",
@@ -749,6 +751,8 @@ def process_claimed_preview_job(
             reason="measurement_crashed",
             detail=f"{type(exc).__name__}: {exc}",
             request_id=job.request_id,
+            download_log_id=_download_log_id_from_job(job),
+            source_path=front_gate_source,
             failure=crash_payload,
         )
         return handle_measurement_failed(crash_result)

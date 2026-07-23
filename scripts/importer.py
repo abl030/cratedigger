@@ -199,6 +199,23 @@ def _cleanup_failed_force_import(
     if force_payload is None:
         return None
     download_log_id, failed_path_hint = force_payload
+    cleanup_plan = outcome.post_commit_cleanup
+    if (
+        cleanup_plan is not None
+        and cleanup_plan.audio_quarantine_source_path is not None
+    ):
+        # Corrupt candidates are archival evidence. The post-commit
+        # quarantine either moved the source or left it in place and recorded
+        # why; both states must bypass Wrong Matches deletion.
+        return {
+            "success": True,
+            "download_log_id": download_log_id,
+            "failed_path_hint": failed_path_hint,
+            "outcome": "skipped_archival_audio_quarantine",
+            "skipped": True,
+            "dispatch_code": outcome.code,
+            "dispatch_message": outcome.message,
+        }
     if outcome.code != DISPATCH_CODE_QUALITY_PIPELINE_REJECTED:
         return {
             "success": False,
