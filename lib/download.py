@@ -963,7 +963,7 @@ def _processing_path_ready_for_importer(
         year=entry.year,
         request_id=request_id,
         staging_dir=ctx.cfg.beets_staging_dir,
-        slskd_download_dir=processing_albums_dir(ctx.cfg.processing_dir),
+        canonical_root=processing_albums_dir(ctx.cfg.processing_dir),
         attempt_fingerprint=attempt_fingerprint(
             [(f.username, f.filename) for f in entry.files],
         ),
@@ -1099,7 +1099,7 @@ def _poll_one_active_download(
             year=str(row["year"] or ""),
             request_id=request_id,
             staging_dir=ctx.cfg.beets_staging_dir,
-            slskd_download_dir=processing_albums_dir(ctx.cfg.processing_dir),
+            canonical_root=processing_albums_dir(ctx.cfg.processing_dir),
             has_entries=directory_has_entries,
             attempt_fingerprint=attempt_fingerprint(
                 [(f.username, f.filename) for f in state.files],

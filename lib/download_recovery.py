@@ -104,7 +104,7 @@ def _recovery_candidates(
     year: str,
     request_id: int,
     staging_dir: str,
-    slskd_download_dir: str,
+    canonical_root: str,
     attempt_fingerprint: str = "",
 ) -> tuple[ProcessingPathLocation, ...]:
     # Deliberately NO bare (un-fingerprinted) canonical fallback candidate:
@@ -117,7 +117,7 @@ def _recovery_candidates(
         artist=artist,
         title=title,
         year=year,
-        slskd_download_dir=slskd_download_dir,
+        slskd_download_dir=canonical_root,
         attempt_fingerprint=attempt_fingerprint,
     )
     return (
@@ -203,7 +203,7 @@ def classify_processing_path(
     year: str,
     request_id: int,
     staging_dir: str,
-    slskd_download_dir: str,
+    canonical_root: str,
     attempt_fingerprint: str = "",
 ) -> ProcessingPathLocation:
     """Classify a persisted current_path against the active download seam."""
@@ -211,7 +211,7 @@ def classify_processing_path(
         artist=artist,
         title=title,
         year=year,
-        slskd_download_dir=slskd_download_dir,
+        slskd_download_dir=canonical_root,
         attempt_fingerprint=attempt_fingerprint,
     )
     if normalize_processing_path(current_path) == normalize_processing_path(
@@ -266,7 +266,7 @@ def resolve_missing_current_path(
     year: str,
     request_id: int,
     staging_dir: str,
-    slskd_download_dir: str,
+    canonical_root: str,
     has_entries: Callable[[str], bool],
     attempt_fingerprint: str = "",
 ) -> ResumeRecoveryDecision:
@@ -277,7 +277,7 @@ def resolve_missing_current_path(
         year=year,
         request_id=request_id,
         staging_dir=staging_dir,
-        slskd_download_dir=slskd_download_dir,
+        canonical_root=canonical_root,
         attempt_fingerprint=attempt_fingerprint,
     )
     return _resolve_recovery_candidates(
@@ -294,7 +294,7 @@ def reconcile_processing_current_path(
     year: str,
     request_id: int,
     staging_dir: str,
-    slskd_download_dir: str,
+    canonical_root: str,
     has_entries: Callable[[str], bool],
     attempt_fingerprint: str = "",
 ) -> ResumeRecoveryDecision:
@@ -312,7 +312,7 @@ def reconcile_processing_current_path(
         year=year,
         request_id=request_id,
         staging_dir=staging_dir,
-        slskd_download_dir=slskd_download_dir,
+        canonical_root=canonical_root,
         attempt_fingerprint=attempt_fingerprint,
     )
     if current_path is None:
@@ -328,7 +328,7 @@ def reconcile_processing_current_path(
         year=year,
         request_id=request_id,
         staging_dir=staging_dir,
-        slskd_download_dir=slskd_download_dir,
+        canonical_root=canonical_root,
         attempt_fingerprint=attempt_fingerprint,
     )
     if current_location.kind != "canonical" or has_entries(current_location.path):
@@ -364,7 +364,7 @@ def find_blocked_recovery_issues(
     active_transfers: set[tuple[str, str]],
     *,
     staging_dir: str,
-    slskd_download_dir: str,
+    canonical_root: str,
     has_entries: Callable[[str], bool],
 ) -> list[BlockedRecoveryIssue]:
     """Find rows whose mid-processing recovery is blocked by ambiguity."""
@@ -402,7 +402,7 @@ def find_blocked_recovery_issues(
             year=str(row.get("year") or ""),
             request_id=request_id,
             staging_dir=staging_dir,
-            slskd_download_dir=slskd_download_dir,
+            canonical_root=canonical_root,
             has_entries=has_entries,
             attempt_fingerprint=_row_files_fingerprint(files),
         )
@@ -436,7 +436,7 @@ def find_blocked_processing_path_issues(
     active_transfers: set[tuple[str, str]],
     *,
     staging_dir: str,
-    slskd_download_dir: str,
+    canonical_root: str,
     has_entries: Callable[[str], bool],
     auto_import_in_progress: Callable[[int, str | None], bool | None] | None = None,
 ) -> list[BlockedRecoveryIssue]:
@@ -477,7 +477,7 @@ def find_blocked_processing_path_issues(
             year=str(row.get("year") or ""),
             request_id=request_id,
             staging_dir=staging_dir,
-            slskd_download_dir=slskd_download_dir,
+            canonical_root=canonical_root,
             has_entries=has_entries,
             attempt_fingerprint=_row_files_fingerprint(files),
         )

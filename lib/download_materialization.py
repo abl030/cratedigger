@@ -24,11 +24,14 @@ from lib.fs_authority import (
     FilesystemAuthorityError,
     OpenedRegularFile,
     copy_opened_file,
+    exclusive_relative_lock,
     open_private_child_directory,
     open_private_processing_root,
     open_relative_directory,
     open_regular_relative,
     open_regular_under_root,
+    remove_relative_tree,
+    same_open_directory,
     unlink_if_same,
 )
 from lib.import_manifest import audio_relative_paths, manifest_trace_summary
@@ -162,7 +165,7 @@ def classify_staged_album_location(
         year=album_data.year,
         request_id=album_data.db_request_id or 0,
         staging_dir=ctx.cfg.beets_staging_dir,
-        slskd_download_dir=processing_albums_dir(ctx.cfg.processing_dir),
+        canonical_root=processing_albums_dir(ctx.cfg.processing_dir),
         attempt_fingerprint=_attempt_fingerprint_for(album_data.files),
     )
 
@@ -662,88 +665,113 @@ def _materialize_processing_dir(
             processing_dir, ctx.cfg.slskd_download_dir,
         ) as processing_fd:
             with open_private_child_directory(processing_fd, albums_name) as albums_fd:
-                # An existing destination is valid only when it is a complete
-                # exact regular-file manifest.  Never add files to it.
-                existing_complete = False
-                try:
-                    with open_relative_directory(albums_fd, canonical_name) as existing_fd:
-                        entries = set(os.listdir(existing_fd))
-                        if entries == set(destination_names):
-                            for name in destination_names:
-                                checked = open_regular_relative(existing_fd, name)
-                                checked.close()
-                            existing_complete = True
-                except (FileNotFoundError, FilesystemAuthorityError, OSError):
+                # The lock is deliberately outside transaction cleanup.  It
+                # serializes destination classification, stale-temp recovery,
+                # publish, and source unlink for this one attempt, removing
+                # the check/rename replacement race without Linux-only APIs.
+                with exclusive_relative_lock(
+                    albums_fd, f".materialize-lock-{canonical_name}",
+                ):
+                    transaction_prefix = f".materialize-{canonical_name}-"
+                    for entry_name in os.listdir(albums_fd):
+                        if entry_name.startswith(transaction_prefix):
+                            remove_relative_tree(albums_fd, entry_name)
+
+                    # An existing destination is valid only when it is a
+                    # complete exact regular-file manifest. Never add files
+                    # to it, including an empty directory.
                     existing_complete = False
-                if existing_complete:
-                    staged_album.current_path = canonical_path
-                    album_data.import_folder = canonical_path
-                    if persist_current_path:
-                        staged_album.persist_current_path(db)
-                    return Materialized()
-                try:
-                    existing = os.stat(canonical_name, dir_fd=albums_fd, follow_symlinks=False)
-                except FileNotFoundError:
-                    existing = None
-                if existing is not None:
-                    return MaterializeGuarded(detail="incomplete_or_unsafe_canonical")
-
-                # Preflight *all* event-stamped sources before creating a
-                # destination.  Missing stamps, path escapes, symlinks and
-                # special files all leave every byte untouched.
-                for file in album_data.files:
-                    if file.local_path is None:
-                        raise FilesystemAuthorityError("event_path_missing")
                     try:
-                        opened_sources.append(open_regular_under_root(
-                            ctx.cfg.slskd_download_dir, file.local_path,
-                        ))
-                    except FilesystemAuthorityError as exc:
-                        if "No such file" in str(exc):
-                            raise FilesystemAuthorityError("event_path_missing") from exc
-                        raise FilesystemAuthorityError("unsafe_source_path") from exc
+                        with open_relative_directory(albums_fd, canonical_name) as existing_fd:
+                            entries = set(os.listdir(existing_fd))
+                            if entries == set(destination_names):
+                                for name in destination_names:
+                                    checked = open_regular_relative(existing_fd, name)
+                                    checked.close()
+                                existing_complete = True
+                    except (FileNotFoundError, FilesystemAuthorityError, OSError):
+                        existing_complete = False
+                    if existing_complete:
+                        if not same_open_directory(processing_dir, processing_fd):
+                            return MaterializeGuarded(detail="processing_root_relocated")
+                        staged_album.current_path = canonical_path
+                        album_data.import_folder = canonical_path
+                        if persist_current_path:
+                            staged_album.persist_current_path(db)
+                        return Materialized()
+                    try:
+                        os.stat(canonical_name, dir_fd=albums_fd, follow_symlinks=False)
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        return MaterializeGuarded(detail="incomplete_or_unsafe_canonical")
 
-                temp_name = f".materialize-{secrets.token_hex(16)}"
-                os.mkdir(temp_name, 0o700, dir_fd=albums_fd)
-                temp_fd = os.open(
-                    temp_name,
-                    os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
-                    dir_fd=albums_fd,
-                )
-                published = False
-                try:
-                    for opened, name in zip(opened_sources, destination_names, strict=True):
-                        destination_fd = os.open(
-                            name,
-                            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
-                            0o600,
-                            dir_fd=temp_fd,
+                    # Preflight *all* event-stamped sources before creating a
+                    # destination. Missing stamps, path escapes, symlinks and
+                    # special files all leave every byte untouched.
+                    for file in album_data.files:
+                        if file.local_path is None:
+                            raise FilesystemAuthorityError("event_path_missing")
+                        try:
+                            opened_sources.append(open_regular_under_root(
+                                ctx.cfg.slskd_download_dir, file.local_path,
+                            ))
+                        except FilesystemAuthorityError as exc:
+                            if "No such file" in str(exc):
+                                raise FilesystemAuthorityError("event_path_missing") from exc
+                            raise FilesystemAuthorityError("unsafe_source_path") from exc
+
+                    temp_name = f"{transaction_prefix}{secrets.token_hex(16)}"
+                    os.mkdir(temp_name, 0o700, dir_fd=albums_fd)
+                    temp_fd = os.open(
+                        temp_name,
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                        dir_fd=albums_fd,
+                    )
+                    published = False
+                    try:
+                        for opened, name in zip(opened_sources, destination_names, strict=True):
+                            destination_fd = os.open(
+                                name,
+                                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+                                0o600,
+                                dir_fd=temp_fd,
+                            )
+                            try:
+                                copy_opened_file(opened.fd, destination_fd)
+                            finally:
+                                os.close(destination_fd)
+                        os.fsync(temp_fd)
+                        os.rename(
+                            temp_name, canonical_name,
+                            src_dir_fd=albums_fd, dst_dir_fd=albums_fd,
                         )
-                        try:
-                            copy_opened_file(opened.fd, destination_fd)
-                        finally:
-                            os.close(destination_fd)
-                    os.fsync(temp_fd)
-                    os.rename(temp_name, canonical_name, src_dir_fd=albums_fd, dst_dir_fd=albums_fd)
-                    os.fsync(albums_fd)
-                    published = True
-                finally:
-                    os.close(temp_fd)
-                    if not published:
-                        try:
-                            temp_path = os.path.join(processing_dir, albums_name, temp_name)
-                            shutil.rmtree(temp_path)
-                        except FileNotFoundError:
-                            pass
-                        except OSError as exc:
-                            raise FilesystemAuthorityError(
-                                f"temporary materialization cleanup failed: {exc}") from exc
+                        os.fsync(albums_fd)
+                        published = True
+                    finally:
+                        os.close(temp_fd)
+                        if not published:
+                            remove_relative_tree(albums_fd, temp_name)
 
-                # The durable private album is now visible.  An adversarial
-                # slskd replacement is never unlinked: inode comparison makes
-                # the race a harmless retained source rather than data loss.
-                for opened in opened_sources:
-                    unlink_if_same(opened)
+                    # Verify the lexical root still names this held private
+                    # inode before publishing/persisting its pathname or
+                    # deleting source bytes.
+                    if not same_open_directory(processing_dir, processing_fd):
+                        return MaterializeGuarded(detail="processing_root_relocated")
+
+                    # Reopen the winner for convergence proof. A success
+                    # cannot coexist with a stale transaction under this lock.
+                    with open_relative_directory(albums_fd, canonical_name) as winner_fd:
+                        if set(os.listdir(winner_fd)) != set(destination_names):
+                            return MaterializeGuarded(detail="published_manifest_mismatch")
+                        for name in destination_names:
+                            winner = open_regular_relative(winner_fd, name)
+                            winner.close()
+
+                    # The durable private album is now visible. An
+                    # adversarial slskd replacement is never unlinked.
+                    for opened in opened_sources:
+                        unlink_if_same(opened)
     except FilesystemAuthorityError as exc:
         logger.error("MATERIALIZE AUTHORITY FAILED request=%s: %s", request_id, exc)
         return MaterializeFailed(reason=str(exc).split(":", 1)[0])

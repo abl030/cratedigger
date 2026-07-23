@@ -31,7 +31,7 @@ from lib.download_recovery import (BlockedRecoveryIssue,
                                    find_blocked_recovery_issues)
 from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_RELEASE, PipelineDB,
                              release_id_to_lock_key)
-from lib.processing_paths import directory_has_entries
+from lib.processing_paths import directory_has_entries, processing_albums_dir
 from lib.repair import (OrphanInfo, SlskdOrphanTransfer, find_inconsistencies,
                         find_orphaned_downloads, find_slskd_orphans,
                         suggest_repair)
@@ -254,7 +254,7 @@ def _collect_issues(
                     rows,
                     active,
                     staging_dir=cfg.beets_staging_dir,
-                    slskd_download_dir=cfg.slskd_download_dir,
+                    canonical_root=processing_albums_dir(cfg.processing_dir),
                     has_entries=directory_has_entries,
                     auto_import_in_progress=(
                         lambda request_id, mb_release_id: _auto_import_in_progress(
@@ -280,7 +280,7 @@ def _collect_issues(
                     rows,
                     active,
                     staging_dir=cfg.beets_staging_dir,
-                    slskd_download_dir=cfg.slskd_download_dir,
+                    canonical_root=processing_albums_dir(cfg.processing_dir),
                     has_entries=directory_has_entries,
                 )
             ]

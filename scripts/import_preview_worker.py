@@ -34,6 +34,8 @@ from lib.import_preview import (
     load_current_evidence_for_preview,
     load_persisted_existing_spectral,
     measure_and_persist_candidate_evidence,
+    remove_preview_snapshot,
+    snapshot_configured_quarantine_directory,
     persist_exact_current_spectral_from_attempt,
     prepare_current_evidence_for_failure,
     preserve_existing_source_spectral,
@@ -70,6 +72,7 @@ from lib.quality_evidence import (
     load_candidate_evidence_for_source,
 )
 from lib.youtube_ingest_service import YoutubeImportPayload
+from lib.validation_envelope import decode_validation_envelope
 
 logger = logging.getLogger("cratedigger-import-preview-worker")
 STALE_PREVIEW_MESSAGE = "Preview worker restarted while job was running; retry queued"
@@ -223,9 +226,8 @@ def _front_gate_source_path(db: Any, job: ImportJob) -> str | None:
     """
     payload = job.payload or {}
     if job.job_type == IMPORT_JOB_FORCE:
-        failed_path = payload.get("failed_path")
-        if isinstance(failed_path, str) and failed_path:
-            return failed_path
+        # A force payload is audit metadata, not filesystem authority. Its
+        # path is resolved only from the download_log row at execution time.
         return None
     if job.job_type == IMPORT_JOB_YOUTUBE:
         # KTD1: YT path NEVER reads ``active_download_state``. The
@@ -344,20 +346,7 @@ def _preview_input(db: Any, job: ImportJob) -> dict[str, Any]:
 
     payload = job.payload or {}
     if job.job_type == IMPORT_JOB_FORCE:
-        failed_path = payload.get("failed_path")
-        if not isinstance(failed_path, str) or not failed_path:
-            raise ValueError("Force import preview job is missing failed_path")
-        download_log_id = payload.get("download_log_id")
-        return {
-            "request_id": job.request_id,
-            "path": failed_path,
-            "force": True,
-            "download_log_id": (
-                int(download_log_id)
-                if isinstance(download_log_id, int)
-                else None
-            ),
-        }
+        raise ValueError("Force import preview inputs are resolved from download_log")
 
     if job.job_type == IMPORT_JOB_AUTOMATION:
         row = db.get_request(job.request_id)
@@ -399,6 +388,32 @@ def _preview_input(db: Any, job: ImportJob) -> dict[str, Any]:
 
 
 def execute_preview_job(db: Any, job: ImportJob) -> ImportPreviewResult:
+    if job.job_type == IMPORT_JOB_FORCE:
+        if job.request_id is None:
+            raise ValueError("Import job has no request_id")
+        download_log_id = _download_log_id_from_job(job)
+        if download_log_id is None:
+            raise ValueError("Force import preview job is missing download_log_id")
+        entry = db.get_download_log_entry(download_log_id)
+        if not entry:
+            raise ValueError(f"Download log {download_log_id} not found")
+        raw_path = decode_validation_envelope(entry.get("validation_result")).failed_path
+        if not raw_path:
+            raise ValueError("Download log has no failed_path")
+        cfg = read_runtime_config()
+        snapshot = snapshot_configured_quarantine_directory(raw_path, cfg)
+        try:
+            return measure_and_persist_candidate_evidence(
+                db,
+                request_id=job.request_id,
+                path=snapshot,
+                source_display_path=raw_path,
+                force=True,
+                download_log_id=download_log_id,
+                import_job_id=job.id,
+            )
+        finally:
+            remove_preview_snapshot(snapshot, cfg)
     preview_input = _preview_input(db, job)
     return measure_and_persist_candidate_evidence(
         db,

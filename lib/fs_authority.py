@@ -10,9 +10,10 @@ name and opening it later would re-introduce a symlink/swap race.
 from __future__ import annotations
 
 import errno
+import fcntl
 import os
 import stat
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 
@@ -84,34 +85,108 @@ def paths_overlap(left: str, right: str) -> bool:
 
 
 def _assert_private_parent(path: str) -> None:
-    """Reject group/other writable ancestors and root-identity mismatches."""
+    """Open every ancestor no-follow and reject replaceable authority.
+
+    A private child under ``/tmp`` is not sufficient: a writer of *any*
+    ancestor can replace an intervening directory between validation and a
+    future open.  The supported module layout deliberately uses a stable,
+    non-writable ancestry such as ``/var/lib``.
+    """
     expected_uid = os.geteuid()
     root = os.path.abspath(path)
-    current = root
-    while True:
+    root_parts = () if root == os.sep else _parts(root.lstrip(os.sep))
+    fd = os.open(os.sep, _DIR_FLAGS)
+    current = os.sep
+    try:
+        for part in ("", *root_parts):
+            if part:
+                try:
+                    child = os.open(part, _DIR_FLAGS, dir_fd=fd)
+                except OSError as exc:
+                    raise _raise_path_error(root, exc) from exc
+                os.close(fd)
+                fd = child
+                current = os.path.join(current, part)
+            try:
+                info = os.fstat(fd)
+            except OSError as exc:
+                raise FilesystemAuthorityError(
+                    f"cannot inspect {current}: {exc.strerror}") from exc
+            if info.st_mode & 0o022:
+                raise FilesystemAuthorityError(
+                    f"private processing ancestor is group/other writable: {current}")
+            if current == root and info.st_uid != expected_uid:
+                raise FilesystemAuthorityError(
+                    f"private processing root is not owned by service identity: {current}")
+            if current == root and stat.S_IMODE(info.st_mode) != 0o700:
+                raise FilesystemAuthorityError(
+                    f"private processing root is not mode 0700: {current}")
+    finally:
+        os.close(fd)
+
+
+def same_open_directory(path: str, held_fd: int) -> bool:
+    """Does a fresh no-follow open of ``path`` name the held directory?"""
+    with open_directory_path(path) as reopened_fd:
+        reopened = os.fstat(reopened_fd)
+    held = os.fstat(held_fd)
+    return reopened.st_dev == held.st_dev and reopened.st_ino == held.st_ino
+
+
+@contextmanager
+def exclusive_relative_lock(root_fd: int, name: str) -> Iterator[None]:
+    """Hold a no-follow regular lock file beneath an authoritative root."""
+    lock_name = _parts(name)
+    if len(lock_name) != 1:
+        raise FilesystemAuthorityError("lock name must be one safe component")
+    try:
+        fd = os.open(
+            lock_name[0], os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o600, dir_fd=root_fd,
+        )
+    except OSError as exc:
+        raise _raise_path_error(name, exc) from exc
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise FilesystemAuthorityError("private lock is not regular")
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
         try:
-            info = os.lstat(current)
-        except OSError as exc:
-            raise FilesystemAuthorityError(f"cannot inspect {current}: {exc.strerror}") from exc
-        if stat.S_ISLNK(info.st_mode):
-            raise FilesystemAuthorityError(f"private processing root has symlink ancestor: {current}")
-        if current == root and info.st_uid != expected_uid:
-            raise FilesystemAuthorityError(
-                f"private processing root is not owned by service identity: {current}")
-        if current == root and stat.S_IMODE(info.st_mode) != 0o700:
-            raise FilesystemAuthorityError(
-                f"private processing root is not mode 0700: {current}")
-        # The direct containing parent is the boundary that prevents a
-        # co-resident writer from replacing the configured root. Ancestors
-        # still must not be links, but a sticky shared /tmp above an owned
-        # 0700 parent does not grant replacement authority over that parent.
-        if current == os.path.dirname(root) and info.st_mode & 0o022:
-            raise FilesystemAuthorityError(
-                f"private processing parent is group/other writable: {current}")
-        parent = os.path.dirname(current)
-        if parent == current:
-            return
-        current = parent
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def remove_relative_tree(parent_fd: int, name: str) -> None:
+    """Delete one service-owned tree via held descriptors only.
+
+    Used solely for materialization transaction directories while their
+    per-attempt lock is held. It never reconstructs an absolute filesystem
+    path, so a post-check root relocation cannot redirect cleanup.
+    """
+    part = _parts(name)
+    if len(part) != 1:
+        raise FilesystemAuthorityError("tree name must be one safe component")
+    try:
+        fd = os.open(part[0], _DIR_FLAGS, dir_fd=parent_fd)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise _raise_path_error(name, exc) from exc
+    try:
+        with os.scandir(fd) as entries:
+            children = list(entries)
+        for entry in children:
+            if entry.is_dir(follow_symlinks=False):
+                remove_relative_tree(fd, entry.name)
+            else:
+                os.unlink(entry.name, dir_fd=fd)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.rmdir(part[0], dir_fd=parent_fd)
+    os.fsync(parent_fd)
 
 
 @contextmanager
@@ -195,6 +270,76 @@ class OpenedRegularFile:
         os.close(self.parent_fd)
 
 
+@dataclass
+class HeldDirectory:
+    """A configured quarantine directory held open for its whole use.
+
+    ``display_path`` is audit/UI metadata only.  Consumers must traverse
+    ``fd`` rather than closing it and opening that pathname again.
+    """
+
+    fd: int
+    display_path: str
+    authority_root: str
+
+    def close(self) -> None:
+        os.close(self.fd)
+
+
+@contextmanager
+def open_configured_quarantine_directory(raw_path: str, cfg: object) -> Iterator[HeldDirectory]:
+    """Resolve a DB/path payload through the configured quarantine roots.
+
+    The required marker is a *path component*, never a string prefix.  In
+    particular this permits an importer quarantine nested below Incoming,
+    while refusing lookalikes such as ``failed_imports-old``.  The returned
+    descriptor remains open until the caller has finished scanning/copying.
+    """
+    from lib.processing_paths import processing_albums_dir
+
+    roots = (
+        (getattr(cfg, "slskd_download_dir"), frozenset({"failed_imports", "wrong_matches"})),
+        (getattr(cfg, "beets_staging_dir"), frozenset({"failed_imports"})),
+        (
+            processing_albums_dir(getattr(cfg, "processing_dir")),
+            frozenset({"failed_imports", "wrong_matches"}),
+        ),
+    )
+    if not isinstance(raw_path, str) or not raw_path:
+        raise FilesystemAuthorityError("quarantine path is missing")
+
+    for root, markers in roots:
+        if not isinstance(root, str) or not os.path.isabs(root):
+            continue
+        try:
+            if os.path.isabs(raw_path):
+                relative = _relative_to(root, os.path.abspath(os.path.normpath(raw_path)))
+            else:
+                relative = os.path.normpath(raw_path)
+                _parts(relative)
+        except FilesystemAuthorityError:
+            continue
+        parts = _parts(relative)
+        if not markers.intersection(parts):
+            continue
+        try:
+            with open_directory_path(root) as root_fd:
+                with open_relative_directory(root_fd, relative) as candidate_fd:
+                    held = HeldDirectory(
+                        fd=os.dup(candidate_fd),
+                        display_path=os.path.abspath(os.path.join(root, relative)),
+                        authority_root=root,
+                    )
+        except FilesystemAuthorityError:
+            continue
+        try:
+            yield held
+        finally:
+            held.close()
+        return
+    raise FilesystemAuthorityError("path is outside configured quarantine roots")
+
+
 def open_regular_relative(root_fd: int, relative_path: str) -> OpenedRegularFile:
     """Open one regular descendant without ever following a pathname link."""
     parts = _parts(relative_path)
@@ -250,6 +395,7 @@ def copy_opened_file(
     destination_fd: int,
     *,
     max_bytes: int | None = None,
+    before_write: Callable[[int], None] | None = None,
 ) -> int:
     """Copy already-authorized bytes and durably flush the destination.
 
@@ -268,6 +414,8 @@ def copy_opened_file(
             break
         if max_bytes is not None and len(chunk) > max_bytes - copied:
             raise FilesystemAuthorityError("source grew beyond copy limit")
+        if before_write is not None:
+            before_write(len(chunk))
         view = memoryview(chunk)
         while view:
             written = os.write(destination_fd, view)

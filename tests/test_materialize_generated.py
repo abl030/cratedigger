@@ -336,7 +336,7 @@ class TestMaterializeAttemptIsolation(unittest.TestCase):
     def test_materialize_never_blends_files_across_attempts(
             self, pairs_a, pairs_b):
         with tempfile.TemporaryDirectory(
-                prefix="cratedigger-materialize-gen-") as tmpdir:
+                prefix="cratedigger-materialize-gen-", dir=os.getcwd()) as tmpdir:
             download_root = os.path.join(tmpdir, "downloads")
             os.makedirs(download_root)
             processing_root = os.path.join(tmpdir, "processing")

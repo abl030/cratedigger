@@ -1423,7 +1423,7 @@ in {
         "d ${cfg.processingDir}/preview 0700 ${cfg.user} ${cfg.group} -"
         # Only ephemeral preview children are age-cleaned.  Canonical albums
         # are durable in-flight state and are never a tmpfiles cleanup target.
-        "e ${cfg.processingDir}/preview 0700 ${cfg.user} ${cfg.group} 7d"
+        "e ${cfg.processingDir}/preview/preview-* 0700 ${cfg.user} ${cfg.group} 7d"
         # BEETSDIR for every beets consumer (cratedigger-beet, harness).
         # U4 renders config.yaml into it; the dir must exist regardless so
         # the wrapper works on a fresh boot.

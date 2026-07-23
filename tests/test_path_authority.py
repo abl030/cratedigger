@@ -5,10 +5,20 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
-from lib.download_materialization import MaterializeFailed, Materialized, _materialize_processing_dir
-from lib.fs_authority import FilesystemAuthorityError, open_private_processing_root, open_regular_relative
+from lib.download_materialization import (
+    MaterializeFailed,
+    MaterializeGuarded,
+    Materialized,
+    _materialize_processing_dir,
+)
+from lib.fs_authority import (
+    FilesystemAuthorityError,
+    open_configured_quarantine_directory,
+    open_private_processing_root,
+    open_regular_relative,
+)
 from lib.grab_list import DownloadFile
 from lib.processing_paths import canonical_folder_for_row, processing_albums_dir
 from lib.staged_album import StagedAlbum
@@ -18,7 +28,7 @@ from tests.helpers import make_ctx_with_fake_db, make_grab_list_entry
 
 class TestPrivateProcessingAuthority(unittest.TestCase):
     def test_rejects_overlap_and_symlinked_root(self) -> None:
-        with tempfile.TemporaryDirectory() as parent:
+        with tempfile.TemporaryDirectory(dir=os.getcwd()) as parent:
             source = os.path.join(parent, "source")
             processing = os.path.join(parent, "processing")
             os.mkdir(source)
@@ -37,6 +47,16 @@ class TestPrivateProcessingAuthority(unittest.TestCase):
                 with open_private_processing_root(link, source):
                     pass
 
+    def test_rejects_group_writable_ancestor(self) -> None:
+        with tempfile.TemporaryDirectory() as parent:
+            source = os.path.join(parent, "source")
+            processing = os.path.join(parent, "processing")
+            os.mkdir(source)
+            os.mkdir(processing, 0o700)
+            with self.assertRaisesRegex(FilesystemAuthorityError, "ancestor"):
+                with open_private_processing_root(processing, source):
+                    pass
+
     def test_no_follow_file_open_rejects_symlink_and_parent_escape(self) -> None:
         with tempfile.TemporaryDirectory() as parent:
             root = os.path.join(parent, "root")
@@ -52,10 +72,33 @@ class TestPrivateProcessingAuthority(unittest.TestCase):
                 with self.assertRaises(FilesystemAuthorityError):
                     open_regular_relative(root_fd, "../outside")
 
+    def test_quarantine_resolver_requires_exact_component_and_holds_nested_incoming(self) -> None:
+        with tempfile.TemporaryDirectory(dir=os.getcwd()) as parent:
+            slskd = os.path.join(parent, "slskd")
+            incoming = os.path.join(parent, "Incoming")
+            processing = os.path.join(parent, "processing")
+            for directory in (slskd, incoming, processing):
+                os.mkdir(directory, 0o700)
+            os.mkdir(os.path.join(processing, "albums"), 0o700)
+            os.mkdir(os.path.join(processing, "preview"), 0o700)
+            album = os.path.join(incoming, "auto-import", "Artist", "failed_imports", "Album")
+            os.makedirs(album)
+            cfg = MagicMock()
+            cfg.slskd_download_dir = slskd
+            cfg.beets_staging_dir = incoming
+            cfg.processing_dir = processing
+            with open_configured_quarantine_directory(album, cfg) as opened:
+                self.assertEqual(os.fstat(opened.fd).st_ino, os.stat(album).st_ino)
+            lookalike = os.path.join(incoming, "failed_imports-old", "Album")
+            os.makedirs(lookalike)
+            with self.assertRaises(FilesystemAuthorityError):
+                with open_configured_quarantine_directory(lookalike, cfg):
+                    pass
+
 
 class TestAtomicPrivateMaterialization(unittest.TestCase):
     def _world(self):
-        parent = tempfile.TemporaryDirectory()
+        parent = tempfile.TemporaryDirectory(dir=os.getcwd())
         source = os.path.join(parent.name, "source")
         processing = os.path.join(parent.name, "processing")
         os.mkdir(source)
@@ -127,3 +170,58 @@ class TestAtomicPrivateMaterialization(unittest.TestCase):
             self.assertEqual(result.reason, "duplicate_final_basename")
             self.assertTrue(os.path.exists(first))
             self.assertTrue(os.path.exists(second))
+
+    def test_existing_empty_destination_is_guarded_without_overwrite(self) -> None:
+        parent, source, processing = self._world()
+        with parent:
+            source_path = os.path.join(source, "track.mp3")
+            with open(source_path, "wb") as handle:
+                handle.write(b"audio")
+            file = DownloadFile(filename="peer\\track.mp3", username="peer", id="1", file_dir="peer", size=5)
+            file.local_path = source_path
+            album = make_grab_list_entry(files=[file], artist="A", title="B", year="2020")
+            canonical = canonical_folder_for_row(album, processing_albums_dir(processing))
+            os.mkdir(canonical)
+            result = _materialize_processing_dir(
+                album, StagedAlbum.from_entry(album, default_path=canonical), self._ctx(source, processing),
+            )
+            self.assertIsInstance(result, MaterializeGuarded)
+            self.assertTrue(os.path.exists(source_path))
+            self.assertEqual(os.listdir(canonical), [])
+
+    def test_stale_temp_is_recovered_under_attempt_lock(self) -> None:
+        parent, source, processing = self._world()
+        with parent:
+            source_path = os.path.join(source, "track.mp3")
+            with open(source_path, "wb") as handle:
+                handle.write(b"audio")
+            file = DownloadFile(filename="peer\\track.mp3", username="peer", id="1", file_dir="peer", size=5)
+            file.local_path = source_path
+            album = make_grab_list_entry(files=[file], artist="A", title="B", year="2020")
+            canonical = canonical_folder_for_row(album, processing_albums_dir(processing))
+            stale = os.path.join(processing, "albums", f".materialize-{os.path.basename(canonical)}-dead")
+            os.mkdir(stale)
+            with open(os.path.join(stale, "partial.mp3"), "wb") as handle:
+                handle.write(b"partial")
+            result = _materialize_processing_dir(
+                album, StagedAlbum.from_entry(album, default_path=canonical), self._ctx(source, processing),
+            )
+            self.assertIsInstance(result, Materialized)
+            self.assertFalse(os.path.exists(stale))
+
+    def test_root_relocation_guard_retains_authoritative_source(self) -> None:
+        parent, source, processing = self._world()
+        with parent:
+            source_path = os.path.join(source, "track.mp3")
+            with open(source_path, "wb") as handle:
+                handle.write(b"audio")
+            file = DownloadFile(filename="peer\\track.mp3", username="peer", id="1", file_dir="peer", size=5)
+            file.local_path = source_path
+            album = make_grab_list_entry(files=[file], artist="A", title="B", year="2020")
+            canonical = canonical_folder_for_row(album, processing_albums_dir(processing))
+            with patch("lib.download_materialization.same_open_directory", return_value=False):
+                result = _materialize_processing_dir(
+                    album, StagedAlbum.from_entry(album, default_path=canonical), self._ctx(source, processing),
+                )
+            self.assertIsInstance(result, MaterializeGuarded)
+            self.assertTrue(os.path.exists(source_path))

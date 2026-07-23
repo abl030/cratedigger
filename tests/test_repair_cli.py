@@ -240,6 +240,7 @@ class TestCollectIssues(unittest.TestCase):
         mock_read_runtime_config.return_value = SimpleNamespace(
             beets_staging_dir="/tmp/staging",
             slskd_download_dir="/tmp/downloads",
+            processing_dir="/var/lib/cratedigger/processing",
         )
         orphans = [
             OrphanInfo(
@@ -305,6 +306,7 @@ class TestCollectIssuesSlskdOrphanReport(unittest.TestCase):
         mock_read_runtime_config.return_value = SimpleNamespace(
             beets_staging_dir="/tmp/staging",
             slskd_download_dir="/tmp/downloads",
+            processing_dir="/var/lib/cratedigger/processing",
         )
         db = FakePipelineDB()
         db.record_transfer_enqueue([
@@ -345,6 +347,7 @@ class TestCollectIssuesSlskdOrphanReport(unittest.TestCase):
         mock_read_runtime_config.return_value = SimpleNamespace(
             beets_staging_dir="/tmp/staging",
             slskd_download_dir="/tmp/downloads",
+            processing_dir="/var/lib/cratedigger/processing",
         )
 
         collected = repair._collect_issues(

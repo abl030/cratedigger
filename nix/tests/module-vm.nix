@@ -468,6 +468,16 @@ pkgs.testers.nixosTest {
     )
     machine.succeed("systemctl reset-failed cratedigger.service || true")
     machine.succeed("systemctl start cratedigger-importer.service cratedigger-import-preview-worker.service cratedigger-youtube-ingest.service cratedigger-web.service")
+    # #663: this is a real non-root service identity, not merely a rendered
+    # User= value.  Its private processing descendants must be writable by it
+    # and inaccessible to the unrelated VM user.
+    machine.succeed("test $(id -u cratedigger) -ne 0")
+    machine.succeed("test \"$(stat -c %U:%a /var/lib/cratedigger/processing)\" = cratedigger:700")
+    machine.succeed("test \"$(stat -c %U:%a /var/lib/cratedigger/processing/albums)\" = cratedigger:700")
+    machine.succeed("test \"$(stat -c %U:%a /var/lib/cratedigger/processing/preview)\" = cratedigger:700")
+    machine.succeed("runuser -u cratedigger -- mkdir /var/lib/cratedigger/processing/preview/vm-nonroot-snapshot")
+    machine.fail("runuser -u unrelated-user -- test -r /var/lib/cratedigger/processing/preview")
+    machine.succeed("runuser -u cratedigger -- rmdir /var/lib/cratedigger/processing/preview/vm-nonroot-snapshot")
     # config.ini points at the out-of-band secret, never its plaintext value.
     machine.succeed("grep -q 'api_key_file = /etc/cratedigger/slskd-api-key' /var/lib/cratedigger/config.ini")
     # The secret itself must NEVER appear in config.ini — that's the whole fix.

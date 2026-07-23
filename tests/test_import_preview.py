@@ -49,7 +49,7 @@ from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_album_quality_evidence, make_request_row
 
 
-_PREVIEW_RUNTIME = tempfile.TemporaryDirectory()
+_PREVIEW_RUNTIME = tempfile.TemporaryDirectory(dir=os.getcwd())
 _PREVIEW_SOURCE_ROOT = os.path.join(_PREVIEW_RUNTIME.name, "slskd")
 _PREVIEW_PROCESSING_ROOT = os.path.join(_PREVIEW_RUNTIME.name, "processing")
 os.mkdir(_PREVIEW_SOURCE_ROOT)
@@ -2349,7 +2349,7 @@ class TestImportPreviewPath(unittest.TestCase):
             import shutil
             shutil.rmtree(source, ignore_errors=True)
 
-    def test_source_change_during_preview_does_not_persist_candidate_evidence(self):
+    def test_same_size_source_replacement_uses_private_snapshot_evidence(self):
         db = self._db()
         job = db.enqueue_import_job(
             "force_import",
@@ -2360,8 +2360,8 @@ class TestImportPreviewPath(unittest.TestCase):
         source = self._source_dir()
 
         def run_preview(*args, **kwargs):
-            with open(os.path.join(source, "01.mp3"), "ab") as handle:
-                handle.write(b"changed")
+            with open(os.path.join(source, "01.mp3"), "r+b") as handle:
+                handle.write(b"X" * len(b"not real audio but never inspected in this test"))
             return SimpleNamespace(
                 import_result=ImportResult(
                     decision="import",
@@ -2402,11 +2402,11 @@ class TestImportPreviewPath(unittest.TestCase):
                     persist_candidate_evidence=True,
                 )
 
-            self.assertEqual(preview.verdict, "uncertain")
-            self.assertEqual(preview.decision, "source_changed_during_preview")
-            # Source mutated mid-flight: preview must NOT wire the candidate
-            # FK on the import_job row.
-            self.assertIsNone(db.get_import_job_candidate_evidence_id(job.id))
+            self.assertEqual(preview.verdict, "would_import")
+            # Evidence addresses the bytes copied before the same-size
+            # external replacement, so its identity cannot be spoofed by a
+            # post-measurement pathname inventory.
+            self.assertIsNotNone(db.get_import_job_candidate_evidence_id(job.id))
         finally:
             import shutil
             shutil.rmtree(source, ignore_errors=True)

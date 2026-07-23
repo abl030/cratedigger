@@ -10,10 +10,8 @@ from __future__ import annotations
 
 import logging
 import os
-import shutil
+import secrets
 import stat
-import tempfile
-import fcntl
 from collections.abc import Mapping, Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -76,12 +74,16 @@ from lib.quality import (
 from lib.fs_authority import (
     FilesystemAuthorityError,
     copy_opened_file,
+    exclusive_relative_lock,
+    open_configured_quarantine_directory,
     open_directory_path,
     open_private_child_directory,
     open_private_processing_root,
+    open_relative_directory,
     open_regular_relative,
+    remove_relative_tree,
 )
-from lib.processing_paths import path_is_within_root, processing_albums_dir, processing_preview_dir
+from lib.processing_paths import processing_preview_dir
 from lib.util import repair_mp3_headers
 from lib.validation_envelope import decode_validation_envelope
 from lib.v0_probe import probe_installed_album_as_v0
@@ -91,30 +93,7 @@ logger = logging.getLogger("cratedigger")
 _PREVIEW_MAX_DEPTH = 32
 _PREVIEW_MAX_FILES = 5000
 _PREVIEW_MAX_BYTES = 100 * 1024**3
-
-
-def _authorized_failed_root(raw_path: str, cfg: Any) -> str:
-    """Resolve a tainted DB failed_path through configured quarantine roots."""
-    roots = (
-        os.path.join(cfg.slskd_download_dir, "failed_imports"),
-        os.path.join(cfg.slskd_download_dir, "wrong_matches"),
-        os.path.join(cfg.beets_staging_dir, "failed_imports"),
-        os.path.join(processing_albums_dir(cfg.processing_dir), "failed_imports"),
-        os.path.join(processing_albums_dir(cfg.processing_dir), "wrong_matches"),
-    )
-    candidates = [raw_path] if os.path.isabs(raw_path) else [
-        os.path.join(root, raw_path) for root in roots
-    ]
-    for candidate in candidates:
-        if not any(path_is_within_root(candidate, root) for root in roots):
-            continue
-        try:
-            with open_directory_path(candidate):
-                pass
-        except FilesystemAuthorityError:
-            continue
-        return os.path.abspath(candidate)
-    raise FilesystemAuthorityError("failed_path is outside configured quarantine roots")
+_PREVIEW_FREE_RESERVE_BYTES = 100 * 1024**2
 
 
 @contextmanager
@@ -128,103 +107,140 @@ def _preview_copy_lock(cfg: Any) -> Any:
     with open_private_processing_root(
         cfg.processing_dir, cfg.slskd_download_dir,
     ) as processing_fd:
-        with open_private_child_directory(processing_fd, "preview"):
-            lock_path = os.path.join(processing_preview_dir(cfg.processing_dir), ".snapshot.lock")
-            lock_fd = os.open(
-                lock_path,
-                os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW,
-                0o600,
-            )
-            try:
-                lock_info = os.fstat(lock_fd)
-                if not stat.S_ISREG(lock_info.st_mode):
-                    raise FilesystemAuthorityError("preview snapshot lock is not regular")
-                fcntl.flock(lock_fd, fcntl.LOCK_EX)
-                yield
-            finally:
-                try:
-                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
-                finally:
-                    os.close(lock_fd)
+        # Keep locks out of the aged preview directory: its contents are
+        # ephemeral snapshots and tmpfiles may prune them independently.
+        with exclusive_relative_lock(processing_fd, ".preview-snapshot.lock"):
+            with open_private_child_directory(processing_fd, "preview") as preview_fd:
+                yield preview_fd
 
 
-def _snapshot_authorized_directory(path: str, cfg: Any) -> str:
-    """No-follow bounded copy of an authorized source into private preview."""
-    snapshot: str | None = None
+def _assert_preview_space(preview_fd: int, next_write_bytes: int) -> None:
+    info = os.fstatvfs(preview_fd)
+    available = info.f_bavail * info.f_frsize
+    if available - next_write_bytes < _PREVIEW_FREE_RESERVE_BYTES:
+        raise FilesystemAuthorityError("insufficient private preview space")
+
+
+def _snapshot_opened_directory(source_root_fd: int, cfg: Any) -> str:
+    """Boundedly copy an already-held source directory into private preview.
+
+    Every byte is copied from an opened regular inode.  The inventory later
+    used for evidence is consequently taken from the private copy, never a
+    second walk of the externally mutable source pathname.
+    """
+    snapshot_name = f"preview-{secrets.token_hex(16)}"
+    snapshot_path = os.path.join(processing_preview_dir(cfg.processing_dir), snapshot_name)
     files = 0
     copied_bytes = 0
+    made_snapshot = False
     try:
-        with _preview_copy_lock(cfg):
-            preview_parent = processing_preview_dir(cfg.processing_dir)
-            snapshot = tempfile.mkdtemp(prefix="preview-", dir=preview_parent)
-            with open_directory_path(path) as root_fd:
-                # The maximum is an admission cap, not a promise that the
-                # filesystem can supply it.  The private-copy lock makes this
-                # free-space check meaningful across concurrent snapshots.
-                available = os.statvfs(preview_parent).f_bavail * os.statvfs(preview_parent).f_frsize
-                stack: list[tuple[int, str, int]] = [(os.dup(root_fd), snapshot, 0)]
-                try:
-                    while stack:
-                        source_dir_fd, destination_dir, depth = stack.pop()
-                        try:
-                            entries = sorted(list(os.scandir(source_dir_fd)), key=lambda entry: entry.name)
-                            for entry in entries:
-                                if entry.is_symlink():
-                                    raise FilesystemAuthorityError("snapshot contains symlink")
-                                info = entry.stat(follow_symlinks=False)
-                                destination = os.path.join(destination_dir, entry.name)
-                                if stat.S_ISDIR(info.st_mode):
+        with _preview_copy_lock(cfg) as preview_fd:
+            _assert_preview_space(preview_fd, 0)
+            os.mkdir(snapshot_name, 0o700, dir_fd=preview_fd)
+            made_snapshot = True
+            snapshot_fd = os.open(
+                snapshot_name,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=preview_fd,
+            )
+            stack: list[tuple[int, int, int]] = [(os.dup(source_root_fd), snapshot_fd, 0)]
+            try:
+                while stack:
+                    source_dir_fd, destination_dir_fd, depth = stack.pop()
+                    try:
+                        names = sorted(entry.name for entry in os.scandir(source_dir_fd))
+                        for name in names:
+                            try:
+                                child_fd = os.open(
+                                    name,
+                                    os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                                    dir_fd=source_dir_fd,
+                                )
+                            except OSError:
+                                child_fd = -1
+                            if child_fd >= 0:
+                                try:
+                                    if not stat.S_ISDIR(os.fstat(child_fd).st_mode):
+                                        raise FilesystemAuthorityError("snapshot contains non-directory")
                                     if depth >= _PREVIEW_MAX_DEPTH:
                                         raise FilesystemAuthorityError("preview depth limit exceeded")
-                                    os.mkdir(destination, 0o700)
-                                    child_fd = os.open(
-                                        entry.name,
+                                    os.mkdir(name, 0o700, dir_fd=destination_dir_fd)
+                                    destination_child_fd = os.open(
+                                        name,
                                         os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
-                                        dir_fd=source_dir_fd,
+                                        dir_fd=destination_dir_fd,
                                     )
-                                    stack.append((child_fd, destination, depth + 1))
-                                    continue
-                                if not stat.S_ISREG(info.st_mode):
-                                    raise FilesystemAuthorityError("snapshot contains non-regular file")
-                                files += 1
-                                copied_bytes += info.st_size
-                                if files > _PREVIEW_MAX_FILES or copied_bytes > _PREVIEW_MAX_BYTES:
-                                    raise FilesystemAuthorityError("preview snapshot limit exceeded")
-                                if copied_bytes > available:
-                                    raise FilesystemAuthorityError("insufficient private preview space")
-                                opened = open_regular_relative(source_dir_fd, entry.name)
-                                try:
-                                    destination_fd = os.open(
-                                        destination,
-                                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
-                                        0o600,
-                                    )
-                                    try:
-                                        copy_opened_file(
-                                            opened.fd,
-                                            destination_fd,
-                                            max_bytes=opened.stat_result.st_size,
-                                        )
-                                    finally:
-                                        os.close(destination_fd)
+                                    stack.append((child_fd, destination_child_fd, depth + 1))
+                                    child_fd = -1
                                 finally:
-                                    opened.close()
-                        finally:
-                            os.close(source_dir_fd)
-                finally:
-                    for pending_fd, _destination, _depth in stack:
-                        os.close(pending_fd)
-        assert snapshot is not None
-        return snapshot
+                                    if child_fd >= 0:
+                                        os.close(child_fd)
+                                continue
+                            opened = open_regular_relative(source_dir_fd, name)
+                            try:
+                                files += 1
+                                declared_size = opened.stat_result.st_size
+                                if files > _PREVIEW_MAX_FILES or copied_bytes + declared_size > _PREVIEW_MAX_BYTES:
+                                    raise FilesystemAuthorityError("preview snapshot limit exceeded")
+                                destination_fd = os.open(
+                                    name,
+                                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+                                    0o600,
+                                    dir_fd=destination_dir_fd,
+                                )
+                                try:
+                                    copied = copy_opened_file(
+                                        opened.fd,
+                                        destination_fd,
+                                        max_bytes=declared_size,
+                                        before_write=lambda count: _assert_preview_space(preview_fd, count),
+                                    )
+                                finally:
+                                    os.close(destination_fd)
+                                copied_bytes += copied
+                            finally:
+                                opened.close()
+                    finally:
+                        os.close(source_dir_fd)
+                        os.close(destination_dir_fd)
+            finally:
+                for pending_source, pending_destination, _depth in stack:
+                    os.close(pending_source)
+                    os.close(pending_destination)
+        return snapshot_path
     except Exception:
-        if snapshot is not None:
-            _remove_preview_tree(snapshot)
+        if made_snapshot:
+            with _preview_copy_lock(cfg) as preview_fd:
+                remove_relative_tree(preview_fd, snapshot_name)
         raise
 
 
-def _remove_preview_tree(path: str) -> None:
-    """Cleanup failure is a real capacity/security failure, never ignored."""
-    shutil.rmtree(path)
+def _snapshot_authorized_directory(path: str, cfg: Any) -> str:
+    """Snapshot a direct caller path through a held no-follow descriptor."""
+    with open_directory_path(path) as source_fd:
+        return _snapshot_opened_directory(source_fd, cfg)
+
+
+def snapshot_configured_quarantine_directory(raw_path: str, cfg: Any) -> str:
+    """Copy a failed/wrong-match folder from its held configured authority."""
+    with open_configured_quarantine_directory(raw_path, cfg) as source:
+        return _snapshot_opened_directory(source.fd, cfg)
+
+
+def _remove_preview_tree(path: str, cfg: Any) -> None:
+    """Remove only a direct, service-owned private snapshot directory."""
+    name = os.path.basename(path)
+    if name == path or not name.startswith("preview-"):
+        raise FilesystemAuthorityError("not a private preview snapshot")
+    if os.path.dirname(path) != processing_preview_dir(cfg.processing_dir):
+        raise FilesystemAuthorityError("preview snapshot is outside private root")
+    with _preview_copy_lock(cfg) as preview_fd:
+        remove_relative_tree(preview_fd, name)
+
+
+def remove_preview_snapshot(path: str, cfg: Any) -> None:
+    """Public counterpart for callers that own a private preview snapshot."""
+    _remove_preview_tree(path, cfg)
 
 
 def _prefer_successful_spectral_detail(
@@ -1590,6 +1606,7 @@ def measure_and_persist_candidate_evidence(
     *,
     request_id: int,
     path: str,
+    source_display_path: str | None = None,
     force: bool = True,
     download_log_id: int | None = None,
     import_job_id: int | None = None,
@@ -1646,6 +1663,11 @@ def measure_and_persist_candidate_evidence(
     """
     from lib.config import read_runtime_config
 
+    # A force job measures a private snapshot, but its audit trail must keep
+    # the original download-log failed_path rather than leaking that private
+    # implementation location into operator-facing provenance.
+    audit_path = source_display_path or path
+
     # --- Sanity checks ---
     req = db.get_request(request_id)
     if not req:
@@ -1656,7 +1678,7 @@ def measure_and_persist_candidate_evidence(
             detail=f"Request {request_id} not found",
             request_id=request_id,
             download_log_id=download_log_id,
-            source_path=path,
+            source_path=audit_path,
         )
 
     mbid = str(req.get("mb_release_id") or "")
@@ -1668,32 +1690,7 @@ def measure_and_persist_candidate_evidence(
             detail="No MusicBrainz release ID",
             request_id=request_id,
             download_log_id=download_log_id,
-            source_path=path,
-        )
-
-    if not os.path.isdir(path):
-        return _measurement_failed_result(
-            mode="path",
-            reason="source_vanished",
-            decision="path_missing",
-            detail=f"Path not found: {path}",
-            request_id=request_id,
-            download_log_id=download_log_id,
-            source_path=path,
-        )
-
-    # --- Snapshot for freshness guard + evidence files column ---
-    try:
-        source_snapshot = snapshot_audio_files(path)
-    except OSError as exc:
-        return _measurement_failed_result(
-            mode="path",
-            reason="snapshot_stale",
-            decision="evidence_snapshot_failed",
-            detail=str(exc),
-            request_id=request_id,
-            download_log_id=download_log_id,
-            source_path=path,
+            source_path=audit_path,
         )
 
     cfg = read_runtime_config()
@@ -1725,7 +1722,7 @@ def measure_and_persist_candidate_evidence(
             ),
             request_id=request_id,
             download_log_id=download_log_id,
-            source_path=path,
+            source_path=audit_path,
         )
     else:
         current_evidence = current_result.evidence
@@ -1746,7 +1743,7 @@ def measure_and_persist_candidate_evidence(
             detail=f"private descriptor snapshot failed: {exc}",
             request_id=request_id,
             download_log_id=download_log_id,
-            source_path=path,
+            source_path=audit_path,
         )
     try:
         preview_path = temp_root
@@ -1754,6 +1751,21 @@ def measure_and_persist_candidate_evidence(
             repair_mp3_headers(preview_path)
         except Exception:
             pass
+        try:
+            # Address evidence from precisely the immutable private bytes
+            # being inspected and passed to the harness.  Never re-inventory
+            # the external source after the descriptor copy completed.
+            source_snapshot = snapshot_audio_files(preview_path)
+        except OSError as exc:
+            return _measurement_failed_result(
+                mode="path",
+                reason="snapshot_stale",
+                decision="evidence_snapshot_failed",
+                detail=str(exc),
+                request_id=request_id,
+                download_log_id=download_log_id,
+                source_path=audit_path,
+            )
         inspection = inspect_local_files(preview_path)
 
         # --- Run the pure measurement helper (no decision) ---
@@ -1794,7 +1806,7 @@ def measure_and_persist_candidate_evidence(
                 detail=f"{type(exc).__name__}: {exc}",
                 request_id=request_id,
                 download_log_id=download_log_id,
-                source_path=path,
+                source_path=audit_path,
             )
 
         # Integrity facts are authoritative even when the same corrupt
@@ -1819,7 +1831,7 @@ def measure_and_persist_candidate_evidence(
                 detail=spectral_failure,
                 request_id=request_id,
                 download_log_id=download_log_id,
-                source_path=path,
+                source_path=audit_path,
                 import_result=ImportResult(spectral=measurement.spectral_audit),
             )
 
@@ -1832,17 +1844,6 @@ def measure_and_persist_candidate_evidence(
         # early-exit branches.
         audit_result = ImportResult(spectral=measurement.spectral_audit)
         if measurement_rejecting:
-            if not audio_snapshot_matches(path, source_snapshot):
-                return _measurement_failed_result(
-                    mode="path",
-                    reason="snapshot_stale",
-                    decision="source_changed_during_preview",
-                    detail="source files changed while preview was running",
-                    request_id=request_id,
-                    download_log_id=download_log_id,
-                    source_path=path,
-                    import_result=audit_result,
-                )
             try:
                 evidence_result = (
                     persist_measurement_fn
@@ -1850,7 +1851,7 @@ def measure_and_persist_candidate_evidence(
                 )(
                     db,
                     mb_release_id=mbid,
-                    source_path=path,
+                    source_path=audit_path,
                     measurement=measurement,
                     download_log_id=download_log_id,
                     import_job_id=import_job_id,
@@ -1864,7 +1865,7 @@ def measure_and_persist_candidate_evidence(
                     detail=f"{type(exc).__name__}: {exc}",
                     request_id=request_id,
                     download_log_id=download_log_id,
-                    source_path=path,
+                    source_path=audit_path,
                     import_result=audit_result,
                 )
             if evidence_result.status != "ready":
@@ -1875,7 +1876,7 @@ def measure_and_persist_candidate_evidence(
                     detail=evidence_result.reason or f"evidence_{evidence_result.status}",
                     request_id=request_id,
                     download_log_id=download_log_id,
-                    source_path=path,
+                    source_path=audit_path,
                     import_result=audit_result,
                 )
             decision_hint = _measurement_decision_hint(measurement)
@@ -1887,7 +1888,7 @@ def measure_and_persist_candidate_evidence(
                 stage_chain=[f"measure_preimport:{decision_hint}"],
                 request_id=request_id,
                 download_log_id=download_log_id,
-                source_path=path,
+                source_path=audit_path,
                 import_result=ImportResult(spectral=measurement.spectral_audit),
             )
 
@@ -1926,7 +1927,7 @@ def measure_and_persist_candidate_evidence(
             preview_spectral_file = _write_preview_spectral_evidence_file(
                 directory=temp_root,
                 mb_release_id=mbid,
-                source_path=path,
+                source_path=audit_path,
                 measurement=measurement,
                 files=source_snapshot,
                 lossless_candidate=measurement.lossless_candidate,
@@ -1954,7 +1955,7 @@ def measure_and_persist_candidate_evidence(
                 detail=f"{type(exc).__name__}: {exc}",
                 request_id=request_id,
                 download_log_id=download_log_id,
-                source_path=path,
+                source_path=audit_path,
                 import_result=audit_result,
             )
 
@@ -1966,7 +1967,7 @@ def measure_and_persist_candidate_evidence(
                 detail="import_one.py emitted no JSON",
                 request_id=request_id,
                 download_log_id=download_log_id,
-                source_path=path,
+                source_path=audit_path,
                 import_result=audit_result,
                 subprocess_stderr=run.stderr,
             )
@@ -1996,7 +1997,7 @@ def measure_and_persist_candidate_evidence(
                 detail=run.import_result.error or run.import_result.decision,
                 request_id=request_id,
                 download_log_id=download_log_id,
-                source_path=path,
+                source_path=audit_path,
                 import_result=run.import_result,
                 subprocess_stderr=run.stderr,
             )
@@ -2008,22 +2009,9 @@ def measure_and_persist_candidate_evidence(
                 detail="ImportResult missing source_measurement",
                 request_id=request_id,
                 download_log_id=download_log_id,
-                source_path=path,
+                source_path=audit_path,
                 import_result=run.import_result,
                 subprocess_stderr=run.stderr,
-            )
-
-        # --- Snapshot freshness guard (post-measurement) ---
-        if not audio_snapshot_matches(path, source_snapshot):
-            return _measurement_failed_result(
-                mode="path",
-                reason="snapshot_stale",
-                decision="source_changed_during_preview",
-                detail="source files changed while preview was running",
-                request_id=request_id,
-                download_log_id=download_log_id,
-                source_path=path,
-                import_result=run.import_result,
             )
 
         # --- Persist candidate evidence ---
@@ -2031,7 +2019,7 @@ def measure_and_persist_candidate_evidence(
             evidence_result = persist_candidate_evidence_from_import_result(
                 db,
                 mb_release_id=mbid,
-                source_path=path,
+                source_path=audit_path,
                 import_result=run.import_result,
                 download_log_id=download_log_id,
                 import_job_id=import_job_id,
@@ -2046,7 +2034,7 @@ def measure_and_persist_candidate_evidence(
                 detail=f"{type(exc).__name__}: {exc}",
                 request_id=request_id,
                 download_log_id=download_log_id,
-                source_path=path,
+                source_path=audit_path,
                 import_result=run.import_result,
             )
         if evidence_result.status != "ready":
@@ -2057,7 +2045,7 @@ def measure_and_persist_candidate_evidence(
                 detail=evidence_result.reason or f"evidence_{evidence_result.status}",
                 request_id=request_id,
                 download_log_id=download_log_id,
-                source_path=path,
+                source_path=audit_path,
                 import_result=run.import_result,
             )
 
@@ -2072,11 +2060,11 @@ def measure_and_persist_candidate_evidence(
             ],
             request_id=request_id,
             download_log_id=download_log_id,
-            source_path=path,
+            source_path=audit_path,
             import_result=run.import_result,
         )
     finally:
-        _remove_preview_tree(temp_root)
+        _remove_preview_tree(temp_root, cfg)
 
 
 def _measurement_decision_hint(measurement: Any) -> str:
@@ -2238,7 +2226,7 @@ def preview_import_from_path(
         source_snapshot = None
         if persist_candidate_evidence:
             try:
-                source_snapshot = snapshot_audio_files(path)
+                source_snapshot = snapshot_audio_files(preview_path)
             except OSError as exc:
                 return _preview_result(
                     mode="path",
@@ -2451,7 +2439,7 @@ def preview_import_from_path(
         evidence_status: str | None = None
         evidence_reason: str | None = None
         if persist_candidate_evidence:
-            if source_snapshot is None or not audio_snapshot_matches(path, source_snapshot):
+            if source_snapshot is None:
                 detail = "source files changed while preview was running"
                 return _preview_result(
                     mode="path",
@@ -2518,7 +2506,7 @@ def preview_import_from_path(
         )
     finally:
         if temp_root is not None:
-            _remove_preview_tree(temp_root)
+            _remove_preview_tree(temp_root, cfg)
 
 
 def preview_import_from_download_log(
@@ -2560,8 +2548,7 @@ def preview_import_from_download_log(
 
     cfg = read_runtime_config()
     try:
-        resolved = _authorized_failed_root(raw_path, cfg)
-        snapshot = _snapshot_authorized_directory(resolved, cfg)
+        snapshot = snapshot_configured_quarantine_directory(raw_path, cfg)
     except (FilesystemAuthorityError, OSError) as exc:
         return _preview_result(
             mode="download_log",
@@ -2583,4 +2570,4 @@ def preview_import_from_download_log(
             _already_isolated=True,
         )
     finally:
-        _remove_preview_tree(snapshot)
+        _remove_preview_tree(snapshot, cfg)

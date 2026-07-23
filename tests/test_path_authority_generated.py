@@ -18,6 +18,7 @@ from hypothesis import strategies as st
 from lib.fs_authority import (
     FilesystemAuthorityError,
     open_directory_path,
+    open_private_processing_root,
     open_regular_relative,
 )
 
@@ -59,6 +60,26 @@ class TestGeneratedDescriptorAuthority(unittest.TestCase):
                         self.assertEqual(os.read(opened.fd, 16), b"owned")
                     finally:
                         opened.close()
+
+    @given(unsafe_ancestor=st.booleans())
+    def test_private_root_acceptance_tracks_ancestor_writability(
+        self, unsafe_ancestor: bool,
+    ) -> None:
+        with tempfile.TemporaryDirectory(dir=os.getcwd()) as parent:
+            source = os.path.join(parent, "source")
+            container = os.path.join(parent, "container")
+            processing = os.path.join(container, "processing")
+            os.mkdir(source)
+            os.mkdir(container, 0o777 if unsafe_ancestor else 0o755)
+            os.chmod(container, 0o777 if unsafe_ancestor else 0o755)
+            os.mkdir(processing, 0o700)
+            if unsafe_ancestor:
+                with self.assertRaises(FilesystemAuthorityError):
+                    with open_private_processing_root(processing, source):
+                        pass
+            else:
+                with open_private_processing_root(processing, source):
+                    pass
 
 
 if __name__ == "__main__":
