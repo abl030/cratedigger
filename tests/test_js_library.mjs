@@ -252,6 +252,23 @@ console.log('renderLibraryAlbumRow() escapes controlled metadata at the live HTM
   }
 }
 
+console.log('renderLibraryAlbumRow() escapes format metadata passed to status badges');
+{
+  const formats = '</span><img src=x onerror=alert(1)>';
+  const html = renderLibraryAlbumRow({
+    id: 42,
+    album: 'Album',
+    formats,
+    track_count: 1,
+    in_library: true,
+    beets_album_id: 42,
+  });
+  assertContains(html, 'in library · &lt;/SPAN&gt;&lt;IMG SRC=X ONERROR=ALERT(1)&gt;',
+    'format-derived badge label is escaped in the real library row');
+  assertExcludes(html, formats.toUpperCase(),
+    'format metadata cannot inject markup through the library row');
+}
+
 console.log('Library quality controls — generated critical-character property sweep');
 {
   const atoms = ['a', "'", '"', '\\', '<', '>', '&', '\n', '\u2028'];
