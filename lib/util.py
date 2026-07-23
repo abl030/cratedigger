@@ -514,22 +514,6 @@ def _plex_container_path(cfg: "CratediggerConfig", imported_path: str) -> str | 
         path_map=cfg.plex_path_map)
 
 
-def _urlopen_ssl_fallback(req: "urllib.request.Request", timeout: int = 15) -> Any:
-    """urlopen with a verify-then-unverified SSL fallback. The homelab
-    Plex/Jellyfin reverse proxies can present a cert that fails default
-    verification from the cratedigger host; the pin must still read/write, so
-    fall back to an unverified context (LAN-local, best-effort) rather than
-    silently failing."""
-    import ssl
-    try:
-        return urllib.request.urlopen(req, timeout=timeout)
-    except ssl.SSLError:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        return urllib.request.urlopen(req, timeout=timeout, context=ctx)
-
-
 def _plex_fetch_xml(cfg: "CratediggerConfig", path: str, **params: str) -> ET.Element:
     """Thin urllib GET → parsed Plex XML. Network leaf seam."""
     from urllib.parse import urlencode
@@ -537,7 +521,7 @@ def _plex_fetch_xml(cfg: "CratediggerConfig", path: str, **params: str) -> ET.El
     params["X-Plex-Token"] = cfg.resolved_plex_token() or ""
     url = f"{cfg.plex_url}{path}?{urlencode(params)}"
     req = urllib.request.Request(url, headers={"Accept": "application/xml"})
-    with _urlopen_ssl_fallback(req) as resp:
+    with urllib.request.urlopen(req, timeout=15) as resp:
         return ET.fromstring(resp.read())
 
 
@@ -548,7 +532,7 @@ def _plex_put(cfg: "CratediggerConfig", path: str, **params: str) -> int:
     params["X-Plex-Token"] = cfg.resolved_plex_token() or ""
     url = f"{cfg.plex_url}{path}?{urlencode(params)}"
     req = urllib.request.Request(url, method="PUT")
-    with _urlopen_ssl_fallback(req) as resp:
+    with urllib.request.urlopen(req, timeout=15) as resp:
         return resp.status
 
 
@@ -818,7 +802,7 @@ def _jellyfin_get_json(cfg: "CratediggerConfig", path: str, **params: str) -> An
         "X-Emby-Token": cfg.resolved_jellyfin_token() or "",
         "Accept": "application/json",
     })
-    with _urlopen_ssl_fallback(req) as resp:
+    with urllib.request.urlopen(req, timeout=15) as resp:
         return json.loads(resp.read())
 
 
@@ -832,7 +816,7 @@ def _jellyfin_post_json(cfg: "CratediggerConfig", path: str, payload: Any) -> in
             "X-Emby-Token": cfg.resolved_jellyfin_token() or "",
             "Content-Type": "application/json",
         })
-    with _urlopen_ssl_fallback(req) as resp:
+    with urllib.request.urlopen(req, timeout=15) as resp:
         return resp.status
 
 
