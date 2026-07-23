@@ -8,14 +8,21 @@ Lucene treat the tokens as title terms.
 """
 
 import json
+import string
 import unittest
 import urllib.parse
 from unittest.mock import MagicMock, patch
 
+from hypothesis import given, strategies as st
+
+from tests import _hypothesis_profiles  # noqa: F401 — registers active profile
 from lib.va_identity import MB_VA_ARTIST_MBID
 from web.mb import (
+    _quote_mb_identifier,
+    get_artist_name,
     get_artist_release_groups,
     get_release,
+    get_release_group,
     search_artists,
     search_release_groups,
 )
@@ -91,6 +98,19 @@ def _mock_urlopen_by_url(responses: dict[str, dict]):
     return patch("web.mb.urllib.request.urlopen", side_effect=_side_effect)
 
 
+def assert_identifier_urls_quoted(identifier: str, urls: list[str]) -> None:
+    """Assert representative MB builders keep one identifier in one component."""
+    quoted = _quote_mb_identifier(identifier)
+    required = (
+        f"/release/{quoted}?",
+        f"/release-group/{quoted}?",
+        f"/artist/{quoted}?",
+        f"artist={quoted}",
+    )
+    if not all(any(fragment in url for url in urls) for fragment in required):
+        raise AssertionError(f"identifier escaped its URL component: {urls!r}")
+
+
 class TestMusicBrainzIdentifierUrlQuoting(unittest.TestCase):
     def test_release_identifier_is_quoted_as_one_path_component(self) -> None:
         identifier = "release/../?inc=evil&fmt=xml"
@@ -113,6 +133,37 @@ class TestMusicBrainzIdentifierUrlQuoting(unittest.TestCase):
         self.assertEqual(len(urls), 3)
         self.assertTrue(all("artist=artist%26inc%3Devil" in url for url in urls))
         self.assertTrue(all("artist=artist&inc=evil" not in url for url in urls))
+
+    def test_identifier_url_checker_rejects_known_bad_component(self) -> None:
+        """Fault qualification: raw query syntax cannot satisfy the oracle."""
+        with self.assertRaisesRegex(AssertionError, "escaped its URL component"):
+            assert_identifier_urls_quoted(
+                "artist&inc=evil", ["https://mb.invalid/release?artist=artist&inc=evil"],
+            )
+
+    @given(identifier=st.text(
+        alphabet=string.ascii_letters + string.digits + "/?&#%= +",
+        min_size=1,
+        max_size=64,
+    ))
+    def test_arbitrary_identifier_quoting_flows_through_representative_builders(
+        self, identifier: str,
+    ) -> None:
+        """Actual path and query builders all delegate identifier quoting."""
+        with patch(
+            "web.mb._cache.memoize_meta", side_effect=lambda _key, fetch, **_kw: fetch(),
+        ), _mock_urlopen({}) as mock_urlopen, patch(
+            "web.mb._quote_mb_identifier", wraps=_quote_mb_identifier,
+        ) as quote_identifier:
+            get_release(identifier, fresh=True)
+            get_release_group(identifier)
+            get_artist_name(identifier)
+            get_artist_release_groups(identifier)
+
+        urls = [call.args[0].full_url for call in mock_urlopen.call_args_list]
+        self.assertEqual(quote_identifier.call_count, len(urls))
+        self.assertTrue(all(call.args == (identifier,) for call in quote_identifier.call_args_list))
+        assert_identifier_urls_quoted(identifier, urls)
 
 
 class TestSearchReleaseGroupsVaRewrite(unittest.TestCase):

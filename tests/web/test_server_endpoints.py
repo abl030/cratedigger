@@ -8,6 +8,7 @@ tests/web/_harness.py.
 import json
 import logging
 import os
+import string
 import sys
 import unittest
 from email.message import Message
@@ -16,6 +17,9 @@ from unittest.mock import patch
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError
 
+from hypothesis import given, strategies as st
+
+from tests import _hypothesis_profiles  # noqa: F401 — registers active profile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -48,6 +52,39 @@ def _post_reader(length: str | None, body: BytesIO):
 
     handler._error = record_error
     return handler, errors
+
+
+def assert_rejected_length_result(
+    body: object,
+    errors: list[tuple[str, int]],
+    expected_error: str,
+    expected_status: int,
+) -> None:
+    """Assert the bounded-reader rejection contract after an unreadable seam."""
+    if body is not None:
+        raise AssertionError(f"rejected body unexpectedly parsed: {body!r}")
+    if errors != [(expected_error, expected_status)]:
+        raise AssertionError(f"unexpected body-length rejection: {errors!r}")
+
+
+def assert_clean_generic_failure(
+    status: int | None,
+    data: dict | None,
+    detail: str,
+    records: list[logging.LogRecord],
+) -> None:
+    """Assert generic 500 output while retaining diagnosis in server logs."""
+    if status != 500 or data != {"error": "Internal server error"}:
+        raise AssertionError(f"unstable generic failure payload: {status=} {data=!r}")
+    if detail in json.dumps(data):
+        raise AssertionError("exception detail leaked in generic 500 body")
+    if not any(
+        record.exc_info is not None
+        and record.exc_info[1] is not None
+        and detail in str(record.exc_info[1])
+        for record in records
+    ):
+        raise AssertionError("server logs lost generic failure detail")
 
 
 class TestServerEndpoints(_FakeDbWebServerCase):
@@ -418,12 +455,46 @@ class TestServerEndpoints(_FakeDbWebServerCase):
             ("not-a-number", "Invalid Content-Length", 400),
             ("-1", "Invalid Content-Length", 400),
             (str(MAX_POST_BODY_BYTES + 1), "Request body too large", 413),
+            ("9" * 5_000, "Request body too large", 413),
         )
         for length, expected_error, expected_status in cases:
             with self.subTest(length=length):
                 handler, errors = _post_reader(length, _UnreadableBody())
-                self.assertIsNone(handler._read_post_body())
-                self.assertEqual(errors, [(expected_error, expected_status)])
+                assert_rejected_length_result(
+                    handler._read_post_body(), errors,
+                    expected_error, expected_status,
+                )
+
+    def test_rejected_length_checker_rejects_known_bad_observation(self):
+        """Fault qualification: the checker rejects a missing rejection."""
+        with self.assertRaisesRegex(AssertionError, "unexpected body-length"):
+            assert_rejected_length_result(
+                None, [], "Request body too large", 413,
+            )
+
+    @given(st.one_of(
+        st.text(
+            alphabet=string.ascii_letters + "+- ", min_size=1, max_size=80,
+        ).map(lambda raw: (raw, "Invalid Content-Length", 400)),
+        st.integers(max_value=-1).map(
+            lambda value: (str(value), "Invalid Content-Length", 400),
+        ),
+        st.integers(
+            min_value=1_048_577, max_value=10 ** 80,
+        ).map(lambda value: (str(value), "Request body too large", 413)),
+        st.integers(min_value=4_301, max_value=4_600).map(
+            lambda digits: ("9" * digits, "Request body too large", 413),
+        ),
+    ))
+    def test_arbitrary_rejected_content_lengths_do_not_consume_a_body(
+        self, case: tuple[str, str, int],
+    ) -> None:
+        """Malformed, negative, huge, and oversized lengths reject pre-read."""
+        length, expected_error, expected_status = case
+        handler, errors = _post_reader(length, _UnreadableBody())
+        assert_rejected_length_result(
+            handler._read_post_body(), errors, expected_error, expected_status,
+        )
 
     def test_post_body_reader_accepts_valid_json(self):
         handler, errors = _post_reader("16", BytesIO(b'{"id":100,"x":1}'))
@@ -766,14 +837,36 @@ class TestClientDisconnectHandling(_FakeDbWebServerCase):
             if r.levelname == "ERROR" and r.exc_info is not None
         ]
         self.assertGreaterEqual(len(errors_with_exc), 1)
-        self.assertEqual(status, 500)
-        self.assertEqual(data, {"error": "Internal server error"})
-        self.assertNotIn(secret, json.dumps(data))
-        self.assertTrue(any(
-            record.exc_info is not None and record.exc_info[1] is not None
-            and secret in str(record.exc_info[1])
-            for record in errors_with_exc
-        ))
+        assert_clean_generic_failure(status, data, secret, errors_with_exc)
+
+    def test_generic_failure_checker_rejects_known_bad_payload(self):
+        """Fault qualification: a detail-bearing 500 cannot satisfy the oracle."""
+        secret = "known bad detail"
+        with self.assertRaisesRegex(AssertionError, "unstable generic failure"):
+            assert_clean_generic_failure(
+                500, {"error": secret}, secret, [],
+            )
+
+    @given(detail_suffix=st.text(
+        alphabet=st.characters(
+            min_codepoint=0x20,
+            max_codepoint=0x7E,
+            blacklist_characters="\r\n",
+        ),
+        min_size=1,
+        max_size=80,
+    ))
+    def test_arbitrary_generic_exception_details_stay_in_logs(
+        self, detail_suffix: str,
+    ) -> None:
+        """The broad catch-all keeps arbitrary details diagnostic-only."""
+        detail = f"generic-handler-detail::{detail_suffix}"
+        self.raising_db.update_error = ValueError(detail)
+        with self.assertLogs("cratedigger-web", level="ERROR") as cm:
+            status, data = self._post_may_disconnect(
+                "/api/pipeline/set-intent", {"id": 100, "intent": "default"},
+            )
+        assert_clean_generic_failure(status, data, detail, cm.records)
 
     @patch("web.server._try_reconnect_db")
     def test_normal_post_no_reconnect_no_warning(self, mock_reconnect):

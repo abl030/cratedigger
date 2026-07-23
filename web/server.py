@@ -405,7 +405,11 @@ class Handler(BaseHTTPRequestHandler):
         if not raw_length.isascii() or not raw_length.isdecimal():
             self._error("Invalid Content-Length")
             return None
-        length = int(raw_length)
+        normalized_length = raw_length.lstrip("0") or "0"
+        if len(normalized_length) > len(str(MAX_POST_BODY_BYTES)):
+            self._error("Request body too large", 413)
+            return None
+        length = int(normalized_length)
         if length > MAX_POST_BODY_BYTES:
             self._error("Request body too large", 413)
             return None
