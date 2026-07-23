@@ -41,6 +41,8 @@ def build_import_one_command(
     quality_rank_config_json: str | None = None,
     existing_v0_probe: V0ProbeEvidence | None = None,
     quality_evidence_action_file: str | None = None,
+    beets_config_dir: str | None = None,
+    beets_python: str | None = None,
     beets_library_db_path: str | None = None,
     beets_library_root: str | None = None,
 ) -> list[str]:
@@ -95,6 +97,10 @@ def build_import_one_command(
         cmd.extend(["--beets-library-db", beets_library_db_path])
         assert beets_library_root is not None
         cmd.extend(["--beets-library-root", beets_library_root])
+    if beets_config_dir is not None:
+        cmd.extend(["--beets-config-dir", beets_config_dir])
+    if beets_python is not None:
+        cmd.extend(["--beets-python", beets_python])
     return cmd
 
 
@@ -134,6 +140,8 @@ def run_import_one(
         quality_rank_config_json=quality_rank_config_json,
         existing_v0_probe=existing_v0_probe,
         quality_evidence_action_file=quality_evidence_action_file,
+        beets_config_dir=beets_config_dir,
+        beets_python=beets_python,
         beets_library_db_path=beets_library_db_path,
         beets_library_root=beets_library_root,
     )

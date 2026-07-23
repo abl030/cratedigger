@@ -680,7 +680,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 handle.write(b"audio")
             with _patch_beets_album(tmpdir, min_bitrate=245):
                 _refresh_current_evidence_after_import(
-                    db,  # type: ignore[arg-type]
+                    db,
                     request_id=42,
                     mb_release_id="mbid-123",
                     quality_ranks=None,

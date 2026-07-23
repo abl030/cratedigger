@@ -168,6 +168,14 @@ class TestShippedBeetsWorldConfig(unittest.TestCase):
                 command[command.index("--beets-library-root") + 1],
                 str(world.library_root),
             )
+            self.assertEqual(
+                command[command.index("--beets-config-dir") + 1],
+                str(world.beets_config_dir),
+            )
+            self.assertEqual(
+                command[command.index("--beets-python") + 1],
+                "/original/pinned-python",
+            )
 
     def test_real_import_one_child_uses_explicit_pair_despite_poisoned_runtime(self) -> None:
         """The child preflight reads the scratch DB, not its ambient config."""

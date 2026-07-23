@@ -47,7 +47,7 @@ TESTS_TYPING_RATCHET_BASELINE: dict[str, dict[str, int]] = {
     "tests/test_discogs_fail_closed.py": {"any": 2},
     "tests/test_disk_coverage_service.py": {"cast": 5},
     "tests/test_disk_reaper_generated.py": {"any": 8},
-    "tests/test_dispatch_core.py": {"type_ignore": 11},
+    "tests/test_dispatch_core.py": {"type_ignore": 10},
     "tests/test_dispatch_from_db.py": {"any": 1, "cast": 1, "type_ignore": 12},
     "tests/test_dispatch_outcomes_generated.py": {"any": 2, "cast": 2, "type_ignore": 5},
     "tests/test_do_mark.py": {"type_ignore": 2},
