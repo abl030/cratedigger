@@ -73,3 +73,16 @@ class TestPlexDupesScriptBoundaries(unittest.TestCase):
             xml_file.flush()
             with self.assertRaises(DefusedXmlException):
                 self.audit._load_albums(xml_file.name)
+
+    def test_audit_rejects_plain_doctype_in_saved_and_live_xml(self) -> None:
+        """The audit has no DTD use case, including a declaration without entities."""
+        plain_doctype = b"<!DOCTYPE MediaContainer><MediaContainer/>"
+
+        with self.assertRaises(DefusedXmlException):
+            self.audit._parse_children_xml(plain_doctype)
+
+        with tempfile.NamedTemporaryFile() as xml_file:
+            xml_file.write(plain_doctype)
+            xml_file.flush()
+            with self.assertRaises(DefusedXmlException):
+                self.audit._load_albums(xml_file.name)

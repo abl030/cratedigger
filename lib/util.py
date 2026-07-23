@@ -905,7 +905,7 @@ def _plex_fetch_xml(cfg: "CratediggerConfig", path: str, **params: str) -> Eleme
     url = f"{cfg.plex_url}{path}?{urlencode(params)}"
     req = urllib.request.Request(url, headers={"Accept": "application/xml"})
     with urllib.request.urlopen(req, timeout=15) as resp:
-        return ET.fromstring(resp.read())
+        return ET.fromstring(resp.read(), forbid_dtd=True)
 
 
 def _plex_put(cfg: "CratediggerConfig", path: str, **params: str) -> int:

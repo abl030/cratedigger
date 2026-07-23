@@ -1109,6 +1109,25 @@ class TestPlexAddedAtPinClient(unittest.TestCase):
 
         mock_urlopen.assert_called_once()
 
+    @patch("lib.util.urllib.request.urlopen")
+    def test_fetch_xml_rejects_plain_doctype(self, mock_urlopen):
+        """Plex never needs a DTD, even one with no entity expansion."""
+        from lib.util import _plex_fetch_xml
+
+        response = MagicMock()
+        response.__enter__ = lambda s: s
+        response.__exit__ = MagicMock(return_value=False)
+        response.read.return_value = (
+            b"<!DOCTYPE MediaContainer><MediaContainer size=\"0\"/>")
+        mock_urlopen.return_value = response
+
+        with self.assertRaises(DefusedXmlException):
+            _plex_fetch_xml(
+                self._cfg(plex_url="https://plex.example.test", plex_token="tok"),
+                "/library/sections/3/search", query="album")
+
+        mock_urlopen.assert_called_once()
+
     def test_container_path_relative_anchored_under_container_prefix(self):
         from lib.util import _plex_container_path
         cfg = self._cfg(plex_path_map="/mnt/virtio/Music/Beets:/prom_music")

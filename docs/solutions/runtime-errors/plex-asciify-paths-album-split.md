@@ -124,28 +124,28 @@ mkdir -p /tmp/plex-asciify-cleanup
 TOKEN=$(ssh doc2 'sudo cat /run/cratedigger-secrets/PLEX_TOKEN')
 curl -sS "https://plex.ablz.au/library/sections/3/all?type=9&X-Plex-Token=$TOKEN" \
   -o /tmp/plex-asciify-cleanup/plex_albums.xml
-PLEX_TOKEN=$TOKEN python3 scripts/plex_dupes_audit.py \
+PLEX_TOKEN="$TOKEN" nix-shell --run "python3 scripts/plex_dupes_audit.py \
   /tmp/plex-asciify-cleanup/plex_albums.xml \
-  > /tmp/plex-asciify-cleanup/dupes.json
+  > /tmp/plex-asciify-cleanup/dupes.json"
 
 # 2. Dry-run review
-PLEX_TOKEN=$TOKEN python3 scripts/plex_dupes_merge.py \
-  /tmp/plex-asciify-cleanup/dupes.json
+PLEX_TOKEN="$TOKEN" nix-shell --run "python3 scripts/plex_dupes_merge.py \
+  /tmp/plex-asciify-cleanup/dupes.json"
 
 # 3. Smoke test on one group
-PLEX_TOKEN=$TOKEN python3 scripts/plex_dupes_merge.py \
-  /tmp/plex-asciify-cleanup/dupes.json --commit --limit 1
+PLEX_TOKEN="$TOKEN" nix-shell --run "python3 scripts/plex_dupes_merge.py \
+  /tmp/plex-asciify-cleanup/dupes.json --commit --limit 1"
 
 # 4. Full run
-PLEX_TOKEN=$TOKEN python3 scripts/plex_dupes_merge.py \
-  /tmp/plex-asciify-cleanup/dupes.json --commit
+PLEX_TOKEN="$TOKEN" nix-shell --run "python3 scripts/plex_dupes_merge.py \
+  /tmp/plex-asciify-cleanup/dupes.json --commit"
 
 # 5. Re-audit; expect dup_groups to drop to the legit-edition floor
 curl -sS "https://plex.ablz.au/library/sections/3/all?type=9&X-Plex-Token=$TOKEN" \
   -o /tmp/plex-asciify-cleanup/plex_albums.final.xml
-PLEX_TOKEN=$TOKEN python3 scripts/plex_dupes_audit.py \
+PLEX_TOKEN="$TOKEN" nix-shell --run "python3 scripts/plex_dupes_audit.py \
   /tmp/plex-asciify-cleanup/plex_albums.final.xml \
-  > /tmp/plex-asciify-cleanup/dupes.final.json
+  > /tmp/plex-asciify-cleanup/dupes.final.json"
 ```
 
 In this incident: 1,178 merges issued, all returned HTTP 200, 0 failures

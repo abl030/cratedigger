@@ -16,9 +16,9 @@ Defaults to DRY RUN. Pass --commit to actually issue merges.
 
 Usage:
     PLEX_TOKEN=$(ssh doc2 'sudo cat /run/cratedigger-secrets/PLEX_TOKEN') \
-      python3 merge_dupes.py dupes.after.json                  # dry-run
-    PLEX_TOKEN=$(...)            python3 merge_dupes.py dupes.after.json --commit
-    PLEX_TOKEN=$(...)            python3 merge_dupes.py dupes.after.json --commit --limit 5
+      nix-shell --run "python3 scripts/plex_dupes_merge.py dupes.after.json"  # dry-run
+    PLEX_TOKEN=$(...) nix-shell --run "python3 scripts/plex_dupes_merge.py dupes.after.json --commit"
+    PLEX_TOKEN=$(...) nix-shell --run "python3 scripts/plex_dupes_merge.py dupes.after.json --commit --limit 5"
 """
 from __future__ import annotations
 
@@ -74,7 +74,7 @@ def merge(primary_rk: str, ghost_rks: list[str], token: str) -> tuple[int, bytes
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("json_path", help="dupes.after.json from build_dupes_json.py")
+    ap.add_argument("json_path", help="dupes.after.json from plex_dupes_audit.py")
     ap.add_argument("--commit", action="store_true",
                     help="Actually issue merges. Default is dry-run.")
     ap.add_argument("--limit", type=int, default=0,

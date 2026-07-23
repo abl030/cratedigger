@@ -8,7 +8,7 @@ Inputs:
 
 Output: JSON to stdout. Run as:
   PLEX_TOKEN=$(ssh doc2 'sudo cat /run/cratedigger-secrets/PLEX_TOKEN') \
-    python3 build_dupes_json.py /tmp/plex-asciify-cleanup/plex_albums.before.xml \
+    nix-shell --run "python3 scripts/plex_dupes_audit.py /tmp/plex-asciify-cleanup/plex_albums.before.xml" \
     > /tmp/plex-asciify-cleanup/dupes.before.json
 """
 from __future__ import annotations
@@ -53,12 +53,12 @@ def fetch_children(rk: str | None, token: str) -> tuple[str | None, bytes]:
 
 
 def _parse_children_xml(raw: bytes) -> Element:
-    return ET.fromstring(raw)
+    return ET.fromstring(raw, forbid_dtd=True)
 
 
 def _load_albums(xml_path: str) -> list[_AlbumEntry]:
     albums: list[_AlbumEntry] = []
-    root = ET.parse(xml_path).getroot()
+    root = ET.parse(xml_path, forbid_dtd=True).getroot()
     assert root is not None
     for d in root.findall('.//Directory'):
         if d.get('type') != 'album':
