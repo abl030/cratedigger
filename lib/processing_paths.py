@@ -191,6 +191,16 @@ def canonical_processing_path(
     return os.path.join(slskd_download_dir, import_folder_name)
 
 
+def processing_albums_dir(processing_dir: str) -> str:
+    """Return the private canonical-album child of a processing root."""
+    return os.path.join(processing_dir, "albums")
+
+
+def processing_preview_dir(processing_dir: str) -> str:
+    """Return the private preview-scratch child of a processing root."""
+    return os.path.join(processing_dir, "preview")
+
+
 def canonical_folder_for_row(row: CanonicalFolderRow, root: str) -> str:
     """Derive one attempt-scoped canonical folder from an album row.
 

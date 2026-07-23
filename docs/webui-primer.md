@@ -48,6 +48,7 @@ Browser → https://music.ablz.au
 | `/api/wrong-matches/audio` | GET | Stream an individual wrong-match audio file with byte-range support |
 | `/api/wrong-matches/converge` | POST | Queue every wrong-match candidate within a release's loosen threshold and delete the rest |
 | `/api/wrong-matches/triage` | POST | Evidence-only full-queue Wrong Matches cleanup; requires `{"confirm_all_wrong_matches": true}` |
+| `/api/import-preview` | POST | Strict path-free preview: nested typed `values` or a positive `download_log_id`; the local CLI retains explicit path preview. |
 | `/api/import-jobs` | GET | List recent import queue jobs |
 | `/api/import-jobs/timeline` | GET | List active queued/running/recovery-required import jobs in importer order, with server-classified display fields |
 | `/api/import-jobs/<id>` | GET | Poll a single import queue job |
@@ -253,6 +254,9 @@ Browser → https://music.ablz.au
 - **Wrong Matches explorer** — expanding a candidate now shows the original
   downloaded folder names captured from the Soulseek user, a per-file explorer,
   extracted audio tags, and inline browser playback for supported audio files.
+  It walks no-follow descriptors with deterministic bounded traversal and
+  visibly labels partial/truncated results; audio streaming validates, ranges,
+  and reads the same opened descriptor.
 - **Wrong Matches cleanup** — one top-level action runs over the full Wrong
   Matches queue. It consumes existing evidence only, deletes force-mode
   confident cleanup-eligible rejects, and leaves would-import, uncertain,

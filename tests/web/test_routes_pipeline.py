@@ -1373,6 +1373,20 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(status, 400)
         self.assertIn("error", data)
 
+    def test_import_preview_http_contract_rejects_paths_extras_and_coercion(self):
+        """HTTP preview has no filesystem authority from client JSON."""
+        rejected_payloads = (
+            {"request_id": 100, "path": "/tmp/candidate"},
+            {"download_log_id": "1"},
+            {"values": {"min_bitrate": "320"}},
+            {"values": {"min_bitrate": 320}, "force": True},
+        )
+        for payload in rejected_payloads:
+            with self.subTest(payload=payload):
+                status, data = self._post("/api/import-preview", payload)
+                self.assertEqual(status, 400)
+                self.assertIn("error", data)
+
     @patch("web.routes.imports.cleanup_all_wrong_matches")
     def test_wrong_match_triage_starts_background_sweep(self, mock_cleanup):
         from lib.wrong_match_cleanup_service import WrongMatchCleanupSummary

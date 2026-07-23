@@ -24,6 +24,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from lib.config import read_runtime_config
+from lib.processing_paths import canonical_folder_for_row, processing_albums_dir
 from lib.dispatch import _record_preview_measurement_failed
 from lib.import_preview import (
     PREVIEW_VERDICT_EVIDENCE_READY,
@@ -133,13 +134,12 @@ def derive_canonical_import_folder(
     """
     from lib.config import read_runtime_config
     from lib.download_reconstruction import reconstruct_grab_list_entry
-    from lib.processing_paths import canonical_folder_for_row
 
     cfg = read_runtime_config()
     entry = reconstruct_grab_list_entry(row, state)
     if entry.import_folder:
         return entry.import_folder
-    return canonical_folder_for_row(entry, cfg.slskd_download_dir)
+    return canonical_folder_for_row(entry, processing_albums_dir(cfg.processing_dir))
 
 
 class _PreviewDBSource:

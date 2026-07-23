@@ -57,7 +57,13 @@ Pipeline DB (PostgreSQL)           |                       |
 
 Cratedigger assumes it **owns** its two neighbours. Violating either assumption can cost you data.
 
-**Give it a dedicated slskd instance.** The slskd download directory is cratedigger's managed workspace, not storage: it cancels its own stray transfers, and a disk reaper deletes any file it can positively prove it downloaded once it's a week old and no longer active, pruning the folders that empties. It deliberately does NOT touch a transfer or file it can't attribute to itself — but that's not a green light to park things there: manual downloads, temp files, that folder you were going to sort later will just sit unmanaged in cratedigger's workspace forever, invisible to it and in the way. Don't share the instance with your own Soulseek use; spin one up just for cratedigger.
+**Keep source and processing authority separate.** slskd's download directory is
+an untrusted source tree, not Cratedigger's canonical workspace. The disk reaper
+walks only that tree and removes only exact event-stamped files it can positively
+prove Cratedigger downloaded once they age out; it never derives ownership from
+canonical folders. Canonical albums and preview scratch live beneath the private
+`processingDir` root. A shared slskd instance is safe for foreign files, which
+are never reaped, but do not use the processing root for another service.
 
 **Use only the shipped beets.** The module pins a beets version and renders its config; `cratedigger-beet` is the one binary that may touch the library. If you're adopting an existing beets library, import it into the pipeline DB (`pipeline-cli add` / the web UI — the pipeline DB is the source of truth) and retire your old beets install. Pointing any other beets version or config at the same library DB can silently migrate the schema or rewrite paths on disk — database corruption and/or data loss.
 

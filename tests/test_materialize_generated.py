@@ -339,15 +339,22 @@ class TestMaterializeAttemptIsolation(unittest.TestCase):
                 prefix="cratedigger-materialize-gen-") as tmpdir:
             download_root = os.path.join(tmpdir, "downloads")
             os.makedirs(download_root)
+            processing_root = os.path.join(tmpdir, "processing")
+            os.mkdir(processing_root, 0o700)
+            os.mkdir(os.path.join(processing_root, "albums"), 0o700)
+            os.mkdir(os.path.join(processing_root, "preview"), 0o700)
             cfg = MagicMock()
             cfg.slskd_download_dir = download_root
+            cfg.processing_dir = processing_root
             cfg.beets_staging_dir = os.path.join(tmpdir, "staging")
             ctx = make_ctx_with_fake_db(FakePipelineDB(), cfg=cfg)
 
             staged_a, expected_a = self._materialize(
-                pairs_a, os.path.join(tmpdir, "src-a"), ctx, download_root)
+                pairs_a, os.path.join(download_root, "src-a"), ctx,
+                os.path.join(processing_root, "albums"))
             staged_b, expected_b = self._materialize(
-                pairs_b, os.path.join(tmpdir, "src-b"), ctx, download_root)
+                pairs_b, os.path.join(download_root, "src-b"), ctx,
+                os.path.join(processing_root, "albums"))
 
             manifests_equal = pairs_a == pairs_b
             assert_resume_stability(

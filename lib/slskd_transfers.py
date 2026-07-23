@@ -18,11 +18,8 @@ from datetime import datetime, timezone
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal, TYPE_CHECKING
 
-from lib.download_reconstruction import reconstruct_grab_list_entry
 from lib.grab_list import DownloadFile, GrabListEntry
 from lib.processing_paths import (
-    canonical_folder_for_row,
-    canonical_processing_path,
     normalize_processing_path,
     path_is_within_root,
 )
@@ -823,12 +820,11 @@ class DiskReapSummary:
     protected/unowned/young counts alone stay silent, so a steady-state
     cycle produces no log traffic. ``aborted`` marks a fail-closed cycle
     (a downloading row's ownership could not be decoded); nothing was
-    deleted. ``unowned`` (issue #571) counts aged files that carry no
+    deleted. ``unowned`` counts files that carry no
     positive ownership signal at all — never deleted, whatever their
     age; distinct from ``protected`` (an ACTIVELY downloading row's
-    canonical folder/stamped path — also never deleted, but for a
-    different reason) and ``skipped_young`` (ledger-owned but too
-    young to reap yet).
+    exact event-stamped path or quarantine tree — also never deleted) and
+    ``skipped_young`` (ledger-owned but too young to reap yet).
     """
     removed: int = 0
     removed_bytes: int = 0
@@ -848,7 +844,7 @@ class DiskReapOwnershipError(Exception):
 
     Raised when a ``downloading`` row's ``active_download_state`` is
     missing or fails to decode: the protected set would silently omit
-    that row's canonical folder and stamped files, leaving them
+    that row's stamped files, leaving them
     reap-eligible (fail-open). A deletion sweep must fail CLOSED
     instead — ``reap_disk_orphans`` aborts the entire cycle's sweep
     (zero deletions) when this is raised.
@@ -866,11 +862,9 @@ def _protected_paths_for_downloading(
     positive-ownership record of past AND present attempts).
 
     ``protected_dirs`` always includes the ``failed_imports/`` and
-    ``wrong_matches/`` quarantine subtrees plus, for every
-    ``downloading`` row, its canonical processing folder from the SAME
-    ``canonical_folder_for_row`` leaf materialize calls. The row's persisted
-    ``(username, filename)`` set scopes the attempt.
-    ``protected_files`` adds each
+    ``wrong_matches/`` quarantine subtrees. Canonical albums are private
+    processing-root children now, so the slskd reaper never derives or
+    protects a canonical folder in this shared source tree. ``protected_files`` adds each
     row's stamped ``local_path`` entries directly, as a second, independent
     guard beyond the directory-level protection.
 
@@ -907,10 +901,6 @@ def _protected_paths_for_downloading(
             if f.local_path:
                 protected_files.add(normalize_processing_path(f.local_path))
 
-        entry = reconstruct_grab_list_entry(row, state)
-        canonical = canonical_folder_for_row(entry, root)
-        protected_dirs.add(normalize_processing_path(canonical))
-
     return protected_dirs, protected_files
 
 
@@ -931,13 +921,9 @@ def _owned_paths_from_ledger(
     delete (see ``reap_disk_orphans``).
 
     ``owned_files`` is every completion-stamped ``local_path``
-    (``get_owned_local_paths``) — proves ownership of one exact file
-    independent of any folder derivation. ``owned_dirs`` is the
-    canonical processing folder for every distinct ledgered
-    ``(request_id, attempt_fingerprint)`` pair
-    (``get_owned_attempt_folders``), derived with the underlying
-    ``canonical_processing_path`` formatter also used by the active path's
-    ``canonical_folder_for_row`` leaf.
+    (``get_owned_local_paths``) — the sole positive disk ownership signal.
+    Canonical folders live outside the slskd source root, so ledger-derived
+    folder ownership no longer authorizes deleting any shared-tree entry.
 
     A request hard-deleted out from under a ledger row (no FK,
     migration 045) makes that row's FOLDER undiscoverable here (the
@@ -955,17 +941,7 @@ def _owned_paths_from_ledger(
     owned_files = {
         normalize_processing_path(p) for p in db.get_owned_local_paths()
     }
-    owned_dirs: set[str] = set()
-    for entry in db.get_owned_attempt_folders():
-        canonical = canonical_processing_path(
-            artist=entry.get("artist_name") or "",
-            title=entry.get("album_title") or "",
-            year=str(entry.get("year") or ""),
-            slskd_download_dir=root,
-            attempt_fingerprint=entry["attempt_fingerprint"],
-        )
-        owned_dirs.add(normalize_processing_path(canonical))
-    return owned_dirs, owned_files
+    return set(), owned_files
 
 
 def _is_within_any(path: str, roots: set[str]) -> bool:
@@ -999,78 +975,6 @@ def _prune_empty_upward(start_dir: str, root: str) -> int:
     return pruned
 
 
-def _prune_stale_empty_dirs(
-    root: str,
-    protected_dirs: set[str],
-    owned_dirs: set[str],
-    threshold: float,
-) -> int:
-    """Remove directories that were already empty — never touched by this
-    sweep's file removals — and are older than ``threshold`` by their own
-    mtime.
-
-    Restricted to ``owned_dirs`` (issue #571 good-citizen doctrine): an
-    already-empty directory cratedigger has no positive ownership record
-    for is FOREIGN and stays, however old and however empty — the same
-    "no positive signal, no deletion" rule the file-level sweep in
-    ``reap_disk_orphans`` applies. A directory this sweep itself just
-    emptied is pruned by ``_prune_empty_upward`` instead (that path is
-    inherently owned: only owned+aged files get deleted in the first
-    place), so this function only ever needs to catch an already-empty
-    owned canonical folder — e.g. one every file was consumed out of by
-    import before this cycle's sweep ran.
-
-    There are no files to age-gate in an already-empty directory, so its
-    own mtime is the safety net that stops a folder slskd only just
-    created (and hasn't populated yet) from being reaped mid-download.
-    Walks deepest-first so a chain of nested empty directories collapses
-    in one pass.
-    """
-    candidates: list[str] = []
-    root_norm = normalize_processing_path(root)
-    for dirpath, dirnames, _filenames in os.walk(root, topdown=True):
-        norm_dirpath = normalize_processing_path(dirpath)
-        if _is_within_any(norm_dirpath, protected_dirs):
-            dirnames[:] = []
-            continue
-        dirnames[:] = [
-            d for d in dirnames
-            if not _is_within_any(
-                normalize_processing_path(os.path.join(dirpath, d)),
-                protected_dirs)
-        ]
-        if norm_dirpath == root_norm:
-            continue
-        if not _is_within_any(norm_dirpath, owned_dirs):
-            continue
-        candidates.append(dirpath)
-
-    candidates.sort(key=lambda p: p.count(os.sep), reverse=True)
-
-    pruned = 0
-    for dirpath in candidates:
-        if not os.path.isdir(dirpath):
-            continue  # Already removed as a side effect of a deeper prune.
-        try:
-            with os.scandir(dirpath) as entries:
-                if any(True for _ in entries):
-                    continue
-        except OSError:
-            continue
-        try:
-            mtime = os.path.getmtime(dirpath)
-        except OSError:
-            continue
-        if mtime >= threshold:
-            continue
-        try:
-            os.rmdir(dirpath)
-        except OSError:
-            continue
-        pruned += 1
-    return pruned
-
-
 def reap_disk_orphans(ctx: CratediggerContext) -> DiskReapSummary:
     """Phase 0 sweep (issue #550 defect 3, flipped to positive ownership
     by issue #571's good-citizen doctrine): reap completed-but-unconsumed
@@ -1087,13 +991,8 @@ def reap_disk_orphans(ctx: CratediggerContext) -> DiskReapSummary:
     A file is reap-eligible ONLY when it carries a positive ownership
     signal:
 
-    (a) it matches a ledgered, event-stamped ``local_path``
-        (``get_owned_local_paths`` — migration 045 T1/T2), OR
-    (b) it lies under a canonical processing folder derived from a
-        ledgered ``attempt_fingerprint`` (``get_owned_attempt_folders``
-        + ``canonical_processing_path`` — covers past attempts whose
-        request has since left ``downloading``, not just the current
-        one).
+    (a) it exactly matches a ledgered, event-stamped ``local_path``
+        (``get_owned_local_paths`` — migration 045 T1/T2).
 
     Anything else — a file this instance never ledgered, a human's own
     download, pre-#571 debris from before migration 045 shipped — is
@@ -1114,15 +1013,12 @@ def reap_disk_orphans(ctx: CratediggerContext) -> DiskReapSummary:
     * the ``failed_imports/`` and ``wrong_matches/`` quarantine trees
       (cratedigger's own trees by construction; their lifecycle is untouched
       by this reaper), and
-    * a ``downloading`` row's CURRENT canonical folder/stamped paths
-      (retry-safe: an abandoned earlier attempt of the SAME request is
-      ledger-owned but inactive, and IS reap-eligible once aged — the
-      still-live retry's folder never is).
+    * a ``downloading`` row's exact event-stamped paths.
 
     Individually removed files' now-empty parent directories are pruned
     afterward (never a recursive folder ``rmtree`` — CLAUDE.md); an
-    already-empty directory with no positive ownership record stays
-    untouched, however old (``_prune_stale_empty_dirs``).
+    already-empty directory stays untouched, however old because a ledger
+    row proves a file, never directory ownership.
 
     Retention/residency ordering (binding, PR #585 review amendment):
     ``prune_transfer_ledger``'s retention window (90 days; accepted ownership
@@ -1158,7 +1054,7 @@ def reap_disk_orphans(ctx: CratediggerContext) -> DiskReapSummary:
             "downloading row; skipping the entire sweep this cycle "
             "(zero deletions) — fail-closed")
         return DiskReapSummary(aborted=True)
-    owned_dirs, owned_files = _owned_paths_from_ledger(root, db)
+    _owned_dirs, owned_files = _owned_paths_from_ledger(root, db)
 
     threshold = time.time() - ORPHAN_MIN_AGE_DAYS * 86400
     removed = 0
@@ -1189,7 +1085,6 @@ def reap_disk_orphans(ctx: CratediggerContext) -> DiskReapSummary:
                 continue
             owned = (
                 norm_path in owned_files
-                or _is_within_any(norm_path, owned_dirs)
             )
             if not owned:
                 # No positive ownership signal — never delete, whatever
@@ -1224,7 +1119,6 @@ def reap_disk_orphans(ctx: CratediggerContext) -> DiskReapSummary:
     pruned = 0
     for touched_dir in touched_dirs:
         pruned += _prune_empty_upward(touched_dir, root)
-    pruned += _prune_stale_empty_dirs(root, protected_dirs, owned_dirs, threshold)
 
     summary = DiskReapSummary(
         removed=removed,

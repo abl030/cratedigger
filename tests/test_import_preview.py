@@ -49,6 +49,15 @@ from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_album_quality_evidence, make_request_row
 
 
+_PREVIEW_RUNTIME = tempfile.TemporaryDirectory()
+_PREVIEW_SOURCE_ROOT = os.path.join(_PREVIEW_RUNTIME.name, "slskd")
+_PREVIEW_PROCESSING_ROOT = os.path.join(_PREVIEW_RUNTIME.name, "processing")
+os.mkdir(_PREVIEW_SOURCE_ROOT)
+os.mkdir(_PREVIEW_PROCESSING_ROOT, 0o700)
+os.mkdir(os.path.join(_PREVIEW_PROCESSING_ROOT, "albums"), 0o700)
+os.mkdir(os.path.join(_PREVIEW_PROCESSING_ROOT, "preview"), 0o700)
+
+
 def _preview_config() -> CratediggerConfig:
     ini = configparser.ConfigParser()
     ini["Beets Validation"] = {
@@ -56,7 +65,18 @@ def _preview_config() -> CratediggerConfig:
         "audio_check": "off",
     }
     ini["Pipeline DB"] = {"enabled": "true"}
+    ini["Slskd"] = {"download_dir": _PREVIEW_SOURCE_ROOT}
+    ini["Paths"] = {"processing_dir": _PREVIEW_PROCESSING_ROOT}
     return CratediggerConfig.from_ini(ini)
+
+
+def _preview_runtime_config(**overrides: Any) -> CratediggerConfig:
+    """Direct-test config with the same private-root contract as Nix."""
+    return CratediggerConfig(
+        slskd_download_dir=_PREVIEW_SOURCE_ROOT,
+        processing_dir=_PREVIEW_PROCESSING_ROOT,
+        **overrides,
+    )
 
 
 class TestSpectralAuditMerge(unittest.TestCase):
@@ -1268,7 +1288,7 @@ class TestImportPreviewPath(unittest.TestCase):
                 return_value=self._beets_current(source),
             ), patch(
                 "lib.config.read_runtime_config",
-                return_value=CratediggerConfig(
+                return_value=_preview_runtime_config(
                     beets_harness_path="/fake/harness/run_beets_harness.sh",
                     pipeline_db_enabled=True,
                 ),
@@ -1546,7 +1566,7 @@ class TestImportPreviewPath(unittest.TestCase):
         try:
             with patch(
                 "lib.config.read_runtime_config",
-                return_value=CratediggerConfig(
+                return_value=_preview_runtime_config(
                     beets_harness_path="/fake/harness/run_beets_harness.sh",
                     pipeline_db_enabled=True,
                 ),
@@ -1622,7 +1642,7 @@ class TestImportPreviewPath(unittest.TestCase):
         try:
             with patch(
                 "lib.config.read_runtime_config",
-                return_value=CratediggerConfig(
+                return_value=_preview_runtime_config(
                     beets_harness_path="/fake/harness/run_beets_harness.sh",
                     pipeline_db_enabled=True,
                 ),
@@ -1738,7 +1758,7 @@ class TestImportPreviewPath(unittest.TestCase):
                     ))
                     with patch(
                         "lib.config.read_runtime_config",
-                        return_value=CratediggerConfig(
+                        return_value=_preview_runtime_config(
                             beets_harness_path="/fake/harness/run_beets_harness.sh",
                             pipeline_db_enabled=True,
                         ),
@@ -1799,7 +1819,7 @@ class TestImportPreviewPath(unittest.TestCase):
         before = sorted(os.listdir(source))
         try:
             with patch("lib.config.read_runtime_config",
-                       return_value=CratediggerConfig(
+                       return_value=_preview_runtime_config(
                            beets_harness_path="/fake/harness/run_beets_harness.sh",
                            beets_directory="/srv/music/Beets",
                            pipeline_db_enabled=True,
@@ -1897,7 +1917,7 @@ class TestImportPreviewPath(unittest.TestCase):
         source = self._source_dir()
         try:
             with patch("lib.config.read_runtime_config",
-                       return_value=CratediggerConfig(
+                       return_value=_preview_runtime_config(
                            beets_harness_path="/fake/harness/run_beets_harness.sh",
                            pipeline_db_enabled=True,
                        )), \
@@ -1954,7 +1974,7 @@ class TestImportPreviewPath(unittest.TestCase):
         source = self._source_dir()
         try:
             with patch("lib.config.read_runtime_config",
-                       return_value=CratediggerConfig(
+                       return_value=_preview_runtime_config(
                            beets_harness_path="/fake/harness/run_beets_harness.sh",
                            pipeline_db_enabled=True,
                        )), \
@@ -2018,7 +2038,7 @@ class TestImportPreviewPath(unittest.TestCase):
         try:
             with patch(
                 "lib.config.read_runtime_config",
-                return_value=CratediggerConfig(
+                return_value=_preview_runtime_config(
                     beets_harness_path="/fake/harness/run_beets_harness.sh",
                     pipeline_db_enabled=True,
                     verified_lossless_target="opus 128",
@@ -2094,7 +2114,7 @@ class TestImportPreviewPath(unittest.TestCase):
         )
         try:
             with patch("lib.config.read_runtime_config",
-                       return_value=CratediggerConfig(
+                       return_value=_preview_runtime_config(
                            beets_harness_path="/fake/harness/run_beets_harness.sh",
                            pipeline_db_enabled=True)), \
                  patch("lib.import_preview.inspect_local_files",
@@ -2155,7 +2175,7 @@ class TestImportPreviewPath(unittest.TestCase):
         try:
             with patch(
                 "lib.config.read_runtime_config",
-                return_value=CratediggerConfig(
+                return_value=_preview_runtime_config(
                     beets_harness_path="/fake/harness/run_beets_harness.sh",
                     pipeline_db_enabled=True,
                 ),
@@ -2255,7 +2275,7 @@ class TestImportPreviewPath(unittest.TestCase):
                 return_value=self._beets_current(source),
             ), patch(
                 "lib.config.read_runtime_config",
-                return_value=CratediggerConfig(
+                return_value=_preview_runtime_config(
                     beets_harness_path="/fake/harness/run_beets_harness.sh",
                     pipeline_db_enabled=True,
                 ),
@@ -2297,7 +2317,7 @@ class TestImportPreviewPath(unittest.TestCase):
             spectral_audit=audit,
         )
         common = (
-            patch("lib.config.read_runtime_config", return_value=CratediggerConfig(
+            patch("lib.config.read_runtime_config", return_value=_preview_runtime_config(
                 beets_harness_path="/fake/harness/run_beets_harness.sh",
                 pipeline_db_enabled=True)),
             patch("lib.import_preview.inspect_local_files",
@@ -2356,7 +2376,7 @@ class TestImportPreviewPath(unittest.TestCase):
 
         try:
             with patch("lib.config.read_runtime_config",
-                       return_value=CratediggerConfig(
+                       return_value=_preview_runtime_config(
                            beets_harness_path="/fake/harness/run_beets_harness.sh",
                            pipeline_db_enabled=True,
                        )), \
@@ -2402,7 +2422,7 @@ class TestImportPreviewPath(unittest.TestCase):
         source = self._source_dir()
         try:
             with patch("lib.config.read_runtime_config",
-                       return_value=CratediggerConfig(
+                       return_value=_preview_runtime_config(
                            beets_harness_path="/fake/harness/run_beets_harness.sh",
                            pipeline_db_enabled=True,
                        )), \
@@ -2444,7 +2464,7 @@ class TestImportPreviewPath(unittest.TestCase):
         source = self._source_dir()
         try:
             with patch("lib.config.read_runtime_config",
-                       return_value=CratediggerConfig(
+                       return_value=_preview_runtime_config(
                            beets_harness_path="/fake/harness/run_beets_harness.sh",
                            pipeline_db_enabled=True,
                        )), \
@@ -2487,7 +2507,7 @@ class TestImportPreviewPath(unittest.TestCase):
         source = self._source_dir()
         try:
             with patch("lib.config.read_runtime_config",
-                       return_value=CratediggerConfig(
+                       return_value=_preview_runtime_config(
                            beets_harness_path="/fake/harness/run_beets_harness.sh",
                            pipeline_db_enabled=True,
                        )), \
@@ -2550,7 +2570,7 @@ class TestImportPreviewPath(unittest.TestCase):
         source = self._source_dir()
         try:
             with patch("lib.config.read_runtime_config",
-                       return_value=CratediggerConfig(
+                       return_value=_preview_runtime_config(
                            beets_harness_path="/fake/harness/run_beets_harness.sh",
                            pipeline_db_enabled=True,
                        )), \

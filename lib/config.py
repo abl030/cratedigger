@@ -186,6 +186,9 @@ class CratediggerConfig:
 
     # --- Paths (derived from args) ---
     var_dir: str = "."
+    # Private, Cratedigger-owned processing root.  The module supplies an
+    # absolute value; the default keeps direct/test construction useful.
+    processing_dir: str = "./processing"
     lock_file_path: str = ""
     config_file_path: str = ""
 
@@ -364,6 +367,9 @@ class CratediggerConfig:
             jellyfin_path_map=get("Jellyfin", "path_map") or None,
             # Paths
             var_dir=var_dir,
+            processing_dir=get(
+                "Paths", "processing_dir", os.path.join(var_dir, "processing"),
+            ),
             lock_file_path=os.path.join(var_dir, ".cratedigger.lock"),
             config_file_path=os.path.join(config_dir, "config.ini"),
         )

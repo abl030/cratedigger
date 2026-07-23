@@ -11,7 +11,9 @@ import os
 import sys
 import tempfile
 import unittest
+from io import IOBase
 from unittest.mock import patch
+from types import SimpleNamespace
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError
 
@@ -144,6 +146,17 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         row = self.db.get_request(request_id)
         assert row is not None
         self.db.seed_request({**row, **overrides})
+
+    def _wrong_match_runtime_config(self, slskd_root: str):
+        """Point descriptor-rooted explorer tests at their temp quarantine."""
+        return patch(
+            "web.wrong_match_file_service.read_runtime_config",
+            return_value=SimpleNamespace(
+                slskd_download_dir=slskd_root,
+                beets_staging_dir=os.path.join(slskd_root, "Incoming"),
+                processing_dir=os.path.join(slskd_root, "processing"),
+            ),
+        )
 
     def _seed_wrong_match(
         self, *,
@@ -433,20 +446,23 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
 
     def test_wrong_match_explorer_lists_audio_files_and_source_dirs(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            track_path = os.path.join(tmpdir, "01 - Track.mp3")
+            failed_dir = os.path.join(tmpdir, "failed_imports", "Test")
+            os.makedirs(failed_dir)
+            track_path = os.path.join(failed_dir, "01 - Track.mp3")
             with open(track_path, "wb") as handle:
                 handle.write(b"fake mp3 bytes")
 
             log_id = self.db.log_download(
                 100, outcome="rejected",
                 validation_result={
-                    "failed_path": tmpdir,
+                    "failed_path": failed_dir,
                     "source_dirs": ["baduser\\Artist\\Album"],
                 },
             )
 
-            status, data = self._get(
-                f"/api/wrong-matches/explorer?download_log_id={log_id}")
+            with self._wrong_match_runtime_config(tmpdir):
+                status, data = self._get(
+                    f"/api/wrong-matches/explorer?download_log_id={log_id}")
 
         self.assertEqual(status, 200)
         self.assertEqual(data["status"], "ok")
@@ -460,13 +476,15 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
 
     def test_wrong_match_explorer_normalizes_raw_id3_tags_and_skips_artwork_frames(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            track_path = os.path.join(tmpdir, "01 - Track.mp3")
+            failed_dir = os.path.join(tmpdir, "failed_imports", "Test")
+            os.makedirs(failed_dir)
+            track_path = os.path.join(failed_dir, "01 - Track.mp3")
             with open(track_path, "wb") as handle:
                 handle.write(b"fake mp3 bytes")
 
             log_id = self.db.log_download(
                 100, outcome="rejected",
-                validation_result={"failed_path": tmpdir},
+                validation_result={"failed_path": failed_dir},
             )
 
             class _FakeInfo:
@@ -486,7 +504,8 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
                 }
                 info = _FakeInfo()
 
-            with patch("mutagen.File", return_value=_FakeAudio()):
+            with patch("mutagen.File", return_value=_FakeAudio()), \
+                    self._wrong_match_runtime_config(tmpdir):
                 status, data = self._get(
                     f"/api/wrong-matches/explorer?download_log_id={log_id}")
 
@@ -506,14 +525,16 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
 
     def test_wrong_match_explorer_returns_files_in_beets_matched_order(self):
         with tempfile.TemporaryDirectory() as tmpdir:
+            failed_dir = os.path.join(tmpdir, "failed_imports", "Test")
+            os.makedirs(failed_dir)
             for filename in ("a.mp3", "b.mp3", "c.mp3"):
-                with open(os.path.join(tmpdir, filename), "wb") as handle:
+                with open(os.path.join(failed_dir, filename), "wb") as handle:
                     handle.write(b"fake mp3 bytes")
 
             log_id = self.db.log_download(
                 100, outcome="rejected",
                 validation_result={
-                    "failed_path": tmpdir,
+                    "failed_path": failed_dir,
                     "candidates": [{
                         "is_target": True,
                         "mapping": [
@@ -538,8 +559,12 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
                 length = 181.0
                 bitrate = 320000
 
-            def _fake_audio(path: str):
-                basename = os.path.basename(path)
+            def _fake_audio(source: object, **_kwargs: object):
+                # Explorer deliberately hands Mutagen the already-open fd;
+                # recover the test fixture basename from that descriptor.
+                assert isinstance(source, IOBase)
+                basename = os.path.basename(os.readlink(
+                    f"/proc/self/fd/{source.fileno()}"))
 
                 class _FakeAudio:
                     info = _FakeInfo()
@@ -552,7 +577,8 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
 
                 return _FakeAudio()
 
-            with patch("mutagen.File", side_effect=_fake_audio):
+            with patch("mutagen.File", side_effect=_fake_audio), \
+                    self._wrong_match_runtime_config(tmpdir):
                 status, data = self._get(
                     f"/api/wrong-matches/explorer?download_log_id={log_id}")
 
@@ -576,49 +602,71 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         import os as _os
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            track_path = _os.path.join(tmpdir, "01 - Track.mp3")
+            failed_dir = _os.path.join(tmpdir, "failed_imports", "Test")
+            _os.makedirs(failed_dir)
+            track_path = _os.path.join(failed_dir, "01 - Track.mp3")
             with open(track_path, "wb") as handle:
                 handle.write(b"abcdef")
 
             log_id = self.db.log_download(
                 100, outcome="rejected",
-                validation_result={"failed_path": tmpdir},
+                validation_result={"failed_path": failed_dir},
             )
 
             conn = http.client.HTTPConnection(
                 "127.0.0.1", self.port, timeout=10)
             try:
-                # Pretend the file is 4 bytes longer than it is — the
-                # stream loop hits EOF early, leaving remaining > 0.
-                with patch("web.routes.imports.os.path.getsize",
-                           return_value=10):
-                    conn.request(
-                        "GET",
-                        "/api/wrong-matches/audio"
-                        f"?download_log_id={log_id}"
-                        "&path=01%20-%20Track.mp3",
+                # Pretend the already-open file was four bytes longer than
+                # it is.  The route intentionally reads and serves one FD;
+                # this patch exposes the short-read close branch without
+                # reintroducing a path/stat race.
+                from lib.fs_authority import (
+                    OpenedRegularFile,
+                    open_directory_path,
+                    open_regular_relative,
+                )
+                with open_directory_path(failed_dir) as root_fd:
+                    actual = open_regular_relative(root_fd, "01 - Track.mp3")
+                    opened = OpenedRegularFile(
+                        fd=actual.fd,
+                        parent_fd=actual.parent_fd,
+                        name=actual.name,
+                        stat_result=os.stat_result(
+                            (0, 0, 0, 0, 0, 0, 10, 0, 0, 0)),
                     )
-                    resp = conn.getresponse()
-                    self.assertEqual(resp.status, 200)
-                    self.assertEqual(
-                        resp.getheader("Content-Length"), "10")
-                    # Server closed after the short body: the client
-                    # sees an incomplete read promptly rather than
-                    # blocking for 4 bytes that will never come.
-                    with self.assertRaises(http.client.IncompleteRead):
-                        resp.read()
+                    with patch(
+                        "web.routes.imports.resolve_wrong_match_stream_file",
+                        return_value=(opened, "audio/mpeg"),
+                    ):
+                        conn.request(
+                            "GET",
+                            "/api/wrong-matches/audio"
+                            f"?download_log_id={log_id}"
+                            "&path=01%20-%20Track.mp3",
+                        )
+                        resp = conn.getresponse()
+                        self.assertEqual(resp.status, 200)
+                        self.assertEqual(
+                            resp.getheader("Content-Length"), "10")
+                        # Server closed after the short body: the client
+                        # sees an incomplete read promptly rather than
+                        # blocking for 4 bytes that will never come.
+                        with self.assertRaises(http.client.IncompleteRead):
+                            resp.read()
             finally:
                 conn.close()
 
     def test_wrong_match_audio_supports_byte_ranges(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            track_path = os.path.join(tmpdir, "01 - Track.mp3")
+            failed_dir = os.path.join(tmpdir, "failed_imports", "Test")
+            os.makedirs(failed_dir)
+            track_path = os.path.join(failed_dir, "01 - Track.mp3")
             with open(track_path, "wb") as handle:
                 handle.write(b"abcdef")
 
             log_id = self.db.log_download(
                 100, outcome="rejected",
-                validation_result={"failed_path": tmpdir},
+                validation_result={"failed_path": failed_dir},
             )
 
             req = Request(
@@ -626,11 +674,12 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
                 f"?download_log_id={log_id}&path=01%20-%20Track.mp3",
                 headers={"Range": "bytes=1-3"},
             )
-            with urlopen(req) as resp:
-                body = resp.read()
-                status = resp.status
-                content_range = resp.headers["Content-Range"]
-                accept_ranges = resp.headers["Accept-Ranges"]
+            with self._wrong_match_runtime_config(tmpdir):
+                with urlopen(req) as resp:
+                    body = resp.read()
+                    status = resp.status
+                    content_range = resp.headers["Content-Range"]
+                    accept_ranges = resp.headers["Accept-Ranges"]
 
         self.assertEqual(status, 206)
         self.assertEqual(body, b"bcd")

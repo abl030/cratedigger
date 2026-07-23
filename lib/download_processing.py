@@ -15,7 +15,7 @@ from lib import download_materialization
 from lib import download_validation
 from lib.dispatch import DispatchCoreFn, DispatchOutcome
 from lib.grab_list import GrabListEntry
-from lib.processing_paths import canonical_folder_for_row
+from lib.processing_paths import canonical_folder_for_row, processing_albums_dir
 from lib.staged_album import StagedAlbum
 
 if TYPE_CHECKING:
@@ -87,7 +87,7 @@ def process_completed_album(
         album_data,
         default_path=canonical_folder_for_row(
             album_data,
-            ctx.cfg.slskd_download_dir,
+            processing_albums_dir(ctx.cfg.processing_dir),
         ),
     )
     materialized = download_materialization._materialize_processing_dir(

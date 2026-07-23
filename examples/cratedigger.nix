@@ -47,6 +47,10 @@
       apiKeyFile = "/var/lib/secrets/slskd-api-key";
       downloadDir = "/srv/music/slskd-downloads";
     };
+    # Private high-capacity processing belongs beneath a root-owned parent,
+    # never in the group-writable slskd tree. Keep the service identities
+    # distinct; Cratedigger needs only the slskd download-directory group.
+    processingDir = "/srv/cratedigger-processing";
 
     # --- Database: provisioned locally, peer auth, zero passwords -----
     pipelineDb.createLocally = true;
@@ -102,13 +106,14 @@
   #   isSystemUser = true;
   #   group = "users";                     # shared consumer group (Jellyfin's gid)
   #   extraGroups = [
-  #     "slskd"           # slskd's download-dir group — reap/move in-flight files
+  #     "slskd"           # slskd's download-dir group — source read/unlink only
   #     "cratedigger-ops" # whatever group owns /run/cratedigger-secrets/*
   #   ];
   # };
   #
   # services.cratedigger.user = "cratedigger";
   # services.cratedigger.group = "users";
+  # services.cratedigger.processingDir = "/srv/cratedigger-processing";
   #
   # Give the library roots a setgid layout so new album/artist dirs inherit
   # the `users` group automatically — plain 0775 strips the setgid bit and

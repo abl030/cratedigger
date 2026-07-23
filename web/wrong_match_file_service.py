@@ -5,6 +5,7 @@ from __future__ import annotations
 import mimetypes
 import os
 import re
+import stat
 from urllib.parse import quote
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence, TypeGuard
@@ -13,9 +14,19 @@ from lib.json_narrow import (
     is_object_list as _is_object_list,
     is_str_object_dict as _is_str_object_dict,
 )
-from lib.processing_paths import normalize_source_dirs, path_is_within_root
+from lib.config import read_runtime_config
+from lib.fs_authority import (
+    FilesystemAuthorityError,
+    OpenedRegularFile,
+    open_directory_path,
+    open_regular_relative,
+)
+from lib.processing_paths import (
+    normalize_source_dirs,
+    path_is_within_root,
+    processing_albums_dir,
+)
 from lib.quality import AUDIO_EXTENSIONS_DOTTED
-from lib.util import resolve_failed_path
 from lib.validation_envelope import (
     ValidationResultEnvelope,
     decode_validation_envelope,
@@ -92,6 +103,10 @@ _TXXX_TAG_ALIASES: dict[str, str] = {
     "musicbrainz work id": "musicbrainz_workid",
 }
 
+_EXPLORER_MAX_DEPTH = 32
+_EXPLORER_MAX_FILES = 5000
+_EXPLORER_MAX_BYTES = 100 * 1024**3
+
 
 def target_candidate(
     validation_result: ValidationResultEnvelope,
@@ -116,10 +131,27 @@ def _resolved_wrong_match_root(
 ) -> tuple[ValidationResultEnvelope, str]:
     validation_result = decode_validation_envelope(entry.get("validation_result"))
     failed_path = validation_result.failed_path or ""
-    resolved_path = resolve_failed_path(failed_path)
-    if resolved_path is None:
-        raise FileNotFoundError(f"Wrong-match files not found: {failed_path or '<missing>'}")
-    return validation_result, resolved_path
+    cfg = read_runtime_config()
+    roots = (
+        os.path.join(cfg.slskd_download_dir, "failed_imports"),
+        os.path.join(cfg.slskd_download_dir, "wrong_matches"),
+        os.path.join(cfg.beets_staging_dir, "failed_imports"),
+        os.path.join(processing_albums_dir(cfg.processing_dir), "failed_imports"),
+        os.path.join(processing_albums_dir(cfg.processing_dir), "wrong_matches"),
+    )
+    candidates = [failed_path] if os.path.isabs(failed_path) else [
+        os.path.join(root, failed_path) for root in roots
+    ]
+    for candidate in candidates:
+        if not any(path_is_within_root(candidate, root) for root in roots):
+            continue
+        try:
+            with open_directory_path(candidate):
+                pass
+        except FilesystemAuthorityError:
+            continue
+        return validation_result, os.path.abspath(candidate)
+    raise FileNotFoundError(f"Wrong-match files not found or unauthorized: {failed_path or '<missing>'}")
 
 
 def _audio_mime_type(path: str) -> str:
@@ -334,7 +366,7 @@ def _reorder_files_by_match(
     return reordered, "matched"
 
 
-def _inspect_audio_file(path: str) -> tuple[dict[str, list[str]], float | None, int | None]:
+def _inspect_audio_file(handle: int) -> tuple[dict[str, list[str]], float | None, int | None]:
     try:
         # getattr (not `from mutagen import File`) keeps this Any-typed:
         # mutagen's File() factory has an untyped `filething` parameter and
@@ -347,7 +379,8 @@ def _inspect_audio_file(path: str) -> tuple[dict[str, list[str]], float | None, 
         return {}, None, None
 
     try:
-        audio = _mutagen_file(path, easy=True)
+        with os.fdopen(os.dup(handle), "rb") as source:
+            audio = _mutagen_file(source, easy=True)
     except Exception:
         return {}, None, None
     if audio is None:
@@ -383,46 +416,79 @@ def build_wrong_match_explorer(
     validation_result, root = _resolved_wrong_match_root(entry)
     files: list[dict[str, object]] = []
     other_file_count = 0
-
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames.sort()
-        filenames.sort()
-        for filename in filenames:
-            abs_path = os.path.join(dirpath, filename)
-            ext = os.path.splitext(filename)[1].lower()
-            if ext not in AUDIO_EXTENSIONS_DOTTED:
-                other_file_count += 1
-                continue
-
-            rel_path = os.path.relpath(abs_path, root).replace(os.sep, "/")
-            tags, duration_seconds, bitrate_bps = _inspect_audio_file(abs_path)
-            try:
-                size_bytes = os.path.getsize(abs_path)
-            except OSError:
-                size_bytes = None
-            playable = ext in _PLAYABLE_AUDIO_EXTENSIONS
-            files.append({
-                "relative_path": rel_path,
-                "filename": filename,
-                "directory": os.path.dirname(rel_path),
-                "format": ext[1:].upper(),
-                "mime_type": _audio_mime_type(abs_path),
-                "playable": playable,
-                "duration_seconds": duration_seconds,
-                "bitrate_kbps": (
-                    int(round(bitrate_bps / 1000))
-                    if isinstance(bitrate_bps, int) and bitrate_bps > 0
-                    else None
-                ),
-                "size_bytes": size_bytes,
-                "tags": tags,
-                "stream_url": (
-                    "/api/wrong-matches/audio"
-                    f"?download_log_id={int(download_log_id)}"
-                    f"&path={quote(rel_path)}"
-                    if playable else None
-                ),
-            })
+    scanned_file_count = 0
+    scanned_bytes = 0
+    truncated_reason: str | None = None
+    with open_directory_path(root) as root_fd:
+        stack: list[tuple[int, str, int]] = [(os.dup(root_fd), "", 0)]
+        try:
+            while stack and truncated_reason is None:
+                directory_fd, relative_dir, depth = stack.pop()
+                try:
+                    entries = sorted(list(os.scandir(directory_fd)), key=lambda entry: entry.name)
+                    for directory_entry in entries:
+                        if directory_entry.is_symlink():
+                            continue
+                        relative = f"{relative_dir}/{directory_entry.name}".strip("/")
+                        try:
+                            info = directory_entry.stat(follow_symlinks=False)
+                        except OSError:
+                            continue
+                        if stat.S_ISDIR(info.st_mode):
+                            if depth >= _EXPLORER_MAX_DEPTH:
+                                truncated_reason = "depth_limit"
+                                break
+                            try:
+                                child_fd = os.open(
+                                    directory_entry.name,
+                                    os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                                    dir_fd=directory_fd,
+                                )
+                            except OSError:
+                                continue
+                            stack.append((child_fd, relative, depth + 1))
+                            continue
+                        if not stat.S_ISREG(info.st_mode):
+                            continue
+                        if scanned_file_count >= _EXPLORER_MAX_FILES:
+                            truncated_reason = "file_limit"
+                            break
+                        if scanned_bytes + info.st_size > _EXPLORER_MAX_BYTES:
+                            truncated_reason = "byte_limit"
+                            break
+                        scanned_file_count += 1
+                        scanned_bytes += info.st_size
+                        ext = os.path.splitext(directory_entry.name)[1].lower()
+                        if ext not in AUDIO_EXTENSIONS_DOTTED:
+                            other_file_count += 1
+                            continue
+                        try:
+                            opened = open_regular_relative(directory_fd, directory_entry.name)
+                        except FilesystemAuthorityError:
+                            continue
+                        try:
+                            tags, duration_seconds, bitrate_bps = _inspect_audio_file(opened.fd)
+                        finally:
+                            opened.close()
+                        playable = ext in _PLAYABLE_AUDIO_EXTENSIONS
+                        files.append({
+                            "relative_path": relative,
+                            "filename": directory_entry.name,
+                            "directory": os.path.dirname(relative),
+                            "format": ext[1:].upper(),
+                            "mime_type": _audio_mime_type(directory_entry.name),
+                            "playable": playable,
+                            "duration_seconds": duration_seconds,
+                            "bitrate_kbps": int(round(bitrate_bps / 1000)) if isinstance(bitrate_bps, int) and bitrate_bps > 0 else None,
+                            "size_bytes": info.st_size,
+                            "tags": tags,
+                            "stream_url": "/api/wrong-matches/audio" f"?download_log_id={int(download_log_id)}" f"&path={quote(relative)}" if playable else None,
+                        })
+                finally:
+                    os.close(directory_fd)
+        finally:
+            for pending_fd, _relative, _depth in stack:
+                os.close(pending_fd)
 
     files, ordered_by = _reorder_files_by_match(files, validation_result)
 
@@ -434,6 +500,10 @@ def build_wrong_match_explorer(
         "source_dirs": source_dirs_from_validation_result(validation_result),
         "audio_file_count": len(files),
         "other_file_count": other_file_count,
+        "partial": truncated_reason is not None,
+        "truncated_reason": truncated_reason,
+        "scanned_file_count": scanned_file_count,
+        "scanned_bytes": scanned_bytes,
         "ordered_by": ordered_by,
         "files": files,
     }
@@ -443,20 +513,18 @@ def resolve_wrong_match_stream_file(
     *,
     entry: Mapping[str, Any],
     relative_path: str,
-) -> tuple[str, str]:
+) -> tuple[OpenedRegularFile, str]:
     _validation_result, root = _resolved_wrong_match_root(entry)
     cleaned_relative_path = str(relative_path or "").replace("\\", os.sep).strip()
     if not cleaned_relative_path:
         raise ValueError("Missing path")
 
-    abs_path = os.path.abspath(os.path.join(root, cleaned_relative_path))
-    if not path_is_within_root(abs_path, root):
-        raise ValueError("Path escapes wrong-match root")
-    if not os.path.isfile(abs_path):
-        raise FileNotFoundError(f"Wrong-match file not found: {cleaned_relative_path}")
-
-    ext = os.path.splitext(abs_path)[1].lower()
+    ext = os.path.splitext(cleaned_relative_path)[1].lower()
     if ext not in AUDIO_EXTENSIONS_DOTTED:
         raise ValueError("Requested file is not an audio file")
-
-    return abs_path, _audio_mime_type(abs_path)
+    try:
+        with open_directory_path(root) as root_fd:
+            opened = open_regular_relative(root_fd, cleaned_relative_path)
+    except FilesystemAuthorityError as exc:
+        raise FileNotFoundError(f"Wrong-match file not found: {cleaned_relative_path}") from exc
+    return opened, _audio_mime_type(cleaned_relative_path)
