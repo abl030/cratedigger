@@ -8,7 +8,6 @@ in a separate class and explicitly labeled.
 import os
 import tempfile
 import unittest
-from contextlib import nullcontext
 from unittest.mock import MagicMock, patch
 
 import msgspec
@@ -1139,13 +1138,10 @@ class TestDispatchCoreSeams(unittest.TestCase):
                 preview_result={"ready": True},
             )
             assert db.claim_next_import_job(worker_id="seam-test") is not None
-            runner_context = (
-                patch("lib.dispatch.core.run_import_one", side_effect=runner_hook)
-                if runner_hook is not None else nullcontext()
-            )
             with patch_dispatch_externals() as ext, \
-                 patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir), \
-                 runner_context:
+                 patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir):
+                if runner_hook is not None:
+                    kwargs["run_import_fn"] = runner_hook
                 dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="mbid-123",
@@ -1223,16 +1219,28 @@ class TestDispatchCoreSeams(unittest.TestCase):
 
         self.assertNotIn("--preview-import-result-file", cmd)
 
-    def test_default_runner_gets_authority_snapshotted_before_runtime_swap(self):
+    def test_injected_runner_gets_authority_snapshotted_before_runtime_swap(self):
         received: dict[str, object] = {}
         with tempfile.TemporaryDirectory() as root:
             swapped = os.path.join(root, "swapped-runtime.ini")
             with open(swapped, "w", encoding="utf-8") as handle:
                 handle.write("[Beets]\nlibrary = /swapped/library.db\n")
 
-            def runner_after_swap(**kwargs: object) -> ImportOneRun:
+            def runner_after_swap(
+                *,
+                beets_config_dir: str | None,
+                beets_python: str | None,
+                beets_library_db_path: str | None,
+                beets_library_root: str | None,
+                **_kwargs: object,
+            ) -> ImportOneRun:
                 os.environ["CRATEDIGGER_RUNTIME_CONFIG"] = swapped
-                received.update(kwargs)
+                received.update({
+                    "beets_config_dir": beets_config_dir,
+                    "beets_python": beets_python,
+                    "beets_library_db_path": beets_library_db_path,
+                    "beets_library_root": beets_library_root,
+                })
                 return ImportOneRun(
                     command=(), returncode=1, stdout="", stderr="", import_result=None,
                 )

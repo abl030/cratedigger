@@ -32,7 +32,8 @@ from lib.quality import (AlbumQualityEvidenceDecisionFacts, DownloadInfo,
 from lib.quality_evidence import EvidenceBuildResult, audit_v0_probe_from_metric
 from lib.dispatch.types import (DispatchOutcome, EvidenceImportGate,
                                 FORCE_IMPORT_SCENARIOS, ImportAttemptResult,
-                                ImportOneRun, PostCommitCleanup, QualityGateFn)
+                                ImportOneRunner, PostCommitCleanup,
+                                QualityGateFn)
 from lib.dispatch.subprocess_runner import run_import_one
 from lib.dispatch.helpers import (_guard_failure_detail,
                                   _log_postflight_bad_extensions,
@@ -116,7 +117,7 @@ def dispatch_import_core(
     candidate_download_log_id: int | None = None,
     prevalidated_candidate_result: CandidateEvidenceActionResult | None = None,
     quality_gate_fn: QualityGateFn = _check_quality_gate_core,
-    run_import_fn: Callable[..., ImportOneRun] | None = None,
+    run_import_fn: ImportOneRunner | None = None,
     evidence_gate_fn: Callable[..., EvidenceImportGate] = _load_evidence_import_gate,
     current_evidence_loader: Callable[
         ..., "CurrentEvidenceActionResult | None"
@@ -538,6 +539,10 @@ def dispatch_import_core(
                     quality_rank_config_json=quality_rank_config_json,
                     existing_v0_probe=existing_v0_probe,
                     quality_evidence_action_file=quality_evidence_action_file,
+                    beets_config_dir=beets_cfg.beets_config_dir,
+                    beets_python=beets_cfg.beets_python,
+                    beets_library_db_path=effective_beets_library_db_path,
+                    beets_library_root=effective_beets_library_root,
                 )
             _remove_quality_evidence_action_file(quality_evidence_action_file)
             quality_evidence_action_file = None

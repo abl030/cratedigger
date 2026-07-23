@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -29,7 +28,7 @@ from lib.terminal_outcomes import ImportJobTerminal
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
     from lib.pipeline_db import PipelineDB
-    from lib.dispatch.types import ImportOneRun, QualityGateFn
+    from lib.dispatch.types import ImportOneRunner, QualityGateFn
 
 logger = logging.getLogger("cratedigger")
 
@@ -45,7 +44,7 @@ def dispatch_import_from_db(
     download_log_id: int | None = None,
     quality_gate_fn: "QualityGateFn | None" = None,
     cfg: "CratediggerConfig | None" = None,
-    run_import_fn: "Callable[..., ImportOneRun] | None" = None,
+    run_import_fn: "ImportOneRunner | None" = None,
     beets_library_db_path: str | None = None,
     beets_library_root: str | None = None,
 ) -> "DispatchOutcome":
@@ -136,7 +135,7 @@ def _dispatch_import_from_db_locked(
     download_log_id: int | None,
     quality_gate_fn: "QualityGateFn | None" = None,
     cfg: "CratediggerConfig | None" = None,
-    run_import_fn: "Callable[..., ImportOneRun] | None" = None,
+    run_import_fn: "ImportOneRunner | None" = None,
     beets_library_db_path: str | None = None,
     beets_library_root: str | None = None,
 ) -> "DispatchOutcome":
