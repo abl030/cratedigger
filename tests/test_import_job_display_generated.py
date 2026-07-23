@@ -8,6 +8,7 @@ import unittest
 from hypothesis import example, given, strategies as st
 
 from lib.import_queue import (
+    ForceImportPayload,
     IMPORT_JOB_PREVIEW_STATUSES,
     ImportJob,
 )
@@ -23,7 +24,7 @@ def _job(status: str, preview_status: str | None, text: str) -> ImportJob:
         status=status,
         request_id=100,
         dedupe_key="force_import:download_log:575",
-        payload={"failed_path": "/tmp/album"},
+        payload=ForceImportPayload(failed_path="/tmp/album"),
         result=None,
         message=text,
         error=None,

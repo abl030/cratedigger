@@ -1090,6 +1090,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
     def test_enqueue_youtube_import_is_allowed_by_pg_constraint(self):
         from lib.import_queue import (
             IMPORT_JOB_YOUTUBE,
+            YoutubeImportPayload,
             youtube_import_dedupe_key,
             youtube_import_payload,
         )
@@ -1107,7 +1108,8 @@ class TestImportJobQueueAPI(unittest.TestCase):
 
         self.assertEqual(job.job_type, IMPORT_JOB_YOUTUBE)
         self.assertEqual(job.request_id, self.req_id)
-        self.assertEqual(job.payload["browse_id"], "MPREb_pg_constraint")
+        assert isinstance(job.payload, YoutubeImportPayload)
+        self.assertEqual(job.payload.browse_id, "MPREb_pg_constraint")
 
     def test_claim_complete_and_fail_lifecycle(self):
         from lib.import_queue import IMPORT_JOB_FORCE
@@ -1887,19 +1889,82 @@ class TestTrackManagement(unittest.TestCase):
             )
         self.assertEqual(self.db.get_request(self.req_id), before)
 
-    def test_set_get_tracks_roundtrip(self):
+    def test_set_tracks_round_trip_preserves_every_field(self):
+        """Rule A: every track field survives the real PostgreSQL write."""
         tracks = [
-            {"disc_number": 1, "track_number": 1, "title": "Intro", "length_seconds": 120},
-            {"disc_number": 1, "track_number": 2, "title": "Song", "length_seconds": 240},
-            {"disc_number": 1, "track_number": 3, "title": "Outro", "length_seconds": 180},
+            {
+                "disc_number": 1,
+                "track_number": 1,
+                "title": "Intro",
+                "length_seconds": 120,
+                "track_artist": "Opening Artist",
+            },
+            {
+                "disc_number": 1,
+                "track_number": 2,
+                "title": "Song",
+                "length_seconds": 240,
+                "track_artist": None,
+            },
+            {
+                "disc_number": 2,
+                "track_number": 1,
+                "title": "Outro",
+                "length_seconds": 180,
+                "track_artist": "Closing Artist",
+            },
         ]
         self.db.set_tracks(self.req_id, tracks)
 
         result = self.db.get_tracks(self.req_id)
         self.assertEqual(len(result), 3)
-        self.assertEqual(result[0]["title"], "Intro")
-        self.assertEqual(result[1]["disc_number"], 1)
-        self.assertEqual(result[2]["length_seconds"], 180)
+        for expected, actual in zip(tracks, result, strict=True):
+            for field, value in expected.items():
+                self.assertEqual(
+                    actual[field],
+                    value,
+                    f"set_tracks field {field!r} was dropped at the PG boundary",
+                )
+
+    def test_set_tracks_rolls_back_later_constraint_failure(self):
+        """A failed replacement leaves the complete prior tracklist intact."""
+        old_tracks = [
+            {
+                "disc_number": 1,
+                "track_number": 1,
+                "title": "Old One",
+                "length_seconds": 111,
+                "track_artist": "Old Artist",
+            },
+            {
+                "disc_number": 1,
+                "track_number": 2,
+                "title": "Old Two",
+                "length_seconds": 222,
+                "track_artist": None,
+            },
+        ]
+        self.db.set_tracks(self.req_id, old_tracks)
+
+        with self.assertRaises(psycopg2.IntegrityError):
+            self.db.set_tracks(self.req_id, [
+                {
+                    "disc_number": 1,
+                    "track_number": 1,
+                    "title": "New One",
+                    "length_seconds": 333,
+                    "track_artist": "New Artist",
+                },
+                {
+                    "disc_number": 1,
+                    "track_number": 2,
+                    "title": None,
+                    "length_seconds": 444,
+                    "track_artist": "Broken Later Row",
+                },
+            ])
+
+        self.assertEqual(self.db.get_tracks(self.req_id), old_tracks)
 
     def test_set_tracks_replaces_existing(self):
         self.db.set_tracks(self.req_id, [

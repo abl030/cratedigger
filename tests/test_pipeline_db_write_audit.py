@@ -117,8 +117,6 @@ ALLOWLIST: dict[str, str] = {
         "TODO: backfill round-trip test (legacy method, predates rule)",
     "record_field_resolution":
         "TODO: backfill round-trip test (legacy method, predates rule)",
-    "set_tracks":
-        "TODO: backfill round-trip test (legacy method, predates rule)",
     "update_spectral_state":
         "TODO: backfill round-trip test. RequestSpectralStateUpdate already "
         "column-checked by test_pipeline_db_column_contract.py.",

@@ -75,16 +75,61 @@ IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES = frozenset({
     IMPORT_JOB_PREVIEW_EVIDENCE_READY,
     IMPORT_JOB_PREVIEW_WOULD_IMPORT,
 })
+
+
+class ForceImportPayload(msgspec.Struct, kw_only=True, forbid_unknown_fields=True):
+    """The strict JSONB contract for a ``force_import`` queue row."""
+
+    failed_path: str
+    download_log_id: int | None = None
+    source_username: str | None = None
+    source_dirs: list[str] = msgspec.field(default_factory=list)
+
+
+class AutomationImportPayload(
+    msgspec.Struct,
+    kw_only=True,
+    forbid_unknown_fields=True,
+):
+    """The intentionally empty JSONB contract for automation queue rows."""
+
+
+class YoutubeImportPayload(msgspec.Struct, kw_only=True, forbid_unknown_fields=True):
+    """The strict JSONB contract for a ``youtube_import`` queue row."""
+
+    staged_path: str
+    request_id: int
+    browse_id: str
+    download_log_id: int | None = None
+
+
+ImportJobPayload = (
+    ForceImportPayload | AutomationImportPayload | YoutubeImportPayload
+)
+
+
+def decode_import_job_payload(job_type: str, value: Any) -> ImportJobPayload:
+    """Decode the one strict payload selected by a database row's job type."""
+    validate_job_type(job_type)
+    if job_type == IMPORT_JOB_FORCE:
+        return msgspec.convert(value, type=ForceImportPayload)
+    if job_type == IMPORT_JOB_AUTOMATION:
+        return msgspec.convert(value, type=AutomationImportPayload)
+    if job_type == IMPORT_JOB_YOUTUBE:
+        return msgspec.convert(value, type=YoutubeImportPayload)
+    raise AssertionError(f"validated unknown import job type: {job_type}")
+
+
 @dataclass(frozen=True)
 class ImportJob:
-    """One row from ``import_jobs`` with JSONB fields normalized to dicts."""
+    """One row from ``import_jobs`` with a strict job-specific payload."""
 
     id: int
     job_type: str
     status: str
     request_id: int | None
     dedupe_key: str | None
-    payload: dict[str, Any]
+    payload: ImportJobPayload
     result: dict[str, Any] | None
     message: str | None
     error: str | None
@@ -116,7 +161,8 @@ class ImportJob:
 
     @classmethod
     def from_row(cls, row: dict[str, Any], *, deduped: bool = False) -> "ImportJob":
-        payload = _json_dict(row.get("payload"))
+        job_type = validate_job_type(str(row["job_type"]))
+        payload = decode_import_job_payload(job_type, row.get("payload"))
         result_raw = row.get("result")
         result = _json_dict(result_raw) if result_raw is not None else None
         preview_result_raw = row.get("preview_result")
@@ -127,7 +173,7 @@ class ImportJob:
         )
         return cls(
             id=int(row["id"]),
-            job_type=str(row["job_type"]),
+            job_type=job_type,
             status=str(row["status"]),
             request_id=(
                 int(row["request_id"])
@@ -231,7 +277,7 @@ class ImportJob:
             "status": self.status,
             "request_id": self.request_id,
             "dedupe_key": self.dedupe_key,
-            "payload": self.payload,
+            "payload": msgspec.to_builtins(self.payload),
             "result": self.result,
             "message": self.message,
             "error": self.error,
@@ -407,15 +453,15 @@ def youtube_import_payload(
     browse_id: str,
     download_log_id: int | None = None,
 ) -> dict[str, Any]:
-    """Build the payload dict for a ``youtube_import`` job.
+    """Build the payload for a ``youtube_import`` job.
 
     The YT ingest worker stages audio to
     ``/Incoming/auto-import/<artist>-<album>/`` and enqueues this
     payload — the importer dispatcher (U9) reads ``staged_path``
     instead of the slskd-shaped ``active_download_state``.
 
-    All three fields are required and validated by
-    ``validate_payload(IMPORT_JOB_YOUTUBE, payload)``.
+    The database row is decoded into ``YoutubeImportPayload`` before any
+    consumer acts on it.
     """
     payload: dict[str, Any] = {
         "staged_path": str(staged_path),

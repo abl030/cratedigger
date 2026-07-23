@@ -34,13 +34,17 @@ if TYPE_CHECKING:
     )
 
 from lib.import_queue import (
+    ForceImportPayload,
     ImportJob,
     IMPORT_JOB_ACTIVE_STATUSES,
+    IMPORT_JOB_AUTOMATION,
+    IMPORT_JOB_FORCE,
     IMPORT_JOB_RECOVERY_REQUIRED,
     IMPORT_JOB_YOUTUBE,
     IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES,
     IMPORT_JOB_PREVIEW_EVIDENCE_READY,
     IMPORT_JOB_PREVIEW_WAITING,
+    YoutubeImportPayload,
     validate_job_type,
     validate_preview_failure_status,
     validate_payload,
@@ -988,7 +992,7 @@ class FakePipelineDB:
     ) -> list[ImportJob]:
         paths = {str(path) for path in failed_paths if path}
         dirs = {str(path) for path in source_dirs if path}
-        rows: list[dict[str, Any]] = []
+        jobs: list[ImportJob] = []
         for row in self._import_jobs:
             if row.get("status") not in IMPORT_JOB_ACTIVE_STATUSES:
                 continue
@@ -997,22 +1001,25 @@ class FakePipelineDB:
                 and int(row["id"]) == int(ignore_import_job_id)
             ):
                 continue
-            payload_raw = row.get("payload")
-            payload: dict[str, Any] = payload_raw if isinstance(payload_raw, dict) else {}
-            payload_dirs = {
-                str(path) for path in payload.get("source_dirs", [])
-                if path
-            }
-            matches = (
-                payload.get("download_log_id") == download_log_id
-                or str(payload.get("download_log_id")) == str(download_log_id)
-                or str(payload.get("failed_path") or "") in paths
-                or bool(dirs.intersection(payload_dirs))
-            )
+            job = ImportJob.from_row(copy.deepcopy(row))
+            if isinstance(job.payload, ForceImportPayload):
+                matches = (
+                    job.payload.download_log_id == download_log_id
+                    or job.payload.failed_path in paths
+                    or bool(dirs.intersection(job.payload.source_dirs))
+                )
+            else:
+                matches = False
             if matches:
-                rows.append(row)
-        rows.sort(key=lambda row: (_as_datetime(row.get("created_at")), row["id"]))
-        return [ImportJob.from_row(copy.deepcopy(row)) for row in rows[:limit]]
+                jobs.append(job)
+        jobs.sort(
+            key=lambda job: (
+                job.created_at is None,
+                job.created_at or datetime.min.replace(tzinfo=timezone.utc),
+                job.id,
+            ),
+        )
+        return jobs[:limit]
 
     def count_import_jobs_by_status(self) -> dict[str, int]:
         counts: dict[str, int] = {}
@@ -1134,8 +1141,8 @@ class FakePipelineDB:
                 or not evidence.snapshot_fingerprint
             ):
                 return None
-            job_type = row.get("job_type")
-            if job_type == "automation_import":
+            job = ImportJob.from_row(copy.deepcopy(row))
+            if job.job_type == IMPORT_JOB_AUTOMATION:
                 state = request.get("active_download_state")
                 if (
                     request.get("status") != "downloading"
@@ -1143,19 +1150,17 @@ class FakePipelineDB:
                     or state.get("current_path") != source_path
                 ):
                     return None
-            elif job_type == "force_import":
-                payload = row.get("payload")
+            elif job.job_type == IMPORT_JOB_FORCE:
                 if (
-                    not isinstance(payload, dict)
-                    or payload.get("failed_path") != source_path
+                    not isinstance(job.payload, ForceImportPayload)
+                    or job.payload.failed_path != source_path
                 ):
                     return None
-            elif job_type == "youtube_import":
-                payload = row.get("payload")
+            elif job.job_type == IMPORT_JOB_YOUTUBE:
                 if (
                     request.get("status") not in ("wanted", "unsearchable")
-                    or not isinstance(payload, dict)
-                    or payload.get("staged_path") != source_path
+                    or not isinstance(job.payload, YoutubeImportPayload)
+                    or job.payload.staged_path != source_path
                 ):
                     return None
             else:
@@ -1248,9 +1253,13 @@ class FakePipelineDB:
                     else None
                 )
             elif original.job_type == "force_import":
-                expected_source = original.payload.get("failed_path")
+                if not isinstance(original.payload, ForceImportPayload):
+                    raise AssertionError("force_import payload type mismatch")
+                expected_source = original.payload.failed_path
             elif original.job_type == "youtube_import":
-                expected_source = original.payload.get("staged_path")
+                if not isinstance(original.payload, YoutubeImportPayload):
+                    raise AssertionError("youtube_import payload type mismatch")
+                expected_source = original.payload.staged_path
             else:
                 return None
             if expected_source != original.beets_launch_source_path:
@@ -1298,7 +1307,7 @@ class FakePipelineDB:
                 original.job_type,
                 request_id=original.request_id,
                 dedupe_key=original.dedupe_key,
-                payload=original.payload,
+                payload=msgspec.to_builtins(original.payload),
                 message=f"Operator-authorized retry of recovery job {original.id}",
             )
             retry_row = next(

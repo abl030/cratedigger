@@ -68,8 +68,8 @@ against that reality, not against a hypothetical public exposure.
 | CD-SEC-15 | High | Remediated: typed fail-closed transitions and source-status CAS freeze `replaced` rows | `lib/transitions.py`, `lib/pipeline_db/requests.py` |
 | CD-SEC-16 | High | Remediated: destructive operations share importer locks | `lib/destructive_release_service.py` |
 | CD-SEC-17 | High | Remediated: job-backed terminal import outcomes commit atomically | `lib/pipeline_db/terminal_outcomes.py`, `scripts/importer.py` |
-| CD-SEC-18 | Medium | Track replacement is non-atomic | `lib/pipeline_db/misc.py` |
-| CD-SEC-19 | Medium | Import-job JSONB payloads bypass the strict wire-boundary policy | `lib/import_queue.py`, `scripts/importer.py` |
+| CD-SEC-18 | Medium | Remediated: transactional track replacement is qualified by real-PostgreSQL rollback coverage | `lib/pipeline_db/misc.py`, `tests/test_track_replacement_generated.py` |
+| CD-SEC-19 | Medium | Remediated: job-specific JSONB payloads decode strictly at the row boundary | `lib/import_queue.py`, `tests/test_import_job_payload_generated.py` |
 
 **Clean (no exploitable issue found):** SQL injection (every attacker-influenced
 value is `%s`-parameterized), command/subprocess injection (all argv is
@@ -321,36 +321,33 @@ entire music library plus read access to every secret the user can read.
   existing module VM check, since over-tight confinement would break real file
   access. This is a module change and is deferred to its own PR.
 
-### CD-SEC-18 — Track replacement is non-atomic (Medium)
+### CD-SEC-18 — Transactional track replacement (Medium)
 
-`PipelineDB.set_tracks` deletes the current release tracklist, then inserts the
-replacement one row at a time under autocommit. A malformed later track,
-connection failure, or concurrent reader can observe or leave zero/partial
-tracks. Those rows feed exact-pressing matching and persisted search plans, so
-partial replacement corrupts identity evidence rather than merely degrading a
-display. `FakePipelineDB` replaces its list atomically, while the real-PG write
-audit explicitly leaves `set_tracks` on a TODO exemption and covers only the
-successful path.
+`PipelineDB.set_tracks` already holds the delete and every replacement insert
+inside its shared `_atomic()` transaction. The missing proof is now supplied:
+a real-PostgreSQL round trip checks every track field, then a seeded old
+tracklist is subjected to a later-row `NOT NULL` violation. The old list
+survives unchanged, so a failed replacement cannot expose an empty or partial
+pressing manifest. The generated companion varies the preserved fields and
+repeats that same real database failure boundary; both invariant checkers carry
+known-bad self-tests. `set_tracks` is no longer exempted from the real-PG write
+audit.
 
-- **Remediation:** perform delete + bulk insert in one DB transaction. Seed an
-  old tracklist, force a later-row constraint failure, and prove the old set
-  survives. Pair the deterministic pin with an all-or-nothing generated
-  property.
+### CD-SEC-19 — Strict import-job payload boundary (Medium)
 
-### CD-SEC-19 — Import-job JSONB payloads bypass strict boundary validation (Medium)
+`ImportJob.from_row` now selects exactly one strict, unknown-field-forbidding
+`msgspec.Struct` from the row's `job_type`: `ForceImportPayload`,
+`AutomationImportPayload`, or `YoutubeImportPayload`. A force payload with
+`download_log_id: "37206"`, an extra automation field, or a misspelled YouTube
+field raises `msgspec.ValidationError` at that database boundary. Importer,
+preview, recovery, route, and YouTube consumers then read typed fields rather
+than permissive payload dictionaries; serialization converts the Struct back to
+ordinary JSON values at the API/write boundary.
 
-`ImportJob` is a dataclass containing `dict[str, Any]` payload/result fields,
-and `from_row` manually coerces outer scalars rather than decoding job-specific
-wire contracts. Force-import consumers then use permissive `.get()` checks. A
-drifted `download_log_id: "42"`, for example, silently becomes `None`; the job
-continues without its wrong-match/audit ancestor instead of failing at the DB
-boundary. This violates the repository's `msgspec.Struct` policy for JSONB and
-subprocess wire data.
-
-- **Remediation:** define strict payload Structs discriminated by job type and
-  decode once when reading the DB row. Reject wrong-type IDs with a boundary
-  test, then remove legacy preview-status compatibility after confirming the
-  migration-swept values are absent live.
+`preview_status` continues to admit the historical `would_import` and
+`uncertain` values, while `result` and `preview_result` intentionally remain
+broad display/audit JSON. This strict-input change does not remove or
+reinterpret terminal display compatibility.
 
 ## Additional hardening findings
 
@@ -540,35 +537,33 @@ cleanup, transition and audit logic directly in the route.
 
 ### CD-QUAL-02 — Forward-only cleanup and documentation drift
 
-The status-documentation portion is remediated alongside CD-SEC-15: the shared
-Pipeline DB rule and schema guide now include terminal, frozen `replaced`.
-The production legacy preview-status cohorts are nonempty, so their
-compatibility and `scripts/populate_tracks.py` are deliberately untouched by
-this workstream rather than being removed on an untrue empty-cohort premise.
-
+The original audit identified three forward-only hygiene failures:
 `scripts/populate_tracks.py` is an obsolete committed one-shot that passes an
-old SQLite path to the PostgreSQL `PipelineDB` and can no longer run. The import
-queue retains `would_import`/`uncertain` compatibility even though migration 018
-is documented as having swept those values. The pipeline DB rule still lists
-four statuses and omits terminal `replaced`. These are three instances of the
-same forward-only hygiene failure: one-shot/compatibility residue outliving its
-deployment window and prose no longer matching the authoritative schema.
+old SQLite path to the PostgreSQL `PipelineDB`; the import queue retains
+`would_import`/`uncertain` compatibility; and the status prose omitted terminal,
+frozen `replaced`. The status-documentation portion is now corrected alongside
+CD-SEC-15. The nonempty legacy preview-status cohort and the obsolete one-shot
+are deliberately untouched by this workstream rather than being removed on an
+untrue empty-cohort premise.
+
+CD-SEC-19 deliberately preserves the historical terminal display values: its
+strict decoder applies to job input, not `preview_status` or result/
+preview-result audit data. Removing compatibility remains separate work only
+after a fresh live cohort check proves that it is safe.
 
 - **Remediation:** delete the dead one-shot, confirm the legacy preview-status
   cohort is empty before removing compatibility, and update the status docs in
-  the same PR that fixes CD-SEC-15/CD-SEC-19.
+  that separate cleanup.
 
-### CD-QUAL-03 — The real-PostgreSQL write audit overstates its coverage
+### CD-QUAL-03 — The real-PostgreSQL write audit has remaining exemptions
 
-The write-contract audit describes universal coverage but still allowlists
-several writers with `TODO` rationales, including `set_tracks`. A green suite
-therefore does not establish the repository's documented rule that every DB
-write preserves every field and failure boundary through real PostgreSQL.
+`set_tracks` is no longer exempt: its real-PG round trip covers every track
+field and its deterministic and generated failure pins prove atomic rollback.
+Several other writers still have `TODO` rationales, so the audit is not yet
+universal.
 
-- **Remediation:** replace TODO exemptions with named real-PG round trips or
-  narrowly document why a method is structurally inapplicable. CD-SEC-18 should
-  remove the `set_tracks` exemption first and qualify the failure path with a
-  planted later-row violation.
+- **Remediation:** replace the remaining TODO exemptions with named real-PG
+  round trips or narrowly document why a method is structurally inapplicable.
 
 ## Considered and dismissed (refuted)
 
@@ -615,8 +610,10 @@ Priority containment / integrity work:
       pending deploy/live proof).
 - [x] CD-SEC-11 — no-follow descriptor authority, private atomic materialize,
       and same-descriptor stream reads.
-- [ ] CD-SEC-18 — transactional track replacement + real-PG failure pin/property.
-- [ ] CD-SEC-19 — strict job-specific JSONB payload Structs at the DB boundary.
+- [x] CD-SEC-18 — transactional track replacement, real-PG every-field round
+      trip, and deterministic/generated rollback pins.
+- [x] CD-SEC-19 — strict job-specific JSONB payload Structs at the row boundary;
+      terminal display/audit result compatibility remains intentionally broad.
 
 Safe hardening fixes (candidate single PR):
 
@@ -634,10 +631,10 @@ Auth, dependency and quality follow-through:
       consider moving local-only gates into CI.
 - [ ] CD-QUAL-01 — add missing CLI/API twins while extracting the shared
       destructive/identity services for CD-SEC-14/CD-SEC-16.
-- [ ] CD-QUAL-02 — delete the dead one-shot, retire proven-empty compatibility,
-      and correct status docs alongside CD-SEC-15/CD-SEC-19.
-- [ ] CD-QUAL-03 — eliminate TODO write-audit exemptions, starting with
-      `set_tracks` in CD-SEC-18.
+- [ ] CD-QUAL-02 — delete the dead one-shot, retire compatibility only after a
+      fresh empty-cohort proof, and correct the remaining status docs.
+- [ ] CD-QUAL-03 — eliminate the remaining TODO write-audit exemptions;
+      `set_tracks` is now covered by CD-SEC-18.
 
 ## Appendix — audit method
 
