@@ -3,10 +3,11 @@
 - All code deploys via Nix flake: push cratedigger (GitHub) → `nix flake update cratedigger-src` on doc1 → commit (SSH-signed) + push nixosconfig to **Forgejo** → from doc1 run `fleet-deploy doc2` through the locked-sibling forced-command boundary, then poll and verify the asynchronous update.
 - **Since the Forgejo cutover (2026-06-10), nixosconfig deploys come from Forgejo (`git.ablz.au`), NEVER `github:abl030/nixosconfig` — GitHub is a frozen, stale fallback.** The cratedigger repo itself still lives on GitHub; only the nixosconfig leg changed.
 - The Forgejo push needs a token header (gh's credential helper is github.com-only). Configure it through `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_0`, and `GIT_CONFIG_VALUE_0` in the environment, never a `git -c` argv value or remote URL. Never echo the token. The exact example is in `.claude/skills/deploy/SKILL.md`.
-- **Never pipe a result-bearing command through `tail`/`head`/`grep` inside an
-  `&&` chain unless `pipefail` is explicitly active** — this covers gate
-  commands (test suites, fuzz bursts), pushes, deploy triggers, and one-shots
-  alike: the downstream command's success can mask the real exit status.
+- **Never pipe a result-bearing command through any downstream pipe target
+  inside an `&&` chain unless `pipefail` is explicitly active** —
+  `tail`/`head`/`grep` are common examples. This covers gate commands (test
+  suites, fuzz bursts), pushes, deploy triggers, and one-shots alike: the
+  downstream command's success can mask the real exit status.
   Long-running commands redirect output to a file and echo `$?` explicitly,
   then the file is tailed separately, as a distinct step. Incident:
   `fuzz_burst.sh 2>&1 | tail -12` run in the background masked the script's

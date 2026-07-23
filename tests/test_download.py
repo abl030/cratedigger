@@ -4581,6 +4581,7 @@ class TestPollActiveDownloads(unittest.TestCase):
                     "filename": ok_filename,
                     "id": "ok-id",
                     "state": "Completed, Succeeded",
+                    "requestedAt": enqueued_at,
                     "bytesTransferred": 6000000,
                 },
                 {
@@ -4707,6 +4708,7 @@ class TestPollActiveDownloads(unittest.TestCase):
                     "filename": ok_filename,
                     "id": "ok-id",
                     "state": "Completed, Succeeded",
+                    "requestedAt": enqueued_at,
                     "bytesTransferred": 6000000,
                 },
                 {
