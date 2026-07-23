@@ -18,6 +18,7 @@ from scripts.run_python_tests import (
     complete_test_modules,
     discover_test_modules,
     list_module_test_ids,
+    recommended_worker_count,
     schedule_modules,
     shard_test_ids,
     test_subprocess_environment,
@@ -60,6 +61,14 @@ class TestModuleDiscovery(unittest.TestCase):
 
 
 class TestModuleScheduling(unittest.TestCase):
+    def test_worker_policy_scales_with_host_without_chasing_diminishing_returns(
+        self,
+    ) -> None:
+        self.assertEqual(recommended_worker_count(1), 1)
+        self.assertEqual(recommended_worker_count(8), 4)
+        self.assertEqual(recommended_worker_count(30), 12)
+        self.assertEqual(recommended_worker_count(64), 12)
+
     def test_generated_first_schedule_is_exact_and_deterministic(self) -> None:
         modules = tuple(
             TestModule(name, Path(f"/{name}.py"), weight)

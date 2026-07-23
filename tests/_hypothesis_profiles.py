@@ -27,6 +27,12 @@ import os
 
 from hypothesis import HealthCheck, settings
 
+_fuzz_max_examples = int(
+    os.environ.get("CRATEDIGGER_FUZZ_MAX_EXAMPLES", "20000")
+)
+if _fuzz_max_examples < 1:
+    raise ValueError("CRATEDIGGER_FUZZ_MAX_EXAMPLES must be at least 1")
+
 settings.register_profile(
     "suite",
     derandomize=True,
@@ -36,7 +42,7 @@ settings.register_profile(
 )
 settings.register_profile(
     "fuzz",
-    max_examples=20_000,
+    max_examples=_fuzz_max_examples,
     deadline=None,
     print_blob=True,
     suppress_health_check=[HealthCheck.too_slow],

@@ -21,7 +21,7 @@ from pathlib import Path
 import msgspec
 
 
-DEFAULT_MAX_WORKERS = 4
+DEFAULT_MAX_WORKERS = 12
 DEFAULT_DURATIONS = 15
 _FAILURE_MARKER = "=" * 70
 _SCHEMA_READY_ENV = "CRATEDIGGER_TEST_SCHEMA_READY"
@@ -478,10 +478,30 @@ def _run_test_target_child(
     test_names: tuple[str, ...],
     durations: int,
     result_path: Path,
+    selected_test_ids: tuple[str, ...] | None = None,
 ) -> int:
     """Run one target in a fresh interpreter and persist its complete result."""
     stream = io.StringIO()
     suite = unittest.defaultTestLoader.loadTestsFromNames(test_names)
+    if selected_test_ids is not None:
+        discovered_by_id: dict[str, unittest.TestCase] = {}
+        for test in _iter_test_cases(suite):
+            test_id = test.id()
+            if test_id in discovered_by_id:
+                raise ValueError(f"duplicate loaded test ID: {test_id}")
+            discovered_by_id[test_id] = test
+        missing = [
+            test_id
+            for test_id in selected_test_ids
+            if test_id not in discovered_by_id
+        ]
+        if missing:
+            raise ValueError(
+                f"selected test IDs were not loaded: {', '.join(missing)}"
+            )
+        suite = unittest.TestSuite(
+            discovered_by_id[test_id] for test_id in selected_test_ids
+        )
     result = unittest.TextTestRunner(
         stream=stream,
         verbosity=2,
@@ -625,11 +645,18 @@ def _parse_nonnegative_int(value: str) -> int:
     return parsed
 
 
+def recommended_worker_count(cpu_count: int) -> int:
+    """Use half the host up to the measured point of diminishing returns."""
+    if cpu_count < 1:
+        raise ValueError("cpu_count must be at least 1")
+    return min(DEFAULT_MAX_WORKERS, max(1, cpu_count // 2))
+
+
 def _default_worker_count() -> int:
     configured = os.environ.get("CRATEDIGGER_TEST_JOBS")
     if configured is not None:
         return _parse_positive_int(configured)
-    return min(DEFAULT_MAX_WORKERS, os.cpu_count() or 1)
+    return recommended_worker_count(os.cpu_count() or 1)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -749,12 +776,17 @@ if __name__ == "__main__":
                 Path(sys.argv[3]),
             )
         )
-    if len(sys.argv) == 5 and sys.argv[1] == "--_run-target":
+    if len(sys.argv) in {5, 6} and sys.argv[1] == "--_run-target":
         raise SystemExit(
             _run_test_target_child(
                 msgspec.json.decode(sys.argv[2], type=tuple[str, ...]),
                 int(sys.argv[3]),
                 Path(sys.argv[4]),
+                (
+                    msgspec.json.decode(sys.argv[5], type=tuple[str, ...])
+                    if len(sys.argv) == 6
+                    else None
+                ),
             )
         )
     raise SystemExit(main())

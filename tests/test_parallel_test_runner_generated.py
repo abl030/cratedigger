@@ -10,15 +10,38 @@ from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401 - registers active profile
 from scripts.run_python_tests import (
+    DEFAULT_MAX_WORKERS,
     TestModule,
     assert_exact_target_coverage,
     assert_exact_schedule,
+    recommended_worker_count,
     schedule_modules,
     shard_test_ids,
 )
 
 
+def assert_recommended_worker_policy(cpu_count: int, worker_count: int) -> None:
+    """Check the bounded half-host worker policy."""
+    expected = min(DEFAULT_MAX_WORKERS, max(1, cpu_count // 2))
+    if worker_count != expected:
+        raise AssertionError(
+            f"{cpu_count} CPUs require {expected} workers, got {worker_count}"
+        )
+    if worker_count > cpu_count:
+        raise AssertionError(f"{worker_count} workers oversubscribe {cpu_count} CPUs")
+
+
 class TestGeneratedParallelSchedule(unittest.TestCase):
+    @given(cpu_count=st.integers(min_value=1, max_value=512))
+    def test_default_workers_follow_bounded_half_host_policy(
+        self,
+        cpu_count: int,
+    ) -> None:
+        assert_recommended_worker_policy(
+            cpu_count,
+            recommended_worker_count(cpu_count),
+        )
+
     @given(
         weights=st.lists(
             st.integers(min_value=1, max_value=100_000),
@@ -43,6 +66,10 @@ class TestGeneratedParallelSchedule(unittest.TestCase):
 
 
 class TestParallelScheduleCheckerKnownBad(unittest.TestCase):
+    def test_worker_policy_checker_rejects_oversized_default(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "require 12 workers"):
+            assert_recommended_worker_policy(30, 16)
+
     def test_checker_rejects_generated_style_omission(self) -> None:
         first = TestModule("first", Path("/first.py"), 1)
         second = TestModule("second", Path("/second.py"), 1)

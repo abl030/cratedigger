@@ -101,7 +101,7 @@ def assert_relocation_invariant(
 
 class TestPrivateProcessingAuthority(unittest.TestCase):
     def test_rejects_overlap_and_symlinked_root(self) -> None:
-        with tempfile.TemporaryDirectory(dir=os.getcwd()) as parent:
+        with tempfile.TemporaryDirectory() as parent:
             source = os.path.join(parent, "source")
             processing = os.path.join(parent, "processing")
             os.mkdir(source)
@@ -123,8 +123,11 @@ class TestPrivateProcessingAuthority(unittest.TestCase):
     def test_rejects_group_writable_ancestor(self) -> None:
         with tempfile.TemporaryDirectory() as parent:
             source = os.path.join(parent, "source")
-            processing = os.path.join(parent, "processing")
             os.mkdir(source)
+            unsafe_ancestor = os.path.join(parent, "unsafe")
+            os.mkdir(unsafe_ancestor, 0o770)
+            os.chmod(unsafe_ancestor, 0o770)
+            processing = os.path.join(unsafe_ancestor, "processing")
             os.mkdir(processing, 0o700)
             with self.assertRaisesRegex(FilesystemAuthorityError, "ancestor"):
                 with open_private_processing_root(processing, source):
@@ -146,7 +149,7 @@ class TestPrivateProcessingAuthority(unittest.TestCase):
                     open_regular_relative(root_fd, "../outside")
 
     def test_quarantine_resolver_requires_exact_component_and_holds_nested_incoming(self) -> None:
-        with tempfile.TemporaryDirectory(dir=os.getcwd()) as parent:
+        with tempfile.TemporaryDirectory() as parent:
             slskd = os.path.join(parent, "slskd")
             incoming = os.path.join(parent, "Incoming")
             processing = os.path.join(parent, "processing")
@@ -171,7 +174,7 @@ class TestPrivateProcessingAuthority(unittest.TestCase):
 
 class TestPrivatePreviewCopyBounds(unittest.TestCase):
     def _world(self) -> tuple[tempfile.TemporaryDirectory[str], str, str, MagicMock]:
-        parent = tempfile.TemporaryDirectory(dir=os.getcwd())
+        parent = tempfile.TemporaryDirectory()
         source = os.path.join(parent.name, "source")
         processing = os.path.join(parent.name, "processing")
         os.mkdir(source)
@@ -271,7 +274,7 @@ class TestPrivatePreviewCopyBounds(unittest.TestCase):
 
 class TestAtomicPrivateMaterialization(unittest.TestCase):
     def _world(self):
-        parent = tempfile.TemporaryDirectory(dir=os.getcwd())
+        parent = tempfile.TemporaryDirectory()
         source = os.path.join(parent.name, "source")
         processing = os.path.join(parent.name, "processing")
         os.mkdir(source)

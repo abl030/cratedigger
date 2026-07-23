@@ -183,8 +183,15 @@ that runner on every normal suite. It can also be run directly while iterating:
 nix-shell --run "python3 -m unittest tests.world_model.state_machine -v"
 ```
 
-The temporary PostgreSQL, Beets SQLite database, library tree, and generated
-audio are local and disposable; this runner never reads or mutates production.
+The temporary PostgreSQL, Beets SQLite database, library tree, generated audio,
+and every other test scratch path live under one private per-shell tmpfs
+directory beneath the operator's private runtime directory
+(`/run/user/$UID` by default). That location is both RAM-backed and has
+non-replaceable ancestry, so filesystem-authority tests can use the same
+scratch root instead of escaping into the checkout. The dev shell fails closed
+if that directory is unavailable, disk-backed, replaceable, or lacks headroom
+rather than silently writing the suite's disposable workload to disk. This
+runner never reads or mutates production.
 The deterministic direct budget is six examples of eight stateful steps. On
 doc1 on 2026-07-19, the initial census-seeded lifecycle module reported 10.431
 test-seconds (excluding dev-shell startup). That is a historical baseline, not
@@ -289,25 +296,44 @@ nix-shell --run "bash scripts/fuzz_burst.sh"                    # all generated 
 nix-shell --run "bash scripts/fuzz_burst.sh tests.test_quality_generated"  # subset
 ```
 
-`scripts/fuzz_burst.sh` runs each generated module in its own process,
-parallelised to the host's core count (`nproc`) — Hypothesis is
-single-threaded, so a serial burst pegs one core and leaves the rest of
-whatever machine you are on idle. Per-module logs surface only on failure.
-Set `HYPOTHESIS_STORAGE_DIRECTORY` for a persistent replay database and
-`CRATEDIGGER_FUZZ_OUTPUT_DIR` to retain a failed run's complete module logs;
-green-run logs are removed. The 20k-example budget is unchanged. The serial
-equivalent, when you need one module's live output:
+`scripts/fuzz_burst.sh` discovers the exact unittest IDs and effective
+Hypothesis settings in every generated module. Ordinary deterministic pins run
+once as a batch, and fixed per-test `@settings(max_examples=...)` budgets remain
+single-run. Each property using the default deep profile divides its 20k
+generated examples exactly across independent entropy shards. The total budget
+does not grow: on a 30-core host, eight processes each receive 2,500 examples.
+The child runner loads the owning module and selects the exact discovered ID,
+so dynamically named state-machine tests can be sharded without repeating the
+module's other properties or pins. An exact-budget check rejects any schedule
+that omits a test, repeats a pin, changes a property's combined example count,
+or invents an ID.
+
+The queue uses every host core by default. Set `CRATEDIGGER_FUZZ_JOBS` to cap
+concurrent processes or `CRATEDIGGER_FUZZ_PROPERTY_SHARDS` to override the
+host-scaled entropy fan-out. On doc1's 30-core VM on 2026-07-23, the complete
+71-module, 769-test burst at the unchanged deep budgets completed in 607.8
+seconds. The worst subprocess-heavy generated module completed alone in 142.7
+seconds; its unsharded properties had still not completed after ten minutes.
+
+All active logs, property tempdirs, and Hypothesis database writes stay in the
+private per-shell tmpfs. A database named by
+`HYPOTHESIS_STORAGE_DIRECTORY` seeds the run read-only. A green run discards
+its active database and logs without writing persistent storage. On failure,
+the active database is copied back so the shrunk example replays, and
+`CRATEDIGGER_FUZZ_OUTPUT_DIR` optionally receives the complete logs plus an
+exact target manifest beneath a unique `run.*` directory. The 20k-example
+budget is unchanged. The serial equivalent, when you need one module's live
+output:
 
 ```bash
 nix-shell --run "CRATEDIGGER_HYPOTHESIS_PROFILE=fuzz \
     python3 -m unittest tests.test_quality_generated -v"
 ```
 
-It is pure and safe: no prod DB, no slskd, no beets, no network; the only
-filesystem writes are per-example tempdirs and the local `.hypothesis/`
-database. Repeat runs add entropy; there is nothing to resume and no seed
-cursor — coverage grows by improving strategies and invariants, not by
-consuming more seeds.
+It is pure and safe: no prod DB, no slskd, no beets, no network. Green runs
+write disposable state only to tmpfs. Repeat runs add entropy; there is
+nothing to resume and no seed cursor — coverage grows by improving strategies
+and invariants, not by consuming more seeds.
 
 ## Promotion policy — failures become named tests, not artifacts
 

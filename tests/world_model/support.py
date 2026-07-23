@@ -178,7 +178,6 @@ class LifecycleWorld:
             raise
         self._processing_tmp = tempfile.TemporaryDirectory(
             prefix="cratedigger-world-processing-",
-            dir=self._repo_root,
         )
         self._release_by_request: dict[int, BeetsWorldRelease] = {}
         self._dispatch_counter = 0

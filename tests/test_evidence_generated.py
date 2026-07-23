@@ -695,7 +695,6 @@ def _run_lossless_spectral_failure_world(
 
     root = tempfile.mkdtemp(
         prefix="cratedigger-lossless-spectral-gen-",
-        dir=os.getcwd(),
     )
     try:
         staging_dir = os.path.join(root, "Incoming")
