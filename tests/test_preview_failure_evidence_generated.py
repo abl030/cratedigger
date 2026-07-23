@@ -413,7 +413,6 @@ def _run_world(world: PreviewFailureWorld) -> PreviewFailureObservation:
     ]
 
     with tempfile.TemporaryDirectory(
-        dir=os.getcwd(),
         prefix="cratedigger-preview-failure-gen-",
     ) as root:
         candidate_path = os.path.join(root, "candidate")

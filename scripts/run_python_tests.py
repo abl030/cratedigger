@@ -478,10 +478,30 @@ def _run_test_target_child(
     test_names: tuple[str, ...],
     durations: int,
     result_path: Path,
+    selected_test_ids: tuple[str, ...] | None = None,
 ) -> int:
     """Run one target in a fresh interpreter and persist its complete result."""
     stream = io.StringIO()
     suite = unittest.defaultTestLoader.loadTestsFromNames(test_names)
+    if selected_test_ids is not None:
+        discovered_by_id: dict[str, unittest.TestCase] = {}
+        for test in _iter_test_cases(suite):
+            test_id = test.id()
+            if test_id in discovered_by_id:
+                raise ValueError(f"duplicate loaded test ID: {test_id}")
+            discovered_by_id[test_id] = test
+        missing = [
+            test_id
+            for test_id in selected_test_ids
+            if test_id not in discovered_by_id
+        ]
+        if missing:
+            raise ValueError(
+                f"selected test IDs were not loaded: {', '.join(missing)}"
+            )
+        suite = unittest.TestSuite(
+            discovered_by_id[test_id] for test_id in selected_test_ids
+        )
     result = unittest.TextTestRunner(
         stream=stream,
         verbosity=2,
@@ -756,12 +776,17 @@ if __name__ == "__main__":
                 Path(sys.argv[3]),
             )
         )
-    if len(sys.argv) == 5 and sys.argv[1] == "--_run-target":
+    if len(sys.argv) in {5, 6} and sys.argv[1] == "--_run-target":
         raise SystemExit(
             _run_test_target_child(
                 msgspec.json.decode(sys.argv[2], type=tuple[str, ...]),
                 int(sys.argv[3]),
                 Path(sys.argv[4]),
+                (
+                    msgspec.json.decode(sys.argv[5], type=tuple[str, ...])
+                    if len(sys.argv) == 6
+                    else None
+                ),
             )
         )
     raise SystemExit(main())

@@ -90,7 +90,7 @@ class TestGeneratedDescriptorAuthority(unittest.TestCase):
     def test_private_root_acceptance_tracks_ancestor_writability(
         self, unsafe_ancestor: bool,
     ) -> None:
-        with tempfile.TemporaryDirectory(dir=os.getcwd()) as parent:
+        with tempfile.TemporaryDirectory() as parent:
             source = os.path.join(parent, "source")
             container = os.path.join(parent, "container")
             processing = os.path.join(container, "processing")
@@ -111,7 +111,7 @@ class TestGeneratedDescriptorAuthority(unittest.TestCase):
         self, entry_count: int,
     ) -> None:
         """Nested traversal has one total ceiling, not per-directory limits."""
-        with tempfile.TemporaryDirectory(dir=os.getcwd()) as parent:
+        with tempfile.TemporaryDirectory() as parent:
             source = os.path.join(parent, "source")
             processing = os.path.join(parent, "processing")
             os.mkdir(source)
@@ -284,7 +284,7 @@ def assert_generated_relocation_invariant(
 
 
 def _private_world() -> tuple[tempfile.TemporaryDirectory[str], str, str, CratediggerConfig]:
-    parent = tempfile.TemporaryDirectory(dir=os.getcwd())
+    parent = tempfile.TemporaryDirectory()
     source = os.path.join(parent.name, "downloads")
     processing = os.path.join(parent.name, "processing")
     incoming = os.path.join(parent.name, "Incoming")

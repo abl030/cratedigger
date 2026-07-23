@@ -56,7 +56,7 @@ from tests.helpers import (
 )
 
 
-_PREVIEW_RUNTIME = tempfile.TemporaryDirectory(dir=os.getcwd())
+_PREVIEW_RUNTIME = tempfile.TemporaryDirectory()
 _PREVIEW_SOURCE_ROOT = os.path.join(_PREVIEW_RUNTIME.name, "slskd")
 _PREVIEW_PROCESSING_ROOT = os.path.join(_PREVIEW_RUNTIME.name, "processing")
 os.mkdir(_PREVIEW_SOURCE_ROOT)

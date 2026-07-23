@@ -65,12 +65,10 @@ def _make_ctx(cfg=None, slskd=None, pipeline_db_source=None):
         # separate from its (adversarial) slskd fixture.  Keep the
         # TemporaryDirectory on the config so its cleanup lifetime matches
         # the context that uses it.
-        # ``/tmp`` is deliberately world-writable, so it is not a valid
-        # private-processing ancestor.  Keep the test tree under this
-        # checkout, just as the production configuration requires an
-        # operator-owned parent.
+        # The dev shell's TMPDIR has private tmpfs ancestry, matching the
+        # production requirement without writing scratch data to the checkout.
         processing_parent = tempfile.mkdtemp(
-            prefix="cratedigger-test-processing-", dir=os.getcwd())
+            prefix="cratedigger-test-processing-")
         atexit.register(shutil.rmtree, processing_parent, ignore_errors=True)
         cfg.processing_dir = _private_processing_dir(processing_parent)
         cfg.slskd_download_dir = "/tmp/test_downloads"
@@ -2828,7 +2826,7 @@ class TestAttemptScopedCanonicalFolder(unittest.TestCase):
         from lib.processing_paths import canonical_folder_for_row
         from lib.staged_album import StagedAlbum
         import tempfile
-        with tempfile.TemporaryDirectory(dir=os.getcwd()) as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             download_root = os.path.join(tmpdir, "downloads")
             os.makedirs(download_root)
 
@@ -5257,7 +5255,7 @@ class TestPollActiveDownloads(unittest.TestCase):
         from lib.download import poll_active_downloads
         from lib.processing_paths import attempt_fingerprint, canonical_processing_path
         import tempfile
-        with tempfile.TemporaryDirectory(dir=os.getcwd()) as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             downloads_root = os.path.join(tmpdir, "downloads")
             processing_dir = _private_processing_dir(tmpdir)
             os.makedirs(downloads_root)
@@ -5509,7 +5507,7 @@ class TestPollActiveDownloads(unittest.TestCase):
         from lib.download import poll_active_downloads
         from lib.processing_paths import attempt_fingerprint, canonical_processing_path
         import tempfile
-        with tempfile.TemporaryDirectory(dir=os.getcwd()) as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             download_root = os.path.join(tmpdir, "downloads")
             processing_dir = _private_processing_dir(tmpdir)
             source_dir = os.path.join(download_root, "Music")
@@ -5568,7 +5566,7 @@ class TestPollActiveDownloads(unittest.TestCase):
         from lib.download import poll_active_downloads
         from lib.processing_paths import attempt_fingerprint, canonical_processing_path
         import tempfile
-        with tempfile.TemporaryDirectory(dir=os.getcwd()) as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             download_root = os.path.join(tmpdir, "downloads")
             processing_dir = _private_processing_dir(tmpdir)
             os.makedirs(download_root)
@@ -5631,7 +5629,7 @@ class TestPollActiveDownloads(unittest.TestCase):
         from lib.quality import ActiveDownloadState
         from lib.staged_album import StagedAlbum
         import tempfile
-        with tempfile.TemporaryDirectory(dir=os.getcwd()) as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             download_root = os.path.join(tmpdir, "downloads")
             processing_dir = _private_processing_dir(tmpdir)
             os.makedirs(download_root)

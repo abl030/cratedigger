@@ -134,7 +134,7 @@ def _run_have_boundary_through_both_adapters(
         else None
     )
 
-    with tempfile.TemporaryDirectory(dir=os.getcwd()) as root, \
+    with tempfile.TemporaryDirectory() as root, \
          tempfile.TemporaryDirectory() as existing:
         staging_dir = os.path.join(root, "Incoming")
         candidate = os.path.join(
@@ -359,7 +359,7 @@ def _run_candidate_snapshot_reuse_world(
 
     request_id = 8883
     mbid = "generated-candidate-reuse-mbid"
-    with tempfile.TemporaryDirectory(dir=os.getcwd()) as root, \
+    with tempfile.TemporaryDirectory() as root, \
          tempfile.TemporaryDirectory() as existing:
         staging_dir = os.path.join(root, "Incoming")
         candidate = os.path.join(

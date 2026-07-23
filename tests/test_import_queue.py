@@ -96,7 +96,7 @@ def _make_failed_import_source() -> tuple[str, str]:
 @contextmanager
 def _force_preview_source():
     """Make a real configured failed-import source for worker preview tests."""
-    with tempfile.TemporaryDirectory(dir=os.getcwd()) as parent:
+    with tempfile.TemporaryDirectory() as parent:
         download_root = os.path.join(parent, "downloads")
         source = os.path.join(download_root, "failed_imports", "Album")
         processing_dir = os.path.join(parent, "processing")
@@ -1356,7 +1356,7 @@ class TestImporterWorker(unittest.TestCase):
             self.assertEqual([job.id for job in recovered], [claimed.id])
 
             processing_parent = tempfile.mkdtemp(
-                prefix="cratedigger-import-queue-processing-", dir=os.getcwd())
+                prefix="cratedigger-import-queue-processing-")
             self.addCleanup(shutil.rmtree, processing_parent, ignore_errors=True)
             processing_dir = os.path.join(processing_parent, "processing")
             os.mkdir(processing_dir, 0o700)
@@ -4118,7 +4118,7 @@ class TestForcePreviewPathAuthority(unittest.TestCase):
         from scripts import import_preview_worker
         from lib.quality_evidence import EvidenceBuildResult
 
-        with tempfile.TemporaryDirectory(dir=os.getcwd()) as parent:
+        with tempfile.TemporaryDirectory() as parent:
             incoming = os.path.join(parent, "Incoming")
             downloads = os.path.join(parent, "downloads")
             processing = os.path.join(parent, "processing")

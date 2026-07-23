@@ -34,10 +34,13 @@ _exit_cratedigger_test_tmpfs() {
 }
 
 setup_cratedigger_test_tmpfs() {
-    local parent="${CRATEDIGGER_TEST_RAM_ROOT:-/dev/shm}"
-    local minimum_bytes="${CRATEDIGGER_TEST_RAM_MIN_BYTES:-4294967296}"
+    local default_parent="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    local parent="${CRATEDIGGER_TEST_RAM_ROOT:-$default_parent}"
+    local minimum_bytes="${CRATEDIGGER_TEST_RAM_MIN_BYTES:-1073741824}"
+    local current
     local filesystem_type
     local available_bytes
+    local mode
 
     if [[ ! "$minimum_bytes" =~ ^[0-9]+$ ]]; then
         echo "CRATEDIGGER_TEST_RAM_MIN_BYTES must be a non-negative integer" >&2
@@ -53,6 +56,19 @@ setup_cratedigger_test_tmpfs() {
         echo "Test RAM root is not tmpfs: $parent ($filesystem_type)" >&2
         return 1
     fi
+
+    current="$(realpath -- "$parent")" || return 1
+    while true; do
+        mode="$(stat --format=%a -- "$current")" || return 1
+        if (( (8#$mode & 8#22) != 0 )); then
+            echo "Test RAM root has replaceable ancestor: $current (mode $mode)" >&2
+            return 1
+        fi
+        if [[ "$current" == "/" ]]; then
+            break
+        fi
+        current="$(dirname -- "$current")"
+    done
 
     available_bytes="$(
         df -B1 --output=avail "$parent" | tail -n 1 | tr -d '[:space:]'

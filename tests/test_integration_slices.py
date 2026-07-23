@@ -3518,8 +3518,8 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
         from tests.helpers import make_download_file
 
         with (
-            tempfile.TemporaryDirectory(dir=os.getcwd()) as tmpdir,
-            tempfile.TemporaryDirectory(dir=os.getcwd()) as processing_dir,
+            tempfile.TemporaryDirectory() as tmpdir,
+            tempfile.TemporaryDirectory() as processing_dir,
         ):
             os.makedirs(os.path.join(processing_dir, "albums"), mode=0o700)
             src_dir = os.path.join(tmpdir, "source_dir")
@@ -6022,7 +6022,7 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
         from lib.quality import SpectralAnalysisDetail, SpectralDetail
         from tests.helpers import noop_quality_gate
 
-        with tempfile.TemporaryDirectory(dir=os.getcwd()) as root:
+        with tempfile.TemporaryDirectory() as root:
             staging_dir = os.path.join(root, "Incoming")
             source = os.path.join(staging_dir, "failed_imports", "candidate")
             os.makedirs(source)
@@ -7730,7 +7730,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
         from scripts import import_preview_worker
 
         db = FakePipelineDB()
-        with tempfile.TemporaryDirectory(dir=os.getcwd()) as root:
+        with tempfile.TemporaryDirectory() as root:
             staging_dir = os.path.join(root, "Incoming")
             source = os.path.join(staging_dir, "failed_imports", "candidate")
             os.makedirs(source)
@@ -7830,7 +7830,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
         from scripts import import_preview_worker
 
         db = FakePipelineDB()
-        with tempfile.TemporaryDirectory(dir=os.getcwd()) as root:
+        with tempfile.TemporaryDirectory() as root:
             staging_dir = os.path.join(root, "Incoming")
             source = os.path.join(staging_dir, "failed_imports", "candidate")
             os.makedirs(source)
@@ -7929,7 +7929,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
         from scripts import import_preview_worker
 
         db = FakePipelineDB()
-        with tempfile.TemporaryDirectory(dir=os.getcwd()) as root:
+        with tempfile.TemporaryDirectory() as root:
             staging_dir = os.path.join(root, "Incoming")
             source = os.path.join(staging_dir, "failed_imports", "candidate")
             os.makedirs(source)
@@ -8067,7 +8067,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
         from scripts import import_preview_worker
 
         db = FakePipelineDB()
-        with tempfile.TemporaryDirectory(dir=os.getcwd()) as root:
+        with tempfile.TemporaryDirectory() as root:
             staging_dir = os.path.join(root, "Incoming")
             source = os.path.join(staging_dir, "failed_imports", "candidate")
             os.makedirs(source)
@@ -8147,7 +8147,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
         from scripts import import_preview_worker
 
         db = FakePipelineDB()
-        with tempfile.TemporaryDirectory(dir=os.getcwd()) as root:
+        with tempfile.TemporaryDirectory() as root:
             staging_dir = os.path.join(root, "Incoming")
             source = os.path.join(staging_dir, "failed_imports", "candidate")
             os.makedirs(source)
@@ -8411,7 +8411,7 @@ class TestWrongMatchStaleEvidenceRefreshSlice(unittest.TestCase):
             cleanup_wrong_match,
         )
 
-        root = tempfile.mkdtemp(dir=os.getcwd())
+        root = tempfile.mkdtemp()
         source = os.path.join(root, "failed_imports", "stale-album")
         os.makedirs(source)
         os.makedirs(os.path.join(root, "slskd"))
