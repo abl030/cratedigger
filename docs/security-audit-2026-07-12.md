@@ -54,7 +54,7 @@ against that reality, not against a hypothetical public exposure.
 | CD-SEC-01 | High | Historical credentials committed to a public repo | deleted notifier docs, git history |
 | CD-SEC-02 | High | No auth + wildcard CORS on file-destructive endpoints | `web/server.py` |
 | CD-SEC-03 | Medium | Remediated: HTTP import-preview is path-free and snapshots authorized DB paths | `web/routes/imports.py`, `lib/import_preview.py` |
-| CD-SEC-04 | Medium | No systemd sandboxing on services that process attacker-controlled bytes | `nix/module.nix` |
+| CD-SEC-04 | Medium | Module hardening added for services that process attacker-controlled bytes; pending merge/deploy proof | `nix/module.nix` |
 | CD-SEC-05 | Low | Internal exception strings reflected in HTTP 500 bodies | `web/server.py` |
 | CD-SEC-06 | Medium | Removed: notifier TLS fallback now fails closed | `lib/util.py` |
 | CD-SEC-07 | Low | Unbounded request body read + JSON parse (memory-exhaustion DoS) | `web/server.py` |
@@ -302,24 +302,48 @@ check — this endpoint omits it.
   `failed_imports` roots with the same within-root check the wrong-match service
   uses, and route import-preview through `parse_body`.
 
-### CD-SEC-04 — No systemd sandboxing on untrusted-input services (Medium)
+### CD-SEC-04 — Sandboxed untrusted-input services (Medium; pending deploy proof)
 
-Every long-running unit rendered by `nix/module.nix` (web, importer,
-import-preview-worker, youtube-ingest) sets only `User`/`Group`/`ExecStart`/
-`WorkingDirectory`/`Restart`. There is **no** `ProtectSystem=strict`,
-`ReadWritePaths`, `PrivateTmp`, `ProtectHome`, `NoNewPrivileges`,
-`RestrictAddressFamilies`, or `SystemCallFilter`. These services drive yt-dlp,
-ffmpeg, beets, mp3val, and sox over attacker-controlled bytes. Running as a
-non-root system user is the only current mitigation — a memory-safety bug in any
-of those tools yields the full service-user capability set: write access to the
-entire music library plus read access to every secret the user can read.
+The four long-running units that process network/media input —
+`cratedigger-web`, `cratedigger-importer`,
+`cratedigger-import-preview-worker`, and `cratedigger-youtube-ingest` — now
+share a module-owned systemd baseline: `NoNewPrivileges=yes`, `PrivateTmp=yes`,
+`ProtectSystem=strict`, `ProtectHome=yes`, and
+`RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6`. Their syscall surface is
+the portable `@system-service` allowlist. It retains `fchownat`, needed by the
+explicit operator-group secret handoff in the config renderer, rather than
+claiming a narrower filter that would prevent the real services from starting.
 
-- **Remediation:** add a hardening block to the untrusted-input units (start
-  with `NoNewPrivileges`, `ProtectSystem=strict` + an explicit `ReadWritePaths`
-  allowlist for the state/library/staging dirs, `PrivateTmp`, `ProtectHome`,
-  `RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX`). Gate the change with the
-  existing module VM check, since over-tight confinement would break real file
-  access. This is a module change and is deferred to its own PR.
+Each unit receives a `ReadWritePaths` list derived from its own authority
+roots rather than a shared blanket grant. All four get `stateDir`; importer,
+preview worker, and web get `processingDir`; only importer and web get the
+Beets root and library-DB parent; importer and web get the validation staging
+root, with importer additionally getting the tracking-file parent; and the
+YouTube worker gets only `youtubeIngest.tempDir` plus validation staging. The
+slskd download directory is writable only for web, importer, and preview
+worker. The module VM starts all four services, pins every rendered hardening
+property and per-unit writable root, qualifies the checker with known-bad
+properties, and runs a test-only importer pre-start inside the real sandbox.
+That probe exercises Beets, ffmpeg, sox, and mp3val, writes every importer
+authority root, and proves a deliberately world-writable sibling outside
+`ReadWritePaths` remains effectively read-only. Direct negative pins keep the
+main, unfindable, and migrate units outside this hardening scope.
+
+This boundary intentionally does **not** apply to the main pipeline,
+unfindable, or migrate oneshots: CD-SEC-04 is scoped to those four
+untrusted-input long-running units. It is defense in depth, not a replacement
+for POSIX ownership, path-authority checks, secret permissions, or downstream
+mount review. In particular, a downstream writable `BindPaths` can reopen a
+target beyond the upstream list; private namespaces must use narrow per-unit
+binds and verify the effective mount behavior. With a private `/mnt`, expose
+broad shared-tree visibility using `BindReadOnlyPaths`, then add writable binds
+only for the unit-specific roots listed above. On doc2, the metadata gate used
+by web, importer, and import-preview-worker writes under
+`/run/cratedigger-metadata-gate`, so that exact directory must appear in those
+units' `ReadWritePaths`; the YouTube worker does not run the gate. This module
+does not grant generic `/run` write access. The issue remains open until this
+module change and the downstream mount/runtime-path configuration are merged,
+deployed, and verified on the live units.
 
 ### CD-SEC-18 — Track replacement is non-atomic (Medium)
 
@@ -609,7 +633,8 @@ Priority data-loss / audit-integrity work:
 Priority containment / integrity work:
 
 - [x] CD-SEC-03 — path-free HTTP contract plus no-follow authorized snapshots.
-- [ ] CD-SEC-04 — systemd hardening block (gated by the module VM check).
+- [ ] CD-SEC-04 — module hardening is VM-gated; merge, deployment, and live
+      service-property proof remain before closure.
 - [x] CD-SEC-06 — remove the unreachable `CERT_NONE` fallback; notifier leaves
       use default CA-verified TLS and fail closed (tracking issue remains open
       pending deploy/live proof).

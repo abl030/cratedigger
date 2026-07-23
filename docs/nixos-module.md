@@ -172,6 +172,53 @@ See [`examples/cratedigger.nix`](../examples/cratedigger.nix) for the full worke
 - `cratedigger-unfindable.timer` — `OnCalendar=daily`, `Persistent=true`, `RandomizedDelaySec=30min`. The 30-min jitter is purely local cron-collision avoidance (logrotate, postgres autovacuum on doc2); the single-operator install has no fleet to spread across. The daily fire processes K=100 rows per run with a ~7-day per-request cadence target; full cohort coverage finishes in ~9 days for a ~830-row wanted cohort.
 - `cratedigger-web.service` — long-running web UI for music.ablz.au.
 
+### Untrusted-input service sandbox
+
+Exactly four long-running units receive the shared systemd sandbox:
+`cratedigger-web.service`, `cratedigger-importer.service`,
+`cratedigger-import-preview-worker.service`, and
+`cratedigger-youtube-ingest.service`. The timer-driven
+`cratedigger.service`/`cratedigger-unfindable.service` and the migration
+oneshot deliberately remain outside this boundary.
+
+Every sandboxed unit has `NoNewPrivileges=yes`, `PrivateTmp=yes`,
+`ProtectSystem=strict`, `ProtectHome=yes`, and
+`RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6`. `SystemCallFilter` uses
+systemd's portable `@system-service` allowlist. It intentionally includes the
+ordinary `fchownat` operation used by the renderer's explicit group-read
+secrets handoff; do not add a broad negative syscall class without re-running
+the module VM, because it can prevent config rendering before the worker starts.
+
+`ReadWritePaths` is derived from the configured authority roots and is exact:
+
+| Unit | Writable paths |
+|---|---|
+| web | `stateDir`, `processingDir`, `slskd.downloadDir`, Beets root, parent of the Beets library DB, validation staging root |
+| importer | web paths plus parent of `beets.validation.trackingFile` |
+| import-preview-worker | `stateDir`, `processingDir`, `slskd.downloadDir` |
+| youtube-ingest | `stateDir`, `youtubeIngest.tempDir`, validation staging root |
+
+An optional path (`slskd.downloadDir`, validation staging/tracking) is omitted
+when its option is `null`. `ReadWritePaths` only makes the named portion of the
+otherwise read-only system namespace writable; it neither grants Unix
+permissions nor makes a path visible in a downstream private mount namespace.
+A downstream writable `BindPaths` entry is an independent mount grant and can
+reopen its target even when the upstream `ReadWritePaths` list is narrower.
+For a consumer using `TemporaryFileSystem=/mnt`, the recommended composition is
+broad shared-tree visibility through `BindReadOnlyPaths`, followed by
+`BindPaths` only for that unit's exact writable roots from the table above.
+Those writable binds must be narrow and per-unit; do not bind an entire shared
+music or data parent writable for every worker. Verify effective denial rather
+than inferring confinement from the rendered property strings alone. The
+upstream module VM proves the generic module boundary without downstream
+writable binds.
+
+All service phases inherit the sandbox, including downstream `ExecCondition`
+and `ExecStartPre` commands. On doc2, the metadata gate used by web, importer,
+and import-preview-worker writes under `/run/cratedigger-metadata-gate`, so
+that exact directory must appear in those units' `ReadWritePaths`. The
+upstream module deliberately does not grant generic write access to `/run`.
+
 ## Sops + per-key secrets
 
 sops-nix's `key = "..."` does NOT actually extract a single value from a multi-key dotenv file (it writes the whole `KEY=VALUE` envfile regardless — verified empirically; same gotcha is documented in `~/nixosconfig/modules/nixos/services/alerting.nix` for the gotify token). The upstream module wants raw values per file, so the homelab wrapper materializes them via a `cratedigger-secrets-split` oneshot at boot:

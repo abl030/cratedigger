@@ -205,6 +205,51 @@
   ];
   redisServiceUnits = optional cfg.redis.enable "redis-cratedigger.service";
 
+  # CD-SEC-04: these are the only long-running units that accept untrusted
+  # network/media input. Keep the systemd hardening literal and shared; each
+  # unit below supplies only the filesystem roots its workflow mutates.
+  untrustedInputSandbox = writePaths: {
+    NoNewPrivileges = true;
+    PrivateTmp = true;
+    ProtectSystem = "strict";
+    ProtectHome = true;
+    RestrictAddressFamilies = ["AF_UNIX" "AF_INET" "AF_INET6"];
+    # The renderer's explicit operator-group secrets handoff uses chgrp
+    # (fchownat). @system-service is the portable systemd service profile
+    # that includes that required ordinary filesystem operation.
+    SystemCallFilter = ["@system-service"];
+    ReadWritePaths = lib.unique writePaths;
+  };
+
+  slskdWritePaths = optional (cfg.slskd.downloadDir != null) cfg.slskd.downloadDir;
+  validationStagingWritePaths = optional
+    (cfg.beets.validation.stagingDir != null)
+    cfg.beets.validation.stagingDir;
+  validationTrackingWritePaths = optional
+    (cfg.beets.validation.trackingFile != null)
+    (dirOf cfg.beets.validation.trackingFile);
+  beetsWritePaths = lib.unique [
+    cfg.beets.config.directory
+    (dirOf cfg.beets.config.library)
+  ];
+  webSandboxWritePaths = [
+    cfg.stateDir
+    cfg.processingDir
+  ] ++ slskdWritePaths ++ beetsWritePaths ++ validationStagingWritePaths;
+  importerSandboxWritePaths = [
+    cfg.stateDir
+    cfg.processingDir
+  ] ++ slskdWritePaths ++ beetsWritePaths ++ validationStagingWritePaths
+    ++ validationTrackingWritePaths;
+  previewWorkerSandboxWritePaths = [
+    cfg.stateDir
+    cfg.processingDir
+  ] ++ slskdWritePaths;
+  youtubeIngestSandboxWritePaths = [
+    cfg.stateDir
+    cfg.youtubeIngest.tempDir
+  ] ++ validationStagingWritePaths;
+
   # CLI wrappers — the only place PYTHONPATH is set.
   cratediggerPkg = pkgs.writeShellScriptBin "cratedigger" ''
     export PATH="${runtimePath}:$PATH"
@@ -1653,7 +1698,7 @@ in {
       # not by leaving the worker dead.
       restartIfChanged = true;
       path = [pkgs.bash pkgs.coreutils pkgs.gnugrep pkgs.gnused pkgs.curl pkgs.jq pkgs.ffmpeg pkgs.mp3val pkgs.flac pkgs.sox];
-      serviceConfig = {
+      serviceConfig = (untrustedInputSandbox importerSandboxWritePaths) // {
         Type = "simple";
         User = cfg.user;
         Group = cfg.group;
@@ -1678,7 +1723,7 @@ in {
       # leaving the worker dead instead is strictly worse.
       restartIfChanged = true;
       path = [pkgs.bash pkgs.coreutils pkgs.gnugrep pkgs.gnused pkgs.curl pkgs.jq pkgs.ffmpeg pkgs.mp3val pkgs.flac pkgs.sox];
-      serviceConfig = {
+      serviceConfig = (untrustedInputSandbox previewWorkerSandboxWritePaths) // {
         Type = "simple";
         User = cfg.user;
         Group = cfg.group;
@@ -1723,7 +1768,7 @@ in {
       # prepended there). The unit's `path` mirrors the importer's so
       # subprocess invocations have the standard toolchain available.
       path = [pkgs.bash pkgs.coreutils pkgs.gnugrep pkgs.gnused pkgs.curl pkgs.jq pkgs.ffmpeg pkgs.mp3val pkgs.flac pkgs.sox];
-      serviceConfig = {
+      serviceConfig = (untrustedInputSandbox youtubeIngestSandboxWritePaths) // {
         Type = "simple";
         User = cfg.user;
         Group = cfg.group;
@@ -1743,7 +1788,7 @@ in {
       wants = redisServiceUnits;
       requires = ["cratedigger-db-migrate.service"];
       wantedBy = ["multi-user.target"];
-      serviceConfig = {
+      serviceConfig = (untrustedInputSandbox webSandboxWritePaths) // {
         Type = "simple";
         User = cfg.user;
         Group = cfg.group;
