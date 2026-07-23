@@ -8157,7 +8157,8 @@ class TestWrongMatchCleanupFKChainAvoidsRemeasurement(unittest.TestCase):
         cfg = _SN(
             quality_ranks=QualityRankConfig.defaults(),
             verified_lossless_target="",
-            beets_directory="",
+            beets_library_db="/tmp/cratedigger-test-beets-library.db",
+            beets_directory="/tmp/cratedigger-test-beets-library",
         )
         return patch(
             "lib.config.read_runtime_config",
@@ -8215,7 +8216,8 @@ class TestWrongMatchStaleEvidenceRefreshSlice(unittest.TestCase):
         cfg = _SN(
             quality_ranks=QualityRankConfig.defaults(),
             verified_lossless_target="",
-            beets_directory="",
+            beets_library_db="/tmp/cratedigger-test-beets-library.db",
+            beets_directory="/tmp/cratedigger-test-beets-library",
             audio_check_mode="normal",
         )
         return patch("lib.config.read_runtime_config", return_value=cfg)
@@ -8411,14 +8413,19 @@ class TestWrongMatchTriageRejectsSameSourceDuplicate(unittest.TestCase):
             filetype_band="lossless",
         )
 
-    def _patch_cfg(self):
-        """Pin runtime config so cleanup sees ``quality_ranks`` without disk."""
+    @staticmethod
+    def _beets_library_db_path(library_root: str) -> str:
+        return os.path.join(library_root, "beets-library.db")
+
+    def _patch_cfg(self, *, beets_library_root: str):
+        """Pin cleanup to the same explicit Beets DB/root pair as dispatch."""
         from lib.quality import QualityRankConfig
         from types import SimpleNamespace as _SN
         cfg = _SN(
             quality_ranks=QualityRankConfig.defaults(),
             verified_lossless_target="",
-            beets_directory="",
+            beets_library_db=self._beets_library_db_path(beets_library_root),
+            beets_directory=beets_library_root,
         )
         return patch("lib.config.read_runtime_config", return_value=cfg)
 
@@ -8493,7 +8500,9 @@ class TestWrongMatchTriageRejectsSameSourceDuplicate(unittest.TestCase):
             album_path=library_dir,
             format="Opus",
         )
-        with patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+        beets_db_path = self._beets_library_db_path(library_dir)
+        mocked_beets = _mock_beets_db(beets_info)
+        with patch("lib.beets_db.BeetsDB", mocked_beets):
             _refresh_current_evidence_after_import(
                 db,
                 request_id=request_id,
@@ -8503,7 +8512,13 @@ class TestWrongMatchTriageRejectsSameSourceDuplicate(unittest.TestCase):
                 import_result=make_import_result(
                     decision="import", new_min_bitrate=100,
                 ),
+                beets_library_db_path=beets_db_path,
+                beets_library_root=library_dir,
             )
+        mocked_beets.assert_called_once_with(
+            beets_db_path,
+            library_root=library_dir,
+        )
 
         request_row = db.request(request_id)
         new_evidence_id = request_row["current_evidence_id"]
@@ -8618,9 +8633,14 @@ class TestWrongMatchTriageRejectsSameSourceDuplicate(unittest.TestCase):
                 format="Opus",
             )
 
-            with self._patch_cfg(), \
-                    patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+            mocked_beets = _mock_beets_db(beets_info)
+            with self._patch_cfg(beets_library_root=library_dir), \
+                    patch("lib.beets_db.BeetsDB", mocked_beets):
                 result = cleanup_wrong_match(db, log_id)
+            mocked_beets.assert_called_once_with(
+                self._beets_library_db_path(library_dir),
+                library_root=library_dir,
+            )
 
             # Load-bearing assertions. RED today: outcome is
             # OUTCOME_KEPT_WOULD_IMPORT because the library row's NULL
@@ -8711,9 +8731,14 @@ class TestWrongMatchTriageRejectsSameSourceDuplicate(unittest.TestCase):
                 album_path=library_dir,
                 format="Opus",
             )
-            with self._patch_cfg(), \
-                    patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+            mocked_beets = _mock_beets_db(beets_info)
+            with self._patch_cfg(beets_library_root=library_dir), \
+                    patch("lib.beets_db.BeetsDB", mocked_beets):
                 result = cleanup_wrong_match(db, log_id)
+            mocked_beets.assert_called_once_with(
+                self._beets_library_db_path(library_dir),
+                library_root=library_dir,
+            )
 
             self.assertEqual(result.outcome, OUTCOME_KEPT_WOULD_IMPORT)
             self.assertEqual(result.verdict, "would_import")
@@ -8829,9 +8854,14 @@ class TestWrongMatchTriageRejectsSameSourceDuplicate(unittest.TestCase):
                 album_path=library_dir,
                 format="Opus",
             )
-            with self._patch_cfg(), \
-                    patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+            mocked_beets = _mock_beets_db(beets_info)
+            with self._patch_cfg(beets_library_root=library_dir), \
+                    patch("lib.beets_db.BeetsDB", mocked_beets):
                 result = cleanup_wrong_match(db, log_id)
+            mocked_beets.assert_called_once_with(
+                self._beets_library_db_path(library_dir),
+                library_root=library_dir,
+            )
 
             # Decision: lossless_source_locked.
             self.assertEqual(
