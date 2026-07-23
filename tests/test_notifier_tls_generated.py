@@ -3,8 +3,8 @@
 
 The deterministic pin lives in ``tests/test_util.py``. This property drives
 each real token-bearing Plex/Jellyfin urllib leaf with representative URL,
-token, and payload variation. A production-shaped certificate failure must
-escape after exactly one default-context request.
+token, and payload variation. Both raw and urllib-wrapped certificate failures
+must escape after exactly one default-context request.
 """
 
 from __future__ import annotations
@@ -85,11 +85,17 @@ def _invoke_leaf(
 
 
 class TestInvariantCheckersTripOnViolations(unittest.TestCase):
-    def test_single_verified_attempt_checker_rejects_retry_and_context(self) -> None:
+    def test_single_verified_attempt_checker_rejects_context_bearing_attempt(self) -> None:
+        with self.assertRaises(AssertionError):
+            assert_single_verified_attempt([
+                UrlopenAttempt(15, frozenset({"timeout", "context"})),
+            ])
+
+    def test_single_verified_attempt_checker_rejects_retry_trace(self) -> None:
         with self.assertRaises(AssertionError):
             assert_single_verified_attempt([
                 UrlopenAttempt(15, frozenset({"timeout"})),
-                UrlopenAttempt(15, frozenset({"timeout", "context"})),
+                UrlopenAttempt(15, frozenset({"timeout"})),
             ])
 
 
@@ -100,6 +106,7 @@ class TestGeneratedNotifierTlsFailClosed(unittest.TestCase):
         token=_SAFE_TEXT,
         query=_SAFE_TEXT,
         payload_value=_SAFE_TEXT,
+        failure_shape=st.sampled_from(("raw", "urllib_wrapped")),
     )
     def test_certificate_error_has_one_default_context_attempt(
         self,
@@ -108,11 +115,13 @@ class TestGeneratedNotifierTlsFailClosed(unittest.TestCase):
         token: str,
         query: str,
         payload_value: str,
+        failure_shape: str,
     ) -> None:
-        error = urllib.error.URLError(ssl.SSLCertVerificationError(
-            1, "certificate verify failed"))
+        raw_error = ssl.SSLCertVerificationError(1, "certificate verify failed")
+        error = (raw_error if failure_shape == "raw"
+                 else urllib.error.URLError(raw_error))
         with patch("lib.util.urllib.request.urlopen", side_effect=error) as urlopen:
-            with self.assertRaises(urllib.error.URLError) as raised:
+            with self.assertRaises(type(error)) as raised:
                 _invoke_leaf(leaf, _cfg(token), path_segment, query, payload_value)
 
         self.assertIs(raised.exception, error)

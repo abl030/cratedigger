@@ -1051,7 +1051,7 @@ class TestNotifierTlsFailClosed(unittest.TestCase):
         )
 
     def test_certificate_verification_error_escapes_each_leaf_once(self):
-        """A production-shaped urllib TLS failure must not emit a token retry."""
+        """Raw and urllib-wrapped TLS failures must not emit a token retry."""
         from lib import util
 
         self.assertFalse(
@@ -1070,21 +1070,27 @@ class TestNotifierTlsFailClosed(unittest.TestCase):
             ("Jellyfin POST", lambda: util._jellyfin_post_json(
                 cfg, "/Items/album", {"Id": "album"})),
         )
+        failure_shapes = (
+            ("raw", lambda: ssl.SSLCertVerificationError(
+                1, "certificate verify failed")),
+            ("urllib wrapped", lambda: urllib.error.URLError(
+                ssl.SSLCertVerificationError(1, "certificate verify failed"))),
+        )
         for label, leaf in leaves:
-            with self.subTest(leaf=label), patch(
-                "lib.util.urllib.request.urlopen"
-            ) as urlopen:
-                error = urllib.error.URLError(ssl.SSLCertVerificationError(
-                    1, "certificate verify failed"))
-                urlopen.side_effect = error
+            for failure_label, make_error in failure_shapes:
+                with self.subTest(leaf=label, failure=failure_label), patch(
+                    "lib.util.urllib.request.urlopen"
+                ) as urlopen:
+                    error = make_error()
+                    urlopen.side_effect = error
 
-                with self.assertRaises(urllib.error.URLError) as raised:
-                    leaf()
+                    with self.assertRaises(type(error)) as raised:
+                        leaf()
 
-                self.assertIs(raised.exception, error)
-                urlopen.assert_called_once()
-                _request, = urlopen.call_args.args
-                self.assertEqual(urlopen.call_args.kwargs, {"timeout": 15})
+                    self.assertIs(raised.exception, error)
+                    urlopen.assert_called_once()
+                    _request, = urlopen.call_args.args
+                    self.assertEqual(urlopen.call_args.kwargs, {"timeout": 15})
 
 
 class TestBeetsSubprocessEnv(unittest.TestCase):
