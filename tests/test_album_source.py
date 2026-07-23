@@ -115,6 +115,15 @@ class TestAlbumRecordFromDbRow(unittest.TestCase):
 
 
 class TestDatabaseSourceMusicBrainzFallbackUrl(unittest.TestCase):
+    def test_fallback_canonical_uuid_url_keeps_hyphens(self) -> None:
+        mb_id = "44438bf9-26d9-4460-9b4f-1a1b015e37a1"
+
+        self.assertEqual(
+            _fallback_mb_request_url(mb_id),
+            "http://192.168.1.35:5200/ws/2/release/"
+            "44438bf9-26d9-4460-9b4f-1a1b015e37a1?inc=recordings&fmt=json",
+        )
+
     def test_fallback_quotes_release_id_as_one_path_component(self) -> None:
         mb_id = "release/with?query#fragment% and space"
 
@@ -122,7 +131,7 @@ class TestDatabaseSourceMusicBrainzFallbackUrl(unittest.TestCase):
             mb_id, _fallback_mb_request_url(mb_id))
 
     @given(st.text(
-        alphabet=string.ascii_letters + string.digits + "/?#% &:;@[]\u2603",
+        alphabet=string.ascii_letters + string.digits + "-/?#% &:;@[]\u2603",
         min_size=1,
         max_size=40,
     ))

@@ -18,7 +18,7 @@ from unittest.mock import patch
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError
 
-from hypothesis import given, strategies as st
+from hypothesis import example, given, settings, strategies as st
 
 from tests import _hypothesis_profiles  # noqa: F401 — registers active profile
 
@@ -90,6 +90,47 @@ def assert_clean_generic_failure(
         for record in records
     ):
         raise AssertionError("server logs lost generic failure detail")
+
+
+def _unmatched_post_observation(
+    port: int,
+    path: str,
+    body: bytes,
+) -> tuple[bytes, bool]:
+    """Send an unmatched POST and record its complete connection outcome."""
+    request = (
+        f"POST {path} HTTP/1.1\r\n".encode()
+        + b"Host: 127.0.0.1\r\n"
+        + f"Content-Length: {len(body)}\r\n\r\n".encode()
+        + body
+    )
+    with socket.create_connection(("127.0.0.1", port), timeout=2) as client:
+        client.settimeout(2)
+        client.sendall(request)
+        client.shutdown(socket.SHUT_WR)
+        response = bytearray()
+        while chunk := client.recv(4096):
+            response.extend(chunk)
+    return bytes(response), True
+
+
+def assert_unmatched_post_closes_connection(
+    response: bytes,
+    connection_closed: bool,
+) -> None:
+    """An unmatched POST has one 404 response and cannot retain framing."""
+    failures = []
+    if not connection_closed:
+        failures.append("unmatched POST connection stayed open")
+    response_count = response.count(b"HTTP/1.1 ")
+    if response_count != 1:
+        failures.append(f"unmatched POST produced {response_count} HTTP responses")
+    if b"HTTP/1.1 404 Not Found\r\n" not in response:
+        failures.append("unmatched POST did not return 404")
+    if b'{"error": "Not found"}' not in response:
+        failures.append("unmatched POST did not return the not-found payload")
+    if failures:
+        raise AssertionError("; ".join(failures))
 
 
 class TestServerEndpoints(_FakeDbWebServerCase):
@@ -471,9 +512,47 @@ class TestServerEndpoints(_FakeDbWebServerCase):
             while chunk := client.recv(4096):
                 response.extend(chunk)
 
-        self.assertEqual(response.count(b"HTTP/1.1 "), 1)
-        self.assertIn(b"HTTP/1.1 404 Not Found\r\n", response)
-        self.assertIn(b'{"error": "Not found"}', response)
+        assert_unmatched_post_closes_connection(bytes(response), True)
+
+    def test_unmatched_post_oracle_rejects_open_two_response_observation(self):
+        """Fault qualification: the framing checker rejects both symptoms."""
+        two_responses = (
+            b"HTTP/1.1 404 Not Found\r\n\r\n{\"error\": \"Not found\"}"
+            b"HTTP/1.1 200 OK\r\n\r\n"
+        )
+
+        with self.assertRaisesRegex(
+            AssertionError,
+            "connection stayed open.*2 HTTP responses",
+        ):
+            assert_unmatched_post_closes_connection(two_responses, False)
+
+    @settings(max_examples=12, deadline=None)
+    @given(
+        path_token=st.text(
+            alphabet=string.ascii_letters + string.digits + "-_",
+            min_size=1,
+            max_size=24,
+        ),
+        body=st.binary(min_size=0, max_size=96),
+    )
+    @example(
+        path_token="decisive-unread-body",
+        body=b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+    )
+    def test_unmatched_post_always_closes_before_arbitrary_bodies_reparse(
+        self,
+        path_token: str,
+        body: bytes,
+    ) -> None:
+        """Unknown POST paths close after one response for arbitrary bodies."""
+        response, connection_closed = _unmatched_post_observation(
+            self.port,
+            f"/__unmatched_post__/{path_token}",
+            body,
+        )
+
+        assert_unmatched_post_closes_connection(response, connection_closed)
 
     def test_rejected_post_content_lengths_do_not_consume_a_body(self):
         """Malformed, negative, and oversized lengths fail before ``read``."""
