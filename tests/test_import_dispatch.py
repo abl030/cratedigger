@@ -565,6 +565,7 @@ class TestAudioCorruptPostCommitQuarantine(unittest.TestCase):
         from lib.dispatch.types import ImportAttemptResult
         from lib.import_queue import IMPORT_JOB_FORCE
         from lib.quality import AudioQualityMeasurement
+        from lib.quality_evidence import snapshot_audio_files
         from scripts.importer import process_claimed_job
 
         with tempfile.TemporaryDirectory() as parent:
@@ -597,6 +598,35 @@ class TestAudioCorruptPostCommitQuarantine(unittest.TestCase):
                     "download_log_id": original_log_id,
                     "failed_path": source,
                 },
+            )
+            candidate = make_album_quality_evidence(
+                mb_release_id="test-mbid",
+                source_path=source,
+                files=snapshot_audio_files(source),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=900,
+                    avg_bitrate_kbps=900,
+                    median_bitrate_kbps=900,
+                    format="FLAC",
+                ),
+                codec="flac",
+                container="flac",
+                storage_format="FLAC",
+                audio_corrupt=True,
+                audio_error="decoder rejected source",
+            )
+            db.upsert_album_quality_evidence(candidate)
+            persisted_candidate = db.find_album_quality_evidence(
+                mb_release_id=candidate.mb_release_id,
+                snapshot_fingerprint=candidate.snapshot_fingerprint,
+            )
+            assert (
+                persisted_candidate is not None
+                and persisted_candidate.id is not None
+            )
+            db.set_import_job_candidate_evidence(
+                queued.id,
+                persisted_candidate.id,
             )
             db.mark_import_job_preview_importable(
                 queued.id,
@@ -633,10 +663,16 @@ class TestAudioCorruptPostCommitQuarantine(unittest.TestCase):
                 source_download_log_id=original_log_id,
                 audio_quarantine_root=download_root,
             )
+            self.assertEqual(
+                outcome.post_commit_wrong_match_scenario,
+                "audio_corrupt",
+            )
 
             with patch(
                 "lib.wrong_match_delete_service.delete_wrong_match",
-            ) as delete_wrong_match:
+            ) as delete_wrong_match, patch(
+                "lib.wrong_match_cleanup_service.cleanup_wrong_match",
+            ) as cleanup_wrong_match:
                 completed = process_claimed_job(
                     db,  # type: ignore[arg-type]
                     claimed,
@@ -645,6 +681,7 @@ class TestAudioCorruptPostCommitQuarantine(unittest.TestCase):
 
             assert completed is not None and completed.result is not None
             delete_wrong_match.assert_not_called()
+            cleanup_wrong_match.assert_not_called()
             cleanup = completed.result["cleanup"]
             assert isinstance(cleanup, dict)
             self.assertEqual(
@@ -664,6 +701,10 @@ class TestAudioCorruptPostCommitQuarantine(unittest.TestCase):
                 os.path.join(download_root, "failed_imports", "bad_files"),
             )
             terminal_log = db.download_logs[-1]
+            self.assertEqual(
+                terminal_log.candidate_evidence_id,
+                persisted_candidate.id,
+            )
             terminal_audit = msgspec.json.decode(
                 terminal_log.validation_result,
             )
@@ -672,6 +713,7 @@ class TestAudioCorruptPostCommitQuarantine(unittest.TestCase):
                 terminal_audit["post_commit_quarantine"]["source_path"],
                 source,
             )
+            self.assertNotIn("wrong_match_triage", terminal_audit)
             self.assertEqual(db.request(835)["status"], "unsearchable")
 
 

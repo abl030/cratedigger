@@ -217,6 +217,7 @@ def _reject_import_from_evidence_decision(
             if isinstance(terminal_outcome, PendingImportTerminalOutcome)
             else None
         ),
+        post_commit_wrong_match_scenario=decision,
         post_commit_cleanup=cleanup_plan,
     )
 

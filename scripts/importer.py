@@ -618,19 +618,32 @@ def _cleanup_committed_wrong_match_rejection(
     db: PipelineDB,
     job: ImportJob,
     download_log_id: int,
-    scenario: str | None,
+    outcome: DispatchOutcome,
 ) -> None:
     """Run Wrong Matches convergence only after the terminal bundle commits."""
     from lib.wrong_match_policy import rejection_scenario_is_wrong_match_candidate
 
-    if not rejection_scenario_is_wrong_match_candidate(scenario):
+    cleanup_plan = outcome.post_commit_cleanup
+    archival_quarantine = (
+        cleanup_plan is not None
+        and cleanup_plan.audio_quarantine_source_path is not None
+    )
+    wrong_match_candidate = rejection_scenario_is_wrong_match_candidate(
+        outcome.post_commit_wrong_match_scenario
+    )
+    if not archival_quarantine and not wrong_match_candidate:
+        return
+    evidence_id = db.get_import_job_candidate_evidence_id(job.id)
+    if evidence_id is not None:
+        db.set_download_log_candidate_evidence(download_log_id, evidence_id)
+    if archival_quarantine:
+        # The source is now protected archival evidence, whether quarantine
+        # moved it or failed closed at the original path. Never hand either
+        # location to the independent Wrong Matches deletion reducer.
         return
     try:
         from lib.wrong_match_cleanup_service import cleanup_wrong_match
 
-        evidence_id = db.get_import_job_candidate_evidence_id(job.id)
-        if evidence_id is not None:
-            db.set_download_log_candidate_evidence(download_log_id, evidence_id)
         cleanup_wrong_match(
             db,
             download_log_id,
@@ -712,7 +725,7 @@ def process_claimed_job(
                 db,
                 job,
                 terminal.download_log_id,
-                outcome.post_commit_wrong_match_scenario,
+                outcome,
             )
             return terminal_job
         recovery = db.mark_import_job_recovery_required(
@@ -803,7 +816,7 @@ def process_claimed_job(
             db,
             job,
             terminal.download_log_id,
-            outcome.post_commit_wrong_match_scenario,
+            outcome,
         )
         return terminal_job
     recovery = db.mark_import_job_recovery_required(

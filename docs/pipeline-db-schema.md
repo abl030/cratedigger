@@ -216,7 +216,9 @@ Audio-integrity failures split at the evidence boundary:
   the terminal row, and only then moves the retained source under the
   configured `<slskd_download_dir>/failed_imports/bad_files/`.
   The complete source directory moves by one atomic rename; a cross-filesystem
-  or other rename failure leaves the original directory untouched.
+  or other rename failure leaves the original directory untouched. Once this
+  archival move is planned, neither force-source cleanup nor the independent
+  Wrong Matches convergence reducer receives either retained path.
   `validation_result.post_commit_quarantine` records the exact source,
   destination, move result, and any bounded error; `failed_path` points at the
   surviving copy.

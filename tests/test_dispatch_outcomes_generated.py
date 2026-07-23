@@ -902,6 +902,24 @@ def assert_operator_retained_lifecycle(
         )
 
 
+def assert_archival_quarantine_isolated(
+    *,
+    cleanup_call_count: int,
+    terminal_log: DownloadLogRow,
+    candidate_evidence_id: int,
+) -> None:
+    """An archival quarantine never enters a destructive WM reducer."""
+    if cleanup_call_count:
+        raise AssertionError("archival quarantine reached Wrong Matches cleanup")
+    if terminal_log.candidate_evidence_id != candidate_evidence_id:
+        raise AssertionError("archival terminal audit lost candidate evidence")
+    validation = terminal_log.validation_result
+    if isinstance(validation, str):
+        validation = json.loads(validation)
+    if isinstance(validation, dict) and "wrong_match_triage" in validation:
+        raise AssertionError("archival terminal audit gained deletion triage")
+
+
 # ===========================================================================
 # Properties
 # ===========================================================================
@@ -1157,6 +1175,86 @@ class TestGeneratedOperatorRetainedLifecycle(unittest.TestCase):
         )
 
 
+class TestGeneratedArchivalQuarantineIsolation(unittest.TestCase):
+    @given(
+        scenario=st.one_of(
+            st.none(),
+            st.sampled_from((
+                "force_import",
+                "strong_mismatch",
+                "audio_corrupt",
+                "untracked_audio",
+            )),
+        )
+    )
+    @example(scenario=None)
+    def test_archive_plan_never_reaches_wrong_match_cleanup(
+        self,
+        scenario: str | None,
+    ) -> None:
+        from lib.dispatch.types import PostCommitCleanup
+        from lib.import_queue import IMPORT_JOB_FORCE
+        from scripts.importer import _cleanup_committed_wrong_match_rejection
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=835,
+            status="unsearchable",
+            mb_release_id="generated-archival-mbid",
+        ))
+        log_id = db.log_download(
+            request_id=835,
+            outcome="rejected",
+            validation_result=json.dumps({"scenario": "audio_corrupt"}),
+        )
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=835,
+            payload={
+                "download_log_id": log_id,
+                "failed_path": "/failed_imports/bad_files/album",
+            },
+        )
+        evidence = make_album_quality_evidence(
+            mb_release_id="generated-archival-mbid",
+            source_path="/failed_imports/bad_files/album",
+            audio_corrupt=True,
+            audio_error="generated decode failure",
+        )
+        db.upsert_album_quality_evidence(evidence)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_import_job_candidate_evidence(job.id, persisted.id)
+        outcome = DispatchOutcome(
+            success=False,
+            message="audio_corrupt",
+            post_commit_wrong_match_scenario=scenario,
+            post_commit_cleanup=PostCommitCleanup(
+                audio_quarantine_source_path="/source/album",
+                audio_quarantine_root="/download-root",
+            ),
+        )
+
+        with patch(
+            "lib.wrong_match_cleanup_service.cleanup_wrong_match",
+        ) as cleanup_wrong_match:
+            _cleanup_committed_wrong_match_rejection(
+                cast(Any, db),
+                job,
+                log_id,
+                outcome,
+            )
+
+        assert_archival_quarantine_isolated(
+            cleanup_call_count=cleanup_wrong_match.call_count,
+            terminal_log=db.download_logs[-1],
+            candidate_evidence_id=persisted.id,
+        )
+
+
 # ===========================================================================
 # Harness self-tests (RED/GREEN of the fuzzer itself) — each invariant
 # checker must trip on a planted violation, and a planted-bad router must
@@ -1170,6 +1268,24 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         db = FakePipelineDB()
         with self.assertRaises(AssertionError):
             assert_download_log_row_created(db)
+
+    def test_archival_checker_trips_on_wrong_match_cleanup(self):
+        with self.assertRaisesRegex(
+            AssertionError,
+            "reached Wrong Matches cleanup",
+        ):
+            assert_archival_quarantine_isolated(
+                cleanup_call_count=1,
+                terminal_log=DownloadLogRow(
+                    request_id=835,
+                    outcome="rejected",
+                    candidate_evidence_id=7,
+                    validation_result=json.dumps({
+                        "scenario": "audio_corrupt",
+                    }),
+                ),
+                candidate_evidence_id=7,
+            )
 
     def test_verified_lossless_lock_checker_trips_on_reopened_request(self):
         db = FakePipelineDB()

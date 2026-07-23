@@ -61,6 +61,7 @@ Preview persists completed content facts in
 denylist plus post-terminal `failed_imports/bad_files` quarantine path and
 resumes searching. Quarantine atomically renames the complete source directory
 and fails closed with the original untouched when that rename is unavailable.
+The quarantine plan excludes both post-import Wrong Matches deletion passes.
 A `measurement_failed` attempt writes no denylist and its
 retained source path is protected from the disk reaper. Diagnostics are capped
 at 16 files and 2 KiB per normalized stderr excerpt; success carries no
