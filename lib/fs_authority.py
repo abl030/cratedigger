@@ -328,7 +328,6 @@ class HeldDirectory:
 
     fd: int
     display_path: str
-    authority_root: str
 
     def close(self) -> None:
         os.close(self.fd)
@@ -378,7 +377,6 @@ def open_configured_quarantine_directory(
                     held = HeldDirectory(
                         fd=os.dup(candidate_fd),
                         display_path=os.path.abspath(os.path.join(root, relative)),
-                        authority_root=root,
                     )
         except FilesystemAuthorityError:
             continue

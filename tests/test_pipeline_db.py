@@ -11624,10 +11624,6 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
             self.db.get_owned_transfer_keys(), fake.get_owned_transfer_keys())
         self.assertEqual(
             self.db.get_owned_local_paths(), fake.get_owned_local_paths())
-        self.assertEqual(
-            self.db.get_owned_attempt_folders(),
-            fake.get_owned_attempt_folders(),
-        )
 
     def test_prune_removes_old_inactive_accepted_rows(self):
         active = self._seed_request("downloading")
@@ -11704,62 +11700,6 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
 
         self.assertEqual(self.db.prune_transfer_ledger(boundary), 0)
         self.assertEqual(len(self._ledger_rows(rid)), 1)
-
-    def test_attempt_folders_preserve_request_identity_and_dedupe(self):
-        rid = self.db.add_request(
-            artist_name="Sigur Rós",
-            album_title="Ágætis byrjun",
-            source="request",
-            status="imported",
-            year=1999,
-        )
-        self.db.record_transfer_enqueue([
-            TransferLedgerRow(
-                request_id=rid,
-                username="p0",
-                filename="p0\\Tonlist\\01.flac",
-                attempt_fingerprint="abcd1234",
-            ),
-            TransferLedgerRow(
-                request_id=rid,
-                username="p0",
-                filename="p0\\Tonlist\\02.flac",
-                attempt_fingerprint="abcd1234",
-            ),
-        ])
-        self.db.confirm_transfer_enqueue(
-            "p0", "p0\\Tonlist\\01.flac")
-        self.db.confirm_transfer_enqueue(
-            "p0", "p0\\Tonlist\\02.flac")
-
-        self.assertEqual(self.db.get_owned_attempt_folders(), [{
-            "request_id": rid,
-            "attempt_fingerprint": "abcd1234",
-            "artist_name": "Sigur Rós",
-            "album_title": "Ágætis byrjun",
-            "year": 1999,
-        }])
-
-    def test_attempt_folders_exclude_pending_and_missing_requests(self):
-        rid = self._seed_request("imported")
-        self.db.record_transfer_enqueue([
-            TransferLedgerRow(
-                request_id=rid,
-                username="p0",
-                filename="pending.flac",
-                attempt_fingerprint="pending-fp",
-            ),
-            TransferLedgerRow(
-                request_id=999999,
-                username="p1",
-                filename="missing.flac",
-                attempt_fingerprint="missing-fp",
-            ),
-        ])
-        self.db.confirm_transfer_enqueue("p1", "missing.flac")
-
-        self.assertEqual(self.db.get_owned_attempt_folders(), [])
-
 
 @requires_postgres
 class TestReadProjectionParity(unittest.TestCase):

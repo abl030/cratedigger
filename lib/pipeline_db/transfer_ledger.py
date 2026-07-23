@@ -14,11 +14,6 @@ The methods this mixin adds:
   ``(username, filename)`` key.
 * ``get_owned_transfer_keys`` / ``get_owned_local_paths`` -- purpose-shaped
   read surfaces for transfer convergence and the disk reaper.
-* ``get_owned_attempt_folders`` -- read surface for the disk-reaper
-  flip (issue #571 PR 4): "which canonical processing folders are
-  mine?", joined to each ledgered attempt's request identity so the
-  caller can re-derive the folder with
-  ``lib.processing_paths.canonical_processing_path``.
 * ``prune_transfer_ledger`` -- T3: keeps pending intents bounded by age;
   accepted ownership evidence is also protected while its request remains
   active (``wanted``/``downloading``).
@@ -28,7 +23,6 @@ See migrations 045 and 051 for the schema and rationale.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
 
 import msgspec
 
@@ -178,43 +172,6 @@ class _TransferLedgerMixin(_PipelineDBBase):
             "WHERE local_path IS NOT NULL",
         )
         return {r["local_path"] for r in cur.fetchall()}
-
-    def get_owned_attempt_folders(self) -> list[dict[str, Any]]:
-        """Every distinct accepted ``(request_id, attempt_fingerprint)``
-        pair, joined to its request's artist/title/year identity -- the
-        disk-reaper flip's (issue #571) "which canonical processing
-        folders are mine?" lookup.
-
-        The caller re-derives each folder with
-        ``lib.processing_paths.canonical_processing_path`` from the
-        returned ``artist_name``/``album_title``/``year``/
-        ``attempt_fingerprint``. Current downloading rows instead flow
-        through ``canonical_folder_for_row``, which delegates to that same
-        formatter after deriving the fingerprint from persisted files. Thus
-        a past attempt (imported, replaced, or
-        reset-to-wanted-and-retried) whose row has since left
-        ``downloading`` is STILL recognised as owned here, unlike the
-        active-protection set which only tracks the row's CURRENT state.
-
-        The ``JOIN`` to ``album_requests`` means a ``request_id`` whose
-        row has been hard-deleted (the ledger's ``request_id`` carries
-        no FK, migration 045) silently drops out -- conservative in the
-        reap direction: the FOLDER stops being derivable as owned, but
-        any individually completion-stamped file under it is still
-        provable via ``get_owned_local_paths`` above, independent of
-        this join.
-        """
-        cur = self._execute(
-            """
-            SELECT DISTINCT t.request_id, t.attempt_fingerprint,
-                   r.artist_name, r.album_title, r.year
-            FROM slskd_transfer_ledger t
-            JOIN album_requests r ON r.id = t.request_id
-            WHERE t.attempt_fingerprint IS NOT NULL
-              AND t.accepted_at IS NOT NULL
-            """,
-        )
-        return [dict(r) for r in cur.fetchall()]
 
     def prune_transfer_ledger(self, older_than: datetime) -> int:
         """Hard-delete rows strictly older than ``older_than`` (T3).
