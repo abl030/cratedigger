@@ -43,6 +43,7 @@ def assert_published_request_complete(
     ):
         raise AssertionError("wanted upgrade request lost its publication policy")
     if resolved:
+        persisted_tracks = db.get_tracks(request_id)
         if discogs:
             # Direct Add does not pre-seed a Discogs master in the request;
             # the flattened browse payload can still resolve the release
@@ -52,7 +53,8 @@ def assert_published_request_complete(
                 row.get("mb_release_group_id") != "791"
                 or row.get("catalog_number") != "DISC-791"
                 or row.get("release_group_year") is not None
-                or db.get_tracks(request_id)[0].get("track_artist") is not None
+                or [track.get("track_artist") for track in persisted_tracks]
+                != [None] * len(persisted_tracks)
             ):
                 raise AssertionError("wanted Discogs request lost its resolved metadata")
             expected_statuses = {
@@ -66,7 +68,8 @@ def assert_published_request_complete(
                 row.get("mb_release_group_id") != "rg-791"
                 or row.get("release_group_year") != 1991
                 or row.get("catalog_number") != "CAT-791"
-                or db.get_tracks(request_id)[0].get("track_artist") != "MB Artist"
+                or [track.get("track_artist") for track in persisted_tracks]
+                != ["MB Artist"] * len(persisted_tracks)
             ):
                 raise AssertionError("wanted request lost resolved MB metadata")
             expected_statuses = {field: "resolved" for field in required}
@@ -133,6 +136,10 @@ def _creation(release_id: str, *, discogs: bool, tracks: list[dict[str, object]]
               album_title: str = "B") -> RequestCreationInput:
     mb_raw: dict[str, object] = {"artist-credit": [], "media": []}
     discogs_raw: dict[str, object] = {"artist_id": "1", "artists": [], "tracklist": []}
+    payload_tracks = [
+        {"title": str(track.get("title", ""))}
+        for track in tracks
+    ]
     if resolved:
         mb_raw = {
             # This is the direct MB release shape. The creation input below
@@ -140,14 +147,17 @@ def _creation(release_id: str, *, discogs: bool, tracks: list[dict[str, object]]
             "release-group": {"id": "rg-791", "first-release-date": "1991-01-01"},
             "release_group_id": "rg-791",
             "label-info": [{"catalog-number": "CAT-791"}],
-            "media": [{"tracks": [{"artist-credit": [{"name": "MB Artist"}]}]}],
+            "media": [{"tracks": [
+                {**track, "artist-credit": [{"name": "MB Artist"}]}
+                for track in payload_tracks
+            ]}],
         }
         discogs_raw = {
             # Flattened Discogs browse payload: it carries a master and
             # catalog but has no per-track artist credits.
             "artist_id": "1", "release_group_id": "791",
             "labels": [{"catno": "DISC-791"}],
-            "tracks": [{"title": "T0"}],
+            "tracks": payload_tracks,
         }
     # MB Add pre-seeds its known group id from the source payload. Discogs
     # deliberately leaves it to the resolver, matching the real adapter.
@@ -184,6 +194,7 @@ class TestRequestCreationGenerated(unittest.TestCase):
         track_count=st.integers(min_value=1, max_value=3),
     )
     @example(discogs=True, upgrade=True, resolved=True, phase="audit_track_artist", track_count=1)
+    @example(discogs=False, upgrade=True, resolved=True, phase=None, track_count=3)
     @example(discogs=False, upgrade=False, resolved=False, phase="plan", track_count=1)
     def test_create_or_resume_only_publishes_complete_request(
         self, discogs: bool, upgrade: bool, resolved: bool,
@@ -231,7 +242,10 @@ class TestRequestCreationGenerated(unittest.TestCase):
                 with patch("web.mb.get_release_group_year", return_value=1991):
                     result = RequestCreationService(db, CratediggerConfig()).create_or_resume(
                         _creation("known-bad", discogs=False,
-                                  tracks=[{"disc_number": 1, "track_number": 1, "title": "T"}],
+                                  tracks=[
+                                      {"disc_number": 1, "track_number": 1, "title": "T1"},
+                                      {"disc_number": 1, "track_number": 2, "title": "T2"},
+                                  ],
                                   upgrade=True, resolved=True),
                     )
                 assert result.request_id is not None
@@ -249,8 +263,10 @@ class TestRequestCreationGenerated(unittest.TestCase):
                     # The scalar audit row remains resolved while its value is lost.
                     db.request(request_id)["mb_release_group_id"] = None
                 elif signal == "resolved_track_artist":
-                    # Likewise keep the resolved audit row intact.
-                    db._tracks[request_id][0]["track_artist"] = None
+                    # Keep resolved audit evidence, but corrupt the second
+                    # generated artist so index-zero-only checks cannot pass.
+                    self.assertEqual(len(db._tracks[request_id]), 2)
+                    db._tracks[request_id][1]["track_artist"] = None
                 else:
                     db.request(request_id)["min_bitrate"] = None
                 with self.assertRaises(AssertionError):
