@@ -9,6 +9,7 @@ in :mod:`lib.download_processing`, and poll state in :mod:`lib.download`.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
@@ -30,6 +31,7 @@ from lib.fs_authority import (
     open_relative_directory,
     open_regular_relative,
     open_regular_under_root,
+    rename_relative_noreplace,
     remove_relative_tree,
     same_open_directory,
     unlink_if_same,
@@ -108,6 +110,29 @@ class MaterializeGuarded:
 
 
 MaterializeResult = Materialized | MaterializeFailed | MaterializeGuarded
+
+
+def _materialize_token(canonical_name: str) -> str:
+    """Bounded stable token for locks and unpublished transaction names."""
+    return hashlib.sha256(canonical_name.encode("utf-8", "surrogateescape")).hexdigest()
+
+
+def _canonical_manifest_complete(
+    albums_fd: int,
+    canonical_name: str,
+    destination_names: list[str],
+) -> bool:
+    """Does the no-follow canonical directory contain exactly this manifest?"""
+    try:
+        with open_relative_directory(albums_fd, canonical_name) as existing_fd:
+            if set(os.listdir(existing_fd)) != set(destination_names):
+                return False
+            for name in destination_names:
+                checked = open_regular_relative(existing_fd, name)
+                checked.close()
+        return True
+    except (FileNotFoundError, FilesystemAuthorityError, OSError):
+        return False
 """Return type of ``_materialize_processing_dir`` and
 ``_evaluate_staged_path_readiness`` (issue #509 — the shared staged-path
 resume decision the former's non-canonical branch delegates to, and
@@ -659,20 +684,20 @@ def _materialize_processing_dir(
     processing_dir = ctx.cfg.processing_dir
     albums_name = "albums"
     canonical_name = os.path.basename(canonical_path)
+    materialize_token = _materialize_token(canonical_name)
     opened_sources: list[OpenedRegularFile] = []
     try:
         with open_private_processing_root(
             processing_dir, ctx.cfg.slskd_download_dir,
         ) as processing_fd:
             with open_private_child_directory(processing_fd, albums_name) as albums_fd:
-                # The lock is deliberately outside transaction cleanup.  It
-                # serializes destination classification, stale-temp recovery,
-                # publish, and source unlink for this one attempt, removing
-                # the check/rename replacement race without Linux-only APIs.
+                # A bounded shard lock avoids unbounded persistent lock files
+                # and works even when the canonical basename consumes all
+                # NAME_MAX bytes.  Hash collisions only serialize work.
                 with exclusive_relative_lock(
-                    albums_fd, f".materialize-lock-{canonical_name}",
+                    albums_fd, f".materialize-lock-shard-{materialize_token[:2]}",
                 ):
-                    transaction_prefix = f".materialize-{canonical_name}-"
+                    transaction_prefix = f".materialize-tmp-{materialize_token}-"
                     for entry_name in os.listdir(albums_fd):
                         if entry_name.startswith(transaction_prefix):
                             remove_relative_tree(albums_fd, entry_name)
@@ -680,18 +705,9 @@ def _materialize_processing_dir(
                     # An existing destination is valid only when it is a
                     # complete exact regular-file manifest. Never add files
                     # to it, including an empty directory.
-                    existing_complete = False
-                    try:
-                        with open_relative_directory(albums_fd, canonical_name) as existing_fd:
-                            entries = set(os.listdir(existing_fd))
-                            if entries == set(destination_names):
-                                for name in destination_names:
-                                    checked = open_regular_relative(existing_fd, name)
-                                    checked.close()
-                                existing_complete = True
-                    except (FileNotFoundError, FilesystemAuthorityError, OSError):
-                        existing_complete = False
-                    if existing_complete:
+                    if _canonical_manifest_complete(
+                        albums_fd, canonical_name, destination_names,
+                    ):
                         if not same_open_directory(processing_dir, processing_fd):
                             return MaterializeGuarded(detail="processing_root_relocated")
                         staged_album.current_path = canonical_path
@@ -742,16 +758,33 @@ def _materialize_processing_dir(
                             finally:
                                 os.close(destination_fd)
                         os.fsync(temp_fd)
-                        os.rename(
-                            temp_name, canonical_name,
-                            src_dir_fd=albums_fd, dst_dir_fd=albums_fd,
+                        published = rename_relative_noreplace(
+                            albums_fd, temp_name, canonical_name,
                         )
-                        os.fsync(albums_fd)
-                        published = True
+                        if published:
+                            os.fsync(albums_fd)
                     finally:
                         os.close(temp_fd)
                         if not published:
                             remove_relative_tree(albums_fd, temp_name)
+
+                    if not published:
+                        # A writer that bypassed this process's shard lock
+                        # won between our preflight and publish. Never
+                        # overwrite it; converge only an exact manifest.
+                        if not _canonical_manifest_complete(
+                            albums_fd, canonical_name, destination_names,
+                        ):
+                            return MaterializeGuarded(
+                                detail="incomplete_or_unsafe_canonical",
+                            )
+                        if not same_open_directory(processing_dir, processing_fd):
+                            return MaterializeGuarded(detail="processing_root_relocated")
+                        staged_album.current_path = canonical_path
+                        album_data.import_folder = canonical_path
+                        if persist_current_path:
+                            staged_album.persist_current_path(db)
+                        return Materialized()
 
                     # Verify the lexical root still names this held private
                     # inode before publishing/persisting its pathname or

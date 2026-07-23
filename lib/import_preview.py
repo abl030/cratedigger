@@ -79,7 +79,6 @@ from lib.fs_authority import (
     open_directory_path,
     open_private_child_directory,
     open_private_processing_root,
-    open_relative_directory,
     open_regular_relative,
     remove_relative_tree,
 )
@@ -91,6 +90,7 @@ from lib.v0_probe import probe_installed_album_as_v0
 logger = logging.getLogger("cratedigger")
 
 _PREVIEW_MAX_DEPTH = 32
+_PREVIEW_MAX_ENTRIES = 5000
 _PREVIEW_MAX_FILES = 5000
 _PREVIEW_MAX_BYTES = 100 * 1024**3
 _PREVIEW_FREE_RESERVE_BYTES = 100 * 1024**2
@@ -131,6 +131,7 @@ def _snapshot_opened_directory(source_root_fd: int, cfg: Any) -> str:
     snapshot_name = f"preview-{secrets.token_hex(16)}"
     snapshot_path = os.path.join(processing_preview_dir(cfg.processing_dir), snapshot_name)
     files = 0
+    entries_seen = 0
     copied_bytes = 0
     made_snapshot = False
     try:
@@ -143,70 +144,83 @@ def _snapshot_opened_directory(source_root_fd: int, cfg: Any) -> str:
                 os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
                 dir_fd=preview_fd,
             )
-            stack: list[tuple[int, int, int]] = [(os.dup(source_root_fd), snapshot_fd, 0)]
-            try:
-                while stack:
-                    source_dir_fd, destination_dir_fd, depth = stack.pop()
-                    try:
-                        names = sorted(entry.name for entry in os.scandir(source_dir_fd))
-                        for name in names:
+            def copy_directory(
+                source_dir_fd: int,
+                destination_dir_fd: int,
+                depth: int,
+            ) -> None:
+                """Copy depth-first so the descriptor footprint is bounded."""
+                nonlocal copied_bytes, entries_seen, files
+                try:
+                    names: list[str] = []
+                    with os.scandir(source_dir_fd) as entries:
+                        for entry in entries:
+                            entries_seen += 1
+                            if entries_seen > _PREVIEW_MAX_ENTRIES:
+                                raise FilesystemAuthorityError(
+                                    "preview snapshot entry limit exceeded",
+                                )
+                            names.append(entry.name)
+                    names.sort()
+                    for name in names:
+                        try:
+                            child_fd = os.open(
+                                name,
+                                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                                dir_fd=source_dir_fd,
+                            )
+                        except OSError:
+                            child_fd = -1
+                        if child_fd >= 0:
                             try:
-                                child_fd = os.open(
+                                if not stat.S_ISDIR(os.fstat(child_fd).st_mode):
+                                    raise FilesystemAuthorityError("snapshot contains non-directory")
+                                if depth >= _PREVIEW_MAX_DEPTH:
+                                    raise FilesystemAuthorityError("preview depth limit exceeded")
+                                os.mkdir(name, 0o700, dir_fd=destination_dir_fd)
+                                destination_child_fd = os.open(
                                     name,
                                     os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
-                                    dir_fd=source_dir_fd,
-                                )
-                            except OSError:
-                                child_fd = -1
-                            if child_fd >= 0:
-                                try:
-                                    if not stat.S_ISDIR(os.fstat(child_fd).st_mode):
-                                        raise FilesystemAuthorityError("snapshot contains non-directory")
-                                    if depth >= _PREVIEW_MAX_DEPTH:
-                                        raise FilesystemAuthorityError("preview depth limit exceeded")
-                                    os.mkdir(name, 0o700, dir_fd=destination_dir_fd)
-                                    destination_child_fd = os.open(
-                                        name,
-                                        os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
-                                        dir_fd=destination_dir_fd,
-                                    )
-                                    stack.append((child_fd, destination_child_fd, depth + 1))
-                                    child_fd = -1
-                                finally:
-                                    if child_fd >= 0:
-                                        os.close(child_fd)
-                                continue
-                            opened = open_regular_relative(source_dir_fd, name)
-                            try:
-                                files += 1
-                                declared_size = opened.stat_result.st_size
-                                if files > _PREVIEW_MAX_FILES or copied_bytes + declared_size > _PREVIEW_MAX_BYTES:
-                                    raise FilesystemAuthorityError("preview snapshot limit exceeded")
-                                destination_fd = os.open(
-                                    name,
-                                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
-                                    0o600,
                                     dir_fd=destination_dir_fd,
                                 )
-                                try:
-                                    copied = copy_opened_file(
-                                        opened.fd,
-                                        destination_fd,
-                                        max_bytes=declared_size,
-                                        before_write=lambda count: _assert_preview_space(preview_fd, count),
-                                    )
-                                finally:
-                                    os.close(destination_fd)
-                                copied_bytes += copied
+                                next_source_fd = child_fd
+                                child_fd = -1
+                                copy_directory(
+                                    next_source_fd, destination_child_fd, depth + 1,
+                                )
                             finally:
-                                opened.close()
-                    finally:
-                        os.close(source_dir_fd)
-                        os.close(destination_dir_fd)
-            finally:
-                for pending_source, pending_destination, _depth in stack:
-                    os.close(pending_source)
-                    os.close(pending_destination)
+                                if child_fd >= 0:
+                                    os.close(child_fd)
+                            continue
+                        opened = open_regular_relative(source_dir_fd, name)
+                        try:
+                            files += 1
+                            declared_size = opened.stat_result.st_size
+                            if files > _PREVIEW_MAX_FILES or copied_bytes + declared_size > _PREVIEW_MAX_BYTES:
+                                raise FilesystemAuthorityError("preview snapshot limit exceeded")
+                            destination_fd = os.open(
+                                name,
+                                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+                                0o600,
+                                dir_fd=destination_dir_fd,
+                            )
+                            try:
+                                copied = copy_opened_file(
+                                    opened.fd,
+                                    destination_fd,
+                                    max_bytes=declared_size,
+                                    before_write=lambda count: _assert_preview_space(preview_fd, count),
+                                )
+                            finally:
+                                os.close(destination_fd)
+                            copied_bytes += copied
+                        finally:
+                            opened.close()
+                finally:
+                    os.close(source_dir_fd)
+                    os.close(destination_dir_fd)
+
+            copy_directory(os.dup(source_root_fd), snapshot_fd, 0)
         return snapshot_path
     except Exception:
         if made_snapshot:

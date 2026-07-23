@@ -103,6 +103,7 @@ _TXXX_TAG_ALIASES: dict[str, str] = {
 }
 
 _EXPLORER_MAX_DEPTH = 32
+_EXPLORER_MAX_ENTRIES = 5000
 _EXPLORER_MAX_FILES = 5000
 _EXPLORER_MAX_BYTES = 100 * 1024**3
 
@@ -405,80 +406,91 @@ def build_wrong_match_explorer(
     other_file_count = 0
     scanned_file_count = 0
     scanned_bytes = 0
+    entries_seen = 0
     truncated_reason: str | None = None
     with _opened_wrong_match_root(entry) as (validation_result, root):
         root_fd = root.fd
-        stack: list[tuple[int, str, int]] = [(os.dup(root_fd), "", 0)]
-        try:
-            while stack and truncated_reason is None:
-                directory_fd, relative_dir, depth = stack.pop()
-                try:
-                    entries = sorted(list(os.scandir(directory_fd)), key=lambda entry: entry.name)
+        def scan_directory(directory_fd: int, relative_dir: str, depth: int) -> None:
+            """Walk depth-first so a broad tree cannot exhaust descriptors."""
+            nonlocal entries_seen, other_file_count, scanned_bytes
+            nonlocal scanned_file_count, truncated_reason
+            try:
+                names: list[str] = []
+                with os.scandir(directory_fd) as entries:
                     for directory_entry in entries:
-                        name = directory_entry.name
-                        relative = f"{relative_dir}/{name}".strip("/")
+                        entries_seen += 1
+                        if entries_seen > _EXPLORER_MAX_ENTRIES:
+                            truncated_reason = "entry_limit"
+                            break
+                        names.append(directory_entry.name)
+                if truncated_reason is not None:
+                    return
+                names.sort()
+                for name in names:
+                    if truncated_reason is not None:
+                        return
+                    relative = f"{relative_dir}/{name}".strip("/")
+                    try:
+                        child_fd = os.open(
+                            name,
+                            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                            dir_fd=directory_fd,
+                        )
+                    except OSError:
+                        child_fd = -1
+                    if child_fd >= 0:
                         try:
-                            child_fd = os.open(
-                                name,
-                                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
-                                dir_fd=directory_fd,
-                            )
-                        except OSError:
-                            child_fd = -1
-                        if child_fd >= 0:
-                            try:
-                                if not stat.S_ISDIR(os.fstat(child_fd).st_mode):
-                                    continue
-                                if depth >= _EXPLORER_MAX_DEPTH:
-                                    truncated_reason = "depth_limit"
-                                    break
-                                stack.append((child_fd, relative, depth + 1))
-                                child_fd = -1
-                            finally:
-                                if child_fd >= 0:
-                                    os.close(child_fd)
-                            continue
-                        try:
-                            opened = open_regular_relative(directory_fd, name)
-                        except FilesystemAuthorityError:
-                            continue
-                        try:
-                            info = opened.stat_result
-                            if scanned_file_count >= _EXPLORER_MAX_FILES:
-                                truncated_reason = "file_limit"
-                                break
-                            if scanned_bytes + info.st_size > _EXPLORER_MAX_BYTES:
-                                truncated_reason = "byte_limit"
-                                break
-                            scanned_file_count += 1
-                            scanned_bytes += info.st_size
-                            ext = os.path.splitext(name)[1].lower()
-                            if ext not in AUDIO_EXTENSIONS_DOTTED:
-                                other_file_count += 1
+                            if not stat.S_ISDIR(os.fstat(child_fd).st_mode):
                                 continue
-                            tags, duration_seconds, bitrate_bps = _inspect_audio_file(opened.fd)
+                            if depth >= _EXPLORER_MAX_DEPTH:
+                                truncated_reason = "depth_limit"
+                                return
+                            next_fd = child_fd
+                            child_fd = -1
+                            scan_directory(next_fd, relative, depth + 1)
                         finally:
-                            opened.close()
-                        playable = ext in _PLAYABLE_AUDIO_EXTENSIONS
-                        files.append({
-                            "relative_path": relative,
-                            "filename": name,
-                            "directory": os.path.dirname(relative),
-                            "format": ext[1:].upper(),
-                            "mime_type": _audio_mime_type(name),
-                            "playable": playable,
-                            "duration_seconds": duration_seconds,
-                            "bitrate_kbps": int(round(bitrate_bps / 1000)) if isinstance(bitrate_bps, int) and bitrate_bps > 0 else None,
-                            "size_bytes": info.st_size,
-                            "tags": tags,
-                            "stream_url": "/api/wrong-matches/audio" f"?download_log_id={int(download_log_id)}" f"&path={quote(relative)}" if playable else None,
-                        })
+                            if child_fd >= 0:
+                                os.close(child_fd)
                         continue
-                finally:
-                    os.close(directory_fd)
-        finally:
-            for pending_fd, _relative, _depth in stack:
-                os.close(pending_fd)
+                    try:
+                        opened = open_regular_relative(directory_fd, name)
+                    except FilesystemAuthorityError:
+                        continue
+                    try:
+                        info = opened.stat_result
+                        if scanned_file_count >= _EXPLORER_MAX_FILES:
+                            truncated_reason = "file_limit"
+                            return
+                        if scanned_bytes + info.st_size > _EXPLORER_MAX_BYTES:
+                            truncated_reason = "byte_limit"
+                            return
+                        scanned_file_count += 1
+                        scanned_bytes += info.st_size
+                        ext = os.path.splitext(name)[1].lower()
+                        if ext not in AUDIO_EXTENSIONS_DOTTED:
+                            other_file_count += 1
+                            continue
+                        tags, duration_seconds, bitrate_bps = _inspect_audio_file(opened.fd)
+                    finally:
+                        opened.close()
+                    playable = ext in _PLAYABLE_AUDIO_EXTENSIONS
+                    files.append({
+                        "relative_path": relative,
+                        "filename": name,
+                        "directory": os.path.dirname(relative),
+                        "format": ext[1:].upper(),
+                        "mime_type": _audio_mime_type(name),
+                        "playable": playable,
+                        "duration_seconds": duration_seconds,
+                        "bitrate_kbps": int(round(bitrate_bps / 1000)) if isinstance(bitrate_bps, int) and bitrate_bps > 0 else None,
+                        "size_bytes": info.st_size,
+                        "tags": tags,
+                        "stream_url": "/api/wrong-matches/audio" f"?download_log_id={int(download_log_id)}" f"&path={quote(relative)}" if playable else None,
+                    })
+            finally:
+                os.close(directory_fd)
+
+        scan_directory(os.dup(root_fd), "", 0)
 
     files, ordered_by = _reorder_files_by_match(files, validation_result)
 

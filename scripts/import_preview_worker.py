@@ -270,6 +270,20 @@ def _front_gate_source_path(db: Any, job: ImportJob) -> str | None:
     return None
 
 
+def _force_download_log_failed_path(db: Any, job: ImportJob) -> tuple[int, str]:
+    """Return the sole filesystem name authoritative for a force preview."""
+    download_log_id = _download_log_id_from_job(job)
+    if download_log_id is None:
+        raise ValueError("Force import preview job is missing download_log_id")
+    entry = db.get_download_log_entry(download_log_id)
+    if not entry:
+        raise ValueError(f"Download log {download_log_id} not found")
+    raw_path = decode_validation_envelope(entry.get("validation_result")).failed_path
+    if not raw_path:
+        raise ValueError("Download log has no failed_path")
+    return download_log_id, raw_path
+
+
 def _reused_evidence_preview_payload(
     job: ImportJob,
     evidence: AlbumQualityEvidence,
@@ -319,6 +333,29 @@ def _front_gate_check(
     measurement path) and the caller should fall through. A non-None
     result with ``status == 'ready'`` means measurement can be skipped.
     """
+    if job.job_type == IMPORT_JOB_FORCE:
+        try:
+            download_log_id, raw_path = _force_download_log_failed_path(db, job)
+            cfg = read_runtime_config()
+            snapshot = snapshot_configured_quarantine_directory(raw_path, cfg)
+            try:
+                result = load_candidate_evidence_for_source(
+                    db,
+                    source_path=snapshot,
+                    download_log_id=download_log_id,
+                    import_job_id=job.id,
+                )
+            finally:
+                remove_preview_snapshot(snapshot, cfg)
+            return result, raw_path
+        except Exception:
+            logger.debug(
+                "force front-gate isolation failed for job %s; falling through",
+                job.id,
+                exc_info=True,
+            )
+            return None, None
+
     source_path = _front_gate_source_path(db, job)
     if not source_path:
         return None, None
@@ -391,15 +428,7 @@ def execute_preview_job(db: Any, job: ImportJob) -> ImportPreviewResult:
     if job.job_type == IMPORT_JOB_FORCE:
         if job.request_id is None:
             raise ValueError("Import job has no request_id")
-        download_log_id = _download_log_id_from_job(job)
-        if download_log_id is None:
-            raise ValueError("Force import preview job is missing download_log_id")
-        entry = db.get_download_log_entry(download_log_id)
-        if not entry:
-            raise ValueError(f"Download log {download_log_id} not found")
-        raw_path = decode_validation_envelope(entry.get("validation_result")).failed_path
-        if not raw_path:
-            raise ValueError("Download log has no failed_path")
+        download_log_id, raw_path = _force_download_log_failed_path(db, job)
         cfg = read_runtime_config()
         snapshot = snapshot_configured_quarantine_directory(raw_path, cfg)
         try:

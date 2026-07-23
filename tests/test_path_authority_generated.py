@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from unittest.mock import MagicMock, patch
 
 import tests._hypothesis_profiles  # noqa: F401
 from hypothesis import given
@@ -20,6 +21,10 @@ from lib.fs_authority import (
     open_directory_path,
     open_private_processing_root,
     open_regular_relative,
+)
+from lib.import_preview import (
+    _snapshot_authorized_directory,
+    remove_preview_snapshot,
 )
 
 
@@ -80,6 +85,41 @@ class TestGeneratedDescriptorAuthority(unittest.TestCase):
             else:
                 with open_private_processing_root(processing, source):
                     pass
+
+    @given(entry_count=st.integers(min_value=0, max_value=6))
+    def test_preview_snapshot_total_entry_limit_is_global(
+        self, entry_count: int,
+    ) -> None:
+        """Nested traversal has one total ceiling, not per-directory limits."""
+        with tempfile.TemporaryDirectory(dir=os.getcwd()) as parent:
+            source = os.path.join(parent, "source")
+            processing = os.path.join(parent, "processing")
+            os.mkdir(source)
+            os.mkdir(processing, 0o700)
+            os.mkdir(os.path.join(processing, "albums"), 0o700)
+            preview = os.path.join(processing, "preview")
+            os.mkdir(preview, 0o700)
+            for index in range(entry_count):
+                nested = os.path.join(source, f"nested-{index}")
+                os.mkdir(nested)
+                with open(os.path.join(nested, "track.mp3"), "wb") as handle:
+                    handle.write(b"audio")
+            cfg = MagicMock()
+            cfg.slskd_download_dir = source
+            cfg.processing_dir = processing
+            with patch("lib.import_preview._PREVIEW_MAX_ENTRIES", 3):
+                if entry_count * 2 > 3:
+                    with self.assertRaisesRegex(
+                        FilesystemAuthorityError, "entry limit",
+                    ):
+                        _snapshot_authorized_directory(source, cfg)
+                    self.assertEqual(os.listdir(preview), [])
+                else:
+                    snapshot = _snapshot_authorized_directory(source, cfg)
+                    try:
+                        self.assertEqual(len(os.listdir(snapshot)), entry_count)
+                    finally:
+                        remove_preview_snapshot(snapshot, cfg)
 
 
 if __name__ == "__main__":

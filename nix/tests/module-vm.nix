@@ -182,6 +182,15 @@ pkgs.testers.nixosTest {
       extraGroups = ["cratedigger-ops" "beets-library"];
     };
     users.users.unrelated-user.isNormalUser = true;
+    users.groups.slskd-writer = {};
+    users.users.slskd-writer = {
+      isSystemUser = true;
+      group = "slskd-writer";
+    };
+    # The source-owner group is separate from the private processor group.
+    # The service can consume event-stamped source bytes but never grants
+    # the writer any authority over its processing root.
+    users.users.cratedigger.extraGroups = [ "slskd-writer" ];
 
     # Stub beets library DB so cratedigger-web can open it read-only.
     environment.etc."cratedigger/beets.db" = {
@@ -258,6 +267,7 @@ pkgs.testers.nixosTest {
     # first boot; the test removes this hold before exercising the apps.
     systemd.tmpfiles.rules = [
       "d /var/lib/cratedigger-music 2775 cratedigger beets-library -"
+      "d /var/lib/cratedigger-downloads 0770 slskd-writer slskd-writer -"
       "f /run/cratedigger-test-config-hold 0644 root root - held"
     ];
     systemd.services = lib.mkMerge [
@@ -478,6 +488,24 @@ pkgs.testers.nixosTest {
     machine.succeed("runuser -u cratedigger -- mkdir /var/lib/cratedigger/processing/preview/vm-nonroot-snapshot")
     machine.fail("runuser -u unrelated-user -- test -r /var/lib/cratedigger/processing/preview")
     machine.succeed("runuser -u cratedigger -- rmdir /var/lib/cratedigger/processing/preview/vm-nonroot-snapshot")
+    machine.succeed("runuser -u slskd-writer -- sh -c 'printf source > /var/lib/cratedigger-downloads/vm-source.mp3'")
+    machine.succeed("runuser -u cratedigger -- cat /var/lib/cratedigger-downloads/vm-source.mp3")
+    machine.succeed("runuser -u cratedigger -- rm /var/lib/cratedigger-downloads/vm-source.mp3")
+    machine.succeed("runuser -u slskd-writer -- sh -c 'printf source > /var/lib/cratedigger-downloads/vm-rename.mp3'")
+    machine.fail("runuser -u slskd-writer -- test -r /var/lib/cratedigger/processing/preview")
+    machine.fail("runuser -u slskd-writer -- touch /var/lib/cratedigger/processing/preview/foreign")
+    machine.fail("runuser -u slskd-writer -- mv /var/lib/cratedigger-downloads/vm-rename.mp3 /var/lib/cratedigger/processing/albums/foreign")
+    machine.fail("runuser -u slskd-writer -- rm /var/lib/cratedigger/processing/albums/foreign")
+    machine.succeed("runuser -u slskd-writer -- rm /var/lib/cratedigger-downloads/vm-rename.mp3")
+    machine.succeed("grep -qx 'processing_dir = /var/lib/cratedigger/processing' /var/lib/cratedigger/config.ini")
+    machine.succeed("runuser -u cratedigger -- mkdir /var/lib/cratedigger/processing/preview/preview-stale")
+    machine.succeed("runuser -u cratedigger -- mkdir /var/lib/cratedigger/processing/albums/album-kept")
+    machine.succeed("runuser -u cratedigger -- touch /var/lib/cratedigger/.preview-snapshot.lock")
+    machine.succeed("touch -d '8 days ago' /var/lib/cratedigger/processing/preview/preview-stale")
+    machine.succeed("systemd-tmpfiles --clean")
+    machine.fail("test -d /var/lib/cratedigger/processing/preview/preview-stale")
+    machine.succeed("test -d /var/lib/cratedigger/processing/albums/album-kept")
+    machine.succeed("test -f /var/lib/cratedigger/.preview-snapshot.lock")
     # config.ini points at the out-of-band secret, never its plaintext value.
     machine.succeed("grep -q 'api_key_file = /etc/cratedigger/slskd-api-key' /var/lib/cratedigger/config.ini")
     # The secret itself must NEVER appear in config.ini — that's the whole fix.

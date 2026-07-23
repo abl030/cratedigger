@@ -474,6 +474,32 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
             f"/api/wrong-matches/audio?download_log_id={log_id}",
             data["files"][0]["stream_url"])
 
+    def test_wrong_match_explorer_caps_total_entries_across_tree(self):
+        """A broad nested quarantine tree stops at one global entry budget."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            failed_dir = os.path.join(tmpdir, "failed_imports", "Test")
+            os.makedirs(failed_dir)
+            for index in range(4):
+                nested = os.path.join(failed_dir, f"disc-{index}")
+                os.mkdir(nested)
+                with open(os.path.join(nested, "01.mp3"), "wb") as handle:
+                    handle.write(b"audio")
+            log_id = self.db.log_download(
+                100, outcome="rejected",
+                validation_result={"failed_path": failed_dir},
+            )
+
+            with patch(
+                "web.wrong_match_file_service._EXPLORER_MAX_ENTRIES", 3,
+            ), self._wrong_match_runtime_config(tmpdir):
+                status, data = self._get(
+                    f"/api/wrong-matches/explorer?download_log_id={log_id}")
+
+        self.assertEqual(status, 200)
+        self.assertTrue(data["partial"])
+        self.assertEqual(data["truncated_reason"], "entry_limit")
+        self.assertEqual(data["files"], [])
+
     def test_wrong_match_explorer_normalizes_raw_id3_tags_and_skips_artwork_frames(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             failed_dir = os.path.join(tmpdir, "failed_imports", "Test")

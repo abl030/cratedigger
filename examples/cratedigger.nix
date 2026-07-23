@@ -66,10 +66,9 @@
     pipelineDb.createLocally = true;
 
     # --- Beets: cratedigger owns the package, config, and binary ------
-    # `cratedigger-beet` lands on your PATH for manual ops (run it with
-    # sudo — the service runs as root by default; see the "Running as a
-    # non-root user" block near the end of this file for the group-`users`
-    # / media-server-friendly alternative).
+    # `cratedigger-beet` lands on your PATH for manual ops. Run it as the
+    # configured cratedigger service identity so it uses the same ownership
+    # and rendered configuration as automated imports.
     beets.config = {
       directory = "/srv/music/library";          # where tagged albums live
       library = "/srv/music/beets-library.db";   # parent dir must exist
@@ -104,9 +103,8 @@
   };
 
   # ---------------------------------------------------------------------
-  # Running as a non-root user (recommended for media-server integration)
+  # Non-root media-server filesystem posture
   # ---------------------------------------------------------------------
-  # By default (above), cratedigger runs as root — zero-config, since slskd
   # Give the library roots a setgid layout so new album/artist dirs inherit
   # the `users` group automatically — plain 0775 strips the setgid bit and
   # silently breaks this:

@@ -10,10 +10,11 @@ name and opening it later would re-introduce a symlink/swap race.
 from __future__ import annotations
 
 import errno
+import ctypes
 import fcntl
 import os
 import stat
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 
@@ -24,6 +25,8 @@ class FilesystemAuthorityError(ValueError):
 
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
 _FILE_FLAGS = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+_RENAME_NOREPLACE = 1
+_LIBC = ctypes.CDLL(None, use_errno=True)
 
 
 def _parts(relative_path: str) -> tuple[str, ...]:
@@ -42,7 +45,7 @@ def _raise_path_error(path: str, exc: OSError) -> FilesystemAuthorityError:
 
 
 @contextmanager
-def open_directory_path(path: str) -> Iterator[int]:
+def open_directory_path(path: str) -> Generator[int, None, None]:
     """Open an absolute directory while refusing every symlink component."""
     if not os.path.isabs(path):
         raise FilesystemAuthorityError("authority root must be absolute")
@@ -134,7 +137,7 @@ def same_open_directory(path: str, held_fd: int) -> bool:
 
 
 @contextmanager
-def exclusive_relative_lock(root_fd: int, name: str) -> Iterator[None]:
+def exclusive_relative_lock(root_fd: int, name: str) -> Generator[None, None, None]:
     """Hold a no-follow regular lock file beneath an authoritative root."""
     lock_name = _parts(name)
     if len(lock_name) != 1:
@@ -156,6 +159,45 @@ def exclusive_relative_lock(root_fd: int, name: str) -> Iterator[None]:
             fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
+
+
+def rename_relative_noreplace(parent_fd: int, source: str, destination: str) -> bool:
+    """Atomically publish one relative name without replacing a destination.
+
+    Linux's ``renameat2(RENAME_NOREPLACE)`` is available on every supported
+    NixOS target.  ``False`` is the only recoverable race: a winner already
+    exists and callers must reopen and validate it through their held parent
+    descriptor.  Every other errno is surfaced unchanged.
+    """
+    source_part = _parts(source)
+    destination_part = _parts(destination)
+    if len(source_part) != 1 or len(destination_part) != 1:
+        raise FilesystemAuthorityError("rename names must be one safe component")
+    try:
+        renameat2 = _LIBC.renameat2
+    except AttributeError as exc:  # pragma: no cover - unsupported platform
+        raise FilesystemAuthorityError("renameat2 is required on this platform") from exc
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(
+        parent_fd,
+        os.fsencode(source_part[0]),
+        parent_fd,
+        os.fsencode(destination_part[0]),
+        _RENAME_NOREPLACE,
+    )
+    if result == 0:
+        return True
+    error = ctypes.get_errno()
+    if error == errno.EEXIST:
+        return False
+    raise OSError(error, os.strerror(error), source)
 
 
 def remove_relative_tree(parent_fd: int, name: str) -> None:
@@ -190,7 +232,9 @@ def remove_relative_tree(parent_fd: int, name: str) -> None:
 
 
 @contextmanager
-def open_private_processing_root(processing_dir: str, slskd_download_dir: str) -> Iterator[int]:
+def open_private_processing_root(
+    processing_dir: str, slskd_download_dir: str,
+) -> Generator[int, None, None]:
     """Open the configured private root after its complete trust checks."""
     if not os.path.isabs(processing_dir):
         raise FilesystemAuthorityError("processing_dir must be absolute")
@@ -216,7 +260,9 @@ def open_private_processing_root(processing_dir: str, slskd_download_dir: str) -
 
 
 @contextmanager
-def open_relative_directory(root_fd: int, relative_path: str) -> Iterator[int]:
+def open_relative_directory(
+    root_fd: int, relative_path: str,
+) -> Generator[int, None, None]:
     """Walk a directory under an already-authoritative root descriptor."""
     fd = os.dup(root_fd)
     try:
@@ -233,7 +279,9 @@ def open_relative_directory(root_fd: int, relative_path: str) -> Iterator[int]:
 
 
 @contextmanager
-def open_private_child_directory(root_fd: int, name: str) -> Iterator[int]:
+def open_private_child_directory(
+    root_fd: int, name: str,
+) -> Generator[int, None, None]:
     """Open one required 0700 child of the private processing root.
 
     Nix creates ``albums`` and ``preview``.  Rechecking their owner and
@@ -287,7 +335,9 @@ class HeldDirectory:
 
 
 @contextmanager
-def open_configured_quarantine_directory(raw_path: str, cfg: object) -> Iterator[HeldDirectory]:
+def open_configured_quarantine_directory(
+    raw_path: str, cfg: object,
+) -> Generator[HeldDirectory, None, None]:
     """Resolve a DB/path payload through the configured quarantine roots.
 
     The required marker is a *path component*, never a string prefix.  In
@@ -305,11 +355,11 @@ def open_configured_quarantine_directory(raw_path: str, cfg: object) -> Iterator
             frozenset({"failed_imports", "wrong_matches"}),
         ),
     )
-    if not isinstance(raw_path, str) or not raw_path:
+    if not raw_path:
         raise FilesystemAuthorityError("quarantine path is missing")
 
     for root, markers in roots:
-        if not isinstance(root, str) or not os.path.isabs(root):
+        if not os.path.isabs(root):
             continue
         try:
             if os.path.isabs(raw_path):
