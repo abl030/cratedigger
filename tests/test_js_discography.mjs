@@ -299,7 +299,7 @@ console.log('Pressing metadata — hostile catalogue values stay text at the cal
     country: hostile,
     date: hostile,
     format: hostile,
-    track_count: 12,
+    track_count: hostile,
     status: hostile,
     in_library: false,
     pipeline_status: null,
@@ -308,12 +308,12 @@ console.log('Pressing metadata — hostile catalogue values stay text at the cal
   const metaStart = pressingHtml.indexOf('<div class="release-meta"');
   const metaEnd = pressingHtml.indexOf('</div>', metaStart);
   const metadataHtml = pressingHtml.slice(metaStart, metaEnd);
-  assertEqual(metadataHtml.split(escaped).length - 1, 4,
-    'country, date, format, and status are each escaped exactly once');
+  assertEqual(metadataHtml.split(escaped).length - 1, 5,
+    'country, date, format, track count, and status are each escaped exactly once');
   assertExcludes(pressingHtml, hostile,
     'hostile pressing metadata cannot create an image element');
 
-  const oldMeta = `${hostile} ${hostile} - ${hostile} - 12t - ${hostile}`;
+  const oldMeta = `${hostile} ${hostile} - ${hostile} - ${hostile}t - ${hostile}`;
   assertContains(oldMeta, hostile,
     'known-bad raw metadata composition admits an image element');
 }
@@ -321,18 +321,19 @@ console.log('Pressing metadata — hostile catalogue values stay text at the cal
 console.log('Pressing metadata — generated critical-character property sweep');
 {
   const atoms = ['plain', '&', '<', '>', '"', "'", '\\'];
-  for (const field of ['country', 'date', 'format', 'status']) {
+  for (const field of ['country', 'date', 'format', 'track_count', 'status']) {
     for (const value of atoms) {
-      const metadata = { country: 'AU', date: '2000', format: 'CD', status: 'Official', [field]: value };
+      const metadata = {
+        country: 'AU', date: '2000', format: 'CD', track_count: 12, status: 'Official', [field]: value,
+      };
       const pressingHtml = renderPressingRow({
         id: 'metadata-sweep',
         title: 'Safe title',
         ...metadata,
-        track_count: 12,
         in_library: false,
         pipeline_status: null,
       }, { artistName: 'Artist', parentRgId: 'parent', canReplace: false });
-      const expectedMeta = `${expectedEsc(metadata.country)} ${expectedEsc(metadata.date)} - ${expectedEsc(metadata.format)} - 12t - ${expectedEsc(metadata.status)}`;
+      const expectedMeta = `${expectedEsc(metadata.country)} ${expectedEsc(metadata.date)} - ${expectedEsc(metadata.format)} - ${expectedEsc(metadata.track_count)}t - ${expectedEsc(metadata.status)}`;
       assertContains(pressingHtml, expectedMeta,
         `${field} remains escaped text: ${JSON.stringify(value)}`);
     }
