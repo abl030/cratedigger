@@ -25,16 +25,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import ssl
 import sys
 import urllib.request
 
 import msgspec
 
 BASE = "https://plex.ablz.au"
-CTX = ssl.create_default_context()
-CTX.check_hostname = False
-CTX.verify_mode = ssl.CERT_NONE
 
 
 class _MemberRow(msgspec.Struct):
@@ -72,7 +68,7 @@ def merge(primary_rk: str, ghost_rks: list[str], token: str) -> tuple[int, bytes
     ids = ",".join(ghost_rks)
     url = f"{BASE}/library/metadata/{primary_rk}/merge?ids={ids}&X-Plex-Token={token}"
     req = urllib.request.Request(url, method="PUT")
-    with urllib.request.urlopen(req, context=CTX, timeout=30) as r:
+    with urllib.request.urlopen(req, timeout=30) as r:
         return r.status, r.read()
 
 

@@ -53,6 +53,11 @@ _INVALID_WHERE = _FRAGMENT_TEXT.filter(
     lambda value: value != "created_at >= NOW() - %s::interval")
 
 
+def assert_sql_rejected_before_execution(executed: list[tuple[str, object]]) -> None:
+    if executed:
+        raise AssertionError("unapproved SQL fragment reached the execution seam")
+
+
 class TestSqlBoundaryProperties(unittest.TestCase):
     @given(attempt_type=_INVALID_ATTEMPT_TYPES)
     def test_unknown_attempt_types_cannot_reach_sql(self, attempt_type: str) -> None:
@@ -61,7 +66,7 @@ class TestSqlBoundaryProperties(unittest.TestCase):
         with self.assertRaises(ValueError):
             db.record_attempt(1, attempt_type, expected_status="wanted")
 
-        self.assertEqual(db.executed, [])
+        assert_sql_rejected_before_execution(db.executed)
 
     @given(order_by=_INVALID_ORDER_BY)
     def test_unknown_order_by_cannot_reach_sql(self, order_by: str) -> None:
@@ -70,7 +75,7 @@ class TestSqlBoundaryProperties(unittest.TestCase):
         with self.assertRaises(ValueError):
             db._dashboard_cycle_rows(order_by=order_by, limit=1)
 
-        self.assertEqual(db.executed, [])
+        assert_sql_rejected_before_execution(db.executed)
 
     @given(where=_INVALID_WHERE)
     def test_unknown_where_cannot_reach_sql(self, where: str) -> None:
@@ -80,4 +85,10 @@ class TestSqlBoundaryProperties(unittest.TestCase):
             db._dashboard_cycle_rows(
                 order_by="created_at DESC", limit=1, where=where)
 
-        self.assertEqual(db.executed, [])
+        assert_sql_rejected_before_execution(db.executed)
+
+
+class TestSqlBoundaryOracleKnownBad(unittest.TestCase):
+    def test_oracle_trips_when_unapproved_sql_reaches_execution(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "reached the execution seam"):
+            assert_sql_rejected_before_execution([("SELECT injected", ())])

@@ -27,6 +27,15 @@ _ENTITY_NAMES = st.text(
 )
 
 
+def assert_hostile_xml_rejected_after_one_request(
+    *, request_count: int, rejected: bool,
+) -> None:
+    if not rejected:
+        raise AssertionError("hostile XML was accepted")
+    if request_count != 1:
+        raise AssertionError(f"hostile XML made {request_count} requests, expected one")
+
+
 class TestPlexXmlRejectsGeneratedEntities(unittest.TestCase):
     @settings(max_examples=40, deadline=None)
     @given(entity_name=_ENTITY_NAMES)
@@ -45,8 +54,19 @@ class TestPlexXmlRejectsGeneratedEntities(unittest.TestCase):
             plex_token="token",
         )
 
+        rejected = False
         with patch("lib.util.urllib.request.urlopen", return_value=response) as urlopen:
-            with self.assertRaises(DefusedXmlException):
+            try:
                 util._plex_fetch_xml(cfg, "/library/sections/3/search", query="album")
+            except DefusedXmlException:
+                rejected = True
 
-        urlopen.assert_called_once()
+        assert_hostile_xml_rejected_after_one_request(
+            request_count=urlopen.call_count, rejected=rejected)
+
+
+class TestPlexXmlOracleKnownBad(unittest.TestCase):
+    def test_oracle_trips_when_hostile_xml_is_accepted(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "was accepted"):
+            assert_hostile_xml_rejected_after_one_request(
+                request_count=1, rejected=False)
