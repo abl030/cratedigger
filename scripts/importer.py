@@ -633,15 +633,16 @@ def _cleanup_committed_wrong_match_rejection(
     )
     if not archival_quarantine and not wrong_match_candidate:
         return
-    evidence_id = db.get_import_job_candidate_evidence_id(job.id)
-    if evidence_id is not None:
-        db.set_download_log_candidate_evidence(download_log_id, evidence_id)
-    if archival_quarantine:
-        # The source is now protected archival evidence, whether quarantine
-        # moved it or failed closed at the original path. Never hand either
-        # location to the independent Wrong Matches deletion reducer.
-        return
     try:
+        evidence_id = db.get_import_job_candidate_evidence_id(job.id)
+        if evidence_id is not None:
+            db.set_download_log_candidate_evidence(download_log_id, evidence_id)
+        if archival_quarantine:
+            # The source is now protected archival evidence, whether
+            # quarantine moved it or failed closed at the original path.
+            # Never hand either location to the independent Wrong Matches
+            # deletion reducer.
+            return
         from lib.wrong_match_cleanup_service import cleanup_wrong_match
 
         cleanup_wrong_match(

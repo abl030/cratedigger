@@ -43,6 +43,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
@@ -906,12 +907,12 @@ def assert_archival_quarantine_isolated(
     *,
     cleanup_call_count: int,
     terminal_log: DownloadLogRow,
-    candidate_evidence_id: int,
+    expected_candidate_evidence_id: int | None,
 ) -> None:
     """An archival quarantine never enters a destructive WM reducer."""
     if cleanup_call_count:
         raise AssertionError("archival quarantine reached Wrong Matches cleanup")
-    if terminal_log.candidate_evidence_id != candidate_evidence_id:
+    if terminal_log.candidate_evidence_id != expected_candidate_evidence_id:
         raise AssertionError("archival terminal audit lost candidate evidence")
     validation = terminal_log.validation_result
     if isinstance(validation, str):
@@ -1185,12 +1186,14 @@ class TestGeneratedArchivalQuarantineIsolation(unittest.TestCase):
                 "audio_corrupt",
                 "untracked_audio",
             )),
-        )
+        ),
+        link_fault=st.sampled_from(("none", "read", "write")),
     )
-    @example(scenario=None)
+    @example(scenario=None, link_fault="read")
     def test_archive_plan_never_reaches_wrong_match_cleanup(
         self,
         scenario: str | None,
+        link_fault: str,
     ) -> None:
         from lib.dispatch.types import PostCommitCleanup
         from lib.import_queue import IMPORT_JOB_FORCE
@@ -1238,20 +1241,43 @@ class TestGeneratedArchivalQuarantineIsolation(unittest.TestCase):
             ),
         )
 
-        with patch(
+        evidence_link_patch = (
+            patch.object(
+                db,
+                "get_import_job_candidate_evidence_id",
+                side_effect=RuntimeError("generated evidence read failure"),
+            )
+            if link_fault == "read"
+            else patch.object(
+                db,
+                "set_download_log_candidate_evidence",
+                side_effect=RuntimeError("generated evidence write failure"),
+            )
+            if link_fault == "write"
+            else nullcontext()
+        )
+        with evidence_link_patch, patch(
             "lib.wrong_match_cleanup_service.cleanup_wrong_match",
-        ) as cleanup_wrong_match:
+        ) as cleanup_wrong_match, patch(
+            "scripts.importer.logger.exception",
+        ) as log_exception:
             _cleanup_committed_wrong_match_rejection(
                 cast(Any, db),
                 job,
                 log_id,
                 outcome,
             )
+        self.assertEqual(
+            log_exception.call_count,
+            0 if link_fault == "none" else 1,
+        )
 
         assert_archival_quarantine_isolated(
             cleanup_call_count=cleanup_wrong_match.call_count,
             terminal_log=db.download_logs[-1],
-            candidate_evidence_id=persisted.id,
+            expected_candidate_evidence_id=(
+                persisted.id if link_fault == "none" else None
+            ),
         )
 
 
@@ -1284,7 +1310,7 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                         "scenario": "audio_corrupt",
                     }),
                 ),
-                candidate_evidence_id=7,
+                expected_candidate_evidence_id=7,
             )
 
     def test_verified_lossless_lock_checker_trips_on_reopened_request(self):
