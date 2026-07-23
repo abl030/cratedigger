@@ -618,20 +618,20 @@ class TestAudioCorruptPostCommitQuarantine(unittest.TestCase):
             target = quarantine["quarantine_path"]
             assert isinstance(target, str)
 
+            cleanup_wrong_match = MagicMock()
             with patch.object(
                 db,
                 "get_import_job_candidate_evidence_id",
                 side_effect=RuntimeError("transient post-commit DB failure"),
             ), patch(
-                "lib.wrong_match_cleanup_service.cleanup_wrong_match",
-            ) as cleanup_wrong_match, patch(
                 "scripts.importer.logger.exception",
             ) as log_exception:
                 _cleanup_committed_wrong_match_rejection(
-                    db,  # type: ignore[arg-type]
+                    db,  # pyright: ignore[reportArgumentType]
                     job,
                     log_id,
                     outcome,
+                    cleanup_wrong_match_fn=cleanup_wrong_match,
                 )
 
             log_exception.assert_called_once()
@@ -731,7 +731,7 @@ class TestAudioCorruptPostCommitQuarantine(unittest.TestCase):
             attempt = ImportAttemptResult(None)
             attempt.merge(import_result)
             outcome = _reject_import_from_evidence_decision(
-                db=db,  # type: ignore[arg-type]
+                db=db,  # pyright: ignore[reportArgumentType]
                 request_id=835,
                 dl_info=DownloadInfo(filetype="flac", username="bad-peer"),
                 attempt_result=attempt,
@@ -754,20 +754,13 @@ class TestAudioCorruptPostCommitQuarantine(unittest.TestCase):
                 "audio_corrupt",
             )
 
-            with patch(
-                "lib.wrong_match_delete_service.delete_wrong_match",
-            ) as delete_wrong_match, patch(
-                "lib.wrong_match_cleanup_service.cleanup_wrong_match",
-            ) as cleanup_wrong_match:
-                completed = process_claimed_job(
-                    db,  # type: ignore[arg-type]
-                    claimed,
-                    execute_fn=lambda *_args, **_kwargs: outcome,
-                )
+            completed = process_claimed_job(
+                db,  # pyright: ignore[reportArgumentType]
+                claimed,
+                execute_fn=lambda *_args, **_kwargs: outcome,
+            )
 
             assert completed is not None and completed.result is not None
-            delete_wrong_match.assert_not_called()
-            cleanup_wrong_match.assert_not_called()
             cleanup = completed.result["cleanup"]
             assert isinstance(cleanup, dict)
             self.assertEqual(

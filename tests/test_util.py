@@ -330,14 +330,9 @@ class TestValidateAudio(unittest.TestCase):
             path = os.path.join(tmpdir, "track.flac")
             with open(path, "wb") as stream:
                 stream.write(b"readable")
-            with (
-                patch(
-                    "lib.util._probe_file_readable",
-                    side_effect=PermissionError("denied"),
-                ),
-                patch("lib.util.sp.run") as mock_run,
-            ):
-                result = validate_audio(tmpdir)
+            read_probe = MagicMock(side_effect=PermissionError("denied"))
+            with patch("lib.util.sp.run") as mock_run:
+                result = validate_audio(tmpdir, read_probe=read_probe)
 
         mock_run.assert_not_called()
         self.assertTrue(result.measurement_failed)
@@ -369,18 +364,15 @@ class TestValidateAudio(unittest.TestCase):
             with open(path, "wb") as stream:
                 stream.write(b"readable")
             snapshot = _source_snapshot(path)
-            with (
-                patch(
-                    "lib.util._probe_file_readable",
-                    side_effect=[snapshot, PermissionError("read lost")],
-                ),
-                patch("lib.util.sp.run") as mock_run,
-            ):
+            read_probe = MagicMock(
+                side_effect=[snapshot, PermissionError("read lost")],
+            )
+            with patch("lib.util.sp.run") as mock_run:
                 mock_run.return_value = MagicMock(
                     returncode=69,
                     stderr="decode failed",
                 )
-                result = validate_audio(tmpdir)
+                result = validate_audio(tmpdir, read_probe=read_probe)
 
         self.assertTrue(result.measurement_failed)
         self.assertEqual(result.report.files_failed, 0)

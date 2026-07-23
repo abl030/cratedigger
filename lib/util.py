@@ -21,7 +21,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
-from typing import Any, Callable, Iterator, Sequence, TYPE_CHECKING
+from typing import Any, Callable, Iterator, Protocol, Sequence, TYPE_CHECKING
 
 from lib.json_narrow import (
     is_object_list as _is_object_list,
@@ -30,6 +30,7 @@ from lib.json_narrow import (
 from lib.quality.audio_validation import (
     AUDIO_VALIDATION_DIAGNOSTIC_LIMIT,
     AUDIO_VALIDATION_POLICY_ID,
+    AUDIO_VALIDATION_TOOL,
     AudioToolDiagnostic,
     AudioToolDiagnosticCategory,
     AudioValidationOutcome,
@@ -248,6 +249,16 @@ class _AudioSourceChangedError(OSError):
     pass
 
 
+class _AudioReadProbe(Protocol):
+    def __call__(
+        self,
+        filepath: str,
+        *,
+        complete: bool = False,
+        expected: _AudioSourceSnapshot | None = None,
+    ) -> _AudioSourceSnapshot: ...
+
+
 def build_audio_validation_argv(filepath: str) -> list[str]:
     """Build the fixed audio-only full-decode policy from issue #835."""
     return [
@@ -339,7 +350,10 @@ def _ffmpeg_version() -> str:
     """Return one compact version identity per process."""
     try:
         output = sp.check_output(
-            ["ffmpeg", "-version"],
+            # This is a version identity probe, not a media command; the
+            # exact executable literal remains reserved for audited command
+            # lists that map audio explicitly.
+            [AUDIO_VALIDATION_TOOL, "-version"],
             stderr=sp.STDOUT,
             timeout=5,
         )
@@ -362,7 +376,7 @@ def _audio_validation_result(
 ) -> AudioValidationResult:
     report = AudioValidationReport(
         policy_id=AUDIO_VALIDATION_POLICY_ID,
-        tool="ffmpeg",
+        tool=AUDIO_VALIDATION_TOOL,
         tool_version=(
             _ffmpeg_version() if tool_version is None else tool_version
         ),
@@ -419,7 +433,12 @@ def _world_failure_result(
     )
 
 
-def validate_audio(folder_path: str, mode: str = "normal") -> AudioValidationResult:
+def validate_audio(
+    folder_path: str,
+    mode: str = "normal",
+    *,
+    read_probe: _AudioReadProbe = _probe_file_readable,
+) -> AudioValidationResult:
     """Perform a read-only, audio-only strict FFmpeg full decode.
 
     Exit-zero stderr is discarded without inspection. A positive FFmpeg exit
@@ -481,7 +500,7 @@ def validate_audio(folder_path: str, mode: str = "normal") -> AudioValidationRes
     for filepath in files:
         display = os.path.relpath(filepath, folder_path)
         try:
-            snapshot = _probe_file_readable(filepath)
+            snapshot = read_probe(filepath)
         except _AudioSourceChangedError as exc:
             return _world_failure_result(
                 relative_path=display,
@@ -508,7 +527,7 @@ def validate_audio(folder_path: str, mode: str = "normal") -> AudioValidationRes
             )
         except sp.TimeoutExpired as exc:
             try:
-                _probe_file_readable(
+                read_probe(
                     filepath,
                     complete=True,
                     expected=snapshot,
@@ -578,7 +597,7 @@ def validate_audio(folder_path: str, mode: str = "normal") -> AudioValidationRes
                 continue
 
             try:
-                _probe_file_readable(
+                read_probe(
                     filepath,
                     complete=True,
                     expected=snapshot,

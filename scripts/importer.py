@@ -619,6 +619,8 @@ def _cleanup_committed_wrong_match_rejection(
     job: ImportJob,
     download_log_id: int,
     outcome: DispatchOutcome,
+    *,
+    cleanup_wrong_match_fn: Callable[..., object] | None = None,
 ) -> None:
     """Run Wrong Matches convergence only after the terminal bundle commits."""
     from lib.wrong_match_policy import rejection_scenario_is_wrong_match_candidate
@@ -643,9 +645,12 @@ def _cleanup_committed_wrong_match_rejection(
             # Never hand either location to the independent Wrong Matches
             # deletion reducer.
             return
-        from lib.wrong_match_cleanup_service import cleanup_wrong_match
+        if cleanup_wrong_match_fn is None:
+            from lib.wrong_match_cleanup_service import cleanup_wrong_match
 
-        cleanup_wrong_match(
+            cleanup_wrong_match_fn = cleanup_wrong_match
+
+        cleanup_wrong_match_fn(
             db,
             download_log_id,
             ignore_import_job_id=job.id,

@@ -55,6 +55,7 @@ from lib.quality import (
     full_pipeline_decision_from_evidence,
 )
 from lib.quality.decisions import post_import_search_action
+from tests.helpers import make_audio_corrupt_validation_report
 
 
 # ============================================================================
@@ -1144,7 +1145,17 @@ class TestFullPipelineDecisionFromEvidence(unittest.TestCase):
         )
         variants = {
             "audio_corrupt": msgspec.structs.replace(
-                candidate, audio_corrupt=True
+                candidate,
+                files=[
+                    msgspec.structs.replace(
+                        candidate.files[0],
+                        decode_ok=False,
+                    ),
+                ],
+                audio_validation=make_audio_corrupt_validation_report(
+                    candidate.files[0].relative_path,
+                ),
+                audio_corrupt=True,
             ),
             "bad_audio_hash": msgspec.structs.replace(
                 candidate,

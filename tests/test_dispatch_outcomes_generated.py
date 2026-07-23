@@ -1256,16 +1256,16 @@ class TestGeneratedArchivalQuarantineIsolation(unittest.TestCase):
             if link_fault == "write"
             else nullcontext()
         )
+        cleanup_wrong_match = MagicMock()
         with evidence_link_patch, patch(
-            "lib.wrong_match_cleanup_service.cleanup_wrong_match",
-        ) as cleanup_wrong_match, patch(
             "scripts.importer.logger.exception",
         ) as log_exception:
             _cleanup_committed_wrong_match_rejection(
-                cast(Any, db),
+                db,  # pyright: ignore[reportArgumentType]
                 job,
                 log_id,
                 outcome,
+                cleanup_wrong_match_fn=cleanup_wrong_match,
             )
         self.assertEqual(
             log_exception.call_count,

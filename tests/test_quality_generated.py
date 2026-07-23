@@ -66,6 +66,7 @@ from lib.quality import (
     evidence_decision_name,
     full_pipeline_decision,
     full_pipeline_decision_from_evidence,
+    legacy_unrecorded_audio_validation_report,
     quality_gate_decision,
     spectral_import_decision,
 )
@@ -75,6 +76,7 @@ from lib.quality.filetypes import has_mixed_lossless_and_lossy
 from tests.helpers import (
     build_parity_candidate_evidence,
     build_parity_current_evidence,
+    make_audio_corrupt_validation_report,
 )
 from tests.test_simulator_scenarios import (
     AlbumState,
@@ -1667,6 +1669,9 @@ def wild_ready_candidate_evidence(draw) -> AlbumQualityEvidence:
         ),
     )
     has_bad_hash = draw(st.booleans())
+    audio_corrupt = draw(st.booleans())
+    if audio_corrupt:
+        files[0] = msgspec.structs.replace(files[0], decode_ok=False)
     return AlbumQualityEvidence(
         mb_release_id="generated-evidence",
         snapshot_fingerprint="sha256:generated-fingerprint",
@@ -1681,7 +1686,12 @@ def wild_ready_candidate_evidence(draw) -> AlbumQualityEvidence:
         target_is_cbr=target_is_cbr,
         v0_metric=v0_metric,
         verified_lossless_proof=proof,
-        audio_corrupt=draw(st.booleans()),
+        audio_validation=(
+            make_audio_corrupt_validation_report(files[0].relative_path)
+            if audio_corrupt
+            else legacy_unrecorded_audio_validation_report()
+        ),
+        audio_corrupt=audio_corrupt,
         folder_layout=draw(st.sampled_from(("flat", "nested"))),
         audio_file_count=draw(st.sampled_from((0, len(files)))),
         filetype_band="generated",
@@ -1748,6 +1758,7 @@ def _with_integrity_fact(
     clean = msgspec.structs.replace(
         candidate,
         files=[mp3_file],
+        audio_validation=legacy_unrecorded_audio_validation_report(),
         audio_corrupt=False,
         folder_layout="flat",
         audio_file_count=1,
@@ -1755,7 +1766,14 @@ def _with_integrity_fact(
         matched_bad_audio_hash_path=None,
     )
     if fact == "audio_corrupt":
-        return msgspec.structs.replace(clean, audio_corrupt=True)
+        return msgspec.structs.replace(
+            clean,
+            files=[msgspec.structs.replace(mp3_file, decode_ok=False)],
+            audio_validation=make_audio_corrupt_validation_report(
+                mp3_file.relative_path,
+            ),
+            audio_corrupt=True,
+        )
     if fact == "bad_audio_hash":
         return msgspec.structs.replace(
             clean,

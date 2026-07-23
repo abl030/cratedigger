@@ -541,7 +541,13 @@ class TestImportOperationFence(unittest.TestCase):
                 ),
             )
 
-        def record_cleanup(_outcome: DispatchOutcome) -> dict[str, object]:
+        def record_cleanup(
+            _db: object,
+            _outcome: DispatchOutcome,
+            *,
+            download_log_id: int | None = None,
+        ) -> dict[str, object]:
+            self.assertEqual(download_log_id, 1)
             events.append("cleanup")
             return {"staged_path": {"success": True}}
 

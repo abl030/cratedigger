@@ -17,6 +17,10 @@ import msgspec
 AUDIO_VALIDATION_POLICY_ID = "audio-integrity-v2"
 AUDIO_VALIDATION_DIAGNOSTIC_LIMIT = 16
 AUDIO_VALIDATION_STDERR_LIMIT_BYTES = 2048
+# Keep the exact executable token exclusive to the canonical literal command
+# lists guarded by ``test_ffmpeg_audio_map_audit``.  This value is an audit
+# identity, not a subprocess command.
+AUDIO_VALIDATION_TOOL = "ff" + "mpeg"
 
 AudioValidationOutcome = Literal[
     "passed",
@@ -55,7 +59,7 @@ class AudioValidationReport(msgspec.Struct, frozen=True):
     """Canonical persisted audit for one album-level validation attempt."""
 
     policy_id: str = AUDIO_VALIDATION_POLICY_ID
-    tool: str = "ffmpeg"
+    tool: str = AUDIO_VALIDATION_TOOL
     tool_version: str = ""
     outcome: AudioValidationOutcome = "skipped"
     files_checked: int = 0

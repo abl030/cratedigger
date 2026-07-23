@@ -38,6 +38,7 @@ from lib.pipeline_db import (  # noqa: E402
     TransferLedgerRow,
 )
 from lib.pipeline_db._shared import REQUEST_METADATA_RESERVED_FIELDS  # noqa: E402
+from lib.json_narrow import json_dict  # noqa: E402
 from lib.quality import (  # noqa: E402
     AlbumQualityEvidenceFile,
     AudioQualityMeasurement,
@@ -2337,10 +2338,19 @@ class TestDownloadLog(unittest.TestCase):
             self.db.record_post_commit_quarantine(log_id, audit)
         )
 
-        history = self.db.get_download_history(self.req_id)
-        payload = cast(dict, history[0]["validation_result"])
+        row = self.db._execute(
+            """
+            SELECT validation_result
+            FROM download_log
+            WHERE id = %s
+            """,
+            (log_id,),
+        ).fetchone()
+        assert row is not None
+        payload = json_dict(row["validation_result"])
         self.assertEqual(payload["failed_path"], target)
-        self.assertEqual(payload["post_commit_quarantine"]["moved"], True)
+        quarantine = json_dict(payload["post_commit_quarantine"])
+        self.assertEqual(quarantine["moved"], True)
         self.assertEqual(
             self.db.get_retained_failure_paths(),
             {target},

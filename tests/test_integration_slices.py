@@ -13,7 +13,7 @@ import shutil
 import configparser
 from contextlib import contextmanager
 import tempfile
-from typing import Any, cast
+from typing import Any, Never, cast
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -6692,14 +6692,14 @@ class TestU5PreviewWorkerLifecycleSlice(unittest.TestCase):
         claimed = self._setup_worker_job(db, request_id=44)
         assert claimed is not None
 
-        def crash(_db: Any, _job: Any):
+        def crash(_db: object, _job: object) -> Never:
             raise RuntimeError("simulated worker envelope crash")
 
         with patch(
             "scripts.import_preview_worker.logger.exception",
         ):
             updated = import_preview_worker.process_claimed_preview_job(
-                cast(Any, db),
+                db,
                 claimed,
                 preview_fn=crash,
             )

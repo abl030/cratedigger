@@ -40,6 +40,7 @@ from lib.quality import (
     full_pipeline_decision,
     full_pipeline_decision_from_evidence,
     gate_rank,
+    legacy_unrecorded_audio_validation_report,
     measured_import_decision,
     quality_gate_decision,
 )
@@ -54,7 +55,11 @@ from lib.wrong_match_cleanup_service import (
     _result,
 )
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_album_quality_evidence, make_request_row
+from tests.helpers import (
+    make_album_quality_evidence,
+    make_audio_corrupt_validation_report,
+    make_request_row,
+)
 
 
 def _coherent_three_track_metrics(
@@ -1516,6 +1521,11 @@ class TestQualityLineageGenerated(unittest.TestCase):
             )
         ]
         measurement = PreimportMeasurement(
+            audio_validation=(
+                make_audio_corrupt_validation_report("01.mp3")
+                if reject_fact == "audio_corrupt"
+                else legacy_unrecorded_audio_validation_report()
+            ),
             audio_corrupt=reject_fact == "audio_corrupt",
             corrupt_files=(
                 ["01.mp3"] if reject_fact == "audio_corrupt" else []

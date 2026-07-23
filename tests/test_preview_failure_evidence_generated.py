@@ -690,7 +690,9 @@ class TestPreviewFailureEvidenceCheckerKnownBad(unittest.TestCase):
             ))
 
     def test_trips_when_authoritative_source_path_is_lost(self) -> None:
-        audit = cast(dict[str, object], self._observation().audit)
+        observed_audit = self._observation().audit
+        assert observed_audit is not None
+        audit = dict(observed_audit)
         with self.assertRaisesRegex(AssertionError, "authoritative source path"):
             assert_preview_failure_have_contract(self._observation(
                 audit={
