@@ -473,6 +473,14 @@ class TestCmdList(unittest.TestCase):
 
 
 class TestCmdSet(unittest.TestCase):
+    def test_initializing_request_cannot_be_published_by_generic_set(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=791, status="initializing"))
+
+        rc = pipeline_cli.cmd_set(cast(Any, db), MagicMock(id=791, status="wanted"))
+
+        self.assertEqual(rc, 4)
+        self.assertEqual(db.request(791)["status"], "initializing")
     def test_same_status_is_idempotent_for_operator_statuses(self):
         for index, status in enumerate(("wanted", "imported", "unsearchable"), 1):
             with self.subTest(status=status):
@@ -1423,6 +1431,16 @@ class TestCmdStatusShowsDownloading(unittest.TestCase):
 
 
 class TestCmdSetIntent(unittest.TestCase):
+    def test_set_intent_rejects_initializing_request(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=791, status="initializing"))
+
+        result = pipeline_cli.cmd_set_intent(
+            cast(Any, db), MagicMock(id=791, intent="lossless"),
+        )
+
+        self.assertEqual(result, 4)
+        self.assertEqual(db.request(791)["status"], "initializing")
     """Tests for cmd_set_intent — lossless-on-disk toggle."""
 
     @patch("builtins.print")

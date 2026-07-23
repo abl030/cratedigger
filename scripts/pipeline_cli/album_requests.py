@@ -602,6 +602,9 @@ def cmd_set(db: _AlbumRequestsDB, args: argparse.Namespace) -> int:
         print(f"  Request {args.id} not found.")
         return 2
     old_status = req["status"]
+    if old_status == "initializing":
+        print("  Request is still initializing; retry the original add or upgrade.")
+        return 4
     result = finalize_request(
         db,
         args.id,
@@ -630,6 +633,9 @@ def cmd_set_intent(db: _AlbumRequestsDB, args: argparse.Namespace) -> int:
     if not req:
         print(f"  Request {args.id} not found.")
         return 2
+    if req["status"] == "initializing":
+        print("  Request is still initializing; retry the original add or upgrade.")
+        return 4
     if req["status"] == "downloading":
         print(f"  Cannot set intent while album is downloading.")
         return 1

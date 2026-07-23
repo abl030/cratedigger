@@ -8,7 +8,7 @@ requests-by-rg, active-rgs, import-jobs) stay in ``web/routes/pipeline.py``.
 
 import logging
 import urllib.error
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 
 import msgspec
 from pydantic import BaseModel, Field, model_validator
@@ -134,6 +134,18 @@ def _request_fields_applied_or_respond(
         expected_status=expected_status,
         actual_status=None if row is None else str(row["status"]),
     ))
+
+
+def _initializing_mutation_rejected(h: RouteHandler, req: Mapping[str, object]) -> bool:
+    """Keep generic operator mutations out of service-owned initialization."""
+    if req["status"] != "initializing":
+        return False
+    h._json({
+        "error": "initialization_incomplete",
+        "id": req["id"],
+        "detail": "retry the original add or upgrade to resume initialization",
+    }, status=409)
+    return True
 
 
 def _creation_result_or_respond(
@@ -321,6 +333,8 @@ def post_pipeline_update(h: RouteHandler, body: dict[str, object]) -> None:
     req = s._db().get_request(int(req_id))
     if not req:
         h._error("Not found", 404)
+        return
+    if _initializing_mutation_rejected(h, req):
         return
 
     if new_status == "wanted" and req["status"] != "wanted":
@@ -520,6 +534,8 @@ def post_pipeline_set_quality(h: RouteHandler, body: dict[str, object]) -> None:
     if not existing:
         h._error("Not found in pipeline", 404)
         return
+    if _initializing_mutation_rejected(h, existing):
+        return
 
     req_id = existing["id"]
 
@@ -647,6 +663,8 @@ def post_pipeline_set_intent(h: RouteHandler, body: dict[str, object]) -> None:
     req = s._db().get_request(int(req_id))
     if not req:
         h._error("Not found", 404)
+        return
+    if _initializing_mutation_rejected(h, req):
         return
 
     if req["status"] == "downloading":

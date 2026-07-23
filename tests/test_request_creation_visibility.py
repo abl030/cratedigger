@@ -1,4 +1,4 @@
-"""Real-PostgreSQL visibility pin for issue #791's provisional status."""
+"""Real-PostgreSQL visibility and RELEASE-lock pins for issue #791."""
 
 from __future__ import annotations
 
@@ -11,21 +11,38 @@ sys.path.append(os.path.dirname(__file__))
 
 import conftest  # noqa: F401 -- starts the ephemeral PostgreSQL fixture
 
-from lib import transitions
 from lib.config import CratediggerConfig
-from lib.pipeline_db import PipelineDB
+from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_RELEASE, PipelineDB, release_id_to_lock_key
+from lib.request_creation_service import RequestCreationInput, RequestCreationService
 from lib.search import SEARCH_PLAN_GENERATOR_ID
-from lib.search_plan_service import SearchPlanService
 
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
 
 
-@unittest.skipUnless(TEST_DSN, "ephemeral PostgreSQL unavailable")
+class _PausePublicationDB(PipelineDB):
+    pause_publication = True
+
+    def update_status(self, request_id: int, status: str, *, expected_status: str | None = None,
+                      **extra: object) -> bool:
+        if self.pause_publication and status == "wanted" and expected_status == "initializing":
+            return False
+        return super().update_status(request_id, status, expected_status=expected_status, **extra)
+
+
+def _creation() -> RequestCreationInput:
+    return RequestCreationInput(
+        release_id="791-visibility", mb_release_id="791-visibility",
+        artist_name="A", album_title="B", source="request",
+        tracks=[{"disc_number": 1, "track_number": 1, "title": "One"}],
+        mb_release_payload={"artist-credit": [], "media": []},
+    )
+
+
 class TestRequestCreationVisibility(unittest.TestCase):
     def setUp(self) -> None:
         assert TEST_DSN is not None
-        self.writer = PipelineDB(TEST_DSN)
+        self.writer = _PausePublicationDB(TEST_DSN)
         self.observer = PipelineDB(TEST_DSN)
         for table in ("search_log", "search_plan_items", "search_plans", "album_tracks", "album_requests"):
             self.writer._execute(f"TRUNCATE {table} CASCADE")
@@ -35,23 +52,29 @@ class TestRequestCreationVisibility(unittest.TestCase):
         self.writer.close()
         self.observer.close()
 
-    def test_other_connection_cannot_select_initialized_plan_before_publication(self) -> None:
-        request_id = self.writer.add_request(
-            artist_name="A", album_title="B", source="request",
-            mb_release_id="791-visibility", status="initializing",
-        )
-        tracks = [{"disc_number": 1, "track_number": 1, "title": "One"}]
-        self.writer.set_tracks(request_id, tracks)
-        plan = SearchPlanService(self.writer, CratediggerConfig()).generate_for_new_request(
-            request_id, artist_name="A", album_title="B", year=None, tracks=tracks,
-        )
-        self.assertIsNotNone(plan.plan_id)
+    def test_real_service_hides_initializing_work_and_release_lock_serializes_identity(self) -> None:
+        creation = _creation()
+        service = RequestCreationService(self.writer, CratediggerConfig())
+        first = service.create_or_resume(creation)
+        self.assertEqual(first.outcome, "initialization_failed")
+        assert first.request_id is not None
+        self.assertIsNotNone(self.writer.get_active_search_plan(first.request_id))
         before = self.observer.get_wanted_searchable(SEARCH_PLAN_GENERATOR_ID)
-        self.assertNotIn(request_id, {row["id"] for row in before})
-        result = transitions.finalize_request(
-            self.writer, request_id,
-            transitions.RequestTransition.to_wanted(from_status="initializing"),
-        )
-        self.assertIsInstance(result, transitions.TransitionApplied)
+        self.assertNotIn(first.request_id, {row["id"] for row in before})
+
+        # A second connection holding the exact RELEASE lock makes the same
+        # identity retry busy rather than creating a parallel provisional row.
+        with self.observer.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_RELEASE,
+            release_id_to_lock_key(creation.release_id),
+        ) as acquired:
+            self.assertTrue(acquired)
+            contended = service.create_or_resume(creation)
+        self.assertEqual(contended.outcome, "busy")
+        self.assertEqual(self.writer.count_by_status().get("initializing"), 1)
+
+        self.writer.pause_publication = False
+        second = service.create_or_resume(creation)
+        self.assertEqual(second.outcome, "resumed")
         after = self.observer.get_wanted_searchable(SEARCH_PLAN_GENERATOR_ID)
-        self.assertIn(request_id, {row["id"] for row in after})
+        self.assertIn(first.request_id, {row["id"] for row in after})

@@ -177,7 +177,15 @@ class RequestCreationService:
                 resolved = resolve_all(
                     {
                         "id": request_id,
-                        "mb_release_id": creation.mb_release_id,
+                        # Modern Discogs rows dual-write the numeric ID into
+                        # mb_release_id for DB identity compatibility. That
+                        # is not MusicBrainz resolver input: keep source
+                        # dispatch unambiguous while preserving the stored
+                        # dual-write above.
+                        "mb_release_id": (
+                            None if creation.discogs_release_id is not None
+                            else creation.mb_release_id
+                        ),
                         "discogs_release_id": creation.discogs_release_id,
                         "mb_release_group_id": creation.mb_release_group_id,
                         "mb_artist_id": creation.mb_artist_id,
@@ -203,26 +211,30 @@ class RequestCreationService:
                     year=creation.year,
                     tracks=self.db.get_tracks(request_id),
                     source=creation.source,
-                    release_group_year=resolved.release_group_year,
+                    release_group_year=(
+                        resolved.release_group_year
+                        if resolved.release_group_year is not None
+                        else creation.release_group_year
+                    ),
                     is_va_compilation=resolved.is_va_compilation,
                     catalog_number=resolved.catalog_number,
                 )
-                # A no-id transient result is specifically the persistence
-                # failure shape; no durable outcome means no publication.
+                # A no-id result means no durable outcome was reported. Do
+                # not infer success from a pre-existing active plan: that
+                # plan may be unrelated/stale and the current service call
+                # has not proved its own creation boundary persisted.
                 if plan.plan_id is None:
-                    # A prior attempt may have persisted an active plan and
-                    # crashed before this final CAS. ``generate_for_new_request``
-                    # correctly reports that as a no-op; it is nevertheless a
-                    # durable completed plan step for a resume.
-                    if self.db.get_active_search_plan(request_id) is None:
-                        return self._failed(
-                            request_id, plan.error_message or "plan not persisted",
-                        )
-                transition = transitions.RequestTransition.to_wanted_fields(
-                    from_status="initializing", fields=creation.final_fields,
-                )
-                outcome = transitions.finalize_request(self.db, request_id, transition)
-                if isinstance(outcome, transitions.TransitionConflict):
+                    return self._failed(
+                        request_id, plan.error_message or "plan not persisted",
+                    )
+                # Publication is deliberately not an ordinary lifecycle
+                # transition. Only this service may CAS initializing → wanted.
+                if not self.db.update_status(
+                    request_id,
+                    "wanted",
+                    expected_status="initializing",
+                    **creation.final_fields,
+                ):
                     return self._failed(request_id, "publication CAS lost")
             except Exception:  # noqa: BLE001
                 # Resolver/database exceptions may contain upstream URLs or

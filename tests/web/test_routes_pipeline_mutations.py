@@ -675,6 +675,19 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
                 self.assertEqual(data["new_status"], request_status)
                 self.assertEqual(self.db.get_request(index), before)
 
+    def test_pipeline_update_rejects_initializing_request(self):
+        self.db.seed_request(make_request_row(
+            id=791, status="initializing", mb_release_id="initializing-update",
+        ))
+
+        status, data = self._post(
+            "/api/pipeline/update", {"id": 791, "status": "wanted"},
+        )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(data["error"], "initialization_incomplete")
+        self.assertEqual(self.db.request(791)["status"], "initializing")
+
     def test_pipeline_update_imported_to_unsearchable_is_rejected(self):
         self.db.seed_request(make_request_row(
             id=604,
@@ -785,6 +798,19 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         _assert_required_fields(self, data, self.SET_QUALITY_REQUIRED_FIELDS,
                                 "pipeline set-quality response (discogs)")
 
+    def test_pipeline_set_quality_rejects_initializing_request(self):
+        self.db.seed_request(make_request_row(
+            id=792, status="initializing", mb_release_id="initializing-quality",
+        ))
+
+        status, data = self._post(
+            "/api/pipeline/set-quality",
+            {"mb_release_id": "initializing-quality", "min_bitrate": 320},
+        )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(data["error"], "initialization_incomplete")
+
     @patch("web.routes.pipeline_mutations.finalize_request")
     def test_pipeline_upgrade_normalizes_uppercase_uuid(self, mock_transition):
         self.db.seed_request(make_request_row(
@@ -814,6 +840,18 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, self.SET_INTENT_REQUIRED_FIELDS,
                                 "pipeline set-intent response")
+
+    def test_pipeline_set_intent_rejects_initializing_request(self):
+        self.db.seed_request(make_request_row(
+            id=793, status="initializing", mb_release_id="initializing-intent",
+        ))
+
+        status, data = self._post(
+            "/api/pipeline/set-intent", {"id": 793, "intent": "lossless"},
+        )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(data["error"], "initialization_incomplete")
 
     def test_pipeline_set_intent_reports_replace_race(self):
         import web.server as srv

@@ -118,8 +118,8 @@ class TestTransitionTable(unittest.TestCase):
             self.assertIsInstance(fx, TransitionSideEffects,
                                  f"({from_s}, {to_s}) is not TransitionSideEffects")
 
-    def test_exactly_12_transitions(self):
-        self.assertEqual(len(VALID_TRANSITIONS), 12)
+    def test_exactly_11_transitions(self):
+        self.assertEqual(len(VALID_TRANSITIONS), 11)
 
     def test_all_statuses_reachable(self):
         """Every status appears as a target at least once."""
@@ -127,8 +127,8 @@ class TestTransitionTable(unittest.TestCase):
         self.assertEqual(
             targets, {"wanted", "downloading", "imported", "unsearchable"})
 
-    def test_initializing_can_only_publish_to_wanted(self):
-        self.assertIn(("initializing", "wanted"), VALID_TRANSITIONS)
+    def test_initializing_has_no_ordinary_lifecycle_edge(self):
+        self.assertNotIn(("initializing", "wanted"), VALID_TRANSITIONS)
         self.assertNotIn(("initializing", "downloading"), VALID_TRANSITIONS)
 
 
