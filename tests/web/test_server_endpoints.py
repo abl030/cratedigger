@@ -8,6 +8,7 @@ tests/web/_harness.py.
 import json
 import logging
 import os
+import socket
 import string
 import sys
 import unittest
@@ -450,6 +451,29 @@ class TestServerEndpoints(_FakeDbWebServerCase):
     def test_unknown_post_returns_404(self):
         status, data = self._post("/api/nonexistent", {})
         self.assertEqual(status, 404)
+        self.assertEqual(data, {"error": "Not found"})
+
+    def test_unknown_post_with_body_closes_before_it_can_be_reparsed(self):
+        """An unmatched POST never lets its unread bytes form another request."""
+        body = b'{"x":1}'
+        request = (
+            b"POST /api/nonexistent HTTP/1.1\r\n"
+            b"Host: 127.0.0.1\r\n"
+            b"Content-Type: application/json\r\n"
+            + f"Content-Length: {len(body)}\r\n\r\n".encode()
+            + body
+            + b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+        )
+        with socket.create_connection(("127.0.0.1", self.port), timeout=2) as client:
+            client.settimeout(2)
+            client.sendall(request)
+            response = bytearray()
+            while chunk := client.recv(4096):
+                response.extend(chunk)
+
+        self.assertEqual(response.count(b"HTTP/1.1 "), 1)
+        self.assertIn(b"HTTP/1.1 404 Not Found\r\n", response)
+        self.assertIn(b'{"error": "Not found"}', response)
 
     def test_rejected_post_content_lengths_do_not_consume_a_body(self):
         """Malformed, negative, and oversized lengths fail before ``read``."""

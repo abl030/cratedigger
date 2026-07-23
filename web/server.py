@@ -534,6 +534,9 @@ class Handler(BaseHTTPRequestHandler):
                         return
                     fn(self, body, *m.groups())
                     return
+            # The declared body remains unread for an unknown route.  Close
+            # rather than letting those bytes be parsed as a second request.
+            self.close_connection = True
             self._error("Not found", 404)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as e:
             # Issue #233: see do_GET above. The function-level except covers

@@ -1,17 +1,20 @@
 """Tests for album_source.py — AlbumRecord and DatabaseSource."""
 
 import os
+import string
 import sys
 import unittest
 from unittest.mock import patch, MagicMock
+from urllib.parse import quote
 
+from hypothesis import given, strategies as st
 # Bootstrap ephemeral PostgreSQL if available
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from album_source import AlbumRecord, DatabaseSource
+from album_source import AlbumRecord, DatabaseSource, MB_API_BASE
 from lib.grab_list import GrabListEntry, DownloadFile
 from lib.quality import DownloadInfo, ValidationResult
 from tests.fakes import FakePipelineDB
@@ -52,6 +55,26 @@ SAMPLE_TRACKS = [
 ]
 
 
+def _fallback_mb_request_url(mb_id: str) -> str:
+    """Exercise the real MB fallback up to its outbound request boundary."""
+    source = DatabaseSource.__new__(DatabaseSource)
+    response = MagicMock()
+    response.__enter__.return_value.read.return_value = b'{"media": []}'
+    with patch("album_source.urllib.request.urlopen", return_value=response) as urlopen:
+        tracks = source._populate_tracks_mb({"id": 42}, mb_id)
+
+    if tracks:
+        raise AssertionError(f"empty MB response unexpectedly made tracks: {tracks!r}")
+    return urlopen.call_args.args[0].full_url
+
+
+def assert_mb_fallback_url_quotes_one_release_component(mb_id: str, url: str) -> None:
+    """The DB-owned identifier is exactly one escaped path component."""
+    expected = f"{MB_API_BASE}/release/{quote(mb_id, safe='')}?inc=recordings&fmt=json"
+    if url != expected:
+        raise AssertionError(f"fallback URL did not quote one release component: {url!r}")
+
+
 class TestAlbumRecordFromDbRow(unittest.TestCase):
     def test_basic_shape(self):
         record = AlbumRecord.from_db_row(SAMPLE_DB_ROW, SAMPLE_TRACKS)
@@ -89,6 +112,30 @@ class TestAlbumRecordFromDbRow(unittest.TestCase):
         """DB records use negative IDs."""
         record = AlbumRecord.from_db_row(SAMPLE_DB_ROW, SAMPLE_TRACKS)
         self.assertLess(record.id, 0)
+
+
+class TestDatabaseSourceMusicBrainzFallbackUrl(unittest.TestCase):
+    def test_fallback_quotes_release_id_as_one_path_component(self) -> None:
+        mb_id = "release/with?query#fragment% and space"
+
+        assert_mb_fallback_url_quotes_one_release_component(
+            mb_id, _fallback_mb_request_url(mb_id))
+
+    @given(st.text(
+        alphabet=string.ascii_letters + string.digits + "/?#% &:;@[]\u2603",
+        min_size=1,
+        max_size=40,
+    ))
+    def test_fallback_quotes_adversarial_release_ids(self, mb_id: str) -> None:
+        assert_mb_fallback_url_quotes_one_release_component(
+            mb_id, _fallback_mb_request_url(mb_id))
+
+    def test_fallback_url_oracle_rejects_an_unquoted_path_mutant(self) -> None:
+        mb_id = "release/with?query"
+        raw_url = f"{MB_API_BASE}/release/{mb_id}?inc=recordings&fmt=json"
+
+        with self.assertRaisesRegex(AssertionError, "did not quote"):
+            assert_mb_fallback_url_quotes_one_release_component(mb_id, raw_url)
 
 
 class TestDatabaseSourceRejectAndRequeueSeam(unittest.TestCase):

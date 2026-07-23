@@ -12,6 +12,7 @@ import urllib.request
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from typing import Sequence, TYPE_CHECKING, TypedDict
+from urllib.parse import quote
 
 if TYPE_CHECKING:
     from cratedigger import TrackRecord
@@ -444,7 +445,7 @@ class DatabaseSource:
     ) -> list[dict[str, object]]:
         """Fetch tracks from the MusicBrainz API."""
         try:
-            url = f"{MB_API_BASE}/release/{mb_id}?inc=recordings&fmt=json"
+            url = f"{MB_API_BASE}/release/{quote(mb_id, safe='')}?inc=recordings&fmt=json"
             req = urllib.request.Request(url)
             req.add_header("User-Agent", "cratedigger-db/1.0")
             with urllib.request.urlopen(req, timeout=15) as resp:
