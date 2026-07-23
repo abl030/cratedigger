@@ -529,8 +529,10 @@ def harvest_terminal_transfer_evidence(ctx: CratediggerContext) -> None:
     Matching is attempt-scoped (issue #820): the bulk snapshot's
     ``includeRemoved=True`` history can still contain a terminal record
     from a much older attempt at the SAME ``(username, filename)`` queue
-    key (slskd never expires removed history). Matching with the plain
-    ``match_transfer`` here — no attempt boundary — let a months-old
+    key (slskd never expires removed history). Matching with the historical
+    ``match_transfer`` (since renamed and made private as
+    ``_match_transfer_all_history``) here — no attempt boundary — let a
+    months-old
     ``Completed, Succeeded`` record outrank and get stamped over the
     CURRENT attempt's genuine terminal state (e.g. a real
     ``Completed, Errored``), laundering a real failure into a false
