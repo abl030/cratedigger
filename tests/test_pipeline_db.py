@@ -3357,6 +3357,43 @@ class TestPipelineDashboardMetrics(unittest.TestCase):
         self.assertEqual(heavy[0]["browse_time_s"], 12.5)
         self.assertEqual(metrics["cycles"]["outliers"][0]["cycle_total_s"], 900.0)
 
+    def test_cycle_rows_accept_the_two_dashboard_query_fragments(self):
+        now = datetime.now(timezone.utc)
+        self.db.record_cycle_metrics(
+            started_at=now - timedelta(seconds=10),
+            completed_at=now,
+            cycle_total_s=25.0,
+        )
+
+        recent = self.db._dashboard_cycle_rows(
+            order_by="created_at DESC", limit=1)
+        outliers = self.db._dashboard_cycle_rows(
+            where="created_at >= NOW() - %s::interval",
+            params=("24 hours",),
+            order_by="cycle_total_s DESC",
+            limit=1,
+        )
+
+        self.assertEqual(len(recent), 1)
+        self.assertEqual(len(outliers), 1)
+        self.assertEqual(recent[0]["id"], outliers[0]["id"])
+
+    def test_cycle_rows_reject_unapproved_sql_fragments(self):
+        self.db.record_cycle_metrics(cycle_total_s=25.0)
+
+        with self.assertRaises(ValueError):
+            self.db._dashboard_cycle_rows(
+                order_by="created_at DESC; SELECT pg_sleep(1)", limit=1)
+        with self.assertRaises(ValueError):
+            self.db._dashboard_cycle_rows(
+                where="1 = 1 OR 1 = 1",
+                order_by="created_at DESC",
+                limit=1,
+            )
+
+        row = self.db._execute("SELECT COUNT(*)::int AS count FROM cycle_metrics").fetchone()
+        self.assertEqual(row["count"], 1)
+
     def test_peer_observations_track_distinct_peers(self):
         now = datetime.now(timezone.utc)
         old = now - timedelta(days=2)
@@ -3770,6 +3807,19 @@ class TestRetryLogic(unittest.TestCase):
         assert req is not None
         self.assertEqual(req["search_attempts"], 2)
 
+    def test_record_attempt_accepts_exact_counter_types(self):
+        for attempt_type, counter in (
+            ("search", "search_attempts"),
+            ("download", "download_attempts"),
+            ("validation", "validation_attempts"),
+        ):
+            with self.subTest(attempt_type=attempt_type):
+                self.assertTrue(self.db.record_attempt(
+                    self.req_id, attempt_type, expected_status="wanted"))
+                req = self.db.get_request(self.req_id)
+                assert req is not None
+                self.assertEqual(req[counter], 1)
+
     def test_record_attempt_sets_backoff(self):
         self.db.record_attempt(self.req_id, "download", expected_status="wanted")
         req = self.db.get_request(self.req_id)
@@ -3779,6 +3829,20 @@ class TestRetryLogic(unittest.TestCase):
         next_retry = req["next_retry_after"]
         assert next_retry is not None
         self.assertGreater(next_retry, datetime.now(timezone.utc))
+
+    def test_record_attempt_rejects_unknown_type_before_updating_request(self):
+        with self.assertRaises(ValueError):
+            self.db.record_attempt(
+                self.req_id,
+                "search; UPDATE album_requests SET search_attempts = 99",
+                expected_status="wanted",
+            )
+
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        self.assertEqual(req["search_attempts"], 0)
+        self.assertEqual(req["download_attempts"], 0)
+        self.assertEqual(req["validation_attempts"], 0)
 
     def test_exponential_backoff(self):
         self.db.record_attempt(self.req_id, "search", expected_status="wanted")

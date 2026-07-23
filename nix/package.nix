@@ -9,6 +9,7 @@ let
   # then it still resolves the consumer's ``beet``).
   pythonPackages = ps: [
     ps.psycopg2
+    ps.defusedxml # Plex XML responses are untrusted network input
     ps.music-tag
     ps.msgspec
     ps.pydantic  # HTTP request-body validation in web/routes/* (issue #343); msgspec stays for internal wire boundaries

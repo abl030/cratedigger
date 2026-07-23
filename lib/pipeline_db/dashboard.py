@@ -16,6 +16,15 @@ from lib.pipeline_db._shared import (
 from lib.pipeline_db._core import _PipelineDBBase
 
 
+_DASHBOARD_CYCLE_ROW_ORDER_BY = frozenset({
+    "created_at DESC",
+    "cycle_total_s DESC",
+})
+_DASHBOARD_CYCLE_ROW_WHERE = frozenset({
+    "created_at >= NOW() - %s::interval",
+})
+
+
 class _DashboardMixin(_PipelineDBBase):
     """Pipeline dashboard metrics, cycle telemetry, peer roster counters."""
 
@@ -486,6 +495,10 @@ class _DashboardMixin(_PipelineDBBase):
         where: str | None = None,
         params: tuple[object, ...] = (),
     ) -> list[dict[str, Any]]:
+        if order_by not in _DASHBOARD_CYCLE_ROW_ORDER_BY:
+            raise ValueError(f"Unsupported dashboard cycle ordering: {order_by!r}")
+        if where is not None and where not in _DASHBOARD_CYCLE_ROW_WHERE:
+            raise ValueError(f"Unsupported dashboard cycle filter: {where!r}")
         filter_sql = f"WHERE {where}" if where else ""
         cur = self._execute(f"""
             SELECT
