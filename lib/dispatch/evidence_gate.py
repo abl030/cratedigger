@@ -41,6 +41,7 @@ from lib.dispatch.types import (DISPATCH_CODE_REQUEUED_FOR_PREVIEW,
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
     from lib.pipeline_db import PipelineDB
+    from lib.quality_evidence import QualityEvidenceDB
     from lib.quality import (
         AlbumQualityEvidence,
         ImportResult,
@@ -314,7 +315,7 @@ def _load_evidence_import_gate(
 
 
 def _refresh_current_evidence_after_import(
-    db: "PipelineDB",
+    db: "QualityEvidenceDB",
     *,
     request_id: int,
     mb_release_id: str,
@@ -448,7 +449,7 @@ def _refresh_current_evidence_after_import(
 
 
 def _exact_linked_refresh_result(
-    db: "PipelineDB",
+    db: "QualityEvidenceDB",
     *,
     request_id: int,
     mb_release_id: str,

@@ -210,7 +210,7 @@ class TestCurrentEvidenceAuthorityPins(unittest.TestCase):
                 "CRATEDIGGER_RUNTIME_CONFIG": str(world.poisoned_runtime_config()),
             }):
                 result = _refresh_current_evidence_after_import(
-                    db,  # type: ignore[arg-type]
+                    db,
                     request_id=42,
                     mb_release_id=MB_RELEASE_ID,
                     quality_ranks=None,
@@ -284,7 +284,7 @@ class TestCurrentEvidenceAuthorityPins(unittest.TestCase):
             with self.subTest(consumer="refresh", db_path=db_path, root=library_root):
                 with self.assertRaisesRegex(ValueError, "supplied together"):
                     _refresh_current_evidence_after_import(
-                        db,  # type: ignore[arg-type]
+                        db,
                         request_id=42,
                         mb_release_id=MB_RELEASE_ID,
                         quality_ranks=None,

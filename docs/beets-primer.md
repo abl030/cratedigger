@@ -210,7 +210,10 @@ interpreter) on `beets_harness.py`. In production that env var — and
 the module-rendered `[Beets]` keys in config.ini; in the dev shell the
 shellHook exports it. A missing interpreter is an actionable error — there
 is no Home-Manager fallback (tier-2 R6; the old `.beet-wrapped` scraping
-is gone).
+is gone). Dispatch also passes its snapshotted Beets DB/root pair explicitly
+to `import_one.py`; the child opens that pair directly, so a runtime-config
+change between dispatch and child launch cannot redirect its preflight or
+postflight library reads.
 
 ### Harness Options
 

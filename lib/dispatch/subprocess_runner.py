@@ -41,8 +41,16 @@ def build_import_one_command(
     quality_rank_config_json: str | None = None,
     existing_v0_probe: V0ProbeEvidence | None = None,
     quality_evidence_action_file: str | None = None,
+    beets_library_db_path: str | None = None,
+    beets_library_root: str | None = None,
 ) -> list[str]:
     """Build the single shared import_one.py command line."""
+    from lib.beets_db import validate_beets_storage_pair
+
+    validate_beets_storage_pair(
+        db_path=beets_library_db_path,
+        library_root=beets_library_root,
+    )
     cmd = [
         sys.executable,
         import_one_script_from_harness(beets_harness_path),
@@ -83,6 +91,10 @@ def build_import_one_command(
                 "--existing-v0-probe-median-bitrate",
                 str(existing_v0_probe.median_bitrate_kbps),
             ])
+    if beets_library_db_path is not None:
+        cmd.extend(["--beets-library-db", beets_library_db_path])
+        assert beets_library_root is not None
+        cmd.extend(["--beets-library-root", beets_library_root])
     return cmd
 
 
@@ -122,6 +134,8 @@ def run_import_one(
         quality_rank_config_json=quality_rank_config_json,
         existing_v0_probe=existing_v0_probe,
         quality_evidence_action_file=quality_evidence_action_file,
+        beets_library_db_path=beets_library_db_path,
+        beets_library_root=beets_library_root,
     )
     result = sp.run(
         cmd,

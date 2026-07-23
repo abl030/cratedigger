@@ -7,7 +7,7 @@ log rows, denylist). Seam tests verify argv/config wiring.
 import os
 import tempfile
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, create_autospec, patch
 
 import msgspec
 
@@ -1018,13 +1018,15 @@ class TestDispatchFromDbStorageAuthority(unittest.TestCase):
     def test_partial_storage_override_fails_before_advisory_lock(self):
         from lib.dispatch import dispatch_import_from_db
 
-        db = FakePipelineDB()
+        from lib.pipeline_db import PipelineDB
+
+        db = create_autospec(PipelineDB, instance=True)
         for db_path, library_root in (("/only-db", None), (None, "/only-root")):
             with self.subTest(db_path=db_path, library_root=library_root), \
                  patch.object(db, "advisory_lock", side_effect=AssertionError):
                 with self.assertRaisesRegex(ValueError, "supplied together"):
                     dispatch_import_from_db(
-                        db,  # type: ignore[arg-type]
+                        db,
                         request_id=42,
                         failed_path="/never-observed",
                         beets_library_db_path=db_path,

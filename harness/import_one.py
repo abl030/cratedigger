@@ -48,7 +48,7 @@ def _bootstrap_import_paths() -> None:
 
 _bootstrap_import_paths()
 
-from lib.beets_db import AlbumInfo, BeetsDB
+from lib.beets_db import AlbumInfo, BeetsDB, open_beets_db
 from lib.measurement import ffprobe_audio_codec_name
 from lib.permissions import fix_library_modes, reset_umask
 from lib.release_identity import ReleaseIdentity
@@ -1559,6 +1559,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Quality evidence payload: preview-time candidate "
                              "measurement for dry runs, or action-time "
                              "authorization for mutation.")
+    parser.add_argument("--beets-library-db", default=None,
+                        help="Explicit Beets library DB snapshotted by dispatch; "
+                             "must be paired with --beets-library-root.")
+    parser.add_argument("--beets-library-root", default=None,
+                        help="Explicit Beets library root snapshotted by dispatch; "
+                             "must be paired with --beets-library-db.")
     parser.add_argument("--existing-v0-probe-min-bitrate", type=int, default=None,
                         help="Current comparable lossless-source V0 probe min bitrate")
     parser.add_argument("--existing-v0-probe-avg-bitrate", type=int, default=None,
@@ -1573,6 +1579,22 @@ def build_parser() -> argparse.ArgumentParser:
                              "the user's only copy in failed_imports/ (#111).")
     parser.add_argument("--dry-run", action="store_true")
     return parser
+
+
+def open_import_beets(
+    *,
+    db_path: str | None,
+    library_root: str | None,
+) -> BeetsDB:
+    """Open dispatch's explicit Beets pair, never ambient runtime config.
+
+    The importer child is a separate process.  ``BEETS_DB`` only controls the
+    Beets CLI and is not authority for :class:`BeetsDB`; an explicit pair on
+    this wire boundary therefore prevents a runtime-config swap between
+    dispatch and child launch from redirecting the preflight/postflight DB.
+    """
+
+    return open_beets_db(db_path=db_path, library_root=library_root)
 
 
 def main():
@@ -1619,7 +1641,10 @@ def main():
 
     # --- Pre-flight: already imported? ---
     stage_start = time.monotonic()
-    beets = BeetsDB()
+    beets = open_import_beets(
+        db_path=args.beets_library_db,
+        library_root=args.beets_library_root,
+    )
     import atexit
     atexit.register(beets.close)
     already_in_beets = beets.album_exists(mbid)
