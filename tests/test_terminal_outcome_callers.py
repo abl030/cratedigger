@@ -85,7 +85,7 @@ class TestTerminalOutcomeCallers(unittest.TestCase):
         job = db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=42,
-            payload={"failed_path": "/tmp/atomic"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/atomic"},
         )
         db.mark_import_job_preview_importable(job.id, preview_result={"ready": True})
         claimed = db.claim_next_import_job(worker_id="atomic")
@@ -127,7 +127,7 @@ class TestTerminalOutcomeCallers(unittest.TestCase):
         job = db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=42,
-            payload={"failed_path": "/tmp/atomic"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/atomic"},
         )
         claimed = db.claim_next_import_preview_job(worker_id="atomic-preview")
         assert claimed is not None

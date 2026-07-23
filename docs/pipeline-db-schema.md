@@ -245,12 +245,17 @@ Key fields:
 - `dedupe_key TEXT` — active queue dedupe key. A partial unique index prevents
   duplicate queued/running/recovery jobs while allowing a later job after an
   explicit recovery resolution or ordinary completion.
-- `payload JSONB` — typed job input. Force jobs carry `failed_path`,
-  `download_log_id`, and optional `source_username`.
-  YouTube jobs carry `staged_path`, `request_id`, `browse_id`, and
-  `download_log_id`.
+- `payload JSONB` — typed job input. `ImportJob.from_row` decodes it once into
+  the strict Struct selected by `job_type`, rejecting unknown fields and wrong
+  types before any database mutation and again when a row is projected. Force
+  jobs require a positive `download_log_id` and nonempty `failed_path`, with
+  optional `source_username` and `source_dirs`; automation jobs carry no
+  fields; YouTube jobs require positive `request_id`/`download_log_id` values
+  and nonempty `staged_path`/`browse_id` values.
 - `result JSONB`, `message`, `error` — terminal worker result visible to web
-  and CLI callers.
+  and CLI callers. Result and preview-result display/audit data remain broadly
+  decoded; `preview_status` continues to accept historical terminal
+  `would_import`/`uncertain` values. Neither is an input-payload contract.
 - **Partial unique index `one_active_youtube_import_per_request` ON
   `import_jobs (request_id) WHERE job_type = 'youtube_import' AND status IN
   ('queued', 'running', 'recovery_required')`** — added by migration 038 and

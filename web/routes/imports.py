@@ -12,8 +12,10 @@ from web.routes._pydantic import parse_body
 
 from lib.quality import _is_explicit_label
 from lib.import_queue import (
+    ForceImportPayload,
     IMPORT_JOB_FORCE,
     ImportJob,
+    YoutubeImportPayload,
     force_import_dedupe_key,
     force_import_payload,
 )
@@ -261,13 +263,12 @@ def _build_wrong_match_groups(
     active_jobs_by_log_id: dict[int, ImportJob] = {}
     active_jobs_by_request_id: dict[int, list[ImportJob]] = {}
     for job in active_import_jobs:
-        payload = job.payload or {}
         request_id = job.request_id
         if isinstance(request_id, int):
             active_jobs_by_request_id.setdefault(request_id, []).append(job)
-        download_log_id = payload.get("download_log_id")
-        if isinstance(download_log_id, int):
-            active_jobs_by_log_id[download_log_id] = job
+        if isinstance(job.payload, (ForceImportPayload, YoutubeImportPayload)):
+            if job.payload.download_log_id is not None:
+                active_jobs_by_log_id[job.payload.download_log_id] = job
     mbids = [
         mbid for row in rows
         for mbid in [row.get("mb_release_id")]

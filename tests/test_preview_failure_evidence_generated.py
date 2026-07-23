@@ -353,6 +353,7 @@ def _job_payload(
             staged_path=source_path,
             request_id=request_id,
             browse_id="MPREb_generated_764",
+            download_log_id=request_id,
         )
     return automation_import_payload()
 

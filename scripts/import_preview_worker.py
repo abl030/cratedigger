@@ -45,10 +45,12 @@ from lib.import_evidence import (
     ensure_candidate_evidence_for_action,
 )
 from lib.import_queue import (
+    ForceImportPayload,
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
     IMPORT_JOB_YOUTUBE,
     ImportJob,
+    YoutubeImportPayload,
 )
 from lib.pipeline_db import DEFAULT_DSN, PipelineDB
 from lib.measurement import (
@@ -71,7 +73,6 @@ from lib.quality_evidence import (
     EvidenceBuildResult,
     load_candidate_evidence_for_source,
 )
-from lib.youtube_ingest_service import YoutubeImportPayload
 from lib.validation_envelope import decode_validation_envelope
 
 logger = logging.getLogger("cratedigger-import-preview-worker")
@@ -103,9 +104,9 @@ def _preview_reason(result: ImportPreviewResult) -> str:
 
 
 def _download_log_id_from_job(job: ImportJob) -> int | None:
-    payload = job.payload or {}
-    download_log_id = payload.get("download_log_id")
-    return download_log_id if isinstance(download_log_id, int) else None
+    if isinstance(job.payload, (ForceImportPayload, YoutubeImportPayload)):
+        return job.payload.download_log_id
+    return None
 
 
 def _candidate_evidence_ready_for_job(
@@ -233,26 +234,16 @@ def _front_gate_source_path(db: Any, job: ImportJob) -> str | None:
     materialization. ``None`` is a graceful skip: the worker falls through
     to the existing measurement codepath.
     """
-    payload = job.payload or {}
     if job.job_type == IMPORT_JOB_FORCE:
         # A force payload is audit metadata, not filesystem authority. Its
         # path is resolved only from the download_log row at execution time.
         return None
     if job.job_type == IMPORT_JOB_YOUTUBE:
         # KTD1: YT path NEVER reads ``active_download_state``. The
-        # staged path comes from ``import_jobs.payload['staged_path']``,
-        # decoded via ``msgspec.convert`` for wire-boundary safety.
-        try:
-            youtube_payload = msgspec.convert(payload, type=YoutubeImportPayload)
-        except msgspec.ValidationError:
-            logger.debug(
-                "front-gate YT payload validation failed for job %s; "
-                "falling through to measurement",
-                job.id,
-                exc_info=True,
-            )
-            return None
-        return youtube_payload.staged_path
+        # staged path comes from the typed payload decoded at the DB boundary.
+        if not isinstance(job.payload, YoutubeImportPayload):
+            raise AssertionError("youtube_import payload type mismatch")
+        return job.payload.staged_path
     if job.job_type == IMPORT_JOB_AUTOMATION:
         if job.request_id is None:
             return None
@@ -417,7 +408,6 @@ def _preview_input(db: Any, job: ImportJob) -> dict[str, Any]:
     if job.request_id is None:
         raise ValueError("Import job has no request_id")
 
-    payload = job.payload or {}
     if job.job_type == IMPORT_JOB_FORCE:
         raise ValueError("Force import preview inputs are resolved from download_log")
 
@@ -444,15 +434,11 @@ def _preview_input(db: Any, job: ImportJob) -> dict[str, Any]:
         # KTD1: never read ``active_download_state``. The staged path
         # is the authoritative source — yt-dlp already wrote files
         # there, and we measure them in place.
-        try:
-            youtube_payload = msgspec.convert(payload, type=YoutubeImportPayload)
-        except msgspec.ValidationError as exc:
-            raise ValueError(
-                f"YouTube import preview job has malformed payload: {exc}"
-            ) from exc
+        if not isinstance(job.payload, YoutubeImportPayload):
+            raise AssertionError("youtube_import payload type mismatch")
         return {
             "request_id": job.request_id,
-            "path": youtube_payload.staged_path,
+            "path": job.payload.staged_path,
             "force": False,
             "download_log_id": None,
         }

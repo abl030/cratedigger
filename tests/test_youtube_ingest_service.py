@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 import msgspec
 
-from lib.import_queue import IMPORT_JOB_YOUTUBE
+from lib.import_queue import IMPORT_JOB_YOUTUBE, YoutubeImportPayload
 from lib import pipeline_db as _pipeline_db_mod  # module-import so the raise
 # site below resolves YoutubeInFlightError at call time. tests/test_pipeline_db.py
 # does importlib.reload(pipeline_db); a stale symbol import here would raise the
@@ -26,7 +26,6 @@ from lib.youtube_ingest_service import (
     OUTCOME_HTTP_STATUS,
     RunResult,
     SubmitResult,
-    YoutubeImportPayload,
     YoutubeIngestMetadata,
     YoutubeIngestService,
     YtdlpRunResult,
@@ -373,6 +372,7 @@ class TestSubmitInFlight(unittest.TestCase):
                 staged_path="/tmp/yt-staged",
                 request_id=42,
                 browse_id=BROWSE,
+                download_log_id=777,
             ),
         )
         svc = _make_service(pdb)
@@ -730,7 +730,8 @@ class TestRunJobHappyPath(unittest.TestCase):
         self.assertEqual(len(jobs), 1)
         job = jobs[0]
         self.assertEqual(job.request_id, 42)
-        payload = msgspec.convert(job.payload, type=YoutubeImportPayload)
+        assert isinstance(job.payload, YoutubeImportPayload)
+        payload = job.payload
         self.assertEqual(payload.request_id, 42)
         self.assertEqual(payload.browse_id, BROWSE)
         self.assertEqual(payload.download_log_id, log_id)

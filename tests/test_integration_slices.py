@@ -141,7 +141,7 @@ def _claim_dispatch_job(db, *, request_id: int, mb_release_id: str,
     job = db.enqueue_import_job(
         IMPORT_JOB_FORCE if force else IMPORT_JOB_AUTOMATION,
         request_id=request_id,
-        payload={"failed_path": source_path} if force else {},
+        payload={"download_log_id": 1, "failed_path": source_path} if force else {},
     )
     _seed_candidate_for_import_job(
         db,
@@ -2004,7 +2004,7 @@ class TestForceImportSlice(unittest.TestCase):
             job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
-                payload={"failed_path": tmpdir},
+                payload={"download_log_id": 1, "failed_path": tmpdir},
             )
             _seed_candidate_for_import_job(
                 db, job.id,
@@ -2101,7 +2101,7 @@ class TestForceImportSlice(unittest.TestCase):
             job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=833,
-                payload={"failed_path": tmpdir},
+                payload={"download_log_id": 1, "failed_path": tmpdir},
             )
             _seed_candidate_for_import_job(
                 db, job.id,
@@ -6299,7 +6299,7 @@ class TestImporterRequeueToPreviewSlice(unittest.TestCase):
                 IMPORT_JOB_FORCE,
                 request_id=42,
                 dedupe_key="force:slice",
-                payload={"failed_path": source},
+                payload={"download_log_id": 1, "failed_path": source},
             )
             # Step 1: simulate an importer-importable state without evidence
             # (the lossy real-world starting point: preview marked ready in a
@@ -6965,7 +6965,7 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
         job = db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=request_id,
-            payload={"failed_path": tmpdir},
+            payload={"download_log_id": 1, "failed_path": tmpdir},
         )
         db.upsert_album_quality_evidence(candidate_evidence)
         if current_evidence is not None:
@@ -7168,7 +7168,7 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
             job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
-                payload={"failed_path": tmpdir},
+                payload={"download_log_id": 1, "failed_path": tmpdir},
             )
             self._wire_candidate(
                 db, job.id,
@@ -7241,7 +7241,7 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
             job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=43,
-                payload={"failed_path": tmpdir},
+                payload={"download_log_id": 1, "failed_path": tmpdir},
             )
             self._wire_candidate(
                 db, job.id,
@@ -7288,7 +7288,7 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
             job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=44,
-                payload={"failed_path": tmpdir},
+                payload={"download_log_id": 1, "failed_path": tmpdir},
             )
             self._wire_candidate(
                 db, job.id,
@@ -7337,7 +7337,7 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
             job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=46,
-                payload={"failed_path": tmpdir},
+                payload={"download_log_id": 1, "failed_path": tmpdir},
             )
             self._wire_candidate(
                 db, job.id,
@@ -7403,7 +7403,7 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
             job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=45,
-                payload={"failed_path": tmpdir},
+                payload={"download_log_id": 1, "failed_path": tmpdir},
             )
             self._wire_candidate(
                 db, job.id,

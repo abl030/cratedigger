@@ -146,7 +146,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
         return db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=42,
-            payload={"failed_path": failed_path},
+            payload={"download_log_id": 1, "failed_path": failed_path},
         ).id
 
     def test_force_import_rejects_audio_not_in_origin_manifest(self):

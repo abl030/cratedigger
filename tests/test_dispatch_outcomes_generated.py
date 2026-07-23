@@ -231,7 +231,7 @@ def _run_dispatch(
         job = db.enqueue_import_job(
             IMPORT_JOB_FORCE if force else IMPORT_JOB_AUTOMATION,
             request_id=42,
-            payload={"failed_path": tmpdir} if force else {},
+            payload={"download_log_id": 1, "failed_path": tmpdir} if force else {},
         )
         evidence = make_album_quality_evidence(
             mb_release_id="mbid-generated",
@@ -590,7 +590,11 @@ def _run_have_analysis_abort(
     }[mode]
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        payload = {} if mode == "auto" else {"failed_path": tmpdir}
+        payload = (
+            {}
+            if mode == "auto"
+            else {"download_log_id": 1, "failed_path": tmpdir}
+        )
         job = db.enqueue_import_job(
             job_type,
             request_id=42,

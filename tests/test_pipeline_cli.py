@@ -613,7 +613,7 @@ class TestCmdImportJobRecovery(unittest.TestCase):
             "force_import",
             request_id=42,
             dedupe_key="force:cli-recovery",
-            payload={"failed_path": "/tmp/cli-recovery"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/cli-recovery"},
         )
         evidence = make_album_quality_evidence(
             mb_release_id="release-42",
@@ -675,7 +675,7 @@ class TestCmdImportJobRecovery(unittest.TestCase):
         job = db.enqueue_import_job(
             "force_import",
             request_id=42,
-            payload={"failed_path": "/tmp/not-recovery"},
+            payload={"download_log_id": 1, "failed_path": "/tmp/not-recovery"},
         )
         args = SimpleNamespace(
             job_id=job.id,
