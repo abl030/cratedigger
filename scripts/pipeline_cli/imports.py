@@ -72,9 +72,9 @@ class _ImportJobsDB(Protocol):
 def _resolve_failed_path(failed_path: str) -> "str | None":
     """Resolve a failed_path to an existing absolute directory.
 
-    Old entries stored relative paths (e.g. 'failed_imports/Foo - Bar').
-    New entries store absolute paths. Try the path as-is first, then
-    resolve against known slskd download dirs.
+    Old entries stored relative paths (e.g. 'failed_imports/Foo - Bar'). New
+    ``wrong_matches`` entries store absolute paths. Try the path as-is first,
+    then resolve against known slskd download dirs.
     """
     return _shared_resolve_failed_path(
         failed_path,

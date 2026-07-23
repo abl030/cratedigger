@@ -60,7 +60,7 @@ class TestTriageRouteContracts(_FakeDbWebServerCase):
 
     LIST_REQUIRED_FIELDS = {"results", "next_after", "page_size", "filter"}
     QUARANTINE_REQUIRED_FIELDS = {
-        "quarantine_root", "folders", "special_buckets",
+        "quarantine_root", "wrong_matches_root", "folders", "special_buckets",
     }
     QUARANTINE_FOLDER_REQUIRED_FIELDS = {"name", "path", "mtime_ns"}
 
@@ -82,8 +82,10 @@ class TestTriageRouteContracts(_FakeDbWebServerCase):
             quarantine = os.path.join(root, "failed_imports")
             referenced = os.path.join(quarantine, "Referenced")
             orphan = os.path.join(quarantine, "Orphan")
+            wrong_orphan = os.path.join(root, "wrong_matches", "Wrong Orphan")
             os.makedirs(referenced)
             os.makedirs(orphan)
+            os.makedirs(wrong_orphan)
             request_id = self.db.add_request("Artist", "Album", "request")
             self.db.log_download(
                 request_id,
@@ -101,13 +103,16 @@ class TestTriageRouteContracts(_FakeDbWebServerCase):
             self, data, self.QUARANTINE_REQUIRED_FIELDS,
             "quarantine triage response",
         )
-        self.assertEqual(len(data["folders"]), 1)
+        self.assertEqual(len(data["folders"]), 2)
         _assert_required_fields(
             self, data["folders"][0], self.QUARANTINE_FOLDER_REQUIRED_FIELDS,
             "quarantine folder",
         )
         result = msgspec.convert(data, type=QuarantineTriageResult)
-        self.assertEqual(result.folders[0].name, "Orphan")
+        self.assertEqual(
+            [folder.name for folder in result.folders],
+            ["Orphan", "Wrong Orphan"],
+        )
 
     def test_quarantine_filesystem_failure_returns_503(self):
         with tempfile.TemporaryDirectory() as root:

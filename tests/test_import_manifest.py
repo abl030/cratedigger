@@ -47,6 +47,10 @@ class TestImportManifest(unittest.TestCase):
 
             self.assertIsNotNone(failed_path)
             assert failed_path is not None
+            self.assertEqual(
+                failed_path,
+                os.path.join(parent, "wrong_matches", "Album"),
+            )
             self.assertTrue(os.path.exists(os.path.join(failed_path, "01.flac")))
             self.assertTrue(os.path.exists(os.path.join(failed_path, "cover.jpg")))
             self.assertFalse(os.path.exists(os.path.join(failed_path, "bonus.opus")))
@@ -59,6 +63,40 @@ class TestImportManifest(unittest.TestCase):
                 "bonus.opus",
             )
             self.assertTrue(os.path.exists(quarantined))
+
+    def test_integrity_rejection_stays_in_failed_imports(self):
+        with tempfile.TemporaryDirectory() as parent:
+            source = os.path.join(parent, "Album")
+            os.mkdir(source)
+            open(os.path.join(source, "01.flac"), "wb").close()
+
+            failed_path = move_failed_import_curated(
+                source,
+                allowed_audio=["01.flac"],
+                scenario="bad_audio_hash",
+            )
+
+            self.assertEqual(
+                failed_path,
+                os.path.join(parent, "failed_imports", "Album"),
+            )
+
+    def test_spectral_rejection_stays_in_failed_imports_bad_files(self):
+        with tempfile.TemporaryDirectory() as parent:
+            source = os.path.join(parent, "Album")
+            os.mkdir(source)
+            open(os.path.join(source, "01.flac"), "wb").close()
+
+            failed_path = move_failed_import_curated(
+                source,
+                allowed_audio=["01.flac"],
+                scenario="spectral_reject",
+            )
+
+            self.assertEqual(
+                failed_path,
+                os.path.join(parent, "failed_imports", "bad_files", "Album"),
+            )
 
     def test_download_manifest_uses_staged_filenames(self):
         files = [
