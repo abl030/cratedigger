@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Annotated, Any, cast
+from typing import Annotated, Any
 
 import msgspec
 
@@ -126,7 +126,7 @@ def decode_import_job_payload(job_type: str, value: Any) -> ImportJobPayload:
 
 def _payload_to_builtins(payload: ImportJobPayload) -> dict[str, Any]:
     """Serialize one canonical payload Struct to its JSONB object shape."""
-    return cast(dict[str, Any], msgspec.to_builtins(payload))
+    return msgspec.convert(msgspec.to_builtins(payload), type=dict[str, Any])
 
 
 @dataclass(frozen=True)

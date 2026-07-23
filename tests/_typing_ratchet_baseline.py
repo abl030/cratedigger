@@ -75,7 +75,7 @@ TYPING_RATCHET_BASELINE: dict[str, dict[str, int]] = {
     "lib/wrong_match_delete_service.py": {"any": 2},
     "lib/wrong_matches.py": {"any": 3},
     "lib/youtube_album_service.py": {"any": 16},
-    "lib/youtube_ingest_service.py": {"any": 33},
+    "lib/youtube_ingest_service.py": {"any": 32},
     "scripts/import_preview_worker.py": {"any": 17},
     "scripts/importer.py": {"any": 7},
     "scripts/pipeline_cli/long_tail.py": {"any": 3},

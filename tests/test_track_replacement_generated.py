@@ -6,7 +6,6 @@ import os
 import sys
 import unittest
 import uuid
-from typing import Any
 
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401 -- sets TEST_DB_DSN
@@ -27,8 +26,8 @@ _TEXT = st.text(
 
 
 def assert_old_tracklist_survived(
-    before: list[dict[str, Any]],
-    after: list[dict[str, Any]],
+    before: list[dict[str, object]],
+    after: list[dict[str, object]],
 ) -> None:
     """A failed replacement may not expose a partial new tracklist."""
     if after != before:
@@ -85,7 +84,7 @@ class TestTrackReplacementAtomicityGenerated(unittest.TestCase):
             album_title="Generated Album",
             source="request",
         )
-        old_tracks = [
+        old_tracks: list[dict[str, object]] = [
             {
                 "disc_number": 1,
                 "track_number": 1,
@@ -103,23 +102,24 @@ class TestTrackReplacementAtomicityGenerated(unittest.TestCase):
         ]
         self.db.set_tracks(request_id, old_tracks)
 
+        broken_tracks: list[dict[str, object]] = [
+            {
+                "disc_number": 1,
+                "track_number": 1,
+                "title": "New first row",
+                "length_seconds": 1,
+                "track_artist": "New Artist",
+            },
+            {
+                "disc_number": 1,
+                "track_number": 2,
+                "title": None,
+                "length_seconds": 2,
+                "track_artist": "Broken later row",
+            },
+        ]
         with self.assertRaises(psycopg2.IntegrityError):
-            self.db.set_tracks(request_id, [
-                {
-                    "disc_number": 1,
-                    "track_number": 1,
-                    "title": "New first row",
-                    "length_seconds": 1,
-                    "track_artist": "New Artist",
-                },
-                {
-                    "disc_number": 1,
-                    "track_number": 2,
-                    "title": None,
-                    "length_seconds": 2,
-                    "track_artist": "Broken later row",
-                },
-            ])
+            self.db.set_tracks(request_id, broken_tracks)
 
         assert_old_tracklist_survived(
             old_tracks,
