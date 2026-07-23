@@ -173,7 +173,7 @@ export function renderLibraryDetailBody(data, id) {
       html += history.map(renderDownloadHistoryItem).join('');
       html += '</div>';
     } else if (data.pipeline_status) {
-      html += renderDetailRow('Pipeline', `${data.pipeline_status} (${data.pipeline_source || '?'})`);
+      html += renderDetailRow('Pipeline', `${esc(data.pipeline_status)} (${esc(data.pipeline_source || '?')})`);
     }
     // Pipeline controls (status + quality override)
     if (releaseId && data.pipeline_id) {

@@ -94,6 +94,15 @@ console.log('renderBeetsTrackRow()');
   assertContains(html, 'class="lib-track-meta"', 'meta span present');
   assertContains(html, 'MP3 320kbps', 'meta content rendered');
 
+  const hostileFormat = '</span><img src=x onerror=alert(1)>';
+  const hostile = renderBeetsTrackRow({
+    track: 5, title: 'T', format: hostileFormat,
+  });
+  assertContains(hostile, '&lt;/span&gt;&lt;img src=x onerror=alert(1)&gt;',
+    'format is escaped at the shared track-row HTML boundary');
+  assertExcludes(hostile, hostileFormat,
+    'raw track format cannot close the metadata span');
+
   const disc1 = renderBeetsTrackRow({ disc: 1, track: 4, title: 'T', length: 0 });
   assertContains(disc1, '>4. T', 'no disc prefix on disc 1');
   assertExcludes(disc1, '1.4.', 'disc 1 prefix suppressed');

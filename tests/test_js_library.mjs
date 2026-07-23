@@ -160,7 +160,7 @@ function expectedJsArg(value) {
     .replace(/\\/g, '&#92;');
 }
 
-function libraryDetail(releaseId, pipelineStatus = 'wanted') {
+function libraryDetail(releaseId, pipelineStatus = 'wanted', overrides = {}) {
   return renderLibraryDetailBody({
     mb_albumid: releaseId,
     pipeline_id: 1712,
@@ -169,6 +169,7 @@ function libraryDetail(releaseId, pipelineStatus = 'wanted') {
     artist: 'Artist',
     album: 'Album',
     tracks: [],
+    ...overrides,
   }, 42);
 }
 
@@ -267,6 +268,34 @@ console.log('renderLibraryAlbumRow() escapes format metadata passed to status ba
     'format-derived badge label is escaped in the real library row');
   assertExcludes(html, formats.toUpperCase(),
     'format metadata cannot inject markup through the library row');
+}
+
+console.log('renderLibraryDetailBody() preserves ordinary track and pipeline metadata');
+{
+  const html = libraryDetail('release-id', 'wanted', {
+    pipeline_source: 'request',
+    tracks: [{ track: 1, title: 'Track', format: 'FLAC', bitrate: 320000 }],
+  });
+  assertContains(html, 'FLAC 320kbps',
+    'ordinary per-track format remains visible through the Library detail path');
+  assertContains(html, '<span class="p-detail-value">wanted (request)</span>',
+    'ordinary empty-history pipeline status and source remain visible');
+}
+
+console.log('renderLibraryDetailBody() escapes track format and empty-history pipeline metadata');
+{
+  const hostile = '</span><img src=x onerror=alert(1)>';
+  const html = libraryDetail('release-id', hostile, {
+    pipeline_source: hostile,
+    tracks: [{ track: 1, title: 'Track', format: hostile }],
+  });
+  const escaped = esc(hostile);
+  assertExcludes(html, hostile,
+    'Library detail cannot emit raw track format, pipeline status, or pipeline source markup');
+  assertContains(html, `${escaped} (${escaped})`,
+    'empty-history pipeline status and source are escaped at their HTML boundary');
+  assertContains(html, `<span class="lib-track-meta">${escaped}</span>`,
+    'track format is escaped at the shared row boundary through Library detail');
 }
 
 console.log('Library quality controls — generated critical-character property sweep');
