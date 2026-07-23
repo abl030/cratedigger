@@ -31,6 +31,7 @@ from scripts import pipeline_cli
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_album_quality_evidence, make_request_row
 from lib.transitions import TransitionConflict, TransitionConflictKind
+from lib.request_creation_service import RequestCreationResult
 from tests.test_beets_db import _create_test_db, _insert_album
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
@@ -153,6 +154,74 @@ class TestCmdAdd(unittest.TestCase):
         args = MagicMock(mbid="44438bf9-26d9-4460-9b4f-1a1b015e37a1", source="request")
         pipeline_cli.cmd_add(self.db, args)
         mock_fetch.assert_not_called()
+
+    @patch("scripts.pipeline_cli.album_requests.RequestCreationService")
+    @patch("scripts.pipeline_cli.album_requests.fetch_mb_release")
+    def test_mb_preflight_race_reports_authoritative_existing_status(
+        self, mock_fetch, mock_service,
+    ):
+        mock_fetch.return_value = SAMPLE_MB_RELEASE
+
+        def race(_creation: object) -> RequestCreationResult:
+            request_id = self.db.add_request(
+                mb_release_id=SAMPLE_MB_RELEASE["id"], artist_name="Race",
+                album_title="MB", source="request", status="imported",
+            )
+            return RequestCreationResult("exists", request_id=request_id)
+
+        mock_service.return_value.create_or_resume.side_effect = race
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = pipeline_cli.cmd_add(
+                self.db, MagicMock(mbid=SAMPLE_MB_RELEASE["id"], source="request"),
+            )
+
+        self.assertIsNone(rc)
+        self.assertIn("Already in DB:", out.getvalue())
+        self.assertIn("status=imported", out.getvalue())
+
+    @patch("scripts.pipeline_cli.album_requests.RequestCreationService")
+    @patch("web.discogs.get_release")
+    def test_discogs_preflight_race_reports_authoritative_existing_status(
+        self, mock_release, mock_service,
+    ):
+        mock_release.return_value = {
+            "artist_id": "1", "artist_name": "Race", "title": "Discogs",
+            "tracks": [],
+        }
+
+        def race(_creation: object) -> RequestCreationResult:
+            request_id = self.db.add_request(
+                mb_release_id="7919", discogs_release_id="7919", artist_name="Race",
+                album_title="Discogs", source="request", status="unsearchable",
+            )
+            return RequestCreationResult("exists", request_id=request_id)
+
+        mock_service.return_value.create_or_resume.side_effect = race
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = pipeline_cli.cmd_add(self.db, MagicMock(mbid="7919", source="request"))
+
+        self.assertIsNone(rc)
+        self.assertIn("status=unsearchable", out.getvalue())
+
+    @patch("scripts.pipeline_cli.album_requests.RequestCreationService")
+    @patch("scripts.pipeline_cli.album_requests.fetch_mb_release")
+    def test_in_lock_exists_with_disappeared_row_is_retryable_exit_4(
+        self, mock_fetch, mock_service,
+    ):
+        mock_fetch.return_value = SAMPLE_MB_RELEASE
+        mock_service.return_value.create_or_resume.return_value = RequestCreationResult(
+            "exists", request_id=79199,
+        )
+        err = io.StringIO()
+        with redirect_stderr(err):
+            rc = pipeline_cli.cmd_add(
+                self.db, MagicMock(mbid=SAMPLE_MB_RELEASE["id"], source="request"),
+            )
+
+        self.assertEqual(rc, 4)
+        self.assertIn("disappeared", err.getvalue())
 
     @patch("web.mb.get_release")
     @patch("web.mb.get_release_group_year")

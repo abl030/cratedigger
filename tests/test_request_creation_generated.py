@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -18,6 +19,7 @@ from tests.fakes import FakePipelineDB
 
 def assert_published_request_complete(
     db: FakePipelineDB, request_id: int, *, upgrade: bool,
+    discogs: bool = False, resolved: bool = False,
 ) -> None:
     """The publication invariant, callable so known-bad controls prove it."""
     row = db.request(request_id)
@@ -40,6 +42,18 @@ def assert_published_request_complete(
         row.get("search_filetype_override") != "upgrade" or row.get("min_bitrate") != 320
     ):
         raise AssertionError("wanted upgrade request lost its publication policy")
+    if resolved:
+        expected_catalog = "DISC-791" if discogs else "CAT-791"
+        expected_artist = "Disc Artist" if discogs else "MB Artist"
+        if row.get("release_group_year") != 1991 or row.get("catalog_number") != expected_catalog:
+            raise AssertionError("wanted request lost resolved scalar metadata")
+        if db.get_tracks(request_id)[0].get("track_artist") != expected_artist:
+            raise AssertionError("wanted request lost resolved track artist")
+        if any(
+            db.field_resolutions[(request_id, field)].status != "resolved"
+            for field in required
+        ):
+            raise AssertionError("wanted request lost resolved field evidence")
 
 
 class _FaultDB(FakePipelineDB):
@@ -77,7 +91,7 @@ class _FaultDB(FakePipelineDB):
         )
 
     def create_successful_search_plan(self, **kwargs: object) -> int:
-        if self.phase == "plan":
+        if self.phase in {"plan", "plan_transient"}:
             raise RuntimeError("injected plan persistence failure")
         return super().create_successful_search_plan(**kwargs)  # type: ignore[arg-type]
 
@@ -94,23 +108,42 @@ class _FaultDB(FakePipelineDB):
 
 
 def _creation(release_id: str, *, discogs: bool, tracks: list[dict[str, object]],
-              upgrade: bool, resolved: bool) -> RequestCreationInput:
+              upgrade: bool, resolved: bool, artist_name: str = "A",
+              album_title: str = "B") -> RequestCreationInput:
     mb_raw: dict[str, object] = {"artist-credit": [], "media": []}
     discogs_raw: dict[str, object] = {"artist_id": "1", "artists": [], "tracklist": []}
     if resolved:
         mb_raw = {
+            # This is the direct MB release shape. The creation input below
+            # derives its known rg id from this same nested release-group.
             "release-group": {"id": "rg-791", "first-release-date": "1991-01-01"},
+            "release_group_id": "rg-791",
             "label-info": [{"catalog-number": "CAT-791"}],
-            "media": [{"tracks": [{"artist-credit": [{"name": "Artist"}]}]}],
+            "media": [{"tracks": [{"artist-credit": [{"name": "MB Artist"}]}]}],
         }
         discogs_raw = {
-            "artist_id": "1", "artists": [{"name": "Artist"}],
-            "tracklist": [{"title": "T0", "artists": [{"name": "Artist"}]}],
+            # Direct Discogs release shape: resolver consumes master id,
+            # labels and tracks, not the web adapter's tracklist shorthand.
+            "artist_id": "1", "release_group_id": "791",
+            "labels": [{"catno": "DISC-791"}],
+            "tracks": [{"title": "T0", "artists": [{"name": "Disc Artist"}]}],
         }
+    # Match adapters: creation's known group id comes from the source payload
+    # rather than an independently invented test value.
+    mb_group = mb_raw.get("release-group")
+    mb_group_id = (
+        mb_group.get("id") if isinstance(mb_group, dict) else None
+    )
+    discogs_group_id = discogs_raw.get("release_group_id")
     return RequestCreationInput(
         release_id=release_id, mb_release_id=release_id,
         discogs_release_id=release_id if discogs else None,
-        artist_name="A", album_title="B", source="request", tracks=tracks,
+        mb_release_group_id=(
+            str(discogs_group_id) if discogs and discogs_group_id is not None
+            else str(mb_group_id) if mb_group_id is not None
+            else None
+        ),
+        artist_name=artist_name, album_title=album_title, source="request", tracks=tracks,
         discogs_release_payload=discogs_raw if discogs else None,
         mb_release_payload=mb_raw if not discogs else None,
         final_fields=(
@@ -145,29 +178,43 @@ class TestRequestCreationGenerated(unittest.TestCase):
             discogs=discogs, tracks=tracks, upgrade=upgrade, resolved=resolved,
         )
         service = RequestCreationService(db, CratediggerConfig())
-
-        first = service.create_or_resume(creation)
+        with (
+            patch("web.mb.get_release_group_year", return_value=1991),
+            patch("web.discogs.get_master_releases", return_value={"first_release_date": "1991"}),
+        ):
+            first = service.create_or_resume(creation)
         assert first.request_id is not None
-        assert_published_request_complete(db, first.request_id, upgrade=upgrade)
+        assert_published_request_complete(
+            db, first.request_id, upgrade=upgrade, discogs=discogs, resolved=resolved,
+        )
         if phase is not None:
             self.assertEqual(db.request(first.request_id)["status"], "initializing")
             db.phase = None
-            second = service.create_or_resume(creation)
+            with (
+                patch("web.mb.get_release_group_year", return_value=1991),
+                patch("web.discogs.get_master_releases", return_value={"first_release_date": "1991"}),
+            ):
+                second = service.create_or_resume(creation)
             self.assertEqual(second.outcome, "resumed")
             # Re-read after retry: the stale first row must not prove recovery.
             assert_published_request_complete(
                 db, second.request_id or first.request_id, upgrade=upgrade,
+                discogs=discogs, resolved=resolved,
             )
 
     def test_invariant_checker_rejects_each_known_bad_completion_signal(self) -> None:
-        for signal in ("tracks", "resolution", "plan", "policy"):
+        for signal in (
+            "tracks", "resolution", "plan", "policy",
+            "resolved_scalar", "resolved_track_artist",
+        ):
             with self.subTest(signal=signal):
                 db = FakePipelineDB()
-                result = RequestCreationService(db, CratediggerConfig()).create_or_resume(
-                    _creation("known-bad", discogs=False,
-                              tracks=[{"disc_number": 1, "track_number": 1, "title": "T"}],
-                              upgrade=True, resolved=True),
-                )
+                with patch("web.mb.get_release_group_year", return_value=1991):
+                    result = RequestCreationService(db, CratediggerConfig()).create_or_resume(
+                        _creation("known-bad", discogs=False,
+                                  tracks=[{"disc_number": 1, "track_number": 1, "title": "T"}],
+                                  upgrade=True, resolved=True),
+                    )
                 assert result.request_id is not None
                 request_id = result.request_id
                 if signal == "tracks":
@@ -176,28 +223,18 @@ class TestRequestCreationGenerated(unittest.TestCase):
                     del db.field_resolutions[(request_id, "track_artist")]
                 elif signal == "plan":
                     db.search_plans.clear()
+                elif signal == "resolved_scalar":
+                    # Audit still says resolved: only the persisted scalar is corrupt.
+                    db.request(request_id)["catalog_number"] = None
+                elif signal == "resolved_track_artist":
+                    # Likewise keep the resolved audit row intact.
+                    db._tracks[request_id][0]["track_artist"] = None
                 else:
                     db.request(request_id)["min_bitrate"] = None
                 with self.assertRaises(AssertionError):
-                    assert_published_request_complete(db, request_id, upgrade=True)
-
-    def test_completion_accepts_a_durable_failed_plan_outcome(self) -> None:
-        """A persisted failure is audit-complete even though it is not active."""
-        db = FakePipelineDB()
-        result = RequestCreationService(db, CratediggerConfig()).create_or_resume(
-            _creation("failed-plan", discogs=False,
-                      tracks=[{"disc_number": 1, "track_number": 1, "title": "T"}],
-                      upgrade=False, resolved=False),
-        )
-        assert result.request_id is not None
-        request_id = result.request_id
-        db.search_plans.clear()
-        db.create_failed_search_plan(
-            request_id=request_id, generator_id="test", failure_class="transient",
-            transient=True,
-        )
-
-        assert_published_request_complete(db, request_id, upgrade=False)
+                    assert_published_request_complete(
+                        db, request_id, upgrade=True, resolved=True,
+                    )
 
     def test_known_bad_publication_fault_remains_provisional(self) -> None:
         db = _FaultDB("publish")
@@ -209,3 +246,36 @@ class TestRequestCreationGenerated(unittest.TestCase):
 
         assert result.request_id is not None
         self.assertEqual(db.request(result.request_id)["status"], "initializing")
+
+    def test_service_publishes_every_persisted_plan_outcome_only(self) -> None:
+        """The service gates on plan_id, not on active-plan status."""
+        normal = _creation(
+            "plan-success", discogs=False,
+            tracks=[{"disc_number": 1, "track_number": 1, "title": "T"}],
+            upgrade=False, resolved=False,
+        )
+        deterministic = _creation(
+            "plan-deterministic", discogs=False,
+            tracks=[{"disc_number": 1, "track_number": 1, "title": ""}],
+            upgrade=False, resolved=False, artist_name="", album_title="",
+        )
+        for label, db, creation, expected_status, expected_plan_status in (
+            ("success", FakePipelineDB(), normal, "wanted", "active"),
+            ("deterministic", FakePipelineDB(), deterministic, "wanted", "failed_deterministic"),
+            ("transient", _FaultDB("plan_transient"), normal, "wanted", "failed_transient"),
+            ("no_plan_id", _FaultDB("plan"), normal, "initializing", None),
+        ):
+            with self.subTest(outcome=label):
+                result = RequestCreationService(db, CratediggerConfig()).create_or_resume(creation)
+                assert result.request_id is not None
+                request_id = result.request_id
+                self.assertEqual(db.request(request_id)["status"], expected_status)
+                persisted_statuses = [
+                    row.status for row in db.search_plans.values()
+                    if row.request_id == request_id
+                ]
+                if expected_plan_status is None:
+                    self.assertEqual(persisted_statuses, [])
+                else:
+                    self.assertIn(expected_plan_status, persisted_statuses)
+                    assert_published_request_complete(db, request_id, upgrade=False)
