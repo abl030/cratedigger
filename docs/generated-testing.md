@@ -183,8 +183,11 @@ that runner on every normal suite. It can also be run directly while iterating:
 nix-shell --run "python3 -m unittest tests.world_model.state_machine -v"
 ```
 
-The temporary PostgreSQL, Beets SQLite database, library tree, and generated
-audio are local and disposable; this runner never reads or mutates production.
+The temporary PostgreSQL, Beets SQLite database, library tree, generated audio,
+and every other test scratch path live under one private per-shell tmpfs
+directory. The dev shell fails closed if that RAM-backed directory is
+unavailable or lacks headroom rather than silently writing the suite's
+disposable workload to disk. This runner never reads or mutates production.
 The deterministic direct budget is six examples of eight stateful steps. On
 doc1 on 2026-07-19, the initial census-seeded lifecycle module reported 10.431
 test-seconds (excluding dev-shell startup). That is a historical baseline, not

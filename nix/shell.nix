@@ -55,6 +55,13 @@ pkgs.mkShell {
   ];
 
   shellHook = ''
+    # Every test scratch file belongs in RAM: PostgreSQL data/WAL, generated
+    # audio, temporary Git repositories, Beets configs, and runner artifacts.
+    # The helper allocates one private directory per shell and fails closed
+    # instead of silently wearing the root disk when tmpfs is unavailable.
+    source ${../scripts/test_tmpfs.sh}
+    setup_cratedigger_test_tmpfs || exit 1
+
     # Echo to stderr so the banner doesn't pollute stdout when callers do
     # ``nix-shell --run "cmd" > out`` (e.g. regenerating the vulture whitelist).
     echo "cratedigger dev shell — run: python3 -m unittest discover -s tests -t . -v" >&2

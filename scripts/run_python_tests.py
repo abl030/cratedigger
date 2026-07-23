@@ -21,7 +21,7 @@ from pathlib import Path
 import msgspec
 
 
-DEFAULT_MAX_WORKERS = 4
+DEFAULT_MAX_WORKERS = 12
 DEFAULT_DURATIONS = 15
 _FAILURE_MARKER = "=" * 70
 _SCHEMA_READY_ENV = "CRATEDIGGER_TEST_SCHEMA_READY"
@@ -625,11 +625,18 @@ def _parse_nonnegative_int(value: str) -> int:
     return parsed
 
 
+def recommended_worker_count(cpu_count: int) -> int:
+    """Use half the host up to the measured point of diminishing returns."""
+    if cpu_count < 1:
+        raise ValueError("cpu_count must be at least 1")
+    return min(DEFAULT_MAX_WORKERS, max(1, cpu_count // 2))
+
+
 def _default_worker_count() -> int:
     configured = os.environ.get("CRATEDIGGER_TEST_JOBS")
     if configured is not None:
         return _parse_positive_int(configured)
-    return min(DEFAULT_MAX_WORKERS, os.cpu_count() or 1)
+    return recommended_worker_count(os.cpu_count() or 1)
 
 
 def _parser() -> argparse.ArgumentParser:

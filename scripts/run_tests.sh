@@ -38,7 +38,8 @@ bash "$(dirname "$0")/find_dead_code.sh"
 echo ""
 
 echo "=== Python tests ==="
-# Four long-lived workers amortize ephemeral PostgreSQL startup while using
-# the host's idle cores; each module still gets a fresh Python interpreter.
+# Bounded long-lived workers amortize ephemeral PostgreSQL startup while using
+# half the host up to the measured 12-worker cap; each module still gets a
+# fresh Python interpreter.
 # Override with CRATEDIGGER_TEST_JOBS when diagnosing worker-specific behavior.
 python3 scripts/run_python_tests.py
