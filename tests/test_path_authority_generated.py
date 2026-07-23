@@ -11,20 +11,21 @@ import os
 import tempfile
 import unittest
 from collections.abc import Callable
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
 
 import tests._hypothesis_profiles  # noqa: F401
 from hypothesis import example, given
 from hypothesis import strategies as st
 
+from lib.config import CratediggerConfig
 from lib.fs_authority import (
     FilesystemAuthorityError,
+    copy_opened_file,
     open_directory_path,
     open_private_processing_root,
     open_regular_relative,
 )
 from lib.import_preview import (
+    PreviewSnapshotLimits,
     _snapshot_authorized_directory,
     remove_preview_snapshot,
 )
@@ -41,7 +42,10 @@ from lib.quality_evidence import EvidenceBuildResult
 from lib.staged_album import StagedAlbum
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_ctx_with_fake_db, make_grab_list_entry
-from web.wrong_match_file_service import build_wrong_match_explorer
+from web.wrong_match_file_service import (
+    WrongMatchExplorerLimits,
+    build_wrong_match_explorer,
+)
 
 
 _SAFE_COMPONENTS = st.text(
@@ -120,27 +124,37 @@ class TestGeneratedDescriptorAuthority(unittest.TestCase):
                 os.mkdir(nested)
                 with open(os.path.join(nested, "track.mp3"), "wb") as handle:
                     handle.write(b"audio")
-            cfg = MagicMock()
-            cfg.slskd_download_dir = source
-            cfg.processing_dir = processing
-            with patch("lib.import_preview._PREVIEW_MAX_ENTRIES", 3):
-                if entry_count * 2 > 3:
-                    with self.assertRaisesRegex(
-                        FilesystemAuthorityError, "entry limit",
-                    ):
-                        _snapshot_authorized_directory(source, cfg)
-                    self.assertEqual(os.listdir(preview), [])
-                else:
-                    snapshot = _snapshot_authorized_directory(source, cfg)
-                    try:
-                        self.assertEqual(len(os.listdir(snapshot)), entry_count)
-                    finally:
-                        remove_preview_snapshot(snapshot, cfg)
+            cfg = CratediggerConfig(
+                slskd_download_dir=source,
+                processing_dir=processing,
+            )
+            if entry_count * 2 > 3:
+                with self.assertRaisesRegex(
+                    FilesystemAuthorityError, "entry limit",
+                ):
+                    _snapshot_authorized_directory(
+                        source,
+                        cfg,
+                        limits=PreviewSnapshotLimits(max_entries=3),
+                    )
+                self.assertEqual(os.listdir(preview), [])
+            else:
+                snapshot = _snapshot_authorized_directory(
+                    source,
+                    cfg,
+                    limits=PreviewSnapshotLimits(max_entries=3),
+                )
+                try:
+                    self.assertEqual(len(os.listdir(snapshot)), entry_count)
+                finally:
+                    remove_preview_snapshot(snapshot, cfg)
 
 
 def assert_generated_publication_invariant(
     *,
     result: object,
+    expected_result_type: type[Materialized] | type[MaterializeGuarded],
+    expected_detail: str | None,
     source_exists: bool,
     expected_source_exists: bool,
     destination_names: set[str],
@@ -149,12 +163,19 @@ def assert_generated_publication_invariant(
     name_max: int,
 ) -> None:
     """Publication proof checker, deliberately independent of its writer."""
+    if type(result) is not expected_result_type:
+        raise AssertionError(
+            f"materialize result was {type(result).__name__}, expected "
+            f"{expected_result_type.__name__}",
+        )
+    if isinstance(result, MaterializeGuarded) and result.detail != expected_detail:
+        raise AssertionError(
+            f"guard detail was {result.detail!r}, expected {expected_detail!r}",
+        )
     if source_exists != expected_source_exists:
         raise AssertionError("source deletion ordering was violated")
     if destination_names != expected_names:
         raise AssertionError("canonical destination was overwritten or incomplete")
-    if not isinstance(result, (Materialized, MaterializeGuarded)):
-        raise AssertionError(f"unexpected materialize result {result!r}")
     if any(len(name.encode("utf-8", "surrogateescape")) > name_max for name in artifact_names):
         raise AssertionError("a materialize artifact exceeds NAME_MAX")
     if any(name.startswith(".materialize-tmp-") for name in artifact_names):
@@ -188,17 +209,44 @@ def assert_explorer_entry_invariant(
     entry_count: int,
     entry_cap: int,
     payload: dict[str, object],
+    expected_audio_paths: list[str],
+    expected_other_file_count: int,
+    expected_scanned_file_count: int,
+    expected_scanned_bytes: int,
 ) -> None:
-    """A total-entry overflow must never present itself as a complete view."""
+    """Explorer limits are inclusive and complete through the exact cap."""
     partial = payload["partial"]
     reason = payload["truncated_reason"]
-    if entry_count > entry_cap and (partial is not True or reason != "entry_limit"):
+    if entry_count <= entry_cap:
+        if partial is not False or reason is not None:
+            raise AssertionError("at-cap explorer result was truncated")
+        files = payload["files"]
+        if not isinstance(files, list):
+            raise AssertionError("explorer files were not a list")
+        actual_audio_paths = [
+            row.get("relative_path")
+            for row in files
+            if isinstance(row, dict)
+        ]
+        if actual_audio_paths != expected_audio_paths:
+            raise AssertionError("complete explorer audio paths were not exact")
+        if payload["other_file_count"] != expected_other_file_count:
+            raise AssertionError("complete explorer other-file count was not exact")
+        if payload["scanned_file_count"] != expected_scanned_file_count:
+            raise AssertionError("complete explorer scanned-file count was not exact")
+        if payload["scanned_bytes"] != expected_scanned_bytes:
+            raise AssertionError("complete explorer scanned-byte count was not exact")
+        return
+    if partial is not True or reason != "entry_limit":
         raise AssertionError("over-budget explorer result was presented as complete")
     scanned_file_count = payload["scanned_file_count"]
     if not isinstance(scanned_file_count, int):
         raise AssertionError("explorer did not return an integer scanned_file_count")
     if scanned_file_count > entry_cap:
         raise AssertionError("explorer scanned more regular files than its entry budget")
+    files = payload["files"]
+    if not isinstance(files, list) or len(files) > scanned_file_count:
+        raise AssertionError("truncated explorer output exceeded its scanned-file budget")
 
 
 def assert_force_front_gate_invariant(
@@ -206,6 +254,8 @@ def assert_force_front_gate_invariant(
     lookup_path: str,
     db_failed_path: str,
     payload_failed_path: str,
+    lookup_bytes: bytes,
+    expected_db_bytes: bytes,
     snapshot_root: str,
     preview_children: list[str],
 ) -> None:
@@ -214,6 +264,8 @@ def assert_force_front_gate_invariant(
         raise AssertionError("force evidence lookup consumed an unisolated path")
     if os.path.commonpath([lookup_path, snapshot_root]) != snapshot_root:
         raise AssertionError("force evidence lookup escaped private preview")
+    if lookup_bytes != expected_db_bytes:
+        raise AssertionError("force evidence lookup did not contain DB-authorized bytes")
     if preview_children:
         raise AssertionError("force front gate leaked its private snapshot")
 
@@ -231,18 +283,22 @@ def assert_generated_relocation_invariant(
         raise AssertionError("root relocation lost source bytes or wrote replacement root")
 
 
-def _private_world() -> tuple[tempfile.TemporaryDirectory[str], str, str, MagicMock]:
+def _private_world() -> tuple[tempfile.TemporaryDirectory[str], str, str, CratediggerConfig]:
     parent = tempfile.TemporaryDirectory(dir=os.getcwd())
     source = os.path.join(parent.name, "downloads")
     processing = os.path.join(parent.name, "processing")
+    incoming = os.path.join(parent.name, "Incoming")
     os.mkdir(source)
     os.mkdir(processing, 0o700)
     os.mkdir(os.path.join(processing, "albums"), 0o700)
     os.mkdir(os.path.join(processing, "preview"), 0o700)
-    cfg = MagicMock()
-    cfg.slskd_download_dir = source
-    cfg.processing_dir = processing
-    cfg.beets_staging_dir = os.path.join(parent.name, "Incoming")
+    os.mkdir(incoming)
+    cfg = CratediggerConfig(
+        slskd_download_dir=source,
+        processing_dir=processing,
+        beets_staging_dir=incoming,
+        audio_check_mode="off",
+    )
     return parent, source, processing, cfg
 
 
@@ -292,19 +348,40 @@ class TestGeneratedMaterializePublication(unittest.TestCase):
                 album, staged, make_ctx_with_fake_db(FakePipelineDB(), cfg=cfg),
             )
             albums = processing_albums_dir(processing)
-            expected_names = (
-                {"track.mp3"} if destination_state in ("absent", "complete")
-                else ({"foreign.mp3"} if destination_state == "incomplete" else set())
-            )
+            if destination_state == "absent":
+                expected_result_type: type[Materialized] | type[MaterializeGuarded] = Materialized
+                expected_detail = None
+                expected_source_exists = False
+                expected_names = {"track.mp3"}
+                expected_bytes = b"audio"
+            elif destination_state == "complete":
+                # Existing exact manifests converge without a second source
+                # unlink: they may already be owned by an earlier attempt.
+                expected_result_type = Materialized
+                expected_detail = None
+                expected_source_exists = True
+                expected_names = {"track.mp3"}
+                expected_bytes = b"existing"
+            else:
+                expected_result_type = MaterializeGuarded
+                expected_detail = "incomplete_or_unsafe_canonical"
+                expected_source_exists = True
+                expected_names = {"foreign.mp3"} if destination_state == "incomplete" else set()
+                expected_bytes = None
             assert_generated_publication_invariant(
                 result=result,
+                expected_result_type=expected_result_type,
+                expected_detail=expected_detail,
                 source_exists=os.path.exists(source_path),
-                expected_source_exists=destination_state != "absent",
+                expected_source_exists=expected_source_exists,
                 destination_names=set(os.listdir(canonical)),
                 expected_names=expected_names,
                 artifact_names=os.listdir(albums),
                 name_max=os.pathconf(albums, "PC_NAME_MAX"),
             )
+            if expected_bytes is not None:
+                with open(os.path.join(canonical, "track.mp3"), "rb") as handle:
+                    self.assertEqual(handle.read(), expected_bytes)
 
     @given(name=_SAFE_COMPONENTS)
     def test_real_materialize_artifacts_use_only_fixed_bounded_shards(self, name: str) -> None:
@@ -331,6 +408,8 @@ class TestGeneratedMaterializePublication(unittest.TestCase):
             ])
             assert_generated_publication_invariant(
                 result=result,
+                expected_result_type=Materialized,
+                expected_detail=None,
                 source_exists=os.path.exists(source_path),
                 expected_source_exists=False,
                 destination_names=set(os.listdir(canonical)),
@@ -346,6 +425,8 @@ class TestGeneratedPreviewCopyBounds(unittest.TestCase):
         growth_bytes=st.integers(min_value=0, max_value=2),
         available_bytes=st.integers(min_value=0, max_value=7),
     )
+    @example(declared_bytes=4, growth_bytes=0, available_bytes=6)
+    @example(declared_bytes=5, growth_bytes=0, available_bytes=7)
     @example(declared_bytes=4, growth_bytes=1, available_bytes=6)
     @example(declared_bytes=4, growth_bytes=0, available_bytes=5)
     def test_real_preview_copy_obeys_caps_growth_and_reserve(
@@ -359,8 +440,6 @@ class TestGeneratedPreviewCopyBounds(unittest.TestCase):
             source_path = os.path.join(source, "track.mp3")
             with open(source_path, "wb") as handle:
                 handle.write(b"a" * declared_bytes)
-            from lib.fs_authority import copy_opened_file as real_copy_opened_file
-
             def grow_before_real_copy(
                 source_fd: int,
                 destination_fd: int,
@@ -371,24 +450,45 @@ class TestGeneratedPreviewCopyBounds(unittest.TestCase):
                 if growth_bytes:
                     with open(source_path, "ab") as handle:
                         handle.write(b"g" * growth_bytes)
-                return real_copy_opened_file(
+                return copy_opened_file(
                     source_fd,
                     destination_fd,
                     max_bytes=max_bytes,
                     before_write=before_write,
                 )
 
-            statvfs = MagicMock(f_bavail=available_bytes, f_frsize=1)
             snapshot: str | None = None
-            with patch("lib.import_preview._PREVIEW_MAX_BYTES", 4), patch(
-                "lib.import_preview._PREVIEW_FREE_RESERVE_BYTES", 2,
-            ), patch("lib.import_preview.os.fstatvfs", return_value=statvfs), patch(
-                "lib.import_preview.copy_opened_file", side_effect=grow_before_real_copy,
-            ):
-                try:
-                    snapshot = _snapshot_authorized_directory(source, cfg)
-                except FilesystemAuthorityError:
-                    snapshot = None
+            expected_success = (
+                growth_bytes == 0
+                and declared_bytes <= 4
+                and available_bytes >= declared_bytes + 2
+            )
+            try:
+                snapshot = _snapshot_authorized_directory(
+                    source,
+                    cfg,
+                    limits=PreviewSnapshotLimits(
+                        max_bytes=4,
+                        free_reserve_bytes=2,
+                    ),
+                    available_bytes_fn=lambda _preview_fd: available_bytes,
+                    copy_fn=grow_before_real_copy,
+                )
+            except FilesystemAuthorityError as exc:
+                snapshot = None
+                if expected_success:
+                    self.fail(f"expected preview copy success, got {exc}")
+                if available_bytes < 2:
+                    self.assertEqual(str(exc), "insufficient private preview space")
+                elif declared_bytes > 4:
+                    self.assertEqual(str(exc), "preview snapshot limit exceeded")
+                elif growth_bytes:
+                    self.assertEqual(str(exc), "source grew beyond copy limit")
+                else:
+                    self.assertEqual(str(exc), "insufficient private preview space")
+            else:
+                if not expected_success:
+                    self.fail("preview copy succeeded outside the exact bounded world")
             preview = os.path.join(processing, "preview")
             if snapshot is None:
                 assert_generated_preview_invariant(
@@ -408,12 +508,15 @@ class TestGeneratedPreviewCopyBounds(unittest.TestCase):
                         expected_bytes=declared_bytes,
                         lock_path=os.path.join(processing, ".preview-snapshot.lock"),
                     )
+                    with open(copied, "rb") as handle:
+                        self.assertEqual(handle.read(), b"a" * declared_bytes)
                 finally:
                     remove_preview_snapshot(snapshot, cfg)
 
 
 class TestGeneratedWrongMatchExplorerBounds(unittest.TestCase):
     @given(kinds=st.lists(st.sampled_from(("audio", "other", "directory", "fifo")), min_size=0, max_size=6))
+    @example(kinds=["audio", "other", "directory"])
     @example(kinds=["directory", "directory", "directory", "directory"])
     def test_real_explorer_has_deterministic_total_entry_limit(self, kinds: list[str]) -> None:
         parent, source, processing, cfg = _private_world()
@@ -432,38 +535,90 @@ class TestGeneratedWrongMatchExplorerBounds(unittest.TestCase):
                     with open(f"{path}{suffix}", "wb") as handle:
                         handle.write(b"audio")
             entry = {"validation_result": {"failed_path": failed}}
-            runtime = SimpleNamespace(
+            runtime = CratediggerConfig(
                 slskd_download_dir=source,
-                beets_staging_dir=os.path.join(source, "Incoming"),
+                beets_staging_dir=source,
                 processing_dir=os.path.join(source, "processing"),
             )
-            with patch("web.wrong_match_file_service._EXPLORER_MAX_ENTRIES", 3), patch(
-                "web.wrong_match_file_service.read_runtime_config", return_value=runtime,
-            ):
-                first = build_wrong_match_explorer(download_log_id=1, entry=entry)
-                second = build_wrong_match_explorer(download_log_id=1, entry=entry)
+            limits = WrongMatchExplorerLimits(max_entries=3)
+            first = build_wrong_match_explorer(
+                download_log_id=1,
+                entry=entry,
+                cfg=runtime,
+                limits=limits,
+            )
+            second = build_wrong_match_explorer(
+                download_log_id=1,
+                entry=entry,
+                cfg=runtime,
+                limits=limits,
+            )
             self.assertEqual(
                 (first["partial"], first["truncated_reason"], first["scanned_file_count"], first["other_file_count"], first["files"]),
                 (second["partial"], second["truncated_reason"], second["scanned_file_count"], second["other_file_count"], second["files"]),
             )
-            assert_explorer_entry_invariant(entry_count=len(kinds), entry_cap=3, payload=first)
+            expected_audio_paths = [
+                f"{index:02}-audio.mp3"
+                for index, kind in enumerate(kinds)
+                if kind == "audio"
+            ]
+            expected_regular_count = sum(kind in {"audio", "other"} for kind in kinds)
+            assert_explorer_entry_invariant(
+                entry_count=len(kinds),
+                entry_cap=3,
+                payload=first,
+                expected_audio_paths=expected_audio_paths,
+                expected_other_file_count=sum(kind == "other" for kind in kinds),
+                expected_scanned_file_count=expected_regular_count,
+                expected_scanned_bytes=5 * expected_regular_count,
+            )
 
 
 class TestGeneratedForceFrontGateAuthority(unittest.TestCase):
-    @given(payload_leaf=_SAFE_COMPONENTS)
-    def test_front_gate_snapshots_only_db_failed_path(self, payload_leaf: str) -> None:
+    @given(
+        db_leaf=_SAFE_COMPONENTS,
+        payload_leaf=_SAFE_COMPONENTS,
+        payload_outside_authority=st.booleans(),
+    )
+    def test_front_gate_snapshots_only_db_failed_path(
+        self,
+        db_leaf: str,
+        payload_leaf: str,
+        payload_outside_authority: bool,
+    ) -> None:
         from scripts import import_preview_worker
 
         parent, source, processing, cfg = _private_world()
         with parent:
-            db_path = os.path.join(source, "failed_imports", "Database")
-            payload_path = os.path.join(parent.name, f"payload-{payload_leaf}")
+            incoming = cfg.beets_staging_dir
+            db_path = os.path.join(
+                incoming,
+                "auto-import",
+                f"Database-{db_leaf}",
+                "failed_imports",
+                "Album",
+            )
+            payload_root = (
+                parent.name
+                if payload_outside_authority
+                else incoming
+            )
+            payload_path = os.path.join(
+                payload_root,
+                "manual",
+                f"Payload-{payload_leaf}",
+                "failed_imports",
+                "Album",
+            )
             os.makedirs(db_path)
             os.makedirs(payload_path)
+            db_bytes = f"database:{db_leaf}".encode()
+            payload_bytes = f"payload:{payload_leaf}".encode()
+            self.assertNotEqual(db_bytes, payload_bytes)
             with open(os.path.join(db_path, "01.mp3"), "wb") as handle:
-                handle.write(b"database")
+                handle.write(db_bytes)
             with open(os.path.join(payload_path, "01.mp3"), "wb") as handle:
-                handle.write(b"payload")
+                handle.write(payload_bytes)
             db = FakePipelineDB()
             log_id = db.log_download(
                 42,
@@ -476,28 +631,29 @@ class TestGeneratedForceFrontGateAuthority(unittest.TestCase):
                 dedupe_key=force_import_dedupe_key(log_id),
                 payload=force_import_payload(download_log_id=log_id, failed_path=payload_path),
             )
-            captured: list[str] = []
+            captured: list[tuple[str, bytes]] = []
 
             def capture_lookup(*args: object, **kwargs: object) -> EvidenceBuildResult:
                 lookup = str(kwargs["source_path"])
-                captured.append(lookup)
-                self.assertTrue(os.path.exists(os.path.join(lookup, "01.mp3")))
+                with open(os.path.join(lookup, "01.mp3"), "rb") as handle:
+                    captured.append((lookup, handle.read()))
                 return EvidenceBuildResult(None, "missing")
 
-            with patch(
-                "scripts.import_preview_worker.read_runtime_config", return_value=cfg,
-            ), patch(
-                "scripts.import_preview_worker.load_candidate_evidence_for_source",
-                side_effect=capture_lookup,
-            ):
-                result, display = import_preview_worker._front_gate_check(db, job)
+            result, display = import_preview_worker._front_gate_check(
+                db,
+                job,
+                runtime_config=cfg,
+                candidate_evidence_loader=capture_lookup,
+            )
             self.assertIsNotNone(result)
             self.assertEqual(display, db_path)
             self.assertEqual(len(captured), 1)
             assert_force_front_gate_invariant(
-                lookup_path=captured[0],
+                lookup_path=captured[0][0],
                 db_failed_path=db_path,
                 payload_failed_path=payload_path,
+                lookup_bytes=captured[0][1],
+                expected_db_bytes=db_bytes,
                 snapshot_root=os.path.join(processing, "preview"),
                 preview_children=os.listdir(os.path.join(processing, "preview")),
             )
@@ -519,9 +675,8 @@ class TestGeneratedRootRelocation(unittest.TestCase):
             album = make_grab_list_entry(files=[file], artist="Artist", title="Album", year="2020")
             canonical = canonical_folder_for_row(album, processing_albums_dir(processing))
             relocated = f"{processing}-relocated"
-            from lib.fs_authority import rename_relative_noreplace as real_rename
 
-            def relocate_before_real_publish(albums_fd: int, temp: str, destination: str) -> bool:
+            def relocate_before_publish(_albums_fd: int, _destination: str) -> None:
                 os.rename(processing, relocated)
                 os.mkdir(processing, 0o700)
                 os.mkdir(os.path.join(processing, "albums"), 0o700)
@@ -529,17 +684,13 @@ class TestGeneratedRootRelocation(unittest.TestCase):
                 if replacement_extra:
                     with open(os.path.join(processing, "replacement-marker"), "wb") as handle:
                         handle.write(b"replacement")
-                return real_rename(albums_fd, temp, destination)
 
-            with patch(
-                "lib.download_materialization.rename_relative_noreplace",
-                side_effect=relocate_before_real_publish,
-            ):
-                result = _materialize_processing_dir(
-                    album,
-                    StagedAlbum.from_entry(album, default_path=canonical),
-                    make_ctx_with_fake_db(FakePipelineDB(), cfg=cfg),
-                )
+            result = _materialize_processing_dir(
+                album,
+                StagedAlbum.from_entry(album, default_path=canonical),
+                make_ctx_with_fake_db(FakePipelineDB(), cfg=cfg),
+                before_publish=relocate_before_publish,
+            )
             assert_generated_relocation_invariant(
                 result=result,
                 source_exists=os.path.exists(source_path),
@@ -553,7 +704,10 @@ class TestPathAuthorityProofCheckers(unittest.TestCase):
     def test_publication_checker_rejects_overwrite_source_loss(self) -> None:
         with self.assertRaises(AssertionError):
             assert_generated_publication_invariant(
-                result=Materialized(), source_exists=False, expected_source_exists=True,
+                result=Materialized(),
+                expected_result_type=MaterializeGuarded,
+                expected_detail="incomplete_or_unsafe_canonical",
+                source_exists=True, expected_source_exists=True,
                 destination_names={"foreign.mp3"}, expected_names={"track.mp3"},
                 artifact_names=[".materialize-tmp-leaked"], name_max=255,
             )
@@ -565,17 +719,31 @@ class TestPathAuthorityProofCheckers(unittest.TestCase):
                 expected_bytes=0, lock_path=__file__,
             )
 
-    def test_explorer_checker_rejects_complete_over_budget_payload(self) -> None:
+    def test_explorer_checker_rejects_truncation_at_exact_cap(self) -> None:
         with self.assertRaises(AssertionError):
             assert_explorer_entry_invariant(
-                entry_count=4, entry_cap=3,
-                payload={"partial": False, "truncated_reason": None, "scanned_file_count": 3},
+                entry_count=3,
+                entry_cap=3,
+                payload={
+                    "partial": True,
+                    "truncated_reason": "entry_limit",
+                    "scanned_file_count": 0,
+                    "other_file_count": 0,
+                    "scanned_bytes": 0,
+                    "files": [],
+                },
+                expected_audio_paths=[],
+                expected_other_file_count=0,
+                expected_scanned_file_count=0,
+                expected_scanned_bytes=0,
             )
 
     def test_force_checker_rejects_payload_path(self) -> None:
         with self.assertRaises(AssertionError):
             assert_force_front_gate_invariant(
                 lookup_path="/payload", db_failed_path="/db", payload_failed_path="/payload",
+                lookup_bytes=b"payload",
+                expected_db_bytes=b"database",
                 snapshot_root="/preview", preview_children=[],
             )
 

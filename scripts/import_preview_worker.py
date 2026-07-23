@@ -325,6 +325,9 @@ def _reused_evidence_preview_payload(
 def _front_gate_check(
     db: Any,
     job: ImportJob,
+    *,
+    runtime_config: Any | None = None,
+    candidate_evidence_loader: Callable[..., EvidenceBuildResult] | None = None,
 ) -> tuple[EvidenceBuildResult | None, str | None]:
     """Run the cheap candidate-evidence front-gate for ``job``.
 
@@ -336,10 +339,14 @@ def _front_gate_check(
     if job.job_type == IMPORT_JOB_FORCE:
         try:
             download_log_id, raw_path = _force_download_log_failed_path(db, job)
-            cfg = read_runtime_config()
+            cfg = runtime_config or read_runtime_config()
             snapshot = snapshot_configured_quarantine_directory(raw_path, cfg)
             try:
-                result = load_candidate_evidence_for_source(
+                load_candidate = (
+                    candidate_evidence_loader
+                    or load_candidate_evidence_for_source
+                )
+                result = load_candidate(
                     db,
                     source_path=snapshot,
                     download_log_id=download_log_id,

@@ -7,7 +7,7 @@ import tempfile
 import threading
 import unittest
 from collections.abc import Callable
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from lib.download_materialization import (
     MaterializeFailed,
@@ -21,10 +21,13 @@ from lib.fs_authority import (
     open_configured_quarantine_directory,
     open_private_processing_root,
     open_regular_relative,
-    rename_relative_noreplace,
 )
 from lib.grab_list import DownloadFile
-from lib.import_preview import _snapshot_authorized_directory, remove_preview_snapshot
+from lib.import_preview import (
+    PreviewSnapshotLimits,
+    _snapshot_authorized_directory,
+    remove_preview_snapshot,
+)
 from lib.processing_paths import canonical_folder_for_row, processing_albums_dir
 from lib.staged_album import StagedAlbum
 from tests.fakes import FakePipelineDB
@@ -187,12 +190,13 @@ class TestPrivatePreviewCopyBounds(unittest.TestCase):
                 handle.write(b"audio")
             preview = os.path.join(processing, "preview")
             lock = os.path.join(processing, ".preview-snapshot.lock")
-            fstatvfs = MagicMock(f_bavail=2, f_frsize=1)
-            with patch("lib.import_preview._PREVIEW_FREE_RESERVE_BYTES", 3), patch(
-                "lib.import_preview.os.fstatvfs", return_value=fstatvfs,
-            ):
-                with self.assertRaisesRegex(FilesystemAuthorityError, "insufficient private preview space"):
-                    _snapshot_authorized_directory(source, cfg)
+            with self.assertRaisesRegex(FilesystemAuthorityError, "insufficient private preview space"):
+                _snapshot_authorized_directory(
+                    source,
+                    cfg,
+                    limits=PreviewSnapshotLimits(free_reserve_bytes=3),
+                    available_bytes_fn=lambda _preview_fd: 2,
+                )
             assert_preview_copy_invariant(
                 succeeded=False,
                 preview_children=os.listdir(preview),
@@ -227,12 +231,12 @@ class TestPrivatePreviewCopyBounds(unittest.TestCase):
                     before_write=before_write,
                 )
 
-            with patch(
-                "lib.import_preview.copy_opened_file",
-                side_effect=grow_before_real_copy,
-            ):
-                with self.assertRaisesRegex(FilesystemAuthorityError, "source grew beyond copy limit"):
-                    _snapshot_authorized_directory(source, cfg)
+            with self.assertRaisesRegex(FilesystemAuthorityError, "source grew beyond copy limit"):
+                _snapshot_authorized_directory(
+                    source,
+                    cfg,
+                    copy_fn=grow_before_real_copy,
+                )
             assert_preview_copy_invariant(
                 succeeded=False,
                 preview_children=os.listdir(preview),
@@ -418,9 +422,8 @@ class TestAtomicPrivateMaterialization(unittest.TestCase):
             album = make_grab_list_entry(files=[file], artist="A", title="B", year="2020")
             canonical = canonical_folder_for_row(album, processing_albums_dir(processing))
 
-            def external_winner(albums_fd: int, temp: str, destination: str) -> bool:
-                """Timing hook only: publish the foreign winner, then invoke
-                the real Linux renameat2(RENAME_NOREPLACE) helper."""
+            def external_winner(albums_fd: int, destination: str) -> None:
+                """Publish a competing final immediately before real renameat2."""
                 os.mkdir(destination, 0o700, dir_fd=albums_fd)
                 winner_fd = os.open(
                     destination,
@@ -437,16 +440,13 @@ class TestAtomicPrivateMaterialization(unittest.TestCase):
                     os.close(fd)
                 finally:
                     os.close(winner_fd)
-                return rename_relative_noreplace(albums_fd, temp, destination)
 
-            with patch(
-                "lib.download_materialization.rename_relative_noreplace",
-                side_effect=external_winner,
-            ):
-                result = _materialize_processing_dir(
-                    album, StagedAlbum.from_entry(album, default_path=canonical),
-                    self._ctx(source, processing),
-                )
+            result = _materialize_processing_dir(
+                album,
+                StagedAlbum.from_entry(album, default_path=canonical),
+                self._ctx(source, processing),
+                before_publish=external_winner,
+            )
 
             self.assertIsInstance(result, MaterializeGuarded)
             self.assertTrue(os.path.exists(source_path))
@@ -507,33 +507,28 @@ class TestAtomicPrivateMaterialization(unittest.TestCase):
             entered = threading.Event()
             release = threading.Event()
             calls: list[int] = []
-            original_copy = __import__(
-                "lib.download_materialization", fromlist=["copy_opened_file"],
-            ).copy_opened_file
-
-            def blocking_copy(*args, **kwargs):
+            def blocking_before_file_copy() -> None:
                 calls.append(1)
                 if len(calls) == 1:
                     entered.set()
                     self.assertTrue(release.wait(timeout=2))
-                return original_copy(*args, **kwargs)
 
             results: list[object] = []
             def run(entry) -> None:
                 results.append(_materialize_processing_dir(
                     entry[0], entry[1], self._ctx(source, processing),
+                    before_file_copy=blocking_before_file_copy,
                 ))
 
-            with patch("lib.download_materialization.copy_opened_file", side_effect=blocking_copy):
-                first = threading.Thread(target=run, args=(entries[0],))
-                second = threading.Thread(target=run, args=(entries[1],))
-                first.start()
-                self.assertTrue(entered.wait(timeout=2))
-                second.start()
-                self.assertFalse(entered.wait(timeout=0.05) and len(calls) > 1)
-                release.set()
-                first.join(timeout=2)
-                second.join(timeout=2)
+            first = threading.Thread(target=run, args=(entries[0],))
+            second = threading.Thread(target=run, args=(entries[1],))
+            first.start()
+            self.assertTrue(entered.wait(timeout=2))
+            second.start()
+            self.assertFalse(entered.wait(timeout=0.05) and len(calls) > 1)
+            release.set()
+            first.join(timeout=2)
+            second.join(timeout=2)
 
             self.assertFalse(first.is_alive())
             self.assertFalse(second.is_alive())
@@ -550,14 +545,9 @@ class TestAtomicPrivateMaterialization(unittest.TestCase):
             file.local_path = source_path
             album = make_grab_list_entry(files=[file], artist="A", title="B", year="2020")
             canonical = canonical_folder_for_row(album, processing_albums_dir(processing))
-            original_rename = rename_relative_noreplace
             relocated = f"{processing}-relocated"
 
-            def relocate_before_real_publish(
-                albums_fd: int,
-                temp: str,
-                destination: str,
-            ) -> bool:
+            def relocate_before_publish(_albums_fd: int, _destination: str) -> None:
                 # The authoritative descriptors still address the renamed old
                 # root.  A fresh lexical root must receive neither a commit
                 # nor persistence after the real no-replace publication.
@@ -565,15 +555,13 @@ class TestAtomicPrivateMaterialization(unittest.TestCase):
                 os.mkdir(processing, 0o700)
                 os.mkdir(os.path.join(processing, "albums"), 0o700)
                 os.mkdir(os.path.join(processing, "preview"), 0o700)
-                return original_rename(albums_fd, temp, destination)
 
-            with patch(
-                "lib.download_materialization.rename_relative_noreplace",
-                side_effect=relocate_before_real_publish,
-            ):
-                result = _materialize_processing_dir(
-                    album, StagedAlbum.from_entry(album, default_path=canonical), self._ctx(source, processing),
-                )
+            result = _materialize_processing_dir(
+                album,
+                StagedAlbum.from_entry(album, default_path=canonical),
+                self._ctx(source, processing),
+                before_publish=relocate_before_publish,
+            )
             assert_relocation_invariant(
                 result=result,
                 source_exists=os.path.exists(source_path),

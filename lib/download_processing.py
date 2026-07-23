@@ -8,6 +8,7 @@ writes in :mod:`lib.download_rejection`, and poll state in :mod:`lib.download`.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol, TYPE_CHECKING
 
@@ -70,6 +71,8 @@ class ProcessAlbumFn(Protocol):
         validate_fn: download_validation.ValidateFn | None = None,
         handle_valid_fn: download_validation.HandleValidFn | None = None,
         dispatch_fn: DispatchCoreFn | None = None,
+        materialize_before_file_copy: Callable[[], None] | None = None,
+        materialize_fn: Callable[..., download_materialization.MaterializeResult] | None = None,
     ) -> CompletionResult: ...
 
 
@@ -81,6 +84,8 @@ def process_completed_album(
     validate_fn: download_validation.ValidateFn | None = None,
     handle_valid_fn: download_validation.HandleValidFn | None = None,
     dispatch_fn: DispatchCoreFn | None = None,
+    materialize_before_file_copy: Callable[[], None] | None = None,
+    materialize_fn: Callable[..., download_materialization.MaterializeResult] | None = None,
 ) -> CompletionResult:
     """Materialize, validate, and dispatch one fully downloaded album."""
     staged_album = StagedAlbum.from_entry(
@@ -90,10 +95,12 @@ def process_completed_album(
             processing_albums_dir(ctx.cfg.processing_dir),
         ),
     )
-    materialized = download_materialization._materialize_processing_dir(
+    materialize = materialize_fn or download_materialization._materialize_processing_dir
+    materialized = materialize(
         album_data,
         staged_album,
         ctx,
+        before_file_copy=materialize_before_file_copy,
     )
     if isinstance(materialized, download_materialization.MaterializeFailed):
         return CompletionFailed(reason=materialized.reason)

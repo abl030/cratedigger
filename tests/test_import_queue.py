@@ -136,6 +136,8 @@ def assert_force_preview_authority(
     lookup_path: str,
     db_failed_path: str,
     payload_failed_path: str,
+    lookup_bytes: bytes,
+    expected_db_bytes: bytes,
     preview_root: str,
     preview_children: list[str],
 ) -> None:
@@ -144,6 +146,8 @@ def assert_force_preview_authority(
         raise AssertionError("force front gate used an unisolated filesystem path")
     if os.path.commonpath([lookup_path, preview_root]) != preview_root:
         raise AssertionError("force front gate lookup escaped private preview")
+    if lookup_bytes != expected_db_bytes:
+        raise AssertionError("force front gate did not copy DB-authorized bytes")
     if preview_children:
         raise AssertionError("force front gate leaked a private preview snapshot")
 
@@ -4041,10 +4045,22 @@ class TestForcePreviewPathAuthority(unittest.TestCase):
         from scripts import import_preview_worker
         from lib.quality_evidence import EvidenceBuildResult
 
-        with _force_preview_source() as db_source:
-            parent = os.path.dirname(os.path.dirname(os.path.dirname(db_source)))
-            payload_source = os.path.join(parent, "payload-source")
+        with tempfile.TemporaryDirectory(dir=os.getcwd()) as parent:
+            incoming = os.path.join(parent, "Incoming")
+            downloads = os.path.join(parent, "downloads")
+            processing = os.path.join(parent, "processing")
+            for directory in (incoming, downloads, processing):
+                os.mkdir(directory, 0o700)
+            os.mkdir(os.path.join(processing, "albums"), 0o700)
+            os.mkdir(os.path.join(processing, "preview"), 0o700)
+            db_source = os.path.join(
+                incoming, "auto-import", "Database", "failed_imports", "Album",
+            )
+            payload_source = os.path.join(
+                incoming, "manual", "Payload", "failed_imports", "Album",
+            )
             os.makedirs(payload_source)
+            os.makedirs(db_source)
             with open(os.path.join(db_source, "01.mp3"), "wb") as handle:
                 handle.write(b"database")
             with open(os.path.join(payload_source, "01.mp3"), "wb") as handle:
@@ -4060,30 +4076,38 @@ class TestForcePreviewPathAuthority(unittest.TestCase):
                     failed_path=payload_source,
                 ),
             )
-            seen: list[str] = []
+            cfg = CratediggerConfig(
+                slskd_download_dir=downloads,
+                beets_staging_dir=incoming,
+                processing_dir=processing,
+                audio_check_mode="off",
+            )
+            seen: list[tuple[str, bytes]] = []
 
             def capture_lookup(*_args: Any, **kwargs: Any) -> EvidenceBuildResult:
                 lookup_path = str(kwargs["source_path"])
-                seen.append(lookup_path)
                 with open(os.path.join(lookup_path, "01.mp3"), "rb") as handle:
-                    self.assertEqual(handle.read(), b"database")
+                    seen.append((lookup_path, handle.read()))
                 return EvidenceBuildResult(None, "missing")
 
-            with patch(
-                "scripts.import_preview_worker.load_candidate_evidence_for_source",
-                side_effect=capture_lookup,
-            ):
-                result, display_path = import_preview_worker._front_gate_check(db, job)
+            result, display_path = import_preview_worker._front_gate_check(
+                db,
+                job,
+                runtime_config=cfg,
+                candidate_evidence_loader=capture_lookup,
+            )
 
             self.assertIsNotNone(result)
             self.assertEqual(display_path, db_source)
             self.assertEqual(len(seen), 1)
             assert_force_preview_authority(
-                lookup_path=seen[0],
+                lookup_path=seen[0][0],
                 db_failed_path=db_source,
                 payload_failed_path=payload_source,
-                preview_root=os.path.join(parent, "processing", "preview"),
-                preview_children=os.listdir(os.path.join(parent, "processing", "preview")),
+                lookup_bytes=seen[0][1],
+                expected_db_bytes=b"database",
+                preview_root=os.path.join(processing, "preview"),
+                preview_children=os.listdir(os.path.join(processing, "preview")),
             )
 
     def test_force_authority_checker_trips_on_payload_lookup(self) -> None:
@@ -4092,6 +4116,8 @@ class TestForcePreviewPathAuthority(unittest.TestCase):
                 lookup_path="/payload",
                 db_failed_path="/database",
                 payload_failed_path="/payload",
+                lookup_bytes=b"payload",
+                expected_db_bytes=b"database",
                 preview_root="/preview",
                 preview_children=[],
             )

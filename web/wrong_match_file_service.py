@@ -108,6 +108,16 @@ _EXPLORER_MAX_FILES = 5000
 _EXPLORER_MAX_BYTES = 100 * 1024**3
 
 
+@dataclass(frozen=True)
+class WrongMatchExplorerLimits:
+    """Bounded traversal policy for one Wrong Matches explorer response."""
+
+    max_depth: int = _EXPLORER_MAX_DEPTH
+    max_entries: int = _EXPLORER_MAX_ENTRIES
+    max_files: int = _EXPLORER_MAX_FILES
+    max_bytes: int = _EXPLORER_MAX_BYTES
+
+
 def target_candidate(
     validation_result: ValidationResultEnvelope,
 ) -> dict[str, Any] | None:
@@ -129,13 +139,15 @@ def source_dirs_from_validation_result(
 @contextmanager
 def _opened_wrong_match_root(
     entry: Mapping[str, Any],
+    *,
+    cfg: object | None = None,
 ) -> Any:
     """Yield a validation envelope and its held authoritative directory."""
     validation_result = decode_validation_envelope(entry.get("validation_result"))
     failed_path = validation_result.failed_path or ""
-    cfg = read_runtime_config()
+    runtime_config = cfg or read_runtime_config()
     try:
-        with open_configured_quarantine_directory(failed_path, cfg) as root:
+        with open_configured_quarantine_directory(failed_path, runtime_config) as root:
             yield validation_result, root
     except FilesystemAuthorityError as exc:
         raise FileNotFoundError(
@@ -401,14 +413,17 @@ def build_wrong_match_explorer(
     *,
     download_log_id: int,
     entry: Mapping[str, Any],
+    cfg: object | None = None,
+    limits: WrongMatchExplorerLimits | None = None,
 ) -> dict[str, object]:
+    effective_limits = limits or WrongMatchExplorerLimits()
     files: list[dict[str, object]] = []
     other_file_count = 0
     scanned_file_count = 0
     scanned_bytes = 0
     entries_seen = 0
     truncated_reason: str | None = None
-    with _opened_wrong_match_root(entry) as (validation_result, root):
+    with _opened_wrong_match_root(entry, cfg=cfg) as (validation_result, root):
         root_fd = root.fd
         def scan_directory(directory_fd: int, relative_dir: str, depth: int) -> None:
             """Walk depth-first so a broad tree cannot exhaust descriptors."""
@@ -419,7 +434,7 @@ def build_wrong_match_explorer(
                 with os.scandir(directory_fd) as entries:
                     for directory_entry in entries:
                         entries_seen += 1
-                        if entries_seen > _EXPLORER_MAX_ENTRIES:
+                        if entries_seen > effective_limits.max_entries:
                             truncated_reason = "entry_limit"
                             break
                         names.append(directory_entry.name)
@@ -442,7 +457,7 @@ def build_wrong_match_explorer(
                         try:
                             if not stat.S_ISDIR(os.fstat(child_fd).st_mode):
                                 continue
-                            if depth >= _EXPLORER_MAX_DEPTH:
+                            if depth >= effective_limits.max_depth:
                                 truncated_reason = "depth_limit"
                                 return
                             next_fd = child_fd
@@ -458,10 +473,10 @@ def build_wrong_match_explorer(
                         continue
                     try:
                         info = opened.stat_result
-                        if scanned_file_count >= _EXPLORER_MAX_FILES:
+                        if scanned_file_count >= effective_limits.max_files:
                             truncated_reason = "file_limit"
                             return
-                        if scanned_bytes + info.st_size > _EXPLORER_MAX_BYTES:
+                        if scanned_bytes + info.st_size > effective_limits.max_bytes:
                             truncated_reason = "byte_limit"
                             return
                         scanned_file_count += 1

@@ -1,7 +1,7 @@
 """Operator import route handlers — force import and wrong matches."""
 
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from email.message import Message
 from io import BufferedIOBase
 from typing import Any, Protocol, TypedDict
@@ -511,7 +511,10 @@ class _StreamingRouteHandler(RouteHandler, Protocol):
 
 
 def get_wrong_match_audio(
-    h: _StreamingRouteHandler, params: dict[str, list[str]],
+    h: _StreamingRouteHandler,
+    params: dict[str, list[str]],
+    *,
+    stream_file_resolver: Callable[..., tuple[Any, str]] | None = None,
 ) -> None:
     """Stream one wrong-match audio file with byte-range support."""
     try:
@@ -531,7 +534,8 @@ def get_wrong_match_audio(
         return
 
     try:
-        opened, mime_type = resolve_wrong_match_stream_file(
+        resolve_stream = stream_file_resolver or resolve_wrong_match_stream_file
+        opened, mime_type = resolve_stream(
             entry=entry,
             relative_path=relative_path,
         )

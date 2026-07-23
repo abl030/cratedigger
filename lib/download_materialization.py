@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import secrets
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
@@ -627,8 +628,17 @@ def _materialize_processing_dir(
     ctx: CratediggerContext,
     *,
     persist_current_path: bool = True,
+    before_file_copy: Callable[[], None] | None = None,
+    before_publish: Callable[[int, str], None] | None = None,
 ) -> MaterializeResult:
-    """Ensure ``staged_album.current_path`` holds the album's local files."""
+    """Ensure ``staged_album.current_path`` holds the album's local files.
+
+    ``before_file_copy`` and ``before_publish`` are optional transaction
+    boundary hooks.  They are deliberately called while the private
+    descriptor authority and shard lock are held, so observability or a caller
+    that coordinates a competing writer cannot redirect the real copy or
+    ``renameat2(RENAME_NOREPLACE)`` operations.
+    """
     canonical_path = canonical_folder_for_row(
         album_data, processing_albums_dir(ctx.cfg.processing_dir))
     logger.info(
@@ -754,10 +764,14 @@ def _materialize_processing_dir(
                                 dir_fd=temp_fd,
                             )
                             try:
+                                if before_file_copy is not None:
+                                    before_file_copy()
                                 copy_opened_file(opened.fd, destination_fd)
                             finally:
                                 os.close(destination_fd)
                         os.fsync(temp_fd)
+                        if before_publish is not None:
+                            before_publish(albums_fd, canonical_name)
                         published = rename_relative_noreplace(
                             albums_fd, temp_name, canonical_name,
                         )

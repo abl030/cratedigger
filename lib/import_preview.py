@@ -96,6 +96,31 @@ _PREVIEW_MAX_BYTES = 100 * 1024**3
 _PREVIEW_FREE_RESERVE_BYTES = 100 * 1024**2
 
 
+@dataclass(frozen=True)
+class PreviewSnapshotLimits:
+    """Bounded-copy policy for one isolated preview snapshot.
+
+    The normal worker uses the module defaults.  Accepting this immutable
+    value at the snapshot boundary also lets callers exercise a small bounded
+    world without changing global process policy.
+    """
+
+    max_depth: int = _PREVIEW_MAX_DEPTH
+    max_entries: int = _PREVIEW_MAX_ENTRIES
+    max_files: int = _PREVIEW_MAX_FILES
+    max_bytes: int = _PREVIEW_MAX_BYTES
+    free_reserve_bytes: int = _PREVIEW_FREE_RESERVE_BYTES
+
+
+PreviewCopyFn = Callable[..., int]
+PreviewAvailableBytesFn = Callable[[int], int]
+
+
+def _preview_available_bytes(preview_fd: int) -> int:
+    info = os.fstatvfs(preview_fd)
+    return info.f_bavail * info.f_frsize
+
+
 @contextmanager
 def _preview_copy_lock(cfg: Any) -> Any:
     """Serialize bounded source snapshots before they consume private disk.
@@ -114,20 +139,34 @@ def _preview_copy_lock(cfg: Any) -> Any:
                 yield preview_fd
 
 
-def _assert_preview_space(preview_fd: int, next_write_bytes: int) -> None:
-    info = os.fstatvfs(preview_fd)
-    available = info.f_bavail * info.f_frsize
-    if available - next_write_bytes < _PREVIEW_FREE_RESERVE_BYTES:
+def _assert_preview_space(
+    preview_fd: int,
+    next_write_bytes: int,
+    *,
+    free_reserve_bytes: int,
+    available_bytes_fn: PreviewAvailableBytesFn,
+) -> None:
+    if available_bytes_fn(preview_fd) - next_write_bytes < free_reserve_bytes:
         raise FilesystemAuthorityError("insufficient private preview space")
 
 
-def _snapshot_opened_directory(source_root_fd: int, cfg: Any) -> str:
+def _snapshot_opened_directory(
+    source_root_fd: int,
+    cfg: Any,
+    *,
+    limits: PreviewSnapshotLimits | None = None,
+    available_bytes_fn: PreviewAvailableBytesFn | None = None,
+    copy_fn: PreviewCopyFn | None = None,
+) -> str:
     """Boundedly copy an already-held source directory into private preview.
 
     Every byte is copied from an opened regular inode.  The inventory later
     used for evidence is consequently taken from the private copy, never a
     second walk of the externally mutable source pathname.
     """
+    effective_limits = limits or PreviewSnapshotLimits()
+    effective_available_bytes = available_bytes_fn or _preview_available_bytes
+    effective_copy = copy_fn or copy_opened_file
     snapshot_name = f"preview-{secrets.token_hex(16)}"
     snapshot_path = os.path.join(processing_preview_dir(cfg.processing_dir), snapshot_name)
     files = 0
@@ -136,7 +175,12 @@ def _snapshot_opened_directory(source_root_fd: int, cfg: Any) -> str:
     made_snapshot = False
     try:
         with _preview_copy_lock(cfg) as preview_fd:
-            _assert_preview_space(preview_fd, 0)
+            _assert_preview_space(
+                preview_fd,
+                0,
+                free_reserve_bytes=effective_limits.free_reserve_bytes,
+                available_bytes_fn=effective_available_bytes,
+            )
             os.mkdir(snapshot_name, 0o700, dir_fd=preview_fd)
             made_snapshot = True
             snapshot_fd = os.open(
@@ -156,7 +200,7 @@ def _snapshot_opened_directory(source_root_fd: int, cfg: Any) -> str:
                     with os.scandir(source_dir_fd) as entries:
                         for entry in entries:
                             entries_seen += 1
-                            if entries_seen > _PREVIEW_MAX_ENTRIES:
+                            if entries_seen > effective_limits.max_entries:
                                 raise FilesystemAuthorityError(
                                     "preview snapshot entry limit exceeded",
                                 )
@@ -175,7 +219,7 @@ def _snapshot_opened_directory(source_root_fd: int, cfg: Any) -> str:
                             try:
                                 if not stat.S_ISDIR(os.fstat(child_fd).st_mode):
                                     raise FilesystemAuthorityError("snapshot contains non-directory")
-                                if depth >= _PREVIEW_MAX_DEPTH:
+                                if depth >= effective_limits.max_depth:
                                     raise FilesystemAuthorityError("preview depth limit exceeded")
                                 os.mkdir(name, 0o700, dir_fd=destination_dir_fd)
                                 destination_child_fd = os.open(
@@ -196,7 +240,10 @@ def _snapshot_opened_directory(source_root_fd: int, cfg: Any) -> str:
                         try:
                             files += 1
                             declared_size = opened.stat_result.st_size
-                            if files > _PREVIEW_MAX_FILES or copied_bytes + declared_size > _PREVIEW_MAX_BYTES:
+                            if (
+                                files > effective_limits.max_files
+                                or copied_bytes + declared_size > effective_limits.max_bytes
+                            ):
                                 raise FilesystemAuthorityError("preview snapshot limit exceeded")
                             destination_fd = os.open(
                                 name,
@@ -205,11 +252,16 @@ def _snapshot_opened_directory(source_root_fd: int, cfg: Any) -> str:
                                 dir_fd=destination_dir_fd,
                             )
                             try:
-                                copied = copy_opened_file(
+                                copied = effective_copy(
                                     opened.fd,
                                     destination_fd,
                                     max_bytes=declared_size,
-                                    before_write=lambda count: _assert_preview_space(preview_fd, count),
+                                    before_write=lambda count: _assert_preview_space(
+                                        preview_fd,
+                                        count,
+                                        free_reserve_bytes=effective_limits.free_reserve_bytes,
+                                        available_bytes_fn=effective_available_bytes,
+                                    ),
                                 )
                             finally:
                                 os.close(destination_fd)
@@ -229,16 +281,42 @@ def _snapshot_opened_directory(source_root_fd: int, cfg: Any) -> str:
         raise
 
 
-def _snapshot_authorized_directory(path: str, cfg: Any) -> str:
+def _snapshot_authorized_directory(
+    path: str,
+    cfg: Any,
+    *,
+    limits: PreviewSnapshotLimits | None = None,
+    available_bytes_fn: PreviewAvailableBytesFn | None = None,
+    copy_fn: PreviewCopyFn | None = None,
+) -> str:
     """Snapshot a direct caller path through a held no-follow descriptor."""
     with open_directory_path(path) as source_fd:
-        return _snapshot_opened_directory(source_fd, cfg)
+        return _snapshot_opened_directory(
+            source_fd,
+            cfg,
+            limits=limits,
+            available_bytes_fn=available_bytes_fn,
+            copy_fn=copy_fn,
+        )
 
 
-def snapshot_configured_quarantine_directory(raw_path: str, cfg: Any) -> str:
+def snapshot_configured_quarantine_directory(
+    raw_path: str,
+    cfg: Any,
+    *,
+    limits: PreviewSnapshotLimits | None = None,
+    available_bytes_fn: PreviewAvailableBytesFn | None = None,
+    copy_fn: PreviewCopyFn | None = None,
+) -> str:
     """Copy a failed/wrong-match folder from its held configured authority."""
     with open_configured_quarantine_directory(raw_path, cfg) as source:
-        return _snapshot_opened_directory(source.fd, cfg)
+        return _snapshot_opened_directory(
+            source.fd,
+            cfg,
+            limits=limits,
+            available_bytes_fn=available_bytes_fn,
+            copy_fn=copy_fn,
+        )
 
 
 def _remove_preview_tree(path: str, cfg: Any) -> None:

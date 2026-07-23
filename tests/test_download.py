@@ -2100,22 +2100,20 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             cfg.slskd_download_dir = tmpdir
             cfg.beets_validation_enabled = False
 
-            from lib.fs_authority import copy_opened_file as real_copy
             copied = 0
 
-            def _failing_copy(source_fd, destination_fd, **kwargs):
+            def fail_before_second_copy() -> None:
                 nonlocal copied
                 copied += 1
                 if copied == 2:
                     raise OSError("disk full")
-                return real_copy(source_fd, destination_fd, **kwargs)
 
-            with patch(
-                "lib.download_materialization.copy_opened_file",
-                side_effect=_failing_copy,
-            ):
-                result = process_completed_album(
-                    album, ctx, import_job_id=1)
+            result = process_completed_album(
+                album,
+                ctx,
+                import_job_id=1,
+                materialize_before_file_copy=fail_before_second_copy,
+            )
 
             self.assertIsInstance(result, CompletionFailed)
             # Publish never happened, so the sources were never unlinked.
@@ -2979,14 +2977,17 @@ class TestPreMatchRejectRecordsNullDistance(unittest.TestCase):
 
             # This test owns the rejection/audit boundary, not the
             # materializer. A pre-existing extra file is deliberately an
-            # authority guard now, so bypass only that lower layer to reach
-            # the pre-match rejection sink being pinned here.
-            with patch(
-                "lib.download_processing.download_materialization"
-                "._materialize_processing_dir",
-                return_value=Materialized(),
-            ):
-                result = process_completed_album(album, ctx, import_job_id=1)
+            # authority guard now, so pass the lower-layer result through the
+            # explicit processing seam to reach the pre-match rejection sink.
+            def materialize_ready(*_args: object, **_kwargs: object) -> Materialized:
+                return Materialized()
+
+            result = process_completed_album(
+                album,
+                ctx,
+                import_job_id=1,
+                materialize_fn=materialize_ready,
+            )
 
         self.assertIsInstance(result, CompletionDispatched)
         self.assertEqual(len(db.download_logs), 1)

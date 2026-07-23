@@ -11,9 +11,11 @@ import os
 import sys
 import tempfile
 import unittest
-from io import IOBase
+from contextlib import contextmanager
+from email.message import Message
+from io import BufferedIOBase, BytesIO, IOBase
+from typing import cast
 from unittest.mock import patch
-from types import SimpleNamespace
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError
 
@@ -147,16 +149,31 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         assert row is not None
         self.db.seed_request({**row, **overrides})
 
+    @contextmanager
     def _wrong_match_runtime_config(self, slskd_root: str):
-        """Point descriptor-rooted explorer tests at their temp quarantine."""
-        return patch(
-            "web.wrong_match_file_service.read_runtime_config",
-            return_value=SimpleNamespace(
-                slskd_download_dir=slskd_root,
-                beets_staging_dir=os.path.join(slskd_root, "Incoming"),
-                processing_dir=os.path.join(slskd_root, "processing"),
-            ),
-        )
+        """Point the real runtime-config loader at temp quarantine roots."""
+        config_path = os.path.join(slskd_root, "cratedigger-test.ini")
+        previous = os.environ.get("CRATEDIGGER_RUNTIME_CONFIG")
+        with open(config_path, "w", encoding="utf-8") as handle:
+            handle.write(
+                "[Slskd]\n"
+                f"download_dir = {slskd_root}\n"
+                "\n[Search Settings]\n"
+                "number_of_albums_to_grab = 2\n"
+                "\n[Beets Validation]\n"
+                f"staging_dir = {os.path.join(slskd_root, 'Incoming')}\n"
+                "\n[Paths]\n"
+                f"processing_dir = {os.path.join(slskd_root, 'processing')}\n",
+            )
+        os.environ["CRATEDIGGER_RUNTIME_CONFIG"] = config_path
+        try:
+            yield
+        finally:
+            if previous is None:
+                os.environ.pop("CRATEDIGGER_RUNTIME_CONFIG", None)
+            else:
+                os.environ["CRATEDIGGER_RUNTIME_CONFIG"] = previous
+            os.unlink(config_path)
 
     def _seed_wrong_match(
         self, *,
@@ -476,6 +493,12 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
 
     def test_wrong_match_explorer_caps_total_entries_across_tree(self):
         """A broad nested quarantine tree stops at one global entry budget."""
+        from lib.config import CratediggerConfig
+        from web.wrong_match_file_service import (
+            WrongMatchExplorerLimits,
+            build_wrong_match_explorer,
+        )
+
         with tempfile.TemporaryDirectory() as tmpdir:
             failed_dir = os.path.join(tmpdir, "failed_imports", "Test")
             os.makedirs(failed_dir)
@@ -489,13 +512,19 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
                 validation_result={"failed_path": failed_dir},
             )
 
-            with patch(
-                "web.wrong_match_file_service._EXPLORER_MAX_ENTRIES", 3,
-            ), self._wrong_match_runtime_config(tmpdir):
-                status, data = self._get(
-                    f"/api/wrong-matches/explorer?download_log_id={log_id}")
+            entry = self.db.get_download_log_entry(log_id)
+            assert entry is not None
+            data = build_wrong_match_explorer(
+                download_log_id=log_id,
+                entry=entry,
+                cfg=CratediggerConfig(
+                    slskd_download_dir=tmpdir,
+                    beets_staging_dir=os.path.join(tmpdir, "Incoming"),
+                    processing_dir=os.path.join(tmpdir, "processing"),
+                ),
+                limits=WrongMatchExplorerLimits(max_entries=3),
+            )
 
-        self.assertEqual(status, 200)
         self.assertTrue(data["partial"])
         self.assertEqual(data["truncated_reason"], "entry_limit")
         self.assertEqual(data["files"], [])
@@ -623,9 +652,39 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         """A file truncated mid-stream writes fewer bytes than the
         declared Content-Length; the server must close the keep-alive
         socket instead of letting the next response desync (#427)."""
-        import http.client
         import tempfile
         import os as _os
+        from lib.fs_authority import (
+            OpenedRegularFile,
+            open_directory_path,
+            open_regular_relative,
+        )
+        from web.routes.imports import get_wrong_match_audio
+
+        class RecordingHandler:
+            def __init__(self) -> None:
+                self.headers = Message()
+                self.body = BytesIO()
+                self.wfile = cast(BufferedIOBase, self.body)
+                self.close_connection = False
+                self.status: int | None = None
+                self.response_headers: dict[str, str] = {}
+
+            def send_response(self, code: int, message: str | None = None) -> None:
+                del message
+                self.status = code
+
+            def send_header(self, keyword: str, value: str) -> None:
+                self.response_headers[keyword] = value
+
+            def end_headers(self) -> None:
+                pass
+
+            def _json(self, data: object, status: int = 200) -> None:
+                raise AssertionError(f"unexpected JSON response {status}: {data!r}")
+
+            def _error(self, msg: str, status: int = 400) -> None:
+                raise AssertionError(f"unexpected route error {status}: {msg}")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             failed_dir = _os.path.join(tmpdir, "failed_imports", "Test")
@@ -639,48 +698,32 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
                 validation_result={"failed_path": failed_dir},
             )
 
-            conn = http.client.HTTPConnection(
-                "127.0.0.1", self.port, timeout=10)
-            try:
-                # Pretend the already-open file was four bytes longer than
-                # it is.  The route intentionally reads and serves one FD;
-                # this patch exposes the short-read close branch without
-                # reintroducing a path/stat race.
-                from lib.fs_authority import (
-                    OpenedRegularFile,
-                    open_directory_path,
-                    open_regular_relative,
+            # Present a real opened descriptor with a larger already-held
+            # stat snapshot.  The route's explicit resolver seam drives the
+            # actual short-read branch without replacing a production helper.
+            with open_directory_path(failed_dir) as root_fd:
+                actual = open_regular_relative(root_fd, "01 - Track.mp3")
+                opened = OpenedRegularFile(
+                    fd=actual.fd,
+                    parent_fd=actual.parent_fd,
+                    name=actual.name,
+                    stat_result=os.stat_result(
+                        (0, 0, 0, 0, 0, 0, 10, 0, 0, 0)),
                 )
-                with open_directory_path(failed_dir) as root_fd:
-                    actual = open_regular_relative(root_fd, "01 - Track.mp3")
-                    opened = OpenedRegularFile(
-                        fd=actual.fd,
-                        parent_fd=actual.parent_fd,
-                        name=actual.name,
-                        stat_result=os.stat_result(
-                            (0, 0, 0, 0, 0, 0, 10, 0, 0, 0)),
-                    )
-                    with patch(
-                        "web.routes.imports.resolve_wrong_match_stream_file",
-                        return_value=(opened, "audio/mpeg"),
-                    ):
-                        conn.request(
-                            "GET",
-                            "/api/wrong-matches/audio"
-                            f"?download_log_id={log_id}"
-                            "&path=01%20-%20Track.mp3",
-                        )
-                        resp = conn.getresponse()
-                        self.assertEqual(resp.status, 200)
-                        self.assertEqual(
-                            resp.getheader("Content-Length"), "10")
-                        # Server closed after the short body: the client
-                        # sees an incomplete read promptly rather than
-                        # blocking for 4 bytes that will never come.
-                        with self.assertRaises(http.client.IncompleteRead):
-                            resp.read()
-            finally:
-                conn.close()
+                handler = RecordingHandler()
+                get_wrong_match_audio(
+                    handler,
+                    {
+                        "download_log_id": [str(log_id)],
+                        "path": ["01 - Track.mp3"],
+                    },
+                    stream_file_resolver=lambda **_kwargs: (opened, "audio/mpeg"),
+                )
+
+        self.assertEqual(handler.status, 200)
+        self.assertEqual(handler.response_headers["Content-Length"], "10")
+        self.assertEqual(handler.body.getvalue(), b"abcdef")
+        self.assertTrue(handler.close_connection)
 
     def test_wrong_match_audio_supports_byte_ranges(self):
         with tempfile.TemporaryDirectory() as tmpdir:
