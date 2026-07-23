@@ -102,7 +102,13 @@ class RequestCreationDB(SearchPlanDB, transitions.TransitionsDB, Protocol):
 
     def set_tracks(self, request_id: int, tracks: list[dict[str, object]]) -> None: ...
 
-    def update_request_fields(self, request_id: int, **fields: object) -> bool: ...
+    def update_request_fields(
+        self,
+        request_id: int,
+        *,
+        expected_status: str | None = None,
+        **fields: object,
+    ) -> bool: ...
 
     def update_track_artists(
         self, request_id: int, track_artists: list[str | None], *,
