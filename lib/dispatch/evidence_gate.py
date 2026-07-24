@@ -10,12 +10,12 @@ successful import. ``load_current_evidence_for_action`` is looked up here.
 from __future__ import annotations
 
 import logging
-import os
-import tempfile
 from typing import Any, Callable, TYPE_CHECKING
 
-import msgspec
-
+from lib.evidence_action_file import (
+    remove_quality_evidence_action_file,
+    write_quality_evidence_action_file,
+)
 from lib.quality import (DownloadInfo, QualityEvidenceActionPayload,
                          QualityEvidenceActionProvenance, SpectralMeasurement,
                          evidence_decision_name)
@@ -177,7 +177,13 @@ def _write_quality_evidence_action_file(
     verified_lossless_target: str,
     gate: EvidenceImportGate,
 ) -> str:
-    """Write the action-time evidence payload consumed by import_one.py."""
+    """Write the action-time evidence payload consumed by import_one.py.
+
+    Builds the importer's own payload shape, then delegates the actual
+    write to ``lib.evidence_action_file`` — the ONE tempfile-write
+    implementation shared with the preview worker (issue #859; see that
+    module's docstring for why a second writer is forbidden).
+    """
 
     payload = QualityEvidenceActionPayload(
         candidate=candidate,
@@ -193,29 +199,14 @@ def _write_quality_evidence_action_file(
             fallback_reason=gate.candidate_reason,
         ),
     )
-    handle = tempfile.NamedTemporaryFile(
-        prefix="cratedigger-quality-evidence-action-",
-        suffix=".json",
-        delete=False,
-    )
-    try:
-        handle.write(msgspec.json.encode(payload))
-        return handle.name
-    finally:
-        handle.close()
+    return write_quality_evidence_action_file(payload)
 
 
 def _remove_quality_evidence_action_file(path: str | None) -> None:
-    if not path:
-        return
-    try:
-        os.unlink(path)
-    except OSError:
-        logger.debug(
-            "Failed to remove quality evidence action file %s",
-            path,
-            exc_info=True,
-        )
+    """Thin re-export so ``lib.dispatch.core`` has one import site for the
+    load/gate/write/remove action-file surface; the real implementation
+    lives in ``lib.evidence_action_file`` (issue #859)."""
+    remove_quality_evidence_action_file(path)
 
 
 def _load_evidence_import_gate(
