@@ -5,6 +5,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from contextlib import AbstractContextManager
 from types import SimpleNamespace
 from typing import Any, TYPE_CHECKING
 from unittest.mock import patch
@@ -53,7 +54,22 @@ from tests.helpers import (
     make_album_quality_evidence,
     make_audio_corrupt_validation_report,
     make_request_row,
+    hermetic_beets_config_defaults,
 )
+
+
+_HERMETIC_BEETS_DEFAULTS: AbstractContextManager[tuple[str, str]] | None = None
+
+
+def setUpModule() -> None:
+    global _HERMETIC_BEETS_DEFAULTS
+    _HERMETIC_BEETS_DEFAULTS = hermetic_beets_config_defaults()
+    _HERMETIC_BEETS_DEFAULTS.__enter__()
+
+
+def tearDownModule() -> None:
+    assert _HERMETIC_BEETS_DEFAULTS is not None
+    _HERMETIC_BEETS_DEFAULTS.__exit__(None, None, None)
 
 
 _PREVIEW_RUNTIME = tempfile.TemporaryDirectory()
@@ -81,7 +97,6 @@ def _preview_runtime_config(
     *,
     beets_harness_path: str = "",
     pipeline_db_enabled: bool = False,
-    beets_directory: str = "",
     verified_lossless_target: str = "",
 ) -> CratediggerConfig:
     """Direct-test config with the same private-root contract as Nix."""
@@ -90,7 +105,6 @@ def _preview_runtime_config(
         processing_dir=_PREVIEW_PROCESSING_ROOT,
         beets_harness_path=beets_harness_path,
         pipeline_db_enabled=pipeline_db_enabled,
-        beets_directory=beets_directory,
         verified_lossless_target=verified_lossless_target,
     )
 
@@ -1840,7 +1854,6 @@ class TestImportPreviewPath(unittest.TestCase):
             with patch("lib.config.read_runtime_config",
                        return_value=_preview_runtime_config(
                            beets_harness_path="/fake/harness/run_beets_harness.sh",
-                           beets_directory="/srv/music/Beets",
                            pipeline_db_enabled=True,
                        )), \
                  patch("lib.import_preview.inspect_local_files",

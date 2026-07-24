@@ -8,11 +8,15 @@ from __future__ import annotations
 
 import json
 import msgspec
+import os
 import requests
 import types
+import tempfile
+import configparser
+from copy import deepcopy
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable, Generator
 from unittest.mock import MagicMock, patch
 
 from lib.grab_list import DownloadFile, GrabListEntry
@@ -46,6 +50,98 @@ from lib.quality import (
 )
 from lib.quality_evidence import snapshot_fingerprint
 from lib.slskd_client import DownloadDirectory, DownloadUser, TransferSnapshot
+
+
+_DEPLOYED_BEETS_DB_PATHS = frozenset({
+    "/mnt/virtio/Music/beets-library.db",
+    "/var/lib/cratedigger-beets-db/beets-library.db",
+})
+
+
+@contextmanager
+def hermetic_beets_config_defaults() -> Generator[tuple[str, str], None, None]:
+    """Give one test module a disposable complete Beets authority pair.
+
+    Omitted authority receives the pair. A test that supplies either half must
+    supply both, so no test silently combines a disposable DB with a deployed
+    root (or the reverse).
+    """
+    from beets import library as beets_library
+    from lib.beets_db import validate_beets_storage_pair
+    from lib.config import CratediggerConfig
+
+    with tempfile.TemporaryDirectory(prefix="cratedigger-test-beets-") as root:
+        library_root = f"{root}/library"
+        library_db = f"{root}/beets-library.db"
+        os.mkdir(library_root)
+        library = beets_library.Library(library_db, library_root)
+        library._close()
+        validate_beets_storage_pair(
+            db_path=library_db,
+            library_root=library_root,
+        )
+
+        original_init: Callable[..., None] = CratediggerConfig.__init__
+        original_from_ini = CratediggerConfig.from_ini.__func__
+        constructed_configs: list[CratediggerConfig] = []
+
+        def hermetic_init(
+            self: CratediggerConfig,
+            *args: object,
+            **kwargs: object,
+        ) -> None:
+            if args:
+                raise AssertionError(
+                    "hermetic Beets test configs must use keyword arguments"
+                )
+            has_db = "beets_library_db" in kwargs
+            has_root = "beets_directory" in kwargs
+            if has_db != has_root:
+                raise AssertionError(
+                    "test Beets authority must specify both library DB and root"
+                )
+            if not has_db:
+                kwargs["beets_library_db"] = library_db
+                kwargs["beets_directory"] = library_root
+            original_init(self, *args, **kwargs)
+            constructed_configs.append(self)
+
+        def hermetic_from_ini(
+            cls: type[CratediggerConfig],
+            config: configparser.RawConfigParser,
+            config_dir: str = ".",
+            var_dir: str = ".",
+        ) -> CratediggerConfig:
+            has_db = config.has_option("Beets", "library")
+            has_root = config.has_option("Beets", "directory")
+            if has_db != has_root:
+                raise AssertionError(
+                    "test Beets INI authority must specify both library and directory"
+                )
+            if not has_db:
+                config = deepcopy(config)
+                if not config.has_section("Beets"):
+                    config.add_section("Beets")
+                config.set("Beets", "library", library_db)
+                config.set("Beets", "directory", library_root)
+            return original_from_ini(cls, config, config_dir, var_dir)
+
+        CratediggerConfig.__init__ = hermetic_init
+        setattr(CratediggerConfig, "from_ini", classmethod(hermetic_from_ini))
+        try:
+            yield (library_db, library_root)
+        finally:
+            CratediggerConfig.__init__ = original_init
+            setattr(CratediggerConfig, "from_ini", classmethod(original_from_ini))
+            deployed = [
+                config.beets_library_db
+                for config in constructed_configs
+                if config.beets_library_db in _DEPLOYED_BEETS_DB_PATHS
+            ]
+            if deployed:
+                raise AssertionError(
+                    f"test config retained deployed Beets DB authority: {deployed}"
+                )
 
 
 def make_request_row(**overrides: Any) -> dict[str, Any]:

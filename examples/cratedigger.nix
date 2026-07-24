@@ -71,7 +71,9 @@
     # and rendered configuration as automated imports.
     beets.config = {
       directory = "/srv/music/library";          # where tagged albums live
-      library = "/srv/music/beets-library.db";   # parent dir must exist
+      # Keep DB, journals, import log, and harness audit outside the curated
+      # music root. Explicit override parents remain operator-provisioned.
+      library = "/var/lib/cratedigger-beets-db/beets-library.db";
     };
     beets.validation = {
       stagingDir = "/srv/music/incoming";        # validated albums stage here
@@ -131,7 +133,7 @@
   # The staging/library parents must exist; the module manages only its
   # own state and private processing roots.
   systemd.tmpfiles.rules = [
-    "d /srv/music 2775 cratedigger users -"
+    "d /srv/music 0755 root root -"
     "d /srv/music/library 2775 cratedigger users -"
     "d /srv/music/incoming 2775 cratedigger users -"
   ];

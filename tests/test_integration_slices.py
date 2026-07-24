@@ -11,7 +11,7 @@ and _check_quality_gate_core run for real, not patched.
 import os
 import shutil
 import configparser
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 import tempfile
 from typing import Any, Never, cast
 import unittest
@@ -52,7 +52,22 @@ from tests.helpers import (
     make_request_row,
     make_requests_http_error,
     patch_dispatch_externals,
+    hermetic_beets_config_defaults,
 )
+
+
+_HERMETIC_BEETS_DEFAULTS: AbstractContextManager[tuple[str, str]] | None = None
+
+
+def setUpModule() -> None:
+    global _HERMETIC_BEETS_DEFAULTS
+    _HERMETIC_BEETS_DEFAULTS = hermetic_beets_config_defaults()
+    _HERMETIC_BEETS_DEFAULTS.__enter__()
+
+
+def tearDownModule() -> None:
+    assert _HERMETIC_BEETS_DEFAULTS is not None
+    _HERMETIC_BEETS_DEFAULTS.__exit__(None, None, None)
 
 
 _HARNESS = "/nix/store/fake/harness/run_beets_harness.sh"

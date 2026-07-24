@@ -7,7 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 from unittest.mock import ANY, MagicMock, patch
@@ -48,7 +48,23 @@ from tests.helpers import (
     make_download_file,
     make_grab_list_entry,
     make_request_row,
+    hermetic_beets_config_defaults,
 )
+
+
+_HERMETIC_BEETS_DEFAULTS: AbstractContextManager[tuple[str, str]] | None = None
+_HERMETIC_BEETS_PAIR: tuple[str, str] | None = None
+
+
+def setUpModule() -> None:
+    global _HERMETIC_BEETS_DEFAULTS, _HERMETIC_BEETS_PAIR
+    _HERMETIC_BEETS_DEFAULTS = hermetic_beets_config_defaults()
+    _HERMETIC_BEETS_PAIR = _HERMETIC_BEETS_DEFAULTS.__enter__()
+
+
+def tearDownModule() -> None:
+    assert _HERMETIC_BEETS_DEFAULTS is not None
+    _HERMETIC_BEETS_DEFAULTS.__exit__(None, None, None)
 
 
 # Migration 021 helpers — seed evidence and wire the FK chain that
@@ -2088,7 +2104,11 @@ class TestImportPreviewWorker(unittest.TestCase):
         )
         claimed = db.claim_next_import_preview_job(worker_id="preview")
         assert claimed is not None
-        cfg = CratediggerConfig(beets_directory="/music/library")
+        assert _HERMETIC_BEETS_PAIR is not None
+        cfg = CratediggerConfig(
+            beets_library_db=_HERMETIC_BEETS_PAIR[0],
+            beets_directory=_HERMETIC_BEETS_PAIR[1],
+        )
 
         def prepare(db_arg: Any, **kwargs: Any) -> str:
             self.assertIs(db_arg, db)
@@ -2096,7 +2116,7 @@ class TestImportPreviewWorker(unittest.TestCase):
                 "request_id": 42,
                 "mb_release_id": "mbid-42",
                 "quality_ranks": cfg.quality_ranks,
-                "beets_library_root": "/music/library",
+                "beets_library_root": cfg.beets_directory,
             })
             order.append("prepare")
             return "ready"
@@ -2107,7 +2127,7 @@ class TestImportPreviewWorker(unittest.TestCase):
                 "request_id": 42,
                 "mb_release_id": "mbid-42",
                 "quality_ranks": cfg.quality_ranks,
-                "beets_library_root": "/music/library",
+                "beets_library_root": cfg.beets_directory,
             })
             order.append("enrich")
             return "complete"
@@ -2157,7 +2177,11 @@ class TestImportPreviewWorker(unittest.TestCase):
                 )
                 claimed = db.claim_next_import_preview_job(worker_id="preview")
                 assert claimed is not None
-                cfg = CratediggerConfig(beets_directory="/music/library")
+                assert _HERMETIC_BEETS_PAIR is not None
+                cfg = CratediggerConfig(
+                    beets_library_db=_HERMETIC_BEETS_PAIR[0],
+                    beets_directory=_HERMETIC_BEETS_PAIR[1],
+                )
                 prepare = MagicMock(return_value="ready")
                 enrich = MagicMock(return_value="complete")
                 config_error = (

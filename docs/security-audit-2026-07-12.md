@@ -317,7 +317,7 @@ claiming a narrower filter that would prevent the real services from starting.
 Each unit receives a `ReadWritePaths` list derived from its own authority
 roots rather than a shared blanket grant. All four get `stateDir`; importer,
 preview worker, and web get `processingDir`; only importer and web get the
-Beets root and library-DB parent; importer and web get the validation staging
+Beets root and dedicated library-DB parent; importer and web get the validation staging
 root, with importer additionally getting the tracking-file parent; and the
 YouTube worker gets only `youtubeIngest.tempDir` plus validation staging. The
 slskd download directory is writable only for web, importer, and preview

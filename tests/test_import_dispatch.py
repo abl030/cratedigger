@@ -14,6 +14,7 @@ import shutil
 import subprocess as sp
 import tempfile
 import unittest
+from contextlib import AbstractContextManager
 from typing import Never
 from unittest.mock import MagicMock, patch
 
@@ -39,7 +40,88 @@ from tests.helpers import (
     make_request_row,
     noop_quality_gate,
     patch_dispatch_externals,
+    hermetic_beets_config_defaults,
 )
+
+
+_HERMETIC_BEETS_DEFAULTS: AbstractContextManager[tuple[str, str]] | None = None
+_HERMETIC_BEETS_PAIR: tuple[str, str] | None = None
+
+
+def setUpModule() -> None:
+    global _HERMETIC_BEETS_DEFAULTS, _HERMETIC_BEETS_PAIR
+    _HERMETIC_BEETS_DEFAULTS = hermetic_beets_config_defaults()
+    _HERMETIC_BEETS_PAIR = _HERMETIC_BEETS_DEFAULTS.__enter__()
+
+
+def tearDownModule() -> None:
+    assert _HERMETIC_BEETS_DEFAULTS is not None
+    _HERMETIC_BEETS_DEFAULTS.__exit__(None, None, None)
+
+
+class TestHermeticBeetsConfigDefaults(unittest.TestCase):
+    def test_implicit_config_uses_disposable_complete_pair(self) -> None:
+        from lib.beets_db import validate_beets_storage_pair
+
+        config = CratediggerConfig()
+
+        self.assertNotIn(config.beets_library_db, {
+            "/mnt/virtio/Music/beets-library.db",
+            "/var/lib/cratedigger-beets-db/beets-library.db",
+        })
+        self.assertNotIn(config.beets_directory, {
+            "/mnt/virtio/Music/Beets",
+            "/var/lib/cratedigger",
+        })
+        self.assertTrue(os.path.isfile(config.beets_library_db))
+        self.assertTrue(os.path.isdir(config.beets_directory))
+        validate_beets_storage_pair(
+            db_path=config.beets_library_db,
+            library_root=config.beets_directory,
+        )
+
+    def test_direct_config_rejects_one_sided_authority(self) -> None:
+        for library_db in (
+            "/mnt/virtio/Music/beets-library.db",
+            "/var/lib/cratedigger-beets-db/beets-library.db",
+        ):
+            with self.subTest(library_db=library_db):
+                with self.assertRaisesRegex(AssertionError, "both library DB and root"):
+                    CratediggerConfig(beets_library_db=library_db)
+        with self.assertRaisesRegex(AssertionError, "both library DB and root"):
+            CratediggerConfig(beets_directory="/music/library")
+
+    def test_ini_config_requires_complete_authority(self) -> None:
+        assert _HERMETIC_BEETS_PAIR is not None
+        library_db, library_root = _HERMETIC_BEETS_PAIR
+
+        absent = CratediggerConfig.from_ini(configparser.ConfigParser())
+        self.assertEqual(absent.beets_library_db, library_db)
+        self.assertEqual(absent.beets_directory, library_root)
+
+        for library in (
+            "/mnt/virtio/Music/beets-library.db",
+            "/var/lib/cratedigger-beets-db/beets-library.db",
+        ):
+            partial = configparser.ConfigParser()
+            partial["Beets"] = {"library": library}
+            with self.subTest(library=library):
+                with self.assertRaisesRegex(AssertionError, "both library and directory"):
+                    CratediggerConfig.from_ini(partial)
+
+        root_only = configparser.ConfigParser()
+        root_only["Beets"] = {"directory": "/music/library"}
+        with self.assertRaisesRegex(AssertionError, "both library and directory"):
+            CratediggerConfig.from_ini(root_only)
+
+        complete = configparser.ConfigParser()
+        complete["Beets"] = {
+            "library": library_db,
+            "directory": library_root,
+        }
+        config = CratediggerConfig.from_ini(complete)
+        self.assertEqual(config.beets_library_db, library_db)
+        self.assertEqual(config.beets_directory, library_root)
 
 
 # --- Local helpers for auto-import seam tests ---
@@ -3398,7 +3480,6 @@ class TestDispatchJellyfinPinCaptureSlice(unittest.TestCase):
     (``lib.util._jellyfin_get_json``) faked."""
 
     NEW_REL = "Test Artist/0000 - Test Album"
-    OLD_ABS = "/lib/Beets/Test Artist/2007 - Test Album"
     OLD_CONTAINER = "/jf/Test Artist/2007 - Test Album"
     ORIGINAL = "2026-04-01T00:00:00Z"
 
@@ -3422,6 +3503,9 @@ class TestDispatchJellyfinPinCaptureSlice(unittest.TestCase):
     def test_replaced_album_old_path_reaches_capture_and_pins(self):
         from lib.dispatch import dispatch_import_core
 
+        assert _HERMETIC_BEETS_PAIR is not None
+        beets_library_db, beets_library_root = _HERMETIC_BEETS_PAIR
+        old_album_path = f"{beets_library_root}/Test Artist/2007 - Test Album"
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=42, status="downloading",
@@ -3429,17 +3513,18 @@ class TestDispatchJellyfinPinCaptureSlice(unittest.TestCase):
         cfg = CratediggerConfig(
             beets_harness_path=_HARNESS,
             pipeline_db_enabled=True,
-            beets_directory="/lib/Beets",
+            beets_library_db=beets_library_db,
+            beets_directory=beets_library_root,
             jellyfin_url="http://jf:8096",
             jellyfin_token="tok",
-            jellyfin_path_map="/lib/Beets:/jf",
+            jellyfin_path_map=f"{beets_library_root}:/jf",
         )
         ir = make_import_result(
             decision="import", imported_path=self.NEW_REL)
         ir.postflight.replaced_albums = [DuplicateRemoveCandidate(
             beets_album_id=3902,
             mb_albumid="test-mbid",
-            album_path=self.OLD_ABS,
+            album_path=old_album_path,
             item_count=19,
         )]
 
@@ -3471,6 +3556,8 @@ class TestDispatchJellyfinPinCaptureSlice(unittest.TestCase):
                     quality_gate_fn=noop_quality_gate,
                     candidate_import_job_id=claimed.id,
                     prevalidated_candidate_result=candidate,
+                    beets_library_db_path=beets_library_db,
+                    beets_library_root=beets_library_root,
                 )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)

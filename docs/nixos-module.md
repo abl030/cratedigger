@@ -193,7 +193,7 @@ the module VM, because it can prevent config rendering before the worker starts.
 
 | Unit | Writable paths |
 |---|---|
-| web | `stateDir`, `processingDir`, `slskd.downloadDir`, Beets root, parent of the Beets library DB, validation staging root |
+| web | `stateDir`, `processingDir`, `slskd.downloadDir`, Beets root, dedicated parent of the Beets library DB, validation staging root |
 | importer | web paths plus parent of `beets.validation.trackingFile` |
 | import-preview-worker | `stateDir`, `processingDir`, `slskd.downloadDir` |
 | youtube-ingest | `stateDir`, `youtubeIngest.tempDir`, validation staging root |
@@ -207,8 +207,10 @@ reopen its target even when the upstream `ReadWritePaths` list is narrower.
 For a consumer using `TemporaryFileSystem=/mnt`, the recommended composition is
 broad shared-tree visibility through `BindReadOnlyPaths`, followed by
 `BindPaths` only for that unit's exact writable roots from the table above.
-Those writable binds must be narrow and per-unit; do not bind an entire shared
-music or data parent writable for every worker. Verify effective denial rather
+Those writable binds must be narrow and per-unit; the default Beets DB parent is
+`${stateDir}-beets-db` (not the music root or stateDir), and explicit library overrides keep
+their parent operator-owned. Do not bind an entire shared music or data parent
+writable for every worker. Verify effective denial rather
 than inferring confinement from the rendered property strings alone. The
 upstream module VM proves the generic module boundary without downstream
 writable binds.
