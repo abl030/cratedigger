@@ -61,6 +61,93 @@ class EvidenceDriftFactSeed:
     verified_lossless: bool
 
 
+@dataclass(frozen=True)
+class MissingCurrentEvidenceOriginSeed:
+    """Historical origin vocabulary for the 429-row #855 cohort."""
+
+    name: str
+    observed_rows: int
+    origin: str
+
+
+@dataclass(frozen=True)
+class MissingCurrentEvidenceStatusSeed:
+    """Current operator lifecycle status in the #855 cohort."""
+
+    name: str
+    observed_rows: int
+    status: str
+
+
+@dataclass(frozen=True)
+class MissingCurrentEvidenceIdentitySeed:
+    """Exact-provider shape, without retaining a production identity."""
+
+    name: str
+    observed_rows: int
+    identity_shape: str
+
+
+@dataclass(frozen=True)
+class MissingCurrentEvidenceFormatSeed:
+    """Actual installed container/extension vocabulary for #855."""
+
+    name: str
+    observed_rows: int
+    codec: str
+    installed_format: str
+
+
+@dataclass(frozen=True)
+class MissingCurrentEvidenceSearchOverrideSeed:
+    """Operator-owned persisted search scope in the #855 cohort."""
+
+    name: str
+    observed_rows: int
+    search_override: str | None
+
+
+@dataclass(frozen=True)
+class MissingCurrentEvidenceTargetFormatSeed:
+    """Legacy target-format intent beside the missing evidence link."""
+
+    name: str
+    observed_rows: int
+    target_format: str | None
+
+
+@dataclass(frozen=True)
+class MissingCurrentEvidenceLegacySpectralSeed:
+    """Legacy request-level spectral scalar presence, not evidence facts."""
+
+    name: str
+    observed_rows: int
+    spectral_grade: str | None
+    has_bitrate: bool
+
+
+@dataclass(frozen=True)
+class MissingCurrentEvidenceLegacyBitrateSeed:
+    """Legacy request-level min/previous bitrate scalar presence."""
+
+    name: str
+    observed_rows: int
+    has_min_bitrate: bool
+    has_prev_min_bitrate: bool
+
+
+MissingCurrentEvidenceSeed = (
+    MissingCurrentEvidenceOriginSeed
+    | MissingCurrentEvidenceStatusSeed
+    | MissingCurrentEvidenceIdentitySeed
+    | MissingCurrentEvidenceFormatSeed
+    | MissingCurrentEvidenceSearchOverrideSeed
+    | MissingCurrentEvidenceTargetFormatSeed
+    | MissingCurrentEvidenceLegacySpectralSeed
+    | MissingCurrentEvidenceLegacyBitrateSeed
+)
+
+
 WORLD_CENSUS_SEEDS = (
     WorldCensusSeed(
         name="imported_mb_lineage1_verified_v0",
@@ -297,6 +384,161 @@ EVIDENCE_DRIFT_FACT_SEEDS = (
 )
 
 
+# #855's 429 current_evidence_missing rows are an installed-album scar-tissue
+# vocabulary. These are independent observed marginals, not invented row joins.
+MISSING_CURRENT_EVIDENCE_ORIGIN_SEEDS = (
+    MissingCurrentEvidenceOriginSeed(
+        name="pre_rekey_existing_library_add", observed_rows=249,
+        origin="pre_rekey_existing_library_add",
+    ),
+    MissingCurrentEvidenceOriginSeed(
+        name="pre_rekey_completed_import", observed_rows=60,
+        origin="pre_rekey_completed_import",
+    ),
+    MissingCurrentEvidenceOriginSeed(
+        name="post_rekey_existing_library_add", observed_rows=120,
+        origin="post_rekey_existing_library_add",
+    ),
+)
+
+MISSING_CURRENT_EVIDENCE_STATUS_SEEDS = (
+    MissingCurrentEvidenceStatusSeed(
+        name="wanted", observed_rows=427, status="wanted",
+    ),
+    MissingCurrentEvidenceStatusSeed(
+        name="unsearchable", observed_rows=2, status="unsearchable",
+    ),
+)
+
+MISSING_CURRENT_EVIDENCE_IDENTITY_SEEDS = (
+    MissingCurrentEvidenceIdentitySeed(
+        name="musicbrainz", observed_rows=362, identity_shape="musicbrainz",
+    ),
+    MissingCurrentEvidenceIdentitySeed(
+        name="discogs", observed_rows=67, identity_shape="discogs",
+    ),
+)
+
+MISSING_CURRENT_EVIDENCE_FORMAT_SEEDS = (
+    MissingCurrentEvidenceFormatSeed(
+        name="mp3", observed_rows=404, codec="mp3", installed_format="MP3",
+    ),
+    MissingCurrentEvidenceFormatSeed(
+        name="aac_m4a", observed_rows=14, codec="m4a", installed_format="AAC",
+    ),
+    MissingCurrentEvidenceFormatSeed(
+        name="ogg", observed_rows=7, codec="ogg", installed_format="OGG",
+    ),
+    MissingCurrentEvidenceFormatSeed(
+        name="opus", observed_rows=3, codec="opus", installed_format="Opus",
+    ),
+    MissingCurrentEvidenceFormatSeed(
+        name="windows_media_wma", observed_rows=1, codec="wma",
+        installed_format="Windows Media",
+    ),
+)
+
+MISSING_CURRENT_EVIDENCE_SEARCH_OVERRIDE_SEEDS = (
+    MissingCurrentEvidenceSearchOverrideSeed(
+        name="default", observed_rows=207, search_override=None,
+    ),
+    MissingCurrentEvidenceSearchOverrideSeed(
+        name="lossless_mp3_v0_mp3_320", observed_rows=129,
+        search_override="lossless,mp3 v0,mp3 320",
+    ),
+    MissingCurrentEvidenceSearchOverrideSeed(
+        name="lossless", observed_rows=89, search_override="lossless",
+    ),
+    MissingCurrentEvidenceSearchOverrideSeed(
+        name="lossless_mp3_v0", observed_rows=2,
+        search_override="lossless,mp3 v0",
+    ),
+    MissingCurrentEvidenceSearchOverrideSeed(
+        name="full_legacy_ladder", observed_rows=2,
+        search_override="lossless,mp3 v0,mp3 320,aac,opus,ogg",
+    ),
+)
+
+MISSING_CURRENT_EVIDENCE_TARGET_FORMAT_SEEDS = (
+    MissingCurrentEvidenceTargetFormatSeed(
+        name="default", observed_rows=424, target_format=None,
+    ),
+    MissingCurrentEvidenceTargetFormatSeed(
+        name="lossless", observed_rows=5, target_format="lossless",
+    ),
+)
+
+MISSING_CURRENT_EVIDENCE_LEGACY_SPECTRAL_SEEDS = (
+    MissingCurrentEvidenceLegacySpectralSeed(
+        name="absent_no_bitrate", observed_rows=246,
+        spectral_grade=None, has_bitrate=False,
+    ),
+    MissingCurrentEvidenceLegacySpectralSeed(
+        name="genuine_no_bitrate", observed_rows=80,
+        spectral_grade="genuine", has_bitrate=False,
+    ),
+    MissingCurrentEvidenceLegacySpectralSeed(
+        name="likely_transcode_bitrate", observed_rows=64,
+        spectral_grade="likely_transcode", has_bitrate=True,
+    ),
+    MissingCurrentEvidenceLegacySpectralSeed(
+        name="genuine_bitrate", observed_rows=30,
+        spectral_grade="genuine", has_bitrate=True,
+    ),
+    MissingCurrentEvidenceLegacySpectralSeed(
+        name="suspect_bitrate", observed_rows=4,
+        spectral_grade="suspect", has_bitrate=True,
+    ),
+    MissingCurrentEvidenceLegacySpectralSeed(
+        name="likely_transcode_no_bitrate", observed_rows=3,
+        spectral_grade="likely_transcode", has_bitrate=False,
+    ),
+    MissingCurrentEvidenceLegacySpectralSeed(
+        name="suspect_no_bitrate", observed_rows=2,
+        spectral_grade="suspect", has_bitrate=False,
+    ),
+)
+
+MISSING_CURRENT_EVIDENCE_LEGACY_BITRATE_SEEDS = (
+    MissingCurrentEvidenceLegacyBitrateSeed(
+        name="min_and_prev_present", observed_rows=190,
+        has_min_bitrate=True, has_prev_min_bitrate=True,
+    ),
+    MissingCurrentEvidenceLegacyBitrateSeed(
+        name="both_absent", observed_rows=189,
+        has_min_bitrate=False, has_prev_min_bitrate=False,
+    ),
+    MissingCurrentEvidenceLegacyBitrateSeed(
+        name="min_present_prev_absent", observed_rows=50,
+        has_min_bitrate=True, has_prev_min_bitrate=False,
+    ),
+)
+
+
+def _missing_current_evidence_seed_is_allowed(
+    seed: MissingCurrentEvidenceSeed,
+) -> bool:
+    """Accept only the finite, anonymized #855 marginal vocabulary."""
+
+    if isinstance(seed, MissingCurrentEvidenceOriginSeed):
+        return seed in MISSING_CURRENT_EVIDENCE_ORIGIN_SEEDS
+    if isinstance(seed, MissingCurrentEvidenceStatusSeed):
+        return seed in MISSING_CURRENT_EVIDENCE_STATUS_SEEDS
+    if isinstance(seed, MissingCurrentEvidenceIdentitySeed):
+        return seed in MISSING_CURRENT_EVIDENCE_IDENTITY_SEEDS
+    if isinstance(seed, MissingCurrentEvidenceFormatSeed):
+        return seed in MISSING_CURRENT_EVIDENCE_FORMAT_SEEDS
+    if isinstance(seed, MissingCurrentEvidenceSearchOverrideSeed):
+        return seed in MISSING_CURRENT_EVIDENCE_SEARCH_OVERRIDE_SEEDS
+    if isinstance(seed, MissingCurrentEvidenceTargetFormatSeed):
+        return seed in MISSING_CURRENT_EVIDENCE_TARGET_FORMAT_SEEDS
+    if isinstance(seed, MissingCurrentEvidenceLegacySpectralSeed):
+        return seed in MISSING_CURRENT_EVIDENCE_LEGACY_SPECTRAL_SEEDS
+    if isinstance(seed, MissingCurrentEvidenceLegacyBitrateSeed):
+        return seed in MISSING_CURRENT_EVIDENCE_LEGACY_BITRATE_SEEDS
+    return False
+
+
 _UUID = re.compile(
     r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
     re.IGNORECASE,
@@ -310,6 +552,10 @@ _SAFE_NAME_TOKENS = frozenset({
     "replacement", "same",
     "size", "source", "spectral", "path", "three", "tier", "transcode",
     "to", "unsearchable", "v0", "verified", "wanted", "without",
+    "320", "aac", "absent", "add", "and", "bitrate", "completed", "current", "default",
+    "discogs", "existing", "library", "media", "min", "musicbrainz",
+    "genuine", "import", "no", "ogg", "post", "pre", "present", "prev", "rekey", "request", "scalar",
+    "suspect", "target", "windows", "wma",
 })
 
 
@@ -351,14 +597,56 @@ def assert_evidence_drift_seed_anonymized(
         raise AssertionError("drift seed must represent at least one live row")
 
 
+def assert_missing_current_evidence_seed_anonymized(
+    seed: MissingCurrentEvidenceSeed,
+) -> None:
+    """Reject identity, path, and raw-row leakage from the #855 vocabularies."""
+
+    rendered = repr(asdict(seed))
+    name_tokens = frozenset(seed.name.split("_"))
+    if (
+        not name_tokens
+        or not name_tokens.issubset(_SAFE_NAME_TOKENS)
+        or not _missing_current_evidence_seed_is_allowed(seed)
+        or "/" in rendered
+        or "\\" in rendered
+        or _UUID.search(rendered) is not None
+    ):
+        raise AssertionError(
+            f"missing-current-evidence seed is not anonymized: {seed.name!r}"
+        )
+    if seed.observed_rows < 1:
+        raise AssertionError(
+            "missing-current-evidence seed must represent at least one live row"
+        )
+
+
 __all__ = [
     "EVIDENCE_DRIFT_FACT_SEEDS",
     "EVIDENCE_DRIFT_MUTATION_SEEDS",
+    "MISSING_CURRENT_EVIDENCE_FORMAT_SEEDS",
+    "MISSING_CURRENT_EVIDENCE_IDENTITY_SEEDS",
+    "MISSING_CURRENT_EVIDENCE_LEGACY_BITRATE_SEEDS",
+    "MISSING_CURRENT_EVIDENCE_LEGACY_SPECTRAL_SEEDS",
+    "MISSING_CURRENT_EVIDENCE_ORIGIN_SEEDS",
+    "MISSING_CURRENT_EVIDENCE_SEARCH_OVERRIDE_SEEDS",
+    "MISSING_CURRENT_EVIDENCE_STATUS_SEEDS",
+    "MISSING_CURRENT_EVIDENCE_TARGET_FORMAT_SEEDS",
     "STATEFUL_WORLD_CENSUS_SEEDS",
     "WORLD_CENSUS_SEEDS",
     "EvidenceDriftFactSeed",
     "EvidenceDriftMutationSeed",
+    "MissingCurrentEvidenceFormatSeed",
+    "MissingCurrentEvidenceIdentitySeed",
+    "MissingCurrentEvidenceLegacyBitrateSeed",
+    "MissingCurrentEvidenceLegacySpectralSeed",
+    "MissingCurrentEvidenceOriginSeed",
+    "MissingCurrentEvidenceSearchOverrideSeed",
+    "MissingCurrentEvidenceSeed",
+    "MissingCurrentEvidenceStatusSeed",
+    "MissingCurrentEvidenceTargetFormatSeed",
     "WorldCensusSeed",
     "assert_census_seed_anonymized",
     "assert_evidence_drift_seed_anonymized",
+    "assert_missing_current_evidence_seed_anonymized",
 ]

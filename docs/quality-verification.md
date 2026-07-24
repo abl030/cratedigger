@@ -444,6 +444,13 @@ exact installed Beets album before deciding. A same-snapshot repair preserves
 its original `measured_at` and atomic neutral facts so historical Recents cards
 remain pre-attempt evidence.
 
+Beets's native `items.format` is normalized only at the library projection
+boundary: its observed `OGG` label becomes bare `vorbis`, and `Windows Media`
+becomes bare `wma`, before the value reaches rank policy or evidence storage.
+Canonical labels otherwise retain Beets's existing spelling/case. This is a
+closed alias map, not tokenization: an unfamiliar multiword label reaches the
+evidence validator unchanged and fails closed rather than being guessed.
+
 **Motivation (request 6039 / download_log 36608):** a genuine avg 196→288
 rank upgrade (GOOD → TRANSPARENT) rendered as "Upgrade: MP3 V2 to MP3 V2"
 because every UI label re-derived from min bitrate (194 on both sides).
