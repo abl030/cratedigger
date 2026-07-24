@@ -234,6 +234,15 @@ def validate_beets_storage_pair(
         )
 
 
+_BEETS_FORMAT_ALIASES = {
+    # Beets exposes these container/product labels, while quality policy ranks
+    # bare codec families. Keep this boundary deliberately closed: unfamiliar
+    # multiword labels must still reach evidence validation unchanged.
+    "windows media": "wma",
+    "ogg": "vorbis",
+}
+
+
 def _reduce_album_format(
     formats_on_disk: set[str],
     cfg: "QualityRankConfig",
@@ -242,18 +251,32 @@ def _reduce_album_format(
 
     Uses cfg.mixed_format_precedence (worst-first). If the album contains
     any codec listed in the precedence tuple, the first match wins. Otherwise
-    returns the first format alphabetically (stable but not meaningful) or
-    an empty string if the set is empty.
+    returns the first normalized format alphabetically (stable but not
+    meaningful) or an empty string if the set is empty.
     """
     if not formats_on_disk:
         return ""
-    # Normalized lookup: lowercase -> original.
-    normalized: dict[str, str] = {f.lower(): f for f in formats_on_disk if f}
+    # Normalized lookup: rank family -> original canonical label. The two
+    # native Beets aliases return their policy family; canonical Beets labels
+    # retain their original spelling/case for existing callers.
+    normalized: dict[str, str] = {}
+    for observed in sorted(formats_on_disk):
+        if not observed:
+            continue
+        key = observed.lower()
+        alias = _BEETS_FORMAT_ALIASES.get(key)
+        if alias is None:
+            normalized[key] = observed
+        else:
+            normalized.setdefault(alias, alias)
     for preferred in cfg.mixed_format_precedence:
         if preferred in normalized:
             return normalized[preferred]
-    # No precedence match — pick a deterministic fallback.
-    return sorted(formats_on_disk)[0]
+    # No precedence match — pick a deterministic normalized fallback. Native
+    # Beets aliases stay canonical even when a user deliberately omits their
+    # family from mixed_format_precedence; unknown labels retain their source
+    # spelling and therefore still fail evidence validation when multiword.
+    return normalized[sorted(normalized)[0]] if normalized else ""
 
 
 @dataclass

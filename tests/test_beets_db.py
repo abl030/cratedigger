@@ -11,13 +11,14 @@ import sys
 import tempfile
 import unittest
 from contextlib import closing
+from dataclasses import replace
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from lib.beets_db import AlbumInfo, BeetsDB, open_beets_db
 from lib.config import CratediggerConfig
-from lib.quality import QualityRankConfig
+from lib.quality import AudioQualityMeasurement, QualityRankConfig
 
 
 def _create_test_db(path: str) -> None:
@@ -954,6 +955,72 @@ class TestReduceAlbumFormat(unittest.TestCase):
         from lib.beets_db import _reduce_album_format
         self.assertEqual(
             _reduce_album_format({"FLAC", "Opus", "AAC"}, self.cfg), "AAC")
+
+    def test_native_beets_container_labels_reduce_to_rank_families(self) -> None:
+        """Beets labels WMA/OGG with container names, not rank families."""
+        from lib.beets_db import _reduce_album_format
+
+        self.assertEqual(
+            _reduce_album_format({"Windows Media"}, self.cfg), "wma")
+        self.assertEqual(_reduce_album_format({"OGG"}, self.cfg), "vorbis")
+
+    def test_native_container_aliases_obey_existing_mixed_precedence(self) -> None:
+        from lib.beets_db import _reduce_album_format
+
+        self.assertEqual(
+            _reduce_album_format({"Windows Media", "MP3"}, self.cfg), "wma")
+        self.assertEqual(
+            _reduce_album_format({"OGG", "AAC"}, self.cfg), "vorbis")
+
+    def test_native_alias_does_not_rewrite_an_existing_canonical_label(self) -> None:
+        from lib.beets_db import _reduce_album_format
+
+        self.assertEqual(
+            _reduce_album_format({"OGG", "Vorbis"}, self.cfg), "Vorbis")
+        self.assertEqual(
+            _reduce_album_format({"Windows Media", "WMA"}, self.cfg), "WMA")
+
+    def test_native_aliases_survive_custom_precedence_without_their_family(self) -> None:
+        """Alias reduction is a projection fact, not a default-policy accident."""
+        from lib.beets_db import _reduce_album_format
+
+        without_native_families = replace(
+            self.cfg,
+            mixed_format_precedence=("mp3", "aac"),
+        )
+        self.assertEqual(
+            _reduce_album_format({"Windows Media"}, without_native_families),
+            "wma",
+        )
+        self.assertEqual(
+            _reduce_album_format({"OGG"}, without_native_families),
+            "vorbis",
+        )
+        self.assertEqual(
+            _reduce_album_format(
+                {"Windows Media", "OGG"},
+                without_native_families,
+            ),
+            "vorbis",
+        )
+
+    def test_unknown_multiword_format_is_not_guessed(self) -> None:
+        """Only observed Beets labels are aliases; unknown labels fail closed."""
+        from lib.beets_db import _reduce_album_format
+
+        reduced = _reduce_album_format({"Alien Codec"}, self.cfg)
+        self.assertEqual(reduced, "Alien Codec")
+        self.assertEqual(
+            _reduce_album_format(
+                {"Alien Codec"},
+                replace(self.cfg, mixed_format_precedence=("mp3",)),
+            ),
+            "Alien Codec",
+        )
+        self.assertIn(
+            "measurement.format must be a bare measured codec label",
+            AudioQualityMeasurement(format=reduced).new_row_validation_errors(),
+        )
 
 
 class TestGetMinBitrate(unittest.TestCase):
