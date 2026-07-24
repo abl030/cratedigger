@@ -3364,9 +3364,19 @@ class TestPipelineDashboardMetrics(unittest.TestCase):
             completed_at=now - timedelta(hours=1),
             cycle_total_s=25.0,
         )
+        newest_tie_id = self.db.record_cycle_metrics(
+            started_at=now - timedelta(hours=1, seconds=10),
+            completed_at=now - timedelta(hours=1),
+            cycle_total_s=10.0,
+        )
         slower_id = self.db.record_cycle_metrics(
             started_at=now - timedelta(hours=2, seconds=100),
             completed_at=now - timedelta(hours=2),
+            cycle_total_s=100.0,
+        )
+        slower_tie_id = self.db.record_cycle_metrics(
+            started_at=now - timedelta(hours=3, seconds=100),
+            completed_at=now - timedelta(hours=3),
             cycle_total_s=100.0,
         )
         stale_id = self.db.record_cycle_metrics(
@@ -3375,11 +3385,17 @@ class TestPipelineDashboardMetrics(unittest.TestCase):
             cycle_total_s=500.0,
         )
 
-        recent = self.db._dashboard_cycle_rows(outliers=False, limit=3)
+        recent = self.db._dashboard_cycle_rows(outliers=False, limit=5)
         outliers = self.db._dashboard_cycle_rows(outliers=True, limit=8)
 
-        self.assertEqual([row["id"] for row in recent], [newest_id, slower_id, stale_id])
-        self.assertEqual([row["id"] for row in outliers], [slower_id, newest_id])
+        self.assertEqual(
+            [row["id"] for row in recent],
+            [newest_tie_id, newest_id, slower_id, slower_tie_id, stale_id],
+        )
+        self.assertEqual(
+            [row["id"] for row in outliers],
+            [slower_tie_id, slower_id, newest_id, newest_tie_id],
+        )
 
     def test_peer_observations_track_distinct_peers(self):
         now = datetime.now(timezone.utc)
@@ -11268,6 +11284,39 @@ class TestDashboardFakeParity(unittest.TestCase):
             "PostgreSQL read-model — fix the fake (tests/fakes.py), "
             "never the production SQL, unless the SQL change is the "
             "point of your PR.",
+        )
+
+    def test_fake_dashboard_cycle_ties_follow_production_order(self):
+        from tests.fakes import FakePipelineDB
+
+        fake = FakePipelineDB()
+        now = datetime.now(timezone.utc)
+        newest_id = fake.record_cycle_metrics(
+            completed_at=now - timedelta(hours=1),
+            cycle_total_s=25.0,
+        )
+        newest_tie_id = fake.record_cycle_metrics(
+            completed_at=now - timedelta(hours=1),
+            cycle_total_s=10.0,
+        )
+        slower_id = fake.record_cycle_metrics(
+            completed_at=now - timedelta(hours=2),
+            cycle_total_s=100.0,
+        )
+        slower_tie_id = fake.record_cycle_metrics(
+            completed_at=now - timedelta(hours=3),
+            cycle_total_s=100.0,
+        )
+
+        cycles = fake.get_pipeline_dashboard_metrics()["cycles"]
+
+        self.assertEqual(
+            [row["id"] for row in cycles["recent"]],
+            [newest_tie_id, newest_id, slower_id, slower_tie_id],
+        )
+        self.assertEqual(
+            [row["id"] for row in cycles["outliers"]],
+            [slower_tie_id, slower_id, newest_id, newest_tie_id],
         )
 
 

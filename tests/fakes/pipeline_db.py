@@ -5195,25 +5195,32 @@ class FakePipelineDB:
                     self._dashboard_cycle_window("24h", 24, now),
                     self._dashboard_cycle_window("6h", 6, now),
                 ],
-                # Production: ORDER BY created_at DESC LIMIT 12 — NOT
+                # Production: ORDER BY created_at DESC, id DESC LIMIT 12 — NOT
                 # insertion order (rows seeded with explicit
                 # completed_at values must sort by their timestamps).
                 "recent": [
                     self._dashboard_cycle_row(r)
                     for r in sorted(
                         self.cycle_metrics,
-                        key=lambda row: self._as_utc(row["created_at"]),
+                        key=lambda row: (
+                            self._as_utc(row["created_at"]),
+                            int(row["id"]),
+                        ),
                         reverse=True,
                     )[:12]
                 ],
-                # Production restricts outliers to the last 24 hours.
+                # Production restricts outliers to the last 24 hours and
+                # orders by cycle_total_s DESC, id DESC.
                 "outliers": [
                     self._dashboard_cycle_row(r)
                     for r in sorted(
                         (row for row in self.cycle_metrics
                          if self._as_utc(row["created_at"])
                          >= now - timedelta(hours=24)),
-                        key=lambda row: row["cycle_total_s"],
+                        key=lambda row: (
+                            float(row["cycle_total_s"]),
+                            int(row["id"]),
+                        ),
                         reverse=True,
                     )[:8]
                 ],
