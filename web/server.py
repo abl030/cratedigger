@@ -58,6 +58,7 @@ from web import discogs as _discogs
 from web import mb as mb_api
 from web import overlay as _overlay
 from lib.beets_db import BeetsDB, open_beets_db
+from lib.json_narrow import is_str_object_dict as _is_str_object_dict
 from lib.pipeline_db import AlbumRequestRow, PipelineDB
 from web.routes import api_index as _api_index_routes
 from web.routes import beets_distance as _beets_distance_routes
@@ -417,7 +418,7 @@ class Handler(BaseHTTPRequestHandler):
             self._error("Request body too large", 413)
             return None
         body: object = json.loads(self.rfile.read(length)) if length else {}
-        if not isinstance(body, dict):
+        if not _is_str_object_dict(body):
             self._error("Request body must be a JSON object")
             return None
         return body
