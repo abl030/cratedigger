@@ -1148,7 +1148,8 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
                  patch("sys.stdout", stdout), \
                  patch("harness.import_one.BeetsDB", return_value=beets), \
                  patch("harness.import_one.run_import",
-                       return_value=import_one.RunImportOutcome(0, [])) as mock_run_import, \
+                       return_value=import_one.RunImportOutcome(
+                           0, [], applied_distance=0.3359)) as mock_run_import, \
                  patch("harness.import_one.fix_library_modes"), \
                  patch("harness.import_one._get_folder_bitrates",
                        side_effect=measurement_error), \
@@ -1188,6 +1189,7 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
                 "reused",
             )
             self.assertEqual(result["postflight"]["beets_id"], 77)
+            self.assertEqual(result["apply_beets_distance"], 0.3359)
 
     def test_evidence_backed_import_emits_candidate_proof(self):
         """The authorized import must carry the candidate row's

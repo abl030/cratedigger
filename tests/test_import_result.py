@@ -48,6 +48,20 @@ class TestImportResultConstruction(unittest.TestCase):
         self.assertIsNone(r.v0_probe)
         self.assertIsNone(r.existing_v0_probe)
 
+    def test_apply_beets_distance_default_none(self):
+        self.assertIsNone(ImportResult().apply_beets_distance)
+
+    def test_apply_beets_distance_roundtrip(self):
+        r = ImportResult(apply_beets_distance=0.5637)
+        decoded = msgspec.convert(
+            json.loads(msgspec.json.encode(r)), type=ImportResult)
+        self.assertEqual(decoded.apply_beets_distance, 0.5637)
+
+    def test_apply_beets_distance_rejects_wrong_wire_type(self):
+        with self.assertRaises(msgspec.ValidationError):
+            msgspec.convert(
+                {"apply_beets_distance": "high"}, type=ImportResult)
+
     def test_conversion_defaults(self):
         c = ConversionInfo()
         self.assertEqual(c.converted, 0)

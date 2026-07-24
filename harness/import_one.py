@@ -295,6 +295,12 @@ class RunImportOutcome:
     # path-changing upgrade.
     replaced_albums: list[DuplicateRemoveCandidate] = dataclass_field(
         default_factory=list[DuplicateRemoveCandidate])
+    # The beets distance of the pinned target candidate at ACTION time —
+    # recorded on both the apply and over-threshold reject paths so the
+    # emitted ImportResult carries it into download_log JSONB (issue #863:
+    # apply-time distance was journal-only, which hid the tagless-match
+    # inflation for a day and made diagnosis journal archaeology).
+    applied_distance: float | None = None
 
 
 def preflight_decision(already_in_beets: bool, path_exists: bool) -> StageResult:
@@ -520,6 +526,23 @@ def final_exit_decision(is_transcode: bool) -> int:
 # ---------------------------------------------------------------------------
 
 
+# Kept-output metadata policy (issue #863, superseding the conversion
+# sentence of #835 policy item 1): preserve the source tag surface Beets
+# MATCHES on before it applies fresh metadata, drop chapters, and delete
+# every art-in-tag surface — untrusted embedded art must never ride through
+# conversion (picture STREAMS are already excluded by ``-map 0:a``; ffmpeg
+# ``-metadata KEY=`` deletion is case-insensitive, covering adversarial
+# lowercase keys). The V0 probe deliberately does NOT use this policy: its
+# output is a discarded measurement artifact (``V0_METADATA_ARGS``).
+_KEPT_OUTPUT_METADATA_ARGS: tuple[str, ...] = (
+    "-map_metadata", "0",
+    "-map_chapters", "-1",
+    "-metadata", "METADATA_BLOCK_PICTURE=",
+    "-metadata", "COVERART=",
+    "-metadata", "COVERARTMIME=",
+)
+
+
 @dataclass(frozen=True)
 class ConversionSpec:
     """ffmpeg conversion parameters for lossless → lossy conversion.
@@ -532,10 +555,7 @@ class ConversionSpec:
     codec_args: tuple[str, ...] = ()        # quality/bitrate args: ("-q:a", "0") or ("-b:a", "128k")
     extension: str = "mp3"                  # output file extension (without dot)
     label: str = "mp3 v0"                   # human-readable label for logging/display
-    metadata_args: tuple[str, ...] = (
-        "-map_metadata", "-1",
-        "-map_chapters", "-1",
-    )
+    metadata_args: tuple[str, ...] = _KEPT_OUTPUT_METADATA_ARGS
 
 
 # FLAC normalization spec — converts ALAC/WAV → FLAC when keeping lossless on disk
@@ -603,8 +623,7 @@ def parse_verified_lossless_target(spec: str) -> ConversionSpec:
                 extension="mp3",
                 label=spec,
                 metadata_args=(
-                    "-map_metadata", "-1",
-                    "-map_chapters", "-1",
+                    *_KEPT_OUTPUT_METADATA_ARGS,
                     "-id3v2_version", "3",
                 ),
             )
@@ -619,8 +638,7 @@ def parse_verified_lossless_target(spec: str) -> ConversionSpec:
                 extension="mp3",
                 label=spec,
                 metadata_args=(
-                    "-map_metadata", "-1",
-                    "-map_chapters", "-1",
+                    *_KEPT_OUTPUT_METADATA_ARGS,
                     "-id3v2_version", "3",
                 ),
             )
@@ -1173,6 +1191,7 @@ def run_import(
     assert proc.stderr is not None
 
     applied = False
+    applied_distance: float | None = None
     beets_owned_replacement = False
     replaced_albums: list[DuplicateRemoveCandidate] = []
     timeout = HARNESS_TIMEOUT
@@ -1280,11 +1299,13 @@ def run_import(
                     if proc.poll() is None:
                         proc.wait()
                     return RunImportOutcome(
-                        2, [], replaced_albums=replaced_albums)
+                        2, [], replaced_albums=replaced_albums,
+                        applied_distance=float(dist))
 
                 proc.stdin.write(json.dumps({"action": "apply", "candidate_index": matched_idx}) + "\n")
                 proc.stdin.flush()
                 applied = True
+                applied_distance = float(dist)
                 timeout = IMPORT_TIMEOUT
                 print(f"  [APPLY] {cand.get('artist')} - {cand.get('album')} (dist={dist:.4f})", file=sys.stderr)
 
@@ -1307,6 +1328,7 @@ def run_import(
             beets_lines,
             beets_owned_replacement=beets_owned_replacement,
             replaced_albums=replaced_albums,
+            applied_distance=applied_distance,
         )
 
     return RunImportOutcome(
@@ -1314,6 +1336,7 @@ def run_import(
         beets_lines,
         beets_owned_replacement=beets_owned_replacement,
         replaced_albums=replaced_albums,
+        applied_distance=applied_distance,
     )
 
 
@@ -1681,6 +1704,7 @@ def _run_quality_evidence_authorized_import(
     rc = import_outcome.exit_code
     beets_lines = import_outcome.beets_lines
     r.beets_log = beets_lines
+    r.apply_beets_distance = import_outcome.applied_distance
     r.postflight.replaced_albums = import_outcome.replaced_albums
 
     if rc != 0:
@@ -2468,6 +2492,7 @@ def main():
     rc = import_outcome.exit_code
     beets_lines = import_outcome.beets_lines
     r.beets_log = beets_lines
+    r.apply_beets_distance = import_outcome.applied_distance
     r.postflight.replaced_albums = import_outcome.replaced_albums
 
     if rc != 0:
