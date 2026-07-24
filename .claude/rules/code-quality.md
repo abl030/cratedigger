@@ -352,6 +352,46 @@ Tools within the method, for quality-decision bugs specifically:
   decision tests alone miss state mutations and ordering. Guard both
   directions: the fixed case AND the still-valid original behavior.
 
+## Invariants live at the widest boundary the change touches
+
+The #853→#859 incident pair is the canonical lesson: two consecutive P0s
+shipped back-to-back with thousands of passing tests, clean Pyright, and
+adversarial review finding nothing — because every invariant and test lived
+at module scope while both defects lived in the COMPOSITION of two workers
+sharing one filesystem namespace (`processing/albums/`). The preview
+worker's sidecar write was legal by every module-scope test; the importer's
+exact-manifest guard was correct by every module-scope test; their
+composition stalled every automation import in production.
+
+- **Scope invariants to the widest boundary the change touches.** When a
+  change writes to or guards a namespace that another worker, process, or
+  phase also reads or writes — a filesystem tree, a DB table, a queue, a
+  wire format — state the invariant at that shared-namespace level, and
+  the pin+property pair must COMPOSE the real writer with the real
+  guard/consumer over the same real resource. Module-scope tests alone are
+  insufficient evidence for such a change, whatever their count.
+- **Never mock our own writers in a composed test.** The leaf-seam mock
+  rule already forbids mocking our own logic; this is its composition
+  corollary: a test that claims writer→guard coverage must run the REAL
+  writer and the REAL guard against the same real resource (tmp processing
+  root, real PG, …). #858's tests proved normalization ordering with the
+  sidecar writer absent from the composition — that absence was the escape
+  route for #859.
+- **A guard over a shared namespace ships with a patrolling property.**
+  A guard (manifest equality, schema check, fingerprint match) implicitly
+  legislates for every OTHER writer of that namespace, present and future.
+  Ship the guard together with a generated property that drives the real
+  writers and asserts the guarded invariant — otherwise the legislation is
+  unenforced until production enforces it. Canonical patrol:
+  `tests/test_preview_manifest_generated.py` (canonical processing albums
+  remain exact media manifests).
+- **Review must cross-reference the namespace, not just the diff.** For a
+  PR touching writers or guards of a shared namespace, enumerate (grep,
+  not an analyzer) every reader and writer of that namespace and check
+  each pair against the change. The colliding code is usually NOT in the
+  diff — that is precisely why diff-scoped adversarial review converged
+  with no findings on #858.
+
 ## Frontend (JavaScript)
 - ES6 modules in `web/js/` — no inline `<script>` in HTML
 - `// @ts-check` + JSDoc types on all exported functions
