@@ -138,3 +138,17 @@ Taboo VI) — mastering ceilings physically identical to codec ceilings, fundame
 content WITHHOLDS VL PROOF (never rejects/accuses); bar becomes zero-frauds-RECEIVE-PROOF.
 vq5 caught via affirmative-content leg; apple-256 residual unchanged. NEXT: operator nod →
 threshold qualification → scorer v2 freeze → round-2 blind (cohort seeding).
+
+**CALIB VERSION-SKEW LESSON (2026-07-24):** prod deploys continuously; calib (pinned transient
+units + scratch DB) drifted TWICE in 24h — mig 063 (loud: schema gate refused cycles) and mig
+064/audio_validation_report (quiet: importer success-without-terminal-bundle → every import
+fenced recovery_required, queue jammed, zero completions). STANDING RULE: after any prod deploy,
+calib needs migrate-to-current + re-arm all 3 units on current store paths. Fence diagnosis:
+read import_jobs.message (real reason), not .error (generic). #835 fix shipped as mig 064 by
+another session.
+
+**CALIB OPS ADDENDA (2026-07-24 midday):** re-arm stops can strand .cratedigger.lock in the
+var-dir (cycles then exit 1 SILENTLY, 265ms — check the lock first when cycles are quiet-failing).
+#663 hardening: materialization requires private (non-group-writable) processing ANCESTRY —
+calib var-dir must live at /var/lib/cratedigger-calib (root 0700), NOT under the shared music
+tree; --config-dir stays on virtiofs. Old-path staged-missing records self-heal to wanted.
