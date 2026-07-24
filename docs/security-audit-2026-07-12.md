@@ -60,7 +60,7 @@ against that reality, not against a hypothetical public exposure.
 | CD-SEC-07 | Low | Unbounded request body read + JSON parse (memory-exhaustion DoS) | `web/server.py` |
 | CD-SEC-08 | Low | Unvalidated MB `id` interpolated into the mirror URL (request-shaping) | `web/routes/browse.py`, `web/mb.py` |
 | CD-SEC-09 | Low | Latent identifier-interpolation SQLi footguns (hardcoded today) | `lib/pipeline_db/requests.py`, `lib/pipeline_db/dashboard.py` |
-| CD-SEC-10 | Low | Unescaped controlled-vocabulary metadata in a few JS rows | `web/js/pipeline.js`, `web/js/library.js`, `web/js/wrong-matches.js` |
+| CD-SEC-10 | Low | Unescaped controlled-vocabulary metadata in a few JS rows | `web/js/discography.js`, `web/js/library.js`, `web/js/wrong-matches.js` |
 | CD-SEC-11 | Medium | Remediated: no-follow descriptor authority for materialize, explorer, and stream | `lib/fs_authority.py`, `web/wrong_match_file_service.py` |
 | CD-SEC-12 | Low | Vulnerable-version matches in the locked closure + narrow CI scope | `flake.lock`, `nix/package.nix` |
 | CD-SEC-13 | Info | Plex XML parsed with stdlib ElementTree | `lib/util.py` |
@@ -435,9 +435,10 @@ low.
   negative, conversion-limit, and oversized lengths are rejected before
   `rfile.read`; pre-read rejection also closes the HTTP/1.1 connection so the
   unread bytes cannot be interpreted as another request. Valid bodies preserve
-  keep-alive behavior. Duplicate/conflicting `Content-Length` and
-  `Transfer-Encoding` normalization remains the reverse proxy's framing
-  boundary rather than a second HTTP parser in the application.
+  keep-alive behavior, while an unmatched POST closes before returning 404
+  rather than leaving its unknown body on the connection. Duplicate/conflicting
+  `Content-Length` and `Transfer-Encoding` normalization remains the reverse
+  proxy's framing boundary rather than a second HTTP parser in the application.
 
 ### CD-SEC-08 — Unvalidated MB `id` interpolated into the mirror URL (Low)
 
@@ -453,9 +454,10 @@ rejects control chars, so severity is low.
 
   Implemented. The resolver admits only canonical lowercase, hyphenated UUIDs
   for MusicBrainz and rejects anything else before adapter dispatch. Every
-  MusicBrainz identifier path or query component now passes through one
-  `urllib.parse.quote(..., safe="")` helper; the fixed origin and Discogs
-  behavior are unchanged.
+  MusicBrainz identifier path or query component in the web adapter now passes
+  through one `urllib.parse.quote(..., safe="")` helper. The DB-backed track
+  fallback independently quotes its release ID at its outbound URL boundary;
+  the fixed origins and Discogs behavior are unchanged.
 
 ### CD-SEC-09 — Latent identifier-interpolation SQLi footguns (Low)
 
@@ -494,9 +496,10 @@ the codebase's own escaping discipline.
   template literals.
 
   Implemented against the current render graph rather than the stale scanner
-  premise. The reported Pipeline sink was no longer present; the live Library
-  and Wrong Matches paths included album year/country/type, candidate year,
-  mapped format, badge-derived format, per-track format, and empty-history
+  premise. The reported Pipeline sink was no longer present; the live
+  Discography, Library, and Wrong Matches paths included pressing
+  country/date/format/track-count/status, album year/country/type, candidate
+  year, mapped format, badge-derived format, per-track format, and empty-history
   pipeline status/source. Each is escaped once at its final HTML boundary.
   Direct composed-render tests with generated critical-character sweeps protect
   those paths. A semantic source scanner was deliberately not added: it would
@@ -584,12 +587,13 @@ reachable.
   defense in depth; it is not contingent on an unverified-TLS response path.
 
   Implemented for the production Plex client and the documented duplicate-audit
-  tool, including both saved and live XML. Ordinary Plex XML still parses while
-  DTD/entity payloads fail closed, and `defusedxml` is present in the Nix Python
-  closure. Revalidation also found the duplicate-audit and merge scripts plus
-  their canonical runbook still bypassed certificate verification; the scripts
-  now use default verified `urlopen`, and the runbook uses `curl -sS` rather
-  than `curl -k`.
+  tool, including both saved and live XML. Every parser explicitly sets
+  `forbid_dtd=True`; ordinary Plex XML still parses while plain DTD and entity
+  payloads fail closed. `defusedxml` is present in the Nix Python closure, and
+  the canonical runbook now invokes both tools through `nix-shell --run`.
+  Revalidation also found the duplicate-audit and merge scripts plus that
+  runbook still bypassed certificate verification; the scripts now use default
+  verified `urlopen`, and the runbook uses `curl -sS` rather than `curl -k`.
 
 ## Companion code-quality findings
 
