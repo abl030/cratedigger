@@ -201,7 +201,6 @@ class _ImportJobsMixin(_PipelineDBBase):
             ORDER BY
               CASE
                 WHEN status = 'queued' AND preview_status = 'evidence_ready' THEN 0
-                WHEN status = 'queued' AND preview_status = 'would_import' THEN 0
                 WHEN status = 'recovery_required' THEN 0
                 WHEN status = 'running' THEN 1
                 WHEN status = 'queued' AND preview_status = 'running' THEN 2
@@ -228,7 +227,7 @@ class _ImportJobsMixin(_PipelineDBBase):
                 SELECT id
                 FROM import_jobs
                 WHERE status = 'queued'
-                  AND preview_status IN ('evidence_ready', 'would_import')
+                  AND preview_status = 'evidence_ready'
                 ORDER BY importable_at ASC NULLS LAST, created_at ASC, id ASC
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1

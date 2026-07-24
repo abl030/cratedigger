@@ -81,7 +81,7 @@ Never background systemctl with `&` inside SSH quotes — SSH waits on all child
 
 #### Querying the pipeline DB (do this, in this order)
 
-1. **Run the query ON doc2** (`pipeline-cli` is on its PATH). For **write** SQL, `pipeline-cli query` won't work (read-only session) — use `psql "postgresql://cratedigger@10.20.0.11:5432/cratedigger"` on doc2 with `PGPASSWORD` exported.
+1. **Run the query ON doc2** (`pipeline-cli` is the writable operator/agent control plane). Raw `pipeline-cli query` is read-only by default; intentional raw SQL writes require `pipeline-cli query --write --confirm WRITE -`. That is a safety/intent boundary, not authentication: the operator connection is otherwise full-privilege. Routine actions belong in typed `pipeline-cli` subcommands, not raw SQL. See `docs/debugging-cli.md` for the authoritative command and access reference.
 2. **Pull the live schema first — never guess column names** (query `information_schema.columns`; the schema is deliberately not transcribed here).
 3. Then write your query.
 
@@ -90,7 +90,7 @@ Gotchas that cost a lot of time once:
 - **Pass SQL via stdin heredoc, not argv** — `$$` dollar-quoting expands to the shell PID in argv.
 
 ```bash
-ssh doc2 'export PGPASSWORD=$(sudo cat /run/secrets/cratedigger-pgpass | grep "^PGPASSWORD=" | cut -d= -f2); pipeline-cli query "$(cat)"' <<'SQL'
+ssh doc2 'export PGPASSWORD=$(sudo cat /run/secrets/cratedigger-pgpass | grep "^PGPASSWORD=" | cut -d= -f2); pipeline-cli query -' <<'SQL'
 SELECT column_name FROM information_schema.columns
 WHERE table_name = 'album_requests' ORDER BY ordinal_position;
 SQL

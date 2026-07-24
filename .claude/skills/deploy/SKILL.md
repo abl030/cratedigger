@@ -185,7 +185,7 @@ test "$migration_result" = success
 migration_rows=$(env -u SSH_AUTH_SOCK ssh doc2 'set -euo pipefail; \
   export PGPASSWORD=$(sudo cat /run/secrets/cratedigger-pgpass \
     | grep "^PGPASSWORD=" | cut -d= -f2); \
-  test -n "$PGPASSWORD"; pipeline-cli query "$(cat)"' <<'SQL'
+  test -n "$PGPASSWORD"; pipeline-cli query -' <<'SQL'
 SELECT version, name, applied_at
 FROM schema_migrations
 ORDER BY version DESC
@@ -343,7 +343,7 @@ First inspect the schema:
 
 ```bash
 env -u SSH_AUTH_SOCK ssh doc2 'export PGPASSWORD=$(sudo cat /run/secrets/cratedigger-pgpass \
-  | grep "^PGPASSWORD=" | cut -d= -f2); pipeline-cli query "$(cat)"' <<'SQL'
+  | grep "^PGPASSWORD=" | cut -d= -f2); pipeline-cli query -' <<'SQL'
 SELECT column_name, data_type
 FROM information_schema.columns
 WHERE table_name = '<table>'
@@ -356,7 +356,7 @@ sets are rendered:
 
 ```bash
 env -u SSH_AUTH_SOCK ssh doc2 'export PGPASSWORD=$(sudo cat /run/secrets/cratedigger-pgpass \
-  | grep "^PGPASSWORD=" | cut -d= -f2); pipeline-cli query "$(cat)"' <<'SQL'
+  | grep "^PGPASSWORD=" | cut -d= -f2); pipeline-cli query -' <<'SQL'
 SELECT <persisted_column>, COUNT(*)
 FROM <table>
 GROUP BY <persisted_column>

@@ -1321,6 +1321,32 @@ class TestImportJobQueueAPI(unittest.TestCase):
         self.assertEqual(claimed.id, job.id)
         self.assertEqual(claimed.status, "running")
 
+    def test_legacy_would_import_row_is_not_claimable(self):
+        """Only neutral evidence readiness may enter the importer lane."""
+        from lib.import_queue import IMPORT_JOB_FORCE
+
+        job = self.db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=self.req_id,
+            dedupe_key="manual:legacy-would-import",
+            payload={"download_log_id": 1, "failed_path": "/tmp/legacy"},
+        )
+        self.db._execute(
+            "UPDATE import_jobs SET preview_status = 'would_import', "
+            "importable_at = NOW() WHERE id = %s",
+            (job.id,),
+        )
+
+        self.assertIsNone(self.db.claim_next_import_job(worker_id="importer"))
+
+        self.db._execute(
+            "UPDATE import_jobs SET preview_status = 'evidence_ready' WHERE id = %s",
+            (job.id,),
+        )
+        claimed = self.db.claim_next_import_job(worker_id="importer")
+        assert claimed is not None
+        self.assertEqual(claimed.id, job.id)
+
     def test_import_job_timeline_orders_importable_before_waiting(self):
         from lib.import_queue import IMPORT_JOB_FORCE
 
@@ -7465,10 +7491,10 @@ class TestActiveImportJobForRequest(unittest.TestCase):
     def test_returns_running_job(self):
         self._enqueue(
             request_id=self.req_id, dedupe_key="manual:%d" % self.req_id)
-        # Mark would_import → claim → running
+        # Mark evidence_ready → claim → running
         self.db._execute("""
             UPDATE import_jobs
-            SET preview_status = 'would_import',
+            SET preview_status = 'evidence_ready',
                 importable_at = NOW()
             WHERE request_id = %s
         """, (self.req_id,))
@@ -7484,7 +7510,7 @@ class TestActiveImportJobForRequest(unittest.TestCase):
             request_id=self.req_id, dedupe_key="manual:%d" % self.req_id)
         self.db._execute("""
             UPDATE import_jobs
-            SET preview_status = 'would_import',
+            SET preview_status = 'evidence_ready',
                 importable_at = NOW()
             WHERE id = %s
         """, (job.id,))
@@ -7499,7 +7525,7 @@ class TestActiveImportJobForRequest(unittest.TestCase):
             request_id=self.req_id, dedupe_key="manual:%d" % self.req_id)
         self.db._execute("""
             UPDATE import_jobs
-            SET preview_status = 'would_import',
+            SET preview_status = 'evidence_ready',
                 importable_at = NOW()
             WHERE id = %s
         """, (job.id,))
@@ -9624,7 +9650,7 @@ class TestFieldResolutionRecording(unittest.TestCase):
         )
         return req_id
 
-    def test_first_call_inserts_row_with_attempts_one(self):
+    def test_record_field_resolution_round_trip_preserves_request_and_field(self):
         db = make_db()
         req_id = self._seed_request(db)
 
@@ -9637,6 +9663,8 @@ class TestFieldResolutionRecording(unittest.TestCase):
 
         row = db.get_field_resolution(req_id, "release_group_year")
         assert row is not None
+        self.assertEqual(row["request_id"], req_id)
+        self.assertEqual(row["field_name"], "release_group_year")
         self.assertEqual(row["status"], "resolved")
         self.assertIsNone(row["reason_code"])
         self.assertEqual(row["attempts"], 1)

@@ -15,8 +15,8 @@ Async import preview workers do not take the importer singleton lock because
 they must not mutate beets or source folders. They claim `import_jobs` preview
 work through row-level `FOR UPDATE SKIP LOCKED` semantics, persist preview
 audit state, and mark jobs `evidence_ready` for the serial worker's final
-action-time evidence check. Legacy `would_import` rows remain claimable only as
-queue compatibility.
+action-time evidence check. Historical `would_import` rows remain display/audit
+data only and are not runnable.
 
 Outstanding follow-up: after the preview-gated queue has run in production,
 inventory IMPORT/RELEASE lock call sites and remove any lock whose only
@@ -318,7 +318,7 @@ To list candidate blocked rows, query for `status='downloading'` entries
 whose persisted `current_path` already points at your staging root:
 
 ```bash
-pipeline-cli query "
+pipeline-cli query - <<'SQL'
 SELECT id,
        artist_name,
        album_title,
@@ -326,7 +326,7 @@ SELECT id,
 FROM album_requests
 WHERE status = 'downloading'
   AND active_download_state->>'current_path' LIKE '<beets_staging_dir>%';
-"
+SQL
 ```
 
 ## Contention behaviour

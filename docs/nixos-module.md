@@ -44,9 +44,8 @@ The flake export is a wrapper that pins the module's package set to **cratedigge
 | `releaseSettings.*` / `searchSettings.*` / `downloadSettings.*` | match config.ini defaults | Pipeline tunables. See "Search loop tunables" below for the trio that caps the slskd search window. |
 | `qualityRanks.*` | mirror of `QualityRankConfig.defaults()` | See docs/quality-ranks.md § "Tuning reference (Nix options)". |
 | `timer.{enable,onBootSec,onUnitInactiveSec}` | 1s after exit | Cycle frequency. |
-| `importer.enable` | `true` | Long-lived serial importer that drains queued import work. |
-| `importer.preview.enable` | `false` | Enable the async preview gate. When disabled, new import jobs are marked importable immediately for backward-compatible draining. |
-| `importer.previewWorkers` | `2` | Async preview worker concurrency when `importer.preview.enable = true`. Must be at least 1. |
+| `importer.enable` | `true` | Enable both long-lived queue workers: async preview and the serial importer. Disabled queues remain non-runnable. |
+| `importer.previewWorkers` | `2` | Async preview worker concurrency when `importer.enable = true`. Must be at least 1. |
 | `logging.{level,format,datefmt}` | INFO | Python logging config. |
 
 ## Search loop tunables
@@ -166,8 +165,12 @@ See [`examples/cratedigger.nix`](../examples/cratedigger.nix) for the full worke
   (configurable via `timer.onUnitInactiveSec`).
 - `cratedigger-importer.service` — long-running serial beets import worker. It
   claims queued import jobs after async preview marks durable candidate
-  evidence as `evidence_ready` (legacy `would_import` rows remain claimable).
-- `cratedigger-import-preview-worker.service` — optional long-running async preview worker. It starts after DB migrations when `importer.preview.enable = true`, defaults to two worker loops, and runs validation/spectral/measurement preview outside the beets mutation lane.
+  evidence as `evidence_ready`; historical/raw `would_import` rows are
+  non-runnable display/audit data and are not claimable.
+- `cratedigger-import-preview-worker.service` — long-running async preview
+  worker enabled with `importer.enable`. It starts after DB migrations,
+  defaults to two worker loops, and runs validation/spectral/measurement
+  preview outside the beets mutation lane.
 - `cratedigger-unfindable.service` — oneshot, `Type=oneshot`, `restartIfChanged = false`, `TimeoutStartSec=2h`, runs as `cfg.user`. Wraps `scripts/run_unfindable_detection.py` via the `cratedigger-unfindable` wrapper bin. `wants = ["cratedigger-db-migrate.service"]` (not `requires` — see the migrate unit's entry above) and shares the same `ExecStartPre` chain as `cratedigger.service` (`slskdHealthCheck` when `healthCheck.enable = true`, then `preStartScript`) — a slskd outage should fail the unit fast rather than write garbage `last_artist_probe_match_count=0` rows for every cohort member. Lives in its own systemd unit, NOT inline in the main `cratedigger.service` loop, because R20 ("the system never stops searching") forbids the regular search cadence from being throttled by detection state. Implements PR3 U13 (`docs/plans/2026-05-25-001-feat-search-plan-iteration-2-plan.md`). The upstream module sets `Environment="PIPELINE_DB_DSN=..."` only; the downstream wrapper must augment `serviceConfig.EnvironmentFile` with the sops `cratedigger-pgpass` path (same pattern the wrapper uses for `cratedigger.service`) — see `docs/search-plan-iter2-deploy.md` § "PR3 — Detection + telemetry" for the exact incantation and the 2026-05-26 first-deploy gotcha.
 - `cratedigger-unfindable.timer` — `OnCalendar=daily`, `Persistent=true`, `RandomizedDelaySec=30min`. The 30-min jitter is purely local cron-collision avoidance (logrotate, postgres autovacuum on doc2); the single-operator install has no fleet to spread across. The daily fire processes K=100 rows per run with a ~7-day per-request cadence target; full cohort coverage finishes in ~9 days for a ~830-row wanted cohort.
 - `cratedigger-web.service` — long-running web UI for music.ablz.au.
@@ -331,10 +334,9 @@ journalctl -u cratedigger-import-preview-worker -u cratedigger-importer -n 100 -
 
 Queued jobs should move from `preview_status='waiting'` to `evidence_ready` or
 a terminal preview failure. The importer claims `evidence_ready` jobs, with
-legacy `would_import` rows drained as preview-disabled compatibility.
-If `importer.preview.enable = false`, `cratedigger-import-preview-worker.service`
-should not exist and newly queued jobs should already have
-`preview_status='would_import'` with `preview_message='Preview gate disabled'`.
+historical/raw `would_import` rows retained as non-runnable display/audit data.
+If `importer.enable = false`, neither queue worker should exist; the operator
+must restore the preview/evidence path before queueing beets-mutating work.
 
 Rollback note: before starting pre-018 importer or preview-worker code, stop the
 queue services and reset active `evidence_ready` rows to `waiting` so old code

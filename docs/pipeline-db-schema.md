@@ -254,8 +254,9 @@ Key fields:
   and nonempty `staged_path`/`browse_id` values.
 - `result JSONB`, `message`, `error` — terminal worker result visible to web
   and CLI callers. Result and preview-result display/audit data remain broadly
-  decoded; `preview_status` continues to accept historical terminal
-  `would_import`/`uncertain` values. Neither is an input-payload contract.
+  decoded; `preview_status` continues to accept historical/raw
+  `would_import`/`uncertain` display/audit values. Neither is an input-payload
+  contract.
 - **Partial unique index `one_active_youtube_import_per_request` ON
   `import_jobs (request_id) WHERE job_type = 'youtube_import' AND status IN
   ('queued', 'running', 'recovery_required')`** — added by migration 038 and
@@ -275,15 +276,16 @@ Key fields:
   start. These are evidence for refusing an ambiguous replay, not evidence
   that Beets did or did not finish.
 - `preview_status TEXT` — async readiness/audit stage: `waiting`, `running`,
-  `evidence_ready`, legacy `would_import`, `confident_reject`, `uncertain`, or
-  `error`. `evidence_ready` means candidate evidence exists for the final
-  action-time check; it is not import authority. The legacy `would_import`
-  token remains claimable for preview-disabled compatibility and old rows only.
-  Workers must recompute the mutating decision from fresh current evidence plus
-  snapshot-valid candidate evidence at import time. New jobs use `waiting` only
-  when the async preview gate is enabled; preview-disabled or raw/default
-  inserts are `would_import` immediately with
-  `preview_message='Preview gate disabled'`.
+  `evidence_ready`, legacy `would_import`, `confident_reject`, `uncertain`,
+  `measurement_failed`, or `error`. `evidence_ready` means candidate evidence
+  exists for the final action-time check; it is not import authority. Only a
+  queued `evidence_ready` job is claimable. Typed product enqueue creates
+  `waiting`, and the preview worker advances successful measurement to
+  `evidence_ready`. The physical column still has its historical
+  `would_import` SQL default: raw/default legacy inserts therefore remain
+  non-runnable, as do historical terminal `would_import`/`uncertain` values.
+  Workers recompute the mutating decision from fresh current evidence plus
+  snapshot-valid candidate evidence at import time.
 - `preview_result JSONB`, `preview_message`, `preview_error` — durable
   no-mutation preview audit visible in Recents and CLI output. Stored verdicts
   are display/audit facts; they must not authorize import, cleanup, denylist, or
@@ -291,9 +293,8 @@ Key fields:
 - `preview_attempts`, `preview_worker_id`, `preview_started_at`,
   `preview_heartbeat_at`, `preview_completed_at` — async preview claim and
   recovery metadata.
-- `importable_at TIMESTAMPTZ` — set when preview produces `evidence_ready`, or
-  at enqueue time when the preview gate is disabled; the serial importer claims
-  queued jobs with `evidence_ready` and legacy `would_import`.
+- `importable_at TIMESTAMPTZ` — set when preview produces `evidence_ready`; the
+  serial importer claims only queued `evidence_ready` jobs.
 
 On importer startup, a pre-existing `running` job is reset to `queued` only
 when `beets_launch_authorized_at IS NULL`, proving the prior process had not
@@ -331,16 +332,14 @@ for the final import-time check or fail the preview with audit details. This
 lets spectral/measurement work run with tunable parallelism while beets writes
 stay serial, without letting preview decisions become later mutation authority.
 
-The preview gate is opt-in at deployment time. When disabled, no preview worker
-is required for compatibility: `PipelineDB.enqueue_import_job()` and the schema
-defaults both make jobs importable immediately as legacy `would_import` rows
-with `preview_message='Preview gate disabled'`. Legacy completed/failed rows
-from before async previews may also carry `would_import` so historical
-terminal import history does not look like active preview backlog.
-Rollback to pre-018 code requires queue reconciliation first: stop import
-workers and reset queued or running `evidence_ready` rows to queued `waiting`
-rows so old preview code recomputes them. Do not bulk-convert them to
-`would_import`; that would restore preview-decision authority.
+The preview/evidence lane is required for new runnable work: typed product
+enqueue creates `waiting`, and only the preview worker can advance it to
+`evidence_ready`. The retained physical SQL default `would_import` is for raw
+or legacy rows only and is non-runnable; it is not a typed enqueue path or
+import authority. When workers are disabled, queued work remains safely
+non-runnable. Legacy completed/failed rows may carry `would_import` so
+historical terminal import history does not look like active preview backlog.
+Do not bulk-convert those rows; that would restore preview-decision authority.
 The Recents Imports endpoint lists active `queued`, `running`, and
 `recovery_required` jobs; terminal `completed`/`failed` rows remain durable
 audit history and must not be rendered as live queue work.
