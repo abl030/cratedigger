@@ -178,8 +178,11 @@ Beets enforces this structure:
 
 Lossless sources first produce a temporary MP3 VBR V0 quality probe, then use
 the configured storage target (commonly Opus) before Beets import. Conversion
-maps only audio and strips source metadata; Beets applies fresh canonical tags
-after matching. Every album derivative is staged before commit, so the source
+maps only audio and preserves the source tag surface Beets matches on, while
+deleting the art-in-tag surfaces (`METADATA_BLOCK_PICTURE`, legacy
+`COVERART`/`COVERARTMIME`) — Beets matches on the staged tags, then applies
+fresh canonical tags (issue #863; the discarded V0 probe still strips
+everything). Every album derivative is staged before commit, so the source
 is removed only after all files converted successfully with nonempty outputs.
 On any conversion failure every source is retained and the typed failure audit
 is returned to preview.
@@ -639,7 +642,9 @@ A full library health check found:
 Plain FFmpeg defaults can print recoverable decoder errors and still return
 zero, so `ffmpeg -v error -i FILE -f null -` alone is not an integrity proof.
 Cratedigger also ignores tags, pictures, chapters, and exit-zero stderr at this
-boundary; metadata is stripped during conversion and Beets writes it fresh.
+read-only boundary. Kept conversion outputs preserve the tag surface Beets
+matches on and strip only the embedded-art surfaces (#863); the discarded V0
+probe strips everything; Beets writes canonical tags fresh after matching.
 
 ### Validation Script
 

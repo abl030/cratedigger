@@ -282,6 +282,12 @@ class ImportResult(msgspec.Struct):
     spectral: SpectralDetail = msgspec.field(default_factory=SpectralDetail)
     postflight: PostflightInfo = msgspec.field(default_factory=PostflightInfo)
     beets_log: list[str] = []  # beets stderr lines from import
+    # Beets distance of the pinned target candidate at ACTION time (both
+    # apply and over-threshold reject), distinct from download_log's
+    # validate-time ``beets_distance`` column. Queryable via
+    # ``import_result->>'apply_beets_distance'`` (issue #863 — journal-only
+    # apply distance hid the tagless-match inflation).
+    apply_beets_distance: Optional[float] = None
     error: Optional[str] = None
     # Target-conversion audit trail — V0 bitrate that proved genuineness
     v0_verification_bitrate: Optional[int] = None

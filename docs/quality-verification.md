@@ -67,8 +67,15 @@ retained source path is protected from the disk reaper. Diagnostics are capped
 at 16 files and 2 KiB per normalized stderr excerpt; success carries no
 stderr.
 
-Lossless conversion uses the same strict input decoder flags and strips source
-metadata. It stages every derivative on the source filesystem and commits the
+Lossless conversion uses the same strict input decoder flags. Kept outputs
+preserve the source tag surface Beets matches on (`-map_metadata 0`) while
+deleting every art-in-tag surface (`METADATA_BLOCK_PICTURE`, legacy
+`COVERART`/`COVERARTMIME`; picture streams are already excluded by
+`-map 0:a`) — issue #863: Beets must MATCH the staged album on its tags
+before it applies fresh canonical metadata, so stripping all tags inflated
+apply-time distance, while untrusted embedded art has no business surviving
+conversion. The discarded V0 probe output still strips everything.
+Conversion stages every derivative on the source filesystem and commits the
 album only after every file succeeds with a nonempty output. Any batch failure
 removes only temporary derivatives, retains every source, records bounded
 `ConversionInfo` diagnostics, and revalidates the retained sources to
