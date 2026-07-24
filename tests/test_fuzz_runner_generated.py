@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import unittest
 from dataclasses import replace
+import os
+from pathlib import Path
+import tempfile
 
 from hypothesis import given
 from hypothesis import strategies as st
@@ -14,6 +17,7 @@ from scripts.run_fuzz_tests import (
     FuzzPropertyManifest,
     assert_exact_fuzz_coverage,
     build_fuzz_targets,
+    discover_fuzz_manifests,
 )
 
 
@@ -139,6 +143,35 @@ class TestFuzzCoverageCheckerKnownBad(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "changed fuzz property budget"):
             assert_exact_fuzz_coverage((manifest,), targets)
+
+
+class TestFuzzDiscoverySettingsContract(unittest.TestCase):
+    def test_discovery_rejects_property_with_default_deadline(self) -> None:
+        """A module that omits profile registration must fail before sharding."""
+        with tempfile.TemporaryDirectory() as directory:
+            fixture_root = Path(directory)
+            fixture = fixture_root / "unprofiled_fuzz_fixture.py"
+            fixture.write_text(
+                "from hypothesis import given, strategies as st\n"
+                "import unittest\n\n"
+                "class TestUnprofiled(unittest.TestCase):\n"
+                "    @given(st.integers())\n"
+                "    def test_property(self, value):\n"
+                "        self.assertIsInstance(value, int)\n",
+                encoding="utf-8",
+            )
+            environment = dict(os.environ)
+            old_pythonpath = environment.get("PYTHONPATH", "")
+            environment["PYTHONPATH"] = os.pathsep.join(
+                part for part in (str(fixture_root), old_pythonpath) if part
+            )
+            with self.assertRaisesRegex(RuntimeError, "non-None deadline"):
+                discover_fuzz_manifests(
+                    ("unprofiled_fuzz_fixture",),
+                    worker_count=1,
+                    environment=environment,
+                    work_directory=fixture_root,
+                )
 
 
 if __name__ == "__main__":

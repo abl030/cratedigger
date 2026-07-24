@@ -297,6 +297,11 @@ def _settings_max_examples(configured: settings) -> int:
     return raw_max_examples
 
 
+def _settings_deadline(configured: settings) -> object:
+    """Return the effective deadline so fuzz work never depends on timing."""
+    return getattr(configured, "deadline", None)
+
+
 def _discover_module_child(module_name: str, result_path: Path) -> int:
     suite = unittest.defaultTestLoader.loadTestsFromName(module_name)
     cases = tuple(_iter_test_cases(suite))
@@ -345,6 +350,12 @@ def _discover_module_child(module_name: str, result_path: Path) -> int:
             )
         if configured is None:
             raise TypeError(f"Hypothesis test has no settings: {test.id()}")
+        deadline = _settings_deadline(configured)
+        if deadline is not None:
+            raise RuntimeError(
+                "Hypothesis test has non-None deadline: "
+                f"{test.id()}: {deadline!r}"
+            )
         configured_max_examples = _settings_max_examples(configured)
         hypothesis_tests.append(
             FuzzPropertyManifest(

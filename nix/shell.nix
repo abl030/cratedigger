@@ -46,6 +46,7 @@ in
 pkgs.mkShell {
   packages = [
     pkgs.postgresql          # initdb, pg_ctl for ephemeral test DB
+    pkgs.util-linux          # flock for deploy-pin concurrency tests
     pkgs.ruff                # per-module F401 liveness (aggregate vulture masks it)
     testPythonEnv
     pkgs.sox                 # spectral analysis tests
