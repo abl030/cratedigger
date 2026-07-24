@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from typing import TypeVar
 from unittest.mock import patch
 
 from beets import config as beets_config
@@ -43,13 +44,33 @@ from tests.beets_world import (  # noqa: E402
     HISTORICAL_PASSENGER_PATH_TEMPLATE,
 )
 from lib.mbid_replace_service import MbidReplaceService  # noqa: E402
+from lib.quality_evidence import (  # noqa: E402
+    snapshot_audio_files,
+    snapshot_fingerprint,
+)
 from tests.world_model.support import LifecycleWorld, repository_root  # noqa: E402
 from tests.world_model.census_seeds import (  # noqa: E402
     EVIDENCE_DRIFT_FACT_SEEDS,
     EVIDENCE_DRIFT_MUTATION_SEEDS,
+    MISSING_CURRENT_EVIDENCE_FORMAT_SEEDS,
+    MISSING_CURRENT_EVIDENCE_IDENTITY_SEEDS,
+    MISSING_CURRENT_EVIDENCE_LEGACY_BITRATE_SEEDS,
+    MISSING_CURRENT_EVIDENCE_LEGACY_SPECTRAL_SEEDS,
+    MISSING_CURRENT_EVIDENCE_ORIGIN_SEEDS,
+    MISSING_CURRENT_EVIDENCE_SEARCH_OVERRIDE_SEEDS,
+    MISSING_CURRENT_EVIDENCE_STATUS_SEEDS,
+    MISSING_CURRENT_EVIDENCE_TARGET_FORMAT_SEEDS,
     STATEFUL_WORLD_CENSUS_SEEDS,
     EvidenceDriftFactSeed,
     EvidenceDriftMutationSeed,
+    MissingCurrentEvidenceFormatSeed,
+    MissingCurrentEvidenceIdentitySeed,
+    MissingCurrentEvidenceLegacyBitrateSeed,
+    MissingCurrentEvidenceLegacySpectralSeed,
+    MissingCurrentEvidenceOriginSeed,
+    MissingCurrentEvidenceSearchOverrideSeed,
+    MissingCurrentEvidenceStatusSeed,
+    MissingCurrentEvidenceTargetFormatSeed,
     WorldCensusSeed,
 )
 
@@ -67,6 +88,91 @@ def _mb_release_id(counter: int) -> str:
 
 def _discogs_release_id(counter: int) -> str:
     return str(7_000_000 + counter)
+
+
+_MISSING_EVIDENCE_PRESERVED_FIELDS = (
+    "status",
+    "search_filetype_override",
+    "target_format",
+    "final_format",
+    "current_spectral_grade",
+    "current_spectral_bitrate",
+    "min_bitrate",
+    "prev_min_bitrate",
+    "verified_lossless",
+)
+
+
+_AxisSeed = TypeVar("_AxisSeed")
+
+
+def _axis(axis: tuple[_AxisSeed, ...], name: str) -> _AxisSeed:
+    return next(seed for seed in axis if getattr(seed, "name") == name)
+
+
+def _assert_missing_evidence_converges(
+    world: LifecycleWorld,
+    request_id: int,
+) -> None:
+    """Qualify the shared audit before, and convergence after, one scar."""
+    before = world.db.get_request(request_id)
+    assert before is not None
+    preserved = {key: before[key] for key in _MISSING_EVIDENCE_PRESERVED_FIELDS}
+    before_codes = {
+        violation.code
+        for violation in world.violations()
+        if violation.request_id == request_id
+    }
+    if "current_evidence_missing" not in before_codes:
+        raise AssertionError(
+            "missing-evidence scar did not qualify the real invariant checker"
+        )
+
+    result = world.touch_current_evidence(request_id)
+    if not result.available or result.evidence is None:
+        raise AssertionError(
+            "production current-evidence action did not converge missing scar: "
+            f"{result.provenance.fallback_reason!r}"
+        )
+    row = world.db.get_request(request_id)
+    assert row is not None
+    if {key: row[key] for key in _MISSING_EVIDENCE_PRESERVED_FIELDS} != preserved:
+        raise AssertionError("current-evidence convergence mutated request scalars")
+    evidence_id = world.db.get_request_current_evidence_id(request_id)
+    evidence = world.db.load_album_quality_evidence_by_id(evidence_id)
+    if evidence is None:
+        raise AssertionError("convergence did not link current evidence")
+    release = world._release_by_request[request_id]
+    album = next(
+        snapshot for snapshot in world.beets.snapshots()
+        if snapshot.release_id == release.release_id
+    )
+    if evidence.snapshot_fingerprint != snapshot_fingerprint(
+        snapshot_audio_files(album.album_path)
+    ):
+        raise AssertionError("current evidence did not fingerprint installed bytes")
+    if evidence.lineage_version != 4:
+        raise AssertionError("current evidence did not rebuild to lineage 4")
+    expected_policy_format = {
+        "ogg": "vorbis",
+        "wma": "wma",
+    }.get(release.codec)
+    if (
+        expected_policy_format is not None
+        and evidence.measurement.format != expected_policy_format
+    ):
+        raise AssertionError(
+            "current evidence did not reduce the native Beets label: "
+            f"{evidence.measurement.format!r}"
+        )
+    after_codes = {
+        violation.code
+        for violation in world.violations()
+        if violation.request_id == request_id
+    }
+    if "current_evidence_missing" in after_codes:
+        raise AssertionError("convergence left current_evidence_missing behind")
+    world.assert_invariants()
 
 
 class TestPinnedLifecycleWorld(unittest.TestCase):
@@ -489,6 +595,136 @@ class TestPinnedLifecycleWorld(unittest.TestCase):
             self.assertEqual(after.lineage_version, 4)
             world.assert_invariants()
 
+    def test_missing_current_evidence_installed_census_converges(self) -> None:
+        """#855 pins actual rare containers and operator-owned state."""
+        cases = (
+            (
+                "pre_rekey_existing_library_add", "wanted", "musicbrainz",
+                "mp3", "default", "default", "absent_no_bitrate",
+                "both_absent", "mp3",
+            ),
+            (
+                "pre_rekey_completed_import", "wanted", "discogs", "aac_m4a",
+                "lossless_mp3_v0_mp3_320", "lossless", "genuine_no_bitrate",
+                "min_and_prev_present", "aac",
+            ),
+            (
+                "post_rekey_existing_library_add", "unsearchable", "musicbrainz",
+                "ogg", "lossless", "default", "likely_transcode_no_bitrate",
+                "min_present_prev_absent", "vorbis",
+            ),
+            (
+                "pre_rekey_existing_library_add", "wanted", "discogs", "opus",
+                "lossless_mp3_v0", "default", "suspect_bitrate", "both_absent",
+                "opus",
+            ),
+            (
+                "post_rekey_existing_library_add", "wanted", "musicbrainz", "windows_media_wma",
+                "full_legacy_ladder", "default", "likely_transcode_bitrate",
+                "min_and_prev_present", "wmav2",
+            ),
+        )
+        assert TEST_DSN is not None
+        for index, (
+            origin_name, status_name, identity_name, format_name, search_name,
+            target_name, spectral_name, bitrate_name, expected_codec,
+        ) in enumerate(cases, start=1):
+            with self.subTest(format=format_name, status=status_name):
+                origin = _axis(MISSING_CURRENT_EVIDENCE_ORIGIN_SEEDS, origin_name)
+                status = _axis(MISSING_CURRENT_EVIDENCE_STATUS_SEEDS, status_name)
+                identity = _axis(MISSING_CURRENT_EVIDENCE_IDENTITY_SEEDS, identity_name)
+                installed = _axis(MISSING_CURRENT_EVIDENCE_FORMAT_SEEDS, format_name)
+                search = _axis(MISSING_CURRENT_EVIDENCE_SEARCH_OVERRIDE_SEEDS, search_name)
+                target = _axis(MISSING_CURRENT_EVIDENCE_TARGET_FORMAT_SEEDS, target_name)
+                spectral = _axis(MISSING_CURRENT_EVIDENCE_LEGACY_SPECTRAL_SEEDS, spectral_name)
+                bitrate = _axis(MISSING_CURRENT_EVIDENCE_LEGACY_BITRATE_SEEDS, bitrate_name)
+                release_id = (
+                    _discogs_release_id(85_500 + index)
+                    if identity.identity_shape == "discogs"
+                    else _mb_release_id(85_500 + index)
+                )
+                with LifecycleWorld(TEST_DSN, repository_root()) as world:
+                    request_id = world.seed_missing_current_evidence_release(
+                        BeetsWorldRelease(
+                            release_id=release_id,
+                            artist="Missing Evidence Archive",
+                            album=f"Installed Census {index}",
+                            year=2008,
+                            codec=installed.codec,
+                        ),
+                        origin=origin,
+                        status=status,
+                        identity=identity,
+                        installed_format=installed,
+                        search_override=search,
+                        target_format=target,
+                        legacy_spectral=spectral,
+                        legacy_bitrate=bitrate,
+                    )
+                    self.assertEqual(
+                        world.missing_current_evidence_origin(request_id),
+                        origin.origin,
+                    )
+                    self.assertEqual(
+                        world.beets.release_stream_codecs(release_id),
+                        (expected_codec,) * 2,
+                    )
+                    _assert_missing_evidence_converges(world, request_id)
+
+    def test_missing_evidence_beets_label_casing_is_not_normalized_away(self) -> None:
+        """Known-bad setter: exact captured Beets labels are audit facts."""
+
+        origin = _axis(
+            MISSING_CURRENT_EVIDENCE_ORIGIN_SEEDS,
+            "pre_rekey_existing_library_add",
+        )
+        status = _axis(MISSING_CURRENT_EVIDENCE_STATUS_SEEDS, "wanted")
+        identity = _axis(MISSING_CURRENT_EVIDENCE_IDENTITY_SEEDS, "musicbrainz")
+        installed = _axis(MISSING_CURRENT_EVIDENCE_FORMAT_SEEDS, "ogg")
+        search = _axis(MISSING_CURRENT_EVIDENCE_SEARCH_OVERRIDE_SEEDS, "default")
+        target = _axis(MISSING_CURRENT_EVIDENCE_TARGET_FORMAT_SEEDS, "default")
+        spectral = _axis(
+            MISSING_CURRENT_EVIDENCE_LEGACY_SPECTRAL_SEEDS,
+            "absent_no_bitrate",
+        )
+        bitrate = _axis(
+            MISSING_CURRENT_EVIDENCE_LEGACY_BITRATE_SEEDS,
+            "both_absent",
+        )
+        assert TEST_DSN is not None
+        with LifecycleWorld(TEST_DSN, repository_root()) as world:
+            real_setter = world.beets.set_release_item_format
+
+            def lower_label(release_id: str, format_label: str) -> None:
+                real_setter(release_id, format_label.lower())
+
+            with patch.object(
+                world.beets,
+                "set_release_item_format",
+                side_effect=lower_label,
+            ):
+                with self.assertRaisesRegex(
+                    AssertionError,
+                    "format axis did not reach the real Beets DB",
+                ):
+                    world.seed_missing_current_evidence_release(
+                        BeetsWorldRelease(
+                            release_id=_mb_release_id(85_599),
+                            artist="Format Fidelity Archive",
+                            album="Exact OGG Label",
+                            year=2008,
+                            codec=installed.codec,
+                        ),
+                        origin=origin,
+                        status=status,
+                        identity=identity,
+                        installed_format=installed,
+                        search_override=search,
+                        target_format=target,
+                        legacy_spectral=spectral,
+                        legacy_bitrate=bitrate,
+                    )
+
     def test_live_drift_retry_stays_closed_until_new_facts_exist(self) -> None:
         """Shrunk #743 world: installed facts die with the old fingerprint."""
 
@@ -885,6 +1121,53 @@ class LifecycleWorldMachine(RuleBasedStateMachine):
                 "changed snapshot bypassed its enrichment gate: "
                 f"{mutation.name}"
             )
+
+    @rule(
+        origin=st.sampled_from(MISSING_CURRENT_EVIDENCE_ORIGIN_SEEDS),
+        status=st.sampled_from(MISSING_CURRENT_EVIDENCE_STATUS_SEEDS),
+        identity=st.sampled_from(MISSING_CURRENT_EVIDENCE_IDENTITY_SEEDS),
+        installed=st.sampled_from(MISSING_CURRENT_EVIDENCE_FORMAT_SEEDS),
+        search=st.sampled_from(MISSING_CURRENT_EVIDENCE_SEARCH_OVERRIDE_SEEDS),
+        target_axis=st.sampled_from(MISSING_CURRENT_EVIDENCE_TARGET_FORMAT_SEEDS),
+        spectral=st.sampled_from(MISSING_CURRENT_EVIDENCE_LEGACY_SPECTRAL_SEEDS),
+        bitrate=st.sampled_from(MISSING_CURRENT_EVIDENCE_LEGACY_BITRATE_SEEDS),
+    )
+    def missing_evidence_scar_then_converge(
+        self,
+        origin: MissingCurrentEvidenceOriginSeed,
+        status: MissingCurrentEvidenceStatusSeed,
+        identity: MissingCurrentEvidenceIdentitySeed,
+        installed: MissingCurrentEvidenceFormatSeed,
+        search: MissingCurrentEvidenceSearchOverrideSeed,
+        target_axis: MissingCurrentEvidenceTargetFormatSeed,
+        spectral: MissingCurrentEvidenceLegacySpectralSeed,
+        bitrate: MissingCurrentEvidenceLegacyBitrateSeed,
+    ) -> None:
+        """Keep the deliberately incoherent scar inside one clean transition."""
+        self._release_counter += 1
+        release_id = (
+            _discogs_release_id(90_000 + self._release_counter)
+            if identity.identity_shape == "discogs"
+            else _mb_release_id(90_000 + self._release_counter)
+        )
+        request_id = self.world.seed_missing_current_evidence_release(
+            BeetsWorldRelease(
+                release_id=release_id,
+                artist="Scar Tissue Archive",
+                album=f"Missing Evidence {self._release_counter}",
+                year=2009,
+                codec=installed.codec,
+            ),
+            origin=origin,
+            status=status,
+            identity=identity,
+            installed_format=installed,
+            search_override=search,
+            target_format=target_axis,
+            legacy_spectral=spectral,
+            legacy_bitrate=bitrate,
+        )
+        _assert_missing_evidence_converges(self.world, request_id)
 
     @invariant()
     def cross_engine_invariants_hold(self) -> None:

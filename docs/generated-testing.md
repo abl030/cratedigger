@@ -147,6 +147,17 @@ authoritative. Ordinary and force-import pins then prove installed-only facts
 produce the expected `have_analysis_error`, keep the request wanted, and
 converge after the production enrichment path measures the exact new snapshot.
 
+The #855 audit adds the separate 429-row `current_evidence_missing` cohort:
+each row has one uniquely installed Beets album but no current-evidence FK.
+Its anonymized marginal vocabularies retain historical origin, status,
+MusicBrainz/Discogs identity, installed codec/container, operator search and
+target intent, and legacy spectral/bitrate scalar presence. The real-store
+state rule crosses those independent axes, first requiring the shared
+invariant bank to report `current_evidence_missing`, then requiring the
+production evidence loader to rebuild and link a lineage-4 snapshot without
+mutating operator-owned request state. Explicit OGG/Vorbis and Windows
+Media/WMA examples keep the native Beets format labels at that boundary.
+
 Every lifecycle import — ordinary automation and force alike — hands its
 enqueued job to the real preview worker (`process_claimed_preview_job`, the
 shared `_run_preview_worker` step) before the importer may claim it, so

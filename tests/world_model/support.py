@@ -113,7 +113,16 @@ from tests.world_model.census_seeds import (
     STATEFUL_WORLD_CENSUS_SEEDS,
     EvidenceDriftFactSeed,
     EvidenceDriftMutationSeed,
+    MissingCurrentEvidenceIdentitySeed,
+    MissingCurrentEvidenceFormatSeed,
+    MissingCurrentEvidenceLegacyBitrateSeed,
+    MissingCurrentEvidenceLegacySpectralSeed,
+    MissingCurrentEvidenceOriginSeed,
+    MissingCurrentEvidenceSearchOverrideSeed,
+    MissingCurrentEvidenceStatusSeed,
+    MissingCurrentEvidenceTargetFormatSeed,
     WorldCensusSeed,
+    assert_missing_current_evidence_seed_anonymized,
 )
 from scripts.import_preview_worker import process_claimed_preview_job
 
@@ -180,6 +189,7 @@ class LifecycleWorld:
             prefix="cratedigger-world-processing-",
         )
         self._release_by_request: dict[int, BeetsWorldRelease] = {}
+        self._missing_current_evidence_origins: dict[int, str] = {}
         self._dispatch_counter = 0
         self._operator_counter = 0
         self._last_subprocess_run: ImportOneRun | None = None
@@ -411,6 +421,99 @@ class LifecycleWorld:
         ):
             raise AssertionError("failed to apply drift request facts")
         return request_id
+
+    def seed_missing_current_evidence_release(
+        self,
+        release: BeetsWorldRelease,
+        *,
+        origin: MissingCurrentEvidenceOriginSeed,
+        status: MissingCurrentEvidenceStatusSeed,
+        identity: MissingCurrentEvidenceIdentitySeed,
+        installed_format: MissingCurrentEvidenceFormatSeed,
+        search_override: MissingCurrentEvidenceSearchOverrideSeed,
+        target_format: MissingCurrentEvidenceTargetFormatSeed,
+        legacy_spectral: MissingCurrentEvidenceLegacySpectralSeed,
+        legacy_bitrate: MissingCurrentEvidenceLegacyBitrateSeed,
+    ) -> int:
+        """Inject one #855 installed-album/no-evidence scar into real stores.
+
+        The direct historical state belongs only in this disposable harness:
+        the album is installed through real Beets while the request has no
+        current evidence. Normal convergence below still uses the production
+        action loader. Historical origin has no durable production column, so
+        it is retained as model history for sampling and assertions.
+        """
+        release_identity = ReleaseIdentity.from_id(release.release_id)
+        if release_identity is None or release_identity.source != identity.identity_shape:
+            raise ValueError(
+                "release identity does not match missing-evidence census axis: "
+                f"{release.release_id!r} / {identity.identity_shape!r}"
+            )
+        if release.codec.casefold() != installed_format.codec:
+            raise ValueError(
+                "release codec does not match missing-evidence format axis: "
+                f"{release.codec!r} / {installed_format.codec!r}"
+            )
+        assert_missing_current_evidence_seed_anonymized(installed_format)
+        request_id = self.add_release(release)
+        self.beets.import_release(release)
+        self.beets.set_release_item_format(
+            release.release_id,
+            installed_format.installed_format,
+        )
+        expected_formats = (installed_format.installed_format,) * release.track_count
+        actual_formats = self.beets.release_item_formats(release.release_id)
+        if actual_formats != expected_formats:
+            raise AssertionError(
+                "missing-evidence format axis did not reach the real Beets DB: "
+                f"{actual_formats!r} != {expected_formats!r}"
+            )
+        if self.db.get_request_current_evidence_id(request_id) is not None:
+            raise AssertionError("scar-tissue seed unexpectedly linked evidence")
+
+        row = self._require_request(request_id)
+        if status.status == "unsearchable":
+            require_transition_applied(finalize_request(
+                self.db,
+                request_id,
+                RequestTransition.to_unsearchable(
+                    from_status=str(row["status"]),
+                ),
+            ))
+        elif status.status != "wanted":
+            raise ValueError(
+                f"unsupported missing-evidence status: {status.status!r}"
+            )
+
+        scalar_status = str(self._require_request(request_id)["status"])
+        if not self.db.update_request_fields(
+            request_id,
+            expected_status=scalar_status,
+            search_filetype_override=search_override.search_override,
+            target_format=target_format.target_format,
+            final_format=None,
+            verified_lossless=False,
+            current_spectral_grade=legacy_spectral.spectral_grade,
+            current_spectral_bitrate=(
+                192 if legacy_spectral.has_bitrate else None
+            ),
+            min_bitrate=192 if legacy_bitrate.has_min_bitrate else None,
+            prev_min_bitrate=(
+                185 if legacy_bitrate.has_prev_min_bitrate else None
+            ),
+        ):
+            raise AssertionError("failed to apply missing-evidence scar scalars")
+        self._missing_current_evidence_origins[request_id] = origin.origin
+        return request_id
+
+    def missing_current_evidence_origin(self, request_id: int) -> str:
+        """Return the anonymized historical origin attached to one scar."""
+        try:
+            return self._missing_current_evidence_origins[request_id]
+        except KeyError as exc:
+            raise AssertionError(
+                f"request {request_id} is not a missing-evidence scar"
+            ) from exc
 
     def inject_evidence_drift(
         self,

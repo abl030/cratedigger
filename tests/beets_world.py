@@ -371,6 +371,10 @@ class BeetsWorld:
             encoder_args = ["-c:a", "libopus", "-b:a", "128k"]
         elif codec_key == "m4a":
             encoder_args = ["-c:a", "aac", "-b:a", "192k"]
+        elif codec_key == "ogg":
+            encoder_args = ["-c:a", "libvorbis", "-q:a", "4"]
+        elif codec_key == "wma":
+            encoder_args = ["-c:a", "wmav2", "-b:a", "192k"]
         else:
             raise ValueError(f"unsupported scratch-world codec {codec!r}")
         subprocess.run(
@@ -542,6 +546,38 @@ class BeetsWorld:
                 duplicate.remove(delete=True)
         album.move(MoveOperation.MOVE)
         return self.snapshot_album(album)
+
+    def set_release_item_format(self, release_id: str, format_label: str) -> None:
+        """Set the Beets projection label after importing genuine audio bytes."""
+
+        matches = [
+            album
+            for album in self.library.albums()
+            if self._album_release_id(album) == release_id
+        ]
+        if len(matches) != 1:
+            raise AssertionError(
+                f"format release must resolve once: {release_id!r} -> "
+                f"{len(matches)}"
+            )
+        for item in matches[0].items():
+            item["format"] = format_label
+            item.store()
+
+    def release_item_formats(self, release_id: str) -> tuple[str, ...]:
+        """Return the actual Beets item.format labels for one exact release."""
+
+        matches = [
+            album
+            for album in self.library.albums()
+            if self._album_release_id(album) == release_id
+        ]
+        if len(matches) != 1:
+            raise AssertionError(
+                f"format release must resolve once: {release_id!r} -> "
+                f"{len(matches)}"
+            )
+        return tuple(str(item["format"]) for item in matches[0].items())
 
     def set_discogs_identity_layout(
         self,
@@ -825,6 +861,43 @@ class BeetsWorld:
 
     def snapshots(self) -> tuple[LibraryAlbumSnapshot, ...]:
         return tuple(self.snapshot_album(album) for album in self.library.albums())
+
+    def release_stream_codecs(self, release_id: str) -> tuple[str, ...]:
+        """Read actual ffprobe codecs for one installed exact release.
+
+        This deliberately probes the real files rather than inferring an
+        encoder from their suffix, so unusual observed containers (Ogg and
+        Windows Media) cannot regress into renamed MP3 stand-ins.
+        """
+        album = next(
+            (
+                snapshot for snapshot in self.snapshots()
+                if snapshot.release_id == release_id
+            ),
+            None,
+        )
+        if album is None:
+            raise AssertionError(f"release is not installed: {release_id!r}")
+        codecs: list[str] = []
+        for item_path in album.item_paths:
+            result = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v", "error",
+                    "-select_streams", "a:0",
+                    "-show_entries", "stream=codec_name",
+                    "-of", "default=nokey=1:noprint_wrappers=1",
+                    item_path,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            codec = result.stdout.strip()
+            if not codec:
+                raise AssertionError(f"ffprobe found no audio codec: {item_path}")
+            codecs.append(codec)
+        return tuple(codecs)
 
 
 __all__ = [
