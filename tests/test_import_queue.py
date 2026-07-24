@@ -19,7 +19,7 @@ from lib.dispatch import (
     DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
     DispatchOutcome,
 )
-from lib.download_processing import Completed, CompletionDeferred, CompletionDispatched
+from lib.download_processing import Completed, CompletionDeferred, CompletionDispatched, CompletionFailed
 from lib.import_queue import (
     AutomationImportPayload,
     ForceImportPayload,
@@ -1883,6 +1883,54 @@ class TestImporterWorker(unittest.TestCase):
             updated.message,
             "Automation import was deferred or requires manual recovery: "
             "incomplete_or_unsafe_canonical",
+        )
+
+    def test_automation_job_failed_message_carries_reason(self):
+        """Issue #865: a failed completion's job message must carry the honest
+        ``CompletionFailed.reason`` — the same #859 rule that already applies
+        to ``CompletionDeferred.detail``."""
+        from scripts import importer
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={
+                "filetype": "flac",
+                "enqueued_at": "2026-04-25T00:00:00+00:00",
+                "files": [{
+                    "username": "alice",
+                    "filename": "Artist\\Album\\01.flac",
+                    "file_dir": "Artist\\Album",
+                    "size": 123,
+                }],
+            },
+        ))
+        job = db.enqueue_import_job(
+            IMPORT_JOB_AUTOMATION,
+            request_id=42,
+            dedupe_key=automation_import_dedupe_key(42),
+            payload={},
+        )
+        self._mark_importable(db, job)
+        claimed = db.claim_next_import_job(worker_id="worker")
+        assert claimed is not None
+
+        with patch(
+            "lib.download._run_completed_processing",
+            return_value=CompletionFailed(reason="event_path_missing"),
+        ):
+            updated = importer.process_claimed_job(
+                db,  # pyright: ignore[reportArgumentType]
+                claimed,
+                ctx=object(),
+            )
+
+        assert updated is not None
+        self.assertEqual(updated.status, "failed")
+        self.assertEqual(
+            updated.message,
+            "Automation import processing failed: event_path_missing",
         )
 
     def test_automation_job_fails_from_dispatch_outcome(self):
@@ -4523,6 +4571,38 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
             updated.message,
             "YouTube import was deferred or requires manual recovery: "
             "incomplete_or_unsafe_canonical",
+        )
+
+    def test_failed_message_carries_reason(self):
+        """Issue #865: YouTube twin of the failed-reason mapper rule."""
+        from scripts import importer
+
+        with tempfile.TemporaryDirectory() as staged:
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=42, status="wanted", mb_release_id="mbid-yt-failed",
+            ))
+            job = self._enqueue_youtube_job(
+                db, request_id=42, staged_path=staged, download_log_id=19,
+            )
+            self._mark_importable(db, job)
+            claimed = self._claim(db)
+
+            with patch(
+                "lib.download_processing.process_completed_album",
+                return_value=CompletionFailed(reason="staged_path_missing"),
+            ):
+                updated = importer.process_claimed_job(
+                    db,  # pyright: ignore[reportArgumentType]
+                    claimed,
+                    ctx=object(),
+                )
+
+        assert updated is not None
+        self.assertEqual(updated.status, "failed")
+        self.assertEqual(
+            updated.message,
+            "YouTube import processing failed: staged_path_missing",
         )
 
     def test_missing_request_returns_failed_dispatch_outcome(self):

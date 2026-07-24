@@ -84,6 +84,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         "id", "request_id", "outcome", "created_at", "soulseek_username",
         "badge", "badge_class", "border_color",
         "downloaded_label", "verdict", "beets_scenario", "beets_distance",
+        "apply_beets_distance",
         "disambiguation_failure", "disambiguation_detail", "bad_extensions",
         "spectral_grade", "spectral_bitrate", "existing_min_bitrate",
         "existing_spectral_grade", "existing_spectral_bitrate", "existing_format",
@@ -1110,6 +1111,59 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
                                 "pipeline detail history item")
         # Default mock state: no search history → last_search is None.
         self.assertIsNone(data["last_search"])
+
+    def test_pipeline_detail_history_derives_apply_beets_distance(self):
+        """Issue #865: the apply-time beets distance persisted by #863 in
+        ``import_result`` JSONB must surface as a first-class history field
+        (the card previously showed only the validate-time distance)."""
+        self.db.log_download(
+            request_id=100,
+            outcome="rejected",
+            soulseek_username="SevenNines",
+            error_message="beets apply distance 0.5637 exceeded 0.5",
+            import_result={
+                "version": 4,
+                "exit_code": 2,
+                "decision": "import_failed",
+                "apply_beets_distance": 0.5637,
+            },
+        )
+        status, data = self._get("/api/pipeline/100")
+        self.assertEqual(status, 200)
+        by_msg = [
+            h for h in data["history"]
+            if h.get("error_message") == "beets apply distance 0.5637 exceeded 0.5"
+        ]
+        self.assertEqual(len(by_msg), 1)
+        self.assertEqual(by_msg[0]["apply_beets_distance"], 0.5637)
+
+    def test_pipeline_detail_history_apply_distance_null_for_legacy_rows(self):
+        """Rows predating #863 have no apply_beets_distance key — the derived
+        field must be null, never an error."""
+        status, data = self._get("/api/pipeline/100")
+        self.assertEqual(status, 200)
+        self.assertIsNone(data["history"][0]["apply_beets_distance"])
+
+    def test_apply_beets_distance_derivation_table(self):
+        """Direct coverage of the tolerant JSONB read — the bool guard is
+        load-bearing (isinstance(True, int) is True) and the str branch
+        covers legacy text-JSONB rows."""
+        from web.download_history_view import _apply_beets_distance
+
+        cases = [
+            ("dict with float", {"apply_beets_distance": 0.5637}, 0.5637),
+            ("dict with int", {"apply_beets_distance": 1}, 1.0),
+            ("missing key", {"decision": "import_failed"}, None),
+            ("bool must not coerce", {"apply_beets_distance": True}, None),
+            ("json string row", '{"apply_beets_distance": 0.25}', 0.25),
+            ("malformed json string", "{not json", None),
+            ("null jsonb", None, None),
+            ("non-dict json", [1, 2], None),
+            ("string value", {"apply_beets_distance": "0.5"}, None),
+        ]
+        for desc, raw, expected in cases:
+            with self.subTest(desc=desc):
+                self.assertEqual(_apply_beets_distance(raw), expected)
 
     def test_pipeline_detail_uses_fresh_typed_beets_path(self):
         """The request cache is never a current-library display authority."""

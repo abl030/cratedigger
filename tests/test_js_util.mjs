@@ -3,7 +3,7 @@
  * Run with: node tests/test_js_util.mjs
  */
 
-import { qualityLabel, qualityLabelShort, toAWST, awstDate, awstTime, awstDateTime, esc, jsArg, overrideToIntent, detectSource, externalReleaseUrl, sourceLabel, youtubeBrowseUrl, renderForensicBlock, parsePastedId, youtubeSectionState, consoleEmphasis } from '../web/js/util.js';
+import { qualityLabel, qualityLabelShort, toAWST, awstDate, awstTime, awstDateTime, esc, jsArg, overrideToIntent, detectSource, externalReleaseUrl, sourceLabel, youtubeBrowseUrl, renderForensicBlock, parsePastedId, youtubeSectionState, consoleEmphasis, withApplyDistance } from '../web/js/util.js';
 import { state } from '../web/js/state.js';
 import { applyLabelFilters, sortByYearDesc, buildLabelSearchUrl, buildLabelDetailUrl, loadLabelReleases, parseYear, renderLabelLinks, distinctFormats, renderPaginationControls, renderLabelRows } from '../web/js/labels.js';
 import { __test__ as longTailTest } from '../web/js/long_tail.js';
@@ -1829,3 +1829,22 @@ console.log('long_tail_console.js console persistence (#398 / #481 item 1)');
 // --- Summary ---
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
+
+{
+  // #865: the card's Distance cell appends the apply-time distance (#863)
+  // only when one was persisted — legacy rows render unchanged.
+  assertEqual(withApplyDistance('0.082', null), '0.082',
+    'null apply distance leaves the cell unchanged');
+  assertEqual(withApplyDistance('0.082', undefined), '0.082',
+    'undefined apply distance leaves the cell unchanged');
+  assertEqual(withApplyDistance('—', null), '—',
+    'em-dash cell unchanged without apply distance');
+  assertEqual(withApplyDistance('0.082', 0.5637),
+    '0.082 <span class="p-hist-was">· apply 0.564</span>',
+    'numeric apply distance appends the suffix');
+  assertEqual(withApplyDistance('—', '0.5637'),
+    '— <span class="p-hist-was">· apply 0.564</span>',
+    'string apply distance parses and appends');
+  assertEqual(withApplyDistance('0.082', 'not-a-number'), '0.082',
+    'unparseable apply distance leaves the cell unchanged');
+}
