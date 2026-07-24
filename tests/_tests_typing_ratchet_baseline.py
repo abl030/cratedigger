@@ -33,7 +33,6 @@ TESTS_TYPING_RATCHET_BASELINE: dict[str, dict[str, int]] = {
     "tests/test_beets_destructive_configs_generated.py": {"any": 3},
     "tests/test_beets_validation.py": {"type_ignore": 1},
     "tests/test_browse.py": {"any": 7, "cast": 5},
-    "tests/test_browse_route_generated.py": {"type_ignore": 2},
     "tests/test_cleanup_ghost_imported_generated.py": {"cast": 2},
     "tests/test_config.py": {"type_ignore": 2},
     "tests/test_convergence_runner_generated.py": {"cast": 4},
