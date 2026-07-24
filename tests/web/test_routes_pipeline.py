@@ -1144,6 +1144,27 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(status, 200)
         self.assertIsNone(data["history"][0]["apply_beets_distance"])
 
+    def test_apply_beets_distance_derivation_table(self):
+        """Direct coverage of the tolerant JSONB read — the bool guard is
+        load-bearing (isinstance(True, int) is True) and the str branch
+        covers legacy text-JSONB rows."""
+        from web.download_history_view import _apply_beets_distance
+
+        cases = [
+            ("dict with float", {"apply_beets_distance": 0.5637}, 0.5637),
+            ("dict with int", {"apply_beets_distance": 1}, 1.0),
+            ("missing key", {"decision": "import_failed"}, None),
+            ("bool must not coerce", {"apply_beets_distance": True}, None),
+            ("json string row", '{"apply_beets_distance": 0.25}', 0.25),
+            ("malformed json string", "{not json", None),
+            ("null jsonb", None, None),
+            ("non-dict json", [1, 2], None),
+            ("string value", {"apply_beets_distance": "0.5"}, None),
+        ]
+        for desc, raw, expected in cases:
+            with self.subTest(desc=desc):
+                self.assertEqual(_apply_beets_distance(raw), expected)
+
     def test_pipeline_detail_uses_fresh_typed_beets_path(self):
         """The request cache is never a current-library display authority."""
         import web.server as srv
