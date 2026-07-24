@@ -7,6 +7,8 @@ import unittest
 
 from hypothesis import example, given, settings, strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401 - registers active profile
+
 from lib import transitions
 from lib.import_queue import IMPORT_JOB_FORCE
 from lib.pipeline_db import PipelineDB

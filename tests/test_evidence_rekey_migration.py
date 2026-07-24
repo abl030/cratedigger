@@ -29,12 +29,14 @@ import tempfile
 import unittest
 import uuid
 from typing import Sequence
+from unittest.mock import patch
 
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401 — sets TEST_DB_DSN env var
 
 
 import psycopg2  # noqa: E402
+from psycopg2.extensions import make_dsn, parse_dsn  # noqa: E402
 
 from lib.migrator import (  # noqa: E402
     DEFAULT_MIGRATIONS_DIR,
@@ -57,33 +59,47 @@ def requires_postgres(cls):
     return cls
 
 
-def _parse_dsn(dsn: str) -> tuple[str, str, int, str]:
-    """Return (user, host, port, dbname) from a postgres DSN."""
-    # postgresql://user@host:port/dbname
-    body = dsn.split("://", 1)[1]
-    userhost, dbname = body.rsplit("/", 1)
-    user, hostport = userhost.split("@", 1)
-    if ":" in hostport:
-        host, port_str = hostport.split(":", 1)
-        port = int(port_str)
-    else:
-        host = hostport
-        port = 5432
-    return user, host, port, dbname
-
-
 def _build_isolated_dsn(template_dsn: str, db_name: str) -> str:
-    user, host, port, _ = _parse_dsn(template_dsn)
-    return f"postgresql://{user}@{host}:{port}/{db_name}"
+    """Override only dbname while preserving every libpq connection option."""
+    return make_dsn(template_dsn, dbname=db_name)
 
 
 def _maintenance_conn(template_dsn: str):
-    user, host, port, _ = _parse_dsn(template_dsn)
-    conn = psycopg2.connect(
-        host=host, port=port, dbname="postgres", user=user
-    )
+    conn = psycopg2.connect(make_dsn(template_dsn, dbname="postgres"))
     conn.autocommit = True
     return conn
+
+
+class TestIsolatedDatabaseDsnDerivation(unittest.TestCase):
+    SOCKET_DSN = (
+        "postgresql://test-user@/cratedigger_test?"
+        "host=%2Frun%2Fprivate%2Fpg&application_name=migration-test"
+    )
+
+    def test_isolated_dsn_preserves_private_socket_and_query_options(self) -> None:
+        derived = _build_isolated_dsn(self.SOCKET_DSN, "isolated_database")
+
+        self.assertEqual(
+            parse_dsn(derived),
+            {
+                "user": "test-user",
+                "dbname": "isolated_database",
+                "host": "/run/private/pg",
+                "application_name": "migration-test",
+            },
+        )
+
+    def test_maintenance_connection_preserves_private_socket(self) -> None:
+        with patch(
+            "tests.test_evidence_rekey_migration.psycopg2.connect"
+        ) as connect:
+            connection = connect.return_value
+            _maintenance_conn(self.SOCKET_DSN)
+
+        connect.assert_called_once_with(
+            _build_isolated_dsn(self.SOCKET_DSN, "postgres")
+        )
+        self.assertTrue(connection.autocommit)
 
 
 def _make_isolated_db(template_dsn: str) -> tuple[str, str]:

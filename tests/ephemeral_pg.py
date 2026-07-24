@@ -1,126 +1,142 @@
-"""Ephemeral PostgreSQL server for tests.
-
-Spins up an isolated PostgreSQL instance on a random port with a temp data
-directory. Completely independent of any system PostgreSQL. Requires initdb
-and pg_ctl on PATH (provided by pkgs.postgresql in Nix).
-
-Usage:
-    from ephemeral_pg import EphemeralPostgres
-
-    # Module-level (shared across all tests):
-    pg = EphemeralPostgres()
-    pg.start()
-    DSN = pg.dsn
-
-    # In teardown:
-    pg.stop()
-
-Or as a context manager:
-    with EphemeralPostgres() as pg:
-        db = PipelineDB(pg.dsn)
-"""
+"""Disposable PostgreSQL clusters for tests, isolated on private Unix sockets."""
 
 import atexit
 import os
+from pathlib import Path
 import shutil
-import socket
 import subprocess
 import tempfile
 import time
+from urllib.parse import quote
 
 
-def _find_free_port():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+class EphemeralPostgresError(RuntimeError):
+    """A disposable cluster could not start, with its useful diagnostics."""
 
 
 class EphemeralPostgres:
-    def __init__(self):
-        self.tmpdir = None
-        self.port = None
-        self.dsn = None
+    def __init__(self) -> None:
+        self.tmpdir: Path | None = None
+        self.dsn: str | None = None
+        self._server_started = False
         self._started = False
 
-    def start(self):
+    @property
+    def _datadir(self) -> Path:
+        assert self.tmpdir is not None
+        return self.tmpdir / "data"
+
+    @property
+    def _logfile(self) -> Path:
+        assert self.tmpdir is not None
+        return self.tmpdir / "pg.log"
+
+    @property
+    def _socket_dir(self) -> Path:
+        assert self.tmpdir is not None
+        return self.tmpdir / "socket"
+
+    def _failure_detail(self, error: subprocess.CalledProcessError) -> str:
+        command = " ".join(str(part) for part in error.cmd)
+        stdout = (error.stdout or b"").decode("utf-8", errors="replace")
+        stderr = (error.stderr or b"").decode("utf-8", errors="replace")
+        log = ""
+        if self.tmpdir is not None and self._logfile.is_file():
+            log = self._logfile.read_text(encoding="utf-8", errors="replace")
+        return (
+            f"PostgreSQL command failed ({error.returncode}): {command}\n"
+            f"stdout:\n{stdout}\nstderr:\n{stderr}\npg.log:\n{log}"
+        )
+
+    def _cleanup(self) -> None:
+        if self._server_started and self.tmpdir is not None:
+            subprocess.run(
+                ["pg_ctl", "-D", str(self._datadir), "-m", "immediate", "stop"],
+                capture_output=True,
+                check=False,
+            )
+        self._server_started = False
+        self._started = False
+        self.dsn = None
+        if self.tmpdir is not None:
+            shutil.rmtree(self.tmpdir, ignore_errors=True)
+        self.tmpdir = None
+
+    def start(self) -> None:
         if self._started:
             return
-
-        # Check that initdb/pg_ctl are available
         if not shutil.which("initdb") or not shutil.which("pg_ctl"):
-            raise RuntimeError(
-                "initdb/pg_ctl not found. Run tests inside: "
-                "nix-shell -p postgresql python3Packages.psycopg2"
+            raise EphemeralPostgresError(
+                "initdb/pg_ctl not found; run tests inside nix-shell"
             )
 
-        self.tmpdir = tempfile.mkdtemp(prefix="cratedigger_test_pg_")
-        self.port = _find_free_port()
-        datadir = os.path.join(self.tmpdir, "data")
-        logfile = os.path.join(self.tmpdir, "pg.log")
-        sockdir = self.tmpdir
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="cratedigger_test_pg_"))
+        self._socket_dir.mkdir()
+        user = os.getenv("USER", "root")
+        try:
+            subprocess.run(
+                [
+                    "initdb", "-D", str(self._datadir), "--no-locale", "-E", "UTF8",
+                    "-A", "trust",
+                ],
+                capture_output=True,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "pg_ctl", "-D", str(self._datadir), "-l", str(self._logfile), "-o",
+                    f"-k {self._socket_dir} -c listen_addresses=''", "start",
+                ],
+                capture_output=True,
+                check=True,
+            )
+            self._server_started = True
 
-        # initdb
-        subprocess.run(
-            ["initdb", "-D", datadir, "--no-locale", "-E", "UTF8", "-A", "trust"],
-            capture_output=True, check=True,
-        )
+            import psycopg2
 
-        # Start postgres on random port, unix socket in tmpdir
-        subprocess.run(
-            ["pg_ctl", "-D", datadir, "-l", logfile, "-o",
-             f"-p {self.port} -k {sockdir} -c listen_addresses=127.0.0.1",
-             "start"],
-            capture_output=True, check=True,
-        )
-
-        # Wait for it to be ready
-        for _ in range(30):
-            try:
-                import psycopg2
-                conn = psycopg2.connect(
-                    host="127.0.0.1", port=self.port, dbname="postgres", user=os.getenv("USER", "root")
+            for _ in range(30):
+                try:
+                    with psycopg2.connect(
+                        host=str(self._socket_dir), dbname="postgres", user=user,
+                    ):
+                        break
+                except psycopg2.OperationalError:
+                    time.sleep(0.1)
+            else:
+                log = self._logfile.read_text(encoding="utf-8", errors="replace")
+                raise EphemeralPostgresError(
+                    f"PostgreSQL did not become ready. pg.log:\n{log}"
                 )
-                conn.close()
-                break
-            except Exception:
-                time.sleep(0.1)
-        else:
-            self.stop()
-            raise RuntimeError(f"PostgreSQL failed to start. Log: {logfile}")
 
-        # Create test database
-        import psycopg2
-        conn = psycopg2.connect(
-            host="127.0.0.1", port=self.port, dbname="postgres", user=os.getenv("USER", "root")
-        )
-        conn.autocommit = True
-        conn.cursor().execute("CREATE DATABASE cratedigger_test")
-        conn.close()
+            connection = psycopg2.connect(
+                host=str(self._socket_dir), dbname="postgres", user=user,
+            )
+            try:
+                connection.autocommit = True
+                with connection.cursor() as cursor:
+                    cursor.execute("CREATE DATABASE cratedigger_test")
+            finally:
+                connection.close()
+            self.dsn = (
+                f"postgresql://{quote(user)}@/cratedigger_test?host="
+                f"{quote(str(self._socket_dir), safe='')}"
+            )
+            self._started = True
+            atexit.register(self.stop)
+        except subprocess.CalledProcessError as error:
+            detail = self._failure_detail(error)
+            self._cleanup()
+            raise EphemeralPostgresError(detail) from error
+        except Exception:
+            self._cleanup()
+            raise
 
-        self.dsn = f"postgresql://{os.getenv('USER', 'root')}@127.0.0.1:{self.port}/cratedigger_test"
-        self._started = True
+    def stop(self) -> None:
+        self._cleanup()
 
-        # Register cleanup in case stop() is never called
-        atexit.register(self.stop)
-
-    def stop(self):
-        if not self._started:
-            return
-        self._started = False
-
-        assert self.tmpdir is not None
-        datadir = os.path.join(self.tmpdir, "data")
-        subprocess.run(
-            ["pg_ctl", "-D", datadir, "-m", "immediate", "stop"],
-            capture_output=True,
-        )
-
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-        self.tmpdir = None
-
-    def __enter__(self):
+    def __enter__(self) -> "EphemeralPostgres":
         self.start()
         return self
 
-    def __exit__(self, *args):
+    def __exit__(self, *_args: object) -> None:
         self.stop()
