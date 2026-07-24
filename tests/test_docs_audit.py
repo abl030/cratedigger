@@ -23,7 +23,6 @@ read straight off disk.
 
 from __future__ import annotations
 
-import argparse
 import os
 import re
 import subprocess
@@ -34,7 +33,10 @@ from tempfile import TemporaryDirectory
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from scripts.pipeline_cli.routes_meta import _build_parser  # noqa: E402
+from scripts.pipeline_cli.routes_meta import (  # noqa: E402
+    _build_parser,
+    _collect_cli_routes,
+)
 from tests._docs_reference_audit import (  # noqa: E402
     REMOVAL_STABLE_REPO_ROOTS,
     REMOVAL_STABLE_ROOT_FILES,
@@ -624,62 +626,65 @@ class TestBeetsPluginDocCoverage(unittest.TestCase):
 
 
 # ======================================================================
-# Check 2 — pipeline-cli subcommand <-> docs/debugging-cli.md coverage
+# Check 2 — pipeline-cli parser leaves <-> docs/debugging-cli.md capability list
 # ======================================================================
 
-# Genuinely-internal subcommands exempt from the operator debugging doc.
-# Keep MINIMAL — prefer adding a doc row over adding an entry here.
-UNDOCUMENTED_CLI_OK: frozenset[str] = frozenset()
+_CAPABILITY_HEADING = "## Command capability surface"
 
 
-def _top_level_cli_subcommand_names() -> list[str]:
-    """Introspect argparse's own subparser choices — never regex the CLI."""
+def _cli_route_names() -> list[str]:
+    """Derive command capabilities from the parser's route walker."""
     parser, _, _ = _build_parser()
-    sub_action = next(
-        a for a in parser._actions  # noqa: SLF001
-        if isinstance(a, argparse._SubParsersAction)  # noqa: SLF001
+    return sorted(str(row["subcommand"]) for row in _collect_cli_routes(parser))
+
+
+def _documented_cli_capabilities(doc_text: str) -> list[str]:
+    """Read the authoritative bounded capability list, not prose mentions."""
+    try:
+        section = doc_text.split(_CAPABILITY_HEADING, 1)[1]
+    except IndexError:
+        return []
+    next_heading = section.find("\n## ")
+    if next_heading != -1:
+        section = section[:next_heading]
+    return sorted(re.findall(r"^- `pipeline-cli ([^`]+)` —", section, re.MULTILINE))
+
+
+def _capability_surface_drift(
+    expected: list[str], documented: list[str],
+) -> tuple[list[str], list[str]]:
+    """Return missing parser commands and stale document commands."""
+    return (
+        sorted(set(expected) - set(documented)),
+        sorted(set(documented) - set(expected)),
     )
-    return sorted(sub_action.choices.keys())
-
-
-def _undocumented_subcommands(
-    names: list[str], doc_text: str, ok: frozenset[str],
-) -> list[str]:
-    missing = []
-    for name in names:
-        if name in ok:
-            continue
-        if not re.search(rf"\b{re.escape(name)}\b", doc_text):
-            missing.append(name)
-    return missing
 
 
 class TestPipelineCliDocCoverage(unittest.TestCase):
-    """Every pipeline-cli top-level subcommand needs an operator-facing
-    mention in docs/debugging-cli.md (or a rationale in
-    UNDOCUMENTED_CLI_OK)."""
+    """The authoritative capability list is exactly the parser leaf surface."""
 
-    def test_every_subcommand_is_mentioned_in_debugging_cli_doc(self) -> None:
-        names = _top_level_cli_subcommand_names()
-        doc_text = DEBUGGING_CLI.read_text(encoding="utf-8")
-        missing = _undocumented_subcommands(names, doc_text, UNDOCUMENTED_CLI_OK)
+    def test_capability_list_matches_every_parser_command_exactly(self) -> None:
+        actual = _documented_cli_capabilities(
+            DEBUGGING_CLI.read_text(encoding="utf-8"))
+        expected = _cli_route_names()
+        missing, stale = _capability_surface_drift(expected, actual)
         self.assertEqual(
-            missing, [],
-            f"pipeline-cli subcommand(s) {missing} have no mention in "
-            f"docs/debugging-cli.md. Add a line/table row (preferred), or "
-            f"add to UNDOCUMENTED_CLI_OK with a one-line rationale if it's "
-            f"genuinely not an operator-debugging surface.",
+            actual, expected,
+            "docs/debugging-cli.md's Command capability surface must match "
+            "pipeline-cli routes exactly; update docs for additions and removals. "
+            f"missing={missing}, stale={stale}",
         )
 
     def test_scan_is_not_vacuous(self) -> None:
-        names = _top_level_cli_subcommand_names()
-        self.assertGreaterEqual(len(names), 20)
+        self.assertGreaterEqual(len(_cli_route_names()), 30)
 
-    def test_undocumented_subcommands_helper_flags_a_bogus_command(self) -> None:
+    def test_capability_helper_flags_a_bogus_command(self) -> None:
         """Known-bad self-test: the diff helper actually has teeth."""
-        missing = _undocumented_subcommands(
-            ["show", "bogus570cmd"], "pipeline-cli show <id>", frozenset())
-        self.assertEqual(missing, ["bogus570cmd"])
+        missing, stale = _capability_surface_drift(
+            ["show"], ["show", "bogus570cmd"],
+        )
+        self.assertEqual(missing, [])
+        self.assertEqual(stale, ["bogus570cmd"])
 
 
 # ======================================================================

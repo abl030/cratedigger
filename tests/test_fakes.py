@@ -651,6 +651,78 @@ class TestFakePipelineDB(unittest.TestCase):
         self.assertEqual(db._execute("SELECT 1").fetchall(), [])
         self.assertEqual(db.execute_calls, [("SELECT 1", ())])
 
+    def test_read_only_query_cursor_brackets_query_with_setup_and_rollback(self):
+        db = FakePipelineDB()
+        query_cursor = FakeCursor([{"id": 1}])
+        db.queue_execute_results(
+            MagicMock(name="begin"), MagicMock(name="string_mode"),
+            query_cursor, MagicMock(name="rollback"),
+        )
+
+        with db.read_only_query_cursor() as cursor:
+            cursor.execute("SELECT 1")
+            self.assertEqual(cursor.fetchall(), [{"id": 1}])
+
+        self.assertEqual(
+            db.execute_calls,
+            [
+                ("BEGIN TRANSACTION READ ONLY", ()),
+                ("SET LOCAL standard_conforming_strings = on", ()),
+                ("SELECT 1", ()),
+                ("ROLLBACK", ()),
+            ],
+        )
+
+    def test_read_only_query_cursor_rolls_back_after_query_error(self):
+        db = FakePipelineDB()
+        error = RuntimeError("query failed")
+        db.queue_execute_results(
+            MagicMock(name="begin"), MagicMock(name="string_mode"), error,
+            MagicMock(name="rollback"),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "query failed"):
+            with db.read_only_query_cursor() as cursor:
+                cursor.execute("SELECT broken")
+
+        self.assertEqual(
+            db.execute_calls,
+            [
+                ("BEGIN TRANSACTION READ ONLY", ()),
+                ("SET LOCAL standard_conforming_strings = on", ()),
+                ("SELECT broken", ()),
+                ("ROLLBACK", ()),
+            ],
+        )
+
+    def test_read_only_query_cursor_suppresses_connection_lost_during_cleanup(self):
+        import psycopg2
+
+        db = FakePipelineDB()
+        query_cursor = FakeCursor([{"id": 1}])
+        db.queue_execute_results(
+            MagicMock(name="begin"), MagicMock(name="string_mode"),
+            query_cursor, psycopg2.InterfaceError("connection lost"),
+        )
+
+        with db.read_only_query_cursor() as cursor:
+            cursor.execute("SELECT 1")
+            rows = cursor.fetchall()
+
+        self.assertEqual(rows, [{"id": 1}])
+        self.assertEqual(db.execute_calls[-1], ("ROLLBACK", ()))
+
+    def test_read_only_query_cursor_propagates_non_connection_cleanup_error(self):
+        db = FakePipelineDB()
+        db.queue_execute_results(
+            MagicMock(name="begin"), MagicMock(name="string_mode"),
+            FakeCursor(), RuntimeError("rollback failed"),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "rollback failed"):
+            with db.read_only_query_cursor() as cursor:
+                cursor.execute("SELECT 1")
+
     def test_record_attempt_updates_retry_metadata(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="wanted"))
@@ -4757,7 +4829,7 @@ class TestFakeActiveImportJobForRequest(unittest.TestCase):
     def test_returns_running_job_for_request(self):
         db = FakePipelineDB()
         self._enqueue(db, request_id=42, dedupe_key="force:42")
-        # Move it to "would_import" then claim → status='running'.
+        # Preview writes evidence_ready; the stored classifier verdict is audit only.
         db.mark_import_job_preview_importable(
             db._import_jobs[0]["id"],
             preview_result={"verdict": "would_import"},

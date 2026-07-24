@@ -1333,6 +1333,18 @@ class TestMainExitCodes(unittest.TestCase):
 
 
 class TestCmdQuery(unittest.TestCase):
+    def test_parser_accepts_the_documented_write_escape_hatch_shape(self):
+        from scripts.pipeline_cli.routes_meta import _build_parser
+
+        parser, _, _ = _build_parser()
+        args = parser.parse_args(
+            ["query", "--write", "--confirm", "WRITE", "-"],
+        )
+
+        self.assertTrue(args.write)
+        self.assertEqual(args.confirm, "WRITE")
+        self.assertEqual(args.sql, "-")
+
     def test_query_renders_table_output_in_read_only_mode(self):
         db = FakePipelineDB()
         query_cur = MagicMock()
@@ -1340,7 +1352,8 @@ class TestCmdQuery(unittest.TestCase):
         query_cur.fetchall.return_value = [
             {"id": 7, "artist_name": "Buke and Gase", "details": {"tracks": 3}},
         ]
-        db.queue_execute_results(MagicMock(), query_cur, MagicMock())
+        db.queue_execute_results(
+            MagicMock(), MagicMock(), query_cur, MagicMock())
 
         args = MagicMock(sql="SELECT id, artist_name, details FROM album_requests", json=False)
         stdout = io.StringIO()
@@ -1349,8 +1362,8 @@ class TestCmdQuery(unittest.TestCase):
 
         # Behavior: query succeeds, output is formatted, read-only mode was used
         self.assertIsNone(rc)
-        # 3 _execute calls: enable read-only, run query, disable read-only
-        self.assertEqual(len(db.execute_calls), 3)
+        # Begin and standard-string setup bracket the query with rollback.
+        self.assertEqual(len(db.execute_calls), 4)
         output = stdout.getvalue()
         self.assertIn("id | artist_name", output)
         self.assertIn('{"tracks": 3}', output)
@@ -1361,16 +1374,16 @@ class TestCmdQuery(unittest.TestCase):
         query_cur = MagicMock()
         query_cur.description = [("value",)]
         query_cur.fetchall.return_value = [{"value": 1}]
-        db.queue_execute_results(MagicMock(), query_cur, MagicMock())
+        db.queue_execute_results(
+            MagicMock(), MagicMock(), query_cur, MagicMock())
 
         args = MagicMock(sql="-", json=False)
         stdout = io.StringIO()
         with patch("sys.stdin", io.StringIO("SELECT 1 AS value")), redirect_stdout(stdout):
             pipeline_cli.cmd_query(db, args)
 
-        # Second _execute call is the query itself; the first/third are
-        # read-only session toggles.
-        self.assertEqual(db.execute_calls[1][0], "SELECT 1 AS value")
+        # The query follows begin plus transaction-local string-mode setup.
+        self.assertEqual(db.execute_calls[2][0], "SELECT 1 AS value")
         self.assertIn("value", stdout.getvalue())
 
     def test_query_can_emit_json(self):
@@ -1378,7 +1391,8 @@ class TestCmdQuery(unittest.TestCase):
         query_cur = MagicMock()
         query_cur.description = [("id",), ("status",)]
         query_cur.fetchall.return_value = [{"id": 3, "status": "wanted"}]
-        db.queue_execute_results(MagicMock(), query_cur, MagicMock())
+        db.queue_execute_results(
+            MagicMock(), MagicMock(), query_cur, MagicMock())
 
         args = MagicMock(sql="SELECT id, status FROM album_requests", json=True)
         stdout = io.StringIO()
@@ -1396,6 +1410,7 @@ class TestCmdQuery(unittest.TestCase):
         db = FakePipelineDB()
         db.queue_execute_results(
             MagicMock(),
+            MagicMock(),
             psycopg2.ProgrammingError('syntax error at or near "BOOM"'),
             MagicMock(),
         )
@@ -1408,8 +1423,172 @@ class TestCmdQuery(unittest.TestCase):
         # Behavior: error reported, non-zero exit, cleanup still runs
         self.assertEqual(rc, 1)
         self.assertIn("syntax error", stderr.getvalue())
-        # Cleanup call happened (3rd _execute call for read-only reset)
-        self.assertEqual(len(db.execute_calls), 3)
+        # Cleanup call happened after begin/setup/query.
+        self.assertEqual(len(db.execute_calls), 4)
+
+    def test_query_rejects_write_mode_without_exact_confirmation_before_sql(self):
+        db = FakePipelineDB()
+        args = argparse.Namespace(
+            sql="DELETE FROM album_requests", json=False, write=True, confirm=None,
+        )
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            rc = pipeline_cli.cmd_query(db, args)
+
+        self.assertEqual(rc, 1)
+        self.assertIn("--write --confirm WRITE", stderr.getvalue())
+        self.assertEqual(db.execute_calls, [])
+
+    def test_query_executes_write_only_with_exact_confirmation(self):
+        db = FakePipelineDB()
+        write_cur = MagicMock()
+        write_cur.description = None
+        db.queue_execute_results(write_cur)
+        args = argparse.Namespace(
+            sql="UPDATE album_requests SET status = 'wanted'", json=False,
+            write=True, confirm="WRITE",
+        )
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            rc = pipeline_cli.cmd_query(db, args)
+
+        self.assertIsNone(rc)
+        self.assertEqual(
+            db.execute_calls,
+            [("UPDATE album_requests SET status = 'wanted'", ())],
+        )
+        self.assertIn("Query executed successfully.", stdout.getvalue())
+
+    def test_query_rejects_multiple_read_only_statements_before_sql(self):
+        db = FakePipelineDB()
+        args = argparse.Namespace(
+            sql="SET TRANSACTION READ WRITE; DELETE FROM album_requests",
+            json=False, write=False, confirm=None,
+        )
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            rc = pipeline_cli.cmd_query(db, args)
+
+        self.assertEqual(rc, 1)
+        self.assertIn("one statement only", stderr.getvalue())
+        self.assertEqual(db.execute_calls, [])
+
+    def test_read_only_query_lexer_allows_delimiters_in_sql_literals_and_comments(self):
+        from scripts.pipeline_cli.query import _read_only_sql
+
+        cases = (
+            "SELECT ';' AS value;",
+            "SELECT 'it''s; fine' AS value;",
+            "SELECT 'ordinary \\; string';",
+            "SELECT E'escaped \\' quote; string';",
+            "SELECT e'escaped \\' quote; string';",
+            'SELECT "semi;identifier" FROM "a;b";',
+            "SELECT $$dollar; quoted$$;",
+            "SELECT $tag$dollar; quoted$tag$;",
+            "SELECT 1 -- semicolon; in a line comment\n;",
+            "SELECT /* semicolon; in /* nested */ block */ 1;",
+            "SELECT 1; /* trailing comment; is fine */ -- and this one\n",
+        )
+
+        for sql in cases:
+            with self.subTest(sql=sql):
+                self.assertEqual(_read_only_sql(sql), sql)
+
+    def test_read_only_query_lexer_rejects_second_statement_after_comment(self):
+        from scripts.pipeline_cli.query import _read_only_sql
+
+        with self.assertRaisesRegex(ValueError, "one statement only"):
+            _read_only_sql("SELECT 1; /* complete first statement */ DELETE FROM x")
+
+    def test_standard_string_backslash_cannot_conceal_a_second_statement(self):
+        from scripts.pipeline_cli.query import _read_only_sql
+
+        # With standard_conforming_strings=on, the quote after the backslash
+        # ends the ordinary string. The following COMMIT is a second statement
+        # and must fail lexical validation before it reaches PostgreSQL.
+        with self.assertRaisesRegex(ValueError, "one statement only"):
+            _read_only_sql("SELECT 'ordinary\\'; COMMIT")
+
+    def test_e_prefix_requires_a_sql_token_boundary(self):
+        from scripts.pipeline_cli.query import _read_only_sql
+
+        with self.assertRaisesRegex(ValueError, "one statement only"):
+            _read_only_sql("SELECT nameE'ordinary\\'; COMMIT")
+
+    def test_dollar_quote_requires_a_sql_token_boundary(self):
+        from scripts.pipeline_cli.query import _read_only_sql
+
+        for sql in (
+            "SELECT before$$; COMMIT",
+            "SELECT before$tag$; COMMIT",
+            (
+                "SELECT 1 AS before$tag$; COMMIT; DELETE FROM lexer_probe; "
+                "SELECT 1 AS after$tag$"
+            ),
+        ):
+            with self.subTest(sql=sql), self.assertRaisesRegex(
+                ValueError, "one statement only",
+            ):
+                _read_only_sql(sql)
+
+    def test_read_only_scope_never_retries_caller_sql_on_replacement_connection(self):
+        """A post-BEGIN socket death must not replay SQL on writable B."""
+        import psycopg2
+        from lib.pipeline_db import PipelineDB
+
+        class DeadConnection:
+            closed = 0
+            autocommit = True
+
+            def __init__(self) -> None:
+                self.executed: list[str] = []
+
+            def cursor(self, **_kwargs):
+                return DeadCursor(self)
+
+            def rollback(self) -> None:
+                raise psycopg2.InterfaceError("connection already closed")
+
+        class DeadCursor:
+            description = None
+
+            def __init__(self, connection: DeadConnection) -> None:
+                self.connection = connection
+
+            def execute(self, sql: str) -> None:
+                self.connection.executed.append(sql)
+                if sql == "DELETE FROM album_requests":
+                    self.connection.closed = 1
+                    raise psycopg2.InterfaceError("connection lost during SQL")
+
+            def close(self) -> None:
+                return None
+
+        connection_a = DeadConnection()
+        connection_b = DeadConnection()
+        db = PipelineDB.__new__(PipelineDB)
+        db.conn = connection_a
+        db._connect = lambda: connection_b  # type: ignore[method-assign]
+        args = argparse.Namespace(
+            sql="DELETE FROM album_requests", json=False, write=False, confirm=None,
+        )
+        stderr = io.StringIO()
+
+        with redirect_stderr(stderr):
+            rc = pipeline_cli.cmd_query(db, args)
+
+        self.assertEqual(rc, 1)
+        self.assertIn("connection lost", stderr.getvalue())
+        self.assertEqual(
+            connection_a.executed,
+            [
+                "BEGIN TRANSACTION READ ONLY",
+                "SET LOCAL standard_conforming_strings = on",
+                "DELETE FROM album_requests",
+            ],
+        )
+        self.assertEqual(connection_b.executed, [])
+        self.assertIs(db.conn, connection_a)
 
 
 class TestCmdQueryIntegration(unittest.TestCase):
@@ -1422,7 +1601,9 @@ class TestCmdQueryIntegration(unittest.TestCase):
         self.db.close()
 
     def test_query_rejects_writes(self):
-        args = MagicMock(sql="DELETE FROM album_requests", json=False)
+        args = argparse.Namespace(
+            sql="DELETE FROM album_requests", json=False, write=False, confirm=None,
+        )
         stderr = io.StringIO()
         with redirect_stderr(stderr):
             rc = pipeline_cli.cmd_query(self.db, args)
@@ -1430,19 +1611,45 @@ class TestCmdQueryIntegration(unittest.TestCase):
         self.assertIn("read-only", stderr.getvalue().lower())
 
     def test_query_allows_reads(self):
-        args = MagicMock(sql="SELECT count(*) AS n FROM album_requests", json=False)
+        args = argparse.Namespace(
+            sql="SELECT count(*) AS n FROM album_requests", json=False, write=False, confirm=None,
+        )
         stdout = io.StringIO()
         with redirect_stdout(stdout):
             rc = pipeline_cli.cmd_query(self.db, args)
         self.assertIsNone(rc)
         self.assertIn("n", stdout.getvalue())
 
+    def test_query_executes_confirmed_write_and_reports_no_result_success(self):
+        request_id = self.db.add_request(
+            mb_release_id="query-write-confirmed",
+            artist_name="Before",
+            album_title="Before",
+            source="request",
+        )
+        args = argparse.Namespace(
+            sql=(
+                "UPDATE album_requests SET artist_name = 'After' "
+                f"WHERE id = {request_id}"
+            ),
+            json=False, write=True, confirm="WRITE",
+        )
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            rc = pipeline_cli.cmd_query(self.db, args)
+
+        self.assertIsNone(rc)
+        row = self.db.get_request(request_id)
+        assert row is not None
+        self.assertEqual(row["artist_name"], "After")
+        self.assertIn("Query executed successfully.", stdout.getvalue())
+
     def test_query_accepts_like_patterns_with_percent(self):
         """Issue #97: SQL containing % (e.g. ILIKE '%foo%') must not be
         interpreted as psycopg2 printf-style placeholders."""
-        args = MagicMock(
+        args = argparse.Namespace(
             sql="SELECT id FROM album_requests WHERE artist_name ILIKE '%nonexistent%'",
-            json=False,
+            json=False, write=False, confirm=None,
         )
         stdout = io.StringIO()
         stderr = io.StringIO()
@@ -1450,6 +1657,49 @@ class TestCmdQueryIntegration(unittest.TestCase):
             rc = pipeline_cli.cmd_query(self.db, args)
         self.assertIsNone(rc, f"expected success, got stderr={stderr.getvalue()!r}")
         self.assertNotIn("IndexError", stderr.getvalue())
+
+    def test_query_cannot_bypass_read_only_transaction_with_set_transaction(self):
+        args = argparse.Namespace(
+            sql="SET TRANSACTION READ WRITE; DELETE FROM album_requests",
+            json=False, write=False, confirm=None,
+        )
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            rc = pipeline_cli.cmd_query(self.db, args)
+
+        self.assertEqual(rc, 1)
+        self.assertIn("one statement only", stderr.getvalue())
+        remaining = self.db._execute(
+            "SELECT count(*)::int AS n FROM album_requests",
+        ).fetchone()
+        assert remaining is not None
+        self.assertEqual(remaining["n"], 0)
+
+    def test_query_rejects_identifier_adjacent_dollar_quote_before_execution(self):
+        """``before$tag$`` is an identifier, not a dollar-string opener."""
+        self.db._execute("CREATE TEMP TABLE lexer_probe (id INTEGER PRIMARY KEY)")
+        self.db._execute("INSERT INTO lexer_probe (id) VALUES (1)")
+        args = argparse.Namespace(
+            sql=(
+                "SELECT 1 AS before$tag$; COMMIT; DELETE FROM lexer_probe; "
+                "SELECT 1 AS after$tag$"
+            ),
+            json=False,
+            write=False,
+            confirm=None,
+        )
+        stderr = io.StringIO()
+
+        with redirect_stderr(stderr):
+            rc = pipeline_cli.cmd_query(self.db, args)
+
+        self.assertEqual(rc, 1)
+        self.assertIn("one statement only", stderr.getvalue())
+        row = self.db._execute(
+            "SELECT count(*)::int AS n FROM lexer_probe",
+        ).fetchone()
+        assert row is not None
+        self.assertEqual(row["n"], 1)
 
 
 class TestCmdStatusShowsDownloading(unittest.TestCase):

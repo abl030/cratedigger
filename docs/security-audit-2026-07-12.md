@@ -620,43 +620,30 @@ cleanup, transition and audit logic directly in the route.
 
 ### CD-QUAL-02 — Forward-only cleanup and documentation drift
 
-The original audit identified three forward-only hygiene failures:
-`scripts/populate_tracks.py` is an obsolete committed one-shot that passes an
-old SQLite path to the PostgreSQL `PipelineDB`; the import queue retains
-`would_import`/`uncertain` compatibility; and the status prose omitted terminal,
-frozen `replaced`. The status-documentation portion is now corrected alongside
-CD-SEC-15. The nonempty legacy preview-status cohort and the obsolete one-shot
-are deliberately untouched by this workstream rather than being removed on an
-untrue empty-cohort premise.
-
-CD-SEC-19 deliberately preserves the historical terminal display values: its
-strict decoder applies to job input, not `preview_status` or result/
-preview-result audit data. Removing compatibility remains separate work only
-after a fresh live cohort check proves that it is safe.
-
-- **Remediation:** delete the dead one-shot, confirm the legacy preview-status
-  cohort is empty before removing compatibility, and update the status docs in
-  that separate cleanup.
+**Remediated in issue #663 cleanup.** The obsolete committed track-population
+one-shot is deleted. New import jobs now require
+the neutral `evidence_ready` lifecycle state before they can be claimed; the
+historical/raw `would_import` and `uncertain` vocabulary remains for
+non-runnable display/audit data, including terminal audit rows where present.
+No migration, backfill, or compatibility shim rewrites that history. The
+active schema/module/operator docs now state the same boundary.
 
 ### CD-QUAL-03 — The real-PostgreSQL write audit has remaining exemptions
 
-`set_tracks` is no longer exempt: its real-PG round trip covers every track
-field and its deterministic and generated failure pins prove atomic rollback.
-Several other writers still have `TODO` rationales, so the audit is not yet
-universal.
-
-- **Remediation:** replace the remaining TODO exemptions with named real-PG
-  round trips or narrowly document why a method is structurally inapplicable.
+**Remediated in issue #663 cleanup.** The five fixed-column allowlist entries
+now name their exact existing real-PostgreSQL round-trip proof (including the
+field-resolution request/field identity round trip); a bounded audit rejects
+future `TODO:` rationales. Remaining allowlist entries are either scalar/status
+writes or identify a named asymmetric reader rather than deferring coverage.
 
 ## Considered and dismissed (refuted)
 
-- **`pipeline-cli query` read-only guard "bypass".** The session-scoped
-  read-only guard in `scripts/pipeline_cli/query.py` can be overridden by the SQL
-  the operator themselves supplies. This is not an injection: there is no
-  untrusted taint source (the operator provides the whole statement) and reaching
-  the command already requires a shell on doc2 holding the full-privilege DSN,
-  which permits unrestricted writes via `psql` anyway. It is a footgun label, not
-  a privilege boundary.
+- **`pipeline-cli query` as an authentication boundary.** Raw SQL is an
+  operator-provided statement over a full-privilege DSN, so its read-only default
+  is intentionally a safety/intent rail rather than authorization. Issue #663
+  encloses default-mode SQL in an explicit read-only transaction and rejects
+  multi-statement escape shapes; an intentional write requires both `--write`
+  and `--confirm WRITE`.
 - **`failed_imports` rmtree fallback.** The fallback that approves a directory
   with a `failed_imports` ancestor is deliberate (force-import quarantine folders
   live outside the strict slskd-root branch), every path reaching the delete
@@ -715,10 +702,11 @@ Auth, dependency and quality follow-through:
       consider moving local-only gates into CI.
 - [ ] CD-QUAL-01 — add missing CLI/API twins while extracting the shared
       destructive/identity services for CD-SEC-14/CD-SEC-16.
-- [ ] CD-QUAL-02 — delete the dead one-shot, retire compatibility only after a
-      fresh empty-cohort proof, and correct the remaining status docs.
-- [ ] CD-QUAL-03 — eliminate the remaining TODO write-audit exemptions;
-      `set_tracks` is now covered by CD-SEC-18.
+- [x] CD-QUAL-02 — delete the dead one-shot, constrain runnable jobs to
+      `evidence_ready`, preserve truthful terminal display history, and align
+      active status docs.
+- [x] CD-QUAL-03 — name the five real-PG write proofs and reject future TODO
+      allowlist rationales.
 
 ## Appendix — audit method
 

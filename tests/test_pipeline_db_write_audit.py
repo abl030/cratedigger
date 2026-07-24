@@ -106,22 +106,24 @@ ALLOWLIST: dict[str, str] = {
     "update_track_artists":
         "positional list[str|None] driving a single-scalar-column UPDATE; no "
         "column-list payload to round-trip.",
-    # Fixed-column dict/kwargs writers — follow the AddRequestInput pattern
-    # (#382 Layer 1: derive the INSERT from a typed payload + column contract)
-    # in a follow-up. The flat ones are ALREADY column-checked by
-    # tests/test_pipeline_db_column_contract.py.
+    # Fixed-column writers with real-PG evidence. Their readers have names
+    # the generic method-name heuristic cannot derive, so retain the exception
+    # only as a pointer to the exact proof.
     "add_bad_audio_hashes":
-        "TODO: derive-from-Struct + round-trip. BadAudioHashInput already "
-        "column-checked by test_pipeline_db_column_contract.py.",
+        "real-PG round-trip via lookup_bad_audio_hash in "
+        "TestBadAudioHashes::test_lookup_hits_when_present",
     "record_artist_probe":
-        "TODO: backfill round-trip test (legacy method, predates rule)",
+        "real-PG round-trip via get_request in "
+        "TestUnfindableDetectionPipelineDB::test_record_artist_probe_round_trips_count_and_timestamp",
     "record_field_resolution":
-        "TODO: backfill round-trip test (legacy method, predates rule)",
+        "real-PG round-trip via get_field_resolution in "
+        "TestFieldResolutionRecording::test_record_field_resolution_round_trip_preserves_request_and_field",
     "update_spectral_state":
-        "TODO: backfill round-trip test. RequestSpectralStateUpdate already "
-        "column-checked by test_pipeline_db_column_contract.py.",
+        "real-PG round-trip via get_request in "
+        "TestSpectralColumns::test_update_spectral_state_updates_both_pairs",
     "upsert_album_quality_evidence":
-        "TODO: backfill round-trip test (legacy method, predates rule)",
+        "real-PG round-trip via find_album_quality_evidence in "
+        "TestAlbumQualityEvidenceStorage::test_upsert_then_find_by_content_address_round_trips",
     # Methods whose round-trip tests exist but read via an asymmetric
     # seam the audit's auto-detector can't see. Both write into
     # ``download_log`` and round-trip via ``get_download_log_entry`` —
@@ -294,6 +296,27 @@ class TestPipelineDBWriteAudit(unittest.TestCase):
                 + "\n  - ".join(sorted(empty))
             ),
         )
+
+    def test_allowlist_rationales_do_not_defer_coverage_with_todo(self) -> None:
+        """Allowlist entries document current proof, never future intent."""
+        deferred = [
+            name for name, reason in ALLOWLIST.items()
+            if re.search(r"(?i)(?<![A-Za-z0-9_])todo(?![A-Za-z0-9_])", reason)
+        ]
+        self.assertEqual(
+            deferred, [],
+            "ALLOWLIST rationales must name current evidence, not TODO coverage: "
+            + ", ".join(sorted(deferred)),
+        )
+
+    def test_todo_detector_catches_case_and_colon_variants_without_substrings(self) -> None:
+        detector = lambda reason: bool(re.search(
+            r"(?i)(?<![A-Za-z0-9_])todo(?![A-Za-z0-9_])", reason))
+
+        self.assertTrue(detector("TODO: add a round-trip proof"))
+        self.assertTrue(detector("todo add a round-trip proof"))
+        self.assertTrue(detector("ToDo - add a round-trip proof"))
+        self.assertFalse(detector("methodology is current evidence"))
 
     def test_youtube_mapping_write_is_actually_guarded(self) -> None:
         """Smoke test that the YT mapping write (the round 2 P0-1

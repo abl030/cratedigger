@@ -27,6 +27,7 @@ class _PipelineDBBase:
 
     def _ensure_conn(self) -> None: ...
     def _execute(self, sql: str, params: Any = ()) -> Any: ...
+    def read_only_query_cursor(self) -> Any: ...
     def _atomic(self) -> Any: ...
     def advisory_lock(self, namespace: int, key: int) -> Any: ...
     # Cross-cluster calls: declared here so the calling mixin type-checks;
@@ -112,6 +113,46 @@ class _CoreMixin(_PipelineDBBase):
             else:
                 cur.execute(sql)
             return cur
+
+
+    @contextmanager
+    def read_only_query_cursor(self) -> Generator[Any]:
+        """Yield a cursor in one non-retrying read-only transaction.
+
+        Raw operator diagnostics need a transaction-level safety boundary.
+        Capture the live connection once, then execute both ``BEGIN ... READ
+        ONLY`` and caller SQL through that same connection.  In particular,
+        do not use :meth:`_execute` after ``BEGIN``: its healthy autocommit
+        reconnect/retry policy is correct for ordinary one-statement work but
+        could replay caller SQL on a fresh writable session after connection
+        death.
+
+        Cleanup is best-effort.  A dead connection cannot retain a
+        transaction, and its rollback failure must never hide the diagnostic
+        error which caused the scope to exit.
+        """
+        self._ensure_conn()
+        conn = self.conn
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        try:
+            cur.execute("BEGIN TRANSACTION READ ONLY")
+            # The raw-SQL lexer intentionally follows PostgreSQL's standard
+            # string rules. Pin the transaction-local server setting so a
+            # caller's session configuration cannot make its interpretation
+            # drift from the lexical safety boundary.
+            cur.execute("SET LOCAL standard_conforming_strings = on")
+            yield cur
+        finally:
+            try:
+                conn.rollback()
+            except (psycopg2.OperationalError, psycopg2.InterfaceError):
+                logger.debug(
+                    "read-only query rollback failed; connection is already dead")
+            try:
+                cur.close()
+            except (psycopg2.OperationalError, psycopg2.InterfaceError):
+                logger.debug(
+                    "read-only query cursor close failed; connection is already dead")
 
 
     @contextmanager

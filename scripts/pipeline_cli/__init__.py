@@ -9,7 +9,7 @@ mechanical pattern as the ``lib/quality/`` split, issue #477):
                        (named album_requests, not requests, to avoid
                        shadowing the third-party ``requests`` package —
                        see the __main__.py docstring)
-    query.py            query (read-only SQL escape hatch)
+    query.py            query (read-only-by-default SQL; explicit write escape hatch)
     show.py             show (full per-request detail dump)
     quality.py           quality / repair-spectral (quality-gate debug)
     imports.py           force-import / import-jobs / import-job-recovery /

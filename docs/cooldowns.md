@@ -49,14 +49,31 @@ After the 3-day cooldown expires, the user gets one chance. If they succeed, the
 
 ```bash
 # View active cooldowns
-pipeline-cli query "SELECT username, cooldown_until, reason FROM user_cooldowns WHERE cooldown_until > NOW()"
+pipeline-cli query - <<'SQL'
+SELECT username, cooldown_until, reason
+FROM user_cooldowns
+WHERE cooldown_until > NOW();
+SQL
 
 # View all cooldowns (including expired)
-pipeline-cli query "SELECT * FROM user_cooldowns ORDER BY cooldown_until DESC"
+pipeline-cli query - <<'SQL'
+SELECT * FROM user_cooldowns ORDER BY cooldown_until DESC;
+SQL
 
 # Top timeout offenders
-pipeline-cli query "SELECT soulseek_username, COUNT(*) FROM download_log WHERE outcome = 'timeout' GROUP BY soulseek_username ORDER BY count DESC LIMIT 10"
+pipeline-cli query - <<'SQL'
+SELECT soulseek_username, COUNT(*)
+FROM download_log
+WHERE outcome = 'timeout'
+GROUP BY soulseek_username
+ORDER BY count DESC
+LIMIT 10;
+SQL
 
 # Manually seed cooldowns for all users with 5+ consecutive failures
-psql -h 10.20.0.11 -U cratedigger cratedigger -c "INSERT INTO user_cooldowns ..."
+pipeline-cli query --write --confirm WRITE - <<'SQL'
+INSERT INTO user_cooldowns (username, cooldown_until, reason)
+SELECT username, NOW() + INTERVAL '3 days', 'operator one-off seed'
+FROM ...;
+SQL
 ```

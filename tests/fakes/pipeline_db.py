@@ -757,6 +757,47 @@ class FakePipelineDB:
             raise entry
         return entry
 
+    @contextmanager
+    def read_only_query_cursor(self) -> Iterator[Any]:
+        """Fake the pinned read-only query scope used by ``pipeline-cli``.
+
+        The production guarantee (no reconnect/retry after BEGIN) belongs to
+        its real-connection regression test. This fake preserves the visible
+        begin/setup/query/rollback sequence for command-output tests.
+        """
+        self._execute("BEGIN TRANSACTION READ ONLY")
+        self._execute("SET LOCAL standard_conforming_strings = on")
+        query_cursor: Any = None
+
+        class _Cursor:
+            @property
+            def description(self) -> Any:
+                return query_cursor.description
+
+            def execute(self, sql: str) -> None:
+                nonlocal query_cursor
+                query_cursor = self_outer._execute(sql)
+
+            def fetchall(self) -> Any:
+                return query_cursor.fetchall()
+
+        self_outer = self
+        try:
+            yield _Cursor()
+        finally:
+            try:
+                self._execute("ROLLBACK")
+            except Exception as exc:
+                # Match the production context manager: a dead connection
+                # cannot retain the transaction, and cleanup must not replace
+                # successful query output (or the caller's original error).
+                import psycopg2
+
+                if not isinstance(
+                    exc, (psycopg2.OperationalError, psycopg2.InterfaceError),
+                ):
+                    raise
+
     def set_cooldown_result(self, result: bool | Callable[[str], bool]) -> None:
         """Configure what check_and_apply_cooldown returns.
 
