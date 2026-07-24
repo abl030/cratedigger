@@ -216,10 +216,9 @@ class TestBrowseResolverMusicBrainzIdGenerated(unittest.TestCase):
         canonical = str(value)
 
         handler = _RecordingHandler()
-        with patch("web.server.mb_api") as mock_mb, patch(
-            "web.routes.browse._cache.memoize_meta",
-            side_effect=lambda _key, fetch: fetch(),
-        ):
+        # Each generated UUID has a fresh metadata-cache key, so this drives
+        # the real cache boundary without patching its owned implementation.
+        with patch("web.server.mb_api") as mock_mb:
             mock_mb.get_release.return_value = {
                 "artist_id": "artist", "artist_name": "Artist",
                 "release_group_id": "group",

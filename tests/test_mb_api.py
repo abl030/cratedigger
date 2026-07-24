@@ -11,6 +11,7 @@ import json
 import string
 import unittest
 import urllib.parse
+import uuid
 from unittest.mock import MagicMock, patch
 
 from hypothesis import given, strategies as st
@@ -146,23 +147,29 @@ class TestMusicBrainzIdentifierUrlQuoting(unittest.TestCase):
         min_size=1,
         max_size=64,
     ))
-    def test_arbitrary_identifier_quoting_flows_through_representative_builders(
+    def test_identifier_quote_is_the_stdlib_component_encoding(
         self, identifier: str,
     ) -> None:
-        """Actual path and query builders all delegate identifier quoting."""
-        with patch(
-            "web.mb._cache.memoize_meta", side_effect=lambda _key, fetch, **_kw: fetch(),
-        ), _mock_urlopen({}) as mock_urlopen, patch(
-            "web.mb._quote_mb_identifier", wraps=_quote_mb_identifier,
-        ) as quote_identifier:
+        """One identifier must remain exactly one URL component."""
+        self.assertEqual(
+            _quote_mb_identifier(identifier),
+            urllib.parse.quote(identifier, safe=""),
+        )
+
+    @given(value=st.uuids())
+    def test_fresh_identifier_quoting_flows_through_representative_builders(
+        self, value: uuid.UUID,
+    ) -> None:
+        """Actual path and query builders preserve a hostile fresh identifier."""
+        identifier = f"{value}/?inc=evil&fmt=xml"
+        with _mock_urlopen({}) as mock_urlopen:
             get_release(identifier, fresh=True)
             get_release_group(identifier)
             get_artist_name(identifier)
             get_artist_release_groups(identifier)
 
         urls = [call.args[0].full_url for call in mock_urlopen.call_args_list]
-        self.assertEqual(quote_identifier.call_count, len(urls))
-        self.assertTrue(all(call.args == (identifier,) for call in quote_identifier.call_args_list))
+        self.assertEqual(len(urls), 6)
         assert_identifier_urls_quoted(identifier, urls)
 
 
