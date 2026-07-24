@@ -13,7 +13,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from collections.abc import Mapping
+from collections.abc import Generator, Mapping
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator, Optional, Sequence, cast
 import msgspec
 
@@ -83,6 +83,7 @@ from lib.pipeline_db import (ActiveSearchPlan, BACKOFF_BASE_MINUTES,
 from lib.pipeline_db._shared import (
     validate_request_metadata_fields,
 )
+from lib.pipeline_db._core import ReadOnlyQueryCursor
 from lib.quality import (
     AlbumQualityEvidence,
     AlbumQualityV0Metric,
@@ -341,6 +342,32 @@ class _FakeSearchPlanItemRow:
     canonical_query_key: str | None = None
     repeat_group: str | None = None
     provenance: dict[str, Any] | None = None
+
+
+class _FakeReadOnlyQueryCursor:
+    """Typed cursor adapter for FakePipelineDB's raw-query context."""
+
+    def __init__(self, db: "FakePipelineDB") -> None:
+        self._db = db
+        self._query_cursor: ReadOnlyQueryCursor | None = None
+
+    @property
+    def description(self) -> Sequence[Sequence[object]] | None:
+        return self._cursor().description
+
+    def execute(self, sql: str) -> None:
+        self._query_cursor = self._db._execute(sql)
+
+    def fetchall(self) -> list[Mapping[str, object]]:
+        return self._cursor().fetchall()
+
+    def close(self) -> None:
+        return None
+
+    def _cursor(self) -> ReadOnlyQueryCursor:
+        if self._query_cursor is None:
+            raise AssertionError("read-only query cursor has not executed SQL")
+        return self._query_cursor
 
 
 
@@ -758,7 +785,7 @@ class FakePipelineDB:
         return entry
 
     @contextmanager
-    def read_only_query_cursor(self) -> Iterator[Any]:
+    def read_only_query_cursor(self) -> Generator[ReadOnlyQueryCursor, None, None]:
         """Fake the pinned read-only query scope used by ``pipeline-cli``.
 
         The production guarantee (no reconnect/retry after BEGIN) belongs to
@@ -767,23 +794,8 @@ class FakePipelineDB:
         """
         self._execute("BEGIN TRANSACTION READ ONLY")
         self._execute("SET LOCAL standard_conforming_strings = on")
-        query_cursor: Any = None
-
-        class _Cursor:
-            @property
-            def description(self) -> Any:
-                return query_cursor.description
-
-            def execute(self, sql: str) -> None:
-                nonlocal query_cursor
-                query_cursor = self_outer._execute(sql)
-
-            def fetchall(self) -> Any:
-                return query_cursor.fetchall()
-
-        self_outer = self
         try:
-            yield _Cursor()
+            yield _FakeReadOnlyQueryCursor(self)
         finally:
             try:
                 self._execute("ROLLBACK")

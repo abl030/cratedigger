@@ -11,10 +11,11 @@ import json
 import sys
 from datetime import date, datetime, time
 from decimal import Decimal
-from typing import ContextManager, Mapping, Optional, Protocol, Sequence
+from typing import ContextManager, Mapping, Optional, Protocol
 
 import psycopg2
 
+from lib.pipeline_db._core import ReadOnlyQueryCursor
 from scripts.pipeline_cli._format import _json_default
 
 
@@ -211,21 +212,12 @@ def _is_sql_identifier_char(char: str) -> bool:
     return char.isalnum() or char in "_$"
 
 
-class _QueryCursor(Protocol):
-    """DB-API cursor slice ``cmd_query`` reads (issue #784, #409 pattern)."""
-
-    description: Optional[Sequence[Sequence[object]]]
-
-    def execute(self, sql: str) -> None: ...
-    def fetchall(self) -> list[Mapping[str, object]]: ...
-
-
 class _QueryDB(Protocol):
     """Small raw-query seam: writes use ``_execute``; default reads use a
     pinned, non-retrying connection scope."""
 
-    def _execute(self, sql: str) -> _QueryCursor: ...
-    def read_only_query_cursor(self) -> ContextManager[_QueryCursor]: ...
+    def _execute(self, sql: str) -> ReadOnlyQueryCursor: ...
+    def read_only_query_cursor(self) -> ContextManager[ReadOnlyQueryCursor]: ...
 
 
 def cmd_query(db: _QueryDB, args: argparse.Namespace) -> Optional[int]:

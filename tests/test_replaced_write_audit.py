@@ -63,6 +63,14 @@ class _AlbumRequestUpdate:
 # The ratchet does not infer parameter dataflow: transition SQL must use the
 # canonical direct call grammar below.
 _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
+    ("scripts/pipeline_cli/query.py", 240, "30cb3c56e7e5f6fd"): (
+        "deliberate raw-write operator seam, gated by exact "
+        "--write --confirm WRITE rather than a lifecycle-safe typed mutation"
+    ),
+    ("scripts/pipeline_cli/query.py", 254, "30cb3c56e7e5f6fd"): (
+        "default raw-query seam runs in the transaction-enforced read-only "
+        "scope on the live connection"
+    ),
     ("lib/pipeline_db/terminal_outcomes.py", 91, "5fa18d2c1737583f"): (
         "terminal metadata keys use the existing validated request-field "
         "vocabulary (issue #784: `dumps=lambda value: msgspec.json.encode("
@@ -400,20 +408,6 @@ def _name_is_file_read(
         and definition.func.attr == "read"
         for definition in definitions
     )
-
-
-def _scope_sets_read_only(scope: ast.AST) -> bool:
-    for child in ast.walk(scope):
-        if not isinstance(child, ast.Call) or not child.args:
-            continue
-        first = child.args[0]
-        if (
-            isinstance(first, ast.Constant)
-            and isinstance(first.value, str)
-            and "default_transaction_read_only = on" in first.value.lower()
-        ):
-            return True
-    return False
 
 
 def _sql_argument(node: ast.Call) -> ast.expr | None:
@@ -945,7 +939,6 @@ def _unguarded_album_request_update_findings(
             if (
                 _is_execute_forwarder(sql_argument, scope)
                 or _name_is_file_read(sql_argument, values)
-                or _scope_sets_read_only(scope)
             ):
                 continue
             offending.append(_SqlFinding(

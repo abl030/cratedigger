@@ -1,7 +1,7 @@
 """PipelineDB core primitives: connection, _execute, advisory_lock, _atomic."""
 from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, ContextManager, Protocol
 import psycopg2
 import psycopg2.extras
 
@@ -9,6 +9,17 @@ from lib.pipeline_db._shared import (
     DEFAULT_DSN,
     logger,
 )
+
+
+class ReadOnlyQueryCursor(Protocol):
+    """Cursor surface exposed by the raw read-only query scope."""
+
+    @property
+    def description(self) -> Sequence[Sequence[object]] | None: ...
+
+    def execute(self, sql: str) -> None: ...
+    def fetchall(self) -> list[Mapping[str, object]]: ...
+    def close(self) -> None: ...
 
 
 
@@ -27,7 +38,7 @@ class _PipelineDBBase:
 
     def _ensure_conn(self) -> None: ...
     def _execute(self, sql: str, params: Any = ()) -> Any: ...
-    def read_only_query_cursor(self) -> Any: ...
+    def read_only_query_cursor(self) -> ContextManager[ReadOnlyQueryCursor]: ...
     def _atomic(self) -> Any: ...
     def advisory_lock(self, namespace: int, key: int) -> Any: ...
     # Cross-cluster calls: declared here so the calling mixin type-checks;
@@ -116,7 +127,7 @@ class _CoreMixin(_PipelineDBBase):
 
 
     @contextmanager
-    def read_only_query_cursor(self) -> Generator[Any]:
+    def read_only_query_cursor(self) -> Generator[ReadOnlyQueryCursor, None, None]:
         """Yield a cursor in one non-retrying read-only transaction.
 
         Raw operator diagnostics need a transaction-level safety boundary.
@@ -133,7 +144,9 @@ class _CoreMixin(_PipelineDBBase):
         """
         self._ensure_conn()
         conn = self.conn
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur: ReadOnlyQueryCursor = conn.cursor(
+            cursor_factory=psycopg2.extras.RealDictCursor,
+        )
         try:
             cur.execute("BEGIN TRANSACTION READ ONLY")
             # The raw-SQL lexer intentionally follows PostgreSQL's standard

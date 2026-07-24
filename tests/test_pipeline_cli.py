@@ -1565,16 +1565,21 @@ class TestCmdQuery(unittest.TestCase):
                 return None
 
         connection_a = DeadConnection()
-        connection_b = DeadConnection()
         db = PipelineDB.__new__(PipelineDB)
         db.conn = connection_a
-        db._connect = lambda: connection_b  # type: ignore[method-assign]
         args = argparse.Namespace(
             sql="DELETE FROM album_requests", json=False, write=False, confirm=None,
         )
         stderr = io.StringIO()
 
-        with redirect_stderr(stderr):
+        with (
+            patch.object(
+                db,
+                "_connect",
+                side_effect=AssertionError("query must not request replacement connection"),
+            ),
+            redirect_stderr(stderr),
+        ):
             rc = pipeline_cli.cmd_query(db, args)
 
         self.assertEqual(rc, 1)
@@ -1587,7 +1592,6 @@ class TestCmdQuery(unittest.TestCase):
                 "DELETE FROM album_requests",
             ],
         )
-        self.assertEqual(connection_b.executed, [])
         self.assertIs(db.conn, connection_a)
 
 
