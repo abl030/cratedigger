@@ -48,23 +48,23 @@ from tests.helpers import (
     make_download_file,
     make_grab_list_entry,
     make_request_row,
-    disposable_beets_storage_pair,
+    hermetic_beets_config_defaults,
 )
 
 
-_BEETS_STORAGE: AbstractContextManager[tuple[str, str]] | None = None
-_BEETS_PAIR: tuple[str, str] | None = None
+_HERMETIC_BEETS_DEFAULTS: AbstractContextManager[tuple[str, str]] | None = None
+_HERMETIC_BEETS_PAIR: tuple[str, str] | None = None
 
 
 def setUpModule() -> None:
-    global _BEETS_STORAGE, _BEETS_PAIR
-    _BEETS_STORAGE = disposable_beets_storage_pair()
-    _BEETS_PAIR = _BEETS_STORAGE.__enter__()
+    global _HERMETIC_BEETS_DEFAULTS, _HERMETIC_BEETS_PAIR
+    _HERMETIC_BEETS_DEFAULTS = hermetic_beets_config_defaults()
+    _HERMETIC_BEETS_PAIR = _HERMETIC_BEETS_DEFAULTS.__enter__()
 
 
 def tearDownModule() -> None:
-    assert _BEETS_STORAGE is not None
-    _BEETS_STORAGE.__exit__(None, None, None)
+    assert _HERMETIC_BEETS_DEFAULTS is not None
+    _HERMETIC_BEETS_DEFAULTS.__exit__(None, None, None)
 
 
 # Migration 021 helpers — seed evidence and wire the FK chain that
@@ -126,18 +126,12 @@ def _force_preview_source():
         os.mkdir(processing_dir, 0o700)
         os.mkdir(os.path.join(processing_dir, "albums"), 0o700)
         os.mkdir(os.path.join(processing_dir, "preview"), 0o700)
-        assert _BEETS_PAIR is not None
         cfg = CratediggerConfig(
             slskd_download_dir=download_root,
             processing_dir=processing_dir,
             audio_check_mode="off",
-            beets_library_db=_BEETS_PAIR[0],
-            beets_directory=_BEETS_PAIR[1],
         )
-        with patch("lib.config.read_runtime_config", return_value=cfg), \
-                patch("scripts.import_preview_worker.read_runtime_config",
-                      return_value=cfg):
-            yield source, cfg
+        yield source, cfg
 
 
 def _force_download_log(
@@ -1728,11 +1722,7 @@ class TestImportPreviewWorker(unittest.TestCase):
             # Known-bad fault injection: this invokes the real execute path
             # after discarding the config at its exact call boundary.
             mutant_db, mutant_job = new_job()
-            unconfigured = CratediggerConfig()
-            with patch("lib.config.read_runtime_config", return_value=unconfigured), \
-                    patch("scripts.import_preview_worker.read_runtime_config",
-                          return_value=unconfigured), \
-                    self.assertRaises(FilesystemAuthorityError):
+            with self.assertRaises(FilesystemAuthorityError):
                 import_preview_worker.execute_preview_job(
                     mutant_db,
                     mutant_job,
@@ -1828,11 +1818,6 @@ class TestImportPreviewWorker(unittest.TestCase):
             claimed = db.claim_next_import_preview_job(worker_id="preview")
             assert claimed is not None
             self._seed_job_candidate_evidence(db, claimed.id, staged)
-            assert _BEETS_PAIR is not None
-            cfg = CratediggerConfig(
-                beets_library_db=_BEETS_PAIR[0],
-                beets_directory=_BEETS_PAIR[1],
-            )
 
             with patch(
                 "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
@@ -1841,13 +1826,10 @@ class TestImportPreviewWorker(unittest.TestCase):
                     reason="spectral_reject",
                     source_path=staged,
                 ),
-            ), patch("lib.config.read_runtime_config", return_value=cfg), \
-                    patch("scripts.import_preview_worker.read_runtime_config",
-                          return_value=cfg):
+            ):
                 updated = import_preview_worker.process_claimed_preview_job(
                     db,
                     claimed,
-                    runtime_config=cfg,
                 )
 
             assert updated is not None
@@ -1890,18 +1872,11 @@ class TestImportPreviewWorker(unittest.TestCase):
                 request_id=42,
                 import_result=ImportResult(spectral=audit),
             )
-            assert _BEETS_PAIR is not None
-            cfg = CratediggerConfig(
-                beets_library_db=_BEETS_PAIR[0],
-                beets_directory=_BEETS_PAIR[1],
+
+            updated = import_preview_worker.process_claimed_preview_job(
+                db, claimed,
+                preview_fn=lambda db, job: preview_result,
             )
-            with patch("lib.config.read_runtime_config", return_value=cfg), \
-                    patch("scripts.import_preview_worker.read_runtime_config",
-                          return_value=cfg):
-                updated = import_preview_worker.process_claimed_preview_job(
-                    db, claimed,
-                    preview_fn=lambda db, job: preview_result,
-                )
 
         assert updated is not None
         self.assertEqual(updated.preview_status, "measurement_failed")
@@ -2129,7 +2104,11 @@ class TestImportPreviewWorker(unittest.TestCase):
         )
         claimed = db.claim_next_import_preview_job(worker_id="preview")
         assert claimed is not None
-        cfg = CratediggerConfig(beets_directory="/music/library")
+        assert _HERMETIC_BEETS_PAIR is not None
+        cfg = CratediggerConfig(
+            beets_library_db=_HERMETIC_BEETS_PAIR[0],
+            beets_directory=_HERMETIC_BEETS_PAIR[1],
+        )
 
         def prepare(db_arg: Any, **kwargs: Any) -> str:
             self.assertIs(db_arg, db)
@@ -2137,7 +2116,7 @@ class TestImportPreviewWorker(unittest.TestCase):
                 "request_id": 42,
                 "mb_release_id": "mbid-42",
                 "quality_ranks": cfg.quality_ranks,
-                "beets_library_root": "/music/library",
+                "beets_library_root": cfg.beets_directory,
             })
             order.append("prepare")
             return "ready"
@@ -2148,7 +2127,7 @@ class TestImportPreviewWorker(unittest.TestCase):
                 "request_id": 42,
                 "mb_release_id": "mbid-42",
                 "quality_ranks": cfg.quality_ranks,
-                "beets_library_root": "/music/library",
+                "beets_library_root": cfg.beets_directory,
             })
             order.append("enrich")
             return "complete"
@@ -2198,7 +2177,11 @@ class TestImportPreviewWorker(unittest.TestCase):
                 )
                 claimed = db.claim_next_import_preview_job(worker_id="preview")
                 assert claimed is not None
-                cfg = CratediggerConfig(beets_directory="/music/library")
+                assert _HERMETIC_BEETS_PAIR is not None
+                cfg = CratediggerConfig(
+                    beets_library_db=_HERMETIC_BEETS_PAIR[0],
+                    beets_directory=_HERMETIC_BEETS_PAIR[1],
+                )
                 prepare = MagicMock(return_value="ready")
                 enrich = MagicMock(return_value="complete")
                 config_error = (
@@ -3093,26 +3076,17 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                     grade="genuine",
                 )
 
-            assert _BEETS_PAIR is not None
-            cfg = CratediggerConfig(
-                beets_library_db=_BEETS_PAIR[0],
-                beets_directory=_BEETS_PAIR[1],
-            )
             with patch(
                 "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
             ) as preview, patch(
                 "lib.measurement.measure_preimport_state",
             ) as preimport, patch(
                 "lib.download_materialization._materialize_processing_dir",
-            ) as materialize, \
-                    patch("lib.config.read_runtime_config", return_value=cfg), \
-                    patch("scripts.import_preview_worker.read_runtime_config",
-                          return_value=cfg):
+            ) as materialize:
                 updated = import_preview_worker.process_claimed_preview_job(
                     db,
                     claimed,
                     spectral_detail_analyzer=analyze,
-                    runtime_config=cfg,
                 )
 
         preview.assert_not_called()

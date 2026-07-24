@@ -41,7 +41,7 @@ To change the config:
 ```yaml
 # Library
 directory: /mnt/virtio/Music/Beets
-library: /mnt/virtio/Music/beets-library.db
+library: /mnt/virtio/cratedigger/beets-db/beets-library.db
 
 # Import behavior
 import:
@@ -152,8 +152,8 @@ fetchart:
 | Path | Purpose |
 |------|---------|
 | `/mnt/virtio/Music/Beets` | Tagged library — organized by beets path templates |
-| `/mnt/virtio/Music/beets-library.db` | SQLite database — the DB source of truth |
-| `/mnt/virtio/Music/beets-import.log` | Import log |
+| `/mnt/virtio/cratedigger/beets-db/beets-library.db` | SQLite database — the DB source of truth |
+| `/mnt/virtio/cratedigger/beets-db/beets-import.log` | Import log |
 | `/mnt/virtio/Music/AI` | Staging area — raw copies from `/Me`, pre-import |
 | `/mnt/virtio/Music/Incoming` | Processing staging root — `/Incoming/auto-import` for request auto-imports, `/Incoming/post-validation` for redownload/manual-review staging |
 | `/mnt/virtio/Music/Re-download` | Re-download queue — each album has a README.md explaining why |
@@ -406,7 +406,7 @@ not exactly one same-release album.
 ### Constants
 
 ```python
-BEETS_DB = "/mnt/virtio/Music/beets-library.db"
+BEETS_DB = "/mnt/virtio/cratedigger/beets-db/beets-library.db"
 HARNESS_TIMEOUT = 300   # 5 min for match selection
 IMPORT_TIMEOUT = 1800   # 30 min for actual import (fetchart, embedart, lyrics can be slow)
 max_distance = 0.5      # Reject matches above this distance
@@ -525,7 +525,7 @@ successful only when the complete postcondition was already satisfied.
 
 ## The Beets SQLite Database
 
-Located at `/mnt/virtio/Music/beets-library.db`. Two main tables:
+Located at `/mnt/virtio/cratedigger/beets-db/beets-library.db`. Two main tables:
 
 ### `albums` table (key fields)
 

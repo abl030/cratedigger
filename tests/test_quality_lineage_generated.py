@@ -10,6 +10,8 @@ from unittest.mock import patch
 from hypothesis import example, given, strategies as st
 import msgspec
 
+import tests._hypothesis_profiles  # noqa: F401 - registers active profile
+
 from harness.import_one import projected_is_cbr_from_bitrates
 from lib.beets_db import (
     CurrentBeetsUnique,
@@ -60,6 +62,7 @@ from tests.helpers import (
     make_audio_corrupt_validation_report,
     make_request_row,
 )
+from web.classify import LogEntry, classify_log_entry
 
 
 def _coherent_three_track_metrics(
@@ -72,7 +75,6 @@ def _coherent_three_track_metrics(
     minimum, median, maximum = sorted((first, second, third))
     average = int((minimum + median + maximum) / 3)
     return minimum, average, median, minimum == maximum
-from web.classify import LogEntry, classify_log_entry
 
 
 def assert_source_target_lineage(result: ImportResult) -> None:

@@ -10,13 +10,13 @@ import shutil
 import sys
 import tempfile
 import unittest
-import urllib.parse
 
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401 — sets TEST_DB_DSN env var
 
 
 import psycopg2  # noqa: E402
+from psycopg2.extensions import make_dsn  # noqa: E402
 
 from lib.migrator import (  # noqa: E402
     DEFAULT_MIGRATIONS_DIR,
@@ -4973,8 +4973,7 @@ def _maintenance_dsn() -> str:
     cluster -- used to CREATE/DROP a throwaway database with no tracking
     table for TestAssertSchemaCurrent.test_raises_when_tracking_table_missing.
     """
-    parts = urllib.parse.urlsplit(TEST_DSN)
-    return urllib.parse.urlunsplit(parts._replace(path="/postgres"))
+    return make_dsn(TEST_DSN, dbname="postgres")
 
 
 def _create_fresh_database(name: str) -> str:
@@ -4984,8 +4983,7 @@ def _create_fresh_database(name: str) -> str:
         cur.execute(f"DROP DATABASE IF EXISTS {name}")
         cur.execute(f"CREATE DATABASE {name}")
     conn.close()
-    parts = urllib.parse.urlsplit(TEST_DSN)
-    return urllib.parse.urlunsplit(parts._replace(path=f"/{name}"))
+    return make_dsn(TEST_DSN, dbname=name)
 
 
 def _drop_database(name: str) -> None:

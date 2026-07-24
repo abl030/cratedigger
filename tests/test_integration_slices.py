@@ -52,23 +52,22 @@ from tests.helpers import (
     make_request_row,
     make_requests_http_error,
     patch_dispatch_externals,
-    disposable_beets_storage_pair,
+    hermetic_beets_config_defaults,
 )
 
 
-_BEETS_STORAGE: AbstractContextManager[tuple[str, str]] | None = None
-_BEETS_PAIR: tuple[str, str] | None = None
+_HERMETIC_BEETS_DEFAULTS: AbstractContextManager[tuple[str, str]] | None = None
 
 
 def setUpModule() -> None:
-    global _BEETS_STORAGE, _BEETS_PAIR
-    _BEETS_STORAGE = disposable_beets_storage_pair()
-    _BEETS_PAIR = _BEETS_STORAGE.__enter__()
+    global _HERMETIC_BEETS_DEFAULTS
+    _HERMETIC_BEETS_DEFAULTS = hermetic_beets_config_defaults()
+    _HERMETIC_BEETS_DEFAULTS.__enter__()
 
 
 def tearDownModule() -> None:
-    assert _BEETS_STORAGE is not None
-    _BEETS_STORAGE.__exit__(None, None, None)
+    assert _HERMETIC_BEETS_DEFAULTS is not None
+    _HERMETIC_BEETS_DEFAULTS.__exit__(None, None, None)
 
 
 _HARNESS = "/nix/store/fake/harness/run_beets_harness.sh"
@@ -80,7 +79,6 @@ def _preview_worker_config(
     processing_dir: str = "",
 ) -> CratediggerConfig:
     ini = configparser.ConfigParser()
-    assert _BEETS_PAIR is not None
     ini["Beets Validation"] = {
         "harness_path": _HARNESS,
         "audio_check": "off",
@@ -93,10 +91,6 @@ def _preview_worker_config(
     if processing_dir:
         ini["Paths"] = {"processing_dir": processing_dir}
     ini["Pipeline DB"] = {"enabled": "true"}
-    ini["Beets"] = {
-        "library": _BEETS_PAIR[0],
-        "directory": _BEETS_PAIR[1],
-    }
     return CratediggerConfig.from_ini(ini)
 
 
@@ -1644,13 +1638,8 @@ class TestDispatchNoJsonResult(unittest.TestCase):
             mb_release_id="mbid-123",
             active_download_state={"files": [], "filetype": "mp3"},
         ))
-        assert _BEETS_PAIR is not None
         cfg = CratediggerConfig(
-            beets_harness_path=_HARNESS,
-            pipeline_db_enabled=True,
-            beets_library_db=_BEETS_PAIR[0],
-            beets_directory=_BEETS_PAIR[1],
-        )
+            beets_harness_path=_HARNESS, pipeline_db_enabled=True)
         audit = SpectralDetail(
             candidate=SpectralAnalysisDetail(
                 attempted=True, grade="suspect", bitrate_kbps=128),
@@ -3644,25 +3633,19 @@ class TestBadAudioHashSlice(unittest.TestCase):
         # cfg.audio_check_mode='off' so the gate doesn't try to ffmpeg-decode
         # the fixture (which is a 1-second sine and would pass anyway, but
         # 'off' keeps the slice scoped to the bad-hash gate).
-        assert _BEETS_PAIR is not None
-        cfg = CratediggerConfig(
-            audio_check_mode="off",
-            beets_library_db=_BEETS_PAIR[0],
-            beets_directory=_BEETS_PAIR[1],
-        )
+        cfg = CratediggerConfig(audio_check_mode="off")
 
-        with patch("lib.config.read_runtime_config", return_value=cfg):
-            measurement = measure_preimport_state(
-                path=str(fixture_dir),
-                mb_release_id="mbid-bad",
-                label="Bad Rip Test",
-                download_filetype="mp3",
-                download_min_bitrate_bps=320_000,
-                download_is_vbr=False,
-                cfg=cfg,
-                db=db,  # type: ignore[arg-type]
-                request_id=42,
-            )
+        measurement = measure_preimport_state(
+            path=str(fixture_dir),
+            mb_release_id="mbid-bad",
+            label="Bad Rip Test",
+            download_filetype="mp3",
+            download_min_bitrate_bps=320_000,
+            download_is_vbr=False,
+            cfg=cfg,
+            db=db,  # type: ignore[arg-type]
+            request_id=42,
+        )
 
         # 1. Measurement surfaced the bad-hash match facts.
         self.assertIsNotNone(measurement.matched_bad_hash_id)
@@ -3687,17 +3670,11 @@ class TestBadAudioHashSlice(unittest.TestCase):
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
-        assert _BEETS_PAIR is not None
-        cfg = CratediggerConfig(
-            audio_check_mode="off",
-            beets_library_db=_BEETS_PAIR[0],
-            beets_directory=_BEETS_PAIR[1],
-        )
+        cfg = CratediggerConfig(audio_check_mode="off")
 
         with patch("lib.measurement.hash_audio_content") as hashfn, \
              patch.object(db, "lookup_bad_audio_hash") as lookup, \
-             patch("lib.measurement._needs_spectral_check", return_value=False), \
-             patch("lib.config.read_runtime_config", return_value=cfg):
+             patch("lib.measurement._needs_spectral_check", return_value=False):
             measurement = measure_preimport_state(
                 path=str(fixture_dir),
                 mb_release_id="mbid-empty",
@@ -6132,7 +6109,7 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
             ), patch(
                 "lib.import_preview.measure_preimport_state",
                 side_effect=_sentinel_measure,
-            ), patch("lib.config.read_runtime_config", return_value=preview_cfg):
+            ):
                 updated = import_preview_worker.process_claimed_preview_job(
                     db,
                     claimed,
@@ -6160,7 +6137,6 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
             assert import_claimed is not None and import_claimed.id == claimed.id
 
             ir = make_import_result(decision="import", new_min_bitrate=245)
-            assert _BEETS_PAIR is not None
             with patch_dispatch_externals(), patch(
                 "lib.dispatch.subprocess_runner.parse_import_result",
                 return_value=ir,
@@ -6169,11 +6145,7 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
             ), patch(
                 "lib.config.read_runtime_config",
                 return_value=CratediggerConfig(
-                    beets_harness_path=_HARNESS,
-                    pipeline_db_enabled=True,
-                    beets_library_db=_BEETS_PAIR[0],
-                    beets_directory=_BEETS_PAIR[1],
-                ),
+                    beets_harness_path=_HARNESS, pipeline_db_enabled=True),
             ):
                 outcome = dispatch_import_from_db(
                     cast(Any, db), 42, source,
@@ -6271,11 +6243,6 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                 assert audit.candidate is not None
                 return audit.candidate
 
-            assert _BEETS_PAIR is not None
-            preview_cfg = CratediggerConfig(
-                beets_library_db=_BEETS_PAIR[0],
-                beets_directory=_BEETS_PAIR[1],
-            )
             with patch(
                 "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
                 side_effect=_sentinel_preview,
@@ -6285,12 +6252,11 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
             ), patch(
                 "lib.download_materialization._materialize_processing_dir",
                 side_effect=_sentinel_materialize,
-            ), patch("lib.config.read_runtime_config", return_value=preview_cfg):
+            ):
                 updated = import_preview_worker.process_claimed_preview_job(
                     cast(Any, db),
                     claimed,
                     spectral_detail_analyzer=analyze,
-                    runtime_config=preview_cfg,
                 )
 
             self.assertEqual(
@@ -6651,23 +6617,6 @@ class TestU5PreviewWorkerLifecycleSlice(unittest.TestCase):
     status while the job is marked failed
     with ``preview_status='measurement_failed'``.
     """
-
-    def setUp(self) -> None:
-        assert _BEETS_PAIR is not None
-        cfg = CratediggerConfig(
-            beets_library_db=_BEETS_PAIR[0],
-            beets_directory=_BEETS_PAIR[1],
-        )
-        self._worker_config_patch = patch(
-            "scripts.import_preview_worker.read_runtime_config", return_value=cfg,
-        )
-        self._beets_config_patch = patch(
-            "lib.config.read_runtime_config", return_value=cfg,
-        )
-        self._worker_config_patch.start()
-        self._beets_config_patch.start()
-        self.addCleanup(self._worker_config_patch.stop)
-        self.addCleanup(self._beets_config_patch.stop)
 
     def _setup_worker_job(self, db, request_id=42):
         from lib.import_queue import (
@@ -7190,12 +7139,9 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
         return result, ext
 
     def _common_cfg(self):
-        assert _BEETS_PAIR is not None
         return CratediggerConfig(
             beets_harness_path=_HARNESS,
             pipeline_db_enabled=True,
-            beets_library_db=_BEETS_PAIR[0],
-            beets_directory=_BEETS_PAIR[1],
         )
 
     def test_audio_corrupt_evidence_preserves_operator_status(self):
@@ -8050,15 +7996,12 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                 ),
             )
 
-            assert _BEETS_PAIR is not None
             preview_cfg = CratediggerConfig(
                 beets_harness_path=_HARNESS,
                 pipeline_db_enabled=True,
                 beets_staging_dir=staging_dir,
                 slskd_download_dir=os.path.join(root, "slskd"),
                 processing_dir=os.path.join(root, "processing"),
-                beets_library_db=_BEETS_PAIR[0],
-                beets_directory=_BEETS_PAIR[1],
             )
             with patch(
                 "lib.import_preview.measure_preimport_state",
@@ -8066,7 +8009,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
             ), patch(
                 "lib.import_preview.run_import_one",
                 return_value=SimpleNamespace(import_result=harness_ir),
-            ), patch("lib.config.read_runtime_config", return_value=preview_cfg):
+            ):
                 updated_job = import_preview_worker.process_claimed_preview_job(
                     db, claimed, runtime_config=preview_cfg,
                 )
@@ -8183,15 +8126,12 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                 ),
             )
 
-            assert _BEETS_PAIR is not None
             preview_cfg = CratediggerConfig(
                 beets_harness_path=_HARNESS,
                 pipeline_db_enabled=True,
                 beets_staging_dir=staging_dir,
                 slskd_download_dir=os.path.join(root, "slskd"),
                 processing_dir=os.path.join(root, "processing"),
-                beets_library_db=_BEETS_PAIR[0],
-                beets_directory=_BEETS_PAIR[1],
             )
             with patch(
                 "lib.import_preview.measure_preimport_state",
@@ -8199,7 +8139,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
             ), patch(
                 "lib.import_preview.run_import_one",
                 return_value=SimpleNamespace(import_result=harness_ir),
-            ), patch("lib.config.read_runtime_config", return_value=preview_cfg):
+            ):
                 updated_job = import_preview_worker.process_claimed_preview_job(
                     db, claimed, runtime_config=preview_cfg,
                 )
@@ -8265,15 +8205,12 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                     "harness must not run on corrupt audio in the measure-and-persist path"
                 )
 
-            assert _BEETS_PAIR is not None
             preview_cfg = CratediggerConfig(
                 beets_harness_path=_HARNESS,
                 pipeline_db_enabled=True,
                 beets_staging_dir=staging_dir,
                 slskd_download_dir=os.path.join(root, "slskd"),
                 processing_dir=os.path.join(root, "processing"),
-                beets_library_db=_BEETS_PAIR[0],
-                beets_directory=_BEETS_PAIR[1],
             )
             with patch(
                 "lib.import_preview.measure_preimport_state",
@@ -8281,7 +8218,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
             ), patch(
                 "lib.import_preview.run_import_one",
                 side_effect=_harness_sentinel,
-            ), patch("lib.config.read_runtime_config", return_value=preview_cfg):
+            ):
                 updated_job = import_preview_worker.process_claimed_preview_job(
                     db, claimed, runtime_config=preview_cfg,
                 )

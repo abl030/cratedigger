@@ -12,7 +12,7 @@ from urllib.error import HTTPError, URLError
 
 from hypothesis import given, strategies as st
 
-from tests import _hypothesis_profiles  # noqa: F401 — registers active profile
+import tests._hypothesis_profiles  # noqa: F401 - registers active profile
 from web.routes.browse import _resolve_discogs, get_artist, get_browse_resolve
 
 

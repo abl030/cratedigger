@@ -54,23 +54,22 @@ from tests.helpers import (
     make_album_quality_evidence,
     make_audio_corrupt_validation_report,
     make_request_row,
-    disposable_beets_storage_pair,
+    hermetic_beets_config_defaults,
 )
 
 
-_BEETS_STORAGE: AbstractContextManager[tuple[str, str]] | None = None
-_BEETS_PAIR: tuple[str, str] | None = None
+_HERMETIC_BEETS_DEFAULTS: AbstractContextManager[tuple[str, str]] | None = None
 
 
 def setUpModule() -> None:
-    global _BEETS_STORAGE, _BEETS_PAIR
-    _BEETS_STORAGE = disposable_beets_storage_pair()
-    _BEETS_PAIR = _BEETS_STORAGE.__enter__()
+    global _HERMETIC_BEETS_DEFAULTS
+    _HERMETIC_BEETS_DEFAULTS = hermetic_beets_config_defaults()
+    _HERMETIC_BEETS_DEFAULTS.__enter__()
 
 
 def tearDownModule() -> None:
-    assert _BEETS_STORAGE is not None
-    _BEETS_STORAGE.__exit__(None, None, None)
+    assert _HERMETIC_BEETS_DEFAULTS is not None
+    _HERMETIC_BEETS_DEFAULTS.__exit__(None, None, None)
 
 
 _PREVIEW_RUNTIME = tempfile.TemporaryDirectory()
@@ -84,16 +83,11 @@ os.mkdir(os.path.join(_PREVIEW_PROCESSING_ROOT, "preview"), 0o700)
 
 def _preview_config() -> CratediggerConfig:
     ini = configparser.ConfigParser()
-    assert _BEETS_PAIR is not None
     ini["Beets Validation"] = {
         "harness_path": "/fake/harness/run_beets_harness.sh",
         "audio_check": "off",
     }
     ini["Pipeline DB"] = {"enabled": "true"}
-    ini["Beets"] = {
-        "library": _BEETS_PAIR[0],
-        "directory": _BEETS_PAIR[1],
-    }
     ini["Slskd"] = {"download_dir": _PREVIEW_SOURCE_ROOT}
     ini["Paths"] = {"processing_dir": _PREVIEW_PROCESSING_ROOT}
     return CratediggerConfig.from_ini(ini)
@@ -106,14 +100,11 @@ def _preview_runtime_config(
     verified_lossless_target: str = "",
 ) -> CratediggerConfig:
     """Direct-test config with the same private-root contract as Nix."""
-    assert _BEETS_PAIR is not None
     return CratediggerConfig(
         slskd_download_dir=_PREVIEW_SOURCE_ROOT,
         processing_dir=_PREVIEW_PROCESSING_ROOT,
         beets_harness_path=beets_harness_path,
         pipeline_db_enabled=pipeline_db_enabled,
-        beets_library_db=_BEETS_PAIR[0],
-        beets_directory=_BEETS_PAIR[1],
         verified_lossless_target=verified_lossless_target,
     )
 

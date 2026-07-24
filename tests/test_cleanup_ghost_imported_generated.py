@@ -8,6 +8,8 @@ import unittest
 
 from hypothesis import given, strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401 - registers active profile
+
 from lib.beets_db import BeetsDB
 from lib.release_identity import ReleaseIdentity
 from scripts.cleanup_ghost_imported import classify_imported_rows

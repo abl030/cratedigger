@@ -15,21 +15,20 @@ import sys
 # issue #95 dual-load footgun (module reachable as both `quality` and `lib.quality`).
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-# Try to start ephemeral PostgreSQL if tools are available
+# A test process must own a live disposable database. Falling through to an
+# unset DSN makes PipelineDB silently target ambient localhost instead.
 _pg = None
 TEST_DSN = os.environ.get("TEST_DB_DSN")
 
-if not TEST_DSN and shutil.which("initdb") and shutil.which("pg_ctl"):
-    try:
-        from ephemeral_pg import EphemeralPostgres
-        _pg = EphemeralPostgres()
-        _pg.start()
-        TEST_DSN = _pg.dsn
-        if TEST_DSN is not None:
-            os.environ["TEST_DB_DSN"] = TEST_DSN
-    except Exception as e:
-        print(f"[WARN] Could not start ephemeral PostgreSQL: {e}", file=sys.stderr)
-        _pg = None
+if not TEST_DSN:
+    if not shutil.which("initdb") or not shutil.which("pg_ctl"):
+        raise RuntimeError("initdb/pg_ctl are required for the test database")
+    from tests.ephemeral_pg import EphemeralPostgres
+    _pg = EphemeralPostgres()
+    _pg.start()
+    TEST_DSN = _pg.dsn
+    assert TEST_DSN is not None
+    os.environ["TEST_DB_DSN"] = TEST_DSN
 
 if TEST_DSN and os.environ.get("CRATEDIGGER_TEST_SCHEMA_READY") != "1":
     # Apply schema once at session start for either an externally supplied

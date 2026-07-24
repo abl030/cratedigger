@@ -48,6 +48,7 @@ let
     assert mb["ratelimit"] == 1, mb
 
     assert cfg["include"] == ["secrets.yaml"], cfg.get("include")
+    assert cfg["library"] == "/var/lib/cratedigger-beets-db/beets-library.db", cfg
 
     # Path-affecting keys present and production-shaped. path_disambig is
     # the never-empty aunique disambiguator (Passenger collision fix,
@@ -66,8 +67,8 @@ let
     from pathlib import Path
     from beets import library
 
-    root = Path("/var/lib/cratedigger-music")
-    db_path = root / "beets-library.db"
+    root = Path("/var/lib/cratedigger-music/Beets")
+    db_path = Path("/var/lib/cratedigger-beets-db/beets-library.db")
     target_id = "cccccccc-cccc-cccc-cccc-cccccccccccc"
     child_target_id = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
     sibling_id = "dddddddd-dddd-dddd-dddd-dddddddddddd"
@@ -153,11 +154,25 @@ pkgs.testers.nixosTest {
       touch /var/lib/cratedigger/.sandbox-probe
       touch /var/lib/cratedigger/processing/.sandbox-probe
       touch /var/lib/cratedigger-downloads/.sandbox-probe
-      touch /var/lib/cratedigger-music/.sandbox-probe
-      touch /var/lib/cratedigger-staging/.sandbox-probe
-      touch /var/lib/cratedigger-tracking/.sandbox-probe
+      touch /var/lib/cratedigger-music/Beets/.sandbox-probe
+      touch /var/lib/cratedigger-beets-db/.sandbox-probe
+      touch /var/lib/cratedigger-music/Incoming/.sandbox-probe
+      touch /var/lib/cratedigger-music/Re-download/.sandbox-probe
+      if touch /var/lib/cratedigger-music/unrelated/escape 2>/dev/null; then
+        echo "sandbox allowed a write to an unrelated music sibling" >&2
+        exit 1
+      fi
       if touch /var/lib/cratedigger-world-writable/escape 2>/dev/null; then
         echo "sandbox allowed a write outside ReadWritePaths" >&2
+        exit 1
+      fi
+    '';
+    stateDbDenialProbe = pkgs.writeShellScript "cratedigger-state-db-denial-probe" ''
+      set -euo pipefail
+      probe=/var/lib/cratedigger-beets-db/worker-escape
+      if touch "$probe" 2>/dev/null; then
+        rm -f "$probe"
+        echo "sandbox allowed a worker write to the Beets DB parent" >&2
         exit 1
       fi
     '';
@@ -247,22 +262,20 @@ pkgs.testers.nixosTest {
       # what a real first boot produces.
       beets.validation = {
         enable = true;
-        stagingDir = "/var/lib/cratedigger-staging";
+        stagingDir = "/var/lib/cratedigger-music/Incoming";
         # Keep the tracking parent distinct from staging so the sandbox
         # contract proves it is derived from its own option.
-        trackingFile = "/var/lib/cratedigger-tracking/tracking.jsonl";
+        trackingFile = "/var/lib/cratedigger-music/Re-download/tracking.jsonl";
       };
       beets.package = {
         discogsTokenFile = "/etc/cratedigger/discogs-token";
         discogsOperatorGroup = "cratedigger-ops";
       };
-      # Stranger-set beets paths (VM-local). The library's PARENT dir must
-      # exist or `beet` prompts "Create it (Y/n)?" interactively — which
-      # blocks forever under the test driver's backdoor shell. stateDir
-      # exists by tmpfiles, so the library parent is guaranteed.
+      # Keep the library root separate from the default DB parent. The module
+      # must create its sibling-of-stateDir default without granting writes to
+      # the music root.
       beets.config = {
-        directory = "/var/lib/cratedigger-music";
-        library = "/var/lib/cratedigger-music/beets-library.db";
+        directory = "/var/lib/cratedigger-music/Beets";
       };
       web = {
         enable = true;
@@ -297,10 +310,12 @@ pkgs.testers.nixosTest {
     # Only the independent renderer may materialise runtime configuration on
     # first boot; the test removes this hold before exercising the apps.
     systemd.tmpfiles.rules = [
-      "d /var/lib/cratedigger-music 2775 cratedigger beets-library -"
+      "d /var/lib/cratedigger-music 0777 root root -"
+      "d /var/lib/cratedigger-music/Beets 2775 cratedigger beets-library -"
+      "d /var/lib/cratedigger-music/Incoming 2775 cratedigger beets-library -"
+      "d /var/lib/cratedigger-music/Re-download 0755 cratedigger beets-library -"
+      "d /var/lib/cratedigger-music/unrelated 0777 root root -"
       "d /var/lib/cratedigger-downloads 0770 slskd-writer slskd-writer -"
-      "d /var/lib/cratedigger-staging 2775 cratedigger beets-library -"
-      "d /var/lib/cratedigger-tracking 0755 cratedigger beets-library -"
       "d /var/lib/cratedigger-world-writable 0777 root root -"
       "f /run/cratedigger-test-config-hold 0644 root root - held"
     ];
@@ -319,6 +334,12 @@ pkgs.testers.nixosTest {
         # The probe is test-only and ordered after the module's config render.
         cratedigger-importer.serviceConfig.ExecStartPre =
           lib.mkAfter [importerSandboxProbe];
+        # Preview and YouTube retain stateDir for their established workflows,
+        # but the sibling DB parent must remain unreachable in both sandboxes.
+        cratedigger-import-preview-worker.serviceConfig.ExecStartPre =
+          lib.mkAfter [stateDbDenialProbe];
+        cratedigger-youtube-ingest.serviceConfig.ExecStartPre =
+          lib.mkAfter [stateDbDenialProbe];
         # The blocker has no dependency edge from the application units. Its
         # ordering matters only while the VM test has explicitly queued both
         # jobs, which gives us a deterministic real systemd `start/waiting`.
@@ -570,6 +591,28 @@ pkgs.testers.nixosTest {
     else:
         raise AssertionError("sandbox checker accepted NoNewPrivileges=no")
 
+    # The DB parent is a distinct authority. A broad music parent grant must
+    # fail the same data-driven checker rather than merely being absent from
+    # a source-level scan.
+    known_bad = _unit_properties("cratedigger-web.service")
+    known_bad["ReadWritePaths"] += " /var/lib/cratedigger-music"
+    try:
+        _assert_sandbox_properties(
+            "known-bad-broad-parent.service", known_bad,
+            [
+                "/var/lib/cratedigger",
+                "/var/lib/cratedigger/processing",
+                "/var/lib/cratedigger-downloads",
+                "/var/lib/cratedigger-music/Beets",
+                "/var/lib/cratedigger-beets-db",
+                "/var/lib/cratedigger-music/Incoming",
+            ],
+        )
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("sandbox checker accepted a broad music-parent grant")
+
     known_bad = _unit_properties("cratedigger-web.service")
     known_bad["SystemCallFilter"] += " mount"
     try:
@@ -579,8 +622,9 @@ pkgs.testers.nixosTest {
                 "/var/lib/cratedigger",
                 "/var/lib/cratedigger/processing",
                 "/var/lib/cratedigger-downloads",
-                "/var/lib/cratedigger-music",
-                "/var/lib/cratedigger-staging",
+                "/var/lib/cratedigger-music/Beets",
+                "/var/lib/cratedigger-beets-db",
+                "/var/lib/cratedigger-music/Incoming",
             ],
         )
     except AssertionError:
@@ -592,16 +636,18 @@ pkgs.testers.nixosTest {
         "/var/lib/cratedigger",
         "/var/lib/cratedigger/processing",
         "/var/lib/cratedigger-downloads",
-        "/var/lib/cratedigger-music",
-        "/var/lib/cratedigger-staging",
+        "/var/lib/cratedigger-music/Beets",
+        "/var/lib/cratedigger-beets-db",
+        "/var/lib/cratedigger-music/Incoming",
     ])
     _assert_sandbox_contract("cratedigger-importer.service", [
         "/var/lib/cratedigger",
         "/var/lib/cratedigger/processing",
         "/var/lib/cratedigger-downloads",
-        "/var/lib/cratedigger-music",
-        "/var/lib/cratedigger-staging",
-        "/var/lib/cratedigger-tracking",
+        "/var/lib/cratedigger-music/Beets",
+        "/var/lib/cratedigger-beets-db",
+        "/var/lib/cratedigger-music/Incoming",
+        "/var/lib/cratedigger-music/Re-download",
     ])
     _assert_sandbox_contract("cratedigger-import-preview-worker.service", [
         "/var/lib/cratedigger",
@@ -611,7 +657,7 @@ pkgs.testers.nixosTest {
     _assert_sandbox_contract("cratedigger-youtube-ingest.service", [
         "/var/lib/cratedigger",
         "/var/lib/cratedigger/youtube-ingest-temp",
-        "/var/lib/cratedigger-staging",
+        "/var/lib/cratedigger-music/Incoming",
     ])
     for unit in (
         "cratedigger.service",
@@ -628,8 +674,12 @@ pkgs.testers.nixosTest {
         assert properties["ReadWritePaths"] == "", (unit, properties)
 
     # The importer probe ran inside the unit's sandbox. These pins prove every
-    # configured authority root was writable while the world-writable sibling
-    # remained effectively read-only despite its Unix mode.
+    # configured authority root was writable while unrelated world-writable
+    # locations remained effectively read-only despite their Unix modes.
+    machine.succeed("test \"$(stat -c %U:%G:%a /var/lib/cratedigger-beets-db)\" = cratedigger:beets-library:2775")
+    machine.succeed("runuser -u cratedigger -- test -w /var/lib/cratedigger-beets-db")
+    machine.succeed("test \"$(stat -c %a /var/lib/cratedigger-music/unrelated)\" = 777")
+    machine.fail("test -e /var/lib/cratedigger-music/unrelated/escape")
     machine.succeed("test \"$(stat -c %a /var/lib/cratedigger-world-writable)\" = 777")
     machine.fail("test -e /var/lib/cratedigger-world-writable/escape")
     machine.succeed("test -s /var/lib/cratedigger/processing/sandbox-probe/tone.mp3")
@@ -637,9 +687,10 @@ pkgs.testers.nixosTest {
         "/var/lib/cratedigger",
         "/var/lib/cratedigger/processing",
         "/var/lib/cratedigger-downloads",
-        "/var/lib/cratedigger-music",
-        "/var/lib/cratedigger-staging",
-        "/var/lib/cratedigger-tracking",
+        "/var/lib/cratedigger-music/Beets",
+        "/var/lib/cratedigger-beets-db",
+        "/var/lib/cratedigger-music/Incoming",
+        "/var/lib/cratedigger-music/Re-download",
     ):
         machine.succeed(f"test -f {root}/.sandbox-probe")
 
@@ -703,7 +754,9 @@ pkgs.testers.nixosTest {
     # U5 (tier-2): the module renders the beets runtime keys so every
     # beets subprocess resolves the pinned interpreter + rendered config.
     machine.succeed("grep -q 'config_dir = /var/lib/cratedigger/beets' /var/lib/cratedigger/config.ini")
-    machine.succeed("grep -q '^library = /var/lib/cratedigger-music/beets-library.db$' /var/lib/cratedigger/config.ini")
+    machine.succeed("grep -q '^library = /var/lib/cratedigger-beets-db/beets-library.db$' /var/lib/cratedigger/config.ini")
+    machine.succeed("test -d /var/lib/cratedigger-beets-db")
+    machine.succeed("test -f /var/lib/cratedigger-beets-db/.sandbox-probe")
     machine.succeed("grep -q 'python = /nix/store/' /var/lib/cratedigger/config.ini")
     # U6 (tier-2): one MB value, rendered for the python consumers too.
     machine.succeed("grep -q 'api_base = https://musicbrainz.org' /var/lib/cratedigger/config.ini")
@@ -883,8 +936,8 @@ pkgs.testers.nixosTest {
     child_request = json.dumps({
         "album_id": child_album_id,
         "expected_release_id": "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
-        "library_db_path": "/var/lib/cratedigger-music/beets-library.db",
-        "library_root": "/var/lib/cratedigger-music",
+        "library_db_path": "/var/lib/cratedigger-beets-db/beets-library.db",
+        "library_root": "/var/lib/cratedigger-music/Beets",
     }, separators=(",", ":"))
     child_out = machine.succeed(
         f"printf '%s' '{child_request}' | "
