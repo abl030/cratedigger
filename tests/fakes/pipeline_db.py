@@ -1363,18 +1363,19 @@ class FakePipelineDB:
                 payload=msgspec.to_builtins(original.payload),
                 message=f"Operator-authorized retry of recovery job {original.id}",
             )
-            retry_row = next(
-                item for item in self._import_jobs if item["id"] == retry.id
-            )
-            retry_row["preview_status"] = original.preview_status
-            retry_row["preview_result"] = copy.deepcopy(original.preview_result)
-            retry_row["preview_message"] = original.preview_message
-            retry_row["preview_error"] = original.preview_error
-            retry_row["preview_attempts"] = original.preview_attempts
-            retry_row["preview_completed_at"] = original.preview_completed_at
-            retry_row["importable_at"] = original.importable_at
-            retry_row["candidate_evidence_id"] = original.candidate_evidence_id
-            retry = ImportJob.from_row(copy.deepcopy(retry_row))
+            if original.job_type != "force_import":
+                retry_row = next(
+                    item for item in self._import_jobs if item["id"] == retry.id
+                )
+                retry_row["preview_status"] = original.preview_status
+                retry_row["preview_result"] = copy.deepcopy(original.preview_result)
+                retry_row["preview_message"] = original.preview_message
+                retry_row["preview_error"] = original.preview_error
+                retry_row["preview_attempts"] = original.preview_attempts
+                retry_row["preview_completed_at"] = original.preview_completed_at
+                retry_row["importable_at"] = original.importable_at
+                retry_row["candidate_evidence_id"] = original.candidate_evidence_id
+                retry = ImportJob.from_row(copy.deepcopy(retry_row))
         return resolved, retry
 
     def mark_import_job_failed(

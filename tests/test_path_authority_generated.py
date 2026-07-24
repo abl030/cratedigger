@@ -259,11 +259,11 @@ def assert_force_front_gate_invariant(
     snapshot_root: str,
     preview_children: list[str],
 ) -> None:
-    """Force evidence lookup may consume only the DB-authorized snapshot."""
+    """Force evidence lookup may consume only the DB-authorized action copy."""
     if lookup_path == payload_failed_path or lookup_path == db_failed_path:
         raise AssertionError("force evidence lookup consumed an unisolated path")
     if os.path.commonpath([lookup_path, snapshot_root]) != snapshot_root:
-        raise AssertionError("force evidence lookup escaped private preview")
+        raise AssertionError("force evidence lookup escaped private action root")
     if lookup_bytes != expected_db_bytes:
         raise AssertionError("force evidence lookup did not contain DB-authorized bytes")
     if preview_children:
@@ -639,7 +639,7 @@ class TestGeneratedForceFrontGateAuthority(unittest.TestCase):
                     captured.append((lookup, handle.read()))
                 return EvidenceBuildResult(None, "missing")
 
-            result, display = import_preview_worker._front_gate_check(
+            result, display, action_path = import_preview_worker._front_gate_check(
                 db,
                 job,
                 runtime_config=cfg,
@@ -647,6 +647,7 @@ class TestGeneratedForceFrontGateAuthority(unittest.TestCase):
             )
             self.assertIsNotNone(result)
             self.assertEqual(display, db_path)
+            self.assertIsNotNone(action_path)
             self.assertEqual(len(captured), 1)
             assert_force_front_gate_invariant(
                 lookup_path=captured[0][0],
@@ -654,7 +655,7 @@ class TestGeneratedForceFrontGateAuthority(unittest.TestCase):
                 payload_failed_path=payload_path,
                 lookup_bytes=captured[0][1],
                 expected_db_bytes=db_bytes,
-                snapshot_root=os.path.join(processing, "preview"),
+                snapshot_root=os.path.join(processing, "albums"),
                 preview_children=os.listdir(os.path.join(processing, "preview")),
             )
 

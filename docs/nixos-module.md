@@ -84,6 +84,13 @@ the Cratedigger user and do not put processing beneath a parent writable by
 slskd. The module rejects relative and lexically overlapping paths, while the
 runtime also refuses symlinked/unsafe roots.
 
+The descriptor-verified publish into `albums/` is the trust transition:
+Cratedigger may repair or normalize that owned working copy in place before
+measurement and import. slskd and quarantine bytes remain untrusted and are
+never passed to mutating media tools directly. A force/quarantine preview keeps
+one private normalized action copy through Beets; its original path remains the
+job's audit and recovery authority.
+
 ### The `permissions` plugin + `fix_library_modes`
 
 The rendered beets config enables the built-in `permissions` plugin with `file = "0664"` and `dir = "02775"` (setgid + group-writable) — these are fixed literals in `nix/module.nix`, not module options. Its `art_set` listener (`fix_art`) fixes fetched-art mode on BOTH initial import and a manual `beet fetchart` re-fetch. This exists because beets' own `fetchart` writes art via `mkstemp` (which forces `0600` regardless of umask) and nothing else chmods it afterward — without the plugin, art lands `0600` and a media server reading it as a different user throws `UnauthorizedAccessException` (issue #570 defect 1).

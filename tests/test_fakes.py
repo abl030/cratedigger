@@ -3616,6 +3616,60 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         assert failed is not None
         self.assertEqual(failed.status, "failed")
 
+    def test_force_recovery_retry_restarts_preview_without_old_action_state(self):
+        """Fake parity for #853's force-only recovery retry reset."""
+        from lib.import_queue import IMPORT_JOB_FORCE
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, mb_release_id="fake-recovery-force", status="wanted",
+        ))
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            dedupe_key="force:fake-recovery-preview",
+            payload={"download_log_id": 1, "failed_path": "/tmp/raw"},
+        )
+        evidence = make_album_quality_evidence(
+            mb_release_id="fake-recovery-force", source_path="/tmp/raw",
+        )
+        db.upsert_album_quality_evidence(evidence)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_import_job_candidate_evidence(job.id, persisted.id)
+        db.mark_import_job_preview_importable(
+            job.id,
+            preview_result={"action_path": "/processing/albums/force-action-1"},
+        )
+        claimed = db.claim_next_import_job(worker_id="fake-recovery")
+        assert claimed is not None
+        assert db.authorize_import_job_launch(
+            claimed.id,
+            request_id=42,
+            release_id="fake-recovery-force",
+            source_path="/tmp/raw",
+        ) is not None
+        recovery = db.mark_import_job_recovery_required(
+            claimed.id, reason="ambiguous operation",
+        )
+        assert recovery is not None
+
+        resolved = db.resolve_import_job_recovery(
+            recovery.id,
+            resolution="retry",
+            reason="operator reconciled external mutation",
+        )
+
+        assert resolved is not None
+        _closed, retry = resolved
+        assert retry is not None
+        self.assertEqual(retry.preview_status, "waiting")
+        self.assertIsNone(retry.preview_result)
+        self.assertIsNone(retry.candidate_evidence_id)
+
     def test_requeue_import_job_for_preview_flips_running_back_to_waiting(self):
         from lib.import_queue import IMPORT_JOB_FORCE
 

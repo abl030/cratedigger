@@ -532,11 +532,11 @@ class _ImportJobsMixin(_PipelineDBBase):
                         importable_at,
                         candidate_evidence_id,
                         expected_request_status
-                    )
-                    VALUES (
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s
-                    )
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s
+                )
                     RETURNING *
                 """, (
                     original.job_type,
@@ -544,18 +544,41 @@ class _ImportJobsMixin(_PipelineDBBase):
                     original.dedupe_key,
                     psycopg2.extras.Json(msgspec.to_builtins(original.payload)),
                     f"Operator-authorized retry of recovery job {original.id}",
-                    original.preview_status,
                     (
-                        psycopg2.extras.Json(original.preview_result)
-                        if original.preview_result is not None
-                        else None
+                        IMPORT_JOB_PREVIEW_WAITING
+                        if original.job_type == "force_import"
+                        else original.preview_status
                     ),
-                    original.preview_message,
-                    original.preview_error,
-                    original.preview_attempts,
-                    original.preview_completed_at,
-                    original.importable_at,
-                    original.candidate_evidence_id,
+                    (
+                        None
+                        if original.job_type == "force_import"
+                        else (
+                            psycopg2.extras.Json(original.preview_result)
+                            if original.preview_result is not None
+                            else None
+                        )
+                    ),
+                    (
+                        None if original.job_type == "force_import"
+                        else original.preview_message
+                    ),
+                    (
+                        None if original.job_type == "force_import"
+                        else original.preview_error
+                    ),
+                    0 if original.job_type == "force_import" else original.preview_attempts,
+                    (
+                        None if original.job_type == "force_import"
+                        else original.preview_completed_at
+                    ),
+                    (
+                        None if original.job_type == "force_import"
+                        else original.importable_at
+                    ),
+                    (
+                        None if original.job_type == "force_import"
+                        else original.candidate_evidence_id
+                    ),
                     original.expected_request_status,
                 ))
                 retry_raw = retry_cur.fetchone()

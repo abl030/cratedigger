@@ -463,7 +463,145 @@ class TestAutomationEvidenceReuse(unittest.TestCase):
         self.assertEqual(handle_valid_calls, [])
 
 
+class TestPreviewCompletionEvidenceOwnership(unittest.TestCase):
+    def _linked_force_job(self) -> tuple[str, str, FakePipelineDB, ImportJob]:
+        root, source = _make_failed_import_source()
+        with open(os.path.join(source, "01.mp3"), "wb") as handle:
+            handle.write(b"audio")
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, mb_release_id="mbid-123"))
+        log_id = _force_download_log(db, 42, source)
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            dedupe_key=force_import_dedupe_key(log_id),
+            payload=force_import_payload(download_log_id=log_id, failed_path=source),
+        )
+        _seed_candidate_for_import_job(
+            db,
+            job.id,
+            mb_release_id="mbid-123",
+            files=snapshot_audio_files(source),
+        )
+        return root, source, db, job
+
+    def test_download_log_evidence_cannot_complete_a_different_job(self):
+        """#853: preview completion requires this job's exact evidence FK."""
+        from scripts.import_preview_worker import _candidate_evidence_ready_for_job
+
+        root, source = _make_failed_import_source()
+        try:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(id=42, mb_release_id="mbid-123"))
+            log_id = _force_download_log(db, 42, source)
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(log_id),
+                payload=force_import_payload(download_log_id=log_id, failed_path=source),
+            )
+            _seed_candidate_for_download_log(
+                db,
+                log_id,
+                mb_release_id="mbid-123",
+                files=snapshot_audio_files(source),
+            )
+
+            ready, reason = _candidate_evidence_ready_for_job(
+                db,
+                job,
+                ImportPreviewResult(
+                    mode="path", source_path=source, verdict="evidence_ready",
+                ),
+            )
+
+            self.assertFalse(ready)
+            self.assertIn("did not link", reason)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_empty_candidate_fingerprint_cannot_complete_preview(self):
+        """#853: a linked row still needs a non-empty exact fingerprint."""
+        from scripts.import_preview_worker import _candidate_evidence_ready_for_job
+
+        class EmptyFingerprintDB(FakePipelineDB):
+            def load_album_quality_evidence_by_id(self, evidence_id):
+                evidence = super().load_album_quality_evidence_by_id(evidence_id)
+                return (
+                    msgspec.structs.replace(evidence, snapshot_fingerprint="")
+                    if evidence is not None else None
+                )
+
+        root, source, original, job = self._linked_force_job()
+        db = EmptyFingerprintDB()
+        db.__dict__.update(original.__dict__)
+        try:
+            ready, reason = _candidate_evidence_ready_for_job(
+                db,
+                job,
+                ImportPreviewResult(
+                    mode="path", source_path=source, verdict="evidence_ready",
+                ),
+            )
+            self.assertFalse(ready)
+            self.assertIn("empty snapshot fingerprint", reason)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_wrong_candidate_row_cannot_complete_preview(self):
+        """#853: completion rejects a usable snapshot from another evidence row."""
+        from scripts.import_preview_worker import _candidate_evidence_ready_for_job
+
+        class WrongRowDB(FakePipelineDB):
+            def load_album_quality_evidence_by_id(self, evidence_id):
+                evidence = super().load_album_quality_evidence_by_id(evidence_id)
+                return (
+                    msgspec.structs.replace(evidence, id=(evidence.id or 0) + 1)
+                    if evidence is not None else None
+                )
+
+        root, source, original, job = self._linked_force_job()
+        db = WrongRowDB()
+        db.__dict__.update(original.__dict__)
+        try:
+            ready, reason = _candidate_evidence_ready_for_job(
+                db,
+                job,
+                ImportPreviewResult(
+                    mode="path", source_path=source, verdict="evidence_ready",
+                ),
+            )
+            self.assertFalse(ready)
+            self.assertIn("does not match", reason)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+
 class TestImporterWorker(unittest.TestCase):
+    def setUp(self) -> None:
+        self._force_root = tempfile.mkdtemp(prefix="cratedigger-force-action-")
+        downloads = os.path.join(self._force_root, "downloads")
+        processing = os.path.join(self._force_root, "processing")
+        os.mkdir(downloads, 0o700)
+        os.mkdir(processing, 0o700)
+        os.mkdir(os.path.join(processing, "albums"), 0o700)
+        os.mkdir(os.path.join(processing, "preview"), 0o700)
+        self._force_cfg = CratediggerConfig(
+            slskd_download_dir=downloads,
+            processing_dir=processing,
+            audio_check_mode="off",
+        )
+        self._runtime_config_patch = patch(
+            "lib.config.read_runtime_config", return_value=self._force_cfg,
+        )
+        self._runtime_config_patch.start()
+
+    def tearDown(self) -> None:
+        self._runtime_config_patch.stop()
+        shutil.rmtree(self._force_root, ignore_errors=True)
+
     def _mark_importable(
         self,
         db: FakePipelineDB,
@@ -471,9 +609,20 @@ class TestImporterWorker(unittest.TestCase):
         *,
         preview_result: dict[str, Any] | None = None,
     ):
+        payload = preview_result or {"verdict": "would_import"}
+        if job.job_type == IMPORT_JOB_FORCE:
+            from lib.import_preview import force_action_copy_path
+
+            action_path = force_action_copy_path(self._force_cfg, job.id)
+            raw_path = job.payload.failed_path
+            if os.path.isdir(raw_path):
+                shutil.copytree(raw_path, action_path)
+            else:
+                os.mkdir(action_path, 0o700)
+            payload = {**payload, "action_path": action_path}
         updated = db.mark_import_job_preview_importable(
             job.id,
-            preview_result=preview_result or {"verdict": "would_import"},
+            preview_result=payload,
             message="ready",
         )
         assert updated is not None
@@ -601,16 +750,71 @@ class TestImporterWorker(unittest.TestCase):
         dispatch.assert_called_once_with(
             db,
             request_id=42,
-            failed_path="/tmp/failed",
+            failed_path=os.path.join(
+                self._force_cfg.processing_dir, "albums", f"force-action-{claimed.id}",
+            ),
             source_username="alice",
             source_dirs=None,
             import_job_id=claimed.id,
             download_log_id=7,
+            source_reference_path="/tmp/failed",
         )
         assert updated is not None
         self.assertEqual(updated.status, "completed")
         self.assertEqual(self._result(updated)["success"], True)
         self.assertEqual(job.id, updated.id)
+        self.assertFalse(os.path.exists(
+            os.path.join(
+                self._force_cfg.processing_dir,
+                "albums",
+                f"force-action-{claimed.id}",
+            ),
+        ))
+
+    def test_acknowledged_force_success_dismisses_only_wrong_match_pointer(self):
+        """#853: success clears review state, not the operator's raw bytes."""
+        from scripts import importer
+
+        db = FakePipelineDB()
+        root, source = _make_failed_import_source()
+        try:
+            raw_bytes = b"archival raw audio"
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(raw_bytes)
+            log_id = self._log_wrong_match(db, failed_path=source)
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(log_id),
+                payload=force_import_payload(
+                    download_log_id=log_id,
+                    failed_path=source,
+                ),
+            )
+            self._mark_importable(db, job)
+            action_path = os.path.join(
+                self._force_cfg.processing_dir, "albums", f"force-action-{job.id}",
+            )
+            claimed = db.claim_next_import_job(worker_id="worker")
+            assert claimed is not None
+
+            updated = importer.process_claimed_job(
+                cast(Any, db),
+                claimed,
+                execute_fn=lambda *_args, **_kwargs: DispatchOutcome(True, "imported"),
+            )
+
+            assert updated is not None
+            self.assertEqual(updated.status, "completed")
+            with open(os.path.join(source, "01.mp3"), "rb") as handle:
+                self.assertEqual(handle.read(), raw_bytes)
+            self.assertEqual(db.get_wrong_matches(), [])
+            self.assertFalse(os.path.exists(action_path))
+            result = self._result(updated)
+            self.assertTrue(result["wrong_match_dismissal"]["success"])
+            self.assertTrue(result["force_action_cleanup"]["removed"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
     def test_force_import_job_forwards_source_dirs(self):
         from scripts import importer
@@ -640,12 +844,40 @@ class TestImporterWorker(unittest.TestCase):
         dispatch.assert_called_once_with(
             db,
             request_id=42,
-            failed_path="/tmp/failed",
+            failed_path=os.path.join(
+                self._force_cfg.processing_dir, "albums", f"force-action-{claimed.id}",
+            ),
             source_username="alice",
             source_dirs=["alice\\Artist\\Album", "alice\\Artist\\Album\\CD2"],
             import_job_id=claimed.id,
             download_log_id=7,
+            source_reference_path="/tmp/failed",
         )
+
+    def test_force_import_without_private_action_requeues_before_dispatch(self):
+        """A force job must never fall back to the raw quarantine folder."""
+        from scripts import importer
+
+        db = FakePipelineDB()
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            dedupe_key=force_import_dedupe_key(7),
+            payload=force_import_payload(download_log_id=7, failed_path="/tmp/raw"),
+        )
+        db.mark_import_job_preview_importable(
+            job.id,
+            preview_result={"verdict": "would_import"},
+            message="ready",
+        )
+        claimed = db.claim_next_import_job(worker_id="worker")
+        assert claimed is not None
+
+        updated = importer.process_claimed_job(cast(Any, db), claimed)
+        self.assertIsNone(updated)
+        row = db.get_import_job(job.id)
+        assert row is not None
+        self.assertEqual(row.preview_status, "waiting")
 
     def test_force_import_job_does_not_forward_preview_import_result(self):
         from scripts import importer
@@ -735,7 +967,7 @@ class TestImporterWorker(unittest.TestCase):
             "import must recompute the action decision against current evidence.",
         )
 
-    def test_failed_force_import_quality_pipeline_reject_cleans_without_redeciding(self):
+    def test_failed_force_import_quality_pipeline_reject_preserves_raw_source(self):
         from scripts import importer
 
         db = FakePipelineDB()
@@ -780,19 +1012,199 @@ class TestImporterWorker(unittest.TestCase):
             cleanup_wrong_match.assert_not_called()
             assert updated is not None
             self.assertEqual(updated.status, "failed")
-            self.assertFalse(os.path.exists(source))
-            self.assertEqual(db.get_wrong_matches(), [])
+            self.assertTrue(os.path.exists(source))
+            self.assertEqual(len(db.get_wrong_matches()), 1)
             result = self._result(updated)
             self.assertEqual(result["cleanup"]["success"], True)
-            self.assertEqual(result["cleanup"]["outcome"], "deleted")
-            self.assertEqual(result["cleanup"]["cleared_rows"], 1)
-            self.assertEqual(result["cleanup"]["reason"], "quality_pipeline_rejected")
+            self.assertEqual(
+                result["cleanup"]["outcome"], "preserved_operator_force_source",
+            )
             self.assertEqual(
                 result["cleanup"]["dispatch_code"],
                 DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
             )
         finally:
             shutil.rmtree(root, ignore_errors=True)
+
+    def test_corrupt_force_action_is_reclaimed_without_protected_quarantine_copy(self):
+        """#853: corrupt force bytes stay private; raw Wrong Match stays intact."""
+        from scripts import importer
+
+        db = FakePipelineDB()
+        root, source = _make_failed_import_source()
+        try:
+            raw_bytes = b"operator raw evidence"
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(raw_bytes)
+            db.seed_request(make_request_row(
+                id=42,
+                mb_release_id="mbid-123",
+                status="unsearchable",
+            ))
+            db.set_tracks(42, [{"track_number": 1, "title": "One"}])
+            log_id = self._log_wrong_match(db, failed_path=source)
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(log_id),
+                payload=force_import_payload(
+                    download_log_id=log_id,
+                    failed_path=source,
+                    source_username="alice",
+                ),
+            )
+            self._mark_importable(db, job)
+            action_path = os.path.join(
+                self._force_cfg.processing_dir, "albums", f"force-action-{job.id}",
+            )
+            _seed_candidate_for_import_job(
+                db,
+                job.id,
+                mb_release_id="mbid-123",
+                files=snapshot_audio_files(action_path),
+                audio_corrupt=True,
+                audio_error="01.mp3: corrupt fixture",
+            )
+            claimed = db.claim_next_import_job(worker_id="worker")
+            assert claimed is not None
+
+            updated = importer.process_claimed_job(cast(Any, db), claimed)
+
+            assert updated is not None
+            self.assertEqual(updated.status, "failed")
+            with open(os.path.join(source, "01.mp3"), "rb") as handle:
+                self.assertEqual(handle.read(), raw_bytes)
+            self.assertTrue(os.path.isdir(source))
+            self.assertEqual(len(db.get_wrong_matches()), 1)
+            self.assertFalse(os.path.exists(action_path))
+            self.assertFalse(os.path.exists(os.path.join(
+                self._force_cfg.slskd_download_dir, "failed_imports", "bad_files",
+            )))
+            result = self._result(updated)
+            self.assertNotIn("post_commit_cleanup", result)
+            self.assertEqual(
+                result["cleanup"]["outcome"], "preserved_operator_force_source",
+            )
+            self.assertTrue(result["force_action_cleanup"]["removed"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_stale_rejecting_force_evidence_requeues_before_rejection_audit(self):
+        """#853: action drift invalidates even an initially corrupt reject."""
+        from scripts import importer
+
+        db = FakePipelineDB()
+        root, source = _make_failed_import_source()
+        try:
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"operator raw evidence")
+            db.seed_request(make_request_row(
+                id=42, mb_release_id="mbid-123", status="unsearchable",
+            ))
+            db.set_tracks(42, [{"track_number": 1, "title": "One"}])
+            log_id = self._log_wrong_match(db, failed_path=source)
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(log_id),
+                payload=force_import_payload(download_log_id=log_id, failed_path=source),
+            )
+            self._mark_importable(db, job)
+            action_path = os.path.join(
+                self._force_cfg.processing_dir, "albums", f"force-action-{job.id}",
+            )
+            _seed_candidate_for_import_job(
+                db,
+                job.id,
+                mb_release_id="mbid-123",
+                files=snapshot_audio_files(action_path),
+                audio_corrupt=True,
+                audio_error="reject if unchanged",
+            )
+            with open(os.path.join(action_path, "01.mp3"), "ab") as handle:
+                handle.write(b" drift")
+            claimed = db.claim_next_import_job(worker_id="worker")
+            assert claimed is not None
+
+            updated = importer.process_claimed_job(cast(Any, db), claimed)
+
+            self.assertIsNone(updated)
+            row = db.get_import_job(job.id)
+            assert row is not None
+            self.assertEqual(row.status, "queued")
+            self.assertEqual(row.preview_status, "waiting")
+            self.assertEqual(len(db.download_logs), 1)
+            self.assertEqual(len(db.get_wrong_matches()), 1)
+            self.assertTrue(os.path.isdir(action_path))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_force_action_manifest_drift_requeues_before_terminal_audit(self):
+        """Add/remove/rename drift is stale evidence, never a force reject."""
+        from scripts import importer
+
+        def remove(path: str) -> None:
+            os.unlink(os.path.join(path, "01.mp3"))
+
+        def add(path: str) -> None:
+            with open(os.path.join(path, "bonus.mp3"), "wb") as handle:
+                handle.write(b"unexpected audio")
+
+        def rename(path: str) -> None:
+            os.rename(os.path.join(path, "01.mp3"), os.path.join(path, "02.mp3"))
+
+        for drift, mutate in (("remove", remove), ("add", add), ("rename", rename)):
+            with self.subTest(drift=drift):
+                db = FakePipelineDB()
+                root, source = _make_failed_import_source()
+                try:
+                    raw_bytes = b"operator raw evidence"
+                    with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                        handle.write(raw_bytes)
+                    db.seed_request(make_request_row(
+                        id=42, mb_release_id="mbid-123", status="unsearchable",
+                    ))
+                    db.set_tracks(42, [{"track_number": 1, "title": "One"}])
+                    log_id = self._log_wrong_match(db, failed_path=source)
+                    job = db.enqueue_import_job(
+                        IMPORT_JOB_FORCE,
+                        request_id=42,
+                        dedupe_key=force_import_dedupe_key(log_id),
+                        payload=force_import_payload(
+                            download_log_id=log_id, failed_path=source,
+                        ),
+                    )
+                    action_path = os.path.join(
+                        self._force_cfg.processing_dir,
+                        "albums",
+                        f"force-action-{job.id}",
+                    )
+                    shutil.rmtree(action_path, ignore_errors=True)
+                    self._mark_importable(db, job)
+                    _seed_candidate_for_import_job(
+                        db,
+                        job.id,
+                        mb_release_id="mbid-123",
+                        files=snapshot_audio_files(action_path),
+                    )
+                    mutate(action_path)
+                    claimed = db.claim_next_import_job(worker_id="worker")
+                    assert claimed is not None
+
+                    updated = importer.process_claimed_job(cast(Any, db), claimed)
+
+                    self.assertIsNone(updated)
+                    row = db.get_import_job(job.id)
+                    assert row is not None
+                    self.assertEqual(row.status, "queued")
+                    self.assertEqual(row.preview_status, "waiting")
+                    self.assertEqual(len(db.download_logs), 1)
+                    self.assertEqual(len(db.get_wrong_matches()), 1)
+                    self.assertTrue(os.path.isdir(action_path))
+                    with open(os.path.join(source, "01.mp3"), "rb") as handle:
+                        self.assertEqual(handle.read(), raw_bytes)
+                finally:
+                    shutil.rmtree(root, ignore_errors=True)
 
     def test_failed_force_import_non_pipeline_failure_preserves_wrong_match(self):
         from scripts import importer
@@ -847,7 +1259,7 @@ class TestImporterWorker(unittest.TestCase):
             self.assertTrue(cleanup["skipped"])
             self.assertEqual(
                 cleanup["outcome"],
-                "skipped_non_quality_pipeline_failure",
+                "preserved_operator_force_source",
             )
         finally:
             shutil.rmtree(root, ignore_errors=True)
@@ -890,6 +1302,15 @@ class TestImporterWorker(unittest.TestCase):
                 ),
             )
             self._mark_importable(db, job)
+            action_path = os.path.join(
+                self._force_cfg.processing_dir, "albums", f"force-action-{job.id}",
+            )
+            _seed_candidate_for_import_job(
+                db,
+                job.id,
+                mb_release_id="mbid-123",
+                files=snapshot_audio_files(action_path),
+            )
             claimed = db.claim_next_import_job(worker_id="worker")
             assert claimed is not None
 
@@ -959,6 +1380,15 @@ class TestImporterWorker(unittest.TestCase):
                 ),
             )
             self._mark_importable(db, job)
+            action_path = os.path.join(
+                self._force_cfg.processing_dir, "albums", f"force-action-{job.id}",
+            )
+            _seed_candidate_for_import_job(
+                db,
+                job.id,
+                mb_release_id="mbid-123",
+                files=snapshot_audio_files(action_path),
+            )
             claimed = db.claim_next_import_job(worker_id="worker")
             assert claimed is not None
 
@@ -986,12 +1416,8 @@ class TestImporterWorker(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_force_import_requeued_for_preview_does_not_mark_failed(self):
-        """U2: when dispatch returns DISPATCH_CODE_REQUEUED_FOR_PREVIEW the
-        importer does NOT write a terminal failed status and does NOT run
-        the wrong-match cleanup path. The dispatch-side requeue has already
-        flipped the row back to queued/waiting; the importer just logs and
-        yields."""
+    def test_force_import_requeue_leaves_next_preview_action_copy_intact(self):
+        """A requeued importer cannot reclaim an action a new preview owns."""
         from scripts import importer
         from lib.dispatch import DISPATCH_CODE_REQUEUED_FOR_PREVIEW
 
@@ -1012,15 +1438,32 @@ class TestImporterWorker(unittest.TestCase):
                 ),
             )
             self._mark_importable(db, job)
+            from lib.import_preview import force_action_copy_path
+
+            action_path = force_action_copy_path(self._force_cfg, job.id)
             claimed = db.claim_next_import_job(worker_id="worker")
             assert claimed is not None
             claimed_attempts = claimed.attempts
 
             def fake_dispatch(*_args, **_kwargs):
-                # Simulate the dispatch-side requeue.
+                # The requeue releases the action path to the next preview.
                 db.requeue_import_job_for_preview(
                     job.id,
                     reason="candidate evidence missing",
+                )
+                # Interleave the new preview publishing its fresh private
+                # action copy before this old importer frame returns.
+                shutil.rmtree(action_path)
+                os.mkdir(action_path, 0o700)
+                with open(os.path.join(action_path, "01.mp3"), "wb") as handle:
+                    handle.write(b"fresh preview action")
+                db.mark_import_job_preview_importable(
+                    job.id,
+                    preview_result={
+                        "verdict": "evidence_ready",
+                        "action_path": action_path,
+                    },
+                    message="fresh preview ready",
                 )
                 return DispatchOutcome(
                     False,
@@ -1039,10 +1482,12 @@ class TestImporterWorker(unittest.TestCase):
             # Importer must NOT have written a terminal status.
             cleanup.assert_not_called()
             self.assertTrue(os.path.isdir(source))
-            # Job row is queued/waiting after the requeue.
+            # The fresh preview has republished the job's action copy.
             row = next(r for r in db._import_jobs if r["id"] == job.id)
             self.assertEqual(row["status"], "queued")
-            self.assertEqual(row["preview_status"], "waiting")
+            self.assertEqual(row["preview_status"], "evidence_ready")
+            with open(os.path.join(action_path, "01.mp3"), "rb") as handle:
+                self.assertEqual(handle.read(), b"fresh preview action")
             # Importer did not retry-count: row attempts not bumped beyond
             # the original claim.
             self.assertEqual(row["attempts"], claimed_attempts)
@@ -1158,8 +1603,11 @@ class TestImporterWorker(unittest.TestCase):
 
             assert updated is not None
             self.assertEqual(updated.status, "failed")
-            self.assertEqual(self._result(updated)["cleanup"]["cleared_rows"], 2)
-            self.assertEqual(db.get_wrong_matches(), [])
+            self.assertEqual(
+                self._result(updated)["cleanup"]["outcome"],
+                "preserved_operator_force_source",
+            )
+            self.assertEqual(len(db.get_wrong_matches()), 2)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -1208,7 +1656,7 @@ class TestImporterWorker(unittest.TestCase):
             self.assertEqual(len(db.get_wrong_matches()), 1)
             cleanup = self._result(updated)["cleanup"]
             self.assertTrue(cleanup["skipped"])
-            self.assertEqual(cleanup["outcome"], "skipped_active_job")
+            self.assertEqual(cleanup["outcome"], "preserved_operator_force_source")
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -1526,6 +1974,46 @@ class TestImporterWorker(unittest.TestCase):
 
 
 class TestImportPreviewWorker(unittest.TestCase):
+    def test_terminal_force_preview_failure_reclaims_unpublished_stale_action(self):
+        """A failed preview owns and removes a stale action left by its retry."""
+        from lib.import_preview import force_action_copy_path
+        from scripts import import_preview_worker
+
+        with _force_preview_source() as (source, cfg):
+            db = FakePipelineDB()
+            download_log_id = _force_download_log(db, 42, source)
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(download_log_id),
+                payload=force_import_payload(
+                    download_log_id=download_log_id,
+                    failed_path=source,
+                ),
+            )
+            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            assert claimed is not None
+            action_path = force_action_copy_path(cfg, job.id)
+            os.mkdir(action_path, 0o700)
+            with open(os.path.join(action_path, "stale.mp3"), "wb") as handle:
+                handle.write(b"prior action")
+
+            terminal = db.mark_import_job_preview_failed(
+                job.id,
+                preview_status="measurement_failed",
+                error="preparation failed",
+            )
+            assert terminal is not None
+            returned = import_preview_worker._cleanup_terminal_preview_force_action(
+                claimed,
+                terminal,
+                action_path=None,
+                runtime_config=cfg,
+            )
+
+            self.assertEqual(returned, terminal)
+            self.assertFalse(os.path.exists(action_path))
+
     def _preview(
         self,
         verdict: str,
@@ -1649,6 +2137,7 @@ class TestImportPreviewWorker(unittest.TestCase):
             download_log_id=download_log_id,
             import_job_id=claimed.id,
             runtime_config=cfg,
+            repair_fn=ANY,
         )
         assert updated is not None
         self.assertEqual(updated.status, "queued")
@@ -1945,7 +2434,7 @@ class TestImportPreviewWorker(unittest.TestCase):
                 ),
             ):
                 updated = import_preview_worker.run_once(
-                    cast(Any, db),
+                    db,
                     worker_id="preview",
                     heartbeat_interval=0.01,
                     runtime_config=cfg,
@@ -2241,7 +2730,7 @@ class TestImportPreviewWorker(unittest.TestCase):
 
         with patch(
             "scripts.import_preview_worker.read_runtime_config",
-        ) as read_config:
+        ):
             updated = import_preview_worker.process_claimed_preview_job(
                 db,
                 claimed,
@@ -2256,7 +2745,6 @@ class TestImportPreviewWorker(unittest.TestCase):
         assert updated is not None
         self.assertEqual(updated.status, "failed")
         self.assertEqual(len(db.download_logs), 1)
-        read_config.assert_not_called()
         prepare.assert_not_called()
         enrich.assert_not_called()
 
@@ -3140,8 +3628,8 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             def fake_preview(*args: Any, **kwargs: Any) -> ImportPreviewResult:
                 # Simulate production: preview persists candidate evidence
                 # and wires the FK chain that the front-gate reads from.
-                _seed_candidate_for_download_log(
-                    db, download_log_id,
+                _seed_candidate_for_import_job(
+                    db, claimed.id,
                     mb_release_id="mbid-missing-falls-through",
                     files=snapshot_audio_files(source),
                 )
@@ -3218,8 +3706,8 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             def fake_preview(*args: Any, **kwargs: Any) -> ImportPreviewResult:
                 # Simulate production: preview re-measures and persists fresh
                 # evidence with the actual on-disk snapshot, rewiring the FK.
-                _seed_candidate_for_download_log(
-                    db, download_log_id,
+                _seed_candidate_for_import_job(
+                    db, claimed.id,
                     mb_release_id="mbid-fresh",
                     files=snapshot_audio_files(source),
                 )
@@ -3241,7 +3729,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
         self.assertEqual(updated.preview_status, "evidence_ready")
         # The stale evidence row was replaced — the FK now points at fresh
         # content-addressed evidence.
-        evidence_id = db.get_download_log_candidate_evidence_id(download_log_id)
+        evidence_id = db.get_import_job_candidate_evidence_id(claimed.id)
         self.assertIsNotNone(evidence_id)
         evidence = db.load_album_quality_evidence_by_id(evidence_id)
         assert evidence is not None
@@ -4074,7 +4562,7 @@ class TestFrontGateSourcePathYoutubeImport(unittest.TestCase):
         })
 
         result = import_preview_worker._front_gate_source_path(
-            cast(Any, db), job,
+            db, job,
         )
 
         self.assertEqual(result, "/Incoming/auto-import/Artist - Album")
@@ -4117,7 +4605,7 @@ class TestFrontGateSourcePathYoutubeImport(unittest.TestCase):
         })
 
         result = import_preview_worker._front_gate_source_path(
-            cast(Any, db), job,
+            db, job,
         )
 
         # Returns the payload path, not the active_download_state path.
@@ -4154,7 +4642,7 @@ class TestFrontGateSourcePathYoutubeImport(unittest.TestCase):
         })
 
         result = import_preview_worker._front_gate_source_path(
-            cast(Any, db), job,
+            db, job,
         )
 
         self.assertEqual(result, "/slskd/Test Artist - Test Album")
@@ -4200,7 +4688,7 @@ class TestFrontGateSourcePathYoutubeImport(unittest.TestCase):
         })
 
         result = import_preview_worker._preview_input(
-            cast(Any, db), job,
+            db, job,
         )
 
         self.assertEqual(result["path"], "/Incoming/auto-import/Artist - Album")
@@ -4281,7 +4769,7 @@ class TestForcePreviewPathAuthority(unittest.TestCase):
                     seen.append((lookup_path, handle.read()))
                 return EvidenceBuildResult(None, "missing")
 
-            result, display_path = import_preview_worker._front_gate_check(
+            result, display_path, action_path = import_preview_worker._front_gate_check(
                 db,
                 job,
                 runtime_config=cfg,
@@ -4290,6 +4778,7 @@ class TestForcePreviewPathAuthority(unittest.TestCase):
 
             self.assertIsNotNone(result)
             self.assertEqual(display_path, db_source)
+            self.assertIsNotNone(action_path)
             self.assertEqual(len(seen), 1)
             assert_force_preview_authority(
                 lookup_path=seen[0][0],
@@ -4297,7 +4786,7 @@ class TestForcePreviewPathAuthority(unittest.TestCase):
                 payload_failed_path=payload_source,
                 lookup_bytes=seen[0][1],
                 expected_db_bytes=b"database",
-                preview_root=os.path.join(processing, "preview"),
+                preview_root=os.path.join(processing, "albums"),
                 preview_children=os.listdir(os.path.join(processing, "preview")),
             )
 

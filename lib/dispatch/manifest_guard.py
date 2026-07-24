@@ -61,6 +61,7 @@ def _guard_reject(
     *,
     request_id: int,
     failed_path: str,
+    audit_source_path: str | None = None,
     source_username: str | None,
     attempt_result: ImportAttemptResult,
     detail: str,
@@ -75,16 +76,11 @@ def _guard_reject(
     ``wanted`` request, or one whose search was explicitly stopped by the
     operator; neither state belongs to this guard to rewrite.
 
-    The audit row carries no ``validation_result.failed_path``, so it never
-    becomes a *new* Wrong Matches entry (``get_wrong_matches`` keys on that
-    JSONB field).
+    When a private action copy is used, the audit retains its original
+    operator-owned source path rather than exposing the disposable copy.
 
     Always returns ``DISPATCH_CODE_IMPORT_MANIFEST_REJECTED`` so the importer
-    worker (``scripts/importer.py::_cleanup_failed_force_import``) PRESERVES
-    the operator's source folder — that path skips cleanup on any code other
-    than ``QUALITY_PIPELINE_REJECTED``, and for a FORCE job
-    ``QUALITY_PIPELINE_REJECTED`` runs ``delete_wrong_match`` →
-    ``shutil.rmtree`` (``lib/wrong_matches.py``). The guard only ever sees a
+    worker preserves the original operator source. The guard only ever sees a
     *non-empty* folder (an empty source returns ``None`` from the caller and
     reaches the evidence pipeline's ``empty_fileset`` early-exit instead), so
     deleting here would always destroy real audio the operator
@@ -108,7 +104,7 @@ def _guard_reject(
             distance=None,
             scenario=scenario,
             detail=detail,
-            failed_path=failed_path,
+            failed_path=audit_source_path or failed_path,
         ).to_json(),
         requeue=False,
         outcome_label="rejected",
@@ -134,6 +130,7 @@ def _guard_force_import_audio_manifest(
     *,
     request_id: int,
     failed_path: str,
+    audit_source_path: str | None = None,
     download_log_id: int | None,
     source_username: str | None,
     attempt_result: ImportAttemptResult,
@@ -167,13 +164,14 @@ def _guard_force_import_audio_manifest(
     manifest = _origin_manifest_for_download_log(
         db,
         download_log_id=download_log_id,
-        failed_path=failed_path,
+        failed_path=audit_source_path or failed_path,
     )
     actual_audio = audio_relative_paths(failed_path)
 
     def incomplete(detail: str) -> DispatchOutcome:
         return _guard_reject(
             db, request_id=request_id, failed_path=failed_path,
+            audit_source_path=audit_source_path,
             source_username=source_username, detail=detail,
             scenario="incomplete_fileset", attempt_result=attempt_result,
             import_job_id=import_job_id,
@@ -182,6 +180,7 @@ def _guard_force_import_audio_manifest(
     def extra(detail: str, *, scenario: str = "untracked_audio") -> DispatchOutcome:
         return _guard_reject(
             db, request_id=request_id, failed_path=failed_path,
+            audit_source_path=audit_source_path,
             source_username=source_username, detail=detail,
             scenario=scenario, attempt_result=attempt_result,
             import_job_id=import_job_id,

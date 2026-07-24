@@ -21,6 +21,7 @@ from unittest.mock import MagicMock, patch
 import msgspec
 
 from lib.config import CratediggerConfig
+from lib.quality_evidence import snapshot_audio_files, snapshot_fingerprint
 from lib.quality import (DownloadInfo, ImportResult, ConversionInfo,
                          DuplicateRemoveCandidate, DuplicateRemoveGuardInfo,
                          AlbumQualityV0Metric, AudioQualityMeasurement,
@@ -213,6 +214,14 @@ def _claim_dispatch_job(
     )
     from lib.import_queue import IMPORT_JOB_AUTOMATION, IMPORT_JOB_FORCE
 
+    # Production-shaped dispatch tests must persist the snapshot of the path
+    # they later hand to the freshness guard.
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    fixture_track = os.path.join(path, "01 - Track.mp3")
+    if not os.path.exists(fixture_track):
+        with open(fixture_track, "wb") as handle:
+            handle.write(b"fixture audio")
+    files = snapshot_audio_files(path)
     request = db.request(request_id)
     request["mb_release_id"] = release_id
     if not force:
@@ -228,6 +237,7 @@ def _claim_dispatch_job(
     evidence = make_album_quality_evidence(
         mb_release_id=release_id,
         source_path=path,
+        files=files,
         **(evidence_kwargs or {}),
     )
     db.upsert_album_quality_evidence(evidence)
@@ -463,6 +473,8 @@ class TestCleanupStagedDir(unittest.TestCase):
         from lib.dispatch import _cleanup_staged_dir
         tmpdir = tempfile.mkdtemp()
         try:
+            with open(os.path.join(tmpdir, "01 - Track.mp3"), "wb") as handle:
+                handle.write(b"fixture audio")
             parent = os.path.join(tmpdir, "Artist")
             staged = os.path.join(parent, "Album")
             os.makedirs(staged)
@@ -1399,6 +1411,8 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, "01 - Track.mp3"), "wb") as handle:
+                handle.write(b"fixture audio")
             request = db.request(42)
             request["mb_release_id"] = "test-mbid"
             request["active_download_state"] = {
@@ -1415,6 +1429,10 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
                 candidate,
                 mb_release_id="test-mbid",
                 source_path=tmpdir,
+                files=snapshot_audio_files(tmpdir),
+                snapshot_fingerprint=snapshot_fingerprint(
+                    snapshot_audio_files(tmpdir),
+                ),
             )
             db.upsert_album_quality_evidence(candidate)
             persisted = db.find_album_quality_evidence(
@@ -1679,6 +1697,8 @@ class TestDispatchImport(unittest.TestCase):
         mock_gate = RecordingQualityGate()
         tmpdir = tempfile.mkdtemp()
         try:
+            with open(os.path.join(tmpdir, "01 - Track.mp3"), "wb") as handle:
+                handle.write(b"fixture audio")
             del queued  # every Beets seam now requires a claimed job
             db = FakePipelineDB()
             supplied_overrides = dict(request_overrides or {})
@@ -1714,6 +1734,7 @@ class TestDispatchImport(unittest.TestCase):
             evidence = make_album_quality_evidence(
                 mb_release_id="test-mbid",
                 source_path=tmpdir,
+                files=snapshot_audio_files(tmpdir),
             )
             db.upsert_album_quality_evidence(evidence)
             persisted = db.find_album_quality_evidence(

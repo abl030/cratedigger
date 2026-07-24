@@ -8,6 +8,7 @@ from typing import Any, cast
 import unittest
 from unittest.mock import patch
 
+from lib.config import CratediggerConfig
 from lib.dispatch import DispatchOutcome
 from lib.dispatch.types import PostCommitCleanup
 from lib.import_evidence import ensure_candidate_evidence_for_action
@@ -24,6 +25,7 @@ from lib.import_queue import (
 )
 from lib.pipeline_db import PipelineDB
 from lib.quality_evidence import snapshot_audio_files
+from lib.import_preview import force_action_copy_path
 from lib.import_job_recovery_service import resolve_import_job_recovery
 from lib.terminal_outcomes import (
     ImportJobTerminal,
@@ -417,6 +419,79 @@ class TestImportOperationFence(unittest.TestCase):
             "retry",
         )
 
+    def test_recovery_retry_resets_only_force_preview_state(self) -> None:
+        """#853: only force retries lost a disposable action copy."""
+        cases = (
+            (IMPORT_JOB_AUTOMATION, "downloading", "/incoming/automation", {}),
+            (
+                IMPORT_JOB_YOUTUBE,
+                "wanted",
+                "/incoming/youtube",
+                youtube_import_payload(
+                    staged_path="/incoming/youtube",
+                    request_id=42,
+                    browse_id="MPREb_recovery",
+                    download_log_id=77,
+                ),
+            ),
+        )
+        for job_type, status, source_path, payload in cases:
+            with self.subTest(job_type=job_type):
+                db = FakePipelineDB()
+                db.seed_request(make_request_row(
+                    id=42,
+                    mb_release_id="release-42",
+                    status=status,
+                    active_download_state=(
+                        {"current_path": source_path, "files": []}
+                        if job_type == IMPORT_JOB_AUTOMATION else None
+                    ),
+                ))
+                job = db.enqueue_import_job(
+                    job_type,
+                    request_id=42,
+                    dedupe_key=f"{job_type}:recovery-preview",
+                    payload=payload,
+                )
+                _seed_candidate(
+                    db,
+                    job.id,
+                    release_id="release-42",
+                    source_path=source_path,
+                )
+                preview_result = {"verdict": "would_import", "sentinel": job_type}
+                db.mark_import_job_preview_importable(
+                    job.id, preview_result=preview_result,
+                )
+                claimed = db.claim_next_import_job(worker_id="worker")
+                assert claimed is not None
+                candidate_evidence_id = claimed.candidate_evidence_id
+                assert db.authorize_import_job_launch(
+                    claimed.id,
+                    request_id=42,
+                    release_id="release-42",
+                    source_path=source_path,
+                ) is not None
+                recovery = db.mark_import_job_recovery_required(
+                    claimed.id, reason="ambiguous operation",
+                )
+                assert recovery is not None
+
+                result = resolve_import_job_recovery(
+                    db,
+                    recovery.id,
+                    resolution="retry",
+                    reason="Operator reconciled external mutation",
+                )
+
+                assert result.retry_job is not None
+                self.assertEqual(result.retry_job.preview_result, preview_result)
+                self.assertEqual(result.retry_job.candidate_evidence_id, candidate_evidence_id)
+                self.assertEqual(
+                    result.retry_job.beets_launch_snapshot_fingerprint,
+                    None,
+                )
+
     def test_operator_close_never_schedules_replay(self) -> None:
         db, recovery = self._force_recovery_job()
 
@@ -431,6 +506,67 @@ class TestImportOperationFence(unittest.TestCase):
         self.assertIsNone(result.retry_job)
         self.assertEqual(len(db.list_import_jobs()), 1)
         self.assertIsNone(db.claim_next_import_job(worker_id="replay"))
+
+    def test_recovery_resolution_discards_old_force_action_before_close_or_retry(self) -> None:
+        """#853: recovery retains a copy only while reconciliation is pending."""
+        for resolution in ("close", "retry"):
+            with self.subTest(resolution=resolution), tempfile.TemporaryDirectory() as root:
+                downloads = os.path.join(root, "downloads")
+                processing = os.path.join(root, "processing")
+                os.mkdir(downloads, 0o700)
+                os.mkdir(processing, 0o700)
+                os.mkdir(os.path.join(processing, "albums"), 0o700)
+                os.mkdir(os.path.join(processing, "preview"), 0o700)
+                cfg = CratediggerConfig(
+                    slskd_download_dir=downloads,
+                    processing_dir=processing,
+                    audio_check_mode="off",
+                )
+                db = FakePipelineDB()
+                db.seed_request(make_request_row(
+                    id=42, mb_release_id="release-42", status="wanted",
+                ))
+                job = db.enqueue_import_job(
+                    IMPORT_JOB_FORCE,
+                    request_id=42,
+                    dedupe_key=f"force:recovery-action:{resolution}",
+                    payload={"download_log_id": 1, "failed_path": "/operator/raw"},
+                )
+                action_path = force_action_copy_path(cfg, job.id)
+                os.mkdir(action_path, 0o700)
+                with open(os.path.join(action_path, "01.mp3"), "wb") as handle:
+                    handle.write(b"action bytes")
+                _seed_candidate(
+                    db, job.id, release_id="release-42", source_path=action_path,
+                )
+                db.mark_import_job_preview_importable(
+                    job.id, preview_result={"action_path": action_path},
+                )
+                claimed = db.claim_next_import_job(worker_id="worker")
+                assert claimed is not None
+                assert db.authorize_import_job_launch(
+                    claimed.id,
+                    request_id=42,
+                    release_id="release-42",
+                    source_path="/operator/raw",
+                ) is not None
+                recovery = db.mark_import_job_recovery_required(
+                    claimed.id, reason="ambiguous Beets result",
+                )
+                assert recovery is not None
+
+                with patch("lib.config.read_runtime_config", return_value=cfg):
+                    result = resolve_import_job_recovery(
+                        db,
+                        recovery.id,
+                        resolution=resolution,
+                        reason="Operator reconciled Beets and raw source",
+                    )
+
+                self.assertFalse(os.path.exists(action_path))
+                if resolution == "retry":
+                    assert result.retry_job is not None
+                    self.assertIsNone(result.retry_job.preview_result)
 
     def test_operator_retry_refuses_authority_changed_during_inspection(self) -> None:
         db, recovery = self._force_recovery_job()

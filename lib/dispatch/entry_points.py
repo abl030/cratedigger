@@ -38,6 +38,7 @@ def dispatch_import_from_db(
     request_id: int,
     failed_path: str,
     *,
+    source_reference_path: str | None = None,
     source_username: str | None = None,
     source_dirs: list[str] | None = None,
     import_job_id: int | None = None,
@@ -112,6 +113,7 @@ def dispatch_import_from_db(
             )
         return _dispatch_import_from_db_locked(
             db, request_id, failed_path,
+            source_reference_path=source_reference_path,
             source_username=source_username,
             source_dirs=source_dirs,
             import_job_id=import_job_id,
@@ -129,6 +131,7 @@ def _dispatch_import_from_db_locked(
     request_id: int,
     failed_path: str,
     *,
+    source_reference_path: str | None = None,
     source_username: str | None,
     source_dirs: list[str] | None,
     import_job_id: int | None,
@@ -164,6 +167,7 @@ def _dispatch_import_from_db_locked(
         )
 
     source_dirs = normalize_source_dirs(source_dirs or [])
+    launch_authority_path = source_reference_path or failed_path
 
     req = db.get_request(request_id)
     if not req:
@@ -175,23 +179,6 @@ def _dispatch_import_from_db_locked(
 
     if not os.path.isdir(failed_path):
         return DispatchOutcome(success=False, message=f"Path not found: {failed_path}")
-
-    attempt_result = ImportAttemptResult.from_import_job(db, import_job_id)
-    manifest_reject = _guard_force_import_audio_manifest(
-        db,
-        request_id=request_id,
-        failed_path=failed_path,
-        download_log_id=download_log_id,
-        source_username=source_username,
-        attempt_result=attempt_result,
-        import_job_id=import_job_id,
-    )
-    if manifest_reject is not None:
-        return _persist_terminal_dispatch_outcome(
-            db,
-            manifest_reject,
-            defer=_job_is_running(db, import_job_id),
-        )
 
     from lib.config import read_runtime_config
 
@@ -225,6 +212,29 @@ def _dispatch_import_from_db_locked(
             import_job_id=import_job_id,
             reason=reason,
         )
+
+    # Candidate freshness is the first force-import gate.  Manifest drift is
+    # evidence drift, not a terminal audit outcome: preview will snapshot the
+    # current action tree and re-establish the candidate before this guard
+    # evaluates the operator's expected audio manifest.
+    attempt_result = ImportAttemptResult.from_import_job(db, import_job_id)
+    manifest_reject = _guard_force_import_audio_manifest(
+        db,
+        request_id=request_id,
+        failed_path=failed_path,
+        audit_source_path=source_reference_path,
+        download_log_id=download_log_id,
+        source_username=source_username,
+        attempt_result=attempt_result,
+        import_job_id=import_job_id,
+    )
+    if manifest_reject is not None:
+        return _persist_terminal_dispatch_outcome(
+            db,
+            manifest_reject,
+            defer=_job_is_running(db, import_job_id),
+        )
+
     dl_info = _download_info_from_candidate_evidence(
         candidate_result.evidence,
         username=source_username,
@@ -256,6 +266,7 @@ def _dispatch_import_from_db_locked(
         candidate_import_job_id=import_job_id,
         attempt_result=attempt_result,
         candidate_download_log_id=download_log_id,
+        launch_authority_path=launch_authority_path,
         prevalidated_candidate_result=candidate_result,
         quality_gate_fn=resolved_quality_gate_fn,
         run_import_fn=run_import_fn,

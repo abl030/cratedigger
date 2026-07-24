@@ -70,6 +70,7 @@ def _reject_import_from_evidence_decision(
     source_download_log_id: int | None = None,
     quality_ranks: QualityRankConfig | None = None,
     audio_quarantine_root: str | None = None,
+    preserve_corrupt_source: bool = False,
 ) -> DispatchOutcome:
     """Record a persisted-evidence rejection before beets can mutate files.
 
@@ -178,12 +179,15 @@ def _reject_import_from_evidence_decision(
                     if db.check_and_apply_cooldown(username):
                         cooled_down_users.add(username)
     cleanup_plan: PostCommitCleanup | None = None
-    if action.cleanup and decision == "audio_corrupt":
+    if action.cleanup and decision == "audio_corrupt" and not preserve_corrupt_source:
         # Corrupt audio is retained for audit in every caller mode. Force
         # imports deliberately do not satisfy ``_should_cleanup_path`` until
         # they succeed, because ordinary force cleanup deletes the reviewed
         # Wrong Matches source. Quarantine is a separate, archival ownership
-        # transfer and must not inherit that destructive gate.
+        # transfer and must not inherit that destructive gate. A force action
+        # copy is different: it is disposable private processing state, and
+        # the queue owner reclaims it after acknowledgement instead of moving
+        # it into the operator's protected quarantine tree.
         if import_job_id is not None:
             cleanup_plan = PostCommitCleanup(
                 audio_quarantine_source_path=staged_path,

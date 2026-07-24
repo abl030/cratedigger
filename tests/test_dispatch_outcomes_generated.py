@@ -65,6 +65,7 @@ from lib.quality import (
     DownloadInfo,
     dispatch_action,
 )
+from lib.quality_evidence import snapshot_audio_files
 from tests.fakes import DownloadLogRow, FakePipelineDB
 from tests.beets_world import BeetsWorld
 from tests.helpers import (
@@ -233,9 +234,12 @@ def _run_dispatch(
             request_id=42,
             payload={"download_log_id": 1, "failed_path": tmpdir} if force else {},
         )
+        with open(os.path.join(tmpdir, "01 - Track.mp3"), "wb") as handle:
+            handle.write(b"generated fixture audio")
         evidence = make_album_quality_evidence(
             mb_release_id="mbid-generated",
             source_path=tmpdir,
+            files=snapshot_audio_files(tmpdir),
         )
         db.upsert_album_quality_evidence(evidence)
         persisted = db.find_album_quality_evidence(
@@ -559,17 +563,6 @@ def _run_have_analysis_abort(
         search_filetype_override=search_override,
         active_download_state={"files": [], "filetype": "flac"},
     ))
-    candidate = make_album_quality_evidence(
-        mb_release_id="generated-have-analysis-mbid",
-        source_path="/tmp/generated-candidate",
-    )
-    candidate_result = CandidateEvidenceActionResult(
-        evidence=candidate,
-        provenance=ActionEvidenceProvenance(
-            candidate_status="reused",
-            snapshot_guard="matched",
-        ),
-    )
     current_result = CurrentEvidenceActionResult(
         evidence=None,
         provenance=ActionEvidenceProvenance(
@@ -590,6 +583,8 @@ def _run_have_analysis_abort(
     }[mode]
 
     with tempfile.TemporaryDirectory() as tmpdir:
+        with open(os.path.join(tmpdir, "01 - Track.mp3"), "wb") as handle:
+            handle.write(b"generated HAVE fixture")
         payload = (
             {}
             if mode == "auto"
@@ -599,6 +594,25 @@ def _run_have_analysis_abort(
             job_type,
             request_id=42,
             payload=payload,
+        )
+        candidate = make_album_quality_evidence(
+            mb_release_id="generated-have-analysis-mbid",
+            source_path=tmpdir,
+            files=snapshot_audio_files(tmpdir),
+        )
+        db.upsert_album_quality_evidence(candidate)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=candidate.mb_release_id,
+            snapshot_fingerprint=candidate.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_import_job_candidate_evidence(job.id, persisted.id)
+        candidate_result = CandidateEvidenceActionResult(
+            evidence=persisted,
+            provenance=ActionEvidenceProvenance(
+                candidate_status="reused",
+                snapshot_guard="matched",
+            ),
         )
         with patch_dispatch_externals():
             outcome = dispatch_import_core(

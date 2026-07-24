@@ -39,6 +39,7 @@ from lib.import_preview import (
     ImportPreviewResult,
     enrich_incomplete_current_evidence_for_request,
     persist_exact_current_spectral_from_attempt,
+    force_action_copy_path,
 )
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
@@ -124,7 +125,10 @@ from tests.world_model.census_seeds import (
     WorldCensusSeed,
     assert_missing_current_evidence_seed_anonymized,
 )
-from scripts.import_preview_worker import process_claimed_preview_job
+from scripts.import_preview_worker import (
+    _prepare_force_action_path,
+    process_claimed_preview_job,
+)
 
 
 @dataclass(frozen=True)
@@ -769,7 +773,10 @@ class LifecycleWorld:
                 # the persisted candidate matches the new bytes.
                 fresh = self._persist_candidate_evidence(
                     release=release,
-                    source_path=source_path,
+                    source_path=(
+                        force_action_copy_path(cfg, import_job_id)
+                        if _job.job_type == IMPORT_JOB_FORCE else source_path
+                    ),
                     measurement=measurement,
                     codec=codec,
                     verified_lossless_proof=verified_lossless_proof,
@@ -785,7 +792,14 @@ class LifecycleWorld:
                 verdict="evidence_ready",
                 decision="import",
                 reason="import",
-                source_path=source_path,
+                source_path=(
+                    force_action_copy_path(cfg, import_job_id)
+                    if _job.job_type == IMPORT_JOB_FORCE else source_path
+                ),
+                action_path=(
+                    force_action_copy_path(cfg, import_job_id)
+                    if _job.job_type == IMPORT_JOB_FORCE else None
+                ),
                 request_id=request_id,
                 download_log_id=download_log_id,
             )
@@ -810,6 +824,9 @@ class LifecycleWorld:
         preview_dir = processing_dir / "preview"
         preview_dir.mkdir(mode=0o700, exist_ok=True)
         preview_dir.chmod(0o700)
+        albums_dir = processing_dir / "albums"
+        albums_dir.mkdir(mode=0o700, exist_ok=True)
+        albums_dir.chmod(0o700)
         slskd_dir = self.beets.root / "slskd"
         slskd_dir.mkdir(exist_ok=True)
         cfg = CratediggerConfig(
@@ -820,6 +837,24 @@ class LifecycleWorld:
             slskd_download_dir=str(slskd_dir),
             processing_dir=str(processing_dir),
         )
+        if claimed.job_type == IMPORT_JOB_FORCE and not snapshot_changed:
+            action_path = _prepare_force_action_path(
+                self.db,
+                claimed,
+                cfg,
+                raw_path=source_path,
+            )
+            action_evidence = self._persist_candidate_evidence(
+                release=release,
+                source_path=action_path,
+                measurement=measurement,
+                codec=codec,
+                verified_lossless_proof=verified_lossless_proof,
+            )
+            self.db.set_import_job_candidate_evidence(
+                import_job_id,
+                action_evidence.id,
+            )
         # ``derive_canonical_import_folder`` does a call-time
         # ``from lib.config import read_runtime_config`` for the automation
         # front gate, so patch that binding too — the world never touches the

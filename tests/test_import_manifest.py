@@ -6,6 +6,7 @@ from typing import Any, cast
 from lib.grab_list import DownloadFile
 from lib.dispatch import (
     DISPATCH_CODE_IMPORT_MANIFEST_REJECTED,
+    DispatchOutcome,
     dispatch_import_from_db,
 )
 from lib.import_manifest import (
@@ -14,8 +15,9 @@ from lib.import_manifest import (
     tracked_audio_paths_for_downloads,
 )
 from lib.import_queue import IMPORT_JOB_FORCE
+from lib.quality_evidence import snapshot_audio_files
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_request_row
+from tests.helpers import make_album_quality_evidence, make_request_row
 
 
 class TestImportManifest(unittest.TestCase):
@@ -142,12 +144,58 @@ class TestImportManifest(unittest.TestCase):
 
 class TestForceImportManifestGuard(unittest.TestCase):
     @staticmethod
-    def _queued_job(db: FakePipelineDB, failed_path: str) -> int:
-        return db.enqueue_import_job(
+    def _persist_deferred_terminal(
+        db: FakePipelineDB,
+        outcome: DispatchOutcome,
+    ) -> None:
+        terminal = outcome.terminal_outcome
+        if terminal is not None:
+            from tests.helpers import finalize_claimed_dispatch
+
+            job = db.get_import_job(terminal.import_job_id)
+            assert job is not None
+            finalize_claimed_dispatch(db, job, outcome)
+
+    @staticmethod
+    def _claimed_job(
+        db: FakePipelineDB,
+        failed_path: str,
+        *,
+        download_log_id: int | None = None,
+        preview_result: dict[str, object] | None = None,
+    ) -> int:
+        job = db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=42,
-            payload={"download_log_id": 1, "failed_path": failed_path},
-        ).id
+            payload={
+                "download_log_id": download_log_id or 1,
+                "failed_path": failed_path,
+            },
+        )
+        request = db.get_request(42)
+        assert request is not None
+        mb_release_id = request["mb_release_id"]
+        assert isinstance(mb_release_id, str)
+        evidence = make_album_quality_evidence(
+            mb_release_id=mb_release_id,
+            source_path=failed_path,
+            files=snapshot_audio_files(failed_path),
+        )
+        db.upsert_album_quality_evidence(evidence)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_import_job_candidate_evidence(job.id, persisted.id)
+        ready = db.mark_import_job_preview_importable(
+            job.id,
+            preview_result=preview_result or {},
+        )
+        assert ready is not None
+        claimed = db.claim_next_import_job(worker_id="manifest-guard")
+        assert claimed is not None and claimed.id == job.id
+        return job.id
 
     def test_force_import_rejects_audio_not_in_origin_manifest(self):
         import msgspec
@@ -173,15 +221,6 @@ class TestForceImportManifestGuard(unittest.TestCase):
                     "items": [{"path": os.path.join(root, "01 Perth.flac")}],
                 },
             )
-            job = db.enqueue_import_job(
-                IMPORT_JOB_FORCE,
-                request_id=42,
-                payload=force_import_payload(
-                    download_log_id=log_id,
-                    failed_path=root,
-                    source_username="alice",
-                ),
-            )
             audit = SpectralDetail(
                 candidate=SpectralAnalysisDetail(
                     attempted=True, grade="suspect", bitrate_kbps=96),
@@ -191,8 +230,10 @@ class TestForceImportManifestGuard(unittest.TestCase):
             preview_import_result = msgspec.to_builtins(
                 ImportResult(spectral=audit))
             assert isinstance(preview_import_result, dict)
-            db.mark_import_job_preview_importable(
-                job.id,
+            job_id = self._claimed_job(
+                db,
+                root,
+                download_log_id=log_id,
                 preview_result={"import_result": preview_import_result},
             )
 
@@ -200,10 +241,11 @@ class TestForceImportManifestGuard(unittest.TestCase):
                 cast(Any, db),
                 request_id=42,
                 failed_path=root,
-                import_job_id=job.id,
+                import_job_id=job_id,
                 download_log_id=log_id,
             )
 
+        self._persist_deferred_terminal(db, outcome)
         self.assertFalse(outcome.success)
         # Extra/untracked audio: keep the Wrong Matches entry for operator
         # review (the importer skips cleanup on this code).
@@ -250,7 +292,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
                     ],
                 },
             )
-            job_id = self._queued_job(db, root)
+            job_id = self._claimed_job(db, root, download_log_id=log_id)
 
             outcome = dispatch_import_from_db(
                 cast(Any, db),
@@ -260,6 +302,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
                 download_log_id=log_id,
             )
 
+        self._persist_deferred_terminal(db, outcome)
         self.assertFalse(outcome.success)
         self.assertEqual(outcome.code, DISPATCH_CODE_IMPORT_MANIFEST_REJECTED)
         self.assertIn("manifest has 2 audio files", outcome.message)
@@ -284,7 +327,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
             open(os.path.join(root, "01.mp3"), "wb").close()
             open(os.path.join(root, "02.mp3"), "wb").close()
             open(os.path.join(root, "bonus.mp3"), "wb").close()
-            job_id = self._queued_job(db, root)
+            job_id = self._claimed_job(db, root)
 
             outcome = dispatch_import_from_db(
                 cast(Any, db),
@@ -293,6 +336,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
                 import_job_id=job_id,
             )
 
+        self._persist_deferred_terminal(db, outcome)
         self.assertFalse(outcome.success)
         self.assertEqual(outcome.code, DISPATCH_CODE_IMPORT_MANIFEST_REJECTED)
         self.assertIn("3 audio files", outcome.message)
@@ -314,7 +358,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as root:
             open(os.path.join(root, "01.mp3"), "wb").close()
-            job_id = self._queued_job(db, root)
+            job_id = self._claimed_job(db, root)
 
             outcome = dispatch_import_from_db(
                 cast(Any, db),
@@ -323,6 +367,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
                 import_job_id=job_id,
             )
 
+        self._persist_deferred_terminal(db, outcome)
         self.assertFalse(outcome.success)
         self.assertEqual(outcome.code, DISPATCH_CODE_IMPORT_MANIFEST_REJECTED)
         self.assertIn("requires either an origin audio manifest", outcome.message)
@@ -351,7 +396,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as root:
             open(os.path.join(root, "01.mp3"), "wb").close()
-            job_id = self._queued_job(db, root)
+            job_id = self._claimed_job(db, root)
 
             outcome = dispatch_import_from_db(
                 cast(Any, db),
@@ -360,6 +405,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
                 import_job_id=job_id,
             )
 
+        self._persist_deferred_terminal(db, outcome)
         self.assertFalse(outcome.success)
         # Preserve-folder code (importer skips deletion) — a non-empty source
         # must never route through the rmtree-ing QUALITY_PIPELINE_REJECTED.
@@ -399,7 +445,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
                     ],
                 },
             )
-            job_id = self._queued_job(db, root)
+            job_id = self._claimed_job(db, root, download_log_id=log_id)
 
             outcome = dispatch_import_from_db(
                 cast(Any, db),
@@ -409,6 +455,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
                 download_log_id=log_id,
             )
 
+        self._persist_deferred_terminal(db, outcome)
         self.assertFalse(outcome.success)
         self.assertEqual(outcome.code, DISPATCH_CODE_IMPORT_MANIFEST_REJECTED)
         self.assertEqual(db.request(42)["status"], "unsearchable")
