@@ -152,3 +152,18 @@ var-dir (cycles then exit 1 SILENTLY, 265ms — check the lock first when cycles
 #663 hardening: materialization requires private (non-group-writable) processing ANCESTRY —
 calib var-dir must live at /var/lib/cratedigger-calib (root 0700), NOT under the shared music
 tree; --config-dir stays on virtiofs. Old-path staged-missing records self-heal to wanted.
+
+**TRANSIENT-UNIT KILLER IDENTIFIED (2026-07-24 eve):** prod deploys (nixos-rebuild switch →
+systemd daemon-reload) GC ALL calib transient units — timer AND services — silently (13:39 kill
+cost 6h of zero polling while downloads completed in slskd). Also: /var/lib/cratedigger-calib
+needs processing/albums/ pre-created (module preStart does it for prod). Re-arm checklist after
+ANY deploy: migrate-to-current, recreate 3 units on current store paths, verify lock absent,
+verify processing dir. All three active + 0 authority failures as of 18:35.
+
+**CALIB FINAL FIXES (2026-07-24 eve):** preview worker has ITS OWN private-ancestry check on
+processing_dir — pin [Paths] processing_dir = /var/lib/cratedigger-calib/processing in calib
+config.ini (workers do NOT inherit the cycle --var-dir!). mbid_not_found rejections on calib =
+NORMAL strict-pressing behavior (wrong-edition grabs: Fame Monster EP vs deluxe, Pet Sounds
+mono+stereo sets) — not a regression; prod imports healthy on same binaries. Chain verified
+mechanically whole 19:0x. NEXT SESSION: (1) liveness check all 3 units FIRST (deploys GC them),
+(2) census imported>=40 beyond r1 set, (3) round-2 blind pipeline when ~8+ fresh albums.
