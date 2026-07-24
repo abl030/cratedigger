@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Protocol
 
 import msgspec
 
 from lib.import_queue import ImportJob
+
+logger = logging.getLogger("cratedigger")
 
 
 RECOVERY_RESOLUTION_RETRY = "retry"
@@ -85,6 +88,24 @@ def resolve_import_job_recovery(
             ),
         )
     job, retry_job = resolved
+    if job.job_type == "force_import" and job.preview_result is not None:
+        action_path = job.preview_result.get("action_path")
+        if isinstance(action_path, str) and action_path:
+            try:
+                from lib.config import read_runtime_config
+                from lib.import_preview import cleanup_force_action_copy_for_job
+
+                cleanup_force_action_copy_for_job(
+                    action_path,
+                    read_runtime_config(),
+                    import_job_id=job.id,
+                )
+            except Exception:
+                # The operator resolution is durable. A private deterministic
+                # copy can be reclaimed later; it must not undo that decision.
+                logger.exception(
+                    "Failed to remove resolved force action copy for job %s", job.id,
+                )
     return ImportRecoveryResolution(
         outcome=("retry_queued" if retry_job is not None else "closed"),
         job=job,

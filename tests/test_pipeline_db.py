@@ -22,6 +22,7 @@ from unittest.mock import patch
 
 import msgspec
 import psycopg2
+import psycopg2.extras
 
 # Bootstrap ephemeral PostgreSQL if available
 sys.path.append(os.path.dirname(__file__))
@@ -1241,6 +1242,82 @@ class TestImportJobQueueAPI(unittest.TestCase):
         self.assertIsNone(stored["worker_id"])
         self.assertIsNone(stored["heartbeat_at"])
         self.assertEqual(reread.status, stored["status"])
+
+    def test_recovery_retry_resets_preview_only_for_force_job(self):
+        """#853 Rule A: the retry insert keeps non-force preview authority."""
+        from lib.import_queue import IMPORT_JOB_AUTOMATION, IMPORT_JOB_FORCE
+
+        for job_type, status, source_path in (
+            (IMPORT_JOB_FORCE, "wanted", "/tmp/force-recovery"),
+            (IMPORT_JOB_AUTOMATION, "downloading", "/tmp/automation-recovery"),
+        ):
+            with self.subTest(job_type=job_type):
+                request_id = self.db.add_request(
+                    mb_release_id=f"recovery-{job_type}",
+                    artist_name="Recovery",
+                    album_title=job_type,
+                    source="request",
+                    status=status,
+                )
+                if job_type == IMPORT_JOB_AUTOMATION:
+                    self.db._execute(
+                        "UPDATE album_requests SET active_download_state = %s::jsonb "
+                        "WHERE id = %s",
+                        (psycopg2.extras.Json({
+                            "current_path": source_path,
+                            "files": [],
+                        }), request_id),
+                    )
+                job = self.db.enqueue_import_job(
+                    job_type,
+                    request_id=request_id,
+                    dedupe_key=f"recovery-preview:{job_type}",
+                    payload={"download_log_id": 1, "failed_path": source_path}
+                    if job_type == IMPORT_JOB_FORCE else {},
+                )
+                evidence = make_album_quality_evidence(
+                    mb_release_id=f"recovery-{job_type}", source_path=source_path,
+                )
+                self.db.upsert_album_quality_evidence(evidence)
+                persisted = self.db.find_album_quality_evidence(
+                    mb_release_id=evidence.mb_release_id,
+                    snapshot_fingerprint=evidence.snapshot_fingerprint,
+                )
+                assert persisted is not None and persisted.id is not None
+                self.db.set_import_job_candidate_evidence(job.id, persisted.id)
+                preview_result = {"verdict": "would_import", "case": job_type}
+                self.db.mark_import_job_preview_importable(
+                    job.id, preview_result=preview_result,
+                )
+                claimed = self.db.claim_next_import_job(worker_id="recovery-worker")
+                assert claimed is not None
+                assert self.db.authorize_import_job_launch(
+                    claimed.id,
+                    request_id=request_id,
+                    release_id=f"recovery-{job_type}",
+                    source_path=source_path,
+                ) is not None
+                recovery = self.db.mark_import_job_recovery_required(
+                    claimed.id, reason="ambiguous external mutation",
+                )
+                assert recovery is not None
+
+                resolved = self.db.resolve_import_job_recovery(
+                    recovery.id,
+                    resolution="retry",
+                    reason="operator reconciled mutation",
+                )
+
+                assert resolved is not None
+                _closed, retry = resolved
+                assert retry is not None
+                if job_type == IMPORT_JOB_FORCE:
+                    self.assertEqual(retry.preview_status, "waiting")
+                    self.assertIsNone(retry.preview_result)
+                    self.assertIsNone(retry.candidate_evidence_id)
+                else:
+                    self.assertEqual(retry.preview_result, preview_result)
+                    self.assertEqual(retry.candidate_evidence_id, persisted.id)
 
     def test_two_sessions_cannot_claim_same_job(self):
         from lib.import_queue import IMPORT_JOB_FORCE

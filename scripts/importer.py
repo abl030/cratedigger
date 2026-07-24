@@ -19,10 +19,10 @@ if REPO_ROOT not in sys.path:
 import msgspec
 
 from lib.dispatch import (
-    DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
     DISPATCH_CODE_REQUEUE_FAILED,
     DISPATCH_CODE_REQUEUED_FOR_PREVIEW,
     DispatchOutcome,
+    _requeue_import_job_to_preview,
 )
 from lib.dispatch.types import (
     PostCommitCleanup,
@@ -186,6 +186,59 @@ def _force_job_wrong_match_payload(job: ImportJob) -> tuple[int, str | None] | N
     return job.payload.download_log_id, job.payload.failed_path
 
 
+def _force_action_path(job: ImportJob) -> str | None:
+    """Return the retained private copy selected by this preview, if any."""
+    preview = job.preview_result
+    value = preview.get("action_path") if preview is not None else None
+    return value if isinstance(value, str) and value else None
+
+
+def _cleanup_terminal_force_action(job: ImportJob) -> dict[str, object] | None:
+    """Best-effort cleanup after a terminal force outcome.
+
+    The action copy must outlive Beets, but it is disposable once no launch is
+    pending.  Cleanup is deliberately reported after the real outcome rather
+    than allowed to replace it.
+    """
+    action_path = _force_action_path(job)
+    if action_path is None:
+        return None
+    try:
+        from lib.config import read_runtime_config
+        from lib.import_preview import cleanup_force_action_copy_for_job
+
+        cfg = read_runtime_config()
+        cleanup_force_action_copy_for_job(action_path, cfg, import_job_id=job.id)
+        return {"action_path": action_path, "removed": True}
+    except Exception as exc:
+        logger.exception("Failed to remove retained force action copy %s", action_path)
+        return {
+            "action_path": action_path,
+            "removed": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+def _record_terminal_force_action_cleanup(
+    db: PipelineDB,
+    job: ImportJob,
+    terminal_job: ImportJob | None,
+) -> ImportJob | None:
+    cleanup = _cleanup_terminal_force_action(job)
+    if cleanup is None:
+        return terminal_job
+    try:
+        merged = db.merge_import_job_result(
+            job.id, {"force_action_cleanup": cleanup},
+        )
+    except Exception:  # terminal acknowledgement must remain authoritative
+        logger.exception(
+            "Failed to record retained force action cleanup for job %s", job.id,
+        )
+        return terminal_job
+    return merged or terminal_job
+
+
 def _cleanup_failed_force_import(
     db: PipelineDB,
     job: ImportJob,
@@ -214,55 +267,30 @@ def _cleanup_failed_force_import(
             "dispatch_code": outcome.code,
             "dispatch_message": outcome.message,
         }
-    if outcome.code != DISPATCH_CODE_QUALITY_PIPELINE_REJECTED:
-        return {
-            "success": False,
-            "download_log_id": download_log_id,
-            "failed_path_hint": failed_path_hint,
-            "outcome": "skipped_non_quality_pipeline_failure",
-            "skipped": True,
-            "dispatch_code": outcome.code,
-            "dispatch_message": outcome.message,
-        }
-    try:
-        from lib.wrong_match_delete_service import delete_wrong_match
-
-        # Dispatch already made the canonical import decision via
-        # full_pipeline_decision_from_evidence; this step only removes the
-        # reviewed source from Wrong Matches.
-        if not isinstance(job.payload, ForceImportPayload):
-            raise AssertionError("force_import payload type mismatch")
-        result = delete_wrong_match(
-            db,
-            download_log_id,
-            failed_path_hint=failed_path_hint,
-            source_dirs_hint=job.payload.source_dirs,
-            ignore_import_job_id=job.id,
-            require_visible=False,
-        )
-        data = result.to_dict()
-        data["dispatch_code"] = outcome.code
-        data["dispatch_message"] = outcome.message
-        if result.success:
-            data["reason"] = "quality_pipeline_rejected"
-        return data
-    except Exception as exc:
-        logger.exception(
-            "Failed to clean wrong-match source for import job %s",
-            job.id,
-        )
-        return {
-            "success": False,
-            "download_log_id": download_log_id,
-            "failed_path_hint": failed_path_hint,
-            "error": f"{type(exc).__name__}: {exc}",
-        }
+    # The original force/quarantine directory is operator authority and audit
+    # evidence. Dispatch consumes only the private action copy; cleanup of the
+    # raw source requires a distinct operator action, never a quality result.
+    return {
+        "success": True,
+        "download_log_id": download_log_id,
+        "failed_path_hint": failed_path_hint,
+        "outcome": "preserved_operator_force_source",
+        "skipped": True,
+        "dispatch_code": outcome.code,
+        "dispatch_message": outcome.message,
+    }
 
 
 def _dismiss_successful_force_import(
     db: PipelineDB,
     job: ImportJob,
 ) -> dict[str, object] | None:
+    """Remove a successfully imported source from Wrong Matches, never disk.
+
+    This runs only after the terminal acknowledgement.  The raw quarantine
+    directory remains operator evidence; the dismissed pointers only stop it
+    appearing as an actionable Wrong Matches entry.
+    """
     force_payload = _force_job_wrong_match_payload(job)
     if force_payload is None:
         return None
@@ -277,7 +305,7 @@ def _dismiss_successful_force_import(
         ).to_dict()
     except Exception as exc:
         logger.exception(
-            "Failed to dismiss wrong-match source for import job %s",
+            "Failed to dismiss successful force import source for job %s",
             job.id,
         )
         return {
@@ -313,10 +341,26 @@ def execute_import_job(
         if not isinstance(job.payload, ForceImportPayload):
             raise AssertionError("force_import payload type mismatch")
         payload = job.payload
+        from lib.config import read_runtime_config
+        from lib.import_preview import force_action_copy_path
+
+        action_path = _force_action_path(job)
+        expected_action_path = force_action_copy_path(read_runtime_config(), job.id)
+        if (
+            action_path is None
+            or action_path != expected_action_path
+            or not os.path.isdir(action_path)
+        ):
+            return _requeue_import_job_to_preview(
+                db,
+                import_job_id=job.id,
+                reason="force action copy unavailable; preview must rebuild it",
+            )
         return dispatch_import_from_db(
             db,
             request_id=job.request_id,
-            failed_path=payload.failed_path,
+            failed_path=action_path,
+            source_reference_path=payload.failed_path,
             source_username=payload.source_username,
             source_dirs=(
                 [source_dir for source_dir in payload.source_dirs if source_dir]
@@ -648,12 +692,13 @@ def process_claimed_job(
         )
         if recovery is not None:
             return recovery
-        return db.mark_import_job_failed(
+        failed = db.mark_import_job_failed(
             job.id,
             error=type(exc).__name__,
             message=str(exc),
             result={"success": False},
         )
+        return _record_terminal_force_action_cleanup(db, job, failed)
 
     result = _job_result(outcome)
     if outcome.success:
@@ -678,6 +723,13 @@ def process_claimed_job(
                 )
                 if merged is not None:
                     terminal_job = merged
+            if job.job_type != IMPORT_JOB_FORCE:
+                _cleanup_committed_wrong_match_rejection(
+                    db,
+                    job,
+                    terminal.download_log_id,
+                    outcome,
+                )
             dismissal = _dismiss_successful_force_import(db, job)
             if dismissal is not None:
                 merged = db.merge_import_job_result(
@@ -686,13 +738,7 @@ def process_claimed_job(
                 )
                 if merged is not None:
                     terminal_job = merged
-            _cleanup_committed_wrong_match_rejection(
-                db,
-                job,
-                terminal.download_log_id,
-                outcome,
-            )
-            return terminal_job
+            return _record_terminal_force_action_cleanup(db, job, terminal_job)
         recovery = db.mark_import_job_recovery_required(
             job.id,
             reason="Beets returned without a terminal acknowledgement bundle",
@@ -708,11 +754,11 @@ def process_claimed_job(
             return None
         dismissal = _dismiss_successful_force_import(db, job)
         if dismissal is not None:
-            return db.merge_import_job_result(
+            completed = db.merge_import_job_result(
                 job.id,
                 {"wrong_match_dismissal": dismissal},
             ) or completed
-        return completed
+        return _record_terminal_force_action_cleanup(db, job, completed)
     # U2: dispatch flipped this row back to the preview lane (or tried to).
     # We do NOT write a terminal failed status, do NOT bump retry counters,
     # and do NOT run the wrong-match cleanup decision. The dispatch-side
@@ -724,6 +770,9 @@ def process_claimed_job(
             job.request_id,
             outcome.message,
         )
+        # The preview claim now owns this deterministic action path.  It may
+        # publish its fresh copy before this importer frame returns, so an old
+        # importer must never reclaim it after the durable requeue.
         return None
     if outcome.code == DISPATCH_CODE_REQUEUE_FAILED:
         # The requeue UPDATE itself failed (DB transient). Mark the job
@@ -744,12 +793,13 @@ def process_claimed_job(
         )
         if recovery is not None:
             return recovery
-        return db.mark_import_job_failed(
+        failed = db.mark_import_job_failed(
             job.id,
             error=outcome.message,
             message=f"requeue-to-preview failed: {outcome.message}",
             result=result,
         )
+        return _record_terminal_force_action_cleanup(db, job, failed)
     if outcome.terminal_outcome is not None:
         terminal = db.persist_import_terminal_outcome(
             outcome.terminal_outcome.with_job(ImportJobTerminal(
@@ -777,13 +827,14 @@ def process_claimed_job(
             merged = db.merge_import_job_result(job.id, {"cleanup": cleanup})
             if merged is not None:
                 terminal_job = merged
-        _cleanup_committed_wrong_match_rejection(
-            db,
-            job,
-            terminal.download_log_id,
-            outcome,
-        )
-        return terminal_job
+        if job.job_type != IMPORT_JOB_FORCE:
+            _cleanup_committed_wrong_match_rejection(
+                db,
+                job,
+                terminal.download_log_id,
+                outcome,
+            )
+        return _record_terminal_force_action_cleanup(db, job, terminal_job)
     recovery = db.mark_import_job_recovery_required(
         job.id,
         reason="Beets returned without a terminal acknowledgement bundle",
@@ -809,11 +860,11 @@ def process_claimed_job(
             terminal_job = merged
     cleanup = _cleanup_failed_force_import(db, job, outcome)
     if cleanup is not None:
-        return db.merge_import_job_result(
+        terminal_job = db.merge_import_job_result(
             job.id,
             {"cleanup": cleanup},
         ) or terminal_job
-    return terminal_job
+    return _record_terminal_force_action_cleanup(db, job, terminal_job)
 
 
 def run_once(

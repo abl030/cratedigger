@@ -147,6 +147,7 @@ def _run_have_boundary_through_both_adapters(
         os.makedirs(slskd_dir)
         processing_dir = os.path.join(root, "processing")
         os.makedirs(processing_dir, mode=0o700)
+        os.makedirs(os.path.join(processing_dir, "albums"), mode=0o700)
         os.makedirs(os.path.join(processing_dir, "preview"), mode=0o700)
         cfg = CratediggerConfig(
             audio_check_mode="off",
@@ -250,10 +251,18 @@ def _run_have_boundary_through_both_adapters(
                 source_username="generated",
             ),
         )
+        from scripts import import_preview_worker
+
+        action_path = import_preview_worker._prepare_force_action_path(
+            db,
+            job,
+            cfg,
+            raw_path=candidate,
+        )
         candidate_evidence = make_album_quality_evidence(
             mb_release_id=mbid,
-            source_path=candidate,
-            files=snapshot_audio_files(candidate),
+            source_path=action_path,
+            files=snapshot_audio_files(action_path),
         )
         db.upsert_album_quality_evidence(candidate_evidence)
         stored_candidate = db.find_album_quality_evidence(
@@ -261,10 +270,7 @@ def _run_have_boundary_through_both_adapters(
             snapshot_fingerprint=candidate_evidence.snapshot_fingerprint,
         )
         assert stored_candidate is not None and stored_candidate.id is not None
-        db.set_download_log_candidate_evidence(
-            download_log_id,
-            stored_candidate.id,
-        )
+        db.set_import_job_candidate_evidence(job.id, stored_candidate.id)
         claimed = db.claim_next_import_preview_job(worker_id="generated")
         assert claimed is not None and claimed.id == job.id
         with _silence_logs(), patch(
@@ -372,7 +378,18 @@ def _run_candidate_snapshot_reuse_world(
         os.makedirs(slskd_dir)
         processing_dir = os.path.join(root, "processing")
         os.makedirs(processing_dir, mode=0o700)
+        os.makedirs(os.path.join(processing_dir, "albums"), mode=0o700)
         os.makedirs(os.path.join(processing_dir, "preview"), mode=0o700)
+        ini = configparser.ConfigParser()
+        ini["Beets Validation"] = {
+            "harness_path": "/fake/harness/run_beets_harness.sh",
+            "audio_check": "off",
+            "staging_dir": staging_dir,
+        }
+        ini["Slskd"] = {"download_dir": slskd_dir}
+        ini["Paths"] = {"processing_dir": processing_dir}
+        ini["Pipeline DB"] = {"enabled": "true"}
+        cfg = CratediggerConfig.from_ini(ini)
         for track in range(1, track_count + 1):
             Path(candidate, f"{track:02d}.mp3").write_bytes(
                 f"candidate-{track}".encode()
@@ -452,10 +469,20 @@ def _run_candidate_snapshot_reuse_world(
                 payload={},
             )
 
+        action_path = candidate
+        if job_mode == "force":
+            from scripts import import_preview_worker
+
+            action_path = import_preview_worker._prepare_force_action_path(
+                db,
+                job,
+                cfg,
+                raw_path=candidate,
+            )
         candidate_evidence = make_album_quality_evidence(
             mb_release_id=mbid,
-            source_path=candidate,
-            files=snapshot_audio_files(candidate),
+            source_path=action_path,
+            files=snapshot_audio_files(action_path),
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=245,
                 avg_bitrate_kbps=256,
@@ -472,16 +499,11 @@ def _run_candidate_snapshot_reuse_world(
             snapshot_fingerprint=candidate_evidence.snapshot_fingerprint,
         )
         assert stored_candidate is not None and stored_candidate.id is not None
-        if download_log_id is not None:
-            db.set_download_log_candidate_evidence(
-                download_log_id,
-                stored_candidate.id,
-            )
-        else:
-            db.set_import_job_candidate_evidence(job.id, stored_candidate.id)
+        db.set_import_job_candidate_evidence(job.id, stored_candidate.id)
 
         if snapshot_changed:
-            Path(candidate, f"{track_count:02d}.mp3").write_bytes(
+            changed_path = candidate if job_mode == "force" else action_path
+            Path(changed_path, f"{track_count:02d}.mp3").write_bytes(
                 b"changed-candidate-snapshot"
             )
 
@@ -504,8 +526,8 @@ def _run_candidate_snapshot_reuse_world(
             full_preview_calls += 1
             fresh = make_album_quality_evidence(
                 mb_release_id=mbid,
-                source_path=candidate,
-                files=snapshot_audio_files(candidate),
+                source_path=action_path,
+                files=snapshot_audio_files(action_path),
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=245,
                     avg_bitrate_kbps=256,
@@ -522,19 +544,14 @@ def _run_candidate_snapshot_reuse_world(
                 snapshot_fingerprint=fresh.snapshot_fingerprint,
             )
             assert persisted is not None and persisted.id is not None
-            if download_log_id is not None:
-                db_arg.set_download_log_candidate_evidence(
-                    download_log_id,
-                    persisted.id,
-                )
-            else:
-                db_arg.set_import_job_candidate_evidence(job.id, persisted.id)
+            db_arg.set_import_job_candidate_evidence(job.id, persisted.id)
             return ImportPreviewResult(
                 mode="path",
                 verdict="evidence_ready",
                 decision="import",
                 reason="import",
-                source_path=candidate,
+                source_path=action_path,
+                action_path=(action_path if job_mode == "force" else None),
             )
 
         def load_current(*_args: Any, **_kwargs: Any) -> EvidenceBuildResult:
@@ -546,16 +563,6 @@ def _run_candidate_snapshot_reuse_world(
                 )
             return EvidenceBuildResult(current, "ready")
 
-        ini = configparser.ConfigParser()
-        ini["Beets Validation"] = {
-            "harness_path": "/fake/harness/run_beets_harness.sh",
-            "audio_check": "off",
-            "staging_dir": staging_dir,
-        }
-        ini["Slskd"] = {"download_dir": slskd_dir}
-        ini["Paths"] = {"processing_dir": processing_dir}
-        ini["Pipeline DB"] = {"enabled": "true"}
-        cfg = CratediggerConfig.from_ini(ini)
         updated = process_claimed_preview_job(
             db,
             claimed,
@@ -707,6 +714,7 @@ def _run_dispatch_finalization_world(
     if mode == "manifest_rejection":
         from lib.dispatch import dispatch_import_from_db
         from lib.import_queue import IMPORT_JOB_FORCE
+        from lib.quality_evidence import snapshot_audio_files
 
         db.set_tracks(42, [{"track_number": 1, "title": "One"}])
         with tempfile.TemporaryDirectory() as source:
@@ -723,12 +731,26 @@ def _run_dispatch_finalization_world(
                 builtins = msgspec.to_builtins(ImportResult(spectral=audit))
                 assert isinstance(builtins, dict)
                 preview_result["import_result"] = builtins
+            evidence = make_album_quality_evidence(
+                mb_release_id="generated-mbid",
+                source_path=source,
+                files=snapshot_audio_files(source),
+            )
+            db.upsert_album_quality_evidence(evidence)
+            persisted = db.find_album_quality_evidence(
+                mb_release_id=evidence.mb_release_id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert persisted is not None and persisted.id is not None
+            db.set_import_job_candidate_evidence(job.id, persisted.id)
             db.mark_import_job_preview_importable(
                 job.id,
                 preview_result=preview_result,
             )
+            claimed = db.claim_next_import_job(worker_id="generated-importer")
+            assert claimed is not None and claimed.id == job.id
             with _silence_logs():
-                dispatch_import_from_db(
+                outcome = dispatch_import_from_db(
                     db,  # type: ignore[arg-type]
                     request_id=42,
                     failed_path=source,
@@ -737,6 +759,7 @@ def _run_dispatch_finalization_world(
                     beets_library_db_path=str(beets.library_db),
                     beets_library_root=str(beets.library_root),
                 )
+                finalize_claimed_dispatch(db, claimed, outcome)
     else:
         from lib.import_queue import IMPORT_JOB_AUTOMATION
         from lib.quality_evidence import snapshot_audio_files

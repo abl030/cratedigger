@@ -30,15 +30,18 @@ from lib.import_preview import (
     PREVIEW_VERDICT_EVIDENCE_READY,
     PREVIEW_VERDICT_MEASUREMENT_FAILED,
     ImportPreviewResult,
+    cleanup_force_action_copy_for_job,
     enrich_incomplete_current_evidence_for_request,
     load_current_evidence_for_preview,
     load_persisted_existing_spectral,
     measure_and_persist_candidate_evidence,
     remove_preview_snapshot,
+    retain_preview_snapshot_for_force_action,
     snapshot_configured_quarantine_directory,
     persist_exact_current_spectral_from_attempt,
     prepare_current_evidence_for_failure,
     preserve_existing_source_spectral,
+    force_action_copy_path,
 )
 from lib.import_evidence import (
     CANDIDATE_STATUS_REUSED,
@@ -117,20 +120,68 @@ def _candidate_evidence_ready_for_job(
     source_path = result.source_path
     if not source_path:
         return False, "preview_source_path_missing"
+    # Completion is deliberately stricter than the reuse/action loader: this
+    # preview must have written the *job's* FK and a non-empty fingerprint.
+    # In particular, do not quietly accept an older download-log FK here.
+    evidence_id = db.get_import_job_candidate_evidence_id(job.id)
+    if evidence_id is None:
+        return False, "preview did not link candidate evidence to import job"
+    evidence = db.load_album_quality_evidence_by_id(evidence_id)
+    if evidence is None:
+        return False, f"candidate evidence id {evidence_id} not found"
+    if not evidence.snapshot_fingerprint:
+        return False, "candidate evidence has empty snapshot fingerprint"
+    action_path = result.action_path or source_path
     candidate = ensure_candidate_evidence_for_action(
         db,
-        source_path=source_path,
+        source_path=action_path,
         import_job_id=job.id,
-        download_log_id=_download_log_id_from_job(job),
     )
     if candidate.available and candidate.evidence is not None:
-        return True, "ready"
+        if candidate.evidence.id == evidence_id:
+            return True, "ready"
+        return False, "candidate evidence id does not match import job FK"
     return (
         False,
         candidate.provenance.fallback_reason
         or candidate.provenance.candidate_status
         or "candidate_evidence_unavailable",
     )
+
+
+def _cleanup_terminal_preview_force_action(
+    job: ImportJob,
+    terminal_job: ImportJob | None,
+    *,
+    action_path: str | None,
+    runtime_config: CratediggerConfig | None,
+) -> ImportJob | None:
+    """Discard a force action only after preview reaches a known terminal state."""
+    if (
+        job.job_type != IMPORT_JOB_FORCE
+        or terminal_job is None
+        or terminal_job.status == "recovery_required"
+    ):
+        return terminal_job
+    # A preparation failure can occur before this claim publishes a new action
+    # copy.  Reclaim the deterministic path anyway: it can only be the stale
+    # private copy left by the prior import attempt, and this preview claim is
+    # still its owner until it returns a terminal outcome.
+    try:
+        resolved_config = _resolve_runtime_config(runtime_config)
+        terminal_action_path = (
+            action_path or force_action_copy_path(resolved_config, job.id)
+        )
+        cleanup_force_action_copy_for_job(
+            terminal_action_path,
+            resolved_config,
+            import_job_id=job.id,
+        )
+    except Exception:
+        # Preview's DB outcome is already durable. A stale private copy is
+        # reclaimable on its deterministic path and must not change it.
+        logger.exception("Failed to remove terminal preview force action for job %s", job.id)
+    return terminal_job
 
 
 def derive_canonical_import_folder(
@@ -305,6 +356,8 @@ def _reused_evidence_preview_payload(
     evidence: AlbumQualityEvidence,
     source_path: str,
     import_result: ImportResult,
+    *,
+    action_path: str | None = None,
 ) -> dict[str, object]:
     """Synthesize a preview_result payload for the reused-evidence branch.
 
@@ -335,7 +388,40 @@ def _reused_evidence_preview_payload(
         type=dict[str, object],
     )
     payload["candidate_status"] = CANDIDATE_STATUS_REUSED
+    if action_path is not None:
+        payload["action_path"] = action_path
     return payload
+
+
+def _prepare_force_action_path(
+    db: object,
+    job: ImportJob,
+    cfg: CratediggerConfig,
+    *,
+    raw_path: str,
+) -> str:
+    """Publish one normalized, private action copy for a force job.
+
+    This is the only force-copy lifecycle owner.  Repeating a preview replaces
+    the job's deterministic action directory, so retrying cannot accumulate
+    random copies of an operator-owned quarantine source.
+    """
+    del db
+    snapshot = snapshot_configured_quarantine_directory(raw_path, cfg)
+    try:
+        # The descriptor copy is now private working state.  Normalize before
+        # inventorying/persisting evidence, and never touch ``raw_path``.
+        from lib.util import repair_mp3_headers
+
+        repair_mp3_headers(snapshot)
+        return retain_preview_snapshot_for_force_action(
+            snapshot,
+            cfg,
+            import_job_id=job.id,
+        )
+    finally:
+        if os.path.isdir(snapshot):
+            remove_preview_snapshot(snapshot, cfg)
 
 
 def _front_gate_check(
@@ -344,10 +430,10 @@ def _front_gate_check(
     *,
     runtime_config: CratediggerConfig | None = None,
     candidate_evidence_loader: Callable[..., EvidenceBuildResult] | None = None,
-) -> tuple[EvidenceBuildResult | None, str | None]:
+) -> tuple[EvidenceBuildResult | None, str | None, str | None]:
     """Run the cheap candidate-evidence front-gate for ``job``.
 
-    Returns ``(result, source_path)``. ``result is None`` means the
+    Returns ``(result, source_path, action_path)``. ``result is None`` means the
     front-gate could not run at all (path-derivation deferred to the
     measurement path) and the caller should fall through. A non-None
     result with ``status == 'ready'`` means measurement can be skipped.
@@ -357,21 +443,29 @@ def _front_gate_check(
         try:
             download_log_id, raw_path = _force_download_log_failed_path(db, job)
             cfg = _resolve_runtime_config(runtime_config)
-            snapshot = snapshot_configured_quarantine_directory(raw_path, cfg)
-            try:
-                load_candidate = (
-                    candidate_evidence_loader
-                    or load_candidate_evidence_for_source
-                )
-                result = load_candidate(
-                    db,
-                    source_path=snapshot,
-                    download_log_id=download_log_id,
-                    import_job_id=job.id,
-                )
-            finally:
-                remove_preview_snapshot(snapshot, cfg)
-            return result, raw_path
+            action_path = _prepare_force_action_path(
+                db, job, cfg, raw_path=raw_path,
+            )
+            load_candidate = (
+                candidate_evidence_loader or load_candidate_evidence_for_source
+            )
+            result = load_candidate(
+                db,
+                source_path=action_path,
+                download_log_id=download_log_id,
+                import_job_id=job.id,
+            )
+            # Reuse is allowed to discover a content-addressed evidence row
+            # through the originating audit record, but completion is not:
+            # bind the proven exact action snapshot to this job before its
+            # strict completion gate runs.
+            if (
+                result.status == "ready"
+                and result.evidence is not None
+                and result.evidence.id is not None
+            ):
+                db.set_import_job_candidate_evidence(job.id, result.evidence.id)
+            return result, raw_path, action_path
         except Exception:
             logger.debug(
                 "force front-gate isolation failed for job %s; falling through",
@@ -381,11 +475,11 @@ def _front_gate_check(
             # The front gate has already recovered the persisted force source.
             # Keep it for a later failure audit even when its isolated snapshot
             # was not available; only the evidence-reuse optimization failed.
-            return None, raw_path
+            return None, raw_path, None
 
     source_path = _front_gate_source_path(db, job)
     if not source_path:
-        return None, None
+        return None, None, None
     try:
         result = load_candidate_evidence_for_source(
             db,
@@ -400,8 +494,8 @@ def _front_gate_check(
             job.id,
             exc_info=True,
         )
-        return None, source_path
-    return result, source_path
+        return None, source_path, None
+    return result, source_path, None
 
 
 def _preview_input(db: Any, job: ImportJob) -> dict[str, Any]:
@@ -451,26 +545,31 @@ def execute_preview_job(
     job: ImportJob,
     *,
     runtime_config: CratediggerConfig | None = None,
+    prepared_force_action_path: str | None = None,
+    prepared_force_source_path: str | None = None,
 ) -> ImportPreviewResult:
     if job.job_type == IMPORT_JOB_FORCE:
         if job.request_id is None:
             raise ValueError("Import job has no request_id")
         download_log_id, raw_path = _force_download_log_failed_path(db, job)
+        if prepared_force_source_path is not None:
+            raw_path = prepared_force_source_path
         cfg = _resolve_runtime_config(runtime_config)
-        snapshot = snapshot_configured_quarantine_directory(raw_path, cfg)
-        try:
-            return measure_and_persist_candidate_evidence(
-                db,
-                request_id=job.request_id,
-                path=snapshot,
-                source_display_path=raw_path,
-                force=True,
-                download_log_id=download_log_id,
-                import_job_id=job.id,
-                runtime_config=cfg,
-            )
-        finally:
-            remove_preview_snapshot(snapshot, cfg)
+        action_path = prepared_force_action_path or _prepare_force_action_path(
+            db, job, cfg, raw_path=raw_path,
+        )
+        result = measure_and_persist_candidate_evidence(
+            db,
+            request_id=job.request_id,
+            path=action_path,
+            source_display_path=raw_path,
+            force=True,
+            download_log_id=download_log_id,
+            import_job_id=job.id,
+            runtime_config=cfg,
+            repair_fn=lambda _path: None,
+        )
+        return msgspec.structs.replace(result, action_path=action_path)
     preview_input = _preview_input(db, job)
     return measure_and_persist_candidate_evidence(
         db,
@@ -612,12 +711,18 @@ def process_claimed_preview_job(
     runtime_config: CratediggerConfig | None = None,
 ) -> ImportJob | None:
     def handle_measurement_failed(result: ImportPreviewResult) -> ImportJob | None:
-        return _handle_measurement_failed(
+        terminal = _handle_measurement_failed(
             db,
             job,
             result,
             prepare_failure_have_fn=prepare_failure_have_fn,
             enrich_failure_have_fn=enrich_failure_have_fn,
+            runtime_config=runtime_config,
+        )
+        return _cleanup_terminal_preview_force_action(
+            job,
+            terminal,
+            action_path=result.action_path,
             runtime_config=runtime_config,
         )
 
@@ -638,6 +743,7 @@ def process_claimed_preview_job(
             reason="measurement_crashed",
             detail=detail,
             source_path=source_path,
+            action_path=front_gate_action,
             request_id=job.request_id,
             download_log_id=_download_log_id_from_job(job),
             failure=failure,
@@ -647,7 +753,7 @@ def process_claimed_preview_job(
     # snapshot guard, mark the job importable without invoking measurement.
     # The post-measurement gate below remains as belt-and-braces for the
     # fall-through path.
-    front_gate_result, front_gate_source = _front_gate_check(
+    front_gate_result, front_gate_source, front_gate_action = _front_gate_check(
         db,
         job,
         runtime_config=runtime_config,
@@ -745,7 +851,7 @@ def process_claimed_preview_job(
             else:
                 audit_resolver = existing_spectral_resolver_for_config(audit_cfg)
         audit, have_lookup = collect_release_attempt_spectral_audit(
-            front_gate_source,
+            front_gate_action or front_gate_source,
             mb_release_id,
             existing_spectral_evidence=persisted_existing,
             preserve_existing_source_spectral=preserve_have_source,
@@ -793,6 +899,7 @@ def process_claimed_preview_job(
             front_gate_result.evidence,
             front_gate_source,
             ImportResult(spectral=audit),
+            action_path=front_gate_action,
         )
         logger.info(
             "Reused candidate evidence for import job %s; skipping preview measurement",
@@ -816,6 +923,8 @@ def process_claimed_preview_job(
                 db,
                 job,
                 runtime_config=runtime_config,
+                prepared_force_action_path=front_gate_action,
+                prepared_force_source_path=front_gate_source,
             )
     except Exception as exc:
         logger.exception("Import job %s preview crashed", job.id)
@@ -837,6 +946,7 @@ def process_claimed_preview_job(
             request_id=job.request_id,
             download_log_id=_download_log_id_from_job(job),
             source_path=front_gate_source,
+            action_path=front_gate_action,
             failure=crash_payload,
         )
         return handle_measurement_failed(crash_result)
@@ -873,6 +983,7 @@ def process_claimed_preview_job(
             reason="evidence_persist_failed",
             detail=evidence_reason,
             source_path=result.source_path,
+            action_path=result.action_path,
             request_id=result.request_id,
             download_log_id=result.download_log_id,
             import_result=result.import_result,
@@ -900,6 +1011,7 @@ def process_claimed_preview_job(
         reason=result.verdict,
         detail=f"unexpected verdict: {result.verdict}",
         source_path=result.source_path,
+        action_path=result.action_path,
         request_id=result.request_id,
         download_log_id=result.download_log_id,
         import_result=result.import_result,

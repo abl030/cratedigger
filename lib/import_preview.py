@@ -1,9 +1,8 @@
-"""Unified import preview service.
+"""Preview measurement and candidate-evidence persistence.
 
-Preview answers the operator's "would this import?" question without beets,
-pipeline DB, queue, denylist, or source-folder mutation. Real-folder preview
-uses the same preimport gates and import_one.py harness protocol as force-import,
-but runs both against isolated temporary copies.
+Foreign paths are descriptor-copied before media tools run. A completed album
+under the private processing root is Cratedigger working state: it may be
+normalized in place, measured, and imported as those exact bytes.
 """
 
 from __future__ import annotations
@@ -85,7 +84,11 @@ from lib.fs_authority import (
     open_regular_relative,
     remove_relative_tree,
 )
-from lib.processing_paths import processing_preview_dir
+from lib.processing_paths import (
+    path_is_within_root,
+    processing_albums_dir,
+    processing_preview_dir,
+)
 from lib.util import repair_mp3_headers
 from lib.validation_envelope import decode_validation_envelope
 from lib.v0_probe import probe_installed_album_as_v0
@@ -117,6 +120,7 @@ class PreviewSnapshotLimits:
 
 PreviewCopyFn = Callable[..., int]
 PreviewAvailableBytesFn = Callable[[int], int]
+HeaderRepairFn = Callable[[str], None]
 
 
 def _preview_available_bytes(preview_fd: int) -> int:
@@ -343,6 +347,75 @@ def _remove_preview_tree(path: str, cfg: CratediggerConfig) -> None:
 def remove_preview_snapshot(path: str, cfg: CratediggerConfig) -> None:
     """Public counterpart for callers that own a private preview snapshot."""
     _remove_preview_tree(path, cfg)
+
+
+def retain_preview_snapshot_for_force_action(
+    path: str,
+    cfg: CratediggerConfig,
+    *,
+    import_job_id: int,
+) -> str:
+    """Promote one verified private snapshot to a force-import action copy.
+
+    The source has already crossed the descriptor-copy boundary.  This is a
+    rename wholly inside Cratedigger's private processing tree, not another
+    copy of the operator's quarantine folder.  The returned path survives
+    preview so the importer consumes the exact normalized bytes evidence
+    describes.
+    """
+    name = os.path.basename(path)
+    if name == path or not name.startswith("preview-"):
+        raise FilesystemAuthorityError("not a private preview snapshot")
+    if os.path.dirname(path) != processing_preview_dir(cfg.processing_dir):
+        raise FilesystemAuthorityError("preview snapshot is outside private root")
+    action_name = f"force-action-{import_job_id}"
+    with open_private_processing_root(
+        cfg.processing_dir, cfg.slskd_download_dir,
+    ) as processing_fd:
+        with open_private_child_directory(processing_fd, "preview") as preview_fd:
+            with open_private_child_directory(processing_fd, "albums") as albums_fd:
+                with exclusive_relative_lock(
+                    albums_fd, f".force-action-{import_job_id}.lock",
+                ):
+                    remove_relative_tree(albums_fd, action_name)
+                    os.rename(
+                        name, action_name,
+                        src_dir_fd=preview_fd, dst_dir_fd=albums_fd,
+                    )
+    return os.path.join(processing_albums_dir(cfg.processing_dir), action_name)
+
+
+def remove_force_action_copy(path: str, cfg: CratediggerConfig) -> None:
+    """Remove one unneeded retained force action copy after a terminal result."""
+    name = os.path.basename(path)
+    if name == path or not name.startswith("force-action-"):
+        raise FilesystemAuthorityError("not a private force action copy")
+    if os.path.dirname(path) != processing_albums_dir(cfg.processing_dir):
+        raise FilesystemAuthorityError("force action copy is outside private root")
+    with open_private_processing_root(
+        cfg.processing_dir, cfg.slskd_download_dir,
+    ) as processing_fd:
+        with open_private_child_directory(processing_fd, "albums") as albums_fd:
+            remove_relative_tree(albums_fd, name)
+
+
+def cleanup_force_action_copy_for_job(
+    path: str,
+    cfg: CratediggerConfig,
+    *,
+    import_job_id: int,
+) -> None:
+    """Remove only the deterministic force copy owned by this job."""
+    if path != force_action_copy_path(cfg, import_job_id):
+        raise FilesystemAuthorityError("force action copy does not belong to job")
+    remove_force_action_copy(path, cfg)
+
+
+def force_action_copy_path(cfg: CratediggerConfig, import_job_id: int) -> str:
+    """The one reclaimable private action directory for a force job."""
+    return os.path.join(
+        processing_albums_dir(cfg.processing_dir), f"force-action-{import_job_id}",
+    )
 
 
 def _prefer_successful_spectral_detail(
@@ -1390,6 +1463,10 @@ class ImportPreviewResult(msgspec.Struct):
     request_id: int | None = None
     download_log_id: int | None = None
     source_path: str | None = None
+    # Force/quarantine previews retain this private copy through Beets.  It is
+    # action data, not launch/audit authority; ``source_path`` remains the
+    # original source reference.
+    action_path: str | None = None
     import_result: ImportResult | None = None
     simulation: dict[str, Any] | None = None
     failure: MeasurementFailure | None = None
@@ -1689,6 +1766,7 @@ def measure_and_persist_candidate_evidence(
     existing_spectral_resolver: ExistingSpectralResolver | None = None,
     current_evidence_loader: Callable[..., EvidenceBuildResult] | None = None,
     runtime_config: CratediggerConfig | None = None,
+    repair_fn: HeaderRepairFn | None = None,
 ) -> ImportPreviewResult:
     """Measure a source folder and persist candidate evidence; never decide.
 
@@ -1807,8 +1885,15 @@ def measure_and_persist_candidate_evidence(
         )
     preserve_have_source = preserve_existing_source_spectral(current_evidence)
 
+    repair = repair_fn or repair_mp3_headers
+    owns_path = path_is_within_root(path, processing_albums_dir(cfg.processing_dir))
+    # The processing album is the trust transition.  Normalise it before the
+    # preview snapshot so evidence and the later importer both see the same
+    # bytes.  Foreign paths still reach repair only after descriptor copying.
+    if owns_path:
+        repair(path)
     try:
-        temp_root = _snapshot_authorized_directory(path, cfg)
+        temp_root = None if owns_path else _snapshot_authorized_directory(path, cfg)
     except (FilesystemAuthorityError, OSError) as exc:
         return _measurement_failed_result(
             mode="path",
@@ -1820,11 +1905,9 @@ def measure_and_persist_candidate_evidence(
             source_path=audit_path,
         )
     try:
-        preview_path = temp_root
-        try:
-            repair_mp3_headers(preview_path)
-        except Exception:
-            pass
+        preview_path = path if temp_root is None else temp_root
+        if not owns_path:
+            repair(preview_path)
         try:
             # Address evidence from precisely the immutable private bytes
             # being inspected and passed to the harness.  Never re-inventory
@@ -2010,7 +2093,7 @@ def measure_and_persist_candidate_evidence(
 
         try:
             preview_spectral_file = _write_preview_spectral_evidence_file(
-                directory=temp_root,
+                directory=preview_path,
                 mb_release_id=mbid,
                 source_path=audit_path,
                 measurement=measurement,
@@ -2263,7 +2346,8 @@ def measure_and_persist_candidate_evidence(
             import_result=run.import_result,
         )
     finally:
-        _remove_preview_tree(temp_root, cfg)
+        if temp_root is not None:
+            _remove_preview_tree(temp_root, cfg)
 
 
 def _measurement_decision_hint(measurement: Any) -> str:

@@ -115,6 +115,7 @@ def dispatch_import_core(
     attempt_spectral_audit: "SpectralDetail | None" = None,
     attempt_result: ImportAttemptResult | None = None,
     candidate_download_log_id: int | None = None,
+    launch_authority_path: str | None = None,
     prevalidated_candidate_result: CandidateEvidenceActionResult | None = None,
     quality_gate_fn: QualityGateFn = _check_quality_gate_core,
     run_import_fn: ImportOneRunner | None = None,
@@ -277,6 +278,35 @@ def dispatch_import_core(
                 beets_library_root=effective_beets_library_root,
                 **evidence_gate_kwargs,
             )
+            if prevalidated_candidate_result is not None:
+                # Re-check the queue-owned action copy before *any* evidence
+                # decision can become terminal. A late content change is a
+                # typed preview retry, never a false quality rejection.
+                from lib.import_evidence import ensure_candidate_evidence_for_action
+
+                fresh_candidate = ensure_candidate_evidence_for_action(
+                    db,
+                    source_path=path,
+                    import_job_id=candidate_import_job_id,
+                )
+                if (
+                    not fresh_candidate.available
+                    or fresh_candidate.evidence is None
+                    or evidence_gate.candidate is None
+                    or fresh_candidate.evidence.id != evidence_gate.candidate.id
+                    or fresh_candidate.evidence.snapshot_fingerprint
+                        != evidence_gate.candidate.snapshot_fingerprint
+                ):
+                    reason = (
+                        fresh_candidate.provenance.fallback_reason
+                        or fresh_candidate.provenance.candidate_status
+                        or "candidate evidence changed before dispatch"
+                    )
+                    return _requeue_import_job_to_preview(
+                        db,
+                        import_job_id=candidate_import_job_id,
+                        reason=reason,
+                    )
             if (
                 evidence_gate.candidate is not None
                 and _current_evidence_analysis_failed(evidence_gate)
@@ -435,6 +465,7 @@ def dispatch_import_core(
                             cfg.quality_ranks if cfg is not None else None
                         ),
                         audio_quarantine_root=beets_cfg.slskd_download_dir,
+                        preserve_corrupt_source=force,
                     )
                 quality_evidence_action_file = _write_quality_evidence_action_file(
                     candidate=evidence_gate.candidate,
@@ -453,11 +484,15 @@ def dispatch_import_core(
                     ),
                     code="launch_authority_missing",
                 )
+            # A force action can run from a retained private copy, but the
+            # job's original source remains the durable launch/recovery
+            # authority.  The action copy is separately bound by the
+            # candidate-evidence snapshot above.
             authorized_job = db.authorize_import_job_launch(
                 candidate_import_job_id,
                 request_id=request_id,
                 release_id=mb_release_id,
-                source_path=path,
+                source_path=launch_authority_path or path,
             )
             if authorized_job is None:
                 return DispatchOutcome(

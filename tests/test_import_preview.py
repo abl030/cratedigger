@@ -2821,6 +2821,64 @@ if TYPE_CHECKING:
     _fake_db_satisfies_preview_protocol: _PreviewDB = cast("FakePipelineDB", None)
 
 
+class TestOwnedProcessingNormalization(unittest.TestCase):
+    """Issue #853: repair belongs after private processing publication."""
+
+    def test_repaired_processing_album_persists_matching_evidence(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=853, mb_release_id="issue-853"))
+        album = tempfile.mkdtemp(
+            prefix="issue-853-",
+            dir=os.path.join(_PREVIEW_PROCESSING_ROOT, "albums"),
+        )
+        track = os.path.join(album, "01.mp3")
+        with open(track, "wb") as handle:
+            handle.write(b"unrepaired")
+        persisted_files: list[object] = []
+
+        def repair(path: str) -> None:
+            self.assertEqual(path, album)
+            with open(track, "wb") as handle:
+                handle.write(b"repaired")
+
+        try:
+            with patch(
+                "lib.import_preview.inspect_local_files",
+                return_value=LocalFileInspection(filetype="mp3"),
+            ), patch(
+                "lib.import_preview.measure_preimport_state",
+                return_value=PreimportMeasurement(
+                    audio_corrupt=True,
+                    folder_layout="flat",
+                    audio_file_count=1,
+                ),
+            ):
+                result = measure_and_persist_candidate_evidence(
+                    db,
+                    request_id=853,
+                    path=album,
+                    runtime_config=_preview_runtime_config(),
+                    current_evidence_loader=lambda *_args, **_kwargs: EvidenceBuildResult(
+                        None, "empty_current",
+                    ),
+                    persist_measurement_fn=lambda *_args, **kwargs: (
+                        persisted_files.extend(kwargs["files"])
+                        or EvidenceBuildResult(
+                            make_album_quality_evidence(mb_release_id="issue-853"),
+                            "ready",
+                        )
+                    ),
+                    repair_fn=repair,
+                )
+            self.assertEqual(result.verdict, "evidence_ready")
+            with open(track, "rb") as handle:
+                self.assertEqual(handle.read(), b"repaired")
+            self.assertEqual(len(persisted_files), 1)
+            self.assertEqual(getattr(persisted_files[0], "size_bytes"), len(b"repaired"))
+        finally:
+            shutil.rmtree(album, ignore_errors=True)
+
+
 class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
     """Failure-point HAVE enrichment fills only what's missing, once."""
 

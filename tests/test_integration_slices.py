@@ -89,6 +89,7 @@ def _preview_worker_config(
             "download_dir": os.path.join(os.path.dirname(staging_dir), "slskd"),
         }
     if processing_dir:
+        os.makedirs(os.path.join(processing_dir, "albums"), mode=0o700, exist_ok=True)
         ini["Paths"] = {"processing_dir": processing_dir}
     ini["Pipeline DB"] = {"enabled": "true"}
     return CratediggerConfig.from_ini(ini)
@@ -6043,6 +6044,7 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
             os.makedirs(source)
             os.makedirs(os.path.join(root, "slskd"))
             os.makedirs(os.path.join(root, "processing"), mode=0o700)
+            os.makedirs(os.path.join(root, "processing", "albums"), mode=0o700)
             os.makedirs(os.path.join(root, "processing", "preview"), mode=0o700)
             with open(os.path.join(source, "01.mp3"), "wb") as handle:
                 handle.write(b"audio")
@@ -6066,7 +6068,6 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
             )
             claimed = db.claim_next_import_preview_job(worker_id="preview")
             assert claimed is not None
-            self._seed_evidence_for_download_log(db, log_id, source)
 
             sentinels = {
                 "preview_called": False,
@@ -6103,6 +6104,13 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                 staging_dir=staging_dir,
                 processing_dir=os.path.join(root, "processing"),
             )
+            action_path = import_preview_worker._prepare_force_action_path(
+                db,
+                claimed,
+                preview_cfg,
+                raw_path=source,
+            )
+            self._seed_evidence_for_import_job(db, claimed.id, action_path)
             with patch(
                 "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
                 side_effect=_sentinel_preview,
@@ -6863,7 +6871,16 @@ class TestU5PreviewEvidenceReadySlice(unittest.TestCase):
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="downloading"))
-        with tempfile.TemporaryDirectory() as source:
+        with tempfile.TemporaryDirectory() as root:
+            staging_dir = os.path.join(root, "Incoming")
+            source = os.path.join(staging_dir, "failed_imports", "candidate")
+            os.makedirs(source)
+            slskd_dir = os.path.join(root, "slskd")
+            os.mkdir(slskd_dir)
+            processing_dir = os.path.join(root, "processing")
+            os.makedirs(os.path.join(processing_dir, "albums"), mode=0o700)
+            os.makedirs(os.path.join(processing_dir, "preview"), mode=0o700)
+            os.chmod(processing_dir, 0o700)
             with open(os.path.join(source, "01.mp3"), "wb") as handle:
                 handle.write(b"audio")
             download_log_id = db.log_download(
@@ -6883,6 +6900,17 @@ class TestU5PreviewEvidenceReadySlice(unittest.TestCase):
             )
             claimed = db.claim_next_import_preview_job(worker_id="preview")
             assert claimed is not None
+            cfg = CratediggerConfig(
+                beets_staging_dir=staging_dir,
+                slskd_download_dir=slskd_dir,
+                processing_dir=processing_dir,
+            )
+            action_path = import_preview_worker._prepare_force_action_path(
+                db,
+                claimed,
+                cfg,
+                raw_path=source,
+            )
 
             preview_result = ImportPreviewResult(
                 mode="path",
@@ -6891,16 +6919,17 @@ class TestU5PreviewEvidenceReadySlice(unittest.TestCase):
                 reason="import",
                 stage_chain=["stage2_import:import"],
                 source_path=source,
+                action_path=action_path,
                 request_id=42,
             )
 
-            def fake_preview(*args, **kwargs):
+            def fake_preview(*_args: object, **_kwargs: object):
                 # Simulate production: preview persisted candidate evidence
                 # and wired the FK before returning.
-                _seed_candidate_for_download_log(
-                    db, download_log_id,
+                _seed_candidate_for_import_job(
+                    db, claimed.id,
                     mb_release_id="mbid-evidence-ready",
-                    files=snapshot_audio_files(source),
+                    files=snapshot_audio_files(action_path),
                     measurement=AudioQualityMeasurement(
                         min_bitrate_kbps=245,
                         avg_bitrate_kbps=256,
@@ -6921,13 +6950,14 @@ class TestU5PreviewEvidenceReadySlice(unittest.TestCase):
                 updated = import_preview_worker.process_claimed_preview_job(
                     cast(Any, db),
                     claimed,
-                    preview_fn=lambda _db, _job: (
+                    preview_fn=lambda preview_db, _preview_job: (
                         import_preview_worker.measure_and_persist_candidate_evidence(
-                            cast(Any, _db),
+                            cast(Any, preview_db),
                             request_id=42,
-                            path=source,
+                            path=action_path,
                         )
                     ),
+                    runtime_config=cfg,
                 )
 
         assert updated is not None
@@ -7751,6 +7781,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
             os.makedirs(source)
             os.makedirs(os.path.join(root, "slskd"))
             os.makedirs(os.path.join(root, "processing"), mode=0o700)
+            os.makedirs(os.path.join(root, "processing", "albums"), mode=0o700)
             os.makedirs(os.path.join(root, "processing", "preview"), mode=0o700)
             with open(os.path.join(source, "01.flac"), "wb") as handle:
                 handle.write(b"lossless-audio")
@@ -7851,6 +7882,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
             os.makedirs(source)
             os.makedirs(os.path.join(root, "slskd"))
             os.makedirs(os.path.join(root, "processing"), mode=0o700)
+            os.makedirs(os.path.join(root, "processing", "albums"), mode=0o700)
             os.makedirs(os.path.join(root, "processing", "preview"), mode=0o700)
             with open(os.path.join(source, "01.flac"), "wb") as handle:
                 handle.write(b"lossless-audio")
@@ -7950,6 +7982,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
             os.makedirs(source)
             os.makedirs(os.path.join(root, "slskd"))
             os.makedirs(os.path.join(root, "processing"), mode=0o700)
+            os.makedirs(os.path.join(root, "processing", "albums"), mode=0o700)
             os.makedirs(os.path.join(root, "processing", "preview"), mode=0o700)
             with open(os.path.join(source, "01.mp3"), "wb") as h:
                 h.write(b"audio")
@@ -8088,6 +8121,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
             os.makedirs(source)
             os.makedirs(os.path.join(root, "slskd"))
             os.makedirs(os.path.join(root, "processing"), mode=0o700)
+            os.makedirs(os.path.join(root, "processing", "albums"), mode=0o700)
             os.makedirs(os.path.join(root, "processing", "preview"), mode=0o700)
             with open(os.path.join(source, "01.mp3"), "wb") as h:
                 h.write(b"audio")
@@ -8168,6 +8202,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
             os.makedirs(source)
             os.makedirs(os.path.join(root, "slskd"))
             os.makedirs(os.path.join(root, "processing"), mode=0o700)
+            os.makedirs(os.path.join(root, "processing", "albums"), mode=0o700)
             os.makedirs(os.path.join(root, "processing", "preview"), mode=0o700)
             with open(os.path.join(source, "01.mp3"), "wb") as h:
                 h.write(b"audio")
@@ -8431,6 +8466,7 @@ class TestWrongMatchStaleEvidenceRefreshSlice(unittest.TestCase):
         os.makedirs(source)
         os.makedirs(os.path.join(root, "slskd"))
         os.makedirs(os.path.join(root, "processing"), mode=0o700)
+        os.makedirs(os.path.join(root, "processing", "albums"), mode=0o700)
         os.makedirs(os.path.join(root, "processing", "preview"), mode=0o700)
         try:
             # The track the original evidence describes: a real size that no
