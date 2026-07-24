@@ -67,15 +67,6 @@ def tearDownModule() -> None:
     _BEETS_STORAGE.__exit__(None, None, None)
 
 
-def _preview_runtime_config(**kwargs: Any) -> CratediggerConfig:
-    assert _BEETS_PAIR is not None
-    return CratediggerConfig(
-        beets_library_db=_BEETS_PAIR[0],
-        beets_directory=_BEETS_PAIR[1],
-        **kwargs,
-    )
-
-
 # Migration 021 helpers — seed evidence and wire the FK chain that
 # production reads through.
 def _seed_candidate_for_download_log(db, log_id: int, *, mb_release_id: str,
@@ -135,10 +126,13 @@ def _force_preview_source():
         os.mkdir(processing_dir, 0o700)
         os.mkdir(os.path.join(processing_dir, "albums"), 0o700)
         os.mkdir(os.path.join(processing_dir, "preview"), 0o700)
-        cfg = _preview_runtime_config(
+        assert _BEETS_PAIR is not None
+        cfg = CratediggerConfig(
             slskd_download_dir=download_root,
             processing_dir=processing_dir,
             audio_check_mode="off",
+            beets_library_db=_BEETS_PAIR[0],
+            beets_directory=_BEETS_PAIR[1],
         )
         with patch("lib.config.read_runtime_config", return_value=cfg), \
                 patch("scripts.import_preview_worker.read_runtime_config",
@@ -1834,7 +1828,11 @@ class TestImportPreviewWorker(unittest.TestCase):
             claimed = db.claim_next_import_preview_job(worker_id="preview")
             assert claimed is not None
             self._seed_job_candidate_evidence(db, claimed.id, staged)
-            cfg = _preview_runtime_config()
+            assert _BEETS_PAIR is not None
+            cfg = CratediggerConfig(
+                beets_library_db=_BEETS_PAIR[0],
+                beets_directory=_BEETS_PAIR[1],
+            )
 
             with patch(
                 "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
@@ -1892,7 +1890,11 @@ class TestImportPreviewWorker(unittest.TestCase):
                 request_id=42,
                 import_result=ImportResult(spectral=audit),
             )
-            cfg = _preview_runtime_config()
+            assert _BEETS_PAIR is not None
+            cfg = CratediggerConfig(
+                beets_library_db=_BEETS_PAIR[0],
+                beets_directory=_BEETS_PAIR[1],
+            )
             with patch("lib.config.read_runtime_config", return_value=cfg), \
                     patch("scripts.import_preview_worker.read_runtime_config",
                           return_value=cfg):
@@ -3091,7 +3093,11 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                     grade="genuine",
                 )
 
-            cfg = _preview_runtime_config()
+            assert _BEETS_PAIR is not None
+            cfg = CratediggerConfig(
+                beets_library_db=_BEETS_PAIR[0],
+                beets_directory=_BEETS_PAIR[1],
+            )
             with patch(
                 "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
             ) as preview, patch(

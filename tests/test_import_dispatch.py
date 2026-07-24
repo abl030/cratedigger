@@ -15,7 +15,7 @@ import subprocess as sp
 import tempfile
 import unittest
 from contextlib import AbstractContextManager
-from typing import Any, Never
+from typing import Never
 from unittest.mock import MagicMock, patch
 
 import msgspec
@@ -57,15 +57,6 @@ def setUpModule() -> None:
 def tearDownModule() -> None:
     assert _BEETS_STORAGE is not None
     _BEETS_STORAGE.__exit__(None, None, None)
-
-
-def _test_config(**kwargs: Any) -> CratediggerConfig:
-    assert _BEETS_PAIR is not None
-    return CratediggerConfig(
-        beets_library_db=_BEETS_PAIR[0],
-        beets_directory=_BEETS_PAIR[1],
-        **kwargs,
-    )
 
 
 # --- Local helpers for auto-import seam tests ---
@@ -2161,10 +2152,13 @@ class TestDispatchImport(unittest.TestCase):
             path=source,
             release_id="test-mbid",
         )
-        cfg = _test_config(
+        assert _BEETS_PAIR is not None
+        cfg = CratediggerConfig(
             beets_harness_path=_HARNESS,
             beets_staging_dir=staging_root,
             pipeline_db_enabled=True,
+            beets_library_db=_BEETS_PAIR[0],
+            beets_directory=_BEETS_PAIR[1],
         )
         try:
             with patch_dispatch_externals() as ext, \
@@ -2265,13 +2259,19 @@ class TestDispatchImport(unittest.TestCase):
             release_id="test-mbid",
         )
 
+        assert _BEETS_PAIR is not None
+        cfg = CratediggerConfig(
+            beets_library_db=_BEETS_PAIR[0],
+            beets_directory=_BEETS_PAIR[1],
+        )
+
         def execute(db_arg, _job, *, ctx=None):
             del ctx
             return dispatch_import_core(
                 path="/tmp/dest", mb_release_id="test-mbid",
                 request_id=42, label="Test",
                 beets_harness_path=_HARNESS,
-                cfg=_test_config(),
+                cfg=cfg,
                 db=db_arg,
                 dl_info=DownloadInfo(filetype="mp3"),
                 candidate_import_job_id=claimed.id,
@@ -2307,13 +2307,19 @@ class TestDispatchImport(unittest.TestCase):
             release_id="test-mbid",
         )
 
+        assert _BEETS_PAIR is not None
+        cfg = CratediggerConfig(
+            beets_library_db=_BEETS_PAIR[0],
+            beets_directory=_BEETS_PAIR[1],
+        )
+
         def execute(db_arg, _job, *, ctx=None):
             del ctx
             return dispatch_import_core(
                 path="/tmp/dest", mb_release_id="test-mbid",
                 request_id=42, label="Test",
                 beets_harness_path=_HARNESS,
-                cfg=_test_config(),
+                cfg=cfg,
                 db=db_arg,
                 dl_info=DownloadInfo(filetype="mp3"),
                 candidate_import_job_id=claimed.id,
@@ -2376,9 +2382,12 @@ class TestImportDispatchRescueCapture(unittest.TestCase):
         if prior_rescue_category is not None:
             db._requests[42]["prior_unfindable_category"] = (
                 prior_rescue_category)
-        cfg = _test_config(
+        assert _BEETS_PAIR is not None
+        cfg = CratediggerConfig(
             beets_harness_path=self._HARNESS_PATH,
             pipeline_db_enabled=True,
+            beets_library_db=_BEETS_PAIR[0],
+            beets_directory=_BEETS_PAIR[1],
         )
 
         tmpdir = tempfile.mkdtemp()
@@ -2570,7 +2579,7 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
         """Default QualityRankConfig → argv contains the round-trip JSON."""
         from lib.config import CratediggerConfig
         from lib.quality import QualityRankConfig
-        cfg = _test_config(beets_harness_path=_HARNESS)
+        cfg = CratediggerConfig(beets_harness_path=_HARNESS)
         cmd = self._run_dispatch_capture_cmd(cfg)
         raw = self._extract_rank_config_json(cmd)
         self.assertIsNotNone(raw)
@@ -2594,7 +2603,7 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
             vorbis=vorbis,
             wma=wma,
         )
-        cfg = _test_config(
+        cfg = CratediggerConfig(
             beets_harness_path=_HARNESS, quality_ranks=custom_ranks)
         cmd = self._run_dispatch_capture_cmd(cfg)
         raw = self._extract_rank_config_json(cmd)
@@ -3463,9 +3472,11 @@ class TestDispatchJellyfinPinCaptureSlice(unittest.TestCase):
         db.seed_request(make_request_row(
             id=42, status="downloading",
             active_download_state={"files": [], "filetype": "mp3"}))
-        cfg = _test_config(
+        cfg = CratediggerConfig(
             beets_harness_path=_HARNESS,
             pipeline_db_enabled=True,
+            beets_library_db=beets_library_db,
+            beets_directory=beets_library_root,
             jellyfin_url="http://jf:8096",
             jellyfin_token="tok",
             jellyfin_path_map=f"{beets_library_root}:/jf",
