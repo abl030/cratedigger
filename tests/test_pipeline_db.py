@@ -3357,42 +3357,29 @@ class TestPipelineDashboardMetrics(unittest.TestCase):
         self.assertEqual(heavy[0]["browse_time_s"], 12.5)
         self.assertEqual(metrics["cycles"]["outliers"][0]["cycle_total_s"], 900.0)
 
-    def test_cycle_rows_accept_the_two_dashboard_query_fragments(self):
+    def test_cycle_rows_select_recent_and_24_hour_slowest_cycles(self):
         now = datetime.now(timezone.utc)
-        self.db.record_cycle_metrics(
-            started_at=now - timedelta(seconds=10),
-            completed_at=now,
+        newest_id = self.db.record_cycle_metrics(
+            started_at=now - timedelta(hours=1, seconds=25),
+            completed_at=now - timedelta(hours=1),
             cycle_total_s=25.0,
         )
-
-        recent = self.db._dashboard_cycle_rows(
-            order_by="created_at DESC", limit=1)
-        outliers = self.db._dashboard_cycle_rows(
-            where="created_at >= NOW() - %s::interval",
-            params=("24 hours",),
-            order_by="cycle_total_s DESC",
-            limit=1,
+        slower_id = self.db.record_cycle_metrics(
+            started_at=now - timedelta(hours=2, seconds=100),
+            completed_at=now - timedelta(hours=2),
+            cycle_total_s=100.0,
+        )
+        stale_id = self.db.record_cycle_metrics(
+            started_at=now - timedelta(hours=25, seconds=500),
+            completed_at=now - timedelta(hours=25),
+            cycle_total_s=500.0,
         )
 
-        self.assertEqual(len(recent), 1)
-        self.assertEqual(len(outliers), 1)
-        self.assertEqual(recent[0]["id"], outliers[0]["id"])
+        recent = self.db._dashboard_cycle_rows(outliers=False, limit=3)
+        outliers = self.db._dashboard_cycle_rows(outliers=True, limit=8)
 
-    def test_cycle_rows_reject_unapproved_sql_fragments(self):
-        self.db.record_cycle_metrics(cycle_total_s=25.0)
-
-        with self.assertRaises(ValueError):
-            self.db._dashboard_cycle_rows(
-                order_by="created_at DESC; SELECT pg_sleep(1)", limit=1)
-        with self.assertRaises(ValueError):
-            self.db._dashboard_cycle_rows(
-                where="1 = 1 OR 1 = 1",
-                order_by="created_at DESC",
-                limit=1,
-            )
-
-        row = self.db._execute("SELECT COUNT(*)::int AS count FROM cycle_metrics").fetchone()
-        self.assertEqual(row["count"], 1)
+        self.assertEqual([row["id"] for row in recent], [newest_id, slower_id, stale_id])
+        self.assertEqual([row["id"] for row in outliers], [slower_id, newest_id])
 
     def test_peer_observations_track_distinct_peers(self):
         now = datetime.now(timezone.utc)

@@ -16,15 +16,6 @@ from lib.pipeline_db._shared import (
 from lib.pipeline_db._core import _PipelineDBBase
 
 
-_DASHBOARD_CYCLE_ROW_ORDER_BY = frozenset({
-    "created_at DESC",
-    "cycle_total_s DESC",
-})
-_DASHBOARD_CYCLE_ROW_WHERE = frozenset({
-    "created_at >= NOW() - %s::interval",
-})
-
-
 class _DashboardMixin(_PipelineDBBase):
     """Pipeline dashboard metrics, cycle telemetry, peer roster counters."""
 
@@ -281,16 +272,8 @@ class _DashboardMixin(_PipelineDBBase):
             "cycles": {
                 "windows": [self._dashboard_cycle_window(label, hours)
                             for label, hours in DASHBOARD_WINDOWS],
-                "recent": self._dashboard_cycle_rows(
-                    order_by="created_at DESC",
-                    limit=12,
-                ),
-                "outliers": self._dashboard_cycle_rows(
-                    where="created_at >= NOW() - %s::interval",
-                    params=("24 hours",),
-                    order_by="cycle_total_s DESC",
-                    limit=8,
-                ),
+                "recent": self._dashboard_cycle_rows(outliers=False, limit=12),
+                "outliers": self._dashboard_cycle_rows(outliers=True, limit=8),
             },
             "coverage": self._dashboard_coverage(),
             "peers": peers,
@@ -490,17 +473,10 @@ class _DashboardMixin(_PipelineDBBase):
     def _dashboard_cycle_rows(
         self,
         *,
-        order_by: str,
+        outliers: bool,
         limit: int,
-        where: str | None = None,
-        params: tuple[object, ...] = (),
     ) -> list[dict[str, Any]]:
-        if order_by not in _DASHBOARD_CYCLE_ROW_ORDER_BY:
-            raise ValueError(f"Unsupported dashboard cycle ordering: {order_by!r}")
-        if where is not None and where not in _DASHBOARD_CYCLE_ROW_WHERE:
-            raise ValueError(f"Unsupported dashboard cycle filter: {where!r}")
-        filter_sql = f"WHERE {where}" if where else ""
-        cur = self._execute(f"""
+        cur = self._execute("""
             SELECT
                 id, started_at, created_at, cycle_total_s, browse_time_s,
                 match_time_s, search_time_s, cycle_searches_watchdog_killed,
@@ -509,10 +485,13 @@ class _DashboardMixin(_PipelineDBBase):
                 cache_fuse_tripped, peers_browsed, peers_browsed_lazy,
                 fanout_waves
             FROM cycle_metrics
-            {filter_sql}
-            ORDER BY {order_by}
+            WHERE NOT %s OR created_at >= NOW() - INTERVAL '24 hours'
+            ORDER BY
+                CASE WHEN %s THEN cycle_total_s END DESC,
+                CASE WHEN NOT %s THEN created_at END DESC,
+                id DESC
             LIMIT %s
-        """, (*params, limit))
+        """, (outliers, outliers, outliers, limit))
         return [self._serialize_dashboard_cycle_row(dict(row))
                 for row in cur.fetchall()]
 

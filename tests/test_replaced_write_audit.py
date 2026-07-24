@@ -72,12 +72,6 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/pipeline_db/terminal_outcomes.py", 306, "6cfaff9c6507c211"): (
         "terminal attempt kind is restricted to the fixed retry-counter vocabulary"
     ),
-    ("lib/pipeline_db/dashboard.py", 490, "5e3b8177198ccbed"): (
-        "dashboard WHERE and ORDER fragments come from closed enum branches "
-        "(issue #784: lib group B annotation sweep shifted this line by +9; "
-        "hash unchanged since this call sits outside every edited scope — "
-        "no SQL change)"
-    ),
     ("lib/pipeline_db/download_log.py", 850, "8fea92f576d79b49"): (
         "validation key is selected from a closed server-owned vocabulary "
         "(issue #762: the removed request imported-path projection changed "
