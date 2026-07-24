@@ -33,6 +33,37 @@ def _spectral_collection_precedes_conversion(source: str) -> bool:
     return collect_at < first_conversion_at
 
 
+class TestHarnessFailureError(unittest.TestCase):
+    """Issue #865: the harness failure message prefers the typed reason.
+
+    The over-threshold reject, harness timeout, and MBID-skip paths all
+    returned with empty ``beets_lines``, so the stage's fallback degenerated
+    to the opaque "Harness returned rc=N" (the request-8887 card). The
+    helper is the ONE message decision both stage sites share.
+    """
+
+    CASES = [
+        ("typed reason wins",
+         "beets apply distance 0.5637 exceeded 0.5", ["beets: noise"], 2,
+         "beets apply distance 0.5637 exceeded 0.5"),
+        ("last nonempty beets line when no reason",
+         None, ["first", "  ", "actual error"], 2, "actual error"),
+        ("rc fallback when nothing else",
+         None, [], 2, "Harness returned rc=2"),
+        ("rc fallback carries the real rc",
+         None, [], 4, "Harness returned rc=4"),
+    ]
+
+    def test_message_preference_table(self):
+        from harness.import_one import RunImportOutcome, _harness_failure_error
+        for desc, reason, lines, rc, expected in self.CASES:
+            with self.subTest(desc=desc):
+                outcome = RunImportOutcome(
+                    rc, lines, failure_reason=reason)
+                self.assertEqual(
+                    _harness_failure_error(outcome, rc), expected)
+
+
 class TestImportBootstrap(unittest.TestCase):
     """Standalone harness imports should bootstrap the repo root so lib.* resolves.
 

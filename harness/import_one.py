@@ -301,6 +301,12 @@ class RunImportOutcome:
     # apply-time distance was journal-only, which hid the tagless-match
     # inflation for a day and made diagnosis journal archaeology).
     applied_distance: float | None = None
+    # Typed reason for a failed run, set where the run itself knows WHY
+    # (over-threshold reject, harness timeout, MBID skip). Preferred over
+    # the last-beets-line/rc fallback when building ImportResult.error —
+    # those paths return with empty ``beets_lines``, which degenerated the
+    # operator-facing message to "Harness returned rc=N" (issue #865).
+    failure_reason: str | None = None
 
 
 def preflight_decision(already_in_beets: bool, path_exists: bool) -> StageResult:
@@ -574,6 +580,25 @@ V0_SPEC = ConversionSpec(
     label="mp3 v0",
     metadata_args=V0_METADATA_ARGS,
 )
+
+
+def _harness_failure_error(
+    import_outcome: "RunImportOutcome", rc: int,
+) -> str:
+    """The ONE failed-run message decision both stage sites share (#865).
+
+    Prefer the run's typed ``failure_reason``, then the last nonempty
+    beets stderr line, then the bare rc — never let a path that knows its
+    reason collapse to "Harness returned rc=N".
+    """
+    return (
+        import_outcome.failure_reason
+        or next(
+            (line for line in reversed(import_outcome.beets_lines)
+             if line.strip()),
+            f"Harness returned rc={rc}",
+        )
+    )
 
 
 def parse_verified_lossless_target(spec: str) -> ConversionSpec:
@@ -1205,7 +1230,10 @@ def run_import(
                 proc.wait()
                 return RunImportOutcome(
                     2, [], replaced_albums=replaced_albums,
-                    applied_distance=applied_distance)
+                    applied_distance=applied_distance,
+                    failure_reason=(
+                        f"beets harness produced no output for {timeout}s"
+                    ))
 
             line = proc.stdout.readline()
             if not line:
@@ -1288,7 +1316,11 @@ def run_import(
                     if proc.poll() is None:
                         proc.wait()
                     return RunImportOutcome(
-                        4, [], replaced_albums=replaced_albums)
+                        4, [], replaced_albums=replaced_albums,
+                        failure_reason=(
+                            f"target release {mb_release_id} not among "
+                            f"{len(candidates_raw)} beets candidates"
+                        ))
 
                 cand = candidates_raw[matched_idx]
                 assert _as_json_dict(cand)
@@ -1303,7 +1335,11 @@ def run_import(
                         proc.wait()
                     return RunImportOutcome(
                         2, [], replaced_albums=replaced_albums,
-                        applied_distance=float(dist))
+                        applied_distance=float(dist),
+                        failure_reason=(
+                            f"beets apply distance {dist:.4f} exceeded "
+                            f"{max_distance}"
+                        ))
 
                 proc.stdin.write(json.dumps({"action": "apply", "candidate_index": matched_idx}) + "\n")
                 proc.stdin.flush()
@@ -1719,10 +1755,7 @@ def _run_quality_evidence_authorized_import(
             r.error = import_outcome.duplicate_remove_guard.message
         else:
             r.decision = "mbid_missing" if rc == 4 else "import_failed"
-            r.error = next(
-                (line for line in reversed(beets_lines) if line.strip()),
-                f"Harness returned rc={rc}",
-            )
+            r.error = _harness_failure_error(import_outcome, rc)
         _log(f"[ERROR] Import failed (rc={rc})")
         _emit_and_exit(r)
 
@@ -2507,8 +2540,7 @@ def main():
             r.error = import_outcome.duplicate_remove_guard.message
         else:
             r.decision = "import_failed" if rc == 2 else "mbid_missing" if rc == 4 else "import_failed"
-            r.error = next((line for line in reversed(beets_lines) if line.strip()),
-                           f"Harness returned rc={rc}")
+            r.error = _harness_failure_error(import_outcome, rc)
         _log(f"[ERROR] Import failed (rc={rc})")
         _emit_and_exit(r)
 

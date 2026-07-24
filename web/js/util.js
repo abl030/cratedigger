@@ -413,3 +413,18 @@ export function parsePastedId(text) {
   }
   return null;
 }
+
+/**
+ * Append the apply-time beets distance (#863, issue #865) to a rendered
+ * Distance cell. Returns the base unchanged when no apply distance was
+ * persisted (rows predating #863, or runs that never reached the beets
+ * candidate).
+ * @param {string} baseHtml - already-rendered validate-time cell content
+ * @param {number|string|null|undefined} applyDistance
+ * @returns {string}
+ */
+export function withApplyDistance(baseHtml, applyDistance) {
+  const parsed = parseFloat(String(applyDistance));
+  if (applyDistance == null || Number.isNaN(parsed)) return baseHtml;
+  return `${baseHtml} <span class="p-hist-was">· apply ${parsed.toFixed(3)}</span>`;
+}

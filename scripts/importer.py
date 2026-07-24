@@ -450,7 +450,10 @@ def _dispatch_outcome_from_completion(
         case CompletionFailed():
             return DispatchOutcome(
                 success=False,
-                message=failed_message,
+                message=(
+                    f"{failed_message}: {result.reason}"
+                    if result.reason else failed_message
+                ),
                 terminal_outcome=result.terminal_outcome,
             )
     assert_never(result)

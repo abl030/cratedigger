@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
+
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 
 import msgspec
 
+from lib.json_narrow import json_dict
 from web.classify import ClassifiedEntry, LogEntry, classify_log_entry
 
 
@@ -31,6 +34,10 @@ class DownloadHistoryViewRow(msgspec.Struct, frozen=True):
     created_at: str | None
     beets_scenario: str | None
     beets_distance: float | None
+    # Apply-time beets distance persisted by #863 in import_result JSONB
+    # (None on rows predating it) — the card's Distance row shows it next
+    # to the validate-time number (issue #865).
+    apply_beets_distance: float | None
     source_download_log_id: int | None
     original_beets_distance: float | None
     beets_detail: str | None
@@ -137,11 +144,27 @@ def build_download_history_row(
     classified_row = classify_download_log_row(row)
     entry = classified_row.entry
     classified = classified_row.classified
+    merged: dict[str, object] = {
+        **entry.to_json_dict(),
+        **msgspec.to_builtins(classified),
+    }
+    merged["apply_beets_distance"] = _apply_beets_distance(
+        merged.get("import_result"))
     return msgspec.convert(
-        {
-            **entry.to_json_dict(),
-            **msgspec.to_builtins(classified),
-        },
+        merged,
         type=DownloadHistoryViewRow,
         strict=True,
     )
+
+
+def _apply_beets_distance(import_result: object) -> float | None:
+    """Read #863's persisted apply-time distance off the row's JSONB."""
+    if isinstance(import_result, str):
+        try:
+            import_result = json.loads(import_result)
+        except ValueError:
+            return None
+    value = json_dict(import_result).get("apply_beets_distance")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)

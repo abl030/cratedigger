@@ -1,5 +1,5 @@
 // @ts-check
-import { awstDateTime, esc } from './util.js';
+import { awstDateTime, esc, withApplyDistance } from './util.js';
 import {
   qualityToneClass,
   spectralGradeClass,
@@ -589,11 +589,14 @@ export function renderDownloadHistoryItem(h) {
     const original = h.original_beets_distance != null
       ? ` <span class="p-hist-was">(was ${parseFloat(h.original_beets_distance).toFixed(3)})</span>`
       : '';
-    rows.push(['Distance', `<span style="color:#6af;">overridden</span>${original}`]);
+    rows.push(['Distance', withApplyDistance(
+      `<span style="color:#6af;">overridden</span>${original}`,
+      h.apply_beets_distance)]);
   } else if (h.beets_distance != null) {
-    rows.push(['Distance', parseFloat(h.beets_distance).toFixed(3)]);
+    rows.push(['Distance', withApplyDistance(
+      parseFloat(h.beets_distance).toFixed(3), h.apply_beets_distance)]);
   } else {
-    rows.push(['Distance', '—']);
+    rows.push(['Distance', withApplyDistance('—', h.apply_beets_distance)]);
   }
 
   const badExtensions = Array.isArray(h.bad_extensions) ? h.bad_extensions : [];
