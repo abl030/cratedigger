@@ -476,9 +476,12 @@ SQLi that `%s` cannot express.
 
   Implemented locally without a SQL-builder abstraction. `record_attempt`
   already had the exact `search` / `download` / `validation` allowlist on the
-  revalidation baseline; the dashboard helper now admits only its two existing
-  orderings and one existing filter. Deterministic real-PostgreSQL pins and
-  generated production-mixin tests prove invalid text fails before execution.
+  revalidation baseline. The dashboard's fragment-taking API was removed
+  entirely: one static parameterized query now selects recent versus 24-hour
+  outlier behavior from a typed boolean mode, so no caller-supplied SQL text
+  remains. Deterministic real-PostgreSQL/fake parity pins cover both modes and
+  tie ordering; generated production-mixin tests prove invalid attempt text
+  fails before execution.
 
 ### CD-SEC-10 — Unescaped controlled-vocabulary metadata in JS rows (Low)
 
@@ -701,7 +704,7 @@ Safe hardening fixes (candidate single PR):
 - [x] CD-SEC-05 — generic 500 body with diagnostic-only exception detail.
 - [x] CD-SEC-07 — central 1 MiB pre-read cap and framing-safe rejection.
 - [x] CD-SEC-08 — canonical UUID gate + quoted MB identifier components.
-- [x] CD-SEC-09 — exact local allowlists at both interpolation seams.
+- [x] CD-SEC-09 — exact attempt allowlist + static dashboard query.
 - [x] CD-SEC-10 — behavior-tested escaping at every current live metadata sink.
 - [x] CD-SEC-13 — `defusedxml` plus verified Plex maintenance paths.
 
