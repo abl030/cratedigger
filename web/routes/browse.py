@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import urllib.error
+import uuid
 from typing import NotRequired, TypedDict, TypeGuard
 
 import msgspec
@@ -80,6 +81,14 @@ _PIPELINE_BADGE_PRIORITY = {
 
 
 ArtistPipelineKey = tuple[str, str, str]
+
+
+def _is_canonical_mbid(value: str) -> bool:
+    """Whether a resolver-supplied MusicBrainz ID has canonical UUID form."""
+    try:
+        return str(uuid.UUID(value)) == value
+    except ValueError:
+        return False
 
 
 class _PipelineHit(TypedDict):
@@ -860,6 +869,9 @@ def get_browse_resolve(h: RouteHandler, params: dict[str, list[str]]) -> None:
         return
     if kind not in _RESOLVE_VALID_KINDS:
         h._error(f"Invalid 'kind' (must be one of {sorted(_RESOLVE_VALID_KINDS)})")
+        return
+    if source == "mb" and not _is_canonical_mbid(raw_id):
+        h._error("Invalid MusicBrainz ID (must be a canonical UUID)")
         return
     # Discogs IDs must be all-digit. Frontend parsePastedId already enforces
     # this, but defense-in-depth so the resolver never hits int() on garbage.

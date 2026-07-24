@@ -8,13 +8,22 @@ Lucene treat the tokens as title terms.
 """
 
 import json
+import string
 import unittest
 import urllib.parse
+import uuid
 from unittest.mock import MagicMock, patch
 
+from hypothesis import given, strategies as st
+
+from tests import _hypothesis_profiles  # noqa: F401 — registers active profile
 from lib.va_identity import MB_VA_ARTIST_MBID
 from web.mb import (
+    _quote_mb_identifier,
+    get_artist_name,
     get_artist_release_groups,
+    get_release,
+    get_release_group,
     search_artists,
     search_release_groups,
 )
@@ -88,6 +97,80 @@ def _mock_urlopen_by_url(responses: dict[str, dict]):
         raise AssertionError(f"unexpected URL: {req.full_url}")
 
     return patch("web.mb.urllib.request.urlopen", side_effect=_side_effect)
+
+
+def assert_identifier_urls_quoted(identifier: str, urls: list[str]) -> None:
+    """Assert representative MB builders keep one identifier in one component."""
+    quoted = _quote_mb_identifier(identifier)
+    required = (
+        f"/release/{quoted}?",
+        f"/release-group/{quoted}?",
+        f"/artist/{quoted}?",
+        f"artist={quoted}",
+    )
+    if not all(any(fragment in url for url in urls) for fragment in required):
+        raise AssertionError(f"identifier escaped its URL component: {urls!r}")
+
+
+class TestMusicBrainzIdentifierUrlQuoting(unittest.TestCase):
+    def test_release_identifier_is_quoted_as_one_path_component(self) -> None:
+        identifier = "release/../?inc=evil&fmt=xml"
+        with _mock_urlopen({}) as mock_urlopen:
+            get_release(identifier, fresh=True)
+
+        url = mock_urlopen.call_args.args[0].full_url
+        self.assertIn(
+            "/release/release%2F..%2F%3Finc%3Devil%26fmt%3Dxml?",
+            url,
+        )
+        self.assertNotIn("?inc=evil", url)
+
+    def test_artist_identifier_is_quoted_as_one_query_value(self) -> None:
+        identifier = "artist&inc=evil"
+        with _mock_urlopen({}) as mock_urlopen:
+            get_artist_release_groups(identifier)
+
+        urls = [call.args[0].full_url for call in mock_urlopen.call_args_list]
+        self.assertEqual(len(urls), 3)
+        self.assertTrue(all("artist=artist%26inc%3Devil" in url for url in urls))
+        self.assertTrue(all("artist=artist&inc=evil" not in url for url in urls))
+
+    def test_identifier_url_checker_rejects_known_bad_component(self) -> None:
+        """Fault qualification: raw query syntax cannot satisfy the oracle."""
+        with self.assertRaisesRegex(AssertionError, "escaped its URL component"):
+            assert_identifier_urls_quoted(
+                "artist&inc=evil", ["https://mb.invalid/release?artist=artist&inc=evil"],
+            )
+
+    @given(identifier=st.text(
+        alphabet=string.ascii_letters + string.digits + "/?&#%= +",
+        min_size=1,
+        max_size=64,
+    ))
+    def test_identifier_quote_is_the_stdlib_component_encoding(
+        self, identifier: str,
+    ) -> None:
+        """One identifier must remain exactly one URL component."""
+        self.assertEqual(
+            _quote_mb_identifier(identifier),
+            urllib.parse.quote(identifier, safe=""),
+        )
+
+    @given(value=st.uuids())
+    def test_fresh_identifier_quoting_flows_through_representative_builders(
+        self, value: uuid.UUID,
+    ) -> None:
+        """Actual path and query builders preserve a hostile fresh identifier."""
+        identifier = f"{value}/?inc=evil&fmt=xml"
+        with _mock_urlopen({}) as mock_urlopen:
+            get_release(identifier, fresh=True)
+            get_release_group(identifier)
+            get_artist_name(identifier)
+            get_artist_release_groups(identifier)
+
+        urls = [call.args[0].full_url for call in mock_urlopen.call_args_list]
+        self.assertEqual(len(urls), 6)
+        assert_identifier_urls_quoted(identifier, urls)
 
 
 class TestSearchReleaseGroupsVaRewrite(unittest.TestCase):

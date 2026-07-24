@@ -362,7 +362,7 @@ export function renderPressingRow(rel, ctx) {
     dataReleaseId: rel.id,
     onclick: `event.stopPropagation(); window.toggleReleaseDetail(${jsArg(rel.id)})`,
     titleHtml: `${esc(rel.title)}${statusChipHtml(rel.status)}${badges}`,
-    metaLines: [`${rel.country || '?'} ${rel.date || '?'} - ${rel.format} - ${rel.track_count}t - ${rel.status || '?'}`],
+    metaLines: [`${esc(rel.country || '?')} ${esc(rel.date || '?')} - ${esc(rel.format)} - ${esc(rel.track_count)}t - ${esc(rel.status || '?')}`],
     actionsHtml: `${toolbar}${replaceBtn}${spBtn}`,
     detail: { id: `reldet-${rel.id}` },
   });

@@ -55,6 +55,11 @@ from lib.va_identity import (  # noqa: E402
 )
 
 
+def _quote_mb_identifier(identifier: str) -> str:
+    """Encode one MusicBrainz identifier without URL syntax leakage."""
+    return urllib.parse.quote(identifier, safe="")
+
+
 def _get(url: str) -> Any:
     """Fetch and JSON-decode one MB API URL.
 
@@ -296,7 +301,7 @@ def search_release_groups(query: str) -> list[dict[str, object]]:
         query = f"arid:{VA_ARTIST_MBID} AND ({remainder})"
 
     def _fetch() -> list[dict[str, object]]:
-        q = urllib.parse.quote(query)
+        q = urllib.parse.quote(query, safe="")
         data: _MBReleaseSearchResponseJSON = _get(
             f"{MB_API_BASE}/release?query={q}&fmt=json&limit=25")
         seen_rg: set[str] = set()
@@ -343,7 +348,7 @@ def _related_artist_identity_hits(
 ) -> list[dict[str, object]]:
     """Resolve canonical MusicBrainz ``is person`` identity siblings."""
     detail: _MBArtistDetailJSON = _get(
-        f"{MB_API_BASE}/artist/{artist_id}?inc=artist-rels&fmt=json"
+        f"{MB_API_BASE}/artist/{_quote_mb_identifier(artist_id)}?inc=artist-rels&fmt=json"
     )
     relations = detail.get("relations", [])
     identity_artists: list[_MBArtistRefJSON] = []
@@ -359,7 +364,7 @@ def _related_artist_identity_hits(
     if person:
         identity_artists.append(person)
         detail = _get(
-            f"{MB_API_BASE}/artist/{person.get('id', '')}?inc=artist-rels&fmt=json"
+            f"{MB_API_BASE}/artist/{_quote_mb_identifier(person.get('id', ''))}?inc=artist-rels&fmt=json"
         )
         relations = detail.get("relations", [])
 
@@ -381,7 +386,7 @@ def _related_artist_identity_hits(
 def search_artists(query: str) -> list[dict[str, object]]:
     """Search for artists by name. Returns list of {id, name, disambiguation, score}."""
     def _fetch() -> list[dict[str, object]]:
-        q = urllib.parse.quote(query)
+        q = urllib.parse.quote(query, safe="")
         data: _MBArtistSearchResponseJSON = _get(
             f"{MB_API_BASE}/artist?query={q}&fmt=json&limit=20")
         results = [
@@ -487,7 +492,7 @@ def get_artist_release_groups(artist_mbid: str) -> list[ArtistCatalogueRow]:
         offset = 0
         while True:
             data: _MBReleaseGroupBrowseResponseJSON = _get(
-                f"{MB_API_BASE}/release-group?artist={artist_mbid}"
+                f"{MB_API_BASE}/release-group?artist={_quote_mb_identifier(artist_mbid)}"
                 f"&inc=artist-credits&fmt=json&limit=100&offset={offset}"
             )
             for rg in data.get("release-groups", []):
@@ -506,7 +511,7 @@ def get_artist_release_groups(artist_mbid: str) -> list[ArtistCatalogueRow]:
         offset = 0
         while True:
             release_data: _MBReleaseBrowseResponseJSON = _get(
-                f"{MB_API_BASE}/release?artist={artist_mbid}"
+                f"{MB_API_BASE}/release?artist={_quote_mb_identifier(artist_mbid)}"
                 f"&inc=release-groups&fmt=json&limit=100&offset={offset}"
             )
             for release in release_data.get("releases", []):
@@ -519,7 +524,7 @@ def get_artist_release_groups(artist_mbid: str) -> list[ArtistCatalogueRow]:
         offset = 0
         while True:
             track_data: _MBReleaseBrowseResponseJSON = _get(
-                f"{MB_API_BASE}/release?track_artist={artist_mbid}"
+                f"{MB_API_BASE}/release?track_artist={_quote_mb_identifier(artist_mbid)}"
                 "&inc=release-groups+artist-credits"
                 f"&fmt=json&limit=100&offset={offset}"
             )
@@ -565,7 +570,7 @@ def get_release_group(rg_mbid: str) -> dict[str, object]:
     """
     def _fetch() -> dict[str, object]:
         data: _MBReleaseGroupRefJSON = _get(
-            f"{MB_API_BASE}/release-group/{rg_mbid}?inc=artist-credits&fmt=json")
+            f"{MB_API_BASE}/release-group/{_quote_mb_identifier(rg_mbid)}?inc=artist-credits&fmt=json")
         ac = data.get("artist-credit", [{}])
         artist = (
             ac[0].get("artist", _EMPTY_MB_ARTIST_REF)
@@ -603,7 +608,7 @@ def get_release_group_year(rg_mbid: str) -> int | None:
     """
     def _fetch() -> int | None:
         data: _MBReleaseGroupRefJSON = _get(
-            f"{MB_API_BASE}/release-group/{rg_mbid}?fmt=json")
+            f"{MB_API_BASE}/release-group/{_quote_mb_identifier(rg_mbid)}?fmt=json")
         from lib.util import parse_mb_first_release_year
         return parse_mb_first_release_year(dict(data))
 
@@ -616,14 +621,14 @@ def get_release_group_releases(rg_mbid: str) -> dict[str, object]:
     def _fetch() -> dict[str, object]:
         # First get the release group metadata
         rg_data: _MBReleaseGroupRefJSON = _get(
-            f"{MB_API_BASE}/release-group/{rg_mbid}?fmt=json")
+            f"{MB_API_BASE}/release-group/{_quote_mb_identifier(rg_mbid)}?fmt=json")
 
         # Then browse all releases (paginated — the lookup endpoint caps at 25)
         releases: list[dict[str, object]] = []
         offset = 0
         while True:
             data: _MBReleaseGroupReleasesResponseJSON = _get(
-                f"{MB_API_BASE}/release?release-group={rg_mbid}"
+                f"{MB_API_BASE}/release?release-group={_quote_mb_identifier(rg_mbid)}"
                 f"&inc=media&fmt=json&limit=100&offset={offset}"
             )
             for r in data.get("releases", []):
@@ -666,7 +671,7 @@ def _fetch_release_raw(
     """
     def _fetch() -> _MBReleaseFullJSON:
         return _get(
-            f"{MB_API_BASE}/release/{release_mbid}"
+            f"{MB_API_BASE}/release/{_quote_mb_identifier(release_mbid)}"
             f"?inc=recordings+artist-credits+media+release-groups+labels&fmt=json"
         )
     return _cache.memoize_meta(
@@ -770,7 +775,8 @@ def get_release(
 def get_artist_name(artist_mbid: str) -> str:
     """Look up an artist's name by MBID."""
     def _fetch() -> str:
-        data: _MBArtistRefJSON = _get(f"{MB_API_BASE}/artist/{artist_mbid}?fmt=json")
+        data: _MBArtistRefJSON = _get(
+            f"{MB_API_BASE}/artist/{_quote_mb_identifier(artist_mbid)}?fmt=json")
         return data.get("name", "")
 
     return _cache.memoize_meta(f"mb:artist:{artist_mbid}:name", _fetch)
@@ -788,7 +794,7 @@ def get_artist_releases_with_recordings(
         offset = 0
         while True:
             data: _MBArtistReleasesWithRecordingsResponseJSON = _get(
-                f"{MB_API_BASE}/release?artist={artist_mbid}"
+                f"{MB_API_BASE}/release?artist={_quote_mb_identifier(artist_mbid)}"
                 f"&inc=recordings+media+release-groups&fmt=json&limit=100&offset={offset}"
             )
             page = data.get("releases", [])

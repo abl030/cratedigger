@@ -6,13 +6,14 @@ from __future__ import annotations
 import email.message
 import json
 import unittest
-from unittest.mock import patch
+import uuid
+from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError, URLError
 
 from hypothesis import given, strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401 - registers active profile
-from web.routes.browse import _resolve_discogs, get_artist
+from web.routes.browse import _resolve_discogs, get_artist, get_browse_resolve
 
 
 _CLEAN_ERROR = "MusicBrainz fallback unavailable, retry"
@@ -59,9 +60,36 @@ class _RecordingHandler:
         self.status: int | None = None
         self.data: dict | None = None
 
-    def _json(self, data: dict, status: int = 200) -> None:
+    def _json(self, data: object, status: int = 200) -> None:
+        if not isinstance(data, dict):
+            raise AssertionError(f"expected JSON object, got {data!r}")
         self.status = status
         self.data = data
+
+    def _error(self, msg: str, status: int = 400) -> None:
+        self._json({"error": msg}, status)
+
+
+def assert_mb_resolver_adapter_boundary(
+    handler: _RecordingHandler, adapter: MagicMock, *, accepted: bool,
+) -> None:
+    """Assert canonical UUIDs alone may cross into the MB adapter."""
+    calls = (
+        adapter.get_release.call_count + adapter.get_release_group.call_count
+    )
+    if accepted:
+        if handler.status != 200 or calls != 1:
+            raise AssertionError(
+                f"canonical UUID did not reach adapter exactly once: {handler.status=} {calls=}"
+            )
+    elif (
+        handler.status != 400
+        or handler.data != {"error": "Invalid MusicBrainz ID (must be a canonical UUID)"}
+        or calls != 0
+    ):
+        raise AssertionError(
+            f"noncanonical UUID crossed adapter boundary: {handler.status=} {handler.data=!r} {calls=}"
+        )
 
 
 class TestArtistMusicBrainzFailureGenerated(unittest.TestCase):
@@ -105,7 +133,7 @@ class TestArtistMusicBrainzFailureGenerated(unittest.TestCase):
         handler = _RecordingHandler()
         with patch("web.server.mb_api") as mock_mb:
             mock_mb.get_artist_release_groups.side_effect = URLError(raw_reason)
-            get_artist(handler, {}, self.ARTIST_ID)  # type: ignore[arg-type]
+            get_artist(handler, {}, self.ARTIST_ID)
 
         assert handler.status is not None
         assert handler.data is not None
@@ -142,7 +170,7 @@ class TestArtistMusicBrainzFailureGenerated(unittest.TestCase):
         handler = _RecordingHandler()
         with patch("web.server.mb_api") as mock_mb:
             mock_mb.get_artist_release_groups.side_effect = error
-            get_artist(handler, {}, self.ARTIST_ID)  # type: ignore[arg-type]
+            get_artist(handler, {}, self.ARTIST_ID)
 
         assert handler.status is not None
         assert handler.data is not None
@@ -152,6 +180,61 @@ class TestArtistMusicBrainzFailureGenerated(unittest.TestCase):
             upstream_status,
             raw_reason,
         )
+
+
+class TestBrowseResolverMusicBrainzIdGenerated(unittest.TestCase):
+    def test_mbid_adapter_boundary_checker_rejects_known_bad_dispatch(self):
+        """Fault qualification: an adapter call for a bad UUID trips the oracle."""
+        handler = _RecordingHandler()
+        handler.status = 400
+        handler.data = {"error": "Invalid MusicBrainz ID (must be a canonical UUID)"}
+        adapter = MagicMock()
+        adapter.get_release()
+        with self.assertRaisesRegex(AssertionError, "crossed adapter boundary"):
+            assert_mb_resolver_adapter_boundary(handler, adapter, accepted=False)
+
+    @given(raw_id=st.text(alphabet="/?&#%=", min_size=1, max_size=80))
+    def test_invalid_mb_identifier_never_reaches_the_adapter(self, raw_id: str) -> None:
+        handler = _RecordingHandler()
+        with patch("web.server.mb_api") as mock_mb:
+            get_browse_resolve(handler, {
+                "id": [raw_id], "source": ["mb"], "kind": ["unknown"],
+            })
+
+        self.assertEqual(handler.status, 400)
+        self.assertEqual(
+            handler.data,
+            {"error": "Invalid MusicBrainz ID (must be a canonical UUID)"},
+        )
+        self.assertEqual(mock_mb.get_release.call_count, 0)
+        self.assertEqual(mock_mb.get_release_group.call_count, 0)
+
+    @given(value=st.uuids())
+    def test_canonical_uuid_alone_reaches_the_adapter(
+        self, value: uuid.UUID,
+    ) -> None:
+        canonical = str(value)
+
+        handler = _RecordingHandler()
+        # Each generated UUID has a fresh metadata-cache key, so this drives
+        # the real cache boundary without patching its owned implementation.
+        with patch("web.server.mb_api") as mock_mb:
+            mock_mb.get_release.return_value = {
+                "artist_id": "artist", "artist_name": "Artist",
+                "release_group_id": "group",
+            }
+            get_browse_resolve(handler, {
+                "id": [canonical], "source": ["mb"], "kind": ["release"],
+            })
+            assert_mb_resolver_adapter_boundary(handler, mock_mb, accepted=True)
+
+        for noncanonical in (canonical.upper(), value.hex, f"urn:uuid:{canonical}"):
+            handler = _RecordingHandler()
+            with patch("web.server.mb_api") as mock_mb:
+                get_browse_resolve(handler, {
+                    "id": [noncanonical], "source": ["mb"], "kind": ["release"],
+                })
+            assert_mb_resolver_adapter_boundary(handler, mock_mb, accepted=False)
 
 
 def assert_discogs_target_identity(

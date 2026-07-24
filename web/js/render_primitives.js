@@ -47,7 +47,7 @@ export function renderBeetsTrackRow(t) {
   const dur = formatDuration(t.length);
   return `<div class="lib-track">
       <span>${t.disc && t.disc > 1 ? t.disc + '.' : ''}${t.track}. ${esc(t.title)} ${dur ? '<span style="color:#555;">' + dur + '</span>' : ''}</span>
-      <span class="lib-track-meta">${formatTrackMeta(t)}</span>
+      <span class="lib-track-meta">${esc(formatTrackMeta(t))}</span>
     </div>`;
 }
 

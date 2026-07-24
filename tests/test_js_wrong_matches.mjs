@@ -4,6 +4,7 @@
  */
 
 import { __test__ } from '../web/js/wrong-matches.js';
+import { esc } from '../web/js/util.js';
 
 let passed = 0;
 let failed = 0;
@@ -32,6 +33,10 @@ function assertDeepEqual(actual, expected, msg) {
 
 function countOccurrences(text, needle) {
   return (String(text).match(new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length;
+}
+
+function metadataHtmlIsEscaped(html, value) {
+  return !html.includes(value) && html.includes(esc(value));
 }
 
 function installStorage() {
@@ -809,6 +814,57 @@ console.log('renderEntry() embeds evidence cells without preview hooks');
   assert(!/data-action=["']preview["']/.test(html), 'no data-action=preview attribute');
   assert(!/preview[-_]btn/.test(html), 'no preview button class');
   assert(!/onclick=["'][^"']*preview/i.test(html), 'no onclick handler invoking preview');
+}
+
+console.log('renderWrongMatches() preserves ordinary candidate metadata presentation');
+{
+  installStorage();
+  const dom = installDom();
+  const data = wrongMatchesData();
+  data.groups[0].entries[0].candidate = {
+    artist: 'Scott Walker',
+    album: 'Scott 3',
+    year: 1969,
+    mapping: [{
+      track: { title: 'It\'s Raining Today' },
+      item: { title: 'It\'s Raining Today', format: 'MP3' },
+    }],
+  };
+  __test__.renderWrongMatches(data, dom.wrongMatches);
+  assert(dom.wrongMatches.innerHTML.includes('(1969)'), 'ordinary candidate year remains visible');
+  assert(dom.wrongMatches.innerHTML.includes(' MP3'), 'ordinary local format remains visible');
+}
+
+console.log('renderWrongMatches() escapes candidate metadata at the live HTML sink');
+{
+  const knownBad = '<span><script>alert(1)</script></span>';
+  assert(!metadataHtmlIsEscaped(knownBad, '<script>alert(1)</script>'),
+    'metadata escape checker rejects known-bad raw HTML');
+
+  const atoms = ['<', '>', '&', '"', "'", '\\'];
+  for (const left of atoms) {
+    for (const right of atoms) {
+      const year = `year${left}${right}tail`;
+      const format = `format${left}${right}tail`;
+      const data = wrongMatchesData();
+      data.groups[0].entries[0].candidate = {
+        artist: 'Artist',
+        album: 'Album',
+        year,
+        mapping: [{
+          track: { title: 'Track' },
+          item: { title: 'Track', format },
+        }],
+      };
+      installStorage();
+      const dom = installDom();
+      __test__.renderWrongMatches(data, dom.wrongMatches);
+      assert(metadataHtmlIsEscaped(dom.wrongMatches.innerHTML, year),
+        `candidate year escaped: ${JSON.stringify(year)}`);
+      assert(metadataHtmlIsEscaped(dom.wrongMatches.innerHTML, format),
+        `local format escaped: ${JSON.stringify(format)}`);
+    }
+  }
 }
 
 console.log('renderWrongMatchExplorer() collapses shared album tags and hides replaygain noise');

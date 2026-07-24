@@ -16,7 +16,7 @@
  */
 
 import { pipelineStore, pipelineStoreKey } from './state.js';
-import { qualityLabelShort } from './util.js';
+import { esc, qualityLabelShort } from './util.js';
 import { qualityRankBadgeClass } from './quality_palette.js';
 
 /**
@@ -59,7 +59,7 @@ export function renderStatusBadges(item) {
       item.library_format || '',
       item.library_avg_bitrate || 0,
     );
-    const suffix = q && q !== '?' ? ` · ${q}` : '';
+    const suffix = q && q !== '?' ? ` · ${esc(q)}` : '';
     // Rank colour overrides the default blue when the backend supplied
     // a codec-aware tier. Falls back to badge-library blue when not.
     const rank = (item.library_rank || '').toLowerCase();

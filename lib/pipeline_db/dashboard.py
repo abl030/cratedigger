@@ -272,16 +272,8 @@ class _DashboardMixin(_PipelineDBBase):
             "cycles": {
                 "windows": [self._dashboard_cycle_window(label, hours)
                             for label, hours in DASHBOARD_WINDOWS],
-                "recent": self._dashboard_cycle_rows(
-                    order_by="created_at DESC",
-                    limit=12,
-                ),
-                "outliers": self._dashboard_cycle_rows(
-                    where="created_at >= NOW() - %s::interval",
-                    params=("24 hours",),
-                    order_by="cycle_total_s DESC",
-                    limit=8,
-                ),
+                "recent": self._dashboard_cycle_rows(outliers=False, limit=12),
+                "outliers": self._dashboard_cycle_rows(outliers=True, limit=8),
             },
             "coverage": self._dashboard_coverage(),
             "peers": peers,
@@ -481,13 +473,10 @@ class _DashboardMixin(_PipelineDBBase):
     def _dashboard_cycle_rows(
         self,
         *,
-        order_by: str,
+        outliers: bool,
         limit: int,
-        where: str | None = None,
-        params: tuple[object, ...] = (),
     ) -> list[dict[str, Any]]:
-        filter_sql = f"WHERE {where}" if where else ""
-        cur = self._execute(f"""
+        cur = self._execute("""
             SELECT
                 id, started_at, created_at, cycle_total_s, browse_time_s,
                 match_time_s, search_time_s, cycle_searches_watchdog_killed,
@@ -496,10 +485,13 @@ class _DashboardMixin(_PipelineDBBase):
                 cache_fuse_tripped, peers_browsed, peers_browsed_lazy,
                 fanout_waves
             FROM cycle_metrics
-            {filter_sql}
-            ORDER BY {order_by}
+            WHERE NOT %s OR created_at >= NOW() - INTERVAL '24 hours'
+            ORDER BY
+                CASE WHEN %s THEN cycle_total_s END DESC,
+                CASE WHEN NOT %s THEN created_at END DESC,
+                id DESC
             LIMIT %s
-        """, (*params, limit))
+        """, (outliers, outliers, outliers, limit))
         return [self._serialize_dashboard_cycle_row(dict(row))
                 for row in cur.fetchall()]
 

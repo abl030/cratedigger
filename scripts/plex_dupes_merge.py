@@ -16,25 +16,21 @@ Defaults to DRY RUN. Pass --commit to actually issue merges.
 
 Usage:
     PLEX_TOKEN=$(ssh doc2 'sudo cat /run/cratedigger-secrets/PLEX_TOKEN') \
-      python3 merge_dupes.py dupes.after.json                  # dry-run
-    PLEX_TOKEN=$(...)            python3 merge_dupes.py dupes.after.json --commit
-    PLEX_TOKEN=$(...)            python3 merge_dupes.py dupes.after.json --commit --limit 5
+      nix-shell --run "python3 scripts/plex_dupes_merge.py dupes.after.json"  # dry-run
+    PLEX_TOKEN=$(...) nix-shell --run "python3 scripts/plex_dupes_merge.py dupes.after.json --commit"
+    PLEX_TOKEN=$(...) nix-shell --run "python3 scripts/plex_dupes_merge.py dupes.after.json --commit --limit 5"
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
-import ssl
 import sys
 import urllib.request
 
 import msgspec
 
 BASE = "https://plex.ablz.au"
-CTX = ssl.create_default_context()
-CTX.check_hostname = False
-CTX.verify_mode = ssl.CERT_NONE
 
 
 class _MemberRow(msgspec.Struct):
@@ -72,13 +68,13 @@ def merge(primary_rk: str, ghost_rks: list[str], token: str) -> tuple[int, bytes
     ids = ",".join(ghost_rks)
     url = f"{BASE}/library/metadata/{primary_rk}/merge?ids={ids}&X-Plex-Token={token}"
     req = urllib.request.Request(url, method="PUT")
-    with urllib.request.urlopen(req, context=CTX, timeout=30) as r:
+    with urllib.request.urlopen(req, timeout=30) as r:
         return r.status, r.read()
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("json_path", help="dupes.after.json from build_dupes_json.py")
+    ap.add_argument("json_path", help="dupes.after.json from plex_dupes_audit.py")
     ap.add_argument("--commit", action="store_true",
                     help="Actually issue merges. Default is dry-run.")
     ap.add_argument("--limit", type=int, default=0,

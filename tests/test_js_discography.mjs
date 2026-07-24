@@ -44,6 +44,17 @@ function expectedJsArg(value) {
     .replace(/\\/g, '&#92;');
 }
 
+/** Independent expected text encoder for caller-owned HTML fragments. */
+function expectedEsc(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+    .replace(/\\/g, '&#92;');
+}
+
 console.log('synthesizeMasterlessRow() — overlay fields survive the synthesis');
 {
   // The live bug (request 8838, Deloris "Feather Figure/Elastic Bones"):
@@ -263,6 +274,70 @@ console.log('Release-id onclick arguments — generated critical-character prope
   let oldCompiles = true;
   try { new Function('window', oldHandler); } catch (_) { oldCompiles = false; }
   assertEqual(oldCompiles, false, 'known-bad raw interpolation checker rejects apostrophe ID');
+}
+
+console.log('Pressing metadata — hostile catalogue values stay text at the caller-owned HTML boundary');
+{
+  const ordinary = renderPressingRow({
+    id: 'metadata-ordinary',
+    title: 'Safe title',
+    country: 'Australia',
+    date: '2003-06-00',
+    format: 'CD',
+    track_count: 13,
+    status: 'Official',
+    in_library: false,
+    pipeline_status: null,
+  }, { artistName: 'Artist', parentRgId: 'parent', canReplace: false });
+  assertContains(ordinary, 'Australia 2003-06-00 - CD - 13t - Official',
+    'ordinary pressing metadata presentation is unchanged');
+
+  const hostile = '<img src=x onerror=alert(1)>';
+  const pressingHtml = renderPressingRow({
+    id: 'metadata-hostile',
+    title: 'Safe title',
+    country: hostile,
+    date: hostile,
+    format: hostile,
+    track_count: hostile,
+    status: hostile,
+    in_library: false,
+    pipeline_status: null,
+  }, { artistName: 'Artist', parentRgId: 'parent', canReplace: false });
+  const escaped = '&lt;img src=x onerror=alert(1)&gt;';
+  const metaStart = pressingHtml.indexOf('<div class="release-meta"');
+  const metaEnd = pressingHtml.indexOf('</div>', metaStart);
+  const metadataHtml = pressingHtml.slice(metaStart, metaEnd);
+  assertEqual(metadataHtml.split(escaped).length - 1, 5,
+    'country, date, format, track count, and status are each escaped exactly once');
+  assertExcludes(pressingHtml, hostile,
+    'hostile pressing metadata cannot create an image element');
+
+  const oldMeta = `${hostile} ${hostile} - ${hostile} - ${hostile}t - ${hostile}`;
+  assertContains(oldMeta, hostile,
+    'known-bad raw metadata composition admits an image element');
+}
+
+console.log('Pressing metadata — generated critical-character property sweep');
+{
+  const atoms = ['plain', '&', '<', '>', '"', "'", '\\'];
+  for (const field of ['country', 'date', 'format', 'track_count', 'status']) {
+    for (const value of atoms) {
+      const metadata = {
+        country: 'AU', date: '2000', format: 'CD', track_count: 12, status: 'Official', [field]: value,
+      };
+      const pressingHtml = renderPressingRow({
+        id: 'metadata-sweep',
+        title: 'Safe title',
+        ...metadata,
+        in_library: false,
+        pipeline_status: null,
+      }, { artistName: 'Artist', parentRgId: 'parent', canReplace: false });
+      const expectedMeta = `${expectedEsc(metadata.country)} ${expectedEsc(metadata.date)} - ${expectedEsc(metadata.format)} - ${expectedEsc(metadata.track_count)}t - ${expectedEsc(metadata.status)}`;
+      assertContains(pressingHtml, expectedMeta,
+        `${field} remains escaped text: ${JSON.stringify(value)}`);
+    }
+  }
 }
 
 console.log('Discogs master/release DOM identities stay distinct at equal numeric IDs');

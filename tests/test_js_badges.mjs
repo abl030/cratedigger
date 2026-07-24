@@ -36,6 +36,19 @@ console.log('renderStatusBadges() uses average while retaining the min floor');
   assertExcludes(html, 'M V2', 'min 194 does not drive badge label');
 }
 
+console.log('renderStatusBadges() escapes fallback quality labels at the badge HTML boundary');
+{
+  const formats = '</span><img src=x onerror=alert(1)>';
+  const html = renderStatusBadges({
+    in_library: true,
+    library_format: formats,
+  });
+  assertContains(html, 'in library · &lt;/SPAN&gt;&lt;IMG SRC=X ONERROR=ALERT(1)&gt;',
+    'unknown format label is rendered as text');
+  assertExcludes(html, formats.toUpperCase(),
+    'unknown format label cannot close the badge or create markup');
+}
+
 console.log('renderStatusBadges() marks a provisional lossless-source install');
 {
   const html = renderStatusBadges({

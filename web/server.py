@@ -46,6 +46,8 @@ logging.basicConfig(
 )
 log = logging.getLogger("cratedigger-web")
 
+MAX_POST_BODY_BYTES = 1024 * 1024
+
 # Ensure this module is importable as 'web.server' even when run as __main__,
 # so route modules can `from web import server` and get the same instance.
 if __name__ == "__main__" or "web.server" not in sys.modules:
@@ -56,6 +58,7 @@ from web import discogs as _discogs
 from web import mb as mb_api
 from web import overlay as _overlay
 from lib.beets_db import BeetsDB, open_beets_db
+from lib.json_narrow import is_str_object_dict as _is_str_object_dict
 from lib.pipeline_db import AlbumRequestRow, PipelineDB
 from web.routes import api_index as _api_index_routes
 from web.routes import beets_distance as _beets_distance_routes
@@ -389,6 +392,37 @@ class Handler(BaseHTTPRequestHandler):
     def _error(self, msg: str, status: int = 400) -> None:
         self._json({"error": msg}, status)
 
+    def _read_post_body(self) -> dict[str, object] | None:
+        """Read one bounded JSON-object POST body, or write its error response.
+
+        ``Content-Length`` is checked before touching ``rfile`` so a client
+        cannot make the server buffer an unbounded or syntactically invalid
+        request body. An omitted length retains the existing empty-object
+        POST behaviour.
+        """
+        raw_length = self.headers.get("Content-Length")
+        if raw_length is None:
+            return {}
+        if not raw_length.isascii() or not raw_length.isdecimal():
+            self.close_connection = True
+            self._error("Invalid Content-Length")
+            return None
+        normalized_length = raw_length.lstrip("0") or "0"
+        if len(normalized_length) > len(str(MAX_POST_BODY_BYTES)):
+            self.close_connection = True
+            self._error("Request body too large", 413)
+            return None
+        length = int(normalized_length)
+        if length > MAX_POST_BODY_BYTES:
+            self.close_connection = True
+            self._error("Request body too large", 413)
+            return None
+        body: object = json.loads(self.rfile.read(length)) if length else {}
+        if not _is_str_object_dict(body):
+            self._error("Request body must be a JSON object")
+            return None
+        return body
+
     # Routing-level response cache was removed by issue #101 — it used to
     # cache the full HTTP response under `web:<url>`, which baked in
     # per-request overlay state (pipeline_status, in_library, …) and
@@ -459,7 +493,7 @@ class Handler(BaseHTTPRequestHandler):
             # under HTTP/1.1 keep-alive a follow-up response on the same
             # socket would desync the stream, so always close after.
             self.close_connection = True
-            self._error(str(e), 500)
+            self._error("Internal server error", 500)
 
     def do_POST(self):
         parsed = urlparse(self.path)
@@ -474,10 +508,9 @@ class Handler(BaseHTTPRequestHandler):
             # the deploy-window asymmetry (in-flight cycles may POST during
             # the swap). Tracked for cleanup in #234.
             if path == "/api/cache/invalidate":
-                length = int(self.headers.get("Content-Length", 0))
-                body: dict[str, object] = (
-                    json.loads(self.rfile.read(length)) if length else {}
-                )
+                body = self._read_post_body()
+                if body is None:
+                    return
                 try:
                     groups = msgspec.convert(
                         body.get("groups", []), type=list[str])
@@ -489,17 +522,22 @@ class Handler(BaseHTTPRequestHandler):
 
             fn = self._FUNC_POST_ROUTES.get(path)
             if fn:
-                length = int(self.headers.get("Content-Length", 0))
-                body = json.loads(self.rfile.read(length)) if length else {}
+                body = self._read_post_body()
+                if body is None:
+                    return
                 fn(self, body)
                 return
             for pattern, fn in self._FUNC_POST_PATTERNS:
                 m = pattern.match(path)
                 if m:
-                    length = int(self.headers.get("Content-Length", 0))
-                    body = json.loads(self.rfile.read(length)) if length else {}
+                    body = self._read_post_body()
+                    if body is None:
+                        return
                     fn(self, body, *m.groups())
                     return
+            # The declared body remains unread for an unknown route.  Close
+            # rather than letting those bytes be parsed as a second request.
+            self.close_connection = True
             self._error("Not found", 404)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as e:
             # Issue #233: see do_GET above. The function-level except covers
@@ -517,7 +555,7 @@ class Handler(BaseHTTPRequestHandler):
             _try_reconnect_db()
             # See do_GET: never reuse the socket after an error response.
             self.close_connection = True
-            self._error(str(e), 500)
+            self._error("Internal server error", 500)
 
     def finish(self):
         """Connection teardown: release this thread's DB handles.

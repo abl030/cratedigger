@@ -60,7 +60,7 @@ against that reality, not against a hypothetical public exposure.
 | CD-SEC-07 | Low | Unbounded request body read + JSON parse (memory-exhaustion DoS) | `web/server.py` |
 | CD-SEC-08 | Low | Unvalidated MB `id` interpolated into the mirror URL (request-shaping) | `web/routes/browse.py`, `web/mb.py` |
 | CD-SEC-09 | Low | Latent identifier-interpolation SQLi footguns (hardcoded today) | `lib/pipeline_db/requests.py`, `lib/pipeline_db/dashboard.py` |
-| CD-SEC-10 | Low | Unescaped controlled-vocabulary metadata in a few JS rows | `web/js/pipeline.js`, `web/js/library.js`, `web/js/wrong-matches.js` |
+| CD-SEC-10 | Low | Unescaped controlled-vocabulary metadata in a few JS rows | `web/js/discography.js`, `web/js/library.js`, `web/js/wrong-matches.js` |
 | CD-SEC-11 | Medium | Remediated: no-follow descriptor authority for materialize, explorer, and stream | `lib/fs_authority.py`, `web/wrong_match_file_service.py` |
 | CD-SEC-12 | Low | Vulnerable-version matches in the locked closure + narrow CI scope | `flake.lock`, `nix/package.nix` |
 | CD-SEC-13 | Info | Plex XML parsed with stdlib ElementTree | `lib/util.py` |
@@ -394,6 +394,12 @@ could reveal are already in the public repo), so severity is low.
 - **Remediation:** return a generic `{"error": "internal error"}` on the 500 path
   and keep the full trace in the server log.
 
+  Implemented. Both catch-alls now return the fixed
+  `{"error": "Internal server error"}` response and retain the exception and
+  traceback only in `cratedigger-web` logs. Deterministic and generated tests
+  drive the real handler boundary with adversarial exception text and prove it
+  remains diagnostic-only.
+
 ### CD-SEC-06 — Removed notifier TLS fallback; fail closed (Medium)
 
 The audit found a helper in `lib/util.py` that contained a `CERT_NONE` retry
@@ -425,6 +431,15 @@ low.
 - **Remediation:** enforce a central maximum body size (reject over ~1 MB with
   413) before reading, and validate `Content-Length` parses to a non-negative int.
 
+  Implemented as one 1 MiB reader shared by every POST route. Malformed,
+  negative, conversion-limit, and oversized lengths are rejected before
+  `rfile.read`; pre-read rejection also closes the HTTP/1.1 connection so the
+  unread bytes cannot be interpreted as another request. Valid bodies preserve
+  keep-alive behavior, while an unmatched POST closes before returning 404
+  rather than leaving its unknown body on the connection. Duplicate/conflicting
+  `Content-Length` and `Transfer-Encoding` normalization remains the reverse
+  proxy's framing boundary rather than a second HTTP parser in the application.
+
 ### CD-SEC-08 — Unvalidated MB `id` interpolated into the mirror URL (Low)
 
 `web/routes/browse.py` validates `raw_id.isdigit()` only for the Discogs source;
@@ -436,6 +451,13 @@ rejects control chars, so severity is low.
 
 - **Remediation:** UUID-validate MB ids before dispatch (mirroring the Discogs
   `isdigit` gate) and `urllib.parse.quote` path segments in the MB URL builder.
+
+  Implemented. The resolver admits only canonical lowercase, hyphenated UUIDs
+  for MusicBrainz and rejects anything else before adapter dispatch. Every
+  MusicBrainz identifier path or query component in the web adapter now passes
+  through one `urllib.parse.quote(..., safe="")` helper. The DB-backed track
+  fallback independently quotes its release ID at its outbound URL boundary;
+  the fixed origins and Discogs behavior are unchanged.
 
 ### CD-SEC-09 — Latent identifier-interpolation SQLi footguns (Low)
 
@@ -452,6 +474,15 @@ SQLi that `%s` cannot express.
   raise on anything else — one line closes each seam locally instead of relying
   on auditing every future caller.
 
+  Implemented locally without a SQL-builder abstraction. `record_attempt`
+  already had the exact `search` / `download` / `validation` allowlist on the
+  revalidation baseline. The dashboard's fragment-taking API was removed
+  entirely: one static parameterized query now selects recent versus 24-hour
+  outlier behavior from a typed boolean mode, so no caller-supplied SQL text
+  remains. Deterministic real-PostgreSQL/fake parity pins cover both modes and
+  tie ordering; generated production-mixin tests prove invalid attempt text
+  fails before execution.
+
 ### CD-SEC-10 — Unescaped controlled-vocabulary metadata in JS rows (Low)
 
 A small, consistent class of enum-shaped metadata fields (country, format,
@@ -466,6 +497,17 @@ the codebase's own escaping discipline.
 - **Remediation:** wrap the interpolations in the existing escape helper and add
   a JS lint/test rule that flags un-escaped interpolations inside `innerHTML`
   template literals.
+
+  Implemented against the current render graph rather than the stale scanner
+  premise. The reported Pipeline sink was no longer present; the live
+  Discography, Library, and Wrong Matches paths included pressing
+  country/date/format/track-count/status, album year/country/type, candidate
+  year, mapped format, badge-derived format, per-track format, and empty-history
+  pipeline status/source. Each is escaped once at its final HTML boundary.
+  Direct composed-render tests with generated critical-character sweeps protect
+  those paths. A semantic source scanner was deliberately not added: it would
+  duplicate JavaScript semantics incompletely and violate the repository's
+  behavior-test rule.
 
 ## Containment, dependency and defense-in-depth
 
@@ -546,6 +588,15 @@ reachable.
 
 - **Remediation:** consider `defusedxml` for the Plex XML parse as independent
   defense in depth; it is not contingent on an unverified-TLS response path.
+
+  Implemented for the production Plex client and the documented duplicate-audit
+  tool, including both saved and live XML. Every parser explicitly sets
+  `forbid_dtd=True`; ordinary Plex XML still parses while plain DTD and entity
+  payloads fail closed. `defusedxml` is present in the Nix Python closure, and
+  the canonical runbook now invokes both tools through `nix-shell --run`.
+  Revalidation also found the duplicate-audit and merge scripts plus that
+  runbook still bypassed certificate verification; the scripts now use default
+  verified `urlopen`, and the runbook uses `curl -sS` rather than `curl -k`.
 
 ## Companion code-quality findings
 
@@ -650,12 +701,12 @@ Priority containment / integrity work:
 
 Safe hardening fixes (candidate single PR):
 
-- [ ] CD-SEC-05 — generic 500 body.
-- [ ] CD-SEC-07 — request-body size cap.
-- [ ] CD-SEC-08 — UUID-validate MB id + `quote` path segments.
-- [ ] CD-SEC-09 — allowlist the two identifier-interpolation sites.
-- [ ] CD-SEC-10 — escape enum metadata in the three JS rows + lint rule.
-- [ ] CD-SEC-13 — `defusedxml` for the Plex XML parse.
+- [x] CD-SEC-05 — generic 500 body with diagnostic-only exception detail.
+- [x] CD-SEC-07 — central 1 MiB pre-read cap and framing-safe rejection.
+- [x] CD-SEC-08 — canonical UUID gate + quoted MB identifier components.
+- [x] CD-SEC-09 — exact attempt allowlist + static dashboard query.
+- [x] CD-SEC-10 — behavior-tested escaping at every current live metadata sink.
+- [x] CD-SEC-13 — `defusedxml` plus verified Plex maintenance paths.
 
 Auth, dependency and quality follow-through:
 

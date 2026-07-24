@@ -17,11 +17,13 @@ import subprocess as sp
 import time
 import unicodedata
 import difflib
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
 from typing import Any, Callable, Iterator, Protocol, Sequence, TYPE_CHECKING
+from xml.etree.ElementTree import Element
+
+from defusedxml import ElementTree as ET
 
 from lib.json_narrow import (
     is_object_list as _is_object_list,
@@ -855,7 +857,7 @@ class PlexAlbumRef:
     artist: str = ""
 
 
-FetchXml = Callable[..., ET.Element]
+FetchXml = Callable[..., Element]
 PutFn = Callable[..., int]
 
 
@@ -895,7 +897,7 @@ def _plex_container_path(cfg: "CratediggerConfig", imported_path: str) -> str | 
         path_map=cfg.plex_path_map)
 
 
-def _plex_fetch_xml(cfg: "CratediggerConfig", path: str, **params: str) -> ET.Element:
+def _plex_fetch_xml(cfg: "CratediggerConfig", path: str, **params: str) -> Element:
     """Thin urllib GET → parsed Plex XML. Network leaf seam."""
     from urllib.parse import urlencode
     params = dict(params)
@@ -903,7 +905,7 @@ def _plex_fetch_xml(cfg: "CratediggerConfig", path: str, **params: str) -> ET.El
     url = f"{cfg.plex_url}{path}?{urlencode(params)}"
     req = urllib.request.Request(url, headers={"Accept": "application/xml"})
     with urllib.request.urlopen(req, timeout=15) as resp:
-        return ET.fromstring(resp.read())
+        return ET.fromstring(resp.read(), forbid_dtd=True)
 
 
 def _plex_put(cfg: "CratediggerConfig", path: str, **params: str) -> int:
@@ -957,7 +959,7 @@ def plex_find_album_by_path(
     if not container:
         return None
 
-    def _default_fetch(path: str, **p: str) -> ET.Element:
+    def _default_fetch(path: str, **p: str) -> Element:
         return _plex_fetch_xml(cfg, path, **p)
 
     fetch: FetchXml = fetch_xml or _default_fetch
@@ -965,7 +967,7 @@ def plex_find_album_by_path(
     artist, album = _parse_artist_album(imported_path)
     prefix = container.rstrip("/") + "/"
 
-    def _candidates() -> Iterator[ET.Element]:
+    def _candidates() -> Iterator[Element]:
         if album:
             root = fetch(f"/library/sections/{section}/search", type="9", query=album)
             for d in root.findall(".//Directory"):

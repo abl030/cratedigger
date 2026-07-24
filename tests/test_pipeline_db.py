@@ -3357,6 +3357,46 @@ class TestPipelineDashboardMetrics(unittest.TestCase):
         self.assertEqual(heavy[0]["browse_time_s"], 12.5)
         self.assertEqual(metrics["cycles"]["outliers"][0]["cycle_total_s"], 900.0)
 
+    def test_cycle_rows_select_recent_and_24_hour_slowest_cycles(self):
+        now = datetime.now(timezone.utc)
+        newest_id = self.db.record_cycle_metrics(
+            started_at=now - timedelta(hours=1, seconds=25),
+            completed_at=now - timedelta(hours=1),
+            cycle_total_s=25.0,
+        )
+        newest_tie_id = self.db.record_cycle_metrics(
+            started_at=now - timedelta(hours=1, seconds=10),
+            completed_at=now - timedelta(hours=1),
+            cycle_total_s=10.0,
+        )
+        slower_id = self.db.record_cycle_metrics(
+            started_at=now - timedelta(hours=2, seconds=100),
+            completed_at=now - timedelta(hours=2),
+            cycle_total_s=100.0,
+        )
+        slower_tie_id = self.db.record_cycle_metrics(
+            started_at=now - timedelta(hours=3, seconds=100),
+            completed_at=now - timedelta(hours=3),
+            cycle_total_s=100.0,
+        )
+        stale_id = self.db.record_cycle_metrics(
+            started_at=now - timedelta(hours=25, seconds=500),
+            completed_at=now - timedelta(hours=25),
+            cycle_total_s=500.0,
+        )
+
+        recent = self.db._dashboard_cycle_rows(outliers=False, limit=5)
+        outliers = self.db._dashboard_cycle_rows(outliers=True, limit=8)
+
+        self.assertEqual(
+            [row["id"] for row in recent],
+            [newest_tie_id, newest_id, slower_id, slower_tie_id, stale_id],
+        )
+        self.assertEqual(
+            [row["id"] for row in outliers],
+            [slower_tie_id, slower_id, newest_id, newest_tie_id],
+        )
+
     def test_peer_observations_track_distinct_peers(self):
         now = datetime.now(timezone.utc)
         old = now - timedelta(days=2)
@@ -3770,6 +3810,19 @@ class TestRetryLogic(unittest.TestCase):
         assert req is not None
         self.assertEqual(req["search_attempts"], 2)
 
+    def test_record_attempt_accepts_exact_counter_types(self):
+        for attempt_type, counter in (
+            ("search", "search_attempts"),
+            ("download", "download_attempts"),
+            ("validation", "validation_attempts"),
+        ):
+            with self.subTest(attempt_type=attempt_type):
+                self.assertTrue(self.db.record_attempt(
+                    self.req_id, attempt_type, expected_status="wanted"))
+                req = self.db.get_request(self.req_id)
+                assert req is not None
+                self.assertEqual(req[counter], 1)
+
     def test_record_attempt_sets_backoff(self):
         self.db.record_attempt(self.req_id, "download", expected_status="wanted")
         req = self.db.get_request(self.req_id)
@@ -3779,6 +3832,20 @@ class TestRetryLogic(unittest.TestCase):
         next_retry = req["next_retry_after"]
         assert next_retry is not None
         self.assertGreater(next_retry, datetime.now(timezone.utc))
+
+    def test_record_attempt_rejects_unknown_type_before_updating_request(self):
+        with self.assertRaises(ValueError):
+            self.db.record_attempt(
+                self.req_id,
+                "search; UPDATE album_requests SET search_attempts = 99",
+                expected_status="wanted",
+            )
+
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        self.assertEqual(req["search_attempts"], 0)
+        self.assertEqual(req["download_attempts"], 0)
+        self.assertEqual(req["validation_attempts"], 0)
 
     def test_exponential_backoff(self):
         self.db.record_attempt(self.req_id, "search", expected_status="wanted")
@@ -11217,6 +11284,39 @@ class TestDashboardFakeParity(unittest.TestCase):
             "PostgreSQL read-model — fix the fake (tests/fakes.py), "
             "never the production SQL, unless the SQL change is the "
             "point of your PR.",
+        )
+
+    def test_fake_dashboard_cycle_ties_follow_production_order(self):
+        from tests.fakes import FakePipelineDB
+
+        fake = FakePipelineDB()
+        now = datetime.now(timezone.utc)
+        newest_id = fake.record_cycle_metrics(
+            completed_at=now - timedelta(hours=1),
+            cycle_total_s=25.0,
+        )
+        newest_tie_id = fake.record_cycle_metrics(
+            completed_at=now - timedelta(hours=1),
+            cycle_total_s=10.0,
+        )
+        slower_id = fake.record_cycle_metrics(
+            completed_at=now - timedelta(hours=2),
+            cycle_total_s=100.0,
+        )
+        slower_tie_id = fake.record_cycle_metrics(
+            completed_at=now - timedelta(hours=3),
+            cycle_total_s=100.0,
+        )
+
+        cycles = fake.get_pipeline_dashboard_metrics()["cycles"]
+
+        self.assertEqual(
+            [row["id"] for row in cycles["recent"]],
+            [newest_tie_id, newest_id, slower_id, slower_tie_id],
+        )
+        self.assertEqual(
+            [row["id"] for row in cycles["outliers"]],
+            [slower_tie_id, slower_id, newest_id, newest_tie_id],
         )
 
 
