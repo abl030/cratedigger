@@ -421,11 +421,21 @@ def _dispatch_outcome_from_completion(
     ``process_claimed_job`` (+ ``_job_result``) converts any
     ``DispatchOutcome`` — regardless of which job-type executor produced
     it — into the ``ImportJob``'s terminal queue status.
+
+    Policy (issue #859): a deferred attempt REMAINS a terminal failed job
+    carrying the honest ``result.detail`` (e.g. "incomplete_or_unsafe_canonical")
+    appended to ``deferred_message`` — never a generic message that hides
+    the diagnostic. Retry ownership stays with the poll cycle, which
+    re-enqueues on the next cycle; requeueing inside the serial importer
+    drain here would risk a hot loop.
     """
     if isinstance(result, CompletionDeferred):
+        message = deferred_message
+        if result.detail:
+            message = f"{deferred_message}: {result.detail}"
         return DispatchOutcome(
             success=False,
-            message=deferred_message,
+            message=message,
             deferred=True,
         )
     if isinstance(result, CompletionDispatched):

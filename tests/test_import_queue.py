@@ -19,7 +19,7 @@ from lib.dispatch import (
     DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
     DispatchOutcome,
 )
-from lib.download_processing import Completed, CompletionDispatched
+from lib.download_processing import Completed, CompletionDeferred, CompletionDispatched
 from lib.import_queue import (
     AutomationImportPayload,
     ForceImportPayload,
@@ -1831,6 +1831,59 @@ class TestImporterWorker(unittest.TestCase):
         self.assertEqual(updated.status, "completed")
         self.assertEqual(updated.message, "Imported by dispatch")
         self.assertEqual(self._result(updated)["success"], True)
+
+    def test_automation_job_deferred_message_carries_detail(self):
+        """Issue #859: a deferred completion's job message must carry the
+        honest ``CompletionDeferred.detail`` — not the generic "deferred or
+        requires manual recovery" string alone. The detail (e.g.
+        "incomplete_or_unsafe_canonical") is the diagnostic that told the
+        operator WHY the automation import kept stalling in ``downloading``.
+        """
+        from scripts import importer
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={
+                "filetype": "flac",
+                "enqueued_at": "2026-04-25T00:00:00+00:00",
+                "files": [{
+                    "username": "alice",
+                    "filename": "Artist\\Album\\01.flac",
+                    "file_dir": "Artist\\Album",
+                    "size": 123,
+                }],
+            },
+        ))
+        job = db.enqueue_import_job(
+            IMPORT_JOB_AUTOMATION,
+            request_id=42,
+            dedupe_key=automation_import_dedupe_key(42),
+            payload={},
+        )
+        self._mark_importable(db, job)
+        claimed = db.claim_next_import_job(worker_id="worker")
+        assert claimed is not None
+
+        with patch(
+            "lib.download._run_completed_processing",
+            return_value=CompletionDeferred(
+                detail="incomplete_or_unsafe_canonical"),
+        ):
+            updated = importer.process_claimed_job(
+                db,  # pyright: ignore[reportArgumentType]
+                claimed,
+                ctx=object(),
+            )
+
+        assert updated is not None
+        self.assertEqual(updated.status, "failed")
+        self.assertEqual(
+            updated.message,
+            "Automation import was deferred or requires manual recovery: "
+            "incomplete_or_unsafe_canonical",
+        )
 
     def test_automation_job_fails_from_dispatch_outcome(self):
         from scripts import importer
@@ -4434,6 +4487,43 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
         assert row is not None
         self.assertEqual(
             row.get("active_download_state"), unrelated_state)
+
+    def test_deferred_message_carries_detail(self):
+        """Issue #859: mirrors
+        ``TestImporterWorker.test_automation_job_deferred_message_carries_detail``
+        for the YouTube caller — both route through the same
+        ``_dispatch_outcome_from_completion`` mapper."""
+        from scripts import importer
+
+        with tempfile.TemporaryDirectory() as staged:
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=42, status="wanted", mb_release_id="mbid-yt-deferred",
+            ))
+            job = self._enqueue_youtube_job(
+                db, request_id=42, staged_path=staged, download_log_id=19,
+            )
+            self._mark_importable(db, job)
+            claimed = self._claim(db)
+
+            with patch(
+                "lib.download_processing.process_completed_album",
+                return_value=CompletionDeferred(
+                    detail="incomplete_or_unsafe_canonical"),
+            ):
+                updated = importer.process_claimed_job(
+                    db,  # pyright: ignore[reportArgumentType]
+                    claimed,
+                    ctx=object(),
+                )
+
+        assert updated is not None
+        self.assertEqual(updated.status, "failed")
+        self.assertEqual(
+            updated.message,
+            "YouTube import was deferred or requires manual recovery: "
+            "incomplete_or_unsafe_canonical",
+        )
 
     def test_missing_request_returns_failed_dispatch_outcome(self):
         from scripts import importer

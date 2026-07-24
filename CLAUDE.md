@@ -35,6 +35,7 @@ If a design drifts toward "good enough" matches, "smart" defaults, or auto-throt
 6. **The pipeline self-heals — the request is the source of truth, everything else is derived.** Operator actions that touch identity supersede the row rather than mutate it (canonical example: Replace, `lib/mbid_replace_service.py` — old row flips to `replaced`, new row points back via `replaces_request_id`, next cycle rebuilds).
 7. **Don't duplicate convergence — reuse the cleanup paths that already exist.** Prefer letting existing convergence (e.g. `lib/slskd_transfers.py::converge_slskd_orphans`) reap orphans over adding bespoke teardown to an action.
 8. **Wildcard-all-artist-tokens stays.** `lib/search.py::wildcard_artist_tokens` wildcards EVERY artist token (bypasses Soulseek server-side artist-name bans, which are exact-string keyed). Deliberate; do not "optimize" to first-token-only.
+9. **Canonical processing albums are exact media manifests** (#853/#859): trust transitions ONCE at atomic publication into `processing/albums/`, after which the owned album may be normalized in place — but its directory must contain exactly the downloaded manifest, nothing else. Control-plane artifacts (quality-evidence action sidecars) are tempfiles via `lib/evidence_action_file.py`, never written inside album dirs; `_canonical_manifest_complete` enforces exact equality and must not be weakened to allowlist our own debris. Patrolled by `tests/test_preview_manifest_generated.py`.
 
 ## Subsystems (one line + the doc that owns it)
 

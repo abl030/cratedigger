@@ -3,6 +3,14 @@
 Foreign paths are descriptor-copied before media tools run. A completed album
 under the private processing root is Cratedigger working state: it may be
 normalized in place, measured, and imported as those exact bytes.
+
+A Cratedigger-owned canonical processing album (``processing/albums/``) must
+stay an exact media manifest at every moment — no preview JSON, action file,
+or other control-plane artifact ever belongs inside it, whether or not
+preview snapshots the directory first (issue #859). The action-time
+evidence file every preview writes for the dry-run harness therefore always
+lives outside the previewed directory, via the single shared writer in
+``lib.evidence_action_file``.
 """
 
 from __future__ import annotations
@@ -24,6 +32,10 @@ if TYPE_CHECKING:
 
 from lib.dispatch import run_import_one
 from lib.dispatch.types import ImportOneRun
+from lib.evidence_action_file import (
+    remove_quality_evidence_action_file,
+    write_quality_evidence_action_file,
+)
 from lib.measurement import (
     ExistingSpectralResolver,
     PreimportMeasurement,
@@ -472,14 +484,22 @@ def _lossless_candidate_spectral_failure(
 
 def _write_preview_spectral_evidence_file(
     *,
-    directory: str,
     mb_release_id: str,
     source_path: str,
     measurement: PreimportMeasurement,
     files: list[AlbumQualityEvidenceFile] | None,
     lossless_candidate: bool,
 ) -> str | None:
-    """Carry preview-measured lossless spectral facts into the dry-run harness."""
+    """Carry preview-measured lossless spectral facts into the dry-run harness.
+
+    Delegates the write to ``lib.evidence_action_file`` — the ONE
+    tempfile-write implementation shared with the importer's action-time
+    writer. Never writes into the previewed directory: a Cratedigger-owned
+    canonical processing album under ``processing/albums/`` must stay an
+    exact media manifest (issue #859 — a sidecar written in-directory
+    poisoned ``_materialize_processing_dir``'s exact-manifest guard and
+    stalled automation imports forever).
+    """
     if not lossless_candidate:
         return None
     built = evidence_from_measurement(
@@ -499,10 +519,7 @@ def _write_preview_spectral_evidence_file(
             snapshot_status="matched",
         ),
     )
-    path = os.path.join(directory, "preview-spectral-evidence.json")
-    with open(path, "wb") as handle:
-        handle.write(msgspec.json.encode(payload))
-    return path
+    return write_quality_evidence_action_file(payload)
 
 
 @runtime_checkable
@@ -1904,6 +1921,12 @@ def measure_and_persist_candidate_evidence(
             download_log_id=download_log_id,
             source_path=audit_path,
         )
+    # Removed unconditionally in the outermost ``finally`` below — on
+    # success, every early return, and every exception — regardless of
+    # ``temp_root``. A canonical processing album must never carry this
+    # file, whether preview snapshots it or normalizes it in place
+    # (issue #859).
+    preview_spectral_file: str | None = None
     try:
         preview_path = path if temp_root is None else temp_root
         if not owns_path:
@@ -2093,7 +2116,6 @@ def measure_and_persist_candidate_evidence(
 
         try:
             preview_spectral_file = _write_preview_spectral_evidence_file(
-                directory=preview_path,
                 mb_release_id=mbid,
                 source_path=audit_path,
                 measurement=measurement,
@@ -2346,6 +2368,7 @@ def measure_and_persist_candidate_evidence(
             import_result=run.import_result,
         )
     finally:
+        remove_quality_evidence_action_file(preview_spectral_file)
         if temp_root is not None:
             _remove_preview_tree(temp_root, cfg)
 
@@ -2496,6 +2519,11 @@ def preview_import_from_path(
             download_log_id=download_log_id,
             source_path=path,
         )
+    # Removed unconditionally in the outermost ``finally`` below — on
+    # success, every early return, and every exception — regardless of
+    # ``temp_root``. See ``measure_and_persist_candidate_evidence`` (issue
+    # #859) for why this must never depend on the snapshot branch.
+    preview_spectral_file: str | None = None
     try:
         preview_path = path if temp_root is None else temp_root
         # Header repair is deliberately against the private copy. This keeps
@@ -2699,7 +2727,6 @@ def preview_import_from_path(
             )
 
         preview_spectral_file = _write_preview_spectral_evidence_file(
-            directory=temp_root or preview_path,
             mb_release_id=mbid,
             source_path=path,
             measurement=measurement,
@@ -2799,6 +2826,7 @@ def preview_import_from_path(
             cleanup_eligible=cleanup_eligible,
         )
     finally:
+        remove_quality_evidence_action_file(preview_spectral_file)
         if temp_root is not None:
             _remove_preview_tree(temp_root, cfg)
 
