@@ -642,7 +642,9 @@ A full library health check found:
 Plain FFmpeg defaults can print recoverable decoder errors and still return
 zero, so `ffmpeg -v error -i FILE -f null -` alone is not an integrity proof.
 Cratedigger also ignores tags, pictures, chapters, and exit-zero stderr at this
-boundary; metadata is stripped during conversion and Beets writes it fresh.
+read-only boundary. Kept conversion outputs preserve the tag surface Beets
+matches on and strip only the embedded-art surfaces (#863); the discarded V0
+probe strips everything; Beets writes canonical tags fresh after matching.
 
 ### Validation Script
 

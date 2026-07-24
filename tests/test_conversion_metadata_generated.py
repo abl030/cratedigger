@@ -30,6 +30,7 @@ from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
 from mutagen.flac import FLAC, Picture
 from mutagen.id3 import ID3
+from mutagen.mp4 import MP4
 from mutagen.oggopus import OggOpus
 
 import tests._hypothesis_profiles  # noqa: F401  (registers/loads profiles)
@@ -143,6 +144,25 @@ def read_match_tags(out_path: str) -> dict[str, str]:
             if _MB_ALBUM_ID in [str(v) for v in frame.text]:
                 tags["musicbrainz_albumid"] = _MB_ALBUM_ID
         return tags
+    if out_path.endswith(".m4a"):
+        mp4 = MP4(out_path)
+        mp4_tags = mp4.tags
+        assert mp4_tags is not None
+        atom_map = {
+            "\xa9ART": "artist",
+            "\xa9alb": "album",
+            "\xa9nam": "title",
+            "\xa9day": "date",
+            "aART": "albumartist",
+        }
+        for atom, key in atom_map.items():
+            values = mp4_tags.get(atom)
+            if values:
+                tags[key] = str(values[0])
+        trkn = mp4_tags.get("trkn")
+        if trkn:
+            tags["tracknumber"] = str(trkn[0][0])
+        return tags
     vorbis = FLAC(out_path) if out_path.endswith(".flac") else OggOpus(out_path)
     vorbis_items: list[tuple[str, list[str]]] = (
         list(vorbis.tags.items())  # pyright: ignore[reportAttributeAccessIssue]
@@ -162,6 +182,11 @@ def read_art_surfaces(out_path: str) -> list[str]:
         id3 = ID3(out_path)
         if id3.getall("APIC"):
             surfaces.append("APIC")
+        return surfaces
+    if out_path.endswith(".m4a"):
+        mp4_tags = MP4(out_path).tags
+        if mp4_tags is not None and mp4_tags.get("covr"):
+            surfaces.append("covr")
         return surfaces
     audio = FLAC(out_path) if out_path.endswith(".flac") else OggOpus(out_path)
     audio_items: list[tuple[str, list[str]]] = (
@@ -242,6 +267,16 @@ class TestConversionMetadataPin(unittest.TestCase):
         with tempfile.TemporaryDirectory() as album:
             expected = make_tagged_flac(album)
             out = convert_album(album, parse_verified_lossless_target("mp3 v0"))
+            self.assertEqual(check_match_surface_preserved(expected, out), [])
+            self.assertEqual(check_no_art_surface(out), [])
+
+    def test_aac_target_preserves_match_tags_and_drops_art(self):
+        """m4a atoms carry the match surface; the mov muxer has no atom for
+        MUSICBRAINZ_ALBUMID, so that key is deliberately not expected."""
+        with tempfile.TemporaryDirectory() as album:
+            expected = make_tagged_flac(album)
+            expected.pop("musicbrainz_albumid")
+            out = convert_album(album, parse_verified_lossless_target("aac 128"))
             self.assertEqual(check_match_surface_preserved(expected, out), [])
             self.assertEqual(check_no_art_surface(out), [])
 

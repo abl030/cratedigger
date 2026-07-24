@@ -1203,7 +1203,9 @@ def run_import(
                 print(f"  [TIMEOUT] No output for {timeout}s", file=sys.stderr)
                 os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
                 proc.wait()
-                return RunImportOutcome(2, [], replaced_albums=replaced_albums)
+                return RunImportOutcome(
+                    2, [], replaced_albums=replaced_albums,
+                    applied_distance=applied_distance)
 
             line = proc.stdout.readline()
             if not line:
@@ -1249,6 +1251,7 @@ def run_import(
                         DUPLICATE_REMOVE_GUARD_EXIT_CODE,
                         [],
                         duplicate_remove_guard=failure,
+                        applied_distance=applied_distance,
                         replaced_albums=replaced_albums,
                     )
 
