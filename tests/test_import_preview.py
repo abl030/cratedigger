@@ -5,6 +5,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from contextlib import AbstractContextManager
 from types import SimpleNamespace
 from typing import Any, TYPE_CHECKING
 from unittest.mock import patch
@@ -53,7 +54,23 @@ from tests.helpers import (
     make_album_quality_evidence,
     make_audio_corrupt_validation_report,
     make_request_row,
+    disposable_beets_storage_pair,
 )
+
+
+_BEETS_STORAGE: AbstractContextManager[tuple[str, str]] | None = None
+_BEETS_PAIR: tuple[str, str] | None = None
+
+
+def setUpModule() -> None:
+    global _BEETS_STORAGE, _BEETS_PAIR
+    _BEETS_STORAGE = disposable_beets_storage_pair()
+    _BEETS_PAIR = _BEETS_STORAGE.__enter__()
+
+
+def tearDownModule() -> None:
+    assert _BEETS_STORAGE is not None
+    _BEETS_STORAGE.__exit__(None, None, None)
 
 
 _PREVIEW_RUNTIME = tempfile.TemporaryDirectory()
@@ -67,11 +84,16 @@ os.mkdir(os.path.join(_PREVIEW_PROCESSING_ROOT, "preview"), 0o700)
 
 def _preview_config() -> CratediggerConfig:
     ini = configparser.ConfigParser()
+    assert _BEETS_PAIR is not None
     ini["Beets Validation"] = {
         "harness_path": "/fake/harness/run_beets_harness.sh",
         "audio_check": "off",
     }
     ini["Pipeline DB"] = {"enabled": "true"}
+    ini["Beets"] = {
+        "library": _BEETS_PAIR[0],
+        "directory": _BEETS_PAIR[1],
+    }
     ini["Slskd"] = {"download_dir": _PREVIEW_SOURCE_ROOT}
     ini["Paths"] = {"processing_dir": _PREVIEW_PROCESSING_ROOT}
     return CratediggerConfig.from_ini(ini)
@@ -81,16 +103,17 @@ def _preview_runtime_config(
     *,
     beets_harness_path: str = "",
     pipeline_db_enabled: bool = False,
-    beets_directory: str = "",
     verified_lossless_target: str = "",
 ) -> CratediggerConfig:
     """Direct-test config with the same private-root contract as Nix."""
+    assert _BEETS_PAIR is not None
     return CratediggerConfig(
         slskd_download_dir=_PREVIEW_SOURCE_ROOT,
         processing_dir=_PREVIEW_PROCESSING_ROOT,
         beets_harness_path=beets_harness_path,
         pipeline_db_enabled=pipeline_db_enabled,
-        beets_directory=beets_directory,
+        beets_library_db=_BEETS_PAIR[0],
+        beets_directory=_BEETS_PAIR[1],
         verified_lossless_target=verified_lossless_target,
     )
 
@@ -1840,7 +1863,6 @@ class TestImportPreviewPath(unittest.TestCase):
             with patch("lib.config.read_runtime_config",
                        return_value=_preview_runtime_config(
                            beets_harness_path="/fake/harness/run_beets_harness.sh",
-                           beets_directory="/srv/music/Beets",
                            pipeline_db_enabled=True,
                        )), \
                  patch("lib.import_preview.inspect_local_files",

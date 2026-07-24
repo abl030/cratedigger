@@ -7,7 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 from unittest.mock import ANY, MagicMock, patch
@@ -48,7 +48,32 @@ from tests.helpers import (
     make_download_file,
     make_grab_list_entry,
     make_request_row,
+    disposable_beets_storage_pair,
 )
+
+
+_BEETS_STORAGE: AbstractContextManager[tuple[str, str]] | None = None
+_BEETS_PAIR: tuple[str, str] | None = None
+
+
+def setUpModule() -> None:
+    global _BEETS_STORAGE, _BEETS_PAIR
+    _BEETS_STORAGE = disposable_beets_storage_pair()
+    _BEETS_PAIR = _BEETS_STORAGE.__enter__()
+
+
+def tearDownModule() -> None:
+    assert _BEETS_STORAGE is not None
+    _BEETS_STORAGE.__exit__(None, None, None)
+
+
+def _preview_runtime_config(**kwargs: Any) -> CratediggerConfig:
+    assert _BEETS_PAIR is not None
+    return CratediggerConfig(
+        beets_library_db=_BEETS_PAIR[0],
+        beets_directory=_BEETS_PAIR[1],
+        **kwargs,
+    )
 
 
 # Migration 021 helpers — seed evidence and wire the FK chain that
@@ -110,12 +135,15 @@ def _force_preview_source():
         os.mkdir(processing_dir, 0o700)
         os.mkdir(os.path.join(processing_dir, "albums"), 0o700)
         os.mkdir(os.path.join(processing_dir, "preview"), 0o700)
-        cfg = CratediggerConfig(
+        cfg = _preview_runtime_config(
             slskd_download_dir=download_root,
             processing_dir=processing_dir,
             audio_check_mode="off",
         )
-        yield source, cfg
+        with patch("lib.config.read_runtime_config", return_value=cfg), \
+                patch("scripts.import_preview_worker.read_runtime_config",
+                      return_value=cfg):
+            yield source, cfg
 
 
 def _force_download_log(
@@ -1706,7 +1734,11 @@ class TestImportPreviewWorker(unittest.TestCase):
             # Known-bad fault injection: this invokes the real execute path
             # after discarding the config at its exact call boundary.
             mutant_db, mutant_job = new_job()
-            with self.assertRaises(FilesystemAuthorityError):
+            unconfigured = CratediggerConfig()
+            with patch("lib.config.read_runtime_config", return_value=unconfigured), \
+                    patch("scripts.import_preview_worker.read_runtime_config",
+                          return_value=unconfigured), \
+                    self.assertRaises(FilesystemAuthorityError):
                 import_preview_worker.execute_preview_job(
                     mutant_db,
                     mutant_job,
@@ -1802,6 +1834,7 @@ class TestImportPreviewWorker(unittest.TestCase):
             claimed = db.claim_next_import_preview_job(worker_id="preview")
             assert claimed is not None
             self._seed_job_candidate_evidence(db, claimed.id, staged)
+            cfg = _preview_runtime_config()
 
             with patch(
                 "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
@@ -1810,10 +1843,13 @@ class TestImportPreviewWorker(unittest.TestCase):
                     reason="spectral_reject",
                     source_path=staged,
                 ),
-            ):
+            ), patch("lib.config.read_runtime_config", return_value=cfg), \
+                    patch("scripts.import_preview_worker.read_runtime_config",
+                          return_value=cfg):
                 updated = import_preview_worker.process_claimed_preview_job(
                     db,
                     claimed,
+                    runtime_config=cfg,
                 )
 
             assert updated is not None
@@ -1856,11 +1892,14 @@ class TestImportPreviewWorker(unittest.TestCase):
                 request_id=42,
                 import_result=ImportResult(spectral=audit),
             )
-
-            updated = import_preview_worker.process_claimed_preview_job(
-                db, claimed,
-                preview_fn=lambda db, job: preview_result,
-            )
+            cfg = _preview_runtime_config()
+            with patch("lib.config.read_runtime_config", return_value=cfg), \
+                    patch("scripts.import_preview_worker.read_runtime_config",
+                          return_value=cfg):
+                updated = import_preview_worker.process_claimed_preview_job(
+                    db, claimed,
+                    preview_fn=lambda db, job: preview_result,
+                )
 
         assert updated is not None
         self.assertEqual(updated.preview_status, "measurement_failed")
@@ -3052,17 +3091,22 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                     grade="genuine",
                 )
 
+            cfg = _preview_runtime_config()
             with patch(
                 "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
             ) as preview, patch(
                 "lib.measurement.measure_preimport_state",
             ) as preimport, patch(
                 "lib.download_materialization._materialize_processing_dir",
-            ) as materialize:
+            ) as materialize, \
+                    patch("lib.config.read_runtime_config", return_value=cfg), \
+                    patch("scripts.import_preview_worker.read_runtime_config",
+                          return_value=cfg):
                 updated = import_preview_worker.process_claimed_preview_job(
                     db,
                     claimed,
                     spectral_detail_analyzer=analyze,
+                    runtime_config=cfg,
                 )
 
         preview.assert_not_called()

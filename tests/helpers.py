@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import json
 import msgspec
+import os
 import requests
 import types
+import tempfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Generator
 from unittest.mock import MagicMock, patch
 
 from lib.grab_list import DownloadFile, GrabListEntry
@@ -46,6 +48,20 @@ from lib.quality import (
 )
 from lib.quality_evidence import snapshot_fingerprint
 from lib.slskd_client import DownloadDirectory, DownloadUser, TransferSnapshot
+
+
+@contextmanager
+def disposable_beets_storage_pair() -> Generator[tuple[str, str], None, None]:
+    """Create a real empty Beets DB and its paired library root for one test."""
+    from beets import library as beets_library
+
+    with tempfile.TemporaryDirectory(prefix="cratedigger-test-beets-") as root:
+        library_root = os.path.join(root, "library")
+        library_db = os.path.join(root, "beets-library.db")
+        os.mkdir(library_root)
+        library = beets_library.Library(library_db, library_root)
+        library._close()
+        yield library_db, library_root
 
 
 def make_request_row(**overrides: Any) -> dict[str, Any]:

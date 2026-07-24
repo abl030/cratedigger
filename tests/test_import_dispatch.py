@@ -14,7 +14,8 @@ import shutil
 import subprocess as sp
 import tempfile
 import unittest
-from typing import Never
+from contextlib import AbstractContextManager
+from typing import Any, Never
 from unittest.mock import MagicMock, patch
 
 import msgspec
@@ -39,7 +40,32 @@ from tests.helpers import (
     make_request_row,
     noop_quality_gate,
     patch_dispatch_externals,
+    disposable_beets_storage_pair,
 )
+
+
+_BEETS_STORAGE: AbstractContextManager[tuple[str, str]] | None = None
+_BEETS_PAIR: tuple[str, str] | None = None
+
+
+def setUpModule() -> None:
+    global _BEETS_STORAGE, _BEETS_PAIR
+    _BEETS_STORAGE = disposable_beets_storage_pair()
+    _BEETS_PAIR = _BEETS_STORAGE.__enter__()
+
+
+def tearDownModule() -> None:
+    assert _BEETS_STORAGE is not None
+    _BEETS_STORAGE.__exit__(None, None, None)
+
+
+def _test_config(**kwargs: Any) -> CratediggerConfig:
+    assert _BEETS_PAIR is not None
+    return CratediggerConfig(
+        beets_library_db=_BEETS_PAIR[0],
+        beets_directory=_BEETS_PAIR[1],
+        **kwargs,
+    )
 
 
 # --- Local helpers for auto-import seam tests ---
@@ -111,6 +137,11 @@ _HARNESS = "/nix/store/fake/harness/run_beets_harness.sh"
 def _full_dispatch_config() -> CratediggerConfig:
     ini = configparser.RawConfigParser()
     ini["Beets Validation"] = {"harness_path": _HARNESS}
+    assert _BEETS_PAIR is not None
+    ini["Beets"] = {
+        "library": _BEETS_PAIR[0],
+        "directory": _BEETS_PAIR[1],
+    }
     ini["Pipeline DB"] = {"enabled": "true"}
     return CratediggerConfig.from_ini(ini)
 
@@ -209,12 +240,11 @@ def _dispatch_valid_result_cmd(
         # the tempdir. ``StagedAlbum.move_to`` creates the destination
         # directory itself, so we just need the staging root to exist.
         ctx.cfg.beets_staging_dir = tmpdir
-        # This argv seam deliberately has no installed album. Supply a
-        # disposable complete authority pair anyway, so an accidental return
-        # to the real current-evidence loader can never consult host Beets.
-        ctx.cfg.beets_library_db = os.path.join(tmpdir, "beets-library.db")
-        ctx.cfg.beets_directory = os.path.join(tmpdir, "beets-library")
-        os.makedirs(ctx.cfg.beets_directory)
+        # This argv seam deliberately has no installed album. Retain the
+        # module's real disposable authority pair so a current-evidence call
+        # cannot consult a host library.
+        assert _BEETS_PAIR is not None
+        ctx.cfg.beets_library_db, ctx.cfg.beets_directory = _BEETS_PAIR
 
         def no_current_evidence(*_args: object, **_kwargs: object) -> None:
             """Typed current-evidence boundary for this subprocess argv seam."""
@@ -2131,7 +2161,7 @@ class TestDispatchImport(unittest.TestCase):
             path=source,
             release_id="test-mbid",
         )
-        cfg = CratediggerConfig(
+        cfg = _test_config(
             beets_harness_path=_HARNESS,
             beets_staging_dir=staging_root,
             pipeline_db_enabled=True,
@@ -2241,6 +2271,7 @@ class TestDispatchImport(unittest.TestCase):
                 path="/tmp/dest", mb_release_id="test-mbid",
                 request_id=42, label="Test",
                 beets_harness_path=_HARNESS,
+                cfg=_test_config(),
                 db=db_arg,
                 dl_info=DownloadInfo(filetype="mp3"),
                 candidate_import_job_id=claimed.id,
@@ -2282,6 +2313,7 @@ class TestDispatchImport(unittest.TestCase):
                 path="/tmp/dest", mb_release_id="test-mbid",
                 request_id=42, label="Test",
                 beets_harness_path=_HARNESS,
+                cfg=_test_config(),
                 db=db_arg,
                 dl_info=DownloadInfo(filetype="mp3"),
                 candidate_import_job_id=claimed.id,
@@ -2344,7 +2376,7 @@ class TestImportDispatchRescueCapture(unittest.TestCase):
         if prior_rescue_category is not None:
             db._requests[42]["prior_unfindable_category"] = (
                 prior_rescue_category)
-        cfg = CratediggerConfig(
+        cfg = _test_config(
             beets_harness_path=self._HARNESS_PATH,
             pipeline_db_enabled=True,
         )
@@ -2495,6 +2527,8 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
     def _run_dispatch_capture_cmd(self, cfg_obj):
         """Call dispatch_import_core with cfg_obj, return captured argv."""
         from lib.dispatch import dispatch_import_core
+        assert _BEETS_PAIR is not None
+        beets_library_db, beets_library_root = _BEETS_PAIR
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=42,
@@ -2514,6 +2548,8 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
                 path="/tmp/dest", mb_release_id="mbid-1",
                 request_id=42, label="Test Artist - Test Album",
                 beets_harness_path=_HARNESS,
+                beets_library_db_path=beets_library_db,
+                beets_library_root=beets_library_root,
                 cfg=cfg_obj,
                 db=db,  # type: ignore[arg-type]
                 dl_info=DownloadInfo(filetype="mp3"),
@@ -2534,7 +2570,7 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
         """Default QualityRankConfig → argv contains the round-trip JSON."""
         from lib.config import CratediggerConfig
         from lib.quality import QualityRankConfig
-        cfg = CratediggerConfig(beets_harness_path=_HARNESS)
+        cfg = _test_config(beets_harness_path=_HARNESS)
         cmd = self._run_dispatch_capture_cmd(cfg)
         raw = self._extract_rank_config_json(cmd)
         self.assertIsNotNone(raw)
@@ -2558,7 +2594,7 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
             vorbis=vorbis,
             wma=wma,
         )
-        cfg = CratediggerConfig(
+        cfg = _test_config(
             beets_harness_path=_HARNESS, quality_ranks=custom_ranks)
         cmd = self._run_dispatch_capture_cmd(cfg)
         raw = self._extract_rank_config_json(cmd)
@@ -3398,7 +3434,6 @@ class TestDispatchJellyfinPinCaptureSlice(unittest.TestCase):
     (``lib.util._jellyfin_get_json``) faked."""
 
     NEW_REL = "Test Artist/0000 - Test Album"
-    OLD_ABS = "/lib/Beets/Test Artist/2007 - Test Album"
     OLD_CONTAINER = "/jf/Test Artist/2007 - Test Album"
     ORIGINAL = "2026-04-01T00:00:00Z"
 
@@ -3422,24 +3457,25 @@ class TestDispatchJellyfinPinCaptureSlice(unittest.TestCase):
     def test_replaced_album_old_path_reaches_capture_and_pins(self):
         from lib.dispatch import dispatch_import_core
 
+        assert _BEETS_PAIR is not None
+        beets_library_db, beets_library_root = _BEETS_PAIR
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=42, status="downloading",
             active_download_state={"files": [], "filetype": "mp3"}))
-        cfg = CratediggerConfig(
+        cfg = _test_config(
             beets_harness_path=_HARNESS,
             pipeline_db_enabled=True,
-            beets_directory="/lib/Beets",
             jellyfin_url="http://jf:8096",
             jellyfin_token="tok",
-            jellyfin_path_map="/lib/Beets:/jf",
+            jellyfin_path_map=f"{beets_library_root}:/jf",
         )
         ir = make_import_result(
             decision="import", imported_path=self.NEW_REL)
         ir.postflight.replaced_albums = [DuplicateRemoveCandidate(
             beets_album_id=3902,
             mb_albumid="test-mbid",
-            album_path=self.OLD_ABS,
+            album_path=f"{beets_library_root}/Test Artist/2007 - Test Album",
             item_count=19,
         )]
 
@@ -3471,6 +3507,8 @@ class TestDispatchJellyfinPinCaptureSlice(unittest.TestCase):
                     quality_gate_fn=noop_quality_gate,
                     candidate_import_job_id=claimed.id,
                     prevalidated_candidate_result=candidate,
+                    beets_library_db_path=beets_library_db,
+                    beets_library_root=beets_library_root,
                 )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
