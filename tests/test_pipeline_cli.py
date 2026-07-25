@@ -721,7 +721,7 @@ class TestCmdForceImport(unittest.TestCase):
             log_id = db.download_logs[0].id
             args = MagicMock(download_log_id=log_id)
             with patch("lib.config.read_runtime_config", return_value=cfg):
-                rc = pipeline_cli.cmd_force_import(cast(Any, db), args)
+                rc = pipeline_cli.cmd_force_import(db, args)
 
         # Exactly one import job was enqueued. Inspect the persisted row.
         self.assertEqual(rc, 0)
@@ -789,8 +789,8 @@ class TestCmdForceImport(unittest.TestCase):
                 ):
                     with self.subTest(name=name):
                         rc = pipeline_cli.cmd_force_import(
-                            cast(Any, db),
-                            cast(argparse.Namespace, SimpleNamespace(download_log_id=log_id)),
+                            db,
+                            argparse.Namespace(download_log_id=log_id),
                         )
                         self.assertEqual(rc, expected_rc)
                         self.assertEqual(db.list_import_jobs(), [])

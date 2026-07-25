@@ -94,6 +94,7 @@ def _evidence(
     *,
     mb_release_id: str = "mbid-1",
     audio_corrupt: bool = False,
+    matched_bad_audio_hash: bool = False,
     files: list[AlbumQualityEvidenceFile] | None = None,
 ) -> AlbumQualityEvidence:
     if files is None:
@@ -133,6 +134,10 @@ def _evidence(
         audio_file_count=len(files),
         filetype_band="mp3",
         folder_layout="flat",
+        matched_bad_audio_hash_id=1 if matched_bad_audio_hash else None,
+        matched_bad_audio_hash_path=(
+            files[0].relative_path if matched_bad_audio_hash and files else None
+        ),
     )
 
 
@@ -265,7 +270,7 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
                 _evidence(
                     delete_source,
                     mb_release_id="mbid-delete",
-                    audio_corrupt=True,
+                    matched_bad_audio_hash=True,
                 ),
             ),
         )
@@ -308,6 +313,22 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
         self.assertTrue(os.path.isdir(keep_source))
         self.assertTrue(os.path.isdir(stale_source))
         self.assertTrue(os.path.isdir(missing_source))
+
+    def test_bulk_does_not_process_candidate_audio_corrupt_rows(self) -> None:
+        source = _make_source(self.tmp, "candidate-corrupt-source")
+        log_id = _log_wrong_match(self.db, 1, source)
+        self.db.set_download_log_candidate_evidence(
+            log_id,
+            _store_evidence(self.db, _evidence(source, audio_corrupt=True)),
+        )
+
+        summary = cleanup_all_wrong_matches(
+            self.db, confirm_all_wrong_matches=True, cfg=_cfg(),
+        )
+
+        self.assertEqual(summary.processed, 0)
+        self.assertEqual(summary.results, ())
+        self.assertTrue(os.path.isdir(source))
 
     def _make_stale_row(self, name: str) -> tuple[str, int]:
         """Wrong-match row whose evidence predates a late-arriving file."""
@@ -496,7 +517,7 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
                 _evidence(
                     delete_source,
                     mb_release_id="audit-delete",
-                    audio_corrupt=True,
+                    matched_bad_audio_hash=True,
                 ),
             ),
         )
@@ -523,8 +544,8 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
         self.assertEqual(deleted_triage["action"], "deleted_reject")
         self.assertEqual(deleted_triage["outcome"], OUTCOME_DELETED)
         self.assertEqual(deleted_triage["preview_verdict"], "confident_reject")
-        self.assertEqual(deleted_triage["preview_decision"], "audio_corrupt")
-        self.assertIn("preimport_audio:reject_corrupt",
+        self.assertEqual(deleted_triage["preview_decision"], "bad_audio_hash")
+        self.assertIn("preimport_bad_hash:reject_bad_hash",
                       deleted_triage["stage_chain"])
 
         self.assertEqual(kept_triage["action"], OUTCOME_KEPT_WOULD_IMPORT)
@@ -654,7 +675,7 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
         log_id = _log_wrong_match(self.db, 1, source)
         self.db.set_download_log_candidate_evidence(
             log_id,
-            _store_evidence(self.db, _evidence(source, audio_corrupt=True)),
+            _store_evidence(self.db, _evidence(source, matched_bad_audio_hash=True)),
         )
         cleanup = types.SimpleNamespace(
             success=False,
@@ -684,7 +705,7 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
         log_id = _log_wrong_match(self.db, 1, source)
         self.db.set_download_log_candidate_evidence(
             log_id,
-            _store_evidence(self.db, _evidence(source, audio_corrupt=True)),
+            _store_evidence(self.db, _evidence(source, matched_bad_audio_hash=True)),
         )
         cleanup = types.SimpleNamespace(
             success=True,
@@ -716,7 +737,7 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
         log_id = _log_wrong_match(self.db, 1, source)
         self.db.set_download_log_candidate_evidence(
             log_id,
-            _store_evidence(self.db, _evidence(source, audio_corrupt=True)),
+            _store_evidence(self.db, _evidence(source, matched_bad_audio_hash=True)),
         )
 
         def raise_get_entry(log_id: int):

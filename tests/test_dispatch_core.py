@@ -9,7 +9,7 @@ import os
 import tempfile
 import unittest
 from collections.abc import Callable
-from typing import Any
+from typing import TypedDict
 from unittest.mock import MagicMock, patch
 
 import msgspec
@@ -17,7 +17,7 @@ import msgspec
 from lib.beets_db import AlbumInfo
 from lib.config import CratediggerConfig
 from lib.import_queue import IMPORT_JOB_AUTOMATION, IMPORT_JOB_FORCE
-from lib.dispatch.types import EvidenceImportGate, ImportOneRun
+from lib.dispatch.types import DispatchOutcome, EvidenceImportGate, ImportOneRun
 from lib.pipeline_db import DownloadLogOutcome
 from lib.terminal_outcomes import ImportJobTerminal
 from lib.quality import (
@@ -84,6 +84,14 @@ def _seed_current_for_request(db, request_id: int, *, mb_release_id: str,
 _HARNESS = "/nix/store/fake/harness/run_beets_harness.sh"
 
 
+class _DispatchWorld(TypedDict):
+    result: DispatchOutcome
+    cmd: object
+    db: FakePipelineDB
+    path: str
+    cleanup_calls: int
+
+
 def _patch_beets_album(album_path: str | None, *, min_bitrate: int = 128):
     beets = FakeBeetsDB()
     if album_path is not None:
@@ -106,14 +114,21 @@ def _patch_beets_album(album_path: str | None, *, min_bitrate: int = 128):
 class TestDispatchCoreOrchestration(unittest.TestCase):
     """Orchestration tests — assert domain state via FakePipelineDB."""
 
-    def _dispatch(self, ir=None, force=False,
+    def _dispatch(self, ir: ImportResult | None = None, force: bool = False,
                   outcome_label: DownloadLogOutcome = "success",
-                  requeue_on_failure=True, override_min_bitrate=None,
-                  source_username=None, target_format=None,
-                  verified_lossless_target="",
-                  request_overrides=None, candidate_kwargs=None,
-                  beets_staging_dir=None, slskd_download_dir=None,
-                  path_parent=None, post_dispatch_fn: Callable[[Any, Any, str], None] | None = None):
+                  requeue_on_failure: bool = True,
+                  override_min_bitrate: int | None = None,
+                  source_username: str | None = None,
+                  target_format: str | None = None,
+                  verified_lossless_target: str = "",
+                  request_overrides: dict[str, object] | None = None,
+                  candidate_kwargs: dict[str, object] | None = None,
+                  beets_staging_dir: str | None = None,
+                  slskd_download_dir: str | None = None,
+                  path_parent: str | None = None,
+                  post_dispatch_fn: Callable[
+                      [DispatchOutcome, FakePipelineDB, str], None,
+                  ] | None = None) -> _DispatchWorld:
         from lib.dispatch import dispatch_import_core
         if ir is None:
             ir = make_import_result(decision="import", new_min_bitrate=245)
@@ -237,7 +252,11 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             os.makedirs(auto_import)
             os.makedirs(slskd)
             observed: dict[str, object] = {}
-            def post_dispatch(result: Any, db: Any, source: str) -> None:
+            def post_dispatch(
+                result: DispatchOutcome,
+                db: FakePipelineDB,
+                source: str,
+            ) -> None:
                 os.makedirs(os.path.join(source, "Disc 1"))
                 with open(os.path.join(source, "Disc 1", "01.flac"), "wb") as f:
                     f.write(b"bad")
