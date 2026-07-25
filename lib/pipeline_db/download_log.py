@@ -40,7 +40,6 @@ DOWNLOAD_LOG_OUTCOMES: frozenset[str] = frozenset(get_args(DownloadLogOutcome))
 from lib.pipeline_db._core import _PipelineDBBase
 from lib.validation_envelope import (
     FAILED_PATH_KEY,
-    SCENARIO_KEY,
     VALIDATION_PROJECTION_UNSET,
     ValidationProjectionUnset,
     WRONG_MATCH_TRIAGE_KEY,
@@ -839,7 +838,7 @@ class _DownloadLogMixin(_PipelineDBBase):
         the manual-review queue; their taxonomy lives in
         ``lib.wrong_match_policy``.
         """
-        from lib.wrong_match_policy import WRONG_MATCH_EXCLUDED_REJECTION_SCENARIOS
+        from lib.wrong_matches import wrong_match_row_is_visible
 
         # Pull the per-candidate quality measurement straight from the
         # canonical evidence row (FK on download_log.candidate_evidence_id).
@@ -876,6 +875,8 @@ class _DownloadLogMixin(_PipelineDBBase):
                 e.min_bitrate_kbps AS evidence_min_bitrate,
                 e.avg_bitrate_kbps AS evidence_avg_bitrate,
                 e.verified_lossless AS evidence_verified_lossless,
+                e.audio_corrupt AS candidate_audio_corrupt,
+                dl.import_result->>'decision' AS terminal_import_decision,
                 ar.status AS request_status,
                 ar.min_bitrate AS request_min_bitrate,
                 ar.verified_lossless AS request_verified_lossless,
@@ -887,11 +888,14 @@ class _DownloadLogMixin(_PipelineDBBase):
                 ON e.id = dl.candidate_evidence_id
             WHERE dl.outcome = 'rejected'
               AND dl.validation_result->>'{FAILED_PATH_KEY}' IS NOT NULL
-              AND (dl.validation_result->>'{SCENARIO_KEY}' IS NULL
-                   OR dl.validation_result->>'{SCENARIO_KEY}' <> ALL(%s))
             ORDER BY dl.request_id, dl.validation_result->>'{FAILED_PATH_KEY}', dl.id DESC
-        """, (sorted(WRONG_MATCH_EXCLUDED_REJECTION_SCENARIOS),))
-        rows = [wrong_match_candidate_row(r) for r in cur.fetchall()]
+        """)
+        rows = [
+            row for raw in cur.fetchall()
+            if wrong_match_row_is_visible(
+                row := wrong_match_candidate_row(raw), include_replaced=True,
+            )
+        ]
         # DISTINCT ON sorts by path within a request; re-sort so the route
         # layer sees newest-first within each request, matching the frontend
         # expectation that the most-recent candidate appears first.

@@ -8,6 +8,8 @@ in a separate class and explicitly labeled.
 import os
 import tempfile
 import unittest
+from collections.abc import Callable
+from typing import TypedDict
 from unittest.mock import MagicMock, patch
 
 import msgspec
@@ -15,7 +17,7 @@ import msgspec
 from lib.beets_db import AlbumInfo
 from lib.config import CratediggerConfig
 from lib.import_queue import IMPORT_JOB_AUTOMATION, IMPORT_JOB_FORCE
-from lib.dispatch.types import EvidenceImportGate, ImportOneRun
+from lib.dispatch.types import DispatchOutcome, EvidenceImportGate, ImportOneRun
 from lib.pipeline_db import DownloadLogOutcome
 from lib.terminal_outcomes import ImportJobTerminal
 from lib.quality import (
@@ -82,6 +84,14 @@ def _seed_current_for_request(db, request_id: int, *, mb_release_id: str,
 _HARNESS = "/nix/store/fake/harness/run_beets_harness.sh"
 
 
+class _DispatchWorld(TypedDict):
+    result: DispatchOutcome
+    cmd: object
+    db: FakePipelineDB
+    path: str
+    cleanup_calls: int
+
+
 def _patch_beets_album(album_path: str | None, *, min_bitrate: int = 128):
     beets = FakeBeetsDB()
     if album_path is not None:
@@ -104,12 +114,21 @@ def _patch_beets_album(album_path: str | None, *, min_bitrate: int = 128):
 class TestDispatchCoreOrchestration(unittest.TestCase):
     """Orchestration tests — assert domain state via FakePipelineDB."""
 
-    def _dispatch(self, ir=None, force=False,
+    def _dispatch(self, ir: ImportResult | None = None, force: bool = False,
                   outcome_label: DownloadLogOutcome = "success",
-                  requeue_on_failure=True, override_min_bitrate=None,
-                  source_username=None, target_format=None,
-                  verified_lossless_target="",
-                  request_overrides=None):
+                  requeue_on_failure: bool = True,
+                  override_min_bitrate: int | None = None,
+                  source_username: str | None = None,
+                  target_format: str | None = None,
+                  verified_lossless_target: str = "",
+                  request_overrides: dict[str, object] | None = None,
+                  candidate_kwargs: dict[str, object] | None = None,
+                  beets_staging_dir: str | None = None,
+                  slskd_download_dir: str | None = None,
+                  path_parent: str | None = None,
+                  post_dispatch_fn: Callable[
+                      [DispatchOutcome, FakePipelineDB, str], None,
+                  ] | None = None) -> _DispatchWorld:
         from lib.dispatch import dispatch_import_core
         if ir is None:
             ir = make_import_result(decision="import", new_min_bitrate=245)
@@ -118,10 +137,12 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             beets_harness_path=_HARNESS,
             pipeline_db_enabled=True,
             verified_lossless_target=verified_lossless_target,
+            beets_staging_dir=beets_staging_dir or "/staging",
+            slskd_download_dir=slskd_download_dir or "/slskd",
         )
         dl_info = DownloadInfo(username=source_username)
 
-        tmpdir = tempfile.mkdtemp()
+        tmpdir = tempfile.mkdtemp(dir=path_parent)
         try:
             db = FakePipelineDB()
             req = make_request_row(
@@ -145,6 +166,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 job.id,
                 mb_release_id="mbid-123",
                 source_path=tmpdir,
+                **(candidate_kwargs or {}),
             )
             db.mark_import_job_preview_importable(
                 job.id,
@@ -188,6 +210,8 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                             error=None if result.success else result.message,
                         ))
                     )
+                if post_dispatch_fn is not None:
+                    post_dispatch_fn(result, db, tmpdir)
                 cmd = ext.run.call_args[0][0] if ext.run.call_args else []
         finally:
             import shutil
@@ -207,6 +231,59 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         r = self._dispatch()
         self.assertTrue(r["result"].success)
         self.assertEqual(r["db"].request(42)["status"], "imported")
+
+    def test_audio_corrupt_automation_uses_beets_staging_quarantine_root(self):
+        r = self._dispatch(
+            candidate_kwargs={"audio_corrupt": True},
+            beets_staging_dir="/configured/staging",
+            slskd_download_dir="/configured/slskd",
+        )
+        cleanup = r["result"].post_commit_cleanup
+        assert cleanup is not None
+        self.assertEqual(cleanup.audio_quarantine_root, "/configured/staging")
+        self.assertNotEqual(cleanup.audio_quarantine_root, "/configured/slskd")
+
+    def test_audio_corrupt_dispatch_composes_atomic_staging_quarantine(self):
+        from scripts.importer import _run_post_commit_cleanup
+        with tempfile.TemporaryDirectory() as root:
+            incoming = os.path.join(root, "Incoming")
+            auto_import = os.path.join(incoming, "auto-import")
+            slskd = os.path.join(root, "slskd")
+            os.makedirs(auto_import)
+            os.makedirs(slskd)
+            observed: dict[str, object] = {}
+            def post_dispatch(
+                result: DispatchOutcome,
+                db: FakePipelineDB,
+                source: str,
+            ) -> None:
+                os.makedirs(os.path.join(source, "Disc 1"))
+                with open(os.path.join(source, "Disc 1", "01.flac"), "wb") as f:
+                    f.write(b"bad")
+                with open(os.path.join(source, "cover.jpg"), "wb") as f:
+                    f.write(b"cover")
+                log_id = db.download_logs[-1].id
+                observed["source"] = source
+                observed["audit"] = _run_post_commit_cleanup(db, result, download_log_id=log_id)
+            self._dispatch(
+                candidate_kwargs={"audio_corrupt": True}, path_parent=auto_import,
+                beets_staging_dir=incoming, slskd_download_dir=slskd,
+                post_dispatch_fn=post_dispatch,
+            )
+            source = observed["source"]
+            audit = observed["audit"]
+            assert isinstance(source, str) and isinstance(audit, dict)
+            quarantine = audit["audio_quarantine"]
+            assert isinstance(quarantine, dict)
+            target = quarantine["quarantine_path"]
+            assert isinstance(target, str)
+            self.assertFalse(os.path.exists(source))
+            self.assertTrue(target.startswith(os.path.join(incoming, "failed_imports", "bad_files")))
+            self.assertFalse(target.startswith(slskd))
+            self.assertTrue(os.path.exists(os.path.join(target, "Disc 1", "01.flac")))
+            self.assertTrue(os.path.exists(os.path.join(target, "cover.jpg")))
+            self.assertTrue(quarantine["moved"])
+            self.assertTrue(quarantine["audit_persisted"])
 
     def test_successful_import_creates_one_log_row(self):
         r = self._dispatch()

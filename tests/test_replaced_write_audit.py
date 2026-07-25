@@ -80,22 +80,20 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/pipeline_db/terminal_outcomes.py", 306, "6cfaff9c6507c211"): (
         "terminal attempt kind is restricted to the fixed retry-counter vocabulary"
     ),
-    ("lib/pipeline_db/download_log.py", 850, "8fea92f576d79b49"): (
+    ("lib/pipeline_db/download_log.py", 849, "86ec443bac615c3c"): (
         "validation key is selected from a closed server-owned vocabulary "
-        "(issue #762: the removed request imported-path projection changed "
-        "the enclosing query fingerprint; issue #835 inserted static retained-"
-        "failure queries above, shifting this line only; dynamic validation-key "
-        "grammar is unchanged)"
+        "(#867 intentionally added terminal/evidence projection and moved final "
+        "classification after same-path DISTINCT)"
     ),
-    ("lib/pipeline_db/download_log.py", 907, "e0154e89026dc8ef"): (
+    ("lib/pipeline_db/download_log.py", 911, "e0154e89026dc8ef"): (
         "validation key is selected from a closed server-owned vocabulary "
         "(issue #835 shifted this line only)"
     ),
-    ("lib/pipeline_db/download_log.py", 925, "1ca75e0c21fa6d7e"): (
+    ("lib/pipeline_db/download_log.py", 929, "1ca75e0c21fa6d7e"): (
         "validation key is closed vocabulary and IN list is value placeholders "
         "(issue #835 shifted this line only)"
     ),
-    ("lib/pipeline_db/download_log.py", 942, "d87a36ba1d1768e7"): (
+    ("lib/pipeline_db/download_log.py", 946, "d87a36ba1d1768e7"): (
         "JSON path key is selected from a closed server-owned vocabulary "
         "(issue #835 shifted this line only)"
     ),
@@ -195,7 +193,7 @@ _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/pipeline_db/terminal_outcomes.py", 387, "0a9c4396d1185b94"): (
         "atomic terminal typed transition CASes the source status selected by the DAG"
     ),
-    ("lib/pipeline_db/download_log.py", 496, "6c7d7519e8c91827"): (
+    ("lib/pipeline_db/download_log.py", 495, "6c7d7519e8c91827"): (
         "atomic abandoned-import recovery performs downloading-to-wanted CAS "
         "(issue #835 shifted this unchanged lifecycle scope)"
     ),

@@ -6,7 +6,6 @@ tests/web/_harness.py.
 """
 
 import copy
-import json
 import os
 import sys
 import tempfile
@@ -16,7 +15,6 @@ from email.message import Message
 from io import BufferedIOBase, BytesIO, IOBase
 from unittest.mock import patch
 from urllib.request import urlopen, Request
-from urllib.error import HTTPError
 
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -43,6 +41,19 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
 
     def setUp(self) -> None:
         super().setUp()
+        self._quarantine_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._quarantine_tmp.cleanup)
+        self._staging_root = os.path.join(self._quarantine_tmp.name, "Incoming")
+        self._slskd_root = os.path.join(self._quarantine_tmp.name, "slskd")
+        self._processing_root = os.path.join(self._quarantine_tmp.name, "processing")
+        os.makedirs(self._staging_root)
+        os.makedirs(self._slskd_root)
+        os.makedirs(self._processing_root)
+        self.enterContext(self._wrong_match_runtime_config(
+            self._slskd_root,
+            staging_root=self._staging_root,
+            processing_root=self._processing_root,
+        ))
         # Default group: request 100 + one rejected row pinned to log id
         # 42 — the id many URLs / dedupe keys in this class reference.
         self.default_log_id = self._seed_wrong_match(
@@ -150,9 +161,17 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self.db.seed_request({**row, **overrides})
 
     @contextmanager
-    def _wrong_match_runtime_config(self, slskd_root: str):
+    def _wrong_match_runtime_config(
+        self,
+        slskd_root: str,
+        *,
+        staging_root: str | None = None,
+        processing_root: str | None = None,
+    ):
         """Point the real runtime-config loader at temp quarantine roots."""
         config_path = os.path.join(slskd_root, "cratedigger-test.ini")
+        staging_dir = staging_root or os.path.join(slskd_root, "Incoming")
+        processing_dir = processing_root or os.path.join(slskd_root, "processing")
         previous = os.environ.get("CRATEDIGGER_RUNTIME_CONFIG")
         with open(config_path, "w", encoding="utf-8") as handle:
             handle.write(
@@ -161,9 +180,9 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
                 "\n[Search Settings]\n"
                 "number_of_albums_to_grab = 2\n"
                 "\n[Beets Validation]\n"
-                f"staging_dir = {os.path.join(slskd_root, 'Incoming')}\n"
+                f"staging_dir = {staging_dir}\n"
                 "\n[Paths]\n"
-                f"processing_dir = {os.path.join(slskd_root, 'processing')}\n",
+                f"processing_dir = {processing_dir}\n",
             )
         os.environ["CRATEDIGGER_RUNTIME_CONFIG"] = config_path
         try:
@@ -208,6 +227,11 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         elif request_overrides:
             self._reseed_request(request_id, **request_overrides)
         vr = copy.deepcopy(_DEFAULT_WRONG_MATCH_VALIDATION)
+        should_exist = "/gone/" not in failed_path
+        path_name = os.path.basename(failed_path.rstrip("/")) or "Album"
+        failed_path = os.path.join(self._staging_root, "failed_imports", path_name)
+        if should_exist:
+            os.makedirs(failed_path, exist_ok=True)
         vr["failed_path"] = failed_path
         vr["scenario"] = scenario
         vr["distance"] = distance
@@ -1127,7 +1151,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self._seed_wrong_match(download_log_id=21, request_id=7,
                                username="missing", failed_path="/gone/b")
         with patch("web.routes.imports.resolve_failed_path",
-                   side_effect=lambda p: p if p.startswith("/on-disk") else None):
+                   side_effect=lambda p: p if p.endswith("/a") else None):
             status, data = self._get("/api/wrong-matches")
         self.assertEqual(status, 200)
         groups = data["groups"]
@@ -1399,12 +1423,15 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
             },
         )
         # EVERY queued row stays visible: failed_path survives on both.
-        for lid, path in ((100, "/fi/a"), (101, "/fi/b")):
+        for lid, path in ((100, "a"), (101, "b")):
             entry = self.db.get_download_log_entry(lid)
             assert entry is not None
             vr = entry["validation_result"]
             assert vr is not None
-            self.assertEqual(vr["failed_path"], path)
+            self.assertEqual(
+                vr["failed_path"],
+                os.path.join(self._staging_root, "failed_imports", path),
+            )
         job = jobs["force_import:download_log:100"]
         assert isinstance(job.payload, ForceImportPayload)
         self.assertEqual(job.payload.source_dirs, ["u1\\Artist\\Album"])
@@ -1436,6 +1463,21 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self.assertFalse(data["group_empty"])
         self.mock_manual_cleanup.assert_called_once_with(self.db, 102, require_visible=True)
         self.mock_cleanup.assert_not_called()
+
+    def test_converge_keeps_unmatched_when_every_green_enqueue_is_unauthorized(self):
+        self._seed_wrong_match(download_log_id=100, request_id=42, username="u1",
+                               failed_path="/gone/a", distance=0.167, mb_release_id="mb-42")
+        self._seed_wrong_match(download_log_id=102, request_id=42, username="u3",
+                               failed_path="/fi/c", distance=0.226, mb_release_id="mb-42")
+        status, data = self._post("/api/wrong-matches/converge", {
+            "request_id": 42, "threshold_milli": 180,
+        })
+        self.assertEqual(status, 202)
+        self.assertEqual(data["queued"], 0)
+        self.assertEqual(data["deleted"], 0)
+        self.assertEqual(data["remaining"], 2)
+        self.assertIn({"download_log_id": 100, "reason": "unauthorized_path"}, data["skipped"])
+        self.mock_manual_cleanup.assert_not_called()
 
     def test_converge_deletes_unmatched_unconditionally_without_classifier(self):
         """Operator-authority contract: converge does NOT route deletion through cleanup_wrong_match.
@@ -1470,18 +1512,17 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
             download_log_id=100, request_id=42, username="u1",
             failed_path="/gone/a", distance=0.167, mb_release_id="mb-42")
 
-        with patch("web.routes.imports.resolve_failed_path", return_value=None):
-            status, data = self._post("/api/wrong-matches/converge", {
-                "request_id": 42,
-                "threshold_milli": 180,
-                "delete_unmatched": False,
-            })
+        status, data = self._post("/api/wrong-matches/converge", {
+            "request_id": 42,
+            "threshold_milli": 180,
+            "delete_unmatched": False,
+        })
 
         self.assertEqual(status, 202)
         self.assertEqual(data["queued"], 0)
         self.assertEqual(data["remaining"], 1)
         self.assertEqual(data["skipped"], [
-            {"download_log_id": 100, "reason": "files_missing"},
+            {"download_log_id": 100, "reason": "unauthorized_path"},
         ])
         self.assertEqual(self.db.list_import_jobs(), [])
         # The row stays visible — failed_path survives.

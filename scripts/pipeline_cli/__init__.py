@@ -77,7 +77,6 @@ from scripts.pipeline_cli.quality import (
     cmd_repair_spectral,
 )
 from scripts.pipeline_cli.imports import (
-    SLSKD_DOWNLOAD_DIRS,
     SPECTRAL_GRADE_CHOICES,
     cmd_force_import,
     cmd_import_job_recovery,
@@ -118,7 +117,6 @@ from scripts.pipeline_cli.cli import PipelineDB, main
 __all__ = [
     "OUTCOME_EXIT_CODE",
     "PipelineDB",
-    "SLSKD_DOWNLOAD_DIRS",
     "SPECTRAL_GRADE_CHOICES",
     "VALID_STATUSES",
     "cmd_add",

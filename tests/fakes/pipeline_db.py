@@ -5465,7 +5465,7 @@ class FakePipelineDB:
         collapse to newest per ``(request_id, failed_path)``, then sort
         newest-first within each request.
         """
-        from lib.wrong_match_policy import rejection_scenario_is_wrong_match_candidate
+        from lib.wrong_matches import wrong_match_row_is_visible
 
         collapsed: dict[tuple[int, str], DownloadLogRow] = {}
         for entry in self.download_logs:
@@ -5474,11 +5474,6 @@ class FakePipelineDB:
             vr = self._validation_result_dict(entry.validation_result)
             failed_path = vr.get("failed_path") if vr else None
             if not failed_path:
-                continue
-            scenario = vr.get("scenario") if vr else None
-            if not rejection_scenario_is_wrong_match_candidate(
-                scenario if isinstance(scenario, str) else None
-            ):
                 continue
             key = (entry.request_id, str(failed_path))
             prev = collapsed.get(key)
@@ -5516,7 +5511,7 @@ class FakePipelineDB:
             v0_probe_avg_bitrate = (
                 ev_v0.avg_bitrate_kbps if ev_v0 is not None else None
             ) or entry.extra.get("v0_probe_avg_bitrate")
-            rows.append({
+            row: dict[str, object] = {
                 "download_log_id": entry.id,
                 "request_id": entry.request_id,
                 "artist_name": req.get("artist_name"),
@@ -5558,6 +5553,15 @@ class FakePipelineDB:
                 "evidence_verified_lossless": (
                     ev is not None and ev.verified_lossless_proof is not None
                 ),
+                "candidate_audio_corrupt": (
+                    ev.audio_corrupt if ev is not None else None
+                ),
+                "terminal_import_decision": (
+                    entry.import_result.get("decision")
+                    if isinstance(entry.import_result, dict)
+                    and isinstance(entry.import_result.get("decision"), str)
+                    else None
+                ),
                 "request_status": req.get("status"),
                 "request_min_bitrate": req.get("min_bitrate"),
                 "request_verified_lossless": req.get("verified_lossless"),
@@ -5565,7 +5569,9 @@ class FakePipelineDB:
                     "current_spectral_grade"),
                 "request_current_spectral_bitrate": req.get(
                     "current_spectral_bitrate"),
-            })
+            }
+            if wrong_match_row_is_visible(row, include_replaced=True):
+                rows.append(row)
         rows.sort(key=lambda r: (
             r["request_id"], -int(r["download_log_id"])))  # type: ignore[arg-type, operator]
         return cast("list[WrongMatchCandidateRow]", rows)

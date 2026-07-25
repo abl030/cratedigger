@@ -415,7 +415,6 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"^scripts\.pipeline_cli\.quality\._load_runtime_rank_config$"),
     re.compile(r"^scripts\.pipeline_cli\.quality\._load_runtime_verified_lossless_target$"),
     re.compile(r"^scripts\.pipeline_cli\.quality\._load_beets_album_info$"),
-    re.compile(r"^scripts\.pipeline_cli\.imports\._resolve_failed_path$"),
 
     # scripts.repair helpers that wrap external boundaries.
     # ``_fetch_slskd_downloads`` is a thin slskd HTTP call (#479 rename of

@@ -11,7 +11,9 @@ import os
 import socket
 import string
 import sys
+import tempfile
 import unittest
+from contextlib import contextmanager
 from email.message import Message
 from io import BytesIO
 from unittest.mock import patch
@@ -54,6 +56,29 @@ def _post_reader(length: str | None, body: BytesIO):
 
     handler._error = record_error
     return handler, errors
+
+
+@contextmanager
+def _force_import_runtime_config(
+    *, staging_dir: str, slskd_dir: str, processing_dir: str,
+):
+    config_path = os.path.join(os.path.dirname(staging_dir), "config.ini")
+    with open(config_path, "w", encoding="utf-8") as handle:
+        handle.write(
+            "[Slskd]\n"
+            f"download_dir = {slskd_dir}\n"
+            "\n[Search Settings]\n"
+            "number_of_albums_to_grab = 2\n"
+            "\n[Beets Validation]\n"
+            f"staging_dir = {staging_dir}\n"
+            "\n[Paths]\n"
+            f"processing_dir = {processing_dir}\n",
+        )
+    try:
+        with patch.dict(os.environ, {"CRATEDIGGER_RUNTIME_CONFIG": config_path}):
+            yield
+    finally:
+        os.unlink(config_path)
 
 
 def assert_rejected_length_result(
@@ -420,25 +445,35 @@ class TestServerEndpoints(_FakeDbWebServerCase):
         self.assertEqual(status, 200)
         self.assertEqual(data["intent"], "lossless")
 
-    @patch("web.routes.pipeline_mutations.resolve_failed_path", return_value="/tmp/Test Album")
-    def test_post_force_import_passes_source_username(self, _mock_resolve):
+    def test_post_force_import_passes_source_username(self):
         from lib.import_queue import (
             ForceImportPayload,
             IMPORT_JOB_FORCE,
             force_import_dedupe_key,
         )
 
-        log_id = self.db.log_download(
-            100, outcome="rejected", soulseek_username="baduser",
-            validation_result={
-                "failed_path": "/tmp/Test Album",
-                "scenario": "high_distance",
-                "source_dirs": ["baduser\\Artist\\Album"],
-            },
-        )
+        with tempfile.TemporaryDirectory() as root:
+            staging = os.path.join(root, "Incoming")
+            slskd = os.path.join(root, "slskd")
+            processing = os.path.join(root, "processing")
+            album = os.path.join(staging, "failed_imports", "Test Album")
+            os.makedirs(album)
+            os.makedirs(slskd)
+            os.makedirs(processing)
+            log_id = self.db.log_download(
+                100, outcome="rejected", soulseek_username="baduser",
+                validation_result={
+                    "failed_path": album,
+                    "scenario": "high_distance",
+                    "source_dirs": ["baduser\\Artist\\Album"],
+                },
+            )
 
-        status, data = self._post(
-            "/api/pipeline/force-import", {"download_log_id": log_id})
+            with _force_import_runtime_config(
+                staging_dir=staging, slskd_dir=slskd, processing_dir=processing,
+            ):
+                status, data = self._post(
+                    "/api/pipeline/force-import", {"download_log_id": log_id})
 
         self.assertEqual(status, 202)
         self.assertEqual(data["status"], "queued")
@@ -453,7 +488,7 @@ class TestServerEndpoints(_FakeDbWebServerCase):
         self.assertEqual(job.request_id, 100)
         self.assertEqual(job.dedupe_key, force_import_dedupe_key(log_id))
         assert isinstance(job.payload, ForceImportPayload)
-        self.assertEqual(job.payload.failed_path, "/tmp/Test Album")
+        self.assertEqual(job.payload.failed_path, album)
         self.assertEqual(job.payload.source_username, "baduser")
         self.assertEqual(job.payload.source_dirs, ["baduser\\Artist\\Album"])
 
