@@ -584,7 +584,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
             if row["wrong_match_triage_action"] == "kept_would_import"
         )
         self.assertEqual(item["wrong_match_triage_action"], "kept_would_import")
-        self.assertEqual(item["badge"], "Triaged · kept")
+        self.assertEqual(item["badge"], "Triaged · download kept")
         self.assertEqual(item["badge_class"], "badge-warn")
         self.assertEqual(item["border_color"], "#a33")
         self.assertEqual(item["existing_format"], "Opus")
@@ -666,7 +666,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
 
         self.assertEqual(status, 200)
         item = data["log"][0]
-        self.assertEqual(item["badge"], "Triaged · deleted")
+        self.assertEqual(item["badge"], "Triaged · download deleted")
         self.assertEqual(item["existing_format"], "Opus")
         self.assertEqual(item["existing_min_bitrate"], 93)
         self.assertEqual(item["existing_avg_bitrate"], 129)
@@ -753,7 +753,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
 
         self.assertEqual(status, 200)
         item = data["log"][0]
-        self.assertEqual(item["badge"], "Triaged · deleted")
+        self.assertEqual(item["badge"], "Triaged · download deleted")
         self.assertEqual(item["existing_format"], "MP3")
         self.assertEqual(item["existing_min_bitrate"], 320)
         self.assertEqual(item["existing_avg_bitrate"], 320)
@@ -928,7 +928,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
 
         self.assertEqual(status, 200)
         item = next(row for row in data["log"] if row["id"] == log_id)
-        self.assertEqual(item["badge"], "Triaged · deleted")
+        self.assertEqual(item["badge"], "Triaged · download deleted")
         self.assertEqual(item["source_format"], "MP3")
         self.assertEqual(item["source_min_bitrate"], 201)
         self.assertEqual(item["source_avg_bitrate"], 259)
@@ -1009,8 +1009,9 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         item = data["log"][0]
         self.assertEqual(item["verdict"], "Wrong match (dist 0.190)")
         self.assertEqual(item["summary"],
-                         "Wrong match (dist 0.190) · moundsofass")
-        self.assertEqual(item["badge"], "Triaged · deleted")
+                         "Wrong match (dist 0.190) · download deleted: "
+                         "requeue upgrade · moundsofass")
+        self.assertEqual(item["badge"], "Triaged · download deleted")
         self.assertEqual(item["wrong_match_triage_action"], "deleted_reject")
         self.assertIn("requeue upgrade", item["wrong_match_triage_summary"])
         self.assertNotIn("spectral", item["wrong_match_triage_summary"])
@@ -1395,7 +1396,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
 
         self.assertEqual(status, 200)
         item = data["history"][0]
-        self.assertEqual(item["badge"], "Triaged · deleted")
+        self.assertEqual(item["badge"], "Triaged · download deleted")
         self.assertEqual(item["wrong_match_triage_action"], "deleted_reject")
         self.assertIn("requeue upgrade", item["wrong_match_triage_summary"])
         self.assertNotIn("spectral", item["wrong_match_triage_summary"])

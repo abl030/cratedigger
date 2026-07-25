@@ -54,7 +54,7 @@ console.log('renderDownloadHistoryItem() shows wrong-match triage audit rows');
     created_at: '2026-04-25T23:25:00+00:00',
     beets_distance: 0.190,
     verdict: 'Wrong match (dist 0.190)',
-    wrong_match_triage_summary: 'deleted: spectral reject',
+    wrong_match_triage_summary: 'download deleted: spectral reject',
     wrong_match_triage_action: 'deleted_reject',
     wrong_match_triage_preview_verdict: 'confident_reject',
     wrong_match_triage_preview_decision: 'requeue_upgrade',
@@ -63,7 +63,7 @@ console.log('renderDownloadHistoryItem() shows wrong-match triage audit rows');
   });
 
   assertContains(html, 'Triage', 'triage summary label rendered');
-  assertContains(html, 'deleted: spectral reject', 'triage summary rendered');
+  assertContains(html, 'download deleted: spectral reject', 'triage summary rendered');
   assertContains(html, 'Preview', 'preview label rendered');
   assertContains(html, 'confident_reject / requeue_upgrade',
     'preview verdict and decision rendered');
@@ -526,7 +526,7 @@ console.log('renderDownloadHistoryItem() tucks debug forensics behind a details 
     soulseek_username: 'testuser',
     created_at: '2026-04-25T23:25:00+00:00',
     verdict: 'Wrong match (dist 0.190)',
-    wrong_match_triage_summary: 'deleted: spectral reject',
+    wrong_match_triage_summary: 'download deleted: spectral reject',
     wrong_match_triage_preview_verdict: 'confident_reject',
     wrong_match_triage_preview_decision: 'requeue_upgrade',
     wrong_match_triage_reason: 'requeue_upgrade',
@@ -1219,7 +1219,7 @@ console.log('Actual Life 3: current canonical evidence fully populates triage HA
 {
   const strip = renderEvidenceFixture({
     outcome: 'rejected',
-    badge: 'Triaged · deleted',
+    badge: 'Triaged · download deleted',
     source_format: 'FLAC',
     source_min_bitrate: 455,
     source_avg_bitrate: 725,
@@ -1246,6 +1246,64 @@ console.log('Actual Life 3: current canonical evidence fully populates triage HA
   assertContains(strip, '~96k suspect', 'triage HAVE keeps current spectral evidence');
   assertContains(strip, 'V0 256k avg (min 193k)',
     'triage HAVE keeps the canonical current V0 probe');
+}
+
+console.log('corrupt candidates suppress invalid IN quality claims while keeping HAVE');
+{
+  const strip = renderEvidenceFixture({
+    outcome: 'rejected',
+    badge: 'Rejected',
+    source_format: 'FLAC',
+    source_min_bitrate: null,
+    source_avg_bitrate: null,
+    source_median_bitrate: null,
+    spectral_grade: null,
+    actual_min_bitrate: null,
+    existing_format: 'MP3',
+    existing_min_bitrate: 192,
+    existing_avg_bitrate: 224,
+  });
+  assertContains(strip, '>FLAC</span>', 'corrupt source codec remains inspectable');
+  assertContains(strip, '>224k avg (min 192k)</span>', 'HAVE remains point-in-time evidence');
+  assertExcludes(strip, '0k', 'corrupt source never presents zero bitrate as quality evidence');
+  assertExcludes(strip, 'genuine', 'corrupt source never presents a positive spectral grade');
+
+  const detail = renderDownloadHistoryFixture({
+    outcome: 'rejected', badge: 'Rejected',
+    created_at: '2026-07-25T12:00:00+00:00',
+    verdict: 'Corrupt audio files detected',
+    source_format: 'FLAC', downloaded_label: 'FLAC',
+    actual_min_bitrate: null,
+    source_min_bitrate: null, source_avg_bitrate: null,
+    source_median_bitrate: null, spectral_grade: null,
+    v0_probe_kind: null, v0_probe_min_bitrate: null,
+    v0_probe_avg_bitrate: null, v0_probe_median_bitrate: null,
+    target_contract_format: null,
+    materialized_format: null, materialized_min_bitrate: null,
+    materialized_avg_bitrate: null, materialized_median_bitrate: null,
+    comparison_basis: null,
+    existing_format: 'MP3', existing_min_bitrate: 192,
+    existing_avg_bitrate: 224,
+  });
+  assertContains(detail, 'FLAC', 'expanded Source retains the honest codec');
+  assertExcludes(detail, '171kbps', 'expanded V0 cannot revive a corrupt candidate');
+  assertExcludes(detail, 'OPUS avg', 'expanded Output cannot revive converted candidate bytes');
+  assertExcludes(detail, 'Target contract', 'expanded conversion policy is hidden for corrupt input');
+
+  const legacy = renderEvidenceFixture({
+    outcome: 'rejected', source_format: null, slskd_filetype: 'FLAC',
+    original_filetype: 'FLAC', filetype: 'MP3', actual_filetype: 'Opus',
+    downloaded_label: 'FLAC', actual_min_bitrate: null,
+    existing_format: 'MP3', existing_min_bitrate: 192, existing_avg_bitrate: 224,
+  });
+  const sourceCodec = legacy.indexOf('>FLAC</span>');
+  const haveRow = legacy.indexOf('r-ev-row r-ev-have');
+  if (sourceCodec !== -1 && sourceCodec < haveRow) {
+    passed++;
+  } else {
+    failed++;
+    console.error('FAIL: legacy corrupt source trusts captured slskd codec before filetype fallbacks');
+  }
 }
 
 console.log('lossless storage labels distinguish V0 from retained FLAC');

@@ -225,19 +225,19 @@ function renderCurrentLibraryRow(current) {
     });
   }
   if (current?.state === 'missing') {
-    return renderDetailRow('Current library', 'Not installed in Beets');
+    return renderDetailRow('Beets library', 'Not installed');
   }
   if (current?.state === 'ambiguous') {
     const ids = Array.isArray(current.album_ids) && current.album_ids.length > 0
       ? `; album IDs ${current.album_ids.join(', ')}`
       : '';
     return renderDetailRow(
-      'Current library',
+      'Beets library',
       `Manual review — ambiguous (${esc(current.reason || 'unknown')}${ids})`,
     );
   }
   return renderDetailRow(
-    'Current library',
+    'Beets library',
     `Unavailable — manual review (${esc(current?.reason || 'beets_unavailable')})`,
   );
 }

@@ -345,12 +345,15 @@ class TestClassifyWrongMatchTriageAudit(unittest.TestCase):
             "stage_chain": ["stage1_spectral:reject"],
         }))
 
-        self.assertEqual(result.badge, "Triaged · deleted")
+        self.assertEqual(result.badge, "Triaged · download deleted")
         self.assertEqual(result.badge_class, "badge-rejected")
         self.assertEqual(result.border_color, "#a33")
         self.assertEqual(result.verdict, "Wrong match (dist 0.190)")
-        self.assertEqual(result.summary,
-                         "Wrong match (dist 0.190) · moundsofass")
+        self.assertEqual(
+            result.summary,
+            "Wrong match (dist 0.190) · download deleted: spectral reject "
+            "· moundsofass",
+        )
         self.assertEqual(result.wrong_match_triage_action, "deleted_reject")
         self.assertEqual(result.wrong_match_triage_preview_verdict,
                          "confident_reject")
@@ -445,7 +448,7 @@ class TestClassifyWrongMatchTriageAudit(unittest.TestCase):
             "stage_chain": ["stage2_import:import"],
         }))
 
-        self.assertEqual(result.badge, "Triaged · kept")
+        self.assertEqual(result.badge, "Triaged · download kept")
         self.assertEqual(result.badge_class, "badge-warn")
         self.assertEqual(result.border_color, "#a33")
         self.assertEqual(result.wrong_match_triage_action, "kept_would_import")
@@ -462,6 +465,67 @@ class TestClassifyWrongMatchTriageAudit(unittest.TestCase):
         self.assertIsNone(result.wrong_match_triage_action)
         self.assertIsNone(result.wrong_match_triage_summary)
         self.assertEqual(result.wrong_match_triage_stage_chain, [])
+
+    def test_audio_corrupt_direct_and_triaged_rows_hide_invalid_quality_claims(self):
+        """Corrupt input never renders a bitrate or positive spectral grade.
+
+        The direct importer decision and post-high-distance cleanup are
+        separate audit paths, but their candidate-facing display projection
+        must communicate the same fact without mutating the raw audit.
+        """
+        corrupt_import = ImportResult(
+            decision="audio_corrupt",
+            source_measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=0,
+                avg_bitrate_kbps=0,
+                median_bitrate_kbps=0,
+                format="FLAC",
+            ),
+            spectral=SpectralDetail(candidate=SpectralAnalysisDetail(
+                attempted=True, grade="genuine",
+            )),
+        ).to_json()
+        direct = classify_log_entry(_entry(
+            outcome="rejected",
+            beets_scenario="audio_corrupt",
+            actual_min_bitrate=0,
+            import_result=corrupt_import,
+        ))
+        triaged = classify_log_entry(_entry(
+            outcome="rejected",
+            beets_scenario="high_distance",
+            beets_distance=0.181,
+            actual_min_bitrate=0,
+            validation_result={"wrong_match_triage": {
+                "action": "deleted_reject",
+                "outcome": "deleted",
+                "reason": "audio_corrupt",
+                "preview_verdict": "confident_reject",
+                "preview_decision": "audio_corrupt",
+                "stage_chain": ["preimport_audio:reject_corrupt"],
+                "candidate_measurement": {
+                    "min_bitrate_kbps": 0,
+                    "avg_bitrate_kbps": 0,
+                    "median_bitrate_kbps": 0,
+                    "format": "FLAC",
+                    "spectral_grade": "genuine",
+                },
+            }},
+        ))
+
+        for result in (direct, triaged):
+            with self.subTest(badge=result.badge):
+                self.assertEqual(result.source_format, "FLAC")
+                self.assertIsNone(result.source_min_bitrate)
+                self.assertIsNone(result.source_avg_bitrate)
+                self.assertIsNone(result.source_median_bitrate)
+                self.assertIsNone(result.spectral_grade)
+                self.assertIsNone(result.spectral_bitrate)
+                self.assertIsNone(result.actual_min_bitrate)
+        self.assertEqual(direct.verdict, "Corrupt audio files detected")
+        self.assertEqual(triaged.verdict, "Wrong match (dist 0.181)")
+        self.assertEqual(triaged.badge, "Triaged · download deleted")
+        self.assertIn("download deleted: audio corrupt", triaged.summary)
 
     def test_string_validation_result_decodes_same_as_dict(self):
         result = classify_log_entry(_entry(
