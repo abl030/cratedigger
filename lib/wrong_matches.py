@@ -34,6 +34,10 @@ def wrong_match_row_is_visible(
     """
     if not include_replaced and row.get("request_status") == "replaced":
         return False
+    if row.get("candidate_audio_corrupt") is True:
+        return False
+    if row.get("terminal_import_decision") == "audio_corrupt":
+        return False
     scenario = decode_validation_envelope(row.get("validation_result")).scenario
     return rejection_scenario_is_wrong_match_candidate(scenario)
 

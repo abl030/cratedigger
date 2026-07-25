@@ -11,14 +11,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from web.routes._pydantic import parse_body
 
 from lib.quality import _is_explicit_label
-from lib.import_queue import (
-    ForceImportPayload,
-    IMPORT_JOB_FORCE,
-    ImportJob,
-    YoutubeImportPayload,
-    force_import_dedupe_key,
-    force_import_payload,
-)
+from lib.config import read_runtime_config
+from lib.force_import_service import RESULT_QUEUED, enqueue_force_import
+from lib.import_queue import ForceImportPayload, ImportJob, YoutubeImportPayload
 from lib.util import resolve_failed_path
 from lib.wrong_match_cleanup_service import (
     cleanup_all_wrong_matches,
@@ -684,9 +679,6 @@ class _GreenCandidate(TypedDict):
 
     download_log_id: int
     distance: float | None
-    failed_path: str
-    source_username: object
-    source_dirs: list[str]
 
 
 class WrongMatchConvergeRequest(BaseModel):
@@ -758,23 +750,9 @@ def post_wrong_match_converge(h: RouteHandler, body: dict[str, object]) -> None:
         green = _is_green_distance(vr, threshold_milli)
 
         if green:
-            resolved_path = resolve_failed_path(failed_path)
-            if resolved_path is None:
-                skipped.append({
-                    "download_log_id": lid,
-                    "reason": "files_missing",
-                })
-                remaining += 1
-                continue
             green_candidates.append({
                 "download_log_id": lid,
                 "distance": distance,
-                "failed_path": resolved_path,
-                "source_username": (
-                    row.get("soulseek_username")
-                    or vr.soulseek_username
-                ),
-                "source_dirs": source_dirs_from_validation_result(vr),
             })
             continue
 
@@ -786,26 +764,13 @@ def post_wrong_match_converge(h: RouteHandler, body: dict[str, object]) -> None:
 
     for candidate in green_candidates:
         lid = candidate["download_log_id"]
-        source_username_raw = candidate.get("source_username")
-        source_username = (
-            str(source_username_raw)
-            if source_username_raw is not None else None
-        )
-        job = pdb.enqueue_import_job(
-            IMPORT_JOB_FORCE,
-            request_id=rid,
-            dedupe_key=force_import_dedupe_key(lid),
-            payload=force_import_payload(
-                download_log_id=lid,
-                failed_path=str(candidate["failed_path"]),
-                source_username=source_username,
-                source_dirs=candidate["source_dirs"],
-            ),
-            message=(
-                f"Force import queued for "
-                f"{req['artist_name']} - {req['album_title']}"
-            ),
-        )
+        result = enqueue_force_import(pdb, read_runtime_config(), lid)
+        if result.outcome != RESULT_QUEUED:
+            skipped.append({"download_log_id": lid, "reason": result.outcome})
+            remaining += 1
+            continue
+        assert result.job is not None
+        job = result.job
         if getattr(job, "deduped", False):
             deduped += 1
         jobs.append(_serialize_import_job(job))
@@ -817,7 +782,7 @@ def post_wrong_match_converge(h: RouteHandler, body: dict[str, object]) -> None:
         })
         remaining += 1
 
-    if green_candidates:
+    if selected:
         for lid in unmatched_log_ids:
             result = _delete_wrong_match_row(pdb, lid)
             if result.success:

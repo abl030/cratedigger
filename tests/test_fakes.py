@@ -4360,6 +4360,37 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             for r in rows])
         self.assertEqual(paths, ["/p1", "/p2"])
 
+    def test_get_wrong_matches_newer_terminal_corrupt_hides_same_path(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, artist_name="A", album_title="B"))
+        db.seed_request(make_request_row(id=2, artist_name="C", album_title="D"))
+        db.log_download(1, soulseek_username="older-legitimate", outcome="rejected",
+                        validation_result={"failed_path": "/same", "scenario": "high_distance"})
+        db.log_download(1, soulseek_username="newer-corrupt", outcome="rejected",
+                        validation_result={"failed_path": "/same", "scenario": "strong_match"},
+                        import_result={"decision": "audio_corrupt"})
+        other_id = db.log_download(2, soulseek_username="other-legitimate", outcome="rejected",
+                                   validation_result={"failed_path": "/other", "scenario": "high_distance"})
+        rows = db.get_wrong_matches()
+        self.assertEqual(
+            [(row["download_log_id"], row["soulseek_username"]) for row in rows],
+            [(other_id, "other-legitimate")],
+        )
+
+    def test_get_wrong_matches_newer_legitimate_reuse_surfaces_after_corrupt(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, artist_name="A", album_title="B"))
+        db.log_download(1, soulseek_username="older-corrupt", outcome="rejected",
+                        validation_result={"failed_path": "/same", "scenario": "strong_match"},
+                        import_result={"decision": "audio_corrupt"})
+        newest_id = db.log_download(1, soulseek_username="newer-legitimate", outcome="rejected",
+                                    validation_result={"failed_path": "/same", "scenario": "high_distance"})
+        rows = db.get_wrong_matches()
+        self.assertEqual(
+            [(row["download_log_id"], row["soulseek_username"]) for row in rows],
+            [(newest_id, "newer-legitimate")],
+        )
+
     def test_get_wrong_matches_excludes_every_non_match_rejection_scenario(self):
         from lib.wrong_match_policy import WRONG_MATCH_EXCLUDED_REJECTION_SCENARIOS
 

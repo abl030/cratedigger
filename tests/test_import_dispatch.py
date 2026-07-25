@@ -8,6 +8,7 @@ Pure function tests (TestPopulateDlInfo*, TestCleanupStagedDir) test in/out.
 """
 
 import configparser
+import errno
 import json
 import os
 import shutil
@@ -590,7 +591,7 @@ class TestAudioCorruptPostCommitQuarantine(unittest.TestCase):
 
             with patch(
                 "lib.import_manifest.os.rename",
-                side_effect=OSError("simulated atomic rename failure"),
+                side_effect=OSError(errno.EXDEV, "Invalid cross-device link"),
             ):
                 result = _run_post_commit_cleanup(
                     db,
@@ -606,6 +607,9 @@ class TestAudioCorruptPostCommitQuarantine(unittest.TestCase):
             self.assertIsNone(audit["quarantine_path"])
             self.assertTrue(os.path.exists(track))
             self.assertTrue(os.path.exists(cover))
+            self.assertFalse(os.path.exists(os.path.join(
+                download_root, "failed_imports", "bad_files", "Artist - Album",
+            )))
             persisted = msgspec.json.decode(
                 db.download_logs[0].validation_result,
             )

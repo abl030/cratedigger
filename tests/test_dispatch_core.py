@@ -8,6 +8,8 @@ in a separate class and explicitly labeled.
 import os
 import tempfile
 import unittest
+from collections.abc import Callable
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import msgspec
@@ -109,7 +111,9 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                   requeue_on_failure=True, override_min_bitrate=None,
                   source_username=None, target_format=None,
                   verified_lossless_target="",
-                  request_overrides=None):
+                  request_overrides=None, candidate_kwargs=None,
+                  beets_staging_dir=None, slskd_download_dir=None,
+                  path_parent=None, post_dispatch_fn: Callable[[Any, Any, str], None] | None = None):
         from lib.dispatch import dispatch_import_core
         if ir is None:
             ir = make_import_result(decision="import", new_min_bitrate=245)
@@ -118,10 +122,12 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             beets_harness_path=_HARNESS,
             pipeline_db_enabled=True,
             verified_lossless_target=verified_lossless_target,
+            beets_staging_dir=beets_staging_dir or "/staging",
+            slskd_download_dir=slskd_download_dir or "/slskd",
         )
         dl_info = DownloadInfo(username=source_username)
 
-        tmpdir = tempfile.mkdtemp()
+        tmpdir = tempfile.mkdtemp(dir=path_parent)
         try:
             db = FakePipelineDB()
             req = make_request_row(
@@ -145,6 +151,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 job.id,
                 mb_release_id="mbid-123",
                 source_path=tmpdir,
+                **(candidate_kwargs or {}),
             )
             db.mark_import_job_preview_importable(
                 job.id,
@@ -188,6 +195,8 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                             error=None if result.success else result.message,
                         ))
                     )
+                if post_dispatch_fn is not None:
+                    post_dispatch_fn(result, db, tmpdir)
                 cmd = ext.run.call_args[0][0] if ext.run.call_args else []
         finally:
             import shutil
@@ -207,6 +216,55 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         r = self._dispatch()
         self.assertTrue(r["result"].success)
         self.assertEqual(r["db"].request(42)["status"], "imported")
+
+    def test_audio_corrupt_automation_uses_beets_staging_quarantine_root(self):
+        r = self._dispatch(
+            candidate_kwargs={"audio_corrupt": True},
+            beets_staging_dir="/configured/staging",
+            slskd_download_dir="/configured/slskd",
+        )
+        cleanup = r["result"].post_commit_cleanup
+        assert cleanup is not None
+        self.assertEqual(cleanup.audio_quarantine_root, "/configured/staging")
+        self.assertNotEqual(cleanup.audio_quarantine_root, "/configured/slskd")
+
+    def test_audio_corrupt_dispatch_composes_atomic_staging_quarantine(self):
+        from scripts.importer import _run_post_commit_cleanup
+        with tempfile.TemporaryDirectory() as root:
+            incoming = os.path.join(root, "Incoming")
+            auto_import = os.path.join(incoming, "auto-import")
+            slskd = os.path.join(root, "slskd")
+            os.makedirs(auto_import)
+            os.makedirs(slskd)
+            observed: dict[str, object] = {}
+            def post_dispatch(result: Any, db: Any, source: str) -> None:
+                os.makedirs(os.path.join(source, "Disc 1"))
+                with open(os.path.join(source, "Disc 1", "01.flac"), "wb") as f:
+                    f.write(b"bad")
+                with open(os.path.join(source, "cover.jpg"), "wb") as f:
+                    f.write(b"cover")
+                log_id = db.download_logs[-1].id
+                observed["source"] = source
+                observed["audit"] = _run_post_commit_cleanup(db, result, download_log_id=log_id)
+            self._dispatch(
+                candidate_kwargs={"audio_corrupt": True}, path_parent=auto_import,
+                beets_staging_dir=incoming, slskd_download_dir=slskd,
+                post_dispatch_fn=post_dispatch,
+            )
+            source = observed["source"]
+            audit = observed["audit"]
+            assert isinstance(source, str) and isinstance(audit, dict)
+            quarantine = audit["audio_quarantine"]
+            assert isinstance(quarantine, dict)
+            target = quarantine["quarantine_path"]
+            assert isinstance(target, str)
+            self.assertFalse(os.path.exists(source))
+            self.assertTrue(target.startswith(os.path.join(incoming, "failed_imports", "bad_files")))
+            self.assertFalse(target.startswith(slskd))
+            self.assertTrue(os.path.exists(os.path.join(target, "Disc 1", "01.flac")))
+            self.assertTrue(os.path.exists(os.path.join(target, "cover.jpg")))
+            self.assertTrue(quarantine["moved"])
+            self.assertTrue(quarantine["audit_persisted"])
 
     def test_successful_import_creates_one_log_row(self):
         r = self._dispatch()

@@ -36,20 +36,19 @@ from lib import transitions
 # new=...)`` at the same module-level scope as ``web.server.db``. See the
 # leaf-seam allowlist in ``tests/_mock_audit_scanner.py``.
 finalize_request = transitions.finalize_operator_request
-from lib.import_queue import (
-    IMPORT_JOB_FORCE,
-    force_import_dedupe_key,
-    force_import_payload,
+from lib.force_import_service import (
+    RESULT_DOWNLOAD_LOG_MISSING,
+    FORCE_IMPORT_HTTP_STATUS,
+    RESULT_QUEUED,
+    RESULT_REQUEST_MISSING,
+    enqueue_force_import,
 )
 from lib.quality import (QUALITY_LOSSLESS, QUALITY_UPGRADE_TIERS,
                          resolve_user_requeue_override,
                          should_clear_lossless_search_override)
 from lib.release_identity import detect_release_source, normalize_release_id
-from lib.util import resolve_failed_path
-from lib.validation_envelope import decode_validation_envelope
 from web import mb as mb_api
 from web import discogs as discogs_api
-from web.wrong_match_file_service import source_dirs_from_validation_result
 
 
 def _release_tracks(release: dict[str, object]) -> list[dict[str, object]]:
@@ -872,45 +871,31 @@ def post_pipeline_force_import(h: RouteHandler, body: dict[str, object]) -> None
     s = _server()
     log_id = req_body.download_log_id
 
-    entry = s._db().get_download_log_entry(int(log_id))
-    if not entry:
-        h._error(f"Download log entry {log_id} not found", 404)
+    result = enqueue_force_import(s._db(), read_runtime_config(), int(log_id))
+    if result.outcome == RESULT_DOWNLOAD_LOG_MISSING:
+        h._error(
+            f"Download log entry {log_id} not found",
+            FORCE_IMPORT_HTTP_STATUS[result.outcome],
+        )
         return
-
-    request_id = entry["request_id"]
-
-    vr_raw = entry.get("validation_result")
-    if not vr_raw:
-        h._error("No validation_result on this download log entry")
+    if result.outcome == RESULT_REQUEST_MISSING:
+        h._error(
+            f"Album request {result.request_id} not found",
+            FORCE_IMPORT_HTTP_STATUS[result.outcome],
+        )
         return
-    vr = decode_validation_envelope(vr_raw)
-    failed_path = vr.failed_path
-    if not failed_path:
-        h._error("No failed_path in validation_result")
+    if result.outcome != RESULT_QUEUED:
+        h._error(
+            result.detail or f"Files not found or unauthorized at: {result.failed_path}",
+            FORCE_IMPORT_HTTP_STATUS[result.outcome],
+        )
         return
-
+    assert result.job is not None
+    assert result.request_id is not None
+    job = result.job
+    request_id = result.request_id
     req = s._db().get_request(request_id)
-    if not req:
-        h._error(f"Album request {request_id} not found", 404)
-        return
-
-    resolved_path = resolve_failed_path(str(failed_path))
-    if resolved_path is None:
-        h._error(f"Files not found at: {failed_path}")
-        return
-
-    job = s._db().enqueue_import_job(
-        IMPORT_JOB_FORCE,
-        request_id=request_id,
-        dedupe_key=force_import_dedupe_key(int(log_id)),
-        payload=force_import_payload(
-            download_log_id=int(log_id),
-            failed_path=resolved_path,
-            source_username=entry.get("soulseek_username"),
-            source_dirs=source_dirs_from_validation_result(vr),
-        ),
-        message=f"Force import queued for {req['artist_name']} - {req['album_title']}",
-    )
+    assert req is not None
 
     h._json({
         "status": "queued",

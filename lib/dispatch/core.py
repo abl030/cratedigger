@@ -464,7 +464,7 @@ def dispatch_import_core(
                         quality_ranks=(
                             cfg.quality_ranks if cfg is not None else None
                         ),
-                        audio_quarantine_root=beets_cfg.slskd_download_dir,
+                        audio_quarantine_root=beets_cfg.beets_staging_dir,
                         preserve_corrupt_source=force,
                     )
                 quality_evidence_action_file = _write_quality_evidence_action_file(

@@ -10,22 +10,14 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from typing import Optional, Protocol, TYPE_CHECKING
 
 import msgspec
 
 from lib.import_preview import ImportPreviewValues
-from lib.import_queue import (
-    IMPORT_JOB_FORCE,
-    ImportJob,
-    force_import_dedupe_key,
-    force_import_payload,
-)
-from lib.util import (
-    resolve_failed_path as _shared_resolve_failed_path,
-)
+from lib.force_import_service import FORCE_IMPORT_EXIT_CODE, RESULT_QUEUED, enqueue_force_import
+from lib.import_queue import ImportJob
 from scripts.pipeline_cli.quality import _load_runtime_rank_config
 
 if TYPE_CHECKING:
@@ -34,10 +26,6 @@ if TYPE_CHECKING:
     from lib.pipeline_db.rows import AlbumRequestRow, DownloadLogWithEvidenceRow
 
 SPECTRAL_GRADE_CHOICES = ("genuine", "marginal", "suspect", "likely_transcode")
-
-# Known slskd download dirs to resolve old relative failed_paths against
-SLSKD_DOWNLOAD_DIRS = ["/mnt/virtio/music/slskd"]
-
 
 class _ForceImportDB(Protocol):
     """``db`` shape ``cmd_force_import`` touches (issue #784, #409
@@ -69,83 +57,23 @@ class _ImportJobsDB(Protocol):
     ) -> list[ImportJob]: ...
 
 
-def _resolve_failed_path(failed_path: str) -> "str | None":
-    """Resolve a failed_path to an existing absolute directory.
-
-    Old entries stored relative paths (e.g. 'failed_imports/Foo - Bar'). New
-    ``wrong_matches`` entries store absolute paths. Try the path as-is first,
-    then resolve against known slskd download dirs.
-    """
-    return _shared_resolve_failed_path(
-        failed_path,
-        search_dirs=SLSKD_DOWNLOAD_DIRS,
-    )
-
-
 def cmd_force_import(
     db: "_ForceImportDB", args: argparse.Namespace,
-) -> None:
+) -> int:
     """Force-import a rejected download by download_log ID."""
     log_id = args.download_log_id
 
-    # 1. Look up download_log entry
-    entry = db.get_download_log_entry(log_id)
-    if not entry:
-        print(f"  Download log entry {log_id} not found.")
-        return
+    from lib.config import read_runtime_config
 
-    request_id = entry["request_id"]
-
-    # 2. Extract failed_path from validation_result JSONB
-    vr_raw = entry.get("validation_result")
-    if not vr_raw:
-        print(f"  No validation_result on download_log {log_id}.")
-        return
-
-    from lib.validation_envelope import decode_validation_envelope
-
-    failed_path = decode_validation_envelope(vr_raw).failed_path
-    if not failed_path:
-        print(f"  No failed_path in validation_result for download_log {log_id}.")
-        return
-
-    # 3. Look up album_request for MBID
-    req = db.get_request(request_id)
-    if not req:
-        print(f"  Album request {request_id} not found.")
-        return
-
-    mbid = req["mb_release_id"]
-    if not mbid:
-        print(f"  Album request {request_id} has no mb_release_id (Discogs-only?).")
-        return
-
-    # 4. Resolve and verify files exist
-    resolved_path = _resolve_failed_path(failed_path)
-    if not resolved_path:
-        print(f"  Files not found at: {failed_path}")
-        if not os.path.isabs(failed_path):
-            print(f"  (also tried: {', '.join(os.path.join(b, failed_path) for b in SLSKD_DOWNLOAD_DIRS)})")
-        return
-    failed_path = resolved_path
-
-    print(f"  Force-importing: {req['artist_name']} - {req['album_title']}")
-    print(f"  Path: {failed_path}")
-    print(f"  MBID: {mbid}")
-
-    job = db.enqueue_import_job(
-        IMPORT_JOB_FORCE,
-        request_id=request_id,
-        dedupe_key=force_import_dedupe_key(log_id),
-        payload=force_import_payload(
-            download_log_id=log_id,
-            failed_path=failed_path,
-            source_username=entry.get("soulseek_username"),
-        ),
-        message=f"Force import queued for {req['artist_name']} - {req['album_title']}",
-    )
+    result = enqueue_force_import(db, read_runtime_config(), log_id)
+    if result.outcome != RESULT_QUEUED:
+        print(f"  Force import rejected: {result.detail or result.outcome}.")
+        return FORCE_IMPORT_EXIT_CODE[result.outcome]
+    assert result.job is not None
+    job = result.job
     deduped = " existing" if job.deduped else ""
     print(f"  [OK] Queued{deduped} import job #{job.id} ({job.status}).")
+    return 0
 
 
 def cmd_import_jobs(db: "_ImportJobsDB", args: argparse.Namespace) -> None:

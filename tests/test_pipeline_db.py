@@ -6759,6 +6759,64 @@ class TestGetWrongMatches(unittest.TestCase):
             validation_result=json.dumps(vr),
         )
 
+    def test_terminal_audio_corrupt_retained_auto_import_is_not_wrong_match(self):
+        """#867: terminal evidence outranks an earlier strong match envelope."""
+        from lib.dispatch.types import PostCommitQuarantineAudit
+        corrupt_log_id = self.db.log_download(
+            request_id=self.req1, soulseek_username="corrupt-peer", outcome="rejected",
+            validation_result=json.dumps({"scenario": "strong_match", "distance": 0.1247,
+                                          "failed_path": "/Incoming/auto-import/Corrupt"}),
+            import_result=json.dumps({"decision": "audio_corrupt"}),
+        )
+        evidence = make_album_quality_evidence(
+            mb_release_id="wm-uuid-1", audio_corrupt=True,
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        persisted = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        self.db.set_download_log_candidate_evidence(corrupt_log_id, persisted.id)
+        self.assertTrue(self.db.record_post_commit_quarantine(
+            corrupt_log_id,
+            PostCommitQuarantineAudit(
+                source_path="/Incoming/auto-import/Corrupt", moved=False,
+                error="OSError: [Errno 18] Invalid cross-device link",
+            ),
+        ))
+        self._log_rejected(self.req2, "legitimate-peer", "/failed/Pressing", "high_distance")
+
+        rows = self.db.get_wrong_matches()
+
+        self.assertEqual([row["soulseek_username"] for row in rows], ["legitimate-peer"])
+
+    def test_newer_terminal_corrupt_hides_same_path_older_legitimate_row(self):
+        self._log_rejected(self.req1, "older-legitimate", "/same/path", "high_distance")
+        self.db.log_download(
+            request_id=self.req1, soulseek_username="newer-corrupt", outcome="rejected",
+            validation_result=json.dumps({"scenario": "strong_match", "distance": 0.1247,
+                                          "failed_path": "/same/path"}),
+            import_result=json.dumps({"decision": "audio_corrupt"}),
+        )
+        self._log_rejected(self.req2, "other-legitimate", "/other/path", "high_distance")
+        self.assertEqual(
+            [row["soulseek_username"] for row in self.db.get_wrong_matches()],
+            ["other-legitimate"],
+        )
+
+    def test_newer_legitimate_reuse_surfaces_after_older_terminal_corrupt(self):
+        self.db.log_download(
+            request_id=self.req1, soulseek_username="older-corrupt", outcome="rejected",
+            validation_result=json.dumps({"scenario": "strong_match", "distance": 0.1247,
+                                          "failed_path": "/same/path"}),
+            import_result=json.dumps({"decision": "audio_corrupt"}),
+        )
+        self._log_rejected(self.req1, "newer-legitimate", "/same/path", "high_distance")
+        rows = self.db.get_wrong_matches()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["soulseek_username"], "newer-legitimate")
+
     def test_returns_every_rejected_row_for_same_request(self):
         """RED for issue #113: three rejected rows with failed_path → three returned."""
         self._log_rejected(self.req1, "alice", "/fi/path_0")

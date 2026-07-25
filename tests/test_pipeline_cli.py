@@ -30,7 +30,6 @@ import scripts.pipeline_cli.long_tail as pipeline_cli_long_tail
 from scripts import pipeline_cli
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_album_quality_evidence, make_request_row
-from lib.transitions import TransitionConflict, TransitionConflictKind
 from tests.test_beets_db import _create_test_db, _insert_album
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
@@ -691,8 +690,7 @@ class TestCmdImportJobRecovery(unittest.TestCase):
 
 class TestCmdForceImport(unittest.TestCase):
     @patch("builtins.print")
-    @patch("scripts.pipeline_cli.imports._resolve_failed_path", return_value="/tmp/Test Album")
-    def test_force_import_passes_source_username_to_queue(self, _mock_resolve, _mock_print):
+    def test_force_import_passes_source_username_to_queue(self, _mock_print):
         from lib.import_queue import IMPORT_JOB_FORCE, force_import_dedupe_key
 
         db = FakePipelineDB()
@@ -705,25 +703,97 @@ class TestCmdForceImport(unittest.TestCase):
         # and soulseek_username.  Production stores validation_result as
         # a JSONB dict — pass a dict, not the typed Struct, so the
         # downstream ``json.loads`` branch isn't tripped.
-        db.log_download(
-            request_id=123,
-            soulseek_username="baduser",
-            outcome="rejected",
-            validation_result={"failed_path": "/tmp/Test Album"},
-        )
-        log_id = db.download_logs[0].id
-
-        args = MagicMock(download_log_id=log_id)
-        pipeline_cli.cmd_force_import(cast(Any, db), args)
+        with tempfile.TemporaryDirectory() as root:
+            staging = os.path.join(root, "Incoming")
+            album = os.path.join(staging, "failed_imports", "Test Album")
+            os.makedirs(album)
+            cfg = SimpleNamespace(
+                beets_staging_dir=staging,
+                slskd_download_dir=os.path.join(root, "slskd"),
+                processing_dir=os.path.join(root, "processing"),
+            )
+            os.makedirs(cfg.slskd_download_dir)
+            os.makedirs(cfg.processing_dir)
+            db.log_download(
+                request_id=123, soulseek_username="baduser", outcome="rejected",
+                validation_result={"failed_path": album, "source_dirs": ["peer\\Album"]},
+            )
+            log_id = db.download_logs[0].id
+            args = MagicMock(download_log_id=log_id)
+            with patch("lib.config.read_runtime_config", return_value=cfg):
+                rc = pipeline_cli.cmd_force_import(cast(Any, db), args)
 
         # Exactly one import job was enqueued. Inspect the persisted row.
+        self.assertEqual(rc, 0)
         self.assertEqual(len(db._import_jobs), 1)
         job_row = db._import_jobs[0]
         self.assertEqual(job_row["job_type"], IMPORT_JOB_FORCE)
         self.assertEqual(job_row["request_id"], 123)
         self.assertEqual(job_row["dedupe_key"], force_import_dedupe_key(log_id))
-        self.assertEqual(job_row["payload"]["failed_path"], "/tmp/Test Album")
+        self.assertEqual(job_row["payload"]["failed_path"], album)
         self.assertEqual(job_row["payload"]["source_username"], "baduser")
+        self.assertEqual(job_row["payload"]["source_dirs"], ["peer\\Album"])
+
+    @patch("builtins.print")
+    def test_force_import_failure_exit_codes_enqueue_nothing(self, _mock_print):
+        from scripts import pipeline_cli
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=123, mb_release_id="mbid-123", artist_name="Artist", album_title="Album",
+        ))
+        db.seed_request(make_request_row(
+            id=124, mb_release_id=None, discogs_release_id="124",
+            artist_name="Discogs Artist", album_title="Discogs Album",
+        ))
+        with tempfile.TemporaryDirectory() as root:
+            staging = os.path.join(root, "Incoming")
+            slskd = os.path.join(root, "slskd")
+            processing = os.path.join(root, "processing")
+            os.makedirs(staging)
+            os.makedirs(slskd)
+            os.makedirs(processing)
+            cfg = SimpleNamespace(
+                beets_staging_dir=staging,
+                slskd_download_dir=slskd,
+                processing_dir=processing,
+            )
+            missing_request_log_id = db.log_download(
+                request_id=999, outcome="rejected", validation_result={},
+            )
+            missing_path_log_id = db.log_download(
+                request_id=123, outcome="rejected", validation_result={},
+            )
+            unauthorized = os.path.join(staging, "failed_imports-old", "Album")
+            os.makedirs(unauthorized)
+            unauthorized_log_id = db.log_download(
+                request_id=123,
+                outcome="rejected",
+                validation_result={"failed_path": unauthorized},
+            )
+            discogs_album = os.path.join(staging, "failed_imports", "Discogs Album")
+            os.makedirs(discogs_album)
+            missing_mbid_log_id = db.log_download(
+                request_id=124,
+                outcome="rejected",
+                validation_result={"failed_path": discogs_album},
+            )
+
+            with patch("lib.config.read_runtime_config", return_value=cfg):
+                for name, log_id, expected_rc in (
+                    ("missing log", 999_999, 2),
+                    ("missing request", missing_request_log_id, 2),
+                    ("missing path", missing_path_log_id, 3),
+                    ("unauthorized", unauthorized_log_id, 3),
+                    ("missing MusicBrainz ID", missing_mbid_log_id, 3),
+                ):
+                    with self.subTest(name=name):
+                        rc = pipeline_cli.cmd_force_import(
+                            cast(Any, db),
+                            cast(argparse.Namespace, SimpleNamespace(download_log_id=log_id)),
+                        )
+                        self.assertEqual(rc, expected_rc)
+                        self.assertEqual(db.list_import_jobs(), [])
 
 
 class TestCmdImportPreview(unittest.TestCase):

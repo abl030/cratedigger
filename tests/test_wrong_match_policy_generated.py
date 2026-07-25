@@ -59,6 +59,8 @@ def assert_wrong_match_row_visibility(
     scenario: str | None,
     request_status: str | None,
     include_replaced: bool,
+    candidate_audio_corrupt: bool = False,
+    terminal_import_decision: str | None = None,
     *,
     visible: bool,
 ) -> None:
@@ -66,6 +68,8 @@ def assert_wrong_match_row_visibility(
     expected = (
         scenario not in EXPECTED_NON_MATCH_SCENARIOS
         and (include_replaced or request_status != "replaced")
+        and not candidate_audio_corrupt
+        and terminal_import_decision != "audio_corrupt"
     )
     assert visible is expected
 
@@ -90,6 +94,13 @@ class TestWrongMatchPolicyChecker(unittest.TestCase):
                 visible=True,
             )
 
+    def test_row_checker_rejects_terminal_corruption_in_worklist(self) -> None:
+        with self.assertRaises(AssertionError):
+            assert_wrong_match_row_visibility(
+                "strong_match", "wanted", False,
+                terminal_import_decision="audio_corrupt", visible=True,
+            )
+
 
 class TestGeneratedWrongMatchPolicy(unittest.TestCase):
     @example(scenario="audio_corrupt")
@@ -111,44 +122,8 @@ class TestGeneratedWrongMatchPolicy(unittest.TestCase):
         )
 
     @example(
-        scenario="audio_corrupt",
-        request_status="wanted",
-        include_replaced=False,
-    )
-    @example(
-        scenario="bad_audio_hash",
-        request_status="unsearchable",
-        include_replaced=True,
-    )
-    @example(
-        scenario="nested_layout",
-        request_status="replaced",
-        include_replaced=True,
-    )
-    @example(
-        scenario="empty_fileset",
-        request_status=None,
-        include_replaced=False,
-    )
-    @example(
-        scenario="mixed_source",
-        request_status="wanted",
-        include_replaced=False,
-    )
-    @example(
-        scenario="spectral_reject",
-        request_status="wanted",
-        include_replaced=True,
-    )
-    @example(
-        scenario="high_distance",
-        request_status="replaced",
-        include_replaced=False,
-    )
-    @example(
-        scenario=None,
-        request_status="replaced",
-        include_replaced=True,
+        scenario="strong_match", request_status="wanted", include_replaced=False,
+        candidate_audio_corrupt=True, terminal_import_decision="audio_corrupt",
     )
     @given(
         scenario=st.one_of(st.none(), st.text(max_size=40)),
@@ -157,12 +132,16 @@ class TestGeneratedWrongMatchPolicy(unittest.TestCase):
             st.sampled_from(("wanted", "downloading", "unsearchable", "imported", "replaced")),
         ),
         include_replaced=st.booleans(),
+        candidate_audio_corrupt=st.booleans(),
+        terminal_import_decision=st.sampled_from((None, "audio_corrupt", "success")),
     )
     def test_row_visibility_obeys_scenario_and_status_policy(
         self,
         scenario: str | None,
         request_status: str | None,
         include_replaced: bool,
+        candidate_audio_corrupt: bool,
+        terminal_import_decision: str | None,
     ) -> None:
         row: dict[str, object] = {
             "request_status": request_status,
@@ -170,11 +149,15 @@ class TestGeneratedWrongMatchPolicy(unittest.TestCase):
                 "failed_path": "/failed/generated",
                 "scenario": scenario,
             },
+            "candidate_audio_corrupt": candidate_audio_corrupt,
+            "terminal_import_decision": terminal_import_decision,
         }
         assert_wrong_match_row_visibility(
             scenario,
             request_status,
             include_replaced,
+            candidate_audio_corrupt,
+            terminal_import_decision,
             visible=wrong_match_row_is_visible(
                 row,
                 include_replaced=include_replaced,

@@ -8,7 +8,9 @@ tests/web/_harness.py.
 import json
 import os
 import sys
+import tempfile
 import unittest
+from contextlib import contextmanager
 from unittest.mock import patch
 
 
@@ -27,6 +29,15 @@ from lib.beets_delete import (
     BeetsDeleteFailed,
     BeetsDeleteRequest,
 )
+from lib.force_import_service import (
+    FORCE_IMPORT_HTTP_STATUS,
+    RESULT_DOWNLOAD_LOG_MISSING,
+    RESULT_FAILED_PATH_MISSING,
+    RESULT_QUEUED,
+    RESULT_REQUEST_MBID_MISSING,
+    RESULT_REQUEST_MISSING,
+    RESULT_UNAUTHORIZED_PATH,
+)
 from lib.transitions import TransitionConflict, TransitionConflictKind
 
 
@@ -40,6 +51,30 @@ def _completed_beets_delete(request: BeetsDeleteRequest) -> BeetsDeleteCompleted
         deleted_artifacts=1,
         preserved_paths=(),
     )
+
+
+@contextmanager
+def _force_import_runtime_config(
+    *, staging_dir: str, slskd_dir: str, processing_dir: str,
+):
+    """Run one route call against a real temporary runtime config."""
+    config_path = os.path.join(os.path.dirname(staging_dir), "config.ini")
+    with open(config_path, "w", encoding="utf-8") as handle:
+        handle.write(
+            "[Slskd]\n"
+            f"download_dir = {slskd_dir}\n"
+            "\n[Search Settings]\n"
+            "number_of_albums_to_grab = 2\n"
+            "\n[Beets Validation]\n"
+            f"staging_dir = {staging_dir}\n"
+            "\n[Paths]\n"
+            f"processing_dir = {processing_dir}\n",
+        )
+    try:
+        with patch.dict(os.environ, {"CRATEDIGGER_RUNTIME_CONFIG": config_path}):
+            yield
+    finally:
+        os.unlink(config_path)
 
 
 class _RacingDeleteDB(FakePipelineDB):
@@ -1034,21 +1069,88 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(status, 400)
         self.assertIn("confirm", data["error"])
 
-    @patch("web.routes.pipeline_mutations.resolve_failed_path", return_value="/tmp/Test Album")
-    def test_pipeline_force_import_contract(self, _mock_resolve):
-        log_id = self.db.log_download(
-            100, outcome="rejected",
-            validation_result={
-                "failed_path": "/mnt/virtio/music/slskd/failed_imports/Test",
-                "scenario": "high_distance",
-            },
-        )
-        status, data = self._post(
-            "/api/pipeline/force-import", {"download_log_id": log_id})
+    def test_pipeline_force_import_contract(self):
+        with tempfile.TemporaryDirectory() as root:
+            staging = os.path.join(root, "Incoming")
+            slskd = os.path.join(root, "slskd")
+            processing = os.path.join(root, "processing")
+            album = os.path.join(staging, "failed_imports", "Test")
+            os.makedirs(album)
+            os.makedirs(slskd)
+            os.makedirs(processing)
+            log_id = self.db.log_download(
+                100, outcome="rejected",
+                validation_result={"failed_path": album, "scenario": "high_distance"},
+            )
+            with _force_import_runtime_config(
+                staging_dir=staging, slskd_dir=slskd, processing_dir=processing,
+            ):
+                status, data = self._post(
+                    "/api/pipeline/force-import", {"download_log_id": log_id})
 
         self.assertEqual(status, 202)
         _assert_required_fields(self, data, self.FORCE_IMPORT_REQUIRED_FIELDS,
                                 "pipeline force-import response")
+
+    def test_pipeline_force_import_statuses_are_service_mapped(self):
+        with tempfile.TemporaryDirectory() as root:
+            staging = os.path.join(root, "Incoming")
+            slskd = os.path.join(root, "slskd")
+            processing = os.path.join(root, "processing")
+            os.makedirs(staging)
+            os.makedirs(slskd)
+            os.makedirs(processing)
+            missing_request_log_id = self.db.log_download(
+                999, outcome="rejected", validation_result={},
+            )
+            missing_path_log_id = self.db.log_download(
+                100, outcome="rejected", validation_result={},
+            )
+            self.db.seed_request(make_request_row(
+                id=101, mb_release_id=None, discogs_release_id="101",
+                artist_name="Discogs Artist", album_title="Discogs Album",
+            ))
+            discogs_album = os.path.join(staging, "failed_imports", "Discogs Album")
+            os.makedirs(discogs_album)
+            missing_mbid_log_id = self.db.log_download(
+                101, outcome="rejected", validation_result={"failed_path": discogs_album},
+            )
+            unauthorized = os.path.join(staging, "failed_imports-old", "Album")
+            os.makedirs(unauthorized)
+            unauthorized_log_id = self.db.log_download(
+                100, outcome="rejected", validation_result={"failed_path": unauthorized},
+            )
+            album = os.path.join(staging, "failed_imports", "Album")
+            os.makedirs(album)
+            queued_log_id = self.db.log_download(
+                100, outcome="rejected", validation_result={"failed_path": album},
+            )
+
+            with _force_import_runtime_config(
+                staging_dir=staging, slskd_dir=slskd, processing_dir=processing,
+            ):
+                for name, log_id, outcome in (
+                    ("missing log", 999_999, RESULT_DOWNLOAD_LOG_MISSING),
+                    ("missing request", missing_request_log_id, RESULT_REQUEST_MISSING),
+                    ("missing MusicBrainz ID", missing_mbid_log_id, RESULT_REQUEST_MBID_MISSING),
+                    ("missing path", missing_path_log_id, RESULT_FAILED_PATH_MISSING),
+                    ("unauthorized", unauthorized_log_id, RESULT_UNAUTHORIZED_PATH),
+                ):
+                    with self.subTest(name=name):
+                        status, _data = self._post(
+                            "/api/pipeline/force-import", {"download_log_id": log_id},
+                        )
+                        self.assertEqual(status, FORCE_IMPORT_HTTP_STATUS[outcome])
+                        self.assertEqual(self.db.list_import_jobs(), [])
+
+                status, data = self._post(
+                    "/api/pipeline/force-import", {"download_log_id": queued_log_id},
+                )
+
+        self.assertEqual(status, FORCE_IMPORT_HTTP_STATUS[RESULT_QUEUED])
+        self.assertEqual(len(self.db.list_import_jobs()), 1)
+        _assert_required_fields(self, data, self.FORCE_IMPORT_REQUIRED_FIELDS,
+                                "pipeline force-import queued response")
 
     def test_pipeline_delete_contract(self):
         # No descendant — delete succeeds and the row is gone.
