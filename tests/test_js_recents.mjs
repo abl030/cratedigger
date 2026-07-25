@@ -337,7 +337,7 @@ console.log('renderRecentsItems() shows bad-extension postflight warning chip');
     'bad extension filename appears in hover detail');
 }
 
-console.log('renderRecentsItems() uses the main badge for deleted triage');
+console.log('renderRecentsItems() uses the main badge and server-composed summary for deleted triage');
 {
   const html = renderRecentsFixture([{
     id: 725,
@@ -345,16 +345,16 @@ console.log('renderRecentsItems() uses the main badge for deleted triage');
     created_at: '2026-04-25T23:25:00+00:00',
     album_title: 'For Screening Purposes Only',
     artist_name: 'Test Icicles',
-    badge: 'Triaged · deleted',
+    badge: 'Triaged · download deleted',
     badge_class: 'badge-rejected',
     border_color: '#a33',
-    summary: 'Wrong match (dist 0.190) · moundsofass',
+    summary: 'Wrong match (dist 0.190) · download deleted: spectral reject · moundsofass',
     wrong_match_triage_summary: 'deleted: spectral reject',
     wrong_match_triage_detail: 'action: deleted reject · stages: mp3_spectral:reject',
   }]);
-  assertContains(html, 'Wrong match (dist 0.190) · moundsofass',
-    'original wrong-match summary remains visible');
-  assertContains(html, 'Triaged · deleted',
+  assertContains(html, 'Wrong match (dist 0.190) · download deleted: spectral reject · moundsofass',
+    'one server-composed summary keeps match verdict, cleanup disposition, and uploader');
+  assertContains(html, 'Triaged · download deleted',
     'deleted triage is the primary row badge');
   assertContains(html, 'badge badge-rejected',
     'deleted triage remains visually rejected');
@@ -372,14 +372,14 @@ console.log('renderRecentsItems() uses an amber main badge for kept triage');
     created_at: '2026-07-14T18:36:33+00:00',
     album_title: 'Amaterasu Shiroi',
     artist_name: 'Eldar',
-    badge: 'Triaged · kept',
+    badge: 'Triaged · download kept',
     badge_class: 'badge-warn',
     border_color: '#a33',
-    summary: 'Wrong match (dist 0.233) · R@v@scholl',
+    summary: 'Wrong match (dist 0.233) · download kept: would import · R@v@scholl',
     wrong_match_triage_summary: 'kept: would import',
     wrong_match_triage_detail: 'action: kept would import',
   }]);
-  assertContains(html, 'Triaged · kept', 'kept triage is the primary row badge');
+  assertContains(html, 'Triaged · download kept', 'kept triage is the primary row badge');
   assertContains(html, 'badge badge-warn', 'kept triage uses the amber badge class');
   assertExcludes(html, 'recents-triage-label',
     'kept triage does not render a second competing status label');

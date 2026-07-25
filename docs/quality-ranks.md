@@ -400,8 +400,9 @@ every request) and waiting for the next `cratedigger.timer` fire (5 min).
 - Wrong Matches cleanup consumes already-persisted evidence only. Confident
   cleanup-eligible force-mode rejects are deleted and cleared; would-import,
   uncertain, missing-evidence, and stale-evidence candidates remain visible.
-  Historical `download_log.validation_result.wrong_match_triage` blobs are
-  still rendered as display-only audit, but new cleanup does not write them.
+  Each cleanup outcome persists a typed
+  `download_log.validation_result.wrong_match_triage` audit. Recents renders
+  the audit as display-only evidence beside the original Beets rejection.
 - `/api/import-preview` (web) — returns the common preview verdict shape for
   real-folder preview and typed values.
 

@@ -127,6 +127,10 @@ class ClassifiedEntry(msgspec.Struct):
     verdict: str
     summary: str
     downloaded_label: str = ""  # e.g. "MP3 320", "FLAC (converted to MP3 V0)"
+    # Candidate measurement as it is safe to render. The raw download-log
+    # value remains in the persisted row/import_result; corrupt source bytes
+    # deliberately project ``None`` so UI fallbacks cannot paint ``0k``.
+    actual_min_bitrate: int | None = None
     # Issue #130: ``PostflightInfo.disambiguation_failure`` reaches JSONB but
     # had no UI surface until this field was added. ``None`` = no failure
     # (either disambiguation succeeded or wasn't attempted); string values
@@ -346,7 +350,9 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
         triage_action=triage["action"],
         have_analysis=have_analysis,
     )
-    summary = _build_summary(entry, core.badge, core.verdict)
+    summary = _build_summary(
+        entry, core.badge, core.verdict, triage["summary"]
+    )
     downloaded_label = _build_downloaded_label(entry)
     (
         existing_format,
@@ -392,10 +398,28 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
         basis = triage["comparison_basis"]
     candidate_v0 = triage["candidate_v0_probe"]
     current_v0 = triage["current_v0_probe"]
+    candidate_audio_is_corrupt = _candidate_audio_is_corrupt(entry, triage)
+    if candidate_audio_is_corrupt:
+        # A decoder failure is terminal evidence about the source bytes. A
+        # partial spectral diagnostic can still exist, but presenting it next
+        # to a zero bitrate makes it look like a quality assessment. Retain
+        # raw ImportResult/triage facts; only the shared display projection
+        # declines to compare corrupt input as audio quality.
+        lineage = (lineage[0], None, None, None, lineage[4], lineage[5])
+        spectral = (
+            None, None, spectral[2], spectral[3], spectral[4], spectral[5],
+            spectral[6], spectral[7],
+        )
+        candidate_v0 = None
+        basis = None
     return ClassifiedEntry(
         badge=core.badge, badge_class=core.badge_class,
         border_color=core.border_color, verdict=core.verdict,
         summary=summary, downloaded_label=downloaded_label,
+        actual_min_bitrate=(
+            None if candidate_audio_is_corrupt
+            else entry.actual_min_bitrate
+        ),
         comparison_basis=(
             msgspec.to_builtins(basis) if basis is not None else None
         ),
@@ -680,9 +704,9 @@ def _humanize_token(value: str | None) -> str | None:
 
 def _wrong_match_action_label(action: str | None) -> str | None:
     if action == "deleted_reject":
-        return "deleted"
+        return "download deleted"
     if action == "deleted_verified_lossless_parent":
-        return "deleted: verified-lossless parent"
+        return "download deleted: verified-lossless parent"
     if action == "delete_failed":
         return "delete failed"
     if action == "stale_path_cleared":
@@ -690,9 +714,9 @@ def _wrong_match_action_label(action: str | None) -> str | None:
     if action == "stale_path_clear_failed":
         return "stale path clear failed"
     if action == "kept_would_import":
-        return "kept: would import"
+        return "download kept: would import"
     if action == "kept_uncertain":
-        return "kept: uncertain"
+        return "download kept: uncertain"
     if action == "preview_backfilled":
         return "previewed"
     return _humanize_token(action)
@@ -714,19 +738,23 @@ def _build_wrong_match_triage_summary(
         detail = (_humanize_token(reason)
                   or _humanize_token(preview_decision)
                   or _humanize_token(preview_verdict))
-        return f"deleted: {detail}" if detail else "deleted"
+        return (
+            f"download deleted: {detail}" if detail else "download deleted"
+        )
 
     if action == "deleted_verified_lossless_parent":
-        return "deleted: verified-lossless parent in library"
+        return "download deleted: verified-lossless parent in library"
 
     if action == "kept_would_import":
-        return "kept: would import"
+        return "download kept: would import"
 
     if action == "kept_uncertain":
         detail = (_humanize_token(reason)
                   or _humanize_token(preview_decision)
                   or _humanize_token(preview_verdict))
-        return f"kept: {detail}" if detail else "kept: uncertain"
+        return (
+            f"download kept: {detail}" if detail else "download kept: uncertain"
+        )
 
     if label:
         detail = (_humanize_token(reason)
@@ -806,6 +834,17 @@ def _extract_wrong_match_triage(entry: LogEntry) -> dict[str, Any]:
     }
 
 
+def _candidate_audio_is_corrupt(
+    entry: LogEntry,
+    triage: dict[str, Any],
+) -> bool:
+    """Whether the candidate is corrupt on either persisted audit path."""
+    return (
+        _entry_rejection_decision(entry) == "audio_corrupt"
+        or triage["preview_decision"] == "audio_corrupt"
+    )
+
+
 def _classify(
     entry: LogEntry,
     *,
@@ -849,11 +888,11 @@ def _classify(
         verdict = _rejection_verdict(entry)
         if triage_action in ("kept_would_import", "kept_uncertain"):
             return _Classification(
-                "Triaged · kept", "badge-warn", "#a33", verdict
+                "Triaged · download kept", "badge-warn", "#a33", verdict
             )
         if triage_action in ("deleted_reject", "deleted_verified_lossless_parent"):
             return _Classification(
-                "Triaged · deleted", "badge-rejected", "#a33", verdict
+                "Triaged · download deleted", "badge-rejected", "#a33", verdict
             )
         return _Classification("Rejected", "badge-rejected", "#a33", verdict)
 
@@ -1433,7 +1472,12 @@ def _upgrade_verdict(prev_br: Optional[int], cur_br: Optional[int],
 # Summary (folded in from build_summary_line)
 # ---------------------------------------------------------------------------
 
-def _build_summary(entry: LogEntry, badge: str, verdict: str) -> str:
+def _build_summary(
+    entry: LogEntry,
+    badge: str,
+    verdict: str,
+    triage_summary: str | None,
+) -> str:
     """Build a one-line summary for the collapsed card view.
 
     Returns a plain text string (no HTML).
@@ -1450,6 +1494,11 @@ def _build_summary(entry: LogEntry, badge: str, verdict: str) -> str:
         parts.append(label)
     else:
         parts.append(verdict)
+
+    # Cleanup is a later audit fact. Fold it into the one server-composed
+    # summary instead of having JavaScript add a competing status badge.
+    if badge.startswith("Triaged · ") and triage_summary:
+        parts.append(triage_summary)
 
     if entry.soulseek_username:
         parts.append(entry.soulseek_username)

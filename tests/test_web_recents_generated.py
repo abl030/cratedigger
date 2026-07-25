@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from typing import Protocol
 
 from hypothesis import example, given, strategies as st
 
@@ -22,6 +23,19 @@ REJECT_SCENARIOS = (
     "lossless_source_locked",
     "suspect_lossless_downgrade",
 )
+
+
+class _CompositeTriageProjection(Protocol):
+    verdict: str
+    badge: str
+    badge_class: str
+    border_color: str
+    summary: str
+    actual_min_bitrate: int | None
+    source_min_bitrate: int | None
+    source_avg_bitrate: int | None
+    spectral_grade: str | None
+    existing_min_bitrate: int | None
 
 
 def assert_short_searching_verdict(verdict: str) -> None:
@@ -51,13 +65,55 @@ def assert_triaged_rejection_style(
     if border_color != "#a33":
         raise AssertionError("triaged rejection lost its rejected row border")
     if action.startswith("deleted_"):
-        if badge != "Triaged · deleted" or badge_class != "badge-rejected":
+        if (badge != "Triaged · download deleted"
+                or badge_class != "badge-rejected"):
             raise AssertionError("triaged deletion was styled as a successful library outcome")
     elif action.startswith("kept_"):
-        if badge != "Triaged · kept" or badge_class != "badge-warn":
+        if badge != "Triaged · download kept" or badge_class != "badge-warn":
             raise AssertionError("kept triage lost its primary amber badge")
     elif badge_class != "badge-rejected":
         raise AssertionError("triaged rejection lost its rejected badge")
+
+
+def assert_composite_triage_projection(
+    result: _CompositeTriageProjection,
+    *,
+    action: str,
+    reason: str,
+    uploader: str,
+    distance: float,
+    has_have: bool,
+) -> None:
+    """Check the compact contract for a persisted cleanup audit.
+
+    This intentionally patrols the server-owned classifier rather than the
+    Recents renderer: the exact same projection feeds list and history rows.
+    """
+    expected_object = (
+        "download deleted" if action.startswith("deleted_") else "download kept"
+    )
+    expected_reason = reason.replace("_", " ")
+    expected_verdict = f"Wrong match (dist {distance:.3f})"
+    if result.verdict != expected_verdict:
+        raise AssertionError("cleanup replaced the original match verdict")
+    if expected_object not in result.badge:
+        raise AssertionError("cleanup badge did not name the download object")
+    if expected_object not in result.summary or expected_reason not in result.summary:
+        raise AssertionError("compact summary hid cleanup disposition or reason")
+    if uploader not in result.summary:
+        raise AssertionError("compact summary lost uploader provenance")
+    assert_triaged_rejection_style(
+        action, result.badge, result.badge_class, result.border_color)
+    if reason == "audio_corrupt":
+        if any((
+            result.actual_min_bitrate is not None,
+            result.source_min_bitrate is not None,
+            result.source_avg_bitrate is not None,
+            result.spectral_grade is not None,
+        )):
+            raise AssertionError("corrupt input leaked a quality claim")
+    if has_have and result.existing_min_bitrate is None:
+        raise AssertionError("corrupt projection erased point-in-time HAVE")
 
 
 def assert_current_library_have_is_projected(
@@ -210,7 +266,7 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
                 },
             },
         ))
-        self.assertEqual(result.badge, "Triaged · deleted")
+        self.assertEqual(result.badge, "Triaged · download deleted")
         assert_triaged_rejection_style(
             "deleted_reject",
             result.badge,
@@ -229,7 +285,7 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "rejected row border"):
             assert_triaged_rejection_style(
                 "deleted_reject",
-                "Triaged · deleted",
+                "Triaged · download deleted",
                 "badge-library",
                 "#6a5",
             )
@@ -241,6 +297,82 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
                 "Rejected",
                 "badge-rejected",
                 "#a33",
+            )
+
+    @given(
+        action_reason=st.sampled_from((
+            ("deleted_reject", "audio_corrupt"),
+            ("deleted_reject", "spectral_reject"),
+            ("deleted_reject", "downgrade"),
+            ("kept_would_import", "import"),
+        )),
+        uploader=st.text(
+            alphabet=st.characters(whitelist_categories=("Ll", "Lu", "Nd")),
+            min_size=1,
+            max_size=12,
+        ),
+        distance=st.floats(min_value=0.151, max_value=0.999,
+                           allow_nan=False, allow_infinity=False),
+        has_have=st.booleans(),
+    )
+    @example(
+        action_reason=("deleted_reject", "audio_corrupt"), uploader="Korveck",
+        distance=0.181, has_have=False,
+    )
+    def test_composite_triage_keeps_match_and_cleanup_facts(
+        self,
+        action_reason: tuple[str, str],
+        uploader: str,
+        distance: float,
+        has_have: bool,
+    ) -> None:
+        action, reason = action_reason
+        current = ({
+            "format": "MP3", "min_bitrate_kbps": 192,
+            "avg_bitrate_kbps": 224,
+        } if has_have else None)
+        audit: dict[str, object] = {
+            "action": action,
+            "outcome": "deleted" if action.startswith("deleted_") else "kept",
+            "reason": reason,
+            "preview_verdict": "confident_reject",
+            "preview_decision": reason,
+            "stage_chain": [f"stage2_import:{reason}"],
+            "candidate_measurement": {
+                "format": "FLAC", "min_bitrate_kbps": 0,
+                "avg_bitrate_kbps": 0, "spectral_grade": "genuine",
+            },
+        }
+        if current is not None:
+            audit["current_measurement"] = current
+        result = classify_log_entry(_entry(
+            outcome="rejected", beets_scenario="high_distance",
+            beets_distance=distance, soulseek_username=uploader,
+            actual_min_bitrate=0,
+            validation_result={"wrong_match_triage": audit},
+        ))
+        assert_composite_triage_projection(
+            result, action=action, reason=reason, uploader=uploader,
+            distance=distance, has_have=has_have,
+        )
+
+    def test_composite_triage_checker_rejects_hidden_cleanup_reason(self) -> None:
+        class OldProjection:
+            verdict: str = "Wrong match (dist 0.181)"
+            badge: str = "Triaged · download deleted"
+            badge_class: str = "badge-rejected"
+            border_color: str = "#a33"
+            summary: str = "Wrong match (dist 0.181) · Korveck"
+            actual_min_bitrate: int | None = None
+            source_min_bitrate: int | None = None
+            source_avg_bitrate: int | None = None
+            spectral_grade: str | None = None
+            existing_min_bitrate: int | None = None
+
+        with self.assertRaisesRegex(AssertionError, "hid cleanup"):
+            assert_composite_triage_projection(
+                OldProjection(), action="deleted_reject", reason="audio_corrupt",
+                uploader="Korveck", distance=0.181, has_have=False,
             )
 
     @given(action=st.sampled_from((

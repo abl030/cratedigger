@@ -770,11 +770,11 @@ errors fail the whole view as CLI exit `5` / HTTP `503`; partial state is never
 presented as an empty or trustworthy orphan list. Deletion remains an explicit
 operator decision through the existing Wrong Matches delete surfaces.
 
-Historical rows may still contain
-`download_log.validation_result.wrong_match_triage` from the retired preview
-triage path. Recents History renders those old blobs as display-only audit
-metadata. New cleanup does not write a replacement blob; its immediate outcome
-is returned in the web/CLI summary.
+`download_log.validation_result.wrong_match_triage` is the typed persisted
+audit for Wrong Matches cleanup. Automatic post-rejection cleanup and operator
+cleanup both write it, preserving the action, reason, decision, stage chain,
+and frozen candidate/current evidence snapshots. Recents History renders this
+audit as display-only metadata alongside the original Beets rejection.
 
 After manual review, force-import bypasses the distance check. The request
 handler or CLI command validates the row/path synchronously, then enqueues a

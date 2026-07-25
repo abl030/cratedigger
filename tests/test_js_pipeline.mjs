@@ -99,12 +99,14 @@ console.log('current library display uses typed authority states only');
   assertContains(unique, '/library/Moved/current', 'unique state renders the resolver path');
 
   const missing = __test__.renderCurrentLibraryRow({state: 'missing'});
-  assertContains(missing, 'Not installed in Beets', 'missing state stays explicit');
+  assertContains(missing, 'Beets library', 'missing state namespaces the live authority');
+  assertContains(missing, 'Not installed', 'missing state stays explicit');
 
   const ambiguous = __test__.renderCurrentLibraryRow({
     state: 'ambiguous', reason: 'multiple_matches', album_ids: [7, 8],
   });
   assertContains(ambiguous, 'Manual review', 'ambiguous state fails closed visibly');
+  assertContains(ambiguous, 'Beets library', 'ambiguous state namespaces the live authority');
   assertContains(ambiguous, 'multiple_matches', 'ambiguity reason is visible');
   assertContains(ambiguous, 'album IDs 7, 8', 'ambiguous album ids are visible');
 
@@ -112,6 +114,7 @@ console.log('current library display uses typed authority states only');
     state: 'unavailable', reason: 'conflicting_request_identity',
   });
   assertContains(unavailable, 'Unavailable', 'unavailable state stays explicit');
+  assertContains(unavailable, 'Beets library', 'unavailable state namespaces the live authority');
   assertContains(unavailable, 'conflicting_request_identity', 'unavailable reason is visible');
 }
 
