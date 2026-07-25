@@ -1557,8 +1557,8 @@ def _codec_only_downloaded_label(entry: LogEntry, source_format: str | None) -> 
     tier, target conversion, or raw fallback bitrate into the display label.
     """
     fmt = (
-        source_format or entry.source_format or entry.filetype
-        or entry.actual_filetype
+        source_format or entry.source_format or entry.slskd_filetype
+        or entry.original_filetype or entry.filetype or entry.actual_filetype
     )
     if not fmt:
         return ""

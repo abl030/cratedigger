@@ -166,7 +166,12 @@ def assert_corrupt_candidate_display_is_codec_only(
             raise AssertionError("corrupt projection changed point-in-time HAVE")
 
 
-def _corrupt_import_result(decision: str | None, *, has_have: bool = False) -> str:
+def _corrupt_import_result(
+    decision: str | None,
+    *,
+    has_have: bool = False,
+    typed_source: bool = True,
+) -> str:
     """Full candidate quality world used to prove every display fallback dies."""
     basis = msgspec.convert({
         "verdict": "worse", "branch": "rank",
@@ -179,9 +184,11 @@ def _corrupt_import_result(decision: str | None, *, has_have: bool = False) -> s
     }, type=QualityComparisonBasis)
     return ImportResult(
         decision=decision,
-        source_measurement=AudioQualityMeasurement(
-            min_bitrate_kbps=0, avg_bitrate_kbps=0,
-            median_bitrate_kbps=0, format="FLAC",
+        source_measurement=(
+            AudioQualityMeasurement(
+                min_bitrate_kbps=0, avg_bitrate_kbps=0,
+                median_bitrate_kbps=0, format="FLAC",
+            ) if typed_source else None
         ),
         current_measurement=(
             AudioQualityMeasurement(
@@ -477,13 +484,18 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
                 uploader="Korveck", distance=0.181, has_have=False,
             )
 
-    @given(path=st.sampled_from(("direct", "triaged")), has_have=st.booleans())
-    @example(path="direct", has_have=True)
-    @example(path="triaged", has_have=True)
+    @given(
+        path=st.sampled_from(("direct", "triaged")),
+        has_have=st.booleans(),
+        legacy_source=st.booleans(),
+    )
+    @example(path="direct", has_have=True, legacy_source=True)
+    @example(path="triaged", has_have=True, legacy_source=True)
     def test_corrupt_candidate_projection_clears_all_quality_fallbacks(
         self,
         path: str,
         has_have: bool,
+        legacy_source: bool,
     ) -> None:
         current = ({
             "format": "MP3", "min_bitrate_kbps": 192,
@@ -493,9 +505,13 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
             "outcome": "rejected", "actual_min_bitrate": 0,
             "was_converted": True, "original_filetype": "flac",
             "actual_filetype": "opus", "final_format": "opus 128",
+            "source_format": None if legacy_source else "FLAC",
+            "slskd_filetype": "FLAC",
+            "filetype": "mp3",
             "import_result": _corrupt_import_result(
                 "audio_corrupt" if path == "direct" else None,
                 has_have=has_have,
+                typed_source=not legacy_source,
             ),
         }
         if path == "direct":
@@ -510,7 +526,7 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
                 "preview_decision": "audio_corrupt",
                 "stage_chain": ["preimport_audio:reject_corrupt"],
                 "candidate_measurement": {
-                    "format": "FLAC", "min_bitrate_kbps": 0,
+                    "format": None if legacy_source else "FLAC", "min_bitrate_kbps": 0,
                     "avg_bitrate_kbps": 0, "median_bitrate_kbps": 0,
                     "spectral_grade": "genuine", "spectral_bitrate_kbps": 320,
                 },

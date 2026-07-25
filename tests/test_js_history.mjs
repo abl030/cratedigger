@@ -1289,6 +1289,21 @@ console.log('corrupt candidates suppress invalid IN quality claims while keeping
   assertExcludes(detail, '171kbps', 'expanded V0 cannot revive a corrupt candidate');
   assertExcludes(detail, 'OPUS avg', 'expanded Output cannot revive converted candidate bytes');
   assertExcludes(detail, 'Target contract', 'expanded conversion policy is hidden for corrupt input');
+
+  const legacy = renderEvidenceFixture({
+    outcome: 'rejected', source_format: null, slskd_filetype: 'FLAC',
+    original_filetype: 'FLAC', filetype: 'MP3', actual_filetype: 'Opus',
+    downloaded_label: 'FLAC', actual_min_bitrate: null,
+    existing_format: 'MP3', existing_min_bitrate: 192, existing_avg_bitrate: 224,
+  });
+  const sourceCodec = legacy.indexOf('>FLAC</span>');
+  const haveRow = legacy.indexOf('r-ev-row r-ev-have');
+  if (sourceCodec !== -1 && sourceCodec < haveRow) {
+    passed++;
+  } else {
+    failed++;
+    console.error('FAIL: legacy corrupt source trusts captured slskd codec before filetype fallbacks');
+  }
 }
 
 console.log('lossless storage labels distinguish V0 from retained FLAC');
