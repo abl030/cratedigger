@@ -238,7 +238,7 @@ class TestLibraryAlbumDetailService(unittest.TestCase):
         self.assertEqual(history.wrong_match_triage_action, "deleted_reject")
         self.assertEqual(
             history.wrong_match_triage_summary,
-            "deleted: requeue upgrade",
+            "download deleted: requeue upgrade",
         )
         self.assertEqual(history.wrong_match_triage_preview_verdict,
                          "confident_reject")

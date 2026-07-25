@@ -398,7 +398,10 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
         basis = triage["comparison_basis"]
     candidate_v0 = triage["candidate_v0_probe"]
     current_v0 = triage["current_v0_probe"]
-    candidate_audio_is_corrupt = _candidate_audio_is_corrupt(entry, triage)
+    candidate_audio_is_corrupt = _candidate_audio_is_corrupt(
+        entry,
+        triage["preview_decision"],
+    )
     if candidate_audio_is_corrupt:
         # A decoder failure is terminal evidence about the source bytes. A
         # partial spectral diagnostic can still exist, but presenting it next
@@ -847,12 +850,12 @@ def _extract_wrong_match_triage(entry: LogEntry) -> dict[str, Any]:
 
 def _candidate_audio_is_corrupt(
     entry: LogEntry,
-    triage: dict[str, Any],
+    triage_preview_decision: str | None,
 ) -> bool:
     """Whether the candidate is corrupt on either persisted audit path."""
     return (
         _entry_rejection_decision(entry) == "audio_corrupt"
-        or triage["preview_decision"] == "audio_corrupt"
+        or triage_preview_decision == "audio_corrupt"
     )
 
 
