@@ -6,9 +6,18 @@ import unittest
 from typing import Protocol
 
 from hypothesis import example, given, strategies as st
+import msgspec
 
 import tests._hypothesis_profiles  # noqa: F401
 from tests.test_web_recents import _entry
+from lib.quality import (
+    AudioQualityMeasurement,
+    ImportResult,
+    QualityComparisonBasis,
+    SpectralAnalysisDetail,
+    SpectralDetail,
+    V0ProbeEvidence,
+)
 from web.classify import classify_log_entry
 from web.routes.pipeline import (
     _project_current_library_have,
@@ -34,8 +43,23 @@ class _CompositeTriageProjection(Protocol):
     actual_min_bitrate: int | None
     source_min_bitrate: int | None
     source_avg_bitrate: int | None
+    source_median_bitrate: int | None
     spectral_grade: str | None
+    spectral_bitrate: int | None
+    v0_probe_kind: str | None
+    v0_probe_min_bitrate: int | None
+    v0_probe_avg_bitrate: int | None
+    v0_probe_median_bitrate: int | None
+    comparison_basis: dict[str, object] | None
+    downloaded_label: str
+    target_contract_format: str | None
+    materialized_format: str | None
+    materialized_min_bitrate: int | None
+    materialized_avg_bitrate: int | None
+    materialized_median_bitrate: int | None
+    existing_format: str | None
     existing_min_bitrate: int | None
+    existing_avg_bitrate: int | None
 
 
 def assert_short_searching_verdict(verdict: str) -> None:
@@ -105,15 +129,78 @@ def assert_composite_triage_projection(
     assert_triaged_rejection_style(
         action, result.badge, result.badge_class, result.border_color)
     if reason == "audio_corrupt":
-        if any((
-            result.actual_min_bitrate is not None,
-            result.source_min_bitrate is not None,
-            result.source_avg_bitrate is not None,
-            result.spectral_grade is not None,
-        )):
-            raise AssertionError("corrupt input leaked a quality claim")
-    if has_have and result.existing_min_bitrate is None:
-        raise AssertionError("corrupt projection erased point-in-time HAVE")
+        assert_corrupt_candidate_display_is_codec_only(result, has_have=has_have)
+
+
+def assert_corrupt_candidate_display_is_codec_only(
+    result: _CompositeTriageProjection,
+    *,
+    has_have: bool,
+) -> None:
+    """A corrupt candidate may retain its codec, never quality claims."""
+    if any((
+        result.actual_min_bitrate is not None,
+        result.source_min_bitrate is not None,
+        result.source_avg_bitrate is not None,
+        result.source_median_bitrate is not None,
+        result.spectral_grade is not None,
+        result.spectral_bitrate is not None,
+        result.v0_probe_kind is not None,
+        result.v0_probe_min_bitrate is not None,
+        result.v0_probe_avg_bitrate is not None,
+        result.v0_probe_median_bitrate is not None,
+        result.comparison_basis is not None,
+        result.target_contract_format is not None,
+        result.materialized_format is not None,
+        result.materialized_min_bitrate is not None,
+        result.materialized_avg_bitrate is not None,
+        result.materialized_median_bitrate is not None,
+    )):
+        raise AssertionError("corrupt input leaked a candidate quality claim")
+    if result.downloaded_label != "FLAC":
+        raise AssertionError("corrupt input leaked a tier or conversion label")
+    if has_have:
+        if result.existing_format != "MP3" or result.existing_min_bitrate != 192:
+            raise AssertionError("corrupt projection erased point-in-time HAVE")
+        if result.existing_avg_bitrate != 224:
+            raise AssertionError("corrupt projection changed point-in-time HAVE")
+
+
+def _corrupt_import_result(decision: str | None, *, has_have: bool = False) -> str:
+    """Full candidate quality world used to prove every display fallback dies."""
+    basis = msgspec.convert({
+        "verdict": "worse", "branch": "rank",
+        "new_rank": "transparent", "existing_rank": "acceptable",
+        "new_metric": "avg", "existing_metric": "avg",
+        "new_value_kbps": 0, "existing_value_kbps": 224,
+        "new_format": "FLAC", "existing_format": "MP3",
+        "spectral_clamped": False, "tolerance_kbps": None,
+        "verified_lossless_bypass": False,
+    }, type=QualityComparisonBasis)
+    return ImportResult(
+        decision=decision,
+        source_measurement=AudioQualityMeasurement(
+            min_bitrate_kbps=0, avg_bitrate_kbps=0,
+            median_bitrate_kbps=0, format="FLAC",
+        ),
+        current_measurement=(
+            AudioQualityMeasurement(
+                min_bitrate_kbps=192, avg_bitrate_kbps=224, format="MP3",
+            ) if has_have else None
+        ),
+        materialized_measurement=AudioQualityMeasurement(
+            min_bitrate_kbps=118, avg_bitrate_kbps=124,
+            median_bitrate_kbps=122, format="Opus",
+        ),
+        spectral=SpectralDetail(candidate=SpectralAnalysisDetail(
+            attempted=True, grade="genuine", bitrate_kbps=320,
+        )),
+        v0_probe=V0ProbeEvidence(
+            kind="lossless_source_v0", min_bitrate_kbps=165,
+            avg_bitrate_kbps=171, median_bitrate_kbps=170,
+        ),
+        comparison_basis=basis,
+    ).to_json()
 
 
 def assert_current_library_have_is_projected(
@@ -366,14 +453,108 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
             actual_min_bitrate: int | None = None
             source_min_bitrate: int | None = None
             source_avg_bitrate: int | None = None
+            source_median_bitrate: int | None = None
             spectral_grade: str | None = None
+            spectral_bitrate: int | None = None
+            v0_probe_kind: str | None = None
+            v0_probe_min_bitrate: int | None = None
+            v0_probe_avg_bitrate: int | None = None
+            v0_probe_median_bitrate: int | None = None
+            comparison_basis: dict[str, object] | None = None
+            downloaded_label: str = ""
+            target_contract_format: str | None = None
+            materialized_format: str | None = None
+            materialized_min_bitrate: int | None = None
+            materialized_avg_bitrate: int | None = None
+            materialized_median_bitrate: int | None = None
+            existing_format: str | None = None
             existing_min_bitrate: int | None = None
+            existing_avg_bitrate: int | None = None
 
         with self.assertRaisesRegex(AssertionError, "hid cleanup"):
             assert_composite_triage_projection(
-                OldProjection(), action="deleted_reject", reason="audio_corrupt",
+                OldProjection(), action="deleted_reject", reason="spectral_reject",
                 uploader="Korveck", distance=0.181, has_have=False,
             )
+
+    @given(path=st.sampled_from(("direct", "triaged")), has_have=st.booleans())
+    @example(path="direct", has_have=True)
+    @example(path="triaged", has_have=True)
+    def test_corrupt_candidate_projection_clears_all_quality_fallbacks(
+        self,
+        path: str,
+        has_have: bool,
+    ) -> None:
+        current = ({
+            "format": "MP3", "min_bitrate_kbps": 192,
+            "avg_bitrate_kbps": 224,
+        } if has_have else None)
+        common: dict[str, object] = {
+            "outcome": "rejected", "actual_min_bitrate": 0,
+            "was_converted": True, "original_filetype": "flac",
+            "actual_filetype": "opus", "final_format": "opus 128",
+            "import_result": _corrupt_import_result(
+                "audio_corrupt" if path == "direct" else None,
+                has_have=has_have,
+            ),
+        }
+        if path == "direct":
+            result = classify_log_entry(_entry(
+                **common, beets_scenario="audio_corrupt",
+            ))
+        else:
+            audit: dict[str, object] = {
+                "action": "deleted_reject", "outcome": "deleted",
+                "reason": "audio_corrupt",
+                "preview_verdict": "confident_reject",
+                "preview_decision": "audio_corrupt",
+                "stage_chain": ["preimport_audio:reject_corrupt"],
+                "candidate_measurement": {
+                    "format": "FLAC", "min_bitrate_kbps": 0,
+                    "avg_bitrate_kbps": 0, "median_bitrate_kbps": 0,
+                    "spectral_grade": "genuine", "spectral_bitrate_kbps": 320,
+                },
+                "candidate_v0_probe": {
+                    "kind": "lossless_source_v0", "min_bitrate_kbps": 165,
+                    "avg_bitrate_kbps": 171, "median_bitrate_kbps": 170,
+                },
+            }
+            if current is not None:
+                audit["current_measurement"] = current
+            result = classify_log_entry(_entry(
+                **common, beets_scenario="high_distance", beets_distance=0.181,
+                validation_result={"wrong_match_triage": audit},
+            ))
+        assert_corrupt_candidate_display_is_codec_only(result, has_have=has_have)
+
+    def test_corrupt_projection_checker_rejects_candidate_leaks_and_erased_have(self) -> None:
+        result = classify_log_entry(_entry(
+            outcome="rejected", beets_scenario="audio_corrupt",
+            actual_min_bitrate=0, import_result=_corrupt_import_result("audio_corrupt"),
+        ))
+        leaked_v0 = msgspec.structs.replace(result, v0_probe_avg_bitrate=171)
+        with self.assertRaisesRegex(AssertionError, "candidate quality claim"):
+            assert_corrupt_candidate_display_is_codec_only(leaked_v0, has_have=False)
+        leaked_label = msgspec.structs.replace(
+            result, downloaded_label="FLAC → OPUS 128",
+        )
+        with self.assertRaisesRegex(AssertionError, "tier or conversion label"):
+            assert_corrupt_candidate_display_is_codec_only(leaked_label, has_have=False)
+        leaked_output = msgspec.structs.replace(
+            result, materialized_format="Opus", materialized_avg_bitrate=124,
+        )
+        with self.assertRaisesRegex(AssertionError, "candidate quality claim"):
+            assert_corrupt_candidate_display_is_codec_only(leaked_output, has_have=False)
+        with_have = msgspec.structs.replace(
+            result, existing_format="MP3", existing_min_bitrate=192,
+            existing_avg_bitrate=224,
+        )
+        erased_have = msgspec.structs.replace(
+            with_have, existing_format=None, existing_min_bitrate=None,
+            existing_avg_bitrate=None,
+        )
+        with self.assertRaisesRegex(AssertionError, "erased point-in-time HAVE"):
+            assert_corrupt_candidate_display_is_codec_only(erased_have, has_have=True)
 
     @given(action=st.sampled_from((
         "deleted_reject",

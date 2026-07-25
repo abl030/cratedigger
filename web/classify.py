@@ -405,9 +405,11 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
         # to a zero bitrate makes it look like a quality assessment. Retain
         # raw ImportResult/triage facts; only the shared display projection
         # declines to compare corrupt input as audio quality.
-        lineage = (lineage[0], None, None, None, lineage[4], lineage[5])
+        downloaded_label = _codec_only_downloaded_label(entry, lineage[0])
+        lineage = (lineage[0], None, None, None, None, None)
+        materialized = (None, None, None, None)
         spectral = (
-            None, None, spectral[2], spectral[3], spectral[4], spectral[5],
+            None, None, spectral[2], spectral[3], None, None,
             spectral[6], spectral[7],
         )
         candidate_v0 = None
@@ -456,19 +458,28 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
         existing_avg_bitrate=existing_avg_bitrate,
         existing_median_bitrate=existing_median_bitrate,
         v0_probe_kind=(
-            candidate_v0.kind if candidate_v0 is not None else entry.v0_probe_kind
+            None if candidate_audio_is_corrupt else (
+                candidate_v0.kind
+                if candidate_v0 is not None else entry.v0_probe_kind
+            )
         ),
         v0_probe_min_bitrate=(
-            candidate_v0.min_bitrate_kbps
-            if candidate_v0 is not None else entry.v0_probe_min_bitrate
+            None if candidate_audio_is_corrupt else (
+                candidate_v0.min_bitrate_kbps
+                if candidate_v0 is not None else entry.v0_probe_min_bitrate
+            )
         ),
         v0_probe_avg_bitrate=(
-            candidate_v0.avg_bitrate_kbps
-            if candidate_v0 is not None else entry.v0_probe_avg_bitrate
+            None if candidate_audio_is_corrupt else (
+                candidate_v0.avg_bitrate_kbps
+                if candidate_v0 is not None else entry.v0_probe_avg_bitrate
+            )
         ),
         v0_probe_median_bitrate=(
-            candidate_v0.median_bitrate_kbps
-            if candidate_v0 is not None else entry.v0_probe_median_bitrate
+            None if candidate_audio_is_corrupt else (
+                candidate_v0.median_bitrate_kbps
+                if candidate_v0 is not None else entry.v0_probe_median_bitrate
+            )
         ),
         existing_v0_probe_kind=(
             current_v0.kind
@@ -1537,3 +1548,21 @@ def _build_downloaded_label(entry: LogEntry) -> str:
         return f"{entry.original_filetype.upper()} → {target_label.upper()}"
 
     return legacy_floor_quality_label(fmt, br_kbps) if br_kbps else fmt.upper()
+
+
+def _codec_only_downloaded_label(entry: LogEntry, source_format: str | None) -> str:
+    """Return only the corrupt candidate's measured codec identity.
+
+    Corrupt bytes are not comparable quality evidence, so never carry their
+    tier, target conversion, or raw fallback bitrate into the display label.
+    """
+    fmt = (
+        source_format or entry.source_format or entry.filetype
+        or entry.actual_filetype
+    )
+    if not fmt:
+        return ""
+    formats = list(dict.fromkeys(
+        part.strip().upper() for part in fmt.split(",") if part.strip()
+    ))
+    return " + ".join(formats)

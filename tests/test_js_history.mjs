@@ -1267,6 +1267,28 @@ console.log('corrupt candidates suppress invalid IN quality claims while keeping
   assertContains(strip, '>224k avg (min 192k)</span>', 'HAVE remains point-in-time evidence');
   assertExcludes(strip, '0k', 'corrupt source never presents zero bitrate as quality evidence');
   assertExcludes(strip, 'genuine', 'corrupt source never presents a positive spectral grade');
+
+  const detail = renderDownloadHistoryFixture({
+    outcome: 'rejected', badge: 'Rejected',
+    created_at: '2026-07-25T12:00:00+00:00',
+    verdict: 'Corrupt audio files detected',
+    source_format: 'FLAC', downloaded_label: 'FLAC',
+    actual_min_bitrate: null,
+    source_min_bitrate: null, source_avg_bitrate: null,
+    source_median_bitrate: null, spectral_grade: null,
+    v0_probe_kind: null, v0_probe_min_bitrate: null,
+    v0_probe_avg_bitrate: null, v0_probe_median_bitrate: null,
+    target_contract_format: null,
+    materialized_format: null, materialized_min_bitrate: null,
+    materialized_avg_bitrate: null, materialized_median_bitrate: null,
+    comparison_basis: null,
+    existing_format: 'MP3', existing_min_bitrate: 192,
+    existing_avg_bitrate: 224,
+  });
+  assertContains(detail, 'FLAC', 'expanded Source retains the honest codec');
+  assertExcludes(detail, '171kbps', 'expanded V0 cannot revive a corrupt candidate');
+  assertExcludes(detail, 'OPUS avg', 'expanded Output cannot revive converted candidate bytes');
+  assertExcludes(detail, 'Target contract', 'expanded conversion policy is hidden for corrupt input');
 }
 
 console.log('lossless storage labels distinguish V0 from retained FLAC');
