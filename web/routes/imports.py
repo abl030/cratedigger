@@ -745,7 +745,6 @@ def post_wrong_match_converge(h: RouteHandler, body: dict[str, object]) -> None:
         lid = row["download_log_id"]
 
         vr = decode_validation_envelope(row.get("validation_result"))
-        failed_path = vr.failed_path or ""
         distance = vr.distance
         green = _is_green_distance(vr, threshold_milli)
 
