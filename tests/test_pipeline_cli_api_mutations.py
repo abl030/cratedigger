@@ -6,6 +6,8 @@ import argparse
 from email.message import Message
 import io
 import json
+import os
+import tempfile
 import threading
 import unittest
 import urllib.error
@@ -172,23 +174,31 @@ class TestApiMutationCli(unittest.TestCase):
             ["wrong-match-converge", "8", "150", "--apply"],
             ["resolve-rg", "9"],
         ]
-        for command in commands:
-            with self.subTest(command=command), patch(
-                "scripts.pipeline_cli.cli.PipelineDB", side_effect=AssertionError,
-            ), patch(
-                "web.api_bases.configure_api_bases_from_runtime_config",
-                side_effect=AssertionError,
-            ), patch(
-                "scripts.pipeline_cli.api_mutations.urllib.request.OpenerDirector.open",
-                return_value=_Response(200),
-            ) as urlopen, patch("sys.argv", [
-                "pipeline-cli", "--api-base", "http://api", *command,
-            ]):
-                with self.assertRaises(SystemExit) as exited:
-                    from scripts.pipeline_cli.cli import main
-                    main()
-            self.assertEqual(exited.exception.code, 0)
-            urlopen.assert_called_once()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = os.path.join(temp_dir, "config.ini")
+            # Missing config deliberately soft-fails. This existing but invalid
+            # config, plus the invalid DSN below, makes either forbidden setup
+            # path fail loudly if an API command stops short-circuiting.
+            with open(config_path, "w", encoding="utf-8") as config_file:
+                config_file.write(
+                    "[Search Settings]\n"
+                    "number_of_albums_to_grab = 1\n",
+                )
+            for command in commands:
+                with self.subTest(command=command), patch.dict(
+                    os.environ, {"CRATEDIGGER_RUNTIME_CONFIG": config_path},
+                ), patch(
+                    "scripts.pipeline_cli.api_mutations.urllib.request.OpenerDirector.open",
+                    return_value=_Response(200),
+                ) as urlopen, patch("sys.argv", [
+                    "pipeline-cli", "--dsn", "not-a-postgresql-dsn",
+                    "--api-base", "http://api", *command,
+                ]):
+                    with self.assertRaises(SystemExit) as exited:
+                        from scripts.pipeline_cli.cli import main
+                        main()
+                self.assertEqual(exited.exception.code, 0)
+                urlopen.assert_called_once()
 
 
 class TestApiMutationRealRouteRoundTrips(_FakeDbWebServerCase):
