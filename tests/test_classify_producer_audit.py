@@ -961,13 +961,19 @@ def mbid_not_found_blob(candidate_count: int) -> dict[str, object]:
     """The blob ``lib/beets.py`` writes beside ``mbid_not_found``.
 
     Built from the producer's own Struct, not a hand-rolled dict
-    (``.claude/rules/test-fidelity.md`` Rule C).
+    (``.claude/rules/test-fidelity.md`` Rule C). ``items`` and
+    ``recommendation`` are populated because the ``choose_match`` handler
+    always sets them before it decides ``mbid_found`` — that is exactly
+    what makes them proof beets ran.
     """
     result = ValidationResult(
         valid=False,
         scenario="mbid_not_found",
         mbid_found=False,
         detail="Target MBID rel-1 not in candidates",
+        recommendation="none",
+        local_track_count=3,
+        items=[{"title": f"track {index}"} for index in range(3)],
         candidate_count=candidate_count,
         candidates=[
             CandidateSummary(mbid=f"other-{index}", distance=0.4)
@@ -975,6 +981,20 @@ def mbid_not_found_blob(candidate_count: int) -> dict[str, object]:
         ],
     )
     blob: dict[str, object] = msgspec.to_builtins(result)
+    return blob
+
+
+def synthesized_rejection_blob(scenario: str) -> dict[str, object]:
+    """A rejection stub built WITHOUT beets — the F4 hazard shape.
+
+    Exactly what ``lib/download_rejection.py`` and
+    ``lib/dispatch/outcome_actions.py`` construct: distance, scenario and
+    detail only, leaving ``candidates``/``items``/``recommendation`` at
+    their defaults. On 2026-07-26, 911 of the 929 live rows carrying a
+    zero-candidate validation blob have this shape.
+    """
+    blob: dict[str, object] = msgspec.to_builtins(ValidationResult(
+        distance=0.02, scenario=scenario, detail="synthesized rejection"))
     return blob
 
 
@@ -991,36 +1011,83 @@ class TestFabricatedCopyIsGone(unittest.TestCase):
         )
         self.assertNotIn("No MusicBrainz match", classified.verdict)
 
-    def test_an_empty_candidate_set_says_so_instead(self) -> None:
-        """The other 18 live rows carry an empty set — an unmatchable
-        folder, not a pressing mismatch — so a sentence that reads as
-        though candidates existed is only vacuously true."""
+    def test_an_empty_candidate_set_names_the_release_id_lookup(self) -> None:
+        """The other 18 live rows carry an empty set — a release-ID lookup
+        that came back with nothing, not a pressing mismatch.
+
+        It names the LOOKUP, not the folder: ``lib/beets.py`` always passes
+        ``--search-id``, so beets' ``tag_album`` takes its ``if
+        search_ids:`` branch and derives candidates from
+        ``albums_for_ids`` alone. Live confirmation that the folder is not
+        the discriminator: all 13 requests behind those 18 rows have
+        sibling attempts on the SAME release ID that did return candidates
+        (issue #882 review F1).
+        """
         classified = classify_log_entry(
             _rejected("mbid_not_found", mbid_not_found_blob(0)))
         self.assertEqual(
             classified.verdict,
-            "Beets returned no match candidates for this folder",
+            "Beets returned no match candidates for the requested release ID",
         )
+        lowered = classified.verdict.casefold()
         # The original falsehood must not come back in any form: the
         # producer records an empty CANDIDATE SET, never that no match
-        # exists anywhere. "no match candidates" is the set; "no match
-        # found" / "no MusicBrainz match" are the retracted claim.
-        lowered = classified.verdict.casefold()
+        # exists anywhere.
         for retracted in (
             "no musicbrainz match", "no match found", "no match exists",
             "no matching release",
         ):
             self.assertNotIn(retracted, lowered)
+        # Nor may it point the operator at the folder, which cannot have
+        # decided this, or name MusicBrainz — two of the 18 requested
+        # Discogs release IDs.
+        for misdirection in ("folder", "musicbrainz"):
+            self.assertNotIn(misdirection, lowered)
 
-    def test_without_a_validation_verdict_neither_arm_is_claimed(self) -> None:
-        """Absence of evidence is not evidence of an empty candidate set."""
-        for blob in (None, {"scenario": "mbid_not_found"}):
+    def test_a_row_without_a_beets_verdict_uses_the_general_sentence(self) -> None:
+        """No beets verdict means neither arm is PROVEN, so the general
+        sentence stands — it is the weaker claim and is true of an empty
+        candidate set as well as a populated one."""
+        for blob in (
+            None,
+            {"scenario": "mbid_not_found"},
+            "not json at all",
+            synthesized_rejection_blob("mbid_not_found"),
+        ):
             with self.subTest(blob=blob):
                 classified = classify_log_entry(_rejected("mbid_not_found", blob))
                 self.assertEqual(
                     classified.verdict,
                     "Requested release ID not among the match candidates",
                 )
+
+    def test_a_synthesized_stub_never_claims_beets_returned_nothing(self) -> None:
+        """Review F4: 911 of the 929 live rows with a zero-candidate
+        validation blob carry a beets-shaped rejection stub that beets
+        never produced. An empty ``candidates`` list there is the Struct
+        default, not a verdict.
+
+        The gate therefore requires positive proof beets RAN — the
+        ``items`` and ``recommendation`` its ``choose_match`` handler
+        writes — and each half is load-bearing on its own.
+        """
+        stub = synthesized_rejection_blob("mbid_not_found")
+        self.assertEqual(stub["candidates"], [])
+        self.assertEqual(stub["items"], [])
+        self.assertIsNone(stub["recommendation"])
+        self.assertFalse(classify._beets_returned_no_candidates(
+            _rejected("mbid_not_found", stub)))
+        # A stub dressed up with only one of the two signals still fails.
+        for partial in ({"items": [{"title": "t"}]}, {"recommendation": "none"}):
+            with self.subTest(partial=partial):
+                self.assertFalse(classify._beets_returned_no_candidates(
+                    _rejected("mbid_not_found", {**stub, **partial})))
+        # Both together, with an empty candidate list, is the real thing.
+        self.assertTrue(classify._beets_returned_no_candidates(
+            _rejected("mbid_not_found", mbid_not_found_blob(0))))
+        # …and a real run that DID return candidates is not this arm.
+        self.assertFalse(classify._beets_returned_no_candidates(
+            _rejected("mbid_not_found", mbid_not_found_blob(1))))
 
     def test_the_fabricated_key_no_longer_manufactures_a_sentence(self) -> None:
         classified = classify_log_entry(_rejected("no_candidates"))
@@ -1055,20 +1122,23 @@ class TestUnhandledScenariosReadAsWords(unittest.TestCase):
     no fact — it is the token itself, spelled for a human.
 
     ``changed_rows`` is measured, not assumed: it is how many live rows
-    this change actually re-renders, from replaying both classifiers over
-    all 36,303 ``download_log`` rows on 2026-07-26. It is NOT the count of
-    rows carrying that ``beets_scenario`` — ``_entry_rejection_decision``
-    prefers a rejection-recording ``ImportResult`` decision, so only the
-    rows without one reach this fallback (477 rows carry
-    ``strong_match``; 8 of them render through here).
+    RENDER this text, from replaying both classifiers over all 36,303
+    ``download_log`` rows on 2026-07-26. It is NOT the count of rows
+    carrying that ``beets_scenario`` — ``_entry_rejection_decision``
+    prefers a rejection-recording ``ImportResult`` decision, so a row can
+    render under a different token than its own column holds. 477 rows
+    carry ``strong_match``; 5 render "strong match", and 3 more render
+    "import failed" because their ``ImportResult.decision`` says so
+    (issue #882 review F5 — the same by-scenario-vs-by-rendered-row trap,
+    caught a second time).
     """
 
     CASES = [
         ("extra_tracks", "extra tracks", 45),
-        ("import_failed", "import failed", 44),
+        ("import_failed", "import failed", 47),
         ("untracked_audio", "untracked audio", 14),
         ("mbid_missing", "mbid missing", 10),
-        ("strong_match", "strong match", 8),
+        ("strong_match", "strong match", 5),
         ("quality_evidence_action_failed", "quality evidence action failed", 2),
     ]
 

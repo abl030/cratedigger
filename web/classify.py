@@ -903,21 +903,35 @@ def _extract_wrong_match_triage(entry: LogEntry) -> dict[str, Any]:
 
 
 def _beets_returned_no_candidates(entry: LogEntry) -> bool:
-    """Whether the persisted validation POSITIVELY records an empty candidate set.
+    """Whether a real beets run POSITIVELY recorded an empty candidate set.
 
     ``lib/beets.py`` writes ``mbid_not_found`` whenever the requested release
-    ID is absent from ``cm.candidates``, empty set or not. Only the blob it
-    wrote alongside distinguishes the two, so this answers ``True`` solely on
-    positive evidence: a real ``ValidationResult`` verdict (``valid`` is a
-    bool on every envelope its writer produced — ``None`` marks the
-    curator-ban/legacy envelopes that never carried one) whose ``candidates``
-    list is empty. Absence of evidence is not an empty candidate set.
+    ID is absent from ``cm.candidates``, empty set or not, so only the blob it
+    wrote alongside separates "beets returned nothing" from "beets returned
+    siblings". The discriminator has to prove beets RAN, not merely that the
+    blob is ValidationResult-shaped: ``valid`` defaults to ``False`` and is
+    always emitted, so most rejection blobs on disk are synthesized stubs
+    (``ValidationResult(distance=…, scenario=…, detail=…)`` in
+    ``lib/download_rejection.py`` / ``lib/dispatch/outcome_actions.py``) that
+    carry an empty ``candidates`` list purely because beets was never
+    consulted (issue #882 review F4).
+
+    ``items`` and ``recommendation`` are written together, and only, by the
+    ``choose_match`` handler in ``lib/beets.py`` — the local tracks the
+    harness reported and beets' own confidence in the match it proposed — so
+    both non-empty is positive evidence of a real run. Live on 2026-07-26 the
+    two populations separate cleanly: of every row carrying a zero-candidate
+    validation blob, the 18 with both signals all have
+    ``recommendation='none'`` and 2-20 items, and the other 911 have neither.
+    Anything short of both fails closed to the general sentence, which is
+    true of an empty candidate set anyway.
     """
     try:
         envelope = decode_validation_envelope(entry.validation_result)
     except (msgspec.ValidationError, json.JSONDecodeError):
         return False
-    return envelope.valid is not None and not envelope.candidates
+    beets_ran = bool(envelope.items) and bool(envelope.recommendation)
+    return beets_ran and not envelope.candidates
 
 
 def _candidate_audio_is_corrupt(
@@ -1525,9 +1539,21 @@ def _rejection_verdict(entry: LogEntry) -> str:
     # ``lib/beets.py`` sets this from ``if not result.mbid_found``: the
     # requested release ID is not in the candidate set beets emitted. That
     # fires whether or not the set was empty — 18 of the 50 live rows carry
-    # an empty one (beets' own filtering, e.g. ``match.ignore_video_tracks``)
-    # — and the two cases send the operator to different places, so each
-    # gets the sentence its own evidence supports.
+    # an empty one — and the two cases send the operator to different
+    # places, so each gets the sentence its own evidence supports.
+    #
+    # The empty arm names the release-ID LOOKUP, not the folder, because
+    # the folder cannot be the discriminator: ``lib/beets.py`` always
+    # passes ``--search-id``, the harness maps it to
+    # ``config["import"]["search_ids"]``, and beets' ``tag_album`` then
+    # takes its ``if search_ids:`` branch — deriving candidates from
+    # ``albums_for_ids`` alone and skipping the metadata/text search
+    # entirely. Live confirmation: every one of the 13 requests behind
+    # those 18 rows has sibling attempts on the SAME release ID that did
+    # return candidates (1 to 115 each). It says "Beets" rather than
+    # "MusicBrainz" because the ID is not always an MBID — two of the 18
+    # requested Discogs release IDs, which ``albums_for_ids`` dispatches
+    # across metadata plugins.
     #
     # The copy this replaced was keyed on ``no_candidates``, a string no
     # producer has ever emitted (issue #882): the 50 live rows carrying the
@@ -1535,7 +1561,10 @@ def _rejection_verdict(entry: LogEntry) -> str:
     # sentence sat behind a key nothing could reach.
     if scenario == "mbid_not_found":
         if _beets_returned_no_candidates(entry):
-            return "Beets returned no match candidates for this folder"
+            return (
+                "Beets returned no match candidates for the requested "
+                "release ID"
+            )
         return "Requested release ID not among the match candidates"
 
     # Historical: emitted by a pre-2026-03-24 revision, one live row, no

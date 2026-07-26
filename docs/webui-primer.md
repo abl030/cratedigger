@@ -281,9 +281,21 @@ Browser → https://music.ablz.au
   different places — so the copy splits on the persisted `candidates` list:
   32 live rows with a populated set read "Requested release ID not among the
   match candidates" (a pressing mismatch), 18 with an empty one read "Beets
-  returned no match candidates for this folder" (an unmatchable folder, e.g.
-  beets' own `match.ignore_video_tracks` filtering). A row with no readable
-  validation verdict claims neither.
+  returned no match candidates for the requested release ID". The empty arm
+  names the LOOKUP, not the folder, and asserts no mechanism: `lib/beets.py`
+  always passes `--search-id`, so beets' `tag_album` takes its `if
+  search_ids:` branch and derives candidates from `albums_for_ids` alone —
+  the folder cannot decide whether a candidate exists, and every one of the
+  13 requests behind those 18 rows has sibling attempts on the same release
+  ID that did return candidates. It says "Beets" rather than "MusicBrainz"
+  because two of the 18 requested Discogs release IDs.
+  The empty arm requires positive proof beets actually ran — the `items` and
+  `recommendation` its `choose_match` handler writes — because a synthesized
+  rejection stub carries an empty `candidates` list by default: of every live
+  row with a zero-candidate validation blob, only 18 carry both signals and
+  911 carry neither. A row without that proof falls back to the general
+  sentence, which is the weaker claim and holds of an empty candidate set
+  either way.
   The paired generated properties additionally hold every rendered decision
   claim — verdict and collapsed summary alike — against what the importer
   really does with that decision (`dispatch_action`, `decision_denylists`), so
