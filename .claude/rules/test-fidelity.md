@@ -143,7 +143,7 @@ that cannot emit it, which is the whole diagnosis.
 
 ## Stronger enforcement (future work)
 
-The two rules above are guidance. Three layers of stronger enforcement, in order of ROI:
+The three rules above are guidance. Three layers of stronger enforcement, in order of ROI:
 
 ### 1. Struct-typed write interface (high ROI, moderate effort)
 

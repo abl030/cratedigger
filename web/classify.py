@@ -902,6 +902,24 @@ def _extract_wrong_match_triage(entry: LogEntry) -> dict[str, Any]:
     }
 
 
+def _beets_returned_no_candidates(entry: LogEntry) -> bool:
+    """Whether the persisted validation POSITIVELY records an empty candidate set.
+
+    ``lib/beets.py`` writes ``mbid_not_found`` whenever the requested release
+    ID is absent from ``cm.candidates``, empty set or not. Only the blob it
+    wrote alongside distinguishes the two, so this answers ``True`` solely on
+    positive evidence: a real ``ValidationResult`` verdict (``valid`` is a
+    bool on every envelope its writer produced — ``None`` marks the
+    curator-ban/legacy envelopes that never carried one) whose ``candidates``
+    list is empty. Absence of evidence is not an empty candidate set.
+    """
+    try:
+        envelope = decode_validation_envelope(entry.validation_result)
+    except (msgspec.ValidationError, json.JSONDecodeError):
+        return False
+    return envelope.valid is not None and not envelope.candidates
+
+
 def _candidate_audio_is_corrupt(
     entry: LogEntry,
     triage_preview_decision: str | None,
@@ -1454,12 +1472,6 @@ def _rejection_verdict(entry: LogEntry) -> str:
     # evidence in the row payload.
     scenario = _entry_rejection_decision(entry)
 
-    # Proof lock: the decision is current-proof-driven, so the quality
-    # comparison sentence built from the ImportResult would mislabel it —
-    # return the dedicated policy sentence before any delegation.
-    if scenario == "verified_lossless_locked":
-        return _verified_lossless_locked_verdict()
-
     # Quality comparison scenarios — delegate to ImportResult when available
     if scenario in (
         "downgrade",
@@ -1510,13 +1522,20 @@ def _rejection_verdict(entry: LogEntry) -> str:
             return f"Duplicate remove guard failed: {entry.beets_detail}"
         return "Duplicate remove guard failed"
 
-    # ``lib/beets.py`` sets this when the requested release ID is absent from
-    # the candidate set beets returned — NOT when beets found nothing. The
-    # copy this replaced was keyed on ``no_candidates``, a string no producer
-    # has ever emitted (issue #882): 50 live rows carrying the real
-    # ``mbid_not_found`` fell through to the raw-token fallback while the
-    # fluent sentence sat behind a key nothing could reach.
+    # ``lib/beets.py`` sets this from ``if not result.mbid_found``: the
+    # requested release ID is not in the candidate set beets emitted. That
+    # fires whether or not the set was empty — 18 of the 50 live rows carry
+    # an empty one (beets' own filtering, e.g. ``match.ignore_video_tracks``)
+    # — and the two cases send the operator to different places, so each
+    # gets the sentence its own evidence supports.
+    #
+    # The copy this replaced was keyed on ``no_candidates``, a string no
+    # producer has ever emitted (issue #882): the 50 live rows carrying the
+    # real literal fell through to the raw-token fallback while the fluent
+    # sentence sat behind a key nothing could reach.
     if scenario == "mbid_not_found":
+        if _beets_returned_no_candidates(entry):
+            return "Beets returned no match candidates for this folder"
         return "Requested release ID not among the match candidates"
 
     # Historical: emitted by a pre-2026-03-24 revision, one live row, no
@@ -1527,7 +1546,11 @@ def _rejection_verdict(entry: LogEntry) -> str:
     if scenario == "nested_layout":
         return "Nested folder layout (flatten first)"
 
-    return str(scenario) if scenario else "Rejected"
+    # An unhandled producer scenario reads as words, not as a machine token —
+    # the same doctrine ``_wrong_match_action_label`` has always applied, and
+    # the one this module had two answers to before #882. Humanizing invents
+    # no fact: it is the token itself, spelled for a human.
+    return _humanize_token(scenario) or "Rejected"
 
 
 def _upgrade_verdict(prev_br: Optional[int], cur_br: Optional[int],

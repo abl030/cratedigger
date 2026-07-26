@@ -19,16 +19,30 @@ C1. **Every string that renders a decision claim is true of what the
     form ("could not read" fixed, "unreadable" shipped), so a
     verdict-scoped check proves nothing.
 
-C2. **A decision name no producer emits is never rewritten into operator
-    copy.** It reaches the operator as itself. This is the property twin
-    of the producer audit: the audit proves no fabricated literal is
-    matched today, this proves the module does not manufacture a sentence
-    for one tomorrow. It is the invariant ``no_candidates`` violated —
-    fluent copy for a string nothing produces, while the producing string
-    (``mbid_not_found``, 50 live rows) fell through to the raw token.
+C2. **A decision name no producer emits is never rewritten into a
+    different FACT.** It reaches the operator as the token itself, spelled
+    for a human. This is the property twin of the producer audit: the
+    audit proves no fabricated literal is matched today, this proves the
+    module does not manufacture a sentence for one tomorrow. It is the
+    invariant ``no_candidates`` violated — fluent copy for a string
+    nothing produces, while the producing string (``mbid_not_found``, 50
+    live rows) fell through to the raw token.
+
+    The comparison is against an INDEPENDENT restatement of the
+    presentation-only transform (``humanized``), not against
+    ``_humanize_token`` itself; comparing production to production would
+    make the property follow a producer that started inventing.
 
 C3. **A decision name classify DOES match renders words, not its own raw
     token.** The other half of the same defect.
+
+Known limitation (issue #882 review N6): C1's forbidden vocabulary is a
+DENYLIST of phrasings, so a novel wording of a false claim — "…; the hunt
+goes on" for a proof-locked request — escapes it. That is inherent to
+checking prose; the backstop is the exact-string pins in
+``tests/test_classify_producer_audit.py``, which fail the moment the
+sentence changes at all. Widen the denylist when a new phrasing ships;
+do not mistake it for a semantic check.
 
 Every checker is a module-level function returning a violation string (or
 ``None``), so ``TestInvariantCheckersTripOnViolations`` can call it
@@ -193,6 +207,17 @@ def check_decision_claim(
     return None
 
 
+def humanized(token: str) -> str:
+    """The presentation-only transform, restated independently.
+
+    Deliberately not a call to ``web.classify._humanize_token``: a checker
+    that asks production what production should have said cannot catch
+    production inventing. Separators become spaces; nothing else changes,
+    so no new fact can enter.
+    """
+    return token.replace("_", " ").replace("-", " ").strip()
+
+
 def check_unproduced_name_is_not_rewritten(
     scenario: str,
     verdict: str,
@@ -200,10 +225,13 @@ def check_unproduced_name_is_not_rewritten(
     """C2 — copy is invented only for names a producer actually emits.
 
     The defect this patrols: a branch keyed on a string no producer emits
-    replaced the operator's own evidence with a different, wrong fact.
-    Anything the module does not claim must reach them unedited.
+    replaced the operator's own evidence with a different, wrong fact. The
+    bar is the FACT, not the exact bytes — spelling ``import_failed`` as
+    "import failed" adds no claim, which is why this compares against the
+    independent ``humanized`` restatement rather than the raw token
+    (issue #882 review N1).
     """
-    if verdict != scenario:
+    if verdict != humanized(scenario):
         return (
             f"an unregistered decision name was rewritten: {scenario!r} -> "
             f"{verdict!r}"
@@ -215,8 +243,13 @@ def check_matched_name_renders_words(
     scenario: str,
     verdict: str,
 ) -> str | None:
-    """C3 — a name the module matches never renders as its own raw token."""
-    if verdict.strip() == scenario:
+    """C3 — a name the module matches renders copy, not the token itself.
+
+    A matched name is one the module claims to have something to say
+    about; falling through to the humanized token means the claim is
+    missing (``mbid_not_found``, 50 live rows, before #882).
+    """
+    if verdict.strip() in (scenario, humanized(scenario)):
         return (
             f"{scenario!r} is matched by the module but still renders as its "
             f"own machine token: {verdict!r}"
@@ -338,11 +371,15 @@ class TestUnproducedNamesAreNeverRewritten(unittest.TestCase):
     @given(scenario=st.text(min_size=1, max_size=60))
     @example(scenario="no_candidates")
     @example(scenario="stale_path_cleared")
-    def test_an_unmatched_decision_name_reaches_the_operator_verbatim(
+    @example(scenario="extra_tracks")
+    def test_an_unmatched_decision_name_reaches_the_operator_unedited(
         self, scenario: str,
     ) -> None:
         assume(scenario not in DECISION_LITERALS)
         assume(scenario.strip() == scenario and scenario.strip())
+        # A token that humanizes away entirely ("___") legitimately falls
+        # back to the generic "Rejected"; there is no fact to preserve.
+        assume(humanized(scenario))
         classified = classify_log_entry(
             LogEntry(id=1, request_id=2, outcome="rejected",
                      beets_scenario=scenario))
@@ -457,12 +494,27 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
     def test_passthrough_checker_trips_on_a_manufactured_sentence(self) -> None:
         self.assertIsNotNone(check_unproduced_name_is_not_rewritten(
             "no_candidates", "No MusicBrainz match found"))
+        # Spelling the token for a human adds no fact, so it passes …
         self.assertIsNone(check_unproduced_name_is_not_rewritten(
-            "no_candidates", "no_candidates"))
+            "no_candidates", "no candidates"))
+        # … while any other sentence, however plausible, does not.
+        self.assertIsNotNone(check_unproduced_name_is_not_rewritten(
+            "no_candidates", "Rejected: no usable candidate was found"))
+
+    def test_the_humanize_restatement_is_independent_of_production(self) -> None:
+        """N1: comparing production to production proves nothing."""
+        self.assertEqual(humanized("quality_evidence_action_failed"),
+                         "quality evidence action failed")
+        self.assertEqual(humanized("exception"), "exception")
+        self.assertEqual(humanized("stale-path"), "stale path")
+        self.assertEqual(humanized("  x_y  "), "x y")
 
     def test_raw_token_checker_trips_on_the_other_half_of_the_defect(self) -> None:
         self.assertIsNotNone(check_matched_name_renders_words(
             "mbid_not_found", "mbid_not_found"))
+        # The humanized token is still no claim — a matched name owes copy.
+        self.assertIsNotNone(check_matched_name_renders_words(
+            "mbid_not_found", "mbid not found"))
         self.assertIsNone(check_matched_name_renders_words(
             "mbid_not_found",
             "Requested release ID not among the match candidates"))

@@ -1049,6 +1049,9 @@ class TestClassifyVerdict(unittest.TestCase):
     def test_mbid_not_found_verdict(self):
         """The producer's own fact: the requested ID was not in the set.
 
+        ``lib/beets.py`` writes this from ``if not result.mbid_found``,
+        whether or not that set was empty; the empty case gets its own
+        sentence (pinned in ``tests/test_classify_producer_audit.py``).
         The copy this replaces was keyed on ``no_candidates`` — a literal
         ``lib/beets.py`` has never emitted — and claimed the stronger,
         false fact that no match existed at all (issue #882).

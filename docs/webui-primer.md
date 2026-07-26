@@ -260,17 +260,30 @@ Browser → https://music.ablz.au
 - **Rejection copy is minted only for decision names a producer emits
   (#882)** — every decision-name literal `web/classify.py` matches is a claim
   about what some producer writes, so each is traced to the production file
-  that SPELLS it, and a name nothing produces reaches the operator verbatim
-  instead of acquiring an invented sentence. `tests/test_classify_producer_audit.py`
-  derives the match targets from the module itself (inline comparison grammar
-  plus module-level tables) and fails closed on an unregistered one; a literal
-  a past revision emitted and live rows still carry is registered as
-  historical, with the row count written down. The audit's first run convicted
-  `no_candidates` — fluent copy ("No MusicBrainz match found") behind a
-  scenario nothing has ever written, while the real producing literal
-  `mbid_not_found` (50 live rejected rows) fell through to the raw-token
-  fallback; it now renders "Requested release ID not among the match
-  candidates", which is the fact `lib/beets.py` actually determined.
+  that SPELLS it (parsed, not grepped: a mention in a comment or docstring is
+  not a spelling), and an unhandled name is humanized to words rather than
+  acquiring an invented sentence. That is now the module's ONE fallback
+  doctrine — `_rejection_verdict` used to dump the raw machine token while its
+  sibling `_wrong_match_action_label` humanized, so 123 live rows read as
+  `extra_tracks` / `import_failed` / `strong_match`.
+  `tests/test_classify_producer_audit.py`
+  derives the match targets from the module itself (inline comparison grammar,
+  literal containers at ANY scope, and module-level tables) and fails closed on
+  an unregistered one; a literal a past revision emitted and live rows still
+  carry is registered as historical with structured evidence — source
+  expression, row count, last-seen date — so a reviewer has one falsifiable
+  query.
+  The audit's first run convicted `no_candidates`: fluent copy ("No
+  MusicBrainz match found") behind a scenario nothing has ever written, while
+  the real producing literal `mbid_not_found` fell through to the raw token.
+  `lib/beets.py` writes that from `if not result.mbid_found`, whether or not
+  the candidate set was empty, and the two cases send the operator to
+  different places — so the copy splits on the persisted `candidates` list:
+  32 live rows with a populated set read "Requested release ID not among the
+  match candidates" (a pressing mismatch), 18 with an empty one read "Beets
+  returned no match candidates for this folder" (an unmatchable folder, e.g.
+  beets' own `match.ignore_video_tracks` filtering). A row with no readable
+  validation verdict claims neither.
   The paired generated properties additionally hold every rendered decision
   claim — verdict and collapsed summary alike — against what the importer
   really does with that decision (`dispatch_action`, `decision_denylists`), so
