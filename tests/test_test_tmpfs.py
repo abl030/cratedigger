@@ -48,6 +48,11 @@ def tmpfs_runtime_root() -> str:
     return os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
 
 
+def allocation_environment() -> dict[str, str]:
+    """Make allocation seam tests independent of shared tmpfs headroom."""
+    return {**os.environ, "CRATEDIGGER_TEST_RAM_MIN_BYTES": "0"}
+
+
 def low_headroom_environment(
     *,
     inherited_tmpdir: str,
@@ -88,7 +93,7 @@ def assert_tmpfs_setup_failure_contract(
 
 class TestTmpfsSetup(unittest.TestCase):
     def test_allocates_isolated_tmpfs_directory_and_cleans_it_on_exit(self) -> None:
-        completed = run_tmpfs_setup_and_print_tmpdir()
+        completed = run_tmpfs_setup_and_print_tmpdir(env=allocation_environment())
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
         selected = Path(completed.stdout)
@@ -210,6 +215,7 @@ class TestTmpfsSetup(unittest.TestCase):
                 str(TMPFS_SETUP),
             ],
             cwd=REPO_ROOT,
+            env=allocation_environment(),
             capture_output=True,
             text=True,
             check=False,

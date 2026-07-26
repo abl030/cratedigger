@@ -279,6 +279,96 @@ class TestDeployPinScript(unittest.TestCase):
         self.assertEqual(final_state["receipt_rev"], pending)
         self.assertIsNone(final_state["pending_rev"])
 
+    def test_pending_recovery_leaves_private_refs_untouched_when_remote_is_untrusted(
+        self,
+    ) -> None:
+        cases = (
+            ("bad signature", {"remote_signature_status": "B"}),
+            ("unknown signature", {"remote_signature_status": "U"}),
+            ("unreadable lock", {"remote_lock_readable": False}),
+            ("wrong target", {"remote_target": "7" * 40}),
+        )
+        for name, changes in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as td:
+                fake = FakeDeployPinCommands(Path(td))
+                receipt = fake.seed_divergent_receipt()
+                fake.update_state(
+                    fault="signal_after_pending_commit", remote_move_on_nix=True
+                )
+                interrupted = fake.run(SCRIPT)
+                pending = fake.state["pending_rev"]
+                self.assertNotEqual(interrupted.returncode, 0)
+                self.assertIsNotNone(pending)
+
+                event_count = len(fake.state["events"])
+                fake.update_state(
+                    fault=None, remote_move_on_nix=False, **changes
+                )
+                retry = fake.run(SCRIPT)
+                state = fake.state
+
+                self.assertNotEqual(retry.returncode, 0)
+                self.assertEqual(state["receipt_rev"], receipt)
+                self.assertEqual(state["pending_rev"], pending)
+                self.assertEqual(state["commit_count"], 1)
+                private_ref_mutations = [
+                    event for event in state["events"][event_count:]
+                    if event[0] in {"update-ref", "delete-ref"}
+                    and event[1] in {
+                        "refs/cratedigger-deploy/cratedigger-src",
+                        "refs/cratedigger-deploy/cratedigger-src-pending",
+                    }
+                ]
+                self.assertEqual(private_ref_mutations, [])
+
+    def test_pending_recovery_rebuilds_from_trusted_divergent_parent_target(
+        self,
+    ) -> None:
+        receipt = self.fake.seed_divergent_receipt()
+        self.fake.update_state(
+            fault="signal_after_pending_commit", remote_move_on_nix=True
+        )
+        interrupted = self.fake.run(SCRIPT)
+        pending = self.fake.state["pending_rev"]
+
+        self.assertNotEqual(interrupted.returncode, 0)
+        self.assertIsNotNone(pending)
+
+        self.fake.update_state(fault=None, remote_move_on_nix=False)
+        retry = self.fake.run(SCRIPT)
+        state = self.fake.state
+
+        self.assertEqual(retry.returncode, 0, retry.stderr)
+        self.assertEqual(state["commit_count"], 2)
+        self.assertEqual(state["receipt_rev"], state["remote_rev"])
+        self.assertNotEqual(state["receipt_rev"], pending)
+        self.assertEqual(
+            state["commits"][state["receipt_rev"]]["parent"], "6" * 40
+        )
+        self.assertNotEqual(state["receipt_rev"], receipt)
+
+    def test_pending_recovery_accepts_trusted_remote_at_candidate(self) -> None:
+        self.fake.update_state(fault="signal_after_commit")
+        interrupted = self.fake.run(SCRIPT)
+        pending = self.fake.state["pending_rev"]
+
+        self.assertNotEqual(interrupted.returncode, 0)
+        self.assertIsNotNone(pending)
+
+        self.fake.update_state(
+            fault=None,
+            remote_rev=pending,
+            remote_target=self.fake.TARGET_REV,
+        )
+        retry = self.fake.run(SCRIPT)
+        state = self.fake.state
+
+        self.assertEqual(retry.returncode, 0, retry.stderr)
+        self.assertEqual(state["commit_count"], 1)
+        self.assertEqual(state["receipt_rev"], pending)
+        self.assertEqual(state["remote_rev"], pending)
+        self.assertIsNone(state["pending_rev"])
+
     def test_cleanup_failure_reports_recoverable_remote_revision(self) -> None:
         self.fake.update_state(fault="cleanup")
         first = self.fake.run(SCRIPT)
@@ -305,14 +395,124 @@ class TestDeployPinScript(unittest.TestCase):
         parent = state["commits"][pending]["parent"]
         self.assertNotEqual(first.returncode, 0)
 
+        incompatible_target = "7" * 40
         self.fake.update_state(fault=None, remote_rev=self.fake.OTHER_REV,
-                               remote_target=self.fake.OLD_TARGET)
+                               remote_target=incompatible_target)
         second = self.fake.run(SCRIPT)
         self.assertNotEqual(second.returncode, 0)
         self.assertIn(f"pending={pending}", second.stderr)
         self.assertIn(f"base={parent}", second.stderr)
         self.assertIn(f"remote={self.fake.OTHER_REV}", second.stderr)
         self.assertEqual(self.fake.state["commit_count"], 1)
+
+    def test_equivalent_sibling_receipt_allows_the_next_target(self) -> None:
+        receipt = self.fake.seed_divergent_receipt()
+
+        proc = self.fake.run(SCRIPT)
+        state = self.fake.state
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(state["commit_count"], 1)
+        self.assertEqual(state["remote_target"], self.fake.TARGET_REV)
+        self.assertEqual(state["receipt_rev"], state["remote_rev"])
+        self.assertNotEqual(state["receipt_rev"], receipt)
+        self.assertEqual(
+            state["commits"][state["receipt_rev"]]["parent"],
+            self.fake.OTHER_REV,
+        )
+        self.assertEqual(
+            sum(event[0] == "push" for event in state["events"]), 1
+        )
+
+    def test_equivalent_sibling_same_target_reports_current_signed_remote(
+        self,
+    ) -> None:
+        receipt = self.fake.seed_divergent_receipt(
+            receipt_target=self.fake.TARGET_REV,
+            remote_target=self.fake.TARGET_REV,
+        )
+
+        proc = self.fake.run(SCRIPT)
+        state = self.fake.state
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(state["receipt_rev"], receipt)
+        self.assertEqual(state["commit_count"], 0)
+        self.assertFalse(any(event[0] == "push" for event in state["events"]))
+        self.assertIn("remote preserves pending target", proc.stdout)
+
+    def test_retry_replaces_candidate_rejected_after_equivalence_check(self) -> None:
+        for move_hook in (
+            "remote_move_on_worktree_add",
+            "remote_move_on_nix",
+            "remote_move_on_push",
+        ):
+            with self.subTest(move_hook=move_hook), tempfile.TemporaryDirectory() as td:
+                fake = FakeDeployPinCommands(Path(td))
+                stale_receipt = fake.seed_divergent_receipt()
+                fake.update_state(**{move_hook: True})
+
+                first = fake.run(SCRIPT)
+                rejected_candidate = fake.state["receipt_rev"]
+
+                self.assertNotEqual(first.returncode, 0)
+                self.assertNotEqual(rejected_candidate, stale_receipt)
+                self.assertEqual(fake.state["remote_rev"], "6" * 40)
+                self.assertEqual(fake.state["commit_count"], 1)
+                self.assertEqual(
+                    fake.state["commits"][rejected_candidate]["parent"],
+                    fake.OTHER_REV,
+                )
+
+                fake.update_state(**{move_hook: False})
+                retry = fake.run(SCRIPT)
+                state = fake.state
+
+                self.assertEqual(retry.returncode, 0, retry.stderr)
+                self.assertEqual(state["commit_count"], 2)
+                self.assertEqual(state["receipt_rev"], state["remote_rev"])
+                self.assertNotEqual(state["receipt_rev"], rejected_candidate)
+                self.assertEqual(
+                    state["commits"][state["receipt_rev"]]["parent"], "6" * 40
+                )
+                receipt_updates = [
+                    event for event in state["events"]
+                    if event[:2] == [
+                        "update-ref", "refs/cratedigger-deploy/cratedigger-src"
+                    ]
+                ]
+                self.assertEqual(receipt_updates[-1][3], rejected_candidate)
+
+    def test_divergent_receipt_fails_closed_without_equivalent_verified_remote(
+        self,
+    ) -> None:
+        cases = (
+            ("wrong target", {"remote_target": self.fake.TARGET_REV}),
+            ("bad signature", {"remote_signature_status": "B"}),
+            ("unknown signature", {"remote_signature_status": "U"}),
+            ("unreadable lock", {"remote_lock_readable": False}),
+            ("remote changed", {"remote_change_on_ls_remote_call": 2}),
+        )
+        for name, changes in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as td:
+                fake = FakeDeployPinCommands(Path(td))
+                receipt = fake.seed_divergent_receipt()
+                fake.update_state(**changes)
+
+                proc = fake.run(SCRIPT)
+                state = fake.state
+
+                self.assertNotEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(state["receipt_rev"], receipt)
+                self.assertEqual(state["commit_count"], 0)
+                self.assertFalse(any(event[0] == "push" for event in state["events"]))
+                self.assertFalse(
+                    any(
+                        event[0] == "update-ref"
+                        and event[1] == "refs/cratedigger-deploy/cratedigger-src"
+                        for event in state["events"]
+                    )
+                )
 
     def test_compatible_remote_advancement_allows_the_next_target(self) -> None:
         first = self.fake.run(SCRIPT)
