@@ -218,6 +218,10 @@ def _record_materialize_failure(
     grace expiries on 2026-07-22 left no recoverable cause anywhere. Now
     every one names its request and its machine-stable reason, whether or
     not the caller goes on to write a ``download_log`` row.
+
+    ``level`` preserves each site's pre-existing severity rather than
+    flattening it: the previously-silent returns journal at WARNING, and
+    the ones that already shouted keep shouting.
     """
     logger.log(
         level,
@@ -687,6 +691,7 @@ def _evaluate_staged_path_readiness(
             request_id,
             "staged_path_missing",
             f"current_path={staged_album.current_path}",
+            level=logging.ERROR,
         )
 
     staged_album.bind_import_paths(album_data.files)
@@ -717,6 +722,7 @@ def _evaluate_staged_path_readiness(
             request_id,
             "staged_path_missing_tracked_files",
             f"missing_paths={', '.join(missing_paths)}",
+            level=logging.ERROR,
         )
 
     if (
