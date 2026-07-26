@@ -13,12 +13,13 @@ import tempfile
 import time
 import unittest
 from collections import Counter
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
 import msgspec
+from hypothesis import is_hypothesis_test, settings
 
 
 DEFAULT_MAX_WORKERS = 12
@@ -428,6 +429,87 @@ def _iter_test_cases(suite: unittest.TestSuite) -> Iterator[unittest.TestCase]:
             yield test
 
 
+@dataclass(frozen=True)
+class ResolvedHypothesisSettings:
+    """The settings object one Hypothesis test will actually run under."""
+
+    configured: settings
+    from_state_machine_class: bool
+
+
+def _test_method(test: unittest.TestCase) -> Callable[..., object] | None:
+    method_name = test._testMethodName
+    for owner in type(test).__mro__:
+        candidate = vars(owner).get(method_name)
+        if callable(candidate):
+            return candidate
+    return None
+
+
+def resolve_hypothesis_settings(
+    test: unittest.TestCase,
+) -> ResolvedHypothesisSettings | None:
+    """Resolve one test's effective Hypothesis settings, or ``None``.
+
+    ``None`` means the test is not a Hypothesis test. A Hypothesis test whose
+    settings cannot be resolved raises: an unclassifiable shape fails closed
+    rather than escaping the deadline contract below.
+    """
+    method = _test_method(test)
+    if method is None or not is_hypothesis_test(method):
+        return None
+    raw_configured: object | None = getattr(
+        method,
+        "_hypothesis_internal_use_settings",
+        None,
+    )
+    if raw_configured is not None and not isinstance(raw_configured, settings):
+        raise TypeError(f"Hypothesis test has invalid settings: {test.id()}")
+    if raw_configured is not None:
+        return ResolvedHypothesisSettings(raw_configured, False)
+    if hasattr(method, "_hypothesis_state_machine_class"):
+        raw_stateful: object | None = getattr(type(test), "settings", None)
+        if raw_stateful is not None and not isinstance(raw_stateful, settings):
+            raise TypeError(
+                f"State-machine test has invalid settings: {test.id()}"
+            )
+        if raw_stateful is not None:
+            return ResolvedHypothesisSettings(raw_stateful, True)
+    raise TypeError(f"Hypothesis test has no settings: {test.id()}")
+
+
+def assert_hypothesis_deadlines_disabled(suite: unittest.TestSuite) -> None:
+    """Every Hypothesis test in this suite must resolve ``deadline=None``.
+
+    This is the RUNTIME half of the profile-tier invariant (issue #882): a
+    module that never imports ``tests._hypothesis_profiles`` — or imports it
+    below the decorators that snapshot ``settings.default`` — inherits stock
+    Hypothesis defaults, including a 200ms per-example deadline that flakes
+    under load. ``scripts/run_fuzz_tests.py`` has always asserted this during
+    fuzz discovery; asserting it here means the deterministic suite enforces
+    the same fact, and neither spelling nor import position can evade it.
+
+    Deliberately scoped to ``deadline`` alone. ``derandomize`` and ``database``
+    are legitimately varied by ``tests/world_model/state_machine.py`` under
+    ``CRATEDIGGER_WORLD_RANDOMIZED=1`` (which ``scripts/world_model_burst.sh``
+    exports), so asserting those would fail correctly-pinned tests.
+    """
+    offenders: list[str] = []
+    for test in _iter_test_cases(suite):
+        resolved = resolve_hypothesis_settings(test)
+        if resolved is None:
+            continue
+        deadline: object = getattr(resolved.configured, "deadline", None)
+        if deadline is not None:
+            offenders.append(f"{test.id()}: {deadline!r}")
+    if offenders:
+        raise RuntimeError(
+            "Hypothesis test has non-None deadline (its module never ran "
+            "`import tests._hypothesis_profiles` before the decorator): "
+            + ", ".join(sorted(offenders))
+        )
+
+
 def _list_module_test_ids_child(module_name: str, result_path: Path) -> int:
     """Discover exact unittest IDs in a disposable interpreter."""
     suite = unittest.defaultTestLoader.loadTestsFromName(module_name)
@@ -502,6 +584,7 @@ def _run_test_target_child(
         suite = unittest.TestSuite(
             discovered_by_id[test_id] for test_id in selected_test_ids
         )
+    assert_hypothesis_deadlines_disabled(suite)
     result = unittest.TextTestRunner(
         stream=stream,
         verbosity=2,

@@ -316,27 +316,40 @@ nix-shell --run "bash scripts/fuzz_burst.sh tests.test_quality_generated"  # sub
 ```
 
 Loading a tier is an **import side effect**, so every module that uses
-Hypothesis must import the profile module itself:
+Hypothesis must import the profile module itself — at module level, and
+**above the module's first `class`/`def`**:
 
 ```python
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 ```
 
-That exact, module-level spelling is the whole grammar, and
-`tests/test_hypothesis_profile_audit.py` fails the suite on anything else —
-an alias, a `from`-import, a statement nested inside a function or an `if`,
-or no import at all. A `@given`/`@settings(...)` resolves every knob it does
-not name from `settings.default` **at decoration time**, so a module without
-that import inherits whichever default happened to be loaded when unittest
-imported it: the registered tier if an earlier module pulled it in, stock
-Hypothesis defaults otherwise. Stock defaults are randomized,
-example-database-backed and carry a 200ms deadline — and a non-`None`
+A `@given`/`@settings(...)` resolves every knob it does not name from
+`settings.default` **at decoration time**, i.e. while the class body runs.
+That makes position load-bearing, not cosmetic: the same statement at the
+BOTTOM of a module is a no-op for every decorator above it. A module without
+the import (or with it too late) inherits whichever default happened to be
+loaded when unittest imported it — the registered tier if an earlier module
+pulled it in, stock Hypothesis defaults otherwise. Stock defaults are
+randomized, example-database-backed and carry a 200ms deadline; a non-`None`
 deadline is a hard failure in `scripts/run_fuzz_tests.py`'s discovery, so a
 single unwired module stops the whole burst before it starts (issue #882).
-The audit scans **every** `.py` under `tests/` recursively, not the
-`test_*_generated.py` glob, because an unwired module outside that glob is
-invisible to the burst while still dragging stock defaults into the
-deterministic suite. `tests/_hypothesis_profiles.py` is the only exclusion.
+
+Two independent gates enforce this:
+
+- `tests/test_hypothesis_profile_audit.py` — the static half. That exact
+  spelling in that position is the whole grammar; an alias, a `from`-import,
+  a statement nested inside a function or an `if`, a canonical statement
+  below the first definition, or no import at all all fail the suite. It
+  scans **every** `.py` under `tests/` recursively, not the
+  `test_*_generated.py` glob, because an unwired module outside that glob is
+  invisible to the burst while still dragging stock defaults into the
+  deterministic suite. `tests/_hypothesis_profiles.py` is the only exclusion.
+- `scripts/run_python_tests.py::assert_hypothesis_deadlines_disabled` — the
+  runtime half, run by every suite target child (and by fuzz discovery, which
+  shares the same owner). It reads resolved settings rather than source, so
+  no spelling or position can evade it. Scoped to `deadline` alone:
+  `derandomize` and `database` are legitimately varied by
+  `tests/world_model/state_machine.py` under `CRATEDIGGER_WORLD_RANDOMIZED=1`.
 
 `scripts/fuzz_burst.sh` discovers the exact unittest IDs and effective
 Hypothesis settings in every generated module. Ordinary deterministic pins run
@@ -472,9 +485,15 @@ deeper randomized entropy, 2 survivors fixed in PR #555
 - Invariant checkers are module-level functions so a known-bad self-test
   can prove each one trips. Every checker owes one — a property that has
   never failed anything is unfalsifiable until proven otherwise.
-- Import `tests._hypothesis_profiles` for the side effect before using
-  `@given` — that is what wires the module into the suite/fuzz tiers, and
-  `tests/test_hypothesis_profile_audit.py` fails the suite without it.
+- Import `tests._hypothesis_profiles` for the side effect **above the first
+  `class`/`def`** — that is what wires the module into the suite/fuzz tiers,
+  and both `tests/test_hypothesis_profile_audit.py` and the suite runner's
+  own `assert_hypothesis_deadlines_disabled` fail without it.
+- Discard an unanswerable world with `assume(...)`, never a bare `return`.
+  A `return` spends the example as a PASS and silently shrinks the real
+  budget; `assume` marks it invalid so Hypothesis refills. Issue #882 found
+  a property burning 29% of a 20,000-example budget this way. If the world
+  has a defined answer, assert it instead of discarding it.
 - Reuse the shared fakes/builders (`tests/fakes/`, `tests/helpers.py`)
   per `.claude/rules/code-quality.md`; leaf-seam mock rules apply to
   generated tests like any other test.

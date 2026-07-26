@@ -32,12 +32,25 @@ import time and are subject to the identical ordering hazard. The single
 structural exclusion is the profile module itself, which cannot import
 itself.
 
-The grammar is deliberately small: one canonical, module-level
-``import tests._hypothesis_profiles`` statement. Anything else — an alias, a
-``from``-import, a statement nested inside a function or an ``if`` — fails
-closed and is reported as non-canonical rather than silently accepted. This
-audit reads import statements with the stdlib ``ast`` and nothing else: no
-data flow, no alias tracking, no inference about runtime behaviour (see
+The grammar is deliberately small: one canonical
+``import tests._hypothesis_profiles`` statement, at module level and **above
+the module's first ``class``/``def``**. Anything else — an alias, a
+``from``-import, a statement nested inside a function or an ``if``, or the
+canonical statement placed below the first definition — fails closed rather
+than being silently accepted.
+
+The position half is not cosmetic. Decorators run at class-body execution
+time, so a canonical import at the BOTTOM of a module is a no-op for every
+``@given``/``@settings`` above it: the audit would see the statement and pass
+the module while discovery still rejects it for a stock deadline, or worse,
+the module silently runs non-derandomized in the ``suite`` tier. The runtime
+half of that invariant is enforced independently by
+``scripts/run_python_tests.py::assert_hypothesis_deadlines_disabled``, which
+cannot be fooled by spelling or position at all; this audit is the cheap
+static half that names the fix.
+
+This audit reads import statements with the stdlib ``ast`` and nothing else:
+no data flow, no alias tracking, no inference about runtime behaviour (see
 ``.claude/rules/code-quality.md`` § "Semantic source scanners are
 prohibited").
 """
@@ -71,6 +84,7 @@ class ModuleProfileFacts:
 
     uses_hypothesis: bool
     canonical_profile_import: bool
+    late_canonical_profile_import: bool
     other_profile_import: bool
 
 
@@ -114,11 +128,15 @@ def _is_canonical_profile_import(node: ast.stmt) -> bool:
 def module_profile_facts(source: str, *, label: str) -> ModuleProfileFacts:
     """Classify one module source by its import statements alone.
 
-    Hypothesis usage counts wherever it appears; the canonical profile import
-    counts only as a direct child of the module body, because a statement
-    nested in a function or an ``if`` does not necessarily run at import time.
-    A source that does not parse raises — the audit never passes a module it
-    could not read.
+    Hypothesis usage counts wherever it appears. The canonical profile import
+    counts only as a direct child of the module body AND above the module's
+    first ``class``/``def``: a statement nested in a function or an ``if`` does
+    not necessarily run at import time, and one placed below a decorated class
+    runs *after* the ``@given``/``@settings`` above it have already snapshotted
+    ``settings.default``. Both are the same runtime fact — the import must have
+    run before anything reads the default — expressed as a bounded position
+    rule. A source that does not parse raises; the audit never passes a module
+    it could not read.
     """
     try:
         tree = ast.parse(source, filename=label)
@@ -130,12 +148,33 @@ def module_profile_facts(source: str, *, label: str) -> ModuleProfileFacts:
 
     statements = [node for node in ast.walk(tree) if isinstance(node, ast.stmt)]
     uses_hypothesis = any(_imports_hypothesis(node) for node in statements)
-    canonical = any(_is_canonical_profile_import(node) for node in tree.body)
+    first_definition = next(
+        (
+            index
+            for index, node in enumerate(tree.body)
+            if isinstance(
+                node,
+                (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef),
+            )
+        ),
+        len(tree.body),
+    )
+    canonical = any(
+        _is_canonical_profile_import(node)
+        for node in tree.body[:first_definition]
+    )
+    late_canonical = not canonical and any(
+        _is_canonical_profile_import(node)
+        for node in tree.body[first_definition:]
+    )
     mentions_profile = any(_mentions_profile_module(node) for node in statements)
     return ModuleProfileFacts(
         uses_hypothesis=uses_hypothesis,
         canonical_profile_import=canonical,
-        other_profile_import=mentions_profile and not canonical,
+        late_canonical_profile_import=late_canonical,
+        other_profile_import=(
+            mentions_profile and not canonical and not late_canonical
+        ),
     )
 
 
@@ -145,9 +184,19 @@ def profile_import_violation(facts: ModuleProfileFacts) -> str | None:
         return None
     if facts.canonical_profile_import:
         return None
+    if facts.late_canonical_profile_import:
+        return (
+            "profile import is below the first class/function — every "
+            "`@given`/`@settings` above it already snapshotted "
+            f"`settings.default`; move `import {CANONICAL_PROFILE_MODULE}` "
+            "above the first definition"
+        )
     if facts.other_profile_import:
         return (
-            "non-canonical profile import — use a module-level "
+            "non-canonical profile import (an alias, a `from`-import, or a "
+            "nested statement). Some of these do load the tier at runtime and "
+            "some do not; the audit accepts exactly one spelling so the "
+            "guarantee never depends on which you picked — rewrite it as "
             f"`import {CANONICAL_PROFILE_MODULE}`"
         )
     return (
@@ -251,6 +300,55 @@ class TestHypothesisProfileCheckerTripsOnViolations(unittest.TestCase):
 
     def test_a_module_without_hypothesis_needs_no_profile_import(self) -> None:
         self.assertIsNone(self._violation("import os\nimport unittest\n"))
+
+    def test_a_canonical_import_below_the_first_class_is_rejected(self) -> None:
+        """The exact module the #882 PR1 review planted and drove through
+        real discovery: the audit passed it, discovery still raised
+        ``non-None deadline``. Position is part of the grammar."""
+        source = (
+            "import unittest\n"
+            "from hypothesis import given, strategies as st\n"
+            "\n"
+            "class TestBottomImport(unittest.TestCase):\n"
+            "    @given(n=st.integers())\n"
+            "    def test_property(self, n): self.assertIsInstance(n, int)\n"
+            "\n"
+            f"import {CANONICAL_PROFILE_MODULE}  # noqa: E402, F401\n"
+        )
+
+        violation = self._violation(source)
+
+        self.assertIsNotNone(violation)
+        assert violation is not None
+        self.assertIn("below the first class/function", violation)
+
+    def test_a_canonical_import_below_the_first_function_is_rejected(self) -> None:
+        source = (
+            "from hypothesis import given\n"
+            "def helper():\n    return 1\n"
+            f"import {CANONICAL_PROFILE_MODULE}\n"
+        )
+
+        violation = self._violation(source)
+
+        self.assertIsNotNone(violation)
+        assert violation is not None
+        self.assertIn("below the first class/function", violation)
+
+    def test_a_canonical_import_above_the_first_definition_passes(self) -> None:
+        """Must-still-work guard: the position rule must not reject the
+        ordinary shape every repository module already uses."""
+        source = (
+            "import unittest\n"
+            "from hypothesis import given, strategies as st\n"
+            f"import {CANONICAL_PROFILE_MODULE}  # noqa: F401\n"
+            "\n"
+            "class TestWorld(unittest.TestCase):\n"
+            "    @given(n=st.integers())\n"
+            "    def test_property(self, n): self.assertIsInstance(n, int)\n"
+        )
+
+        self.assertIsNone(self._violation(source))
 
     def test_non_canonical_profile_imports_fail_closed(self) -> None:
         non_canonical = (

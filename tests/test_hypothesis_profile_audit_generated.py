@@ -48,10 +48,26 @@ _PROFILE_FORMS: dict[str, str] = {
     "from_module": f"from {CANONICAL_PROFILE_MODULE} import settings\n",
     "nested_function": f"def wire():\n    import {CANONICAL_PROFILE_MODULE}\n",
     "nested_if": f"if True:\n    import {CANONICAL_PROFILE_MODULE}\n",
+    "canonical_after_class": (
+        "class _Planted:\n    pass\n"
+        f"import {CANONICAL_PROFILE_MODULE}\n"
+    ),
+    "canonical_after_function": (
+        "def _planted():\n    return None\n"
+        f"import {CANONICAL_PROFILE_MODULE}\n"
+    ),
 }
 
-#: Only these spellings run the profile side effect at module import time.
+#: Only these spellings run the profile side effect before any decorator
+#: below them snapshots ``settings.default``.
 CANONICAL_FORMS = frozenset({"canonical", "canonical_noqa"})
+
+#: Canonical spelling, module level, but below the first class/function — the
+#: shape the #882 PR1 review drove through real discovery and reproduced the
+#: burst blocker with.
+LATE_CANONICAL_FORMS = frozenset(
+    {"canonical_after_class", "canonical_after_function"},
+)
 
 _NOISE: dict[str, str] = {
     "none": "",
@@ -106,9 +122,12 @@ def assert_audit_verdict(
         )
     if not reported:
         return
-    expected_phrase = (
-        "non-canonical" if profile_form != "none" else "without a module-level"
-    )
+    if profile_form in LATE_CANONICAL_FORMS:
+        expected_phrase = "below the first class/function"
+    elif profile_form != "none":
+        expected_phrase = "non-canonical"
+    else:
+        expected_phrase = "without a module-level"
     if expected_phrase not in reported[0]:
         raise AssertionError(
             f"violation for {profile_form} was not named {expected_phrase!r}: "
@@ -163,6 +182,14 @@ class TestGeneratedProfileImportAudit(unittest.TestCase):
         noise="unrelated_imports",
         subdirectory="web",
     )
+    @example(
+        # The review's planted probe: canonical spelling, module level, but
+        # below the decorated class it was supposed to wire.
+        hypothesis_form="from_root",
+        profile_form="canonical_after_class",
+        noise="none",
+        subdirectory="",
+    )
     def test_only_a_canonical_module_level_import_satisfies_the_audit(
         self,
         hypothesis_form: str,
@@ -170,10 +197,13 @@ class TestGeneratedProfileImportAudit(unittest.TestCase):
         noise: str,
         subdirectory: str,
     ) -> None:
+        # The profile form precedes the hypothesis form so each form owns its
+        # own position: the late-canonical forms carry the definition they must
+        # sit below, and no other form is accidentally pushed past one.
         source = (
             _NOISE[noise]
-            + _HYPOTHESIS_FORMS[hypothesis_form]
             + _PROFILE_FORMS[profile_form]
+            + _HYPOTHESIS_FORMS[hypothesis_form]
             + "VALUE = 1\n"
         )
         relpath = os.path.join(subdirectory, "test_planted.py")
@@ -234,6 +264,21 @@ class TestProfileAuditCheckerTripsOnViolations(unittest.TestCase):
                 relpath="test_planted.py",
                 hypothesis_form="from_root",
                 profile_form="aliased",
+            )
+
+    def test_oracle_trips_when_a_late_import_is_reported_as_missing(self) -> None:
+        """A late canonical import must be named as a POSITION problem — the
+        author has the statement, and 'missing' would send them looking for
+        one they already wrote."""
+        with self.assertRaises(AssertionError):
+            assert_audit_verdict(
+                offenders=(
+                    "test_planted.py: imports hypothesis without a "
+                    "module-level import",
+                ),
+                relpath="test_planted.py",
+                hypothesis_form="from_root",
+                profile_form="canonical_after_class",
             )
 
     def test_substring_mutant_is_fooled_by_a_string_constant(self) -> None:
