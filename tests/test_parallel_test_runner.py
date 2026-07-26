@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 import msgspec
@@ -18,6 +19,10 @@ from hypothesis.internal.conjecture.data import Status
 from hypothesis.statistics import collector
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
+from scripts.run_fuzz_tests import (
+    aggregate_property_depth,
+    is_structurally_shallow,
+)
 from scripts.run_python_tests import (
     HOTSPOT_SHARD_POLICIES,
     HYPOTHESIS_CASE_STATUSES,
@@ -638,6 +643,29 @@ class TestHypothesisStatsRecorder(unittest.TestCase):
 
         self.assertGreater(record.interesting, 0)
 
+    def test_a_real_interesting_run_is_never_reported_as_shallow(self) -> None:
+        """The carve-out, driven by the producer that makes interesting cases.
+
+        A property that fails on its first world stops with ``nothing left to
+        do`` and zero valid worlds — indistinguishable from an exhausted tiny
+        space unless the interesting cases are read. No repository property
+        reaches this state today (the known-bad self-tests plant their bug in
+        an inner ``@given`` whose statistics are dropped), so the carve-out is
+        defensive; this pin proves the shape is producible and handled.
+        """
+        record = self._record(
+            _planted_failing_property,
+            budget=50,
+            expect_failure=True,
+        )
+        depth = aggregate_property_depth((record,))[0]
+
+        self.assertGreater(depth.interesting, 0)
+        self.assertEqual(depth.exhausted_shards, depth.shards)
+        self.assertLess(depth.distinct_world_bound, depth.budget)
+        self.assertFalse(is_structurally_shallow(depth))
+        self.assertTrue(is_structurally_shallow(replace(depth, interesting=0)))
+
     def test_statistics_arriving_with_no_started_test_are_dropped(self) -> None:
         """Impossible by construction; a report must never break its own run."""
         recorder = HypothesisStatsRecorder({})
@@ -646,13 +674,20 @@ class TestHypothesisStatsRecorder(unittest.TestCase):
 
         self.assertEqual(recorder.records, ())
 
-    def test_an_unbudgeted_test_records_a_zero_budget(self) -> None:
-        recorder = HypothesisStatsRecorder({})
-        recorder.start("planted.Property.test_property")
+    def test_an_inner_property_is_not_filed_under_its_enclosing_test(self) -> None:
+        """The known-bad self-test shape: a plain test that runs a property.
+
+        Attributing those statistics to the enclosing test would inflate the
+        property count, and a body running two inner properties would fold
+        into one row claiming two entropy shards it never had.
+        """
+        recorder = HypothesisStatsRecorder({"module.World.test_property": 150})
+        recorder.start("module.World.test_plain_pin")
         with collector.with_value(recorder.note):  # pyright: ignore[reportArgumentType]
             _tiny_space_property()
+            _discarding_property()
 
-        self.assertEqual(recorder.records[0].max_examples, 0)
+        self.assertEqual(recorder.records, ())
 
     def test_counted_statuses_match_the_hypothesis_vocabulary(self) -> None:
         """A new engine status must not silently vanish from the report."""

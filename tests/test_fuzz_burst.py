@@ -270,8 +270,9 @@ class TestBurstDepthReport(unittest.TestCase):
     def test_entropy_shards_are_aggregated_before_depth_is_judged(self) -> None:
         """One property split eight ways is one row, judged once.
 
-        Without aggregation every sharded property reads as under-run: each
-        shard receives budget/shards examples and reports only its own worlds.
+        Folding does not change WHICH properties are flagged — it de-duplicates
+        eight identical rows out of the ranked list and reports the property's
+        real total budget against one distinct-world bound.
         """
         records = tuple(
             _shard(self.PROPERTY, budget=2_500, valid=4) for _ in range(8)
@@ -285,6 +286,7 @@ class TestBurstDepthReport(unittest.TestCase):
                 PropertyDepth(
                     test_id=self.PROPERTY,
                     budget=20_000,
+                    shard_budget_bound=2_500,
                     shards=8,
                     exhausted_shards=8,
                     distinct_world_bound=4,
@@ -298,27 +300,23 @@ class TestBurstDepthReport(unittest.TestCase):
         self.assertTrue(is_structurally_shallow(depths[0]))
         self.assertEqual(
             [line for line in format_depth_report(depths) if "SHALLOW" in line],
-            [f"SHALLOW 4 worlds of 20000 examples (8 shards) {self.PROPERTY}"],
+            [
+                "SHALLOW 4 worlds vs 2500 examples per shard "
+                f"(8 shards, 20000 total) {self.PROPERTY}"
+            ],
         )
 
-    def test_a_run_that_found_its_planted_bug_is_never_shallow(self) -> None:
-        """Known-bad self-test: every known-bad self-test looks exhausted.
+    def test_a_single_shard_line_names_one_shard(self) -> None:
+        depths = aggregate_property_depth(
+            (_shard(self.PROPERTY, budget=50, valid=4),)
+        )
 
-        A checker without this carve-out flags every deliberately failing
-        property in the repository as structurally shallow.
-        """
-        found_its_bug = aggregate_property_depth(
-            (_shard(self.PROPERTY, budget=20_000, valid=26, interesting=2),)
-        )[0]
-        same_world_without_the_bug = aggregate_property_depth(
-            (_shard(self.PROPERTY, budget=20_000, valid=26),)
-        )[0]
-
-        self.assertFalse(is_structurally_shallow(found_its_bug))
-        self.assertTrue(is_structurally_shallow(same_world_without_the_bug))
-        self.assertNotIn(
-            "SHALLOW",
-            "\n".join(format_depth_report((found_its_bug,))),
+        self.assertEqual(
+            [line for line in format_depth_report(depths) if "SHALLOW" in line],
+            [
+                "SHALLOW 4 worlds vs 50 examples per shard "
+                f"(1 shard, 50 total) {self.PROPERTY}"
+            ],
         )
 
     def test_a_property_that_spends_its_whole_budget_is_not_shallow(self) -> None:
@@ -400,14 +398,50 @@ class TestBurstDepthReport(unittest.TestCase):
         self.assertEqual(
             lines[0],
             f"DEPTH {DEPTH_REPORT_LIMIT + 5} properties measured, "
-            f"{DEPTH_REPORT_LIMIT + 5} exhausted their strategy space, "
-            "0 discarded at least 10% of their examples",
+            f"{DEPTH_REPORT_LIMIT + 5} shallow (space exhausted below budget), "
+            "0 discarding at least 10% of their examples",
         )
         self.assertEqual(
             [line.split()[1] for line in lines[1 : DEPTH_REPORT_LIMIT + 1]],
             [str(index) for index in range(DEPTH_REPORT_LIMIT)],
         )
-        self.assertEqual(lines[-1], "SHALLOW ... 5 more exhausted")
+        self.assertEqual(lines[-1], "SHALLOW ... 5 more shallow")
+
+    def test_discarding_properties_rank_by_rate_and_truncate(self) -> None:
+        records = tuple(
+            _shard(
+                f"{self.PROPERTY}_{index:02d}",
+                budget=150,
+                valid=150,
+                invalid=20 + index,
+                stopped_because="settings.max_examples=150",
+            )
+            for index in range(DEPTH_REPORT_LIMIT + 3)
+        )
+
+        lines = format_depth_report(aggregate_property_depth(records))
+        discard_lines = [
+            line for line in lines if line.startswith("DISCARD ") and "..." not in line
+        ]
+
+        self.assertEqual(
+            lines[0],
+            f"DEPTH {DEPTH_REPORT_LIMIT + 3} properties measured, "
+            "0 shallow (space exhausted below budget), "
+            f"{DEPTH_REPORT_LIMIT + 3} discarding at least 10% of their examples",
+        )
+        self.assertEqual(
+            [line.split()[-1][-2:] for line in discard_lines],
+            [
+                f"{index:02d}"
+                for index in range(
+                    DEPTH_REPORT_LIMIT + 2,
+                    DEPTH_REPORT_LIMIT + 2 - DEPTH_REPORT_LIMIT,
+                    -1,
+                )
+            ],
+        )
+        self.assertEqual(lines[-1], "DISCARD ... 3 more discarding")
 
     def test_a_burst_without_properties_reports_nothing(self) -> None:
         self.assertEqual(format_depth_report(aggregate_property_depth(())), ())
@@ -457,6 +491,35 @@ class TestFuzzRunnerProcess(unittest.TestCase):
             "    @given(value=st.integers())\n"
             "    def test_property(self, value):\n"
             "        self.assertEqual(value, value)\n",
+            encoding="utf-8",
+        )
+        (package / "test_mixed_generated.py").write_text(
+            "import unittest\n"
+            "from hypothesis import given, settings\n"
+            "from hypothesis import strategies as st\n"
+            "from hypothesis.stateful import RuleBasedStateMachine, rule\n"
+            "import tests._hypothesis_profiles\n\n"
+            "class MixedWorld(unittest.TestCase):\n"
+            "    @settings(max_examples=50, database=None)\n"
+            "    @given(value=st.booleans())\n"
+            "    def test_property(self, value):\n"
+            "        self.assertIsInstance(value, bool)\n\n"
+            "    def test_pin(self):\n"
+            "        self.assertTrue(True)\n\n"
+            "    def test_pin_running_an_inner_property(self):\n"
+            "        @settings(max_examples=50, database=None)\n"
+            "        @given(first=st.booleans(), second=st.booleans())\n"
+            "        def planted(first, second):\n"
+            "            raise AssertionError('planted')\n"
+            "        with self.assertRaises(AssertionError):\n"
+            "            planted()\n\n"
+            "@settings(max_examples=5, stateful_step_count=3,\n"
+            "          database=None, deadline=None)\n"
+            "class Machine(RuleBasedStateMachine):\n"
+            "    @rule(value=st.integers())\n"
+            "    def step(self, value):\n"
+            "        assert isinstance(value, int)\n\n"
+            "TestMachine = Machine.TestCase\n",
             encoding="utf-8",
         )
         (package / "test_shallow_generated.py").write_text(
@@ -602,14 +665,75 @@ class TestFuzzRunnerProcess(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
         self.assertIn(
-            "DEPTH 1 properties measured, 1 exhausted their strategy space",
+            "DEPTH 1 properties measured, 1 shallow "
+            "(space exhausted below budget)",
             completed.stdout,
         )
         self.assertIn(
-            "SHALLOW 4 worlds of 50 examples (1 shards) "
+            "SHALLOW 4 worlds vs 50 examples per shard (1 shard, 50 total) "
             "fuzz_fixture.test_shallow_generated.ShallowWorld.test_property",
             completed.stdout,
         )
+
+    def test_reported_property_count_equals_the_discovered_property_count(
+        self,
+    ) -> None:
+        """The denominator is derived, never hand-counted.
+
+        The fixture mixes a property, a plain pin, a pin whose body declares
+        and calls its own ``@given`` (the known-bad self-test shape, which
+        emits statistics under the enclosing test's id), and a stateful
+        machine (whose id comes from ``hypothesis.stateful``, not the module).
+        Only the two real properties may be counted.
+        """
+        module = "fuzz_fixture.test_mixed_generated"
+        env = {
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join(
+                (str(self.root), str(REPO_ROOT), os.environ.get("PYTHONPATH", ""))
+            ),
+            "HYPOTHESIS_STORAGE_DIRECTORY": str(self.database),
+            "CRATEDIGGER_HYPOTHESIS_PROFILE": "suite",
+        }
+        with tempfile.TemporaryDirectory() as discovery:
+            manifest = discover_fuzz_manifests(
+                (module,),
+                worker_count=1,
+                environment=env,
+                work_directory=Path(discovery),
+            )[0]
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(RUNNER),
+                "--jobs",
+                "2",
+                "--profile",
+                "suite",
+                module,
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        discovered = tuple(item.test_id for item in manifest.hypothesis_tests)
+        self.assertEqual(
+            sorted(discovered),
+            [
+                "fuzz_fixture.test_mixed_generated.MixedWorld.test_property",
+                "hypothesis.stateful.Machine.TestCase.runTest",
+            ],
+        )
+        self.assertIn(
+            f"DEPTH {len(discovered)} properties measured,",
+            completed.stdout,
+        )
+        self.assertNotIn("test_pin_running_an_inner_property", completed.stdout)
 
     def test_deterministic_profile_rejects_entropy_sharding(self) -> None:
         completed = subprocess.run(

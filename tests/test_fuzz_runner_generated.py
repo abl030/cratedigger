@@ -9,18 +9,20 @@ import os
 from pathlib import Path
 import tempfile
 
-from hypothesis import given
+from hypothesis import example, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401 - registers active profile
 from scripts.run_fuzz_tests import (
     DEPTH_REPORT_LIMIT,
+    DISCARD_RATE_THRESHOLD,
     FuzzModuleManifest,
     FuzzPropertyManifest,
     PropertyDepth,
     aggregate_property_depth,
     assert_exact_fuzz_coverage,
     build_fuzz_targets,
+    discard_rate,
     discover_fuzz_manifests,
     format_depth_report,
     is_structurally_shallow,
@@ -83,6 +85,7 @@ def assert_shard_aggregation(
         expected = PropertyDepth(
             test_id=depth.test_id,
             budget=sum(shard.max_examples for shard in shards),
+            shard_budget_bound=max(shard.max_examples for shard in shards),
             shards=len(shards),
             exhausted_shards=sum(
                 shard.stopped_because == STRATEGY_SPACE_EXHAUSTED
@@ -123,17 +126,40 @@ def assert_shallow_verdict_is_conservative(
         )
 
 
+def _named_by_section(lines: Sequence[str], prefix: str) -> list[str]:
+    return [
+        line.split()[-1]
+        for line in lines
+        if line.startswith(f"{prefix} ") and not line.startswith(f"{prefix} ...")
+    ]
+
+
+def _assert_section_truncation(
+    lines: Sequence[str],
+    prefix: str,
+    total: int,
+    suffix: str,
+) -> None:
+    expected = (
+        [f"{prefix} ... {total - DEPTH_REPORT_LIMIT} more {suffix}"]
+        if total > DEPTH_REPORT_LIMIT
+        else []
+    )
+    actual = [line for line in lines if line.startswith(f"{prefix} ...")]
+    if actual != expected:
+        raise AssertionError(
+            f"{prefix} truncation line is {actual}, expected {expected} "
+            f"for {total} properties"
+        )
+
+
 def assert_report_names_exactly_the_shallow_properties(
     depths: Sequence[PropertyDepth],
     lines: Sequence[str],
 ) -> None:
     """Every ranked SHALLOW line names a shallow property, smallest first."""
     shallow = {depth.test_id for depth in depths if is_structurally_shallow(depth)}
-    named = [
-        line.split()[-1]
-        for line in lines
-        if line.startswith("SHALLOW") and not line.startswith("SHALLOW ...")
-    ]
+    named = _named_by_section(lines, "SHALLOW")
     if len(named) != len(set(named)):
         raise AssertionError(f"a property is reported twice: {named}")
     unexpected = sorted(set(named) - shallow)
@@ -151,6 +177,40 @@ def assert_report_names_exactly_the_shallow_properties(
     ]
     if bounds != sorted(bounds):
         raise AssertionError(f"shallow ranking is not ascending: {bounds}")
+    _assert_section_truncation(lines, "SHALLOW", len(shallow), "shallow")
+
+
+def assert_report_names_exactly_the_discarding_properties(
+    depths: Sequence[PropertyDepth],
+    lines: Sequence[str],
+) -> None:
+    """Every ranked DISCARD line names a discarding property, worst first."""
+    discarding = {
+        depth.test_id
+        for depth in depths
+        if discard_rate(depth) >= DISCARD_RATE_THRESHOLD
+    }
+    named = _named_by_section(lines, "DISCARD")
+    if len(named) != len(set(named)):
+        raise AssertionError(f"a property is reported twice: {named}")
+    unexpected = sorted(set(named) - discarding)
+    if unexpected:
+        raise AssertionError(
+            f"report names properties below the discard threshold: {unexpected}"
+        )
+    if len(named) != min(len(discarding), DEPTH_REPORT_LIMIT):
+        raise AssertionError(
+            f"report names {len(named)} of {len(discarding)} discarding properties"
+        )
+    rates = [
+        discard_rate(depth)
+        for name in named
+        for depth in depths
+        if depth.test_id == name
+    ]
+    if rates != sorted(rates, reverse=True):
+        raise AssertionError(f"discard ranking is not descending: {rates}")
+    _assert_section_truncation(lines, "DISCARD", len(discarding), "discarding")
 
 
 class TestGeneratedFuzzTargetPlanning(unittest.TestCase):
@@ -234,17 +294,32 @@ class TestGeneratedBurstDepthReport(unittest.TestCase):
                 is_structurally_shallow(depth),
             )
 
+    @example(
+        records=tuple(
+            HypothesisPropertyStats(
+                test_id=(
+                    f"tests.test_world_{index:02d}_generated.World.test_property"
+                ),
+                max_examples=20_000,
+                valid=100,
+                invalid=10 + index,
+                overrun=0,
+                interesting=0,
+                stopped_because="settings.max_examples=20000",
+            )
+            for index in range(25)
+        ),
+    )
     @given(records=property_stats(id_count=40, max_size=60))
-    def test_report_ranks_exactly_the_shallow_properties(
+    def test_report_ranks_exactly_the_shallow_and_discarding_properties(
         self,
         records: tuple[HypothesisPropertyStats, ...],
     ) -> None:
         depths = aggregate_property_depth(records)
+        lines = format_depth_report(depths)
 
-        assert_report_names_exactly_the_shallow_properties(
-            depths,
-            format_depth_report(depths),
-        )
+        assert_report_names_exactly_the_shallow_properties(depths, lines)
+        assert_report_names_exactly_the_discarding_properties(depths, lines)
 
 
 class TestDepthCheckersTripOnViolations(unittest.TestCase):
@@ -318,6 +393,78 @@ class TestDepthCheckersTripOnViolations(unittest.TestCase):
                 (self._depth(),),
                 ("DEPTH 1 properties measured",),
             )
+
+    def test_report_checker_rejects_a_missing_shallow_truncation_line(self) -> None:
+        depths = tuple(
+            replace(self._depth(), test_id=f"module.World.test_{index:02d}")
+            for index in range(DEPTH_REPORT_LIMIT + 1)
+        )
+        lines = format_depth_report(depths)
+
+        with self.assertRaisesRegex(AssertionError, "truncation line"):
+            assert_report_names_exactly_the_shallow_properties(
+                depths,
+                [line for line in lines if not line.startswith("SHALLOW ...")],
+            )
+
+    def _discarding(self, invalid: int, index: int) -> PropertyDepth:
+        return replace(
+            self._depth(),
+            test_id=f"module.World.test_{index:02d}",
+            valid=100,
+            invalid=invalid,
+            exhausted_shards=0,
+        )
+
+    def test_discard_checker_rejects_a_reversed_ranking(self) -> None:
+        depths = (self._discarding(20, 0), self._discarding(60, 1))
+        ascending = tuple(
+            sorted(depths, key=lambda depth: discard_rate(depth))
+        )
+
+        assert_report_names_exactly_the_discarding_properties(
+            depths,
+            format_depth_report(depths),
+        )
+        with self.assertRaisesRegex(AssertionError, "not descending"):
+            assert_report_names_exactly_the_discarding_properties(
+                depths,
+                tuple(
+                    f"DISCARD x of y examples (a discarded, b worlds) "
+                    f"{depth.test_id}"
+                    for depth in ascending
+                ),
+            )
+
+    def test_discard_checker_rejects_a_line_below_the_threshold(self) -> None:
+        quiet = self._discarding(1, 0)
+
+        self.assertLess(discard_rate(quiet), DISCARD_RATE_THRESHOLD)
+        with self.assertRaisesRegex(AssertionError, "below the discard threshold"):
+            assert_report_names_exactly_the_discarding_properties(
+                (quiet,),
+                (f"DISCARD 1% of 101 examples (1 discarded, 100 worlds) "
+                 f"{quiet.test_id}",),
+            )
+
+    def test_discard_checker_rejects_an_omitted_discarding_property(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "names 0 of 1"):
+            assert_report_names_exactly_the_discarding_properties(
+                (self._discarding(60, 0),),
+                ("DEPTH 1 properties measured",),
+            )
+
+    def test_discard_checker_accepts_the_real_report(self) -> None:
+        """Must-still-work: the production report satisfies its own checker."""
+        depths = tuple(
+            self._discarding(20 + index, index)
+            for index in range(DEPTH_REPORT_LIMIT + 2)
+        )
+
+        assert_report_names_exactly_the_discarding_properties(
+            depths,
+            format_depth_report(depths),
+        )
 
 
 class TestFuzzCoverageCheckerKnownBad(unittest.TestCase):

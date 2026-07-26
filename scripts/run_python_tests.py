@@ -149,10 +149,19 @@ class HypothesisStatsRecorder:
     started — ``RecordingTextTestResult.startTest`` — which the child bridges
     into :meth:`start`.
 
+    Only tests that ARE properties are recorded. A plain test whose body
+    declares and calls its own ``@given`` function also emits statistics, and
+    the running test is then the enclosing plain test — the repository's
+    known-bad self-test shape. Absence from the budget map is exactly the
+    "not a property test method" signal, so those runs are dropped: filing
+    them under the enclosing test would inflate the property count and, when
+    one body runs two inner properties, fold them into a single row whose
+    shard count and world bound are both fiction.
+
     The recorder never raises and never fails a run: a burst depth report is a
-    disclosure, not a gate. A callback with no running test, an unrecognised
-    budget, or an unreadable statistics shape degrades to a dropped or
-    zero-budget record instead of breaking the suite that produced it.
+    disclosure, not a gate. A callback with no running test, a test that is
+    not a property, or an unreadable statistics shape degrades to a dropped
+    record instead of breaking the suite that produced it.
     """
 
     def __init__(self, budgets: Mapping[str, int]) -> None:
@@ -170,9 +179,9 @@ class HypothesisStatsRecorder:
         self._current_test_id = test_id
 
     def note(self, statistics: Mapping[str, object]) -> None:
-        """Record one Hypothesis run's generate-phase case statuses."""
+        """Record one property's generate-phase case statuses."""
         test_id = self._current_test_id
-        if test_id is None:
+        if test_id is None or test_id not in self._budgets:
             return
         generate_phase = json_dict(statistics.get("generate-phase"))
         statuses = [
@@ -186,7 +195,7 @@ class HypothesisStatsRecorder:
         self._records.append(
             HypothesisPropertyStats(
                 test_id=test_id,
-                max_examples=self._budgets.get(test_id, 0),
+                max_examples=self._budgets[test_id],
                 valid=counts["valid"],
                 invalid=counts["invalid"],
                 overrun=counts["overrun"],

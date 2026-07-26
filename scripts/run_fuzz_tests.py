@@ -97,10 +97,15 @@ class PropertyDepth:
     reached. Shards re-explore the same strategy space with different entropy,
     so summing them would overcount distinct worlds; the maximum is the honest
     bound on how much of its space the property can reach.
+
+    ``shard_budget_bound`` is the largest budget any single child ran under.
+    That, not ``budget``, is the number Hypothesis compared the worlds
+    against, and it is therefore the report's detection ceiling.
     """
 
     test_id: str
     budget: int
+    shard_budget_bound: int
     shards: int
     exhausted_shards: int
     distinct_world_bound: int
@@ -318,10 +323,16 @@ def aggregate_property_depth(
 ) -> tuple[PropertyDepth, ...]:
     """Fold every entropy shard's statistics into one row per property.
 
-    Sharding is invisible to depth: a default-budget property runs as up to
-    eight children of ``budget / shards`` examples each, so judging a raw
-    record would flag every sharded property as under-run. Budgets and case
-    counts sum; the distinct-world bound is the maximum single shard.
+    A default-budget property runs as up to eight children of
+    ``budget / shards`` examples each. Folding does NOT change which
+    properties are flagged — a shard that stops at its own budget reports
+    ``settings.max_examples=...``, never exhaustion, so an unfolded verdict
+    picks out the same set (measured on a real 8-shard run: 185 shard records,
+    24 properties, same three flagged either way). It changes the report:
+    one row instead of eight identical ones eating the ranked list, the
+    property's real total budget, and one distinct-world bound (the maximum
+    shard, since shards re-explore the same space and summing would
+    overcount).
     """
     grouped: dict[str, list[HypothesisPropertyStats]] = {}
     for record in records:
@@ -332,6 +343,9 @@ def aggregate_property_depth(
                 PropertyDepth(
                     test_id=test_id,
                     budget=sum(shard.max_examples for shard in shards),
+                    shard_budget_bound=max(
+                        shard.max_examples for shard in shards
+                    ),
                     shards=len(shards),
                     exhausted_shards=sum(
                         shard.stopped_because == STRATEGY_SPACE_EXHAUSTED
@@ -371,11 +385,21 @@ def is_structurally_shallow(depth: PropertyDepth) -> bool:
     worlds, so a mutant outside those four worlds survives however deep the
     burst runs.
 
+    **Detection ceiling.** Only a space smaller than ``shard_budget_bound``
+    can be observed at all — 150 at the deterministic tier, ``budget /
+    shards`` (2,500 on a 30-core host) at the fuzz tier. A property with more
+    worlds than that never exhausts, so it is reported as deep whatever its
+    real space is, and an empty SHALLOW section means "none found below the
+    ceiling", never "no shallow properties".
+
     Two carve-outs keep the verdict honest:
 
     * a run that reached an ``interesting`` case stopped early BECAUSE it
-      found what it was looking for — every known-bad self-test in the
-      repository looks exactly like an exhausted run otherwise;
+      found what it was looking for. This is defensive: no repository
+      property produces interesting cases today, because the known-bad
+      self-tests run their planted property in an inner ``@given`` whose
+      statistics ``HypothesisStatsRecorder`` drops. It exists so a future
+      property that does report them is not mislabelled;
     * a property whose worlds reach its budget spent everything it was given,
       whatever the tier's budget happens to be.
 
@@ -389,6 +413,10 @@ def is_structurally_shallow(depth: PropertyDepth) -> bool:
     if depth.exhausted_shards != depth.shards:
         return False
     return depth.distinct_world_bound < depth.budget
+
+
+def _shard_count(shards: int) -> str:
+    return f"{shards} shard" if shards == 1 else f"{shards} shards"
 
 
 def format_depth_report(depths: Sequence[PropertyDepth]) -> tuple[str, ...]:
@@ -409,18 +437,20 @@ def format_depth_report(depths: Sequence[PropertyDepth]) -> tuple[str, ...]:
     )
     lines = [
         f"DEPTH {len(depths)} properties measured, "
-        f"{len(shallow)} exhausted their strategy space, "
-        f"{len(discarding)} discarded at least "
+        f"{len(shallow)} shallow (space exhausted below budget), "
+        f"{len(discarding)} discarding at least "
         f"{DISCARD_RATE_THRESHOLD:.0%} of their examples"
     ]
     for depth in shallow[:DEPTH_REPORT_LIMIT]:
         lines.append(
-            f"SHALLOW {depth.distinct_world_bound} worlds of "
-            f"{depth.budget} examples ({depth.shards} shards) {depth.test_id}"
+            f"SHALLOW {depth.distinct_world_bound} worlds vs "
+            f"{depth.shard_budget_bound} examples per shard "
+            f"({_shard_count(depth.shards)}, {depth.budget} total) "
+            f"{depth.test_id}"
         )
     if len(shallow) > DEPTH_REPORT_LIMIT:
         lines.append(
-            f"SHALLOW ... {len(shallow) - DEPTH_REPORT_LIMIT} more exhausted"
+            f"SHALLOW ... {len(shallow) - DEPTH_REPORT_LIMIT} more shallow"
         )
     for depth in discarding[:DEPTH_REPORT_LIMIT]:
         lines.append(
