@@ -72,7 +72,7 @@ def assert_deploy_lifecycle_invariants(
 
 
 def assert_divergent_receipt_invariants(
-    state: dict[str, Any], *, receipt: str, remote: str, new_target: str,
+    state: dict, *, receipt: str, remote: str, new_target: str,
     remote_matches_receipt: bool, verifier_available: bool,
 ) -> None:
     """A sibling receipt advances only through an equivalent trusted remote."""
@@ -116,7 +116,7 @@ def assert_divergent_receipt_invariants(
 
 
 def assert_same_target_divergent_invariants(
-    state: dict[str, Any], *, receipt: str, remote: str, target: str,
+    state: dict, *, receipt: str, remote: str, target: str,
     remote_relation: str, verifier_available: bool,
 ) -> None:
     """A same-target sibling is current, replaced, or left untouched."""
@@ -160,7 +160,7 @@ def assert_same_target_divergent_invariants(
 
 
 def assert_pending_recovery_invariants(
-    state: dict[str, Any], *, receipt: str, pending: str, event_start: int,
+    state: dict, *, receipt: str, pending: str, event_start: int,
     commit_count: int, outcome: str,
 ) -> None:
     """An interrupted pending candidate is fail-closed until its remote is safe."""
@@ -625,7 +625,7 @@ class TestGeneratedDeployPinLifecycle(unittest.TestCase):
             self.assertIsNotNone(pending)
             assert pending is not None
 
-            changes: dict[str, Any] = {
+            changes: dict = {
                 "fault": None,
                 "remote_move_on_nix": False,
                 "remote_signature_status": "G",
