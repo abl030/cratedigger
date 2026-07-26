@@ -72,6 +72,13 @@ from scripts.pipeline_cli.album_requests import (
     tracks_from_mb_release,
 )
 from scripts.pipeline_cli.audit import cmd_audit_world
+from scripts.pipeline_cli.api_mutations import (
+    cmd_pipeline_delete,
+    cmd_resolve_rg,
+    cmd_set_quality,
+    cmd_upgrade,
+    cmd_wrong_match_converge,
+)
 from scripts.pipeline_cli.query import cmd_query
 from scripts.pipeline_cli.show import cmd_show
 from scripts.pipeline_cli.quality import (
@@ -133,10 +140,12 @@ __all__ = [
     "cmd_list",
     "cmd_library_delete",
     "cmd_long_tail",
+    "cmd_pipeline_delete",
     "cmd_quality",
     "cmd_query",
     "cmd_repair_spectral",
     "cmd_replace",
+    "cmd_resolve_rg",
     "cmd_routes",
     "cmd_search_plan_advance",
     "cmd_search_plan_dry_run",
@@ -146,13 +155,16 @@ __all__ = [
     "cmd_search_plan_show",
     "cmd_set",
     "cmd_set_intent",
+    "cmd_set_quality",
     "cmd_show",
     "cmd_status",
     "cmd_triage_list",
     "cmd_triage_quarantine",
     "cmd_triage_show",
+    "cmd_upgrade",
     "cmd_wrong_match_delete",
     "cmd_wrong_match_delete_group",
+    "cmd_wrong_match_converge",
     "cmd_wrong_match_triage",
     "cmd_youtube_album",
     "cmd_youtube_rescue",

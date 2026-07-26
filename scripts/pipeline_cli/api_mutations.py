@@ -17,7 +17,7 @@ import urllib.request
 import msgspec
 
 
-DEFAULT_API_BASE = "http://127.0.0.1:8090"
+DEFAULT_API_BASE = "http://127.0.0.1:8085"
 _TIMEOUT_SECONDS = 15.0
 
 

@@ -126,6 +126,7 @@ these adapters do not bypass authentication.
 - `pipeline-cli query` — Run one read-only SQL statement, or the explicit write escape hatch.
 - `pipeline-cli repair-spectral` — Repair stale spectral state.
 - `pipeline-cli replace` — Supersede a request with another exact pressing in its release family.
+- `pipeline-cli resolve-rg` — Resolve a request release group through its canonical web route.
 - `pipeline-cli routes` — Discover every parser command, argument, and description.
 - `pipeline-cli search-plan advance` — Advance one persisted search-plan cursor.
 - `pipeline-cli search-plan dry-run` — Generate a request plan without persisting it.
@@ -148,7 +149,6 @@ these adapters do not bypass authentication.
 - `pipeline-cli youtube-album` — Resolve a release to the YouTube Music album matrix.
 - `pipeline-cli youtube-rescue` — Submit a YouTube Music rescue ingest.
 - `pipeline-cli upgrade` — Queue an exact release upgrade through its canonical web route.
-- `pipeline-cli resolve-rg` — Resolve a request release group through its canonical web route.
 
 ## World audit scope
 

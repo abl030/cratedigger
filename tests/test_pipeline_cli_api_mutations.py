@@ -12,6 +12,7 @@ from contextlib import redirect_stdout, redirect_stderr
 from unittest.mock import patch
 
 from scripts.pipeline_cli import api_mutations
+from scripts.pipeline_cli.routes_meta import _build_parser
 from tests.helpers import make_request_row
 from tests.web._harness import _FakeDbWebServerCase
 
@@ -32,6 +33,12 @@ class _Response:
 
 
 class TestApiMutationCli(unittest.TestCase):
+    def test_standalone_api_origin_matches_module_default(self) -> None:
+        parser, _search_plan, _triage = _build_parser()
+        self.assertEqual(api_mutations.DEFAULT_API_BASE, "http://127.0.0.1:8085")
+        self.assertEqual(parser.parse_args(["upgrade", "release"]).api_base,
+                         "http://127.0.0.1:8085")
+
     def _run(self, command: str, **values: object) -> tuple[int, str, str]:
         handlers = {
             "pipeline-delete": api_mutations.cmd_pipeline_delete,
@@ -116,16 +123,31 @@ class TestApiMutationCli(unittest.TestCase):
         self.assertEqual(code, 3)
         urlopen.assert_not_called()
 
-    def test_api_commands_dispatch_before_db_and_mirror_setup(self) -> None:
-        with patch("scripts.pipeline_cli.cli.PipelineDB", side_effect=AssertionError), patch(
-            "web.api_bases.configure_api_bases_from_runtime_config", side_effect=AssertionError,
-        ), patch("scripts.pipeline_cli.api_mutations.urllib.request.urlopen",
-                 return_value=_Response(200)), patch("sys.argv", [
-                     "pipeline-cli", "--api-base", "http://api", "upgrade", "r"]):
-            with self.assertRaises(SystemExit) as exited:
-                from scripts.pipeline_cli.cli import main
-                main()
-        self.assertEqual(exited.exception.code, 0)
+    def test_all_api_commands_dispatch_before_db_and_mirror_setup(self) -> None:
+        commands = [
+            ["pipeline-delete", "7", "--confirm", "DELETE"],
+            ["set-quality", "release-1", "--status", "wanted"],
+            ["upgrade", "release-2"],
+            ["wrong-match-converge", "8", "150", "--apply"],
+            ["resolve-rg", "9"],
+        ]
+        for command in commands:
+            with self.subTest(command=command), patch(
+                "scripts.pipeline_cli.cli.PipelineDB", side_effect=AssertionError,
+            ), patch(
+                "web.api_bases.configure_api_bases_from_runtime_config",
+                side_effect=AssertionError,
+            ), patch(
+                "scripts.pipeline_cli.api_mutations.urllib.request.urlopen",
+                return_value=_Response(200),
+            ) as urlopen, patch("sys.argv", [
+                "pipeline-cli", "--api-base", "http://api", *command,
+            ]):
+                with self.assertRaises(SystemExit) as exited:
+                    from scripts.pipeline_cli.cli import main
+                    main()
+            self.assertEqual(exited.exception.code, 0)
+            urlopen.assert_called_once()
 
 
 class TestApiMutationRealRouteRoundTrips(_FakeDbWebServerCase):

@@ -77,6 +77,19 @@ class TestPythonPathCarriesOnlyRepoRoot(unittest.TestCase):
         )
 
 
+class TestPipelineCliWrapperContract(unittest.TestCase):
+    """API-backed CLI commands must follow the configured web listener."""
+
+    def test_wrapper_passes_configured_loopback_api_origin(self) -> None:
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        wrapper_start = text.index('writeShellScriptBin "pipeline-cli"')
+        wrapper_end = text.index('writeShellScriptBin "pipeline-migrate"')
+        wrapper = text[wrapper_start:wrapper_end]
+        self.assertIn(
+            '--api-base "http://127.0.0.1:${toString cfg.web.port}"', wrapper,
+        )
+
+
 class TestImporterServiceContract(unittest.TestCase):
     def test_importer_wrapper_and_service_are_defined(self) -> None:
         text = MODULE_NIX.read_text(encoding="utf-8")
