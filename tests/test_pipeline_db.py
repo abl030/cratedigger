@@ -2770,6 +2770,40 @@ class TestDownloadLog(unittest.TestCase):
         self.assertEqual(by_id[yt_id]["source"], "youtube")
         self.assertEqual(by_id[yt_id]["request_source"], "request")
 
+    def test_log_download_round_trip_preserves_materialize_failure_evidence(self):
+        """Rule A (test-fidelity.md) for issue #868's grace-expiry row.
+
+        ``lib/download.py`` now writes the machine reason alongside the
+        operator-facing grace sentence. Both must survive the REAL PG
+        round trip: ``FakePipelineDB`` stores whatever dict it is handed,
+        so a column omitted from the INSERT list would be invisible in
+        every orchestration test and silently ``None`` in production.
+        """
+        self.db.log_download(
+            request_id=self.req_id,
+            soulseek_username="user1",
+            filetype="flac",
+            outcome="failed",
+            beets_detail="event_path_never_stamped",
+            error_message=(
+                "Completed download could not be materialized within 3600s "
+                "of processing start; resetting to wanted for re-download"
+            ),
+        )
+
+        history = self.db.get_download_history(self.req_id)
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["beets_detail"], "event_path_never_stamped")
+        self.assertEqual(
+            history[0]["error_message"],
+            "Completed download could not be materialized within 3600s "
+            "of processing start; resetting to wanted for re-download",
+        )
+        # The reason must not be laundered into the distance/scenario
+        # projection columns — it is evidence, not a validation verdict.
+        self.assertIsNone(history[0]["beets_scenario"])
+        self.assertIsNone(history[0]["beets_distance"])
+
     def test_log_download_round_trip_preserves_transfer_detail(self):
         """Rule A (test-fidelity.md): migration 043's transfer_detail
         JSONB column must actually preserve what log_download writes —

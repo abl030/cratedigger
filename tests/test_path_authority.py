@@ -431,6 +431,61 @@ class TestAtomicPrivateMaterialization(unittest.TestCase):
             self.assertTrue(os.path.exists(first))
             self.assertTrue(os.path.exists(second))
 
+    def _stamped_album(self, source: str, processing: str):
+        source_path = os.path.join(source, "track.mp3")
+        with open(source_path, "wb") as handle:
+            handle.write(b"audio")
+        file = DownloadFile(
+            filename="peer\\track.mp3", username="peer", id="1",
+            file_dir="peer", size=5,
+        )
+        file.local_path = source_path
+        album = make_grab_list_entry(
+            files=[file], artist="A", title="B", year="2020")
+        staged = StagedAlbum.from_entry(
+            album,
+            default_path=canonical_folder_for_row(
+                album, processing_albums_dir(processing)),
+        )
+        return album, staged, source_path
+
+    def test_private_tree_absence_reports_a_processing_reason(self) -> None:
+        """Issue #868: a refusal on OUR OWN tree gets its own vocabulary.
+
+        The retired derivation split the message on its first colon, so
+        this failure was persisted as the prose fragment ``cannot open
+        albums`` — which is neither machine-stable nor a cause.
+        """
+        parent, source, processing = self._world()
+        with parent:
+            album, staged, source_path = self._stamped_album(source, processing)
+            os.rmdir(os.path.join(processing, "albums"))
+            result = _materialize_processing_dir(
+                album, staged, self._ctx(source, processing))
+            self.assertIsInstance(result, MaterializeFailed)
+            assert isinstance(result, MaterializeFailed)
+            self.assertEqual(result.reason, "processing_path_missing")
+            self.assertNotIn(":", result.reason)
+            self.assertTrue(os.path.exists(source_path))
+
+    def test_private_tree_storage_failure_carries_its_errno(self) -> None:
+        """Issue #868 I3: our own tree gets the same containment/storage
+        separation the slskd source does."""
+        parent, source, processing = self._world()
+        with parent:
+            album, staged, source_path = self._stamped_album(source, processing)
+            albums = os.path.join(processing, "albums")
+            os.chmod(albums, 0o000)
+            try:
+                result = _materialize_processing_dir(
+                    album, staged, self._ctx(source, processing))
+            finally:
+                os.chmod(albums, 0o700)
+            self.assertIsInstance(result, MaterializeFailed)
+            assert isinstance(result, MaterializeFailed)
+            self.assertEqual(result.reason, "processing_open_failed_EACCES")
+            self.assertTrue(os.path.exists(source_path))
+
     def test_existing_empty_destination_is_guarded_without_overwrite(self) -> None:
         parent, source, processing = self._world()
         with parent:
