@@ -5,17 +5,25 @@
 
 1. *No silent rejection.* ``beets_validate`` NEVER returns a result whose
    ``scenario`` is ``None``. Either a ``choose_match`` was decoded and
-   decided, or the run is named ``no_choose_match``.
-2. *Evidence accompanies the name.* ``harness_session`` is populated on
-   exactly the ``no_choose_match`` results and on no others, and those
-   results always carry a non-empty ``detail``.
-3. *The evidence is observation, not inference.* It records the harness
+   decided, or the run is named for how it reached no reviewed match.
+2. *The name matches the error state.* A run that recorded no error is
+   ``no_choose_match`` — beets offered nothing. A run that recorded one is
+   ``validation_error`` — validation did not complete. The split is not
+   cosmetic: the strict-decode refusal is a world where beets DID offer a
+   match and Cratedigger declined to decode it, so naming it
+   ``no_choose_match`` would assert the opposite of what happened.
+3. *Evidence accompanies the name.* ``harness_session`` is populated on
+   exactly those two outcomes and on no others; they always carry a
+   non-empty, BOUNDED ``detail``; and they are never ``valid`` — a run with
+   no reviewed match can never be an auto-import candidate.
+4. *The evidence is observation, not inference.* It records the harness
    message types, whether a ``session_end`` was announced, and the stderr
-   tail — never a claimed cause.
-4. *Naming the scenario does not move the download.* ``no_choose_match``
-   stays a Wrong Matches candidate, exactly as the unnamed ``None`` was, so
-   the quarantine tree and the operator worklist are unchanged.
-5. *The operator-facing copy is reachable from the producer.* The verdict
+   tail — never a claimed cause. Our own clause is the first ``;``-separated
+   segment, so wire-controlled text can never be read as our assertion.
+5. *Naming the scenario does not move the download.* Both names stay Wrong
+   Matches candidates, exactly as the unnamed ``None`` was, so the
+   quarantine tree and the operator worklist are unchanged.
+6. *The operator-facing copy is reachable from the producer.* The verdict
    Recents renders is triggered by the string ``beets_validate`` actually
    writes, produced here by running it.
 
@@ -47,12 +55,17 @@ from collections.abc import Sequence
 import msgspec
 
 from lib.beets import (
+    NO_CHOOSE_MATCH_CLAUSE,
     NO_CHOOSE_MATCH_SCENARIO,
+    VALIDATION_ERROR_CLAUSE,
+    VALIDATION_ERROR_SCENARIO,
+    _DETAIL_MAX_CHARS,
+    _STDERR_LINE_CHARS,
     _STDERR_TAIL_CHARS,
     beets_validate,
 )
 from lib.import_manifest import move_failed_import_curated
-from lib.quality import ValidationResult
+from lib.quality import HarnessSessionEvidence, ValidationResult
 from lib.wrong_match_policy import (
     WRONG_MATCH_QUARANTINE_DIR,
     rejection_scenario_is_wrong_match_candidate,
@@ -63,9 +76,19 @@ from web.classify import LogEntry, classify_log_entry
 
 TARGET_MBID = "aaaaaaaa-1111-2222-3333-444444444444"
 
-#: The verdict Recents must render for a run that offered no match. Pinned
-#: here so the copy has exactly one spelling in the tests.
+#: The clause each unmatched scenario composes for itself, taken from the
+#: producer rather than retyped (``.claude/rules/test-fidelity.md`` Rule C).
+UNMATCHED_CLAUSES: dict[str, str] = {
+    NO_CHOOSE_MATCH_SCENARIO: NO_CHOOSE_MATCH_CLAUSE,
+    VALIDATION_ERROR_SCENARIO: VALIDATION_ERROR_CLAUSE,
+}
+
+#: The verdicts Recents must render. Pinned here so each has exactly one
+#: spelling across the test pair.
 NO_CHOOSE_MATCH_VERDICT = "Beets ended without offering a match to review"
+VALIDATION_ERROR_VERDICT_PREFIX = (
+    "Validation failed before a match could be reviewed"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +108,10 @@ cat {stderr_file} >&2
 exec 2>&-
 sleep 20
 """
+
+
+def _shell_quote(path: str) -> str:
+    return "'" + path.replace("'", "'\\''") + "'"
 
 
 def write_fake_harness(
@@ -115,10 +142,6 @@ def write_fake_harness(
         ))
     os.chmod(harness_path, os.stat(harness_path).st_mode | stat.S_IEXEC)
     return harness_path
-
-
-def _shell_quote(path: str) -> str:
-    return "'" + path.replace("'", "'\\''") + "'"
 
 
 def run_fake_harness(
@@ -177,11 +200,19 @@ SESSION_END_LINE = '{"type": "session_end"}'
 SHOULD_RESUME_LINE = '{"type": "should_resume", "path": "/staged"}'
 
 #: A ``choose_match`` the strict wire boundary refuses: ``album_id`` is an
-#: int, the PR #98 shape. The message arrives but is never processed.
+#: int, the PR #98 shape. Beets OFFERED a match here — our decoder declined
+#: it — which is the whole reason this world gets its own scenario name.
 UNDECODABLE_CHOOSE_MATCH_LINE = (
     '{"type": "choose_match", "task_id": 0, "path": "/staged", '
     '"candidates": [{"album_id": 2085134, "distance": 0.05}]}'
 )
+
+#: A harness message whose ``type`` is not a string. Nothing in production
+#: emits it, but the guard that skips it is real and load-bearing: without
+#: it the value reaches ``", ".join(...)`` inside ``_record_unmatched_run``,
+#: which runs OUTSIDE the read loop's try/except — so it propagates out of
+#: ``beets_validate`` and fails the import job (issue #888 review F5).
+NON_STRING_TYPE_LINE = '{"type": 5}'
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +222,7 @@ UNDECODABLE_CHOOSE_MATCH_LINE = (
 DECIDED_SCENARIOS = frozenset({
     "strong_match", "high_distance", "extra_tracks", "mbid_not_found",
 })
+UNMATCHED_SCENARIOS = frozenset(UNMATCHED_CLAUSES)
 
 
 def assert_scenario_is_always_named(result: ValidationResult) -> None:
@@ -198,19 +230,50 @@ def assert_scenario_is_always_named(result: ValidationResult) -> None:
     assert result.scenario is not None, (
         "beets_validate returned a result with no scenario — the silent "
         "rejection of issue #888")
-    assert result.scenario in DECIDED_SCENARIOS | {NO_CHOOSE_MATCH_SCENARIO}, (
+    assert result.scenario in DECIDED_SCENARIOS | UNMATCHED_SCENARIOS, (
         f"unknown scenario {result.scenario!r}")
 
 
+def assert_the_name_matches_the_error_state(result: ValidationResult) -> None:
+    """Invariant 2: the name a run gets is decided by whether it errored.
+
+    ``error is None`` is the same discriminator the issue-#888 RCA used to
+    separate the genuine 276 from the four error branches, so production
+    uses it too. Without this, the strict-decode refusal — where beets DID
+    offer a match — renders a headline asserting beets offered nothing, at
+    exactly the moment (a beets field-type change) that would hit every
+    album at once.
+    """
+    if result.scenario not in UNMATCHED_SCENARIOS:
+        return
+    if result.error is None:
+        assert result.scenario == NO_CHOOSE_MATCH_SCENARIO, (
+            f"a run with no recorded error was named {result.scenario!r}")
+    else:
+        assert result.scenario == VALIDATION_ERROR_SCENARIO, (
+            f"a run that recorded {result.error!r} was named "
+            f"{result.scenario!r}, which asserts beets offered nothing")
+
+
 def assert_evidence_accompanies_the_name(result: ValidationResult) -> None:
-    """Invariant 2: ``harness_session`` marks exactly the unmatched runs."""
-    named_no_match = result.scenario == NO_CHOOSE_MATCH_SCENARIO
-    assert (result.harness_session is not None) == named_no_match, (
+    """Invariant 3: ``harness_session`` marks exactly the unmatched runs."""
+    unmatched = result.scenario in UNMATCHED_SCENARIOS
+    assert (result.harness_session is not None) == unmatched, (
         f"scenario {result.scenario!r} and harness_session "
         f"{result.harness_session!r} disagree")
-    if not named_no_match:
+    if not unmatched:
         return
-    assert result.detail, "a no_choose_match result must explain itself"
+    # A run that never reviewed a match can never be an auto-import
+    # candidate: ``lib/download_validation.py`` routes on ``valid`` alone and
+    # never consults the scenario, so a True here would send an unmatched
+    # download straight into dispatch (issue #888 review F2).
+    assert not result.valid, (
+        "an unmatched run must never be valid — it would enter auto-import "
+        "dispatch, which routes on bv_result.valid alone")
+    assert result.detail, "an unmatched result must explain itself"
+    assert len(result.detail) <= _DETAIL_MAX_CHARS, (
+        f"detail is {len(result.detail)} chars; it reaches "
+        "download_log.beets_detail and the Recents card")
     session = result.harness_session
     assert session is not None
     assert list(dict.fromkeys(session.message_types)) == session.message_types, (
@@ -218,50 +281,49 @@ def assert_evidence_accompanies_the_name(result: ValidationResult) -> None:
     if session.session_end_seen:
         assert "session_end" in session.message_types, (
             "session_end_seen without the message type recorded")
+    assert "harness messages: " in result.detail, (
+        "the detail must name what the harness said")
     if not session.message_types:
         assert "harness messages: none" in result.detail, (
             "a harness that said nothing must say so in the detail")
-    for message_type in session.message_types:
-        assert message_type in result.detail, (
-            f"detail omits observed message type {message_type!r}")
+    elif not result.detail.endswith("…"):
+        # Skipped only for a truncated detail, where a tail was dropped by
+        # design; the untruncated case must account for every type.
+        for message_type in session.message_types:
+            assert message_type in result.detail, (
+                f"detail omits observed message type {message_type!r}")
     if session.stderr_tail is not None:
         assert len(session.stderr_tail) <= _STDERR_TAIL_CHARS
         assert session.stderr_tail.strip(), "an empty tail must be None"
 
 
-#: The exact clause ``beets_validate`` composes for itself. Everything
-#: after the first ``;`` is quoted from the harness or from the exception
-#: text, so only this leading clause is OURS to be wrong in.
-NO_MATCH_DETAIL_PREFIX = (
-    "beets harness ended without offering a match to review "
-    "(harness messages: "
-)
-
-
 def assert_evidence_claims_no_cause(result: ValidationResult) -> None:
-    """Invariant 3: our own copy states an observation, never a diagnosis.
+    """Invariant 4: our own clause is an observation, and stands alone.
 
-    Pinned as an exact prefix rather than a keyword scan so that changing
-    the sentence forces a visit to this doctrine, and so that words the
-    HARNESS chose (its message types, its traceback) are never mistaken for
-    a claim Cratedigger made.
+    The clause is pinned by EQUALITY against the producer's own constant,
+    and it is segment 0 of the ``;``-separated detail — so it contains no
+    interpolated, wire-controlled text at all. Words the HARNESS chose (its
+    message type names, its traceback) live after the first ``;`` and can
+    never be mistaken for a claim Cratedigger made (issue #888 review F6).
     """
-    if result.scenario != NO_CHOOSE_MATCH_SCENARIO:
+    if result.scenario not in UNMATCHED_SCENARIOS:
         return
     detail = result.detail or ""
-    assert detail.startswith(NO_MATCH_DETAIL_PREFIX), (
-        f"the no-match detail no longer opens with the observation: {detail!r}")
-    ours = detail.split(";")[0].casefold()
+    expected = UNMATCHED_CLAUSES[result.scenario]
+    assert detail.split(";")[0] == expected, (
+        f"the {result.scenario} detail no longer opens with its own clause: "
+        f"{detail!r}")
+    lowered = expected.casefold()
     for forbidden in (
         "no importable audio", "crashed", "because", "corrupt",
         "the folder is empty", "beets could not read",
     ):
-        assert forbidden not in ours, (
-            f"the no-match detail claims a cause it cannot know: {forbidden!r}")
+        assert forbidden not in lowered, (
+            f"the clause claims a cause it cannot know: {forbidden!r}")
 
 
 def assert_stays_a_wrong_match_candidate(scenario: str | None) -> None:
-    """Invariant 4: naming the scenario does not reroute the download."""
+    """Invariant 5: naming the scenario does not reroute the download."""
     assert rejection_scenario_is_wrong_match_candidate(scenario), (
         f"{scenario!r} left the Wrong Matches taxonomy — the download would "
         "move quarantine trees and vanish from the operator worklist")
@@ -275,24 +337,26 @@ def assert_result_round_trips(result: ValidationResult) -> None:
     assert decoded.harness_session == result.harness_session
 
 
+def assert_every_invariant(result: ValidationResult) -> None:
+    """Every invariant this module owns, against one real run."""
+    assert_scenario_is_always_named(result)
+    assert_the_name_matches_the_error_state(result)
+    assert_evidence_accompanies_the_name(result)
+    assert_evidence_claims_no_cause(result)
+    assert_stays_a_wrong_match_candidate(result.scenario)
+    assert_result_round_trips(result)
+
+
 # ---------------------------------------------------------------------------
 # Pins
 # ---------------------------------------------------------------------------
 
-class TestSessionsThatOfferNoMatch(unittest.TestCase):
-    """The exact worlds the live cohort is consistent with."""
-
-    def _assert_all_invariants(self, result: ValidationResult) -> None:
-        assert_scenario_is_always_named(result)
-        assert_evidence_accompanies_the_name(result)
-        assert_evidence_claims_no_cause(result)
-        assert_stays_a_wrong_match_candidate(result.scenario)
-        assert_result_round_trips(result)
+class TestSessionsThatOfferedNothing(unittest.TestCase):
+    """``no_choose_match``: the run completed and offered no match."""
 
     def test_a_clean_session_that_offered_nothing_is_named_and_evidenced(self):
-        """The harness ran, announced its session end, and never offered a
-        match — the shape consistent with a folder beets found nothing
-        importable in."""
+        """The harness ran, announced its session end, recorded no error, and
+        never offered a match — the shape the live 276 are consistent with."""
         result = run_fake_harness([SESSION_END_LINE])
 
         self.assertEqual(result.scenario, NO_CHOOSE_MATCH_SCENARIO)
@@ -303,13 +367,52 @@ class TestSessionsThatOfferNoMatch(unittest.TestCase):
         self.assertTrue(session.session_end_seen)
         self.assertIsNone(session.stderr_tail)
         assert result.detail is not None
+        self.assertTrue(result.detail.startswith(NO_CHOOSE_MATCH_CLAUSE))
         self.assertIn("session_end", result.detail)
-        self._assert_all_invariants(result)
+        assert_every_invariant(result)
 
-    def test_a_harness_that_died_before_speaking_keeps_its_traceback(self):
+    def test_non_json_chatter_alone_still_offers_no_match(self):
+        result = run_fake_harness(
+            ["", "beets: importing …", "not json at all", SESSION_END_LINE])
+
+        self.assertEqual(result.scenario, NO_CHOOSE_MATCH_SCENARIO)
+        session = result.harness_session
+        assert session is not None
+        self.assertEqual(session.message_types, ["session_end"])
+        assert_every_invariant(result)
+
+    def test_a_non_string_message_type_is_skipped_not_recorded(self):
+        """Issue #888 review F5: without the ``isinstance(msg_type, str)``
+        guard the int reaches ``", ".join(...)`` in ``_record_unmatched_run``
+        and raises outside the read loop's try/except, propagating out of
+        ``beets_validate`` instead of producing a row."""
+        result = run_fake_harness([NON_STRING_TYPE_LINE, SESSION_END_LINE])
+
+        self.assertEqual(result.scenario, NO_CHOOSE_MATCH_SCENARIO)
+        self.assertIsNone(result.error)
+        session = result.harness_session
+        assert session is not None
+        self.assertEqual(session.message_types, ["session_end"])
+        assert_every_invariant(result)
+
+    def test_a_quiet_harness_that_said_nothing_at_all_is_named(self):
+        result = run_fake_harness([])
+
+        self.assertEqual(result.scenario, NO_CHOOSE_MATCH_SCENARIO)
+        session = result.harness_session
+        assert session is not None
+        self.assertEqual(session.message_types, [])
+        self.assertFalse(session.session_end_seen)
+        assert result.detail is not None
+        self.assertIn("harness messages: none", result.detail)
+        assert_every_invariant(result)
+
+    def test_a_crashing_harness_keeps_its_traceback(self):
         """The 2026-06-28/29 shape: 254 of the 276 live rows. Nothing on
         stdout, a Python traceback on stderr — which used to reach the
-        journal and nowhere else."""
+        journal and nowhere else. ``beets_validate`` records no error of its
+        own for this world (the process simply said nothing), so it keeps the
+        ``no_choose_match`` name and the traceback rides in the evidence."""
         traceback = (
             "Traceback (most recent call last):\n"
             '  File "/nix/store/xxx/beets/library.py", line 42, in __init__\n'
@@ -321,50 +424,40 @@ class TestSessionsThatOfferNoMatch(unittest.TestCase):
         self.assertEqual(result.scenario, NO_CHOOSE_MATCH_SCENARIO)
         session = result.harness_session
         assert session is not None
-        self.assertEqual(session.message_types, [])
-        self.assertFalse(session.session_end_seen)
         assert session.stderr_tail is not None
         self.assertIn("sqlite3.OperationalError: database is locked",
                       session.stderr_tail)
         assert result.detail is not None
-        self.assertIn("harness messages: none", result.detail)
-        # The single most diagnostic line — the bottom of the traceback —
-        # rides along in the column the card shows.
         self.assertIn("sqlite3.OperationalError: database is locked",
                       result.detail)
-        self._assert_all_invariants(result)
+        assert_every_invariant(result)
 
-    def test_a_long_stderr_keeps_its_tail_not_its_head(self):
-        """A traceback's cause is at the BOTTOM; the bounded copy keeps it."""
-        noise = "\n".join(f"  frame {index}" for index in range(4000))
-        traceback = f"{noise}\nValueError: the actual cause\n"
-        result = run_fake_harness([], stderr_text=traceback)
 
-        session = result.harness_session
-        assert session is not None
-        assert session.stderr_tail is not None
-        self.assertLessEqual(len(session.stderr_tail), _STDERR_TAIL_CHARS)
-        self.assertTrue(session.stderr_tail.endswith("ValueError: the actual cause"))
-        self._assert_all_invariants(result)
+class TestRunsThatRecordedAnError(unittest.TestCase):
+    """``validation_error``: validation did not complete (issue #888 F1)."""
 
-    def test_an_undecodable_choose_match_is_not_a_processed_match(self):
-        """The PR #98 int-``album_id`` shape. The message arrived, so it is
-        recorded — but nothing was decided, so the run still owes its
-        no-match evidence, alongside the schema-violation error."""
+    def test_an_undecodable_choose_match_never_claims_beets_offered_nothing(self):
+        """The PR #98 int-``album_id`` shape, and the blocker behind the
+        split: beets DID offer a match here — the strict wire decode refused
+        it. ``harness_session.message_types`` says ``choose_match`` in the
+        same row, so a headline claiming nothing was offered would be
+        contradicted by its own evidence."""
         result = run_fake_harness(
             [UNDECODABLE_CHOOSE_MATCH_LINE, SESSION_END_LINE])
 
-        self.assertEqual(result.scenario, NO_CHOOSE_MATCH_SCENARIO)
+        self.assertEqual(result.scenario, VALIDATION_ERROR_SCENARIO)
         assert result.error is not None
         self.assertIn("album_id", result.error)
         session = result.harness_session
         assert session is not None
         self.assertEqual(session.message_types, ["choose_match", "session_end"])
         assert result.detail is not None
+        self.assertTrue(result.detail.startswith(VALIDATION_ERROR_CLAUSE))
         self.assertIn("harness schema violation", result.detail)
-        self._assert_all_invariants(result)
+        self.assertNotIn("without offering a match", result.detail)
+        assert_every_invariant(result)
 
-    def test_a_harness_that_cannot_start_is_named_too(self):
+    def test_a_harness_that_cannot_start_is_a_validation_error(self):
         """No process, no match, and the reason still reaches the row."""
         with tempfile.TemporaryDirectory() as tmpdir:
             album_dir = os.path.join(tmpdir, "Artist - Album")
@@ -373,26 +466,93 @@ class TestSessionsThatOfferNoMatch(unittest.TestCase):
                 os.path.join(tmpdir, "does-not-exist.sh"),
                 album_dir, TARGET_MBID, 0.15)
 
-        self.assertEqual(result.scenario, NO_CHOOSE_MATCH_SCENARIO)
+        self.assertEqual(result.scenario, VALIDATION_ERROR_SCENARIO)
         assert result.error is not None
         self.assertIn("Failed to start harness", result.error)
         assert result.detail is not None
+        self.assertTrue(result.detail.startswith(VALIDATION_ERROR_CLAUSE))
         self.assertIn("Failed to start harness", result.detail)
-        self._assert_all_invariants(result)
+        assert_every_invariant(result)
 
-    def test_non_json_chatter_alone_still_offers_no_match(self):
-        result = run_fake_harness(
-            ["", "beets: importing …", "not json at all", SESSION_END_LINE])
+    def test_a_non_object_json_line_raises_inside_the_loop_and_is_named(self):
+        """The read loop's ``except Exception`` branch: ``msg.get`` on a
+        JSON array raises, the loop ends, and the error is recorded."""
+        result = run_fake_harness(["[1, 2, 3]", SESSION_END_LINE])
 
-        self.assertEqual(result.scenario, NO_CHOOSE_MATCH_SCENARIO)
+        self.assertEqual(result.scenario, VALIDATION_ERROR_SCENARIO)
+        assert result.error is not None
+        assert result.detail is not None
+        self.assertTrue(result.detail.startswith(VALIDATION_ERROR_CLAUSE))
+        assert_every_invariant(result)
+
+
+class TestThePersistedTextIsBounded(unittest.TestCase):
+    """Issue #888 review F3: ``detail`` reaches a DB column and a card."""
+
+    def test_a_long_stderr_keeps_its_tail_not_its_head(self):
+        """A traceback's cause is at the BOTTOM; the bounded audit keeps it."""
+        noise = "\n".join(f"  frame {index}" for index in range(4000))
+        traceback = f"{noise}\nValueError: the actual cause\n"
+        result = run_fake_harness([], stderr_text=traceback)
+
         session = result.harness_session
         assert session is not None
-        self.assertEqual(session.message_types, ["session_end"])
-        self._assert_all_invariants(result)
+        assert session.stderr_tail is not None
+        self.assertLessEqual(len(session.stderr_tail), _STDERR_TAIL_CHARS)
+        self.assertTrue(
+            session.stderr_tail.endswith("ValueError: the actual cause"))
+        assert_every_invariant(result)
+
+    def test_a_half_megabyte_single_line_stderr_does_not_reach_the_card(self):
+        """Measured live shape: one 500 KB newline-free stderr line put
+        500,128 chars into ``detail`` and 504,666 into the JSONB blob."""
+        giant = "E" * 500_000
+        result = run_fake_harness([], stderr_text=f"ValueError: {giant}\n")
+
+        assert result.detail is not None
+        self.assertLessEqual(len(result.detail), _DETAIL_MAX_CHARS)
+        session = result.harness_session
+        assert session is not None
+        assert session.stderr_tail is not None
+        self.assertLessEqual(len(session.stderr_tail), _STDERR_TAIL_CHARS)
+        # The bounded hint keeps the informative FRONT of the line…
+        self.assertIn("ValueError: EEE", result.detail)
+        # …and the whole persisted row stays a sane size.
+        self.assertLess(len(result.to_json()), 16_000)
+        assert_every_invariant(result)
+
+    def test_the_stderr_hint_is_capped_independently_of_the_detail(self):
+        result = run_fake_harness([], stderr_text="X" * 5_000 + "\n")
+        assert result.detail is not None
+        hint = result.detail.split("harness stderr ended: ")[-1]
+        self.assertLessEqual(len(hint), _STDERR_LINE_CHARS)
+
+    def test_a_harness_spamming_distinct_message_types_is_capped(self):
+        """The bound the per-line stderr cap does NOT cover: a harness that
+        emits hundreds of distinct ``type`` values puts all of them in the
+        messages segment. Only the whole-detail cap keeps that out of the
+        column and the card — a mutant deleting it survives every
+        stderr-shaped world (issue #888 review F3, verified by injection)."""
+        lines = [
+            f'{{"type": "future_message_variant_{index:03d}"}}'
+            for index in range(300)
+        ]
+        result = run_fake_harness([*lines, SESSION_END_LINE])
+
+        session = result.harness_session
+        assert session is not None
+        self.assertEqual(len(session.message_types), 301)
+        assert result.detail is not None
+        self.assertGreater(
+            len("; ".join(session.message_types)), _DETAIL_MAX_CHARS,
+            "fixture must exceed the cap or it proves nothing")
+        self.assertLessEqual(len(result.detail), _DETAIL_MAX_CHARS)
+        self.assertTrue(result.detail.startswith(NO_CHOOSE_MATCH_CLAUSE))
+        assert_every_invariant(result)
 
 
 class TestDecidedMatchesAreUnchanged(unittest.TestCase):
-    """Must-still-work: naming the gap must not touch the ordinary paths."""
+    """Must-still-work: naming the gaps must not touch the ordinary paths."""
 
     CASES = [
         ("strong match", TARGET_MBID, 0.05, 0, True, "strong_match"),
@@ -416,8 +576,9 @@ class TestDecidedMatchesAreUnchanged(unittest.TestCase):
                 self.assertEqual(result.valid, valid)
                 self.assertIsNone(
                     result.harness_session,
-                    "a decided match must carry no no-match evidence")
+                    "a decided match must carry no unmatched-run evidence")
                 assert_scenario_is_always_named(result)
+                assert_the_name_matches_the_error_state(result)
                 assert_evidence_accompanies_the_name(result)
                 assert_result_round_trips(result)
 
@@ -431,17 +592,19 @@ class TestDecidedMatchesAreUnchanged(unittest.TestCase):
     def test_a_decodable_match_after_an_undecodable_one_still_decides(self):
         """The schema-violation branch continues the loop; a later,
         well-formed message must still be processed and must clear the
-        no-match stamp."""
+        unmatched stamp — including the ``validation_error`` name — even
+        though the error text is legitimately retained."""
         result = run_fake_harness([
             UNDECODABLE_CHOOSE_MATCH_LINE, choose_match_line(),
             SESSION_END_LINE,
         ])
         self.assertEqual(result.scenario, "strong_match")
         self.assertIsNone(result.harness_session)
+        self.assertIsNotNone(result.error)
 
 
 class TestNamingTheScenarioDoesNotMoveTheDownload(unittest.TestCase):
-    """Invariant 4, composed: real producer → real quarantine allocator."""
+    """Invariant 5, composed: real producer → real quarantine allocator."""
 
     def _quarantine(self, scenario: str | None, root: str) -> str:
         album_dir = os.path.join(root, "source", "Artist - Album")
@@ -458,27 +621,33 @@ class TestNamingTheScenarioDoesNotMoveTheDownload(unittest.TestCase):
         assert target is not None
         return target
 
-    def test_the_named_scenario_lands_where_the_unnamed_one_did(self):
-        """``None`` and ``no_choose_match`` are both Wrong Matches
-        candidates, so the tree the download lands in is byte-identical —
-        the naming is routing-neutral by construction."""
-        produced = run_fake_harness([SESSION_END_LINE]).scenario
-        self.assertEqual(produced, NO_CHOOSE_MATCH_SCENARIO)
-        with tempfile.TemporaryDirectory() as tmpdir:
-            named = self._quarantine(
-                produced, os.path.join(tmpdir, "named"))
-            unnamed = self._quarantine(
-                None, os.path.join(tmpdir, "unnamed"))
+    def test_both_named_scenarios_land_where_the_unnamed_one_did(self):
+        """``None`` and both new names are Wrong Matches candidates, so the
+        tree the download lands in is byte-identical — the naming is
+        routing-neutral by construction."""
+        produced = [
+            run_fake_harness([SESSION_END_LINE]).scenario,
+            run_fake_harness([UNDECODABLE_CHOOSE_MATCH_LINE]).scenario,
+        ]
         self.assertEqual(
-            os.path.relpath(named, os.path.join(tmpdir, "named")),
-            os.path.relpath(unnamed, os.path.join(tmpdir, "unnamed")),
-        )
-        self.assertIn(f"{os.sep}{WRONG_MATCH_QUARANTINE_DIR}{os.sep}", named)
-        self.assertNotIn(f"{os.sep}failed_imports{os.sep}", named)
+            produced, [NO_CHOOSE_MATCH_SCENARIO, VALIDATION_ERROR_SCENARIO])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            unnamed_root = os.path.join(tmpdir, "unnamed")
+            unnamed = os.path.relpath(
+                self._quarantine(None, unnamed_root), unnamed_root)
+            for index, scenario in enumerate(produced):
+                with self.subTest(scenario=scenario):
+                    root = os.path.join(tmpdir, f"named{index}")
+                    named = self._quarantine(scenario, root)
+                    self.assertEqual(os.path.relpath(named, root), unnamed)
+                    self.assertIn(
+                        f"{os.sep}{WRONG_MATCH_QUARANTINE_DIR}{os.sep}", named)
+                    self.assertNotIn(f"{os.sep}failed_imports{os.sep}", named)
 
     def test_the_row_stays_in_the_operator_worklist(self):
-        produced = run_fake_harness([SESSION_END_LINE]).scenario
-        for scenario in (None, produced):
+        for scenario in (
+            None, NO_CHOOSE_MATCH_SCENARIO, VALIDATION_ERROR_SCENARIO,
+        ):
             with self.subTest(scenario=scenario):
                 self.assertTrue(wrong_match_row_is_visible({
                     "request_status": "wanted",
@@ -511,23 +680,53 @@ class TestTheCopyIsReachableFromTheProducer(unittest.TestCase):
         self.assertEqual(
             self._classified_verdict(result), NO_CHOOSE_MATCH_VERDICT)
 
-    def test_the_verdict_never_claims_a_cause_the_row_cannot_prove(self):
-        verdict = self._classified_verdict(run_fake_harness([SESSION_END_LINE]))
-        lowered = verdict.casefold()
-        for overclaim in (
-            "no audio", "corrupt", "crashed", "empty folder", "no candidates",
-            "musicbrainz", "denylist",
-        ):
-            self.assertNotIn(overclaim, lowered)
+    def test_a_real_validation_error_run_names_the_recorded_error(self):
+        """The headline says what happened and quotes the producer's own
+        error — it never says beets offered nothing, which for this world
+        would be false."""
+        result = run_fake_harness([UNDECODABLE_CHOOSE_MATCH_LINE])
+        verdict = self._classified_verdict(result)
+
+        self.assertTrue(verdict.startswith(VALIDATION_ERROR_VERDICT_PREFIX))
+        self.assertIn("album_id", verdict)
+        self.assertNotIn("without offering a match", verdict)
+        assert result.error is not None
+        self.assertIn(result.error, verdict)
+
+    def test_the_verdicts_never_claim_a_cause_the_row_cannot_prove(self):
+        for lines in ([SESSION_END_LINE], [UNDECODABLE_CHOOSE_MATCH_LINE]):
+            with self.subTest(lines=lines):
+                verdict = self._classified_verdict(run_fake_harness(lines))
+                # Only OUR sentence is scanned; anything after the ':' is
+                # the producer's recorded error, quoted verbatim.
+                ours = verdict.split(":")[0].casefold()
+                for overclaim in (
+                    "no audio", "corrupt", "crashed", "empty folder",
+                    "no candidates", "musicbrainz", "denylist",
+                ):
+                    self.assertNotIn(overclaim, ours)
 
     def test_the_row_no_longer_reads_as_the_bare_word_rejected(self):
-        """The whole defect, end to end: before #888 this row's scenario was
+        """The whole defect, end to end: before #888 both scenarios were
         NULL and the classifier's fallback rendered "Rejected"."""
-        result = run_fake_harness([SESSION_END_LINE])
-        self.assertNotEqual(self._classified_verdict(result), "Rejected")
+        for lines in ([SESSION_END_LINE], [UNDECODABLE_CHOOSE_MATCH_LINE]):
+            with self.subTest(lines=lines):
+                self.assertNotEqual(
+                    self._classified_verdict(run_fake_harness(lines)),
+                    "Rejected")
         unnamed = LogEntry(
             id=1, request_id=2, outcome="rejected", beets_scenario=None)
         self.assertEqual(classify_log_entry(unnamed).verdict, "Rejected")
+
+    def test_a_validation_error_without_a_recorded_message_still_reads(self):
+        """``error_message`` is NULL on no live row today, but the verdict
+        must not render a dangling colon if one ever appears."""
+        self.assertEqual(
+            classify_log_entry(LogEntry(
+                id=1, request_id=2, outcome="rejected",
+                beets_scenario=VALIDATION_ERROR_SCENARIO)).verdict,
+            VALIDATION_ERROR_VERDICT_PREFIX,
+        )
 
 
 class TestInvariantCheckersTripOnViolations(unittest.TestCase):
@@ -542,76 +741,98 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             assert_scenario_is_always_named(
                 ValidationResult(scenario="validation_rejected"))
 
+    def test_merging_the_error_worlds_trips_the_error_state_checker(self):
+        """The exact regression F1 convicted: an errored run wearing the
+        name that asserts beets offered nothing."""
+        with self.assertRaises(AssertionError):
+            assert_the_name_matches_the_error_state(ValidationResult(
+                scenario=NO_CHOOSE_MATCH_SCENARIO,
+                error="harness schema violation: Expected `str`, got `int`"))
+        # …and the mirror: a clean run wearing the error name.
+        with self.assertRaises(AssertionError):
+            assert_the_name_matches_the_error_state(
+                ValidationResult(scenario=VALIDATION_ERROR_SCENARIO))
+        # The real pairings pass, so the checker is not vacuous.
+        assert_the_name_matches_the_error_state(
+            ValidationResult(scenario=NO_CHOOSE_MATCH_SCENARIO))
+        assert_the_name_matches_the_error_state(
+            ValidationResult(scenario=VALIDATION_ERROR_SCENARIO, error="boom"))
+
+    def test_a_valid_unmatched_run_trips_the_evidence_checker(self) -> None:
+        """Issue #888 review F2: ``lib/download_validation.py`` routes on
+        ``bv_result.valid`` alone, so a True here sends a run that reviewed
+        no match into auto-import dispatch."""
+        with self.assertRaises(AssertionError):
+            assert_evidence_accompanies_the_name(ValidationResult(
+                valid=True,
+                scenario=NO_CHOOSE_MATCH_SCENARIO,
+                detail=NO_CHOOSE_MATCH_CLAUSE,
+                harness_session=HarnessSessionEvidence()))
+
     def test_a_named_gap_without_evidence_trips_the_evidence_checker(self):
         with self.assertRaises(AssertionError):
             assert_evidence_accompanies_the_name(ValidationResult(
                 scenario=NO_CHOOSE_MATCH_SCENARIO, detail="something"))
 
     def test_a_decided_match_carrying_evidence_trips_the_checker(self) -> None:
-        from lib.quality import HarnessSessionEvidence
-
         with self.assertRaises(AssertionError):
             assert_evidence_accompanies_the_name(ValidationResult(
                 scenario="strong_match",
                 harness_session=HarnessSessionEvidence()))
 
     def test_a_named_gap_without_a_detail_trips_the_checker(self) -> None:
-        from lib.quality import HarnessSessionEvidence
-
         with self.assertRaises(AssertionError):
             assert_evidence_accompanies_the_name(ValidationResult(
                 scenario=NO_CHOOSE_MATCH_SCENARIO,
                 harness_session=HarnessSessionEvidence()))
 
-    def test_an_unrecorded_message_type_trips_the_checker(self) -> None:
-        from lib.quality import HarnessSessionEvidence
-
+    def test_an_unbounded_detail_trips_the_checker(self) -> None:
         with self.assertRaises(AssertionError):
             assert_evidence_accompanies_the_name(ValidationResult(
                 scenario=NO_CHOOSE_MATCH_SCENARIO,
-                detail="beets harness ended without offering a match",
+                detail="E" * (_DETAIL_MAX_CHARS + 1),
+                harness_session=HarnessSessionEvidence()))
+
+    def test_an_unrecorded_message_type_trips_the_checker(self) -> None:
+        with self.assertRaises(AssertionError):
+            assert_evidence_accompanies_the_name(ValidationResult(
+                scenario=NO_CHOOSE_MATCH_SCENARIO,
+                detail=NO_CHOOSE_MATCH_CLAUSE,
                 harness_session=HarnessSessionEvidence(
                     message_types=["session_end"], session_end_seen=True)))
 
     def test_a_claimed_cause_trips_the_no_inference_checker(self) -> None:
-        from lib.quality import HarnessSessionEvidence
-
         with self.assertRaises(AssertionError):
             assert_evidence_claims_no_cause(ValidationResult(
                 scenario=NO_CHOOSE_MATCH_SCENARIO,
                 detail="No importable audio in the folder",
                 harness_session=HarnessSessionEvidence()))
-        # …and a diagnosis smuggled INTO the observation clause, where the
-        # prefix check alone would not see it.
-        with self.assertRaises(AssertionError):
-            assert_evidence_claims_no_cause(ValidationResult(
-                scenario=NO_CHOOSE_MATCH_SCENARIO,
-                detail=(
-                    f"{NO_MATCH_DETAIL_PREFIX}none) because the folder was "
-                    "corrupt"
-                ),
-                harness_session=HarnessSessionEvidence()))
 
     def test_the_harness_own_words_are_not_treated_as_our_claim(self) -> None:
         """A traceback that happens to say "corrupt" is the harness
         talking, quoted after the ``;`` — not a cause we asserted."""
-        from lib.quality import HarnessSessionEvidence
-
         assert_evidence_claims_no_cause(ValidationResult(
             scenario=NO_CHOOSE_MATCH_SCENARIO,
             detail=(
-                f"{NO_MATCH_DETAIL_PREFIX}none); harness stderr ended: "
-                "sqlite3.DatabaseError: database disk image is corrupt"
+                f"{NO_CHOOSE_MATCH_CLAUSE}; harness messages: none; "
+                "harness stderr ended: sqlite3.DatabaseError: database disk "
+                "image is corrupt"
             ),
             harness_session=HarnessSessionEvidence()))
+
+    def test_swapping_the_two_clauses_trips_the_no_inference_checker(self):
+        with self.assertRaises(AssertionError):
+            assert_evidence_claims_no_cause(ValidationResult(
+                scenario=VALIDATION_ERROR_SCENARIO,
+                error="boom",
+                detail=f"{NO_CHOOSE_MATCH_CLAUSE}; harness messages: none",
+                harness_session=HarnessSessionEvidence()))
 
     def test_leaving_the_wrong_match_taxonomy_trips_the_routing_checker(self):
         with self.assertRaises(AssertionError):
             assert_stays_a_wrong_match_candidate("spectral_reject")
 
     def test_a_blob_that_drops_the_evidence_trips_the_round_trip_checker(self):
-        from lib.quality import HarnessSessionEvidence
-
         class _Lossy(ValidationResult):
             def to_json(self) -> str:
                 return msgspec.json.encode({

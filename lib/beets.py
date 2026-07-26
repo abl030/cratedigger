@@ -15,16 +15,42 @@ from lib.util import beets_subprocess_env
 
 logger = logging.getLogger("cratedigger")
 
-#: Scenario recorded when the run ends without a processed ``choose_match``
-#: message. It names the OBSERVATION — no match was ever offered for review
-#: — and deliberately not a cause: no importable audio, a harness that died
-#: before starting, and a session that ended early are all consistent with
-#: it. ``HarnessSessionEvidence`` carries what separates them (issue #888).
+#: Scenario for a run that COMPLETED without error and never offered a match
+#: to review. It names the OBSERVATION — nothing was put in front of us — and
+#: deliberately not a cause: no importable audio, a session that ended early
+#: and a harness that exited quietly are all consistent with it.
+#: ``HarnessSessionEvidence`` carries what separates them (issue #888).
+#:
+#: The guard is ``result.error is None``, which is the same predicate the
+#: issue-#888 investigation used to separate the 276 genuine rows from the
+#: error branches. A run that RECORDED an error is never named this, because
+#: at least one such run — the strict-decode refusal — is a case where beets
+#: DID offer a match and our decoder declined it.
 NO_CHOOSE_MATCH_SCENARIO = "no_choose_match"
 
-#: How much of the harness's stderr to persist alongside that scenario. The
+#: Scenario for a run that recorded an error before any match could be
+#: reviewed: the harness would not start, the strict wire decode refused a
+#: ``choose_match``, the read loop raised, or the 120s timeout fired. It
+#: claims only that validation did not complete — never that beets offered
+#: nothing, which for the strict-decode case would be false.
+VALIDATION_ERROR_SCENARIO = "validation_error"
+
+#: The clause each scenario composes for itself, in front of everything
+#: quoted from the harness. Kept as the FIRST ``;``-separated segment so the
+#: sentence Cratedigger asserts is separable from wire-controlled text.
+NO_CHOOSE_MATCH_CLAUSE = "beets harness ended without offering a match to review"
+VALIDATION_ERROR_CLAUSE = "beets validation did not complete, so no match was reviewed"
+
+#: How much of the harness's stderr to persist alongside the scenario. The
 #: full text still goes to the journal; this is the bounded audit copy.
 _STDERR_TAIL_CHARS = 4000
+
+#: Bounds on the composed ``detail``, which reaches ``download_log
+#: .beets_detail`` and the Recents card. A single 500 KB newline-free stderr
+#: line is a real shape (measured), and neither the DB column nor the card is
+#: the place for it — the bounded tail in ``harness_session`` is.
+_STDERR_LINE_CHARS = 500
+_DETAIL_MAX_CHARS = 2000
 
 
 def _stderr_tail(stderr_out: str) -> str | None:
@@ -36,50 +62,72 @@ def _stderr_tail(stderr_out: str) -> str | None:
 
 
 def _last_stderr_line(stderr_out: str) -> str | None:
-    """The final non-empty stderr line — a traceback's exception line."""
+    """The final non-empty stderr line — a traceback's exception line.
+
+    Bounded from the FRONT: on a traceback's last line the exception type
+    and message lead, and this copy is the human hint, not the audit. The
+    unabridged tail lives in ``HarnessSessionEvidence.stderr_tail``.
+    """
     for line in reversed(stderr_out.splitlines()):
         stripped = line.strip()
         if stripped:
-            return stripped
+            return stripped[:_STDERR_LINE_CHARS]
     return None
 
 
-def _record_no_choose_match(
+def _record_unmatched_run(
     result: ValidationResult,
     *,
     message_types: list[str],
     session_end_seen: bool,
     stderr_out: str,
 ) -> None:
-    """Stamp explicit evidence for a run that never offered a match.
+    """Name and evidence a run that reached no reviewed match.
 
-    Before issue #888 this path persisted nothing beyond one WARNING: the
-    result went out with ``scenario=None`` and every denormalized column
-    NULL, so the rejection reached the operator as the bare word
-    "Rejected". 276 live rows across 215 requests landed there, 181 of
-    which a later triage preview judged importable.
+    Before issue #888 every one of these paths persisted nothing beyond one
+    WARNING: the result went out with ``scenario=None`` and every
+    denormalized column NULL, so the rejection reached the operator as the
+    bare word "Rejected". 276 live rows across 215 requests landed there,
+    181 of which a later triage preview judged importable.
 
-    The stamp records observations only. It never claims WHY no match was
-    offered — the message types, the session-end flag and the stderr tail
-    are what let the next person work that out.
+    Two names, split on exactly the discriminator the investigation used —
+    whether an error was recorded:
+
+    * no error → ``no_choose_match``: the run completed and offered nothing.
+    * an error → ``validation_error``: validation did not complete. Merging
+      this into the first name would assert beets offered nothing, which is
+      FALSE for the strict-decode refusal (beets offered a match; we
+      declined to decode it) and unprovable for the other three.
+
+    Either way the stamp records observations only. It never claims WHY —
+    the message types, the session-end flag, the recorded error and the
+    stderr tail are what let the next person work that out.
     """
-    result.scenario = NO_CHOOSE_MATCH_SCENARIO
+    if result.error is None:
+        result.scenario = NO_CHOOSE_MATCH_SCENARIO
+        clause = NO_CHOOSE_MATCH_CLAUSE
+    else:
+        result.scenario = VALIDATION_ERROR_SCENARIO
+        clause = VALIDATION_ERROR_CLAUSE
     result.harness_session = HarnessSessionEvidence(
         message_types=message_types,
         session_end_seen=session_end_seen,
         stderr_tail=_stderr_tail(stderr_out),
     )
     observed = ", ".join(message_types) if message_types else "none"
-    parts = [
-        "beets harness ended without offering a match to review "
-        f"(harness messages: {observed})"
-    ]
+    # The clause stands alone as segment 0; everything the harness chose —
+    # its message type names, its error text, its stderr — follows the first
+    # ``;`` so it can never be read as part of our assertion.
+    parts = [clause, f"harness messages: {observed}"]
     if result.error:
         parts.append(result.error)
     last_line = _last_stderr_line(stderr_out)
     if last_line:
         parts.append(f"harness stderr ended: {last_line}")
-    result.detail = "; ".join(parts)
+    detail = "; ".join(parts)
+    if len(detail) > _DETAIL_MAX_CHARS:
+        detail = detail[:_DETAIL_MAX_CHARS - 1] + "…"
+    result.detail = detail
 
 
 def beets_validate(
@@ -98,12 +146,16 @@ def beets_validate(
 
     Returns: ValidationResult with candidates, distance, scenario, etc.
 
-    **Invariant: the returned result always names a scenario.** Either a
-    ``choose_match`` was decoded and decided (``strong_match`` /
-    ``high_distance`` / ``extra_tracks`` / ``mbid_not_found``), or the run
-    ended without one and carries ``no_choose_match`` plus its
-    ``harness_session`` evidence. Callers rely on that and must not invent
-    a placeholder scenario of their own (issue #888).
+    **Invariant: the returned result always names a scenario.** Exactly one
+    of three (issue #888):
+
+    * a ``choose_match`` was decoded and decided — ``strong_match`` /
+      ``high_distance`` / ``extra_tracks`` / ``mbid_not_found``;
+    * no error was recorded and none was ever offered — ``no_choose_match``;
+    * an error was recorded first — ``validation_error``.
+
+    The last two carry ``harness_session`` evidence. Callers rely on the
+    invariant and must not invent a placeholder scenario of their own.
     """
     cmd = [harness_path, "--pretend", "--noincremental",
            "--search-id", mb_release_id, album_path]
@@ -126,7 +178,7 @@ def beets_validate(
     except Exception as e:
         result.error = f"Failed to start harness: {e}"
         logger.error(f"BEETS_VALIDATE: {result.error}")
-        _record_no_choose_match(
+        _record_unmatched_run(
             result,
             message_types=message_types,
             session_end_seen=session_end_seen,
@@ -267,7 +319,7 @@ def beets_validate(
         # 500-char slice. journald handles multi-line records fine.
         logger.warning("BEETS_VALIDATE: stderr:\n%s", stderr_out)
     if not got_choose_match:
-        _record_no_choose_match(
+        _record_unmatched_run(
             result,
             message_types=message_types,
             session_end_seen=session_end_seen,
