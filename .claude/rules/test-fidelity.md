@@ -73,6 +73,74 @@ result = resolve_youtube_album(
 The first form is preferred — if the helper doesn't exist yet, add it to
 `tests/fakes/` with the exception contract documented in its docstring.
 
+## Rule C — A copy pin's input comes from the producer, never from a literal
+
+**When a test pins operator-facing copy, the string that TRIGGERS that copy
+must be derived from the code that produces it — the producing function
+called for real, or the producing module's own exported constant. A
+hand-typed literal in a fixture is not evidence that anything can produce
+it.**
+
+This is Rule B one layer up. Rule B stops a fake from returning a shape
+production never returns; Rule C stops a fixture from feeding an *input*
+production never emits. Both failures look identical from inside the test:
+green, fluent, and describing a world that does not exist.
+
+**Forbidden anti-pattern:**
+
+```python
+# WRONG — the trigger is a string the test author invented. It exists
+# nowhere in the codebase, so the copy behind it is unreachable in
+# production and the assertion is unfalsifiable.
+presentation = present_failure(_evidence(
+    outcome="measurement_failed",
+    error_message="FilesystemAuthorityError: path is outside the library root"))
+self.assertEqual(
+    presentation.verdict,
+    "Measurement failed: installed path is outside the library root")
+```
+
+**Required pattern:**
+
+```python
+# RIGHT — the real authority function raises the real exception, composed
+# exactly the way lib/import_preview.py composes the persisted detail.
+with self.assertRaises(FilesystemAuthorityError) as caught:
+    with open_configured_quarantine_directory(outside, roots):
+        pass
+detail = f"{type(caught.exception).__name__}: {caught.exception}"
+presentation = present_failure(_evidence(
+    outcome="measurement_failed", error_message=detail))
+```
+
+**What this catches:** issue #868's shipped defect. The copy asserted that
+the *installed* path was outside the *library root*; the only string
+production can raise there is about the CANDIDATE's quarantine roots. Every
+fixture fed the invented literal by hand, so the wrong fact shipped fluent
+and nothing failed. Issue #882 found the same shape in `web/classify.py`:
+copy keyed on `no_candidates`, a scenario no producer has ever written,
+while the producing string (`mbid_not_found`, 50 live rows) fell through to
+the raw-token fallback.
+
+**When the trigger genuinely cannot be produced in-process** — a persisted
+enum, a DB column value, a decision name another worker writes — a literal
+is allowed only if a producer audit traces it. The audit owes three things:
+
+- the trigger is **SPELLED** as a string literal by a named production file
+  (parse, don't grep: a mention in a comment or docstring is not a
+  spelling, and that is exactly where a fabricated trigger hides);
+- the set of triggers to trace is **DERIVED** from the module under test by
+  introspection, never hand-listed, and an unrecognised match target
+  **fails closed**;
+- a trigger with no producer is legitimate only as a **HISTORICAL** one,
+  registered as such with the live-row evidence written down.
+
+Canonical implementations: `tests/test_failure_presentation.py::TestEveryTriggerHasAProducer`
+and `tests/test_classify_producer_audit.py`.
+
+**Side effect:** when the audit fails it names the literal and the producer
+that cannot emit it, which is the whole diagnosis.
+
 ## Stronger enforcement (future work)
 
 The two rules above are guidance. Three layers of stronger enforcement, in order of ROI:
@@ -114,7 +182,7 @@ When a new mirror adapter is added, the contract test forces the author to docum
 
 Both bugs from rounds 1 and 2 shipped with passing tests, passing pyright, passing vulture, and a clean review pass. They were only caught by adversarial / api-contract / correctness reviewers reading the code by hand against the migration SQL. That's not a sustainable detection method — the next bug of the same shape will ship.
 
-These rules don't replace review; they make the smell harder to introduce in the first place. If a future PR violates Rule A, the real-PG test will fail at PR time. If a future PR violates Rule B, the fake won't compile against the production exception contract.
+These rules don't replace review; they make the smell harder to introduce in the first place. If a future PR violates Rule A, the real-PG test will fail at PR time. If a future PR violates Rule B, the fake won't compile against the production exception contract. If a future PR violates Rule C, the producer audit names the literal and the module that cannot emit it.
 
 ## Related memory
 

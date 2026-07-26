@@ -766,16 +766,21 @@ def _humanize_token(value: str | None) -> str | None:
 
 
 def _wrong_match_action_label(action: str | None) -> str | None:
+    """Operator label for a persisted wrong-match triage action.
+
+    Every literal matched here is one ``lib/wrong_match_cleanup_service.py``
+    or ``lib/wrong_match_delete_service.py`` actually writes, except
+    ``preview_backfilled`` which is historical (59 live rows, 2026-04-26 to
+    2026-04-28). Anything else falls through to the humanized token, so an
+    unhandled producer action still reads as words rather than inventing a
+    fact. Audited by ``tests/test_classify_producer_audit.py``.
+    """
     if action == "deleted_reject":
         return "download deleted"
     if action == "deleted_verified_lossless_parent":
         return "download deleted: verified-lossless parent"
     if action == "delete_failed":
         return "delete failed"
-    if action == "stale_path_cleared":
-        return "stale path cleared"
-    if action == "stale_path_clear_failed":
-        return "stale path clear failed"
     if action == "kept_would_import":
         return "download kept: would import"
     if action == "kept_uncertain":
@@ -1505,9 +1510,17 @@ def _rejection_verdict(entry: LogEntry) -> str:
             return f"Duplicate remove guard failed: {entry.beets_detail}"
         return "Duplicate remove guard failed"
 
-    if scenario == "no_candidates":
-        return "No MusicBrainz match found"
+    # ``lib/beets.py`` sets this when the requested release ID is absent from
+    # the candidate set beets returned — NOT when beets found nothing. The
+    # copy this replaced was keyed on ``no_candidates``, a string no producer
+    # has ever emitted (issue #882): 50 live rows carrying the real
+    # ``mbid_not_found`` fell through to the raw-token fallback while the
+    # fluent sentence sat behind a key nothing could reach.
+    if scenario == "mbid_not_found":
+        return "Requested release ID not among the match candidates"
 
+    # Historical: emitted by a pre-2026-03-24 revision, one live row, no
+    # current producer — which is why the audit registers it as historical.
     if scenario == "album_name_mismatch":
         return "Album name mismatch"
 

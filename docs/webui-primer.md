@@ -257,6 +257,25 @@ Browser → https://music.ablz.au
   Materialize failures render PR1's persisted reason (`download_log.beets_detail`),
   keeping storage errnos and containment refusals in separate vocabularies;
   historical rows without a reason degrade to the generic staging sentence.
+- **Rejection copy is minted only for decision names a producer emits
+  (#882)** — every decision-name literal `web/classify.py` matches is a claim
+  about what some producer writes, so each is traced to the production file
+  that SPELLS it, and a name nothing produces reaches the operator verbatim
+  instead of acquiring an invented sentence. `tests/test_classify_producer_audit.py`
+  derives the match targets from the module itself (inline comparison grammar
+  plus module-level tables) and fails closed on an unregistered one; a literal
+  a past revision emitted and live rows still carry is registered as
+  historical, with the row count written down. The audit's first run convicted
+  `no_candidates` — fluent copy ("No MusicBrainz match found") behind a
+  scenario nothing has ever written, while the real producing literal
+  `mbid_not_found` (50 live rejected rows) fell through to the raw-token
+  fallback; it now renders "Requested release ID not among the match
+  candidates", which is the fact `lib/beets.py` actually determined.
+  The paired generated properties additionally hold every rendered decision
+  claim — verdict and collapsed summary alike — against what the importer
+  really does with that decision (`dispatch_action`, `decision_denylists`), so
+  a proof lock cannot claim the search continues and a no-denylist reject
+  cannot claim the source was banned.
 - **Wrong Matches evidence provenance** — candidate rows keep the downloaded
   source codec, configured target contract, and temporary V0 probe separate.
   A lossless candidate destined for Opus therefore reads `FLAC → OPUS 128
