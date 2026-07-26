@@ -6,7 +6,7 @@ import argparse
 import keyword
 import unittest
 
-from hypothesis import example, given, strategies as st
+from hypothesis import assume, example, given, strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401 - loads the active profile
 from tests.test_import_one_argparse_audit import (
@@ -63,8 +63,7 @@ class TestGeneratedImportOneArgparseAudit(unittest.TestCase):
         declared: set[str],
         read: set[str],
     ) -> None:
-        if declared == read:
-            return
+        assume(declared != read)
         with self.assertRaises(AssertionError):
             assert_argparse_destinations_match_reads(
                 _parser_for(declared),
