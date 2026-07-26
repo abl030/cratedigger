@@ -22,7 +22,7 @@ from urllib.error import HTTPError
 
 from hypothesis import example, given, settings, strategies as st
 
-from tests import _hypothesis_profiles  # noqa: F401 — registers active profile
+import tests._hypothesis_profiles  # noqa: F401 — registers active profile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 

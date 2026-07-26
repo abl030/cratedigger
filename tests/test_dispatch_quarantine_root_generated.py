@@ -6,6 +6,7 @@ import unittest
 
 from hypothesis import given, strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from tests.test_dispatch_core import TestDispatchCoreOrchestration
 
 

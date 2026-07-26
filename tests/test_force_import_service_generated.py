@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from hypothesis import given, strategies as st
 
 from lib.force_import_service import RESULT_QUEUED, enqueue_force_import
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 
