@@ -235,7 +235,14 @@ Browser → https://music.ablz.au
   projection of that raw text (`transfer_message` / `transfer_message_label` on
   the payload) — `transfer_detail` itself remains log-only by contract, so
   without that row humanizing the verdict would delete the peer's own words
-  from the UI. Cratedigger's own messages are humanized on the same seam:
+  from the UI. **A Cratedigger decision never suppresses the cause**: our own
+  headline (we stopped retrying; the peer never started) leads the sentence
+  but the dominant evidence family is always appended — `Gave up on
+  "05 Seventeen.flac" after 5 failed attempts — local storage error writing
+  1 file`. Live-data review of 400 rows found the earlier ranking hiding
+  storage in 10 of its 14 occurrences, which reads as a flaky peer and sends
+  the operator to retry the peer instead of the mount. Cratedigger's own
+  messages are humanized on the same seam:
   retry-limit give-ups name the file's basename instead of dumping a peer's
   absolute path, stall/queue timeouts read as durations instead of config
   tokens, and materialize/abandon rows drop the wrong `Import error:` label.

@@ -515,8 +515,9 @@ class TestOwnDownloadMessages(unittest.TestCase):
         self.assertEqual(
             present_failure(_evidence()).verdict, "Download failed")
 
-    def test_retry_limit_outranks_per_file_evidence_but_keeps_it(self):
-        """Giving up is OUR decision — it must not be relabelled peer text."""
+    def test_retry_limit_leads_but_still_names_the_cause(self):
+        """Giving up is OUR decision, so it leads — but it is context, not a
+        substitute for the cause, which is appended (I6)."""
         presentation = present_failure(_evidence(
             error_message="file exceeded retry limit after 3 retries: "
                           "d:\\x\\05 - The Rooster Moans.flac",
@@ -531,12 +532,13 @@ class TestOwnDownloadMessages(unittest.TestCase):
         ))
         self.assertEqual(
             presentation.verdict,
-            'Gave up on "05 - The Rooster Moans.flac" after 3 failed attempts',
+            'Gave up on "05 - The Rooster Moans.flac" after 3 failed attempts '
+            "— transfer from peer bob failed before any data arrived",
         )
         self.assertIn("reported as failed by bob",
                       presentation.transfer_message or "")
 
-    def test_remote_queue_timeout_outranks_per_file_evidence(self):
+    def test_remote_queue_timeout_leads_but_still_names_the_cause(self):
         presentation = present_failure(_evidence(
             error_message="remote_queue_timeout 3600s exceeded",
             soulseek_username="bob",
@@ -546,7 +548,8 @@ class TestOwnDownloadMessages(unittest.TestCase):
         ))
         self.assertEqual(
             presentation.verdict,
-            "Peer never started the transfer — still queued after 60 minutes",
+            "Peer never started the transfer — still queued after 60 minutes "
+            "— peer bob rejected 1 file before transfer",
         )
         self.assertEqual(
             presentation.transfer_message, '1× "Verification required"')
@@ -555,6 +558,143 @@ class TestOwnDownloadMessages(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # Materialize / staging reasons (PR1's persisted evidence)
 # ---------------------------------------------------------------------------
+
+class TestDecisionHeadlinesNeverSuppressTheCause(unittest.TestCase):
+    """I6, from live-data review of 400 rows.
+
+    Ten of the fourteen local-storage rows rendered as ``Gave up on "05
+    Seventeen.flac" after 5 failed attempts`` — a sentence an operator reads
+    as "flaky peer, retry it" — while the evidence underneath was our own
+    virtiofs share refusing the write (live rows 38203 / 38187 / 38186 /
+    38185 / 38184 / 38183 / 38176 / 38173 / 38160 / 38119). Our decision to
+    stop retrying is context; the cause is the story.
+    """
+
+    def test_live_38203_retry_limit_over_storage_names_the_storage(self):
+        presentation = present_failure(_evidence(
+            error_message=(
+                "file exceeded retry limit after 5 retries: "
+                "Master\\~ J ~\\Jimmy Eat World\\[1996] Static Prevails\\"
+                "05 Seventeen.flac — 1× 'Failed to create file 05 "
+                "Seventeen.flac: Stale file handle : "
+                "'/mnt/virtio/music/slskd/incomplete/x''"
+            ),
+            soulseek_username="Tymemage",
+            transfer_detail=decode_transfer_detail([
+                _transfer_row(
+                    "Tymemage", "05 Seventeen.flac",
+                    last_state="Completed, Errored",
+                    last_exception=(
+                        "Failed to create file 05 Seventeen.flac: Stale file "
+                        "handle : '/mnt/virtio/music/slskd/incomplete/x'"
+                    )),
+            ]),
+        ))
+        verdict = presentation.verdict or ""
+        self.assertEqual(
+            verdict,
+            'Gave up on "05 Seventeen.flac" after 5 failed attempts '
+            "— local storage error writing 1 file",
+        )
+        self.assertNotIn("Tymemage", verdict)
+        self.assertNotIn("peer", verdict.lower())
+        self.assertEqual(
+            presentation.transfer_message_label, TRANSFER_MESSAGE_LABEL_STORAGE)
+
+    def test_live_38184_pure_storage_evidence_is_never_silent(self):
+        """The starkest live row: ten files, all `Could not find a part of
+        the path.`, and the old verdict said nothing about storage."""
+        presentation = present_failure(_evidence(
+            error_message=(
+                "file exceeded retry limit after 5 retries: "
+                "d:\\music\\x\\03 - Track.flac"
+            ),
+            soulseek_username="Tymemage",
+            transfer_detail=decode_transfer_detail([
+                _transfer_row(
+                    "Tymemage", f"{index:02d} - Track.flac",
+                    last_state="Completed, Errored",
+                    last_exception="Could not find a part of the path.")
+                for index in range(10)
+            ]),
+        ))
+        verdict = presentation.verdict or ""
+        self.assertEqual(
+            verdict,
+            'Gave up on "03 - Track.flac" after 5 failed attempts '
+            "— local storage error writing 10 files",
+        )
+        self.assertNotIn("peer", verdict.lower())
+
+    def test_live_38283_retry_limit_over_a_refusal_names_the_refusal(self):
+        """Same rule, no special case: the peer was refusing, not the
+        transfer being flaky."""
+        presentation = present_failure(_evidence(
+            error_message=(
+                "file exceeded retry limit after 5 retries: "
+                "@@vdrdb\\_Lossless\\_Temp\\121 - Bob B. Soxx and the Blue "
+                "Jeans - Not Too Young To Get Married.flac"
+            ),
+            soulseek_username="phil",
+            transfer_detail=decode_transfer_detail(
+                [
+                    _transfer_row(
+                        "phil", f"{index:03d}.flac",
+                        last_exception="Pending shutdown.")
+                    for index in range(57)
+                ] + [
+                    _transfer_row(
+                        "phil", "x.flac", last_exception="Too many files"),
+                ]
+            ),
+        ))
+        self.assertEqual(
+            presentation.verdict,
+            'Gave up on "121 - Bob B. Soxx and the Blue Jeans - Not Too Young '
+            'To Get Married.flac" after 5 failed attempts '
+            "— peer phil rejected all 58 files before transfer",
+        )
+
+    def test_decision_headline_over_mixed_families_lists_them(self):
+        presentation = present_failure(_evidence(
+            error_message="remote_queue_timeout 3600s exceeded",
+            soulseek_username="phil",
+            transfer_detail=decode_transfer_detail([
+                _transfer_row("phil", "a", last_exception="Verification required"),
+                _transfer_row(
+                    "phil", "b",
+                    last_exception="Failed to create file b: Stale file handle"),
+            ]),
+        ))
+        self.assertEqual(
+            presentation.verdict,
+            "Peer never started the transfer — still queued after 60 minutes "
+            "— 1 local storage error, 1 rejected before transfer",
+        )
+
+    def test_mixed_evidence_with_storage_drops_the_peer_headline(self):
+        """Heading a sentence with one peer while part of the failure was our
+        own share is the same fuzzy attribution one step removed."""
+        presentation = present_failure(_evidence(
+            error_message="all 4 files errored",
+            soulseek_username="phil",
+            transfer_detail=decode_transfer_detail(
+                [_transfer_row(
+                    "phil", "a", last_exception="Verification required")]
+                + [
+                    _transfer_row(
+                        "phil", f"b{index}",
+                        last_exception=(
+                            "Failed to create file b: Stale file handle"))
+                    for index in range(3)
+                ]
+            ),
+        ))
+        verdict = presentation.verdict or ""
+        self.assertIn("local storage error", verdict)
+        self.assertNotIn("phil", verdict)
+        self.assertNotIn("from peer", verdict)
+
 
 class TestMaterializeReasonCopy(unittest.TestCase):
 

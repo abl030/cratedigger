@@ -30,6 +30,11 @@ I4. **Unknown text stays raw, bounded and attributed.** Text this module
     diagnosis.
 I5. **Presentation is a pure function of the evidence.** Same evidence,
     same copy; no clocks, no I/O, no config.
+I6. **A Cratedigger decision never suppresses the cause.** Our own
+    headline (we stopped retrying; the peer never started) is CONTEXT.
+    Whenever per-file evidence exists, the dominant family is named in the
+    verdict too — otherwise a fluent sentence derived from a suppressed
+    discriminator lies better than the raw one it replaced.
 
 The peer-failure family taxonomy is a census of what Soulseek peers
 actually send (issue #868, 45-day live census): refusals before transfer,
@@ -378,93 +383,126 @@ def _peer_phrase(peers: Sequence[str]) -> str:
     return ""
 
 
-def _single_family_sentence(
+def _single_family_clause(
     family: PeerFailureFamily,
     *,
     count: int,
     zero_bytes: bool,
     peers: Sequence[str],
-    message: str,
-    other_reasons: int,
 ) -> str:
-    """One family's generic template — never a per-message sentence.
+    """One family's generic cause clause — never a per-message sentence.
 
-    The templates state only what was observed (refused, zero bytes, before
-    transfer) and quote the peer's own words for the rest; they must scale
-    to every message in a family without new prose.
+    Lower-case and quote-free, because the SAME clause has to serve as the
+    head of an evidence-led verdict ("Peer X rejected all 29 files before
+    transfer — ...") AND as the cause appended to a Cratedigger-decision
+    verdict ("Gave up on ... — local storage error writing 1 file"). One
+    vocabulary, two compositions: a cause can never be phrased one way in
+    the branch that leads with it and another way in the branch that does
+    not (I6).
+
+    The clauses state only what was observed (refused, zero bytes, before
+    transfer); the peer's own words live in the quote beside them and in
+    ``transfer_message``. They must scale to every message in a family
+    without new prose.
     """
-    quoted = _quoted(message)
     files = _files(count)
     peer = peers[0] if len(peers) == 1 else None
     many_peers = len(peers) > 1
 
     if family == FAMILY_LOCAL_STORAGE:
-        # I2: our storage, our fault — no peer appears in this sentence.
-        sentence = f"Local storage error writing {files} \u2014 {quoted}"
-    elif family == FAMILY_REFUSAL:
-        subject = (
-            f"Peer {peer} rejected" if peer
-            else f"{len(peers)} peers rejected" if many_peers
-            else f"{files} rejected"
-        )
-        scope = f"all {files}" if peer and count > 1 else files
-        if not peer and not many_peers:
-            sentence = f"{subject} before transfer \u2014 {quoted}"
-        else:
-            sentence = f"{subject} {scope} before transfer \u2014 {quoted}"
-    elif family == FAMILY_TRANSPORT:
+        # I2: our storage, our fault — this clause has no place for a peer.
+        return f"local storage error writing {files}"
+    if family == FAMILY_REFUSAL:
+        if peer:
+            scope = f"all {files}" if count > 1 else files
+            return f"peer {peer} rejected {scope} before transfer"
+        if many_peers:
+            return f"{len(peers)} peers rejected {files} before transfer"
+        return f"{files} rejected before transfer"
+    if family == FAMILY_TRANSPORT:
         outcome = (
             "failed before any data arrived" if zero_bytes
             else "dropped mid-download"
         )
         if peer:
-            subject = f"Transfer from peer {peer}"
-        elif many_peers:
-            subject = f"Transfers from {len(peers)} peers"
-        else:
-            subject = files
-        sentence = f"{subject} {outcome} \u2014 {quoted}"
-    elif family == FAMILY_PEER_FILE:
+            return f"transfer from peer {peer} {outcome}"
+        if many_peers:
+            return f"transfers from {len(peers)} peers {outcome}"
+        return f"{files} {outcome}"
+    if family == FAMILY_PEER_FILE:
         if peer:
-            owned = "one of its own files" if count == 1 else f"{count} of its own files"
-            sentence = f"Peer {peer} could not read {owned} \u2014 {quoted}"
-        elif many_peers:
-            sentence = (
-                f"{len(peers)} peers could not read {files} "
-                f"they were sharing \u2014 {quoted}"
+            owned = (
+                "one of its own files" if count == 1
+                else f"{count} of its own files"
             )
-        else:
-            sentence = f"{files} could not be read by the sharing peer \u2014 {quoted}"
-    else:
-        if peer:
-            scope = f"all {files}" if count > 1 else files
-            sentence = f"Peer {peer} failed {scope} \u2014 {quoted}"
-        elif many_peers:
-            sentence = f"{files} failed across {len(peers)} peers \u2014 {quoted}"
-        else:
-            sentence = f"{files} failed \u2014 {quoted}"
-
-    if other_reasons > 0:
-        reasons = "reason" if other_reasons == 1 else "reasons"
-        sentence += f" (+{other_reasons} other {reasons})"
-    return sentence
+            return f"peer {peer} could not read {owned}"
+        if many_peers:
+            return (
+                f"{len(peers)} peers could not read {files} they were sharing"
+            )
+        return f"{files} could not be read by the sharing peer"
+    if peer:
+        scope = f"all {files}" if count > 1 else files
+        return f"peer {peer} failed {scope}"
+    if many_peers:
+        return f"{files} failed across {len(peers)} peers"
+    return f"{files} failed"
 
 
-def _mixed_family_sentence(groups: Sequence[_ReasonGroup]) -> str:
-    """Two or more families: count them, name none of their messages."""
+def _family_breakdown(groups: Sequence[_ReasonGroup]) -> str:
+    """Per-family counts for an evidence set spanning more than one family."""
     per_family: dict[PeerFailureFamily, int] = {}
     for group in groups:
         per_family[group.family] = per_family.get(group.family, 0) + group.count
-    total = sum(per_family.values())
     ordered = sorted(per_family.items(), key=lambda kv: (-kv[1], kv[0]))
-    breakdown = ", ".join(
+    return ", ".join(
         f"{count} {_plural(count, _FAMILY_BREAKDOWN_LABELS[family])}"
         for family, count in ordered
     )
-    peers = _all_peers(groups)
-    # I2 holds trivially here: a mixed set always contains a peer family,
-    # and the local-storage share is named separately in the breakdown.
-    return f"{_files(total)} failed{_peer_phrase(peers)} \u2014 {breakdown}"
+
+
+def _family_clause(groups: Sequence[_ReasonGroup]) -> str:
+    """The cause this evidence set describes, as one lower-case clause."""
+    families = {group.family for group in groups}
+    if len(families) != 1:
+        return _family_breakdown(groups)
+    return _single_family_clause(
+        groups[0].family,
+        count=sum(group.count for group in groups),
+        zero_bytes=all(
+            group.zero_byte_count == group.count for group in groups
+        ),
+        # I2 is enforced by the local-storage clause itself, which has no
+        # place to put a peer — not by filtering the peers here. (A guard
+        # here would be unreachable defence: fault injection proved removing
+        # it changes nothing, while the generated property kills any clause
+        # that starts naming a peer.)
+        peers=_all_peers(groups),
+    )
+
+
+def _capitalized(clause: str) -> str:
+    return clause[:1].upper() + clause[1:]
+
+
+def _mixed_family_sentence(groups: Sequence[_ReasonGroup]) -> str:
+    """Two or more families: count them, name none of their messages.
+
+    The peer phrase is dropped the moment any local-storage evidence is in
+    the set — heading a sentence with "from peer X" when part of the
+    failure was our own share is exactly the fuzzy attribution this module
+    exists to prevent. The breakdown still names every family separately.
+    """
+    total = sum(group.count for group in groups)
+    peers = (
+        ()
+        if any(group.family == FAMILY_LOCAL_STORAGE for group in groups)
+        else _all_peers(groups)
+    )
+    return (
+        f"{_files(total)} failed{_peer_phrase(peers)} "
+        f"\u2014 {_family_breakdown(groups)}"
+    )
 
 
 def _present_transfer_evidence(
@@ -472,25 +510,14 @@ def _present_transfer_evidence(
 ) -> FailurePresentation:
     families = {group.family for group in groups}
     if len(families) == 1:
-        family = groups[0].family
-        count = sum(group.count for group in groups)
-        zero_bytes = all(
-            group.zero_byte_count == group.count for group in groups
+        verdict = (
+            f"{_capitalized(_family_clause(groups))} "
+            f"\u2014 {_quoted(groups[0].message)}"
         )
-        # I2 is enforced by the local-storage template itself, which has no
-        # place to put a peer — not by filtering the peers here. (A guard
-        # here would be unreachable defence: fault injection proved removing
-        # it changes nothing, while the generated property kills any
-        # template that starts naming a peer.)
-        peers = _all_peers(groups)
-        verdict = _single_family_sentence(
-            family,
-            count=count,
-            zero_bytes=zero_bytes,
-            peers=peers,
-            message=groups[0].message,
-            other_reasons=len(groups) - 1,
-        )
+        other_reasons = len(groups) - 1
+        if other_reasons > 0:
+            reasons = "reason" if other_reasons == 1 else "reasons"
+            verdict += f" (+{other_reasons} other {reasons})"
     else:
         verdict = _mixed_family_sentence(groups)
     return FailurePresentation(
@@ -824,9 +851,10 @@ def present_failure(evidence: FailureEvidence) -> FailurePresentation:
             evidence.transfer_detail, evidence.soulseek_username,
         )
         message = (evidence.error_message or "").strip()
-        # Two message classes outrank the per-file evidence because they
-        # record a Cratedigger DECISION rather than a peer's behaviour: we
-        # stopped retrying, or the peer never started at all.
+        # Two message classes LEAD the sentence because they record a
+        # Cratedigger DECISION rather than a peer's behaviour: we stopped
+        # retrying, or the peer never started at all. Leading is all they
+        # do — see below.
         own_first = bool(message) and (
             _RETRY_LIMIT_RE.match(message) is not None
             or _REMOTE_QUEUE_RE.match(message) is not None
@@ -837,8 +865,17 @@ def present_failure(evidence: FailureEvidence) -> FailurePresentation:
             _present_download_message(message) if message else "Download failed"
         )
         if groups:
+            # I6: our decision is CONTEXT, never a substitute for the cause.
+            # Live-data review of 400 rows found this ranking suppressing the
+            # local-storage family in 10 of its 14 occurrences: rows 38203 /
+            # 38184 / 38119 read "Gave up on '05 Seventeen.flac' after 5
+            # failed attempts" while the evidence underneath was our own
+            # virtiofs share refusing the write. An operator concludes
+            # "flaky peer" and retries the peer. That is precisely the
+            # misattribution PR1 eliminated one layer down, so the dominant
+            # family is appended to every decision-led verdict.
             return FailurePresentation(
-                verdict=verdict,
+                verdict=f"{verdict} — {_family_clause(groups)}",
                 transfer_message=_transfer_message(groups),
                 transfer_message_label=_transfer_message_label(groups),
             )

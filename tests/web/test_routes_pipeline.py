@@ -1222,6 +1222,47 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.assertNotIn("Tymemage", str(item["verdict"]))
         self.assertEqual(item["transfer_message_label"], "Storage error")
 
+    def test_pipeline_detail_history_never_hides_storage_behind_a_giveup(self):
+        """Issue #868 I6, from live-data review: the retry-limit headline used
+        to be the WHOLE verdict, so 10 of 14 local-storage rows rendered as
+        "Gave up on <file> after 5 failed attempts" — an operator reads that
+        as a flaky peer and retries the peer, while our own share is what
+        failed. The cause is appended, never suppressed (live row 38203)."""
+        self.db.log_download(
+            request_id=100,
+            outcome="timeout",
+            soulseek_username="Tymemage",
+            error_message=(
+                "file exceeded retry limit after 5 retries: "
+                "Master\\Jimmy Eat World\\[1996] Static Prevails\\"
+                "05 Seventeen.flac"
+            ),
+            transfer_detail=[{
+                "username": "Tymemage",
+                "filename": "05 Seventeen.flac",
+                "last_state": "Completed, Errored",
+                "last_exception": (
+                    "Failed to create file 05 Seventeen.flac: Stale file "
+                    "handle : '/mnt/virtio/music/slskd/incomplete/x'"
+                ),
+                "bytes_transferred": 0,
+                "retry_count": 5,
+            }],
+        )
+
+        status, data = self._get("/api/pipeline/100")
+
+        self.assertEqual(status, 200)
+        item = next(
+            row for row in data["history"] if row["outcome"] == "timeout")
+        self.assertEqual(
+            item["verdict"],
+            'Gave up on "05 Seventeen.flac" after 5 failed attempts '
+            "— local storage error writing 1 file",
+        )
+        self.assertNotIn("Tymemage", str(item["verdict"]))
+        self.assertEqual(item["transfer_message_label"], "Storage error")
+
     def test_pipeline_detail_history_apply_distance_null_for_legacy_rows(self):
         """Rows predating #863 have no apply_beets_distance key — the derived
         field must be null, never an error."""

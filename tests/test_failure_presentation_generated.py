@@ -264,6 +264,43 @@ def check_local_storage_not_peer_attributed(
     return None
 
 
+def dominant_family(raw_files: Sequence[dict[str, object]]) -> str | None:
+    """The family of the most-reported reason, derived independently."""
+    counts: dict[str, int] = {}
+    for row in raw_files:
+        reason = _observed_reason(dict(row))
+        if reason:
+            counts[reason] = counts.get(reason, 0) + 1
+    if not counts:
+        return None
+    dominant = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+    return peer_failure_family(dominant)
+
+
+def check_storage_cause_is_never_suppressed(
+    raw_files: Sequence[dict[str, object]],
+    peers: Sequence[str],
+    presentation: FailurePresentation,
+) -> str | None:
+    """I6 — a Cratedigger-decision headline never hides a storage cause.
+
+    Live-data review of 400 rows: 10 of 14 local-storage rows led with
+    "Gave up on <file> after 5 failed attempts" and never mentioned storage
+    at all, because the retry-limit message outranked the evidence. The
+    operator's next action (retry the peer / fix the mount) hangs entirely
+    on this sentence.
+    """
+    if dominant_family(raw_files) != FAMILY_LOCAL_STORAGE:
+        return None
+    verdict = presentation.verdict or ""
+    if "local storage" not in verdict.casefold():
+        return f"storage cause suppressed from the verdict: {verdict!r}"
+    for peer in peers:
+        if peer and peer in verdict:
+            return f"storage-caused verdict names peer {peer!r}: {verdict!r}"
+    return None
+
+
 CONTAINMENT_MARKERS = ("refused to import", "symlink", "escaped", "containment")
 STORAGE_MARKERS = ("storage", "could not read", "could not be opened")
 
@@ -331,6 +368,12 @@ def check_rendered_text_is_bounded(
             continue
         if any(not ch.isprintable() and ch != " " for ch in value):
             return _CONTROL_FREE_FAILURE.format(value=value)
+    # A verdict is at most one bounded own-message, one family clause and
+    # one bounded quote — never an unbounded peer string. Live p95 is 163.
+    if presentation.verdict is not None and len(presentation.verdict) > 600:
+        return (
+            f"verdict exceeded its bound ({len(presentation.verdict)} chars)"
+        )
     message = presentation.transfer_message
     if message is None:
         return None
@@ -438,6 +481,54 @@ class TestLocalStorageIsNeverPeerAttributed(unittest.TestCase):
         verdict = presentation.verdict or ""
         self.assertIn("local storage error", verdict)
         self.assertIn("rejected before transfer", verdict)
+
+    @given(
+        storage_files=_files(
+            st.sampled_from(_FAMILY_MESSAGES[FAMILY_LOCAL_STORAGE]),
+            min_size=1, max_size=20,
+        ),
+        other_files=_files(_ANY_MESSAGE, min_size=0, max_size=4),
+        error_message=_OWN_MESSAGES,
+        username=st.one_of(st.none(), _PEER_NAMES),
+    )
+    @example(
+        storage_files=[
+            _transfer_file(
+                "QXZJK",
+                "Failed to create file 05 Seventeen.flac: Stale file handle : "
+                "'/mnt/virtio/music/slskd/incomplete/x'",
+                0,
+                "Completed, Errored",
+            ),
+        ],
+        other_files=[],
+        error_message=(
+            "file exceeded retry limit after 3 retries: "
+            "d:\\music\\x\\05 - Track.flac"
+        ),
+        username="QXZJK",
+    )
+    def test_no_cratedigger_decision_headline_hides_a_storage_cause(
+        self,
+        storage_files: list[dict[str, object]],
+        other_files: list[dict[str, object]],
+        error_message: str | None,
+        username: str | None,
+    ) -> None:
+        """I6 — whichever of OUR messages leads, the cause still shows."""
+        files = storage_files + other_files
+        presentation = present_failure(FailureEvidence(
+            outcome="timeout",
+            error_message=error_message,
+            soulseek_username=username,
+            transfer_detail=decode_transfer_detail(files),
+        ))
+        peers = [str(row["username"]) for row in files]
+        if username:
+            peers.append(username)
+        violation = check_storage_cause_is_never_suppressed(
+            files, peers, presentation)
+        self.assertIsNone(violation, violation)
 
 
 class TestReasonPartition(unittest.TestCase):
@@ -660,6 +751,46 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             ),
         ))
 
+    def test_storage_suppression_checker_trips_on_the_live_defect(self) -> None:
+        files = [
+            _transfer_file(
+                "QXZJK",
+                "Failed to create file 05 Seventeen.flac: Stale file handle",
+                0,
+                "Completed, Errored",
+            ),
+        ]
+        # The exact shape live row 38203 rendered before I6.
+        self.assertIsNotNone(check_storage_cause_is_never_suppressed(
+            files,
+            ["QXZJK"],
+            FailurePresentation(
+                verdict='Gave up on "05 Seventeen.flac" after 5 failed attempts',
+                transfer_message_label=TRANSFER_MESSAGE_LABEL_STORAGE,
+            ),
+        ))
+        # Naming storage but blaming a peer for it is still a violation.
+        self.assertIsNotNone(check_storage_cause_is_never_suppressed(
+            files,
+            ["QXZJK"],
+            FailurePresentation(
+                verdict="Gave up — local storage error from peer QXZJK"),
+        ))
+        self.assertIsNone(check_storage_cause_is_never_suppressed(
+            files,
+            ["QXZJK"],
+            FailurePresentation(
+                verdict='Gave up on "05 Seventeen.flac" after 5 failed '
+                        "attempts — local storage error writing 1 file"),
+        ))
+        # A world with no storage evidence is not this checker's business.
+        self.assertIsNone(check_storage_cause_is_never_suppressed(
+            [_transfer_file("QXZJK", "Verification required", 0,
+                            "Completed, Rejected")],
+            ["QXZJK"],
+            FailurePresentation(verdict="Gave up after 5 failed attempts"),
+        ))
+
     def test_reason_partition_checker_trips_on_a_fused_sentence(self) -> None:
         self.assertIsNotNone(check_reason_partition(
             "open_failed",
@@ -692,6 +823,11 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
     def test_bounded_checker_trips_on_an_unbounded_message(self) -> None:
         self.assertIsNotNone(check_rendered_text_is_bounded(
             FailurePresentation(transfer_message="x" * 10000),
+        ))
+
+    def test_bounded_checker_trips_on_an_unbounded_verdict(self) -> None:
+        self.assertIsNotNone(check_rendered_text_is_bounded(
+            FailurePresentation(verdict="x" * 10000),
         ))
 
 
