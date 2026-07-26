@@ -56,10 +56,11 @@ DISPATCH_CODE_IMPORT_MANIFEST_REJECTED = "import_manifest_rejected"
 # Scenarios whose ``path`` is the user's source data (``failed_imports/…``),
 # NOT a disposable staging directory. Used to gate ``_cleanup_staged_dir``
 # so a ``downgrade`` / ``transcode_downgrade`` decision from the harness
-# can never delete the user's only copy of the source. Auto-import uses
-# bv_result.scenario values like ``strong_match`` / ``weak_match`` /
-# ``auto_import``, none of which appear here — their staging dir under
-# ``/Incoming`` is always safe to remove (see issue #89).
+# can never delete the user's only copy of the source. Auto-import dispatches
+# under ``bv_result.scenario``, which on that path is always ``strong_match``
+# (``lib/beets.py`` sets ``valid`` and that name in one statement) and never
+# appears here — its staging dir under ``/Incoming`` is always safe to remove
+# (see issue #89).
 FORCE_IMPORT_SCENARIOS: frozenset[str] = frozenset({"force_import"})
 
 

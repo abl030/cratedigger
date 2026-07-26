@@ -372,6 +372,26 @@ projects them centrally; writers must not pass the same values separately.
 Payloads that genuinely omit those envelope keys, such as
 `MeasurementFailure`, may supply explicit top-level metadata.
 
+`beets_validate` always names a scenario. Either a `choose_match` was decoded
+and decided (`strong_match` / `high_distance` / `extra_tracks` /
+`mbid_not_found`), or the run ended without one and is recorded as
+`no_choose_match` with a `validation_result.harness_session` audit
+(`message_types`, `session_end_seen`, `stderr_tail`) — the observation that no
+match was ever offered, plus what the next person needs to work out why
+(issue #888). `harness_session` is present on exactly those rows and absent
+everywhere else, so it doubles as the discriminator:
+
+```sql
+-- Runs where beets offered nothing to review, with what the harness said.
+SELECT id, created_at,
+       validation_result->'harness_session'->>'message_types'   AS messages,
+       validation_result->'harness_session'->>'session_end_seen' AS session_end,
+       left(validation_result->'harness_session'->>'stderr_tail', 200) AS stderr
+FROM download_log
+WHERE beets_scenario = 'no_choose_match'
+ORDER BY id DESC LIMIT 20;
+```
+
 For `abandoned_auto_import` audit rows, `validation_result.failed_path`
 points at the prefixed failed-import folder when a leftover staged
 directory existed. A missing staged directory may produce the same audit

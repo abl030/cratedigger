@@ -350,6 +350,17 @@ def _handle_valid_result(
         if will_auto_import:
             assert request_id is not None, "pipeline request must have db_request_id"
             assert pdb is not None, "auto-import path must hold a pipeline DB handle"
+            # This branch is reached only for ``bv_result.valid``, and
+            # ``beets_validate`` sets ``valid`` in exactly one place — the
+            # ``strong_match`` arm, which names the scenario in the same
+            # statement. The ``or "auto_import"`` placeholder that used to
+            # sit on both dispatch calls below was therefore unreachable
+            # (zero live ``download_log`` rows ever carried it) and is gone
+            # (issue #888).
+            dispatch_scenario = bv_result.scenario
+            assert dispatch_scenario is not None, (
+                "beets_validate names a scenario on every valid result"
+            )
             current_spectral = album_data.current_spectral
             override_min_bitrate = compute_effective_override_bitrate(
                 album_data.current_min_bitrate,
@@ -380,7 +391,7 @@ def _handle_valid_result(
                     db=pdb,
                     dl_info=dl_info,
                     distance=bv_result.distance,
-                    scenario=bv_result.scenario or "auto_import",
+                    scenario=dispatch_scenario,
                     files=album_data.files,
                     cfg=ctx.cfg,
                     outcome_label="success",
@@ -405,7 +416,7 @@ def _handle_valid_result(
                 db=pdb,
                 dl_info=dl_info,
                 distance=bv_result.distance,
-                scenario=bv_result.scenario or "auto_import",
+                scenario=dispatch_scenario,
                 files=album_data.files,
                 cfg=ctx.cfg,
                 outcome_label="success",

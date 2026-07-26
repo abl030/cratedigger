@@ -1567,6 +1567,26 @@ def _rejection_verdict(entry: LogEntry) -> str:
             )
         return "Requested release ID not among the match candidates"
 
+    # ``lib/beets.py`` writes this when its stdout loop finished without a
+    # decoded ``choose_match``: beets never offered a match for the folder,
+    # so nothing was ever weighed against the requested release ID.
+    #
+    # The sentence names that OBSERVATION and stops there, because the
+    # observation is all the producer knows. No importable audio, a harness
+    # that died before starting, and a session cut short are all consistent
+    # with it — the discriminating facts (which harness messages arrived,
+    # whether a session_end was announced, the stderr tail) are persisted
+    # as ``validation_result.harness_session`` and summarised into
+    # ``beets_detail``, which the card shows beneath this line. Claiming a
+    # cause here would be exactly the #868/#882 defect in a new place.
+    #
+    # 276 live rows across 215 requests carried this rejection with a NULL
+    # scenario before issue #888 named it, so the card read "Rejected" and
+    # nothing else; 254 of those fell on 2026-06-28/29, the beets 2.12
+    # migration window.
+    if scenario == "no_choose_match":
+        return "Beets ended without offering a match to review"
+
     # Historical: emitted by a pre-2026-03-24 revision, one live row, no
     # current producer — which is why the audit registers it as historical.
     if scenario == "album_name_mismatch":

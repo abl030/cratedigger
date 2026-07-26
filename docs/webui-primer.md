@@ -301,6 +301,24 @@ Browser → https://music.ablz.au
   really does with that decision (`dispatch_action`, `decision_denylists`), so
   a proof lock cannot claim the search continues and a no-denylist reject
   cannot claim the source was banned.
+- **A run that offered no match names itself (#888)** — when
+  `beets_validate`'s stdout loop finishes without a decoded `choose_match`,
+  the result used to leave `scenario`, `detail` and `error` all NULL, so the
+  card read the bare word "Rejected" and nothing else. 276 live rows across
+  215 requests (2026-04-19 → 2026-07-21, 254 of them in the 2026-06-28/29
+  beets 2.12 window) landed there, and 181 were later re-previewed as
+  importable. `lib/beets.py` now writes `scenario="no_choose_match"` with a
+  `harness_session` audit — the harness message types it saw, whether a
+  `session_end` was announced, and the bounded TAIL of the harness's stderr
+  — and Recents renders "Beets ended without offering a match to review".
+  The sentence names the OBSERVATION only: no importable audio, a harness
+  that died before starting and a session cut short are all consistent with
+  it, so the discriminating facts live in the audit and in `beets_detail`
+  rather than in a claimed cause. The scenario is deliberately NOT added to
+  `WRONG_MATCH_EXCLUDED_REJECTION_SCENARIOS`, so the download lands in the
+  same `wrong_matches/` tree and stays on the same operator worklist an
+  unnamed `NULL` scenario always did — naming it changes copy and audit, not
+  routing.
 - **Wrong Matches evidence provenance** — candidate rows keep the downloaded
   source codec, configured target contract, and temporary V0 probe separate.
   A lossless candidate destined for Opus therefore reads `FLAC → OPUS 128

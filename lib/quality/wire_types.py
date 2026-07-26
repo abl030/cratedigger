@@ -157,6 +157,37 @@ class ChooseMatchMessage(msgspec.Struct):
     candidates: list[CandidateSummary] = []
 
 
+class HarnessSessionEvidence(msgspec.Struct):
+    """What the harness session itself did, when it offered no match.
+
+    Written by ``lib/beets.py::beets_validate`` on exactly the runs that end
+    without a processed ``choose_match`` message — the rejection that used
+    to persist nothing at all beyond one WARNING in the journal (issue
+    #888). It records OBSERVATIONS only, never an inferred cause: which
+    message types the harness sent, whether it announced a ``session_end``,
+    and the tail of its stderr.
+
+    Those three together separate the causes the observation is consistent
+    with. A harness that died before starting sends nothing and leaves a
+    traceback; one that ran and found no importable audio announces
+    ``session_end`` with a clean stderr. Neither is asserted here — the
+    evidence is recorded and the operator reads it.
+
+    Wire-boundary type: persisted inside ``download_log.validation_result``
+    JSONB via ``ValidationResult.to_json()``.
+    """
+    # Ordered, deduplicated ``type`` values seen on the harness's stdout.
+    # Empty means the harness never emitted a single JSON message.
+    message_types: list[str] = []
+    # Whether the harness announced the end of its import session.
+    session_end_seen: bool = False
+    # Bounded TAIL of the harness's stderr. The tail is the diagnostic half
+    # of a Python traceback — the exception line is at the bottom, which is
+    # the same reason ``beets_validate`` logs stderr in full rather than
+    # head-slicing it (the 2026-05-04 Psilodump crash).
+    stderr_tail: Optional[str] = None
+
+
 class ValidationResult(msgspec.Struct):
     """Structured result from beets validation + audio integrity check.
 
@@ -193,6 +224,10 @@ class ValidationResult(msgspec.Struct):
     # Audio integrity
     corrupt_files: list[str] = []
     error: Optional[str] = None
+    # Populated by ``beets_validate`` exactly when it returns without having
+    # processed a ``choose_match`` — i.e. alongside ``scenario ==
+    # "no_choose_match"``. ``None`` on every other result (issue #888).
+    harness_session: Optional[HarnessSessionEvidence] = None
     # Bad-audio-hash gate (pre-import defense, plan 2026-04-29-005 / U5).
     # Populated when ``scenario == "bad_audio_hash"``: the matched
     # ``bad_audio_hashes.id`` and the candidate track that hashed to it.
