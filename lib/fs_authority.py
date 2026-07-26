@@ -49,8 +49,8 @@ and permission assertions (a group/other-writable ancestor, a root that
 is not owned by the service identity, a root or child that is not mode
 0700). Those are security-relevant authority downgrades, not the
 "renameat2 is unsupported" miscellany ``unspecified`` collects, and
-lumping them together fused ~13 causes into one reason (issue #868). ``missing`` and ``open_failed`` are not — they say nothing
-about trust. Consumers that translate these into their own vocabulary do
+lumping them together fused ~13 causes into one reason (issue #868). ``missing``, ``open_failed``, ``read_failed`` and ``write_failed`` are
+not — they say nothing about trust. Consumers that translate these into their own vocabulary do
 so with an exhaustive ``match`` so a new code cannot be silently lumped
 in with either group.
 
@@ -72,8 +72,9 @@ class FilesystemAuthorityError(ValueError):
 
     ``code`` is the structured discriminator (see :data:`FsAuthorityCode`);
     ``errno_symbol`` carries the originating errno name (``"ESTALE"``,
-    ``"EIO"``, …) whenever ``code`` is ``"open_failed"``, so a caller can
-    record *which* storage failure happened without parsing ``strerror``.
+    ``"EIO"``, …) for every storage code — ``"open_failed"``,
+    ``"read_failed"`` and ``"write_failed"`` — so a caller can record
+    *which* storage failure happened without parsing ``strerror``.
     """
 
     def __init__(
@@ -274,9 +275,13 @@ def _assert_private_parent(path: str) -> None:
             try:
                 info = os.fstat(fd)
             except OSError as exc:
+                # The directory is already OPEN; it is the stat that failed.
+                # ``open_failed`` here rendered "could not be opened
+                # (ESTALE)" — the same verb-borrow B2 was chartered to
+                # remove (issue #868 review F4).
                 raise FilesystemAuthorityError(
                     f"cannot inspect {current}: {exc.strerror}",
-                    code="open_failed",
+                    code="read_failed",
                     errno_symbol=errno_symbol(exc),
                 ) from exc
             if info.st_mode & 0o022:

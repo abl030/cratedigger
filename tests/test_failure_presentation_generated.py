@@ -55,6 +55,7 @@ from lib.failure_presentation import (
     FAMILY_PEER_FILE,
     FAMILY_REFUSAL,
     FAMILY_TRANSPORT,
+    FAMILY_UNKNOWN,
     MAX_RAW_MESSAGE_CHARS,
     MAX_RAW_MESSAGE_GROUPS,
     TRANSFER_MESSAGE_LABEL_PEER,
@@ -68,6 +69,9 @@ from lib.failure_presentation import (
     materialize_reason_copy,
     peer_failure_family,
     present_failure,
+)
+from lib.failure_presentation import (
+    _FAMILY_BREAKDOWN_LABELS as _BREAKDOWN_LABELS,
 )
 from web.classify import LogEntry, classify_log_entry
 
@@ -145,6 +149,16 @@ _KNOWN_MESSAGES = st.sampled_from(
 )
 _UNKNOWN_MESSAGES = st.text(min_size=1, max_size=300)
 _ANY_MESSAGE = st.one_of(_KNOWN_MESSAGES, _UNKNOWN_MESSAGES, st.none())
+
+
+def _same_message_world(
+    peer: str, message: str, count: int, transferred: int,
+) -> list[dict[str, object]]:
+    """``count`` files from one peer, all failing the same way."""
+    return [
+        _transfer_file(peer, message, transferred, "Completed, Errored")
+        for _index in range(count)
+    ]
 
 
 def _transfer_file(
@@ -269,6 +283,9 @@ _FORBIDDEN_FAMILY_CLAIMS: dict[PeerFailureFamily, tuple[tuple[str, str], ...]] =
     FAMILY_PEER_FILE: (
         ("could not read",
          "the size-mismatch member read its file fine; slskd aborted"),
+        ("unreadable",
+         "the adjective form of the same retracted claim — this is how it "
+         "survived B1 in the breakdown label table"),
         ("its own files",
          "a size mismatch is about what was advertised, not ownership"),
         ("rejected", "nothing in this family is a refusal"),
@@ -285,22 +302,41 @@ _FORBIDDEN_FAMILY_CLAIMS: dict[PeerFailureFamily, tuple[tuple[str, str], ...]] =
         ("peer", "our storage, our fault"),
         ("rejected", "nobody refused anything"),
     ),
+    FAMILY_UNKNOWN: (
+        ("without a reason",
+         "the row HAS a reason, quoted beside it; we failed to classify it"),
+        ("could not read", "nothing here says what failed"),
+        ("rejected", "nothing here says a peer refused"),
+    ),
 }
 
 
-def check_family_clause_holds_for_every_member(
+def check_family_claim(
     family: PeerFailureFamily,
-    message: str,
-    verdict: str,
+    claim: str,
+    *,
+    where: str,
+    bytes_moved: bool = False,
 ) -> str | None:
-    """B1 — the clause must be true of the whole family, not one member."""
-    lowered = verdict.casefold()
+    """B1/F1 — any string that renders a family claim must be family-true.
+
+    ``claim`` is deliberately not "the verdict": the same retracted claim
+    survived in ``_FAMILY_BREAKDOWN_LABELS`` in adjective form, and a
+    verdict-scoped check could not see it because every generated world
+    carried one family and never reached the breakdown (issue #868 review
+    F1). Every string that speaks for a family answers here.
+    """
+    lowered = claim.casefold()
     for forbidden, why in _FORBIDDEN_FAMILY_CLAIMS.get(family, ()):
         if forbidden in lowered:
             return (
-                f"{family} clause claims {forbidden!r} ({why}); "
-                f"message={message!r} verdict={verdict!r}"
+                f"{where} for {family} claims {forbidden!r} ({why}): {claim!r}"
             )
+    if bytes_moved and "before transfer" in lowered:
+        return (
+            f"{where} for {family} claims 'before transfer' after bytes "
+            f"moved: {claim!r}"
+        )
     return None
 
 
@@ -590,20 +626,45 @@ class TestLocalStorageIsNeverPeerAttributed(unittest.TestCase):
             st.sampled_from(_FAMILY_MESSAGES[FAMILY_REFUSAL]),
             min_size=1, max_size=10,
         ),
+        username=st.one_of(st.none(), _PEER_NAMES),
     )
-    def test_mixed_worlds_still_name_the_storage_share_separately(
+    def test_mixed_worlds_name_storage_separately_and_agree_on_attribution(
         self,
         storage_files: list[dict[str, object]],
         peer_files: list[dict[str, object]],
+        username: str | None,
     ) -> None:
+        """Review F6: ONE attribution rule across verdict and summary.
+
+        The verdict dropped its peer phrase as soon as any storage
+        evidence appeared while the summary re-attached the peer unless
+        EVERY group was storage, so the two layers disagreed about the
+        same row.
+        """
+        files = storage_files + peer_files
         presentation = present_failure(FailureEvidence(
             outcome="timeout",
             error_message="all files errored",
-            transfer_detail=decode_transfer_detail(storage_files + peer_files),
+            soulseek_username=username,
+            transfer_detail=decode_transfer_detail(files),
         ))
         verdict = presentation.verdict or ""
         self.assertIn("local storage error", verdict)
-        self.assertIn("rejected before transfer", verdict)
+        self.assertIn("rejected by the peer", verdict)
+        self.assertFalse(presentation.peer_attributable)
+        classified = classify_log_entry(LogEntry(
+            id=1, request_id=2, outcome="timeout",
+            error_message="all files errored",
+            soulseek_username=username,
+            transfer_detail=files,
+        ))
+        peers = [str(row["username"]) for row in files]
+        if username:
+            peers.append(username)
+        for named in peers:
+            if named:
+                self.assertNotIn(named, verdict)
+                self.assertNotIn(named, classified.summary)
 
     @given(
         storage_files=_files(
@@ -655,7 +716,21 @@ class TestLocalStorageIsNeverPeerAttributed(unittest.TestCase):
 
 
 class TestFamilyClausesHoldForEveryMember(unittest.TestCase):
-    """B1 — a clause is a claim about the whole family."""
+    """B1/F1 — every string that speaks for a family, over every member."""
+
+    def test_every_breakdown_label_is_true_of_its_whole_family(self) -> None:
+        """The table itself: a label is a family claim in adjective form.
+
+        This is the half that was structurally invisible — single-family
+        worlds never reach ``_family_breakdown``, so the retracted "could
+        not read" claim survived here as "unreadable on the peer" through
+        a whole review round.
+        """
+        for family, labels in _BREAKDOWN_LABELS.items():
+            for label in labels:
+                violation = check_family_claim(
+                    family, label, where="breakdown label", bytes_moved=True)
+                self.assertIsNone(violation, violation)
 
     @given(
         family=st.sampled_from(tuple(_FAMILY_MESSAGES)),
@@ -665,13 +740,10 @@ class TestFamilyClausesHoldForEveryMember(unittest.TestCase):
         peer=_PEER_NAMES,
     )
     @example(
-        family=FAMILY_PEER_FILE,
-        data=None,
-        count=12,
-        transferred=0,
+        family=FAMILY_PEER_FILE, data=None, count=12, transferred=0,
         peer="QXZJK",
     )
-    def test_no_clause_claims_something_a_member_contradicts(
+    def test_no_single_family_clause_claims_what_a_member_contradicts(
         self,
         family: PeerFailureFamily,
         data: st.DataObject | None,
@@ -681,29 +753,76 @@ class TestFamilyClausesHoldForEveryMember(unittest.TestCase):
     ) -> None:
         messages = _FAMILY_MESSAGES[family]
         chosen = (
-            messages
-            if data is None
-            else (data.draw(st.sampled_from(messages)),)
+            messages if data is None else (data.draw(st.sampled_from(messages)),)
         )
         for message in chosen:
-            files = [
-                {
-                    "username": peer,
-                    "filename": f"{index}.flac",
-                    "last_state": "Completed, Errored",
-                    "last_exception": message,
-                    "bytes_transferred": transferred,
-                    "retry_count": 0,
-                }
-                for index in range(count)
-            ]
             presentation = present_failure(FailureEvidence(
                 outcome="timeout",
                 error_message="all files errored",
-                transfer_detail=decode_transfer_detail(files),
+                transfer_detail=decode_transfer_detail(
+                    _same_message_world(peer, message, count, transferred)),
             ))
-            violation = check_family_clause_holds_for_every_member(
-                family, message, presentation.verdict or "")
+            violation = check_family_claim(
+                family,
+                presentation.verdict or "",
+                where="single-family clause",
+                bytes_moved=transferred > 0,
+            )
+            self.assertIsNone(violation, violation)
+
+    @given(
+        first=st.sampled_from(tuple(_FAMILY_MESSAGES)),
+        second=st.sampled_from(tuple(_FAMILY_MESSAGES)),
+        data=st.data(),
+        counts=st.tuples(
+            st.integers(min_value=1, max_value=8),
+            st.integers(min_value=1, max_value=8),
+        ),
+        transferred=st.integers(min_value=0, max_value=10**6),
+        peer=_PEER_NAMES,
+    )
+    # Live row 37265: ten size mismatches plus one read error, rendered
+    # through the breakdown as "10 unreadable on the peer".
+    @example(
+        first=FAMILY_PEER_FILE, second=FAMILY_TRANSPORT, data=None,
+        counts=(10, 1), transferred=0, peer="wheeliewhee",
+    )
+    def test_no_breakdown_claims_what_a_member_contradicts(
+        self,
+        first: PeerFailureFamily,
+        second: PeerFailureFamily,
+        data: st.DataObject | None,
+        counts: tuple[int, int],
+        transferred: int,
+        peer: str,
+    ) -> None:
+        """Multi-family worlds, so the breakdown actually renders."""
+        assume(first != second)
+        pick = (
+            (lambda fam: _FAMILY_MESSAGES[fam][0])
+            if data is None
+            else (lambda fam: data.draw(st.sampled_from(_FAMILY_MESSAGES[fam])))
+        )
+        files: list[dict[str, object]] = []
+        for family, count in ((first, counts[0]), (second, counts[1])):
+            files.extend(
+                _same_message_world(peer, pick(family), count, transferred))
+        presentation = present_failure(FailureEvidence(
+            outcome="timeout",
+            error_message="all files errored",
+            transfer_detail=decode_transfer_detail(files),
+        ))
+        verdict = presentation.verdict or ""
+        for family in (first, second):
+            label = _BREAKDOWN_LABELS[family][0]
+            self.assertIn(
+                label, verdict,
+                f"{family} did not reach the breakdown: {verdict!r}",
+            )
+            violation = check_family_claim(
+                family, label, where="rendered breakdown",
+                bytes_moved=transferred > 0,
+            )
             self.assertIsNone(violation, violation)
 
 
@@ -951,16 +1070,28 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                 verdict="…", transfer_message='1× "Verification required"'),
         ))
 
-    def test_family_claim_checker_trips_on_the_defect_that_shipped(self) -> None:
-        self.assertIsNotNone(check_family_clause_holds_for_every_member(
+    def test_family_claim_checker_trips_on_both_defects_that_shipped(self) -> None:
+        # The clause form (B1) …
+        self.assertIsNotNone(check_family_claim(
             FAMILY_PEER_FILE,
-            "Transfer aborted: the remote size of 1 does not match expected size 2",
             'Peer QXZJK could not read 12 of its own files — "…"',
+            where="clause",
         ))
-        self.assertIsNone(check_family_clause_holds_for_every_member(
+        # … and the adjective form that survived it in the label table (F1).
+        self.assertIsNotNone(check_family_claim(
+            FAMILY_PEER_FILE, "unreadable on the peer", where="label"))
+        self.assertIsNotNone(check_family_claim(
+            FAMILY_UNKNOWN, "failed without a reason", where="label"))
+        self.assertIsNotNone(check_family_claim(
+            FAMILY_REFUSAL, "rejected before transfer", where="label",
+            bytes_moved=True))
+        self.assertIsNone(check_family_claim(
+            FAMILY_PEER_FILE, "not delivered by the peer", where="label",
+            bytes_moved=True))
+        self.assertIsNone(check_family_claim(
             FAMILY_PEER_FILE,
-            "Transfer aborted: the remote size of 1 does not match expected size 2",
             'Peer QXZJK could not deliver 12 of the files it was sharing — "…"',
+            where="clause",
         ))
 
     def test_local_storage_checker_trips_on_the_summary_suffix(self) -> None:

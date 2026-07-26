@@ -18,7 +18,10 @@ import os
 import sys
 import tempfile
 import unittest
+from collections.abc import Mapping, Sequence, Set as AbstractSet
 from dataclasses import dataclass
+
+import re
 
 import msgspec
 
@@ -359,7 +362,7 @@ class TestPeerFamilyCopy(unittest.TestCase):
         self.assertEqual(
             presentation.verdict,
             "23 files failed across 4 peers — "
-            "20 rejected before transfer, 3 connection lost",
+            "20 rejected by the peer, 3 connection lost",
         )
         self.assertEqual(
             presentation.transfer_message,
@@ -623,7 +626,8 @@ class TestOwnDownloadMessages(unittest.TestCase):
         ))
         self.assertEqual(
             presentation.verdict,
-            'Peer bob rejected 1 file before transfer — "Verification required"',
+            'Peer bob rejected 1 file before transfer — "Verification required" '
+            "(still queued after 60 minutes)",
         )
         self.assertNotIn("never started", presentation.verdict or "")
         self.assertEqual(
@@ -753,8 +757,8 @@ class TestDecisionHeadlinesNeverSuppressTheCause(unittest.TestCase):
         ))
         self.assertEqual(
             presentation.verdict,
-            "2 files failed — 1 local storage error, "
-            "1 rejected before transfer",
+            "2 files failed — 1 local storage error, 1 rejected by the peer "
+            "(still queued after 60 minutes)",
         )
 
     def test_mixed_evidence_with_storage_drops_the_peer_headline(self):
@@ -1303,8 +1307,9 @@ _NON_TRIGGER_TABLES: dict[str, str] = {
         "interpreted, so there is no Cratedigger producer to trace"
     ),
     "_FAMILY_BREAKDOWN_LABELS": (
-        "keyed by failure family, not by a matched string — these are "
-        "output copy, never a match target"
+        "keyed by failure family and holding OUTPUT copy, never a match "
+        "target; its copy is guarded instead by the family-claim property "
+        "in tests/test_failure_presentation_generated.py"
     ),
     "_MATERIALIZE_REASON_COPY": (
         "reason codes, covered by "
@@ -1316,37 +1321,91 @@ _NON_TRIGGER_TABLES: dict[str, str] = {
     ),
 }
 
+_NON_TRIGGER_CONSTANTS: dict[str, str] = {
+    # Output copy: rendered, never matched.
+    "TRANSFER_MESSAGE_LABEL_PEER": "output label",
+    "TRANSFER_MESSAGE_LABEL_STORAGE": "output label",
+    "TRANSFER_MESSAGE_LABEL_MIXED": "output label",
+    "TRANSFER_MESSAGE_LABEL_STATE": "output label",
+    "DETAIL_LABEL_REASON_CODE": "output label",
+    "_GRACE_COPY": "output copy for the grace-expiry sentence",
+    # Internal taxonomy tags, not text anyone produces.
+    "FAMILY_REFUSAL": "family tag",
+    "FAMILY_TRANSPORT": "family tag",
+    "FAMILY_PEER_FILE": "family tag",
+    "FAMILY_LOCAL_STORAGE": "family tag",
+    "FAMILY_UNKNOWN": "family tag",
+    # Structural patterns over text we already matched, not triggers.
+    "_EVIDENCE_TAIL_RE": (
+        "strips lib.download._enrich_timeout_reason's appended summary from "
+        "an ALREADY-matched message; matches no message on its own"
+    ),
+    "_PATH_SEPARATORS": "splits a path, matches no message",
+}
 
-def _match_tables() -> dict[str, tuple[str, ...]]:
-    """Every module-level literal-keyed table in the presenter.
 
-    Discovery, not enumeration: a dict with string keys or a tuple of
-    strings / string-keyed pairs is a match table until it is explicitly
-    exempted with a reason.
+def _match_targets(
+    namespace: "Mapping[str, object] | None" = None,
+) -> dict[str, tuple[str, ...]]:
+    """Every module-level thing the presenter can match a message against.
+
+    Discovery, not enumeration, and deliberately wide: the module's most
+    natural idiom is a bare ``str`` constant feeding ``.startswith`` (issue
+    #868 review F3 — a fabricated prefix constant plus an inline chain
+    passed the narrower scan). Dicts, tuples, lists, sets, frozensets,
+    bare string constants and compiled patterns all answer here; anything
+    unrecognised is a match target until exempted with a reason.
+
+    Names re-exported from the producing module are skipped: they are the
+    producer's own vocabulary, checked against it by
+    ``test_materialize_reason_keys_come_from_their_producer``.
     """
-    from lib import failure_presentation as presenter
+    from lib import download_materialization, failure_presentation
 
-    tables: dict[str, tuple[str, ...]] = {}
-    for name, value in vars(presenter).items():
-        if name.startswith("__"):
+    scope = vars(failure_presentation) if namespace is None else namespace
+    producer_names = set(vars(download_materialization))
+    targets: dict[str, tuple[str, ...]] = {}
+    for name, value in scope.items():
+        if name.startswith("__") or name in producer_names:
             continue
-        if isinstance(value, dict):
+        if isinstance(value, str):
+            targets[name] = (value,)
+        elif isinstance(value, re.Pattern):
+            targets[name] = (value.pattern,)
+        elif isinstance(value, dict):
             keys = tuple(k for k in value if isinstance(k, str))
             if keys and len(keys) == len(value):
-                tables[name] = keys
-        elif isinstance(value, tuple) and value:
-            if all(isinstance(item, str) for item in value):
-                tables[name] = tuple(item for item in value
-                                     if isinstance(item, str))
+                targets[name] = keys
+        elif isinstance(value, (tuple, list, set, frozenset)) and value:
+            items = tuple(value)
+            if all(isinstance(item, str) for item in items):
+                targets[name] = tuple(
+                    item for item in items if isinstance(item, str))
             elif all(
                 isinstance(item, tuple) and item and isinstance(item[0], str)
-                for item in value
+                for item in items
             ):
-                tables[name] = tuple(
-                    item[0] for item in value
+                targets[name] = tuple(
+                    item[0] for item in items
                     if isinstance(item, tuple) and isinstance(item[0], str)
                 )
-    return tables
+    return targets
+
+
+def check_target_is_registered(
+    name: str,
+    values: "Sequence[str]",
+    registered: "AbstractSet[str]",
+) -> str | None:
+    """Return why a discovered match target is unaccounted for, or None."""
+    if name in _NON_TRIGGER_TABLES or name in _NON_TRIGGER_CONSTANTS:
+        return None
+    for value in values:
+        folded = value.casefold()
+        if any(trigger in folded or folded in trigger for trigger in registered):
+            continue
+        return f"{name} matches {value!r}, which no registered producer emits"
+    return None
 
 
 class TestEveryTriggerHasAProducer(unittest.TestCase):
@@ -1404,7 +1463,7 @@ class TestEveryTriggerHasAProducer(unittest.TestCase):
                     outcome=entry.outcome, error_message=entry.probe))
                 self.assertIn(entry.expect, presentation.verdict or "")
 
-    def test_registry_covers_every_match_table_in_the_module(self):
+    def test_registry_covers_every_match_target_in_the_module(self):
         """The registry is DERIVED from the module, not hand-listed.
 
         A hand list closes the instances someone remembered; a reviewer
@@ -1415,30 +1474,59 @@ class TestEveryTriggerHasAProducer(unittest.TestCase):
         cannot ship silently.
         """
         registered = {entry.trigger.casefold() for entry in self.ALL_TRIGGERS}
-        unregistered: list[str] = []
-        for table, keys in _match_tables().items():
-            if table in _NON_TRIGGER_TABLES:
-                continue
-            for key in keys:
-                if key.casefold() not in registered:
-                    unregistered.append(f"{table}[{key!r}]")
+        violations = [
+            violation
+            for name, values in _match_targets().items()
+            if (violation := check_target_is_registered(
+                name, values, registered)) is not None
+        ]
         self.assertEqual(
-            unregistered, [],
+            violations, [],
             "these match targets claim a producer nobody registered",
         )
 
-    def test_the_table_scan_is_fail_closed(self):
-        """Known-bad self-test for the discovery half: an unknown table is
-        a failure, and an exempted one must justify itself."""
-        self.assertIn("_MEASUREMENT_COPY", _match_tables())
-        self.assertIn("_VANISHED_PREFIXES", _match_tables())
-        for table, reason in _NON_TRIGGER_TABLES.items():
-            with self.subTest(table):
-                self.assertIn(
-                    table, _match_tables(),
-                    f"{table} is exempted but no longer exists",
+    def test_the_target_scan_is_fail_closed(self):
+        """Known-bad self-test: plant each shape a fabricated trigger can
+        take and require the scan to catch every one.
+
+        The narrower scan this replaces saw dicts and tuples only, so a
+        bare ``str`` constant feeding ``.startswith`` — the module's most
+        common idiom — shipped silently (issue #868 review F3).
+        """
+        registered = {entry.trigger.casefold() for entry in self.ALL_TRIGGERS}
+        invented = "the mount went sideways"
+        planted: dict[str, object] = {
+            "_FABRICATED_COPY": {invented: "Storage is unwell"},
+            "_FABRICATED_PREFIX": invented,
+            "_FABRICATED_LIST": [invented],
+            "_FABRICATED_FROZENSET": frozenset({invented}),
+            "_FABRICATED_SET": {invented},
+            "_FABRICATED_PAIRS": ((invented, "copy"),),
+            "_FABRICATED_RE": re.compile(f"^{invented}$"),
+        }
+        for name, value in planted.items():
+            with self.subTest(name):
+                targets = _match_targets({name: value})
+                self.assertIn(name, targets, f"{name} was not even discovered")
+                self.assertIsNotNone(
+                    check_target_is_registered(
+                        name, targets[name], registered),
+                    f"{name} slipped past the registry check",
                 )
-                self.assertGreater(len(reason), 20, "exemptions carry a reason")
+        # A registered trigger passes, and every exemption is justified.
+        self.assertIsNone(check_target_is_registered(
+            "_ABANDON_PREFIX", ("abandoned interrupted auto-import",),
+            registered,
+        ))
+        live = _match_targets()
+        for name, reason in {
+            **_NON_TRIGGER_TABLES, **_NON_TRIGGER_CONSTANTS,
+        }.items():
+            with self.subTest(name):
+                if name == "_MEASUREMENT_COPY_VALUES":
+                    continue
+                self.assertIn(name, live, f"{name} is exempted but is gone")
+                self.assertGreater(len(reason), 8, "exemptions carry a reason")
 
     def test_materialize_reason_keys_come_from_their_producer(self):
         """The same rule for PR1's reason vocabulary.

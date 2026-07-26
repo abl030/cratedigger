@@ -181,12 +181,23 @@ def peer_failure_family(message: str | None) -> PeerFailureFamily:
     return FAMILY_UNKNOWN
 
 
+# These are family claims in adjective form and answer to exactly the same
+# rule as the clauses above: true of EVERY member, or it does not ship.
+#
+# ``unreadable on the peer`` was the retracted "could not read" claim
+# surviving here verbatim (issue #868 review F1) — live row 37265 rendered
+# "10 unreadable on the peer" for ten size mismatches the peer had read
+# perfectly well. ``failed without a reason`` was false the same way: the
+# row HAS a reason, quoted immediately beside it, that we merely failed to
+# classify (F2). And ``before transfer`` is licensed by zero bytes, which a
+# breakdown group cannot promise.
 _FAMILY_BREAKDOWN_LABELS: Final[dict[PeerFailureFamily, tuple[str, str]]] = {
-    FAMILY_REFUSAL: ("rejected before transfer", "rejected before transfer"),
+    FAMILY_REFUSAL: ("rejected by the peer", "rejected by the peer"),
     FAMILY_TRANSPORT: ("connection lost", "connection lost"),
-    FAMILY_PEER_FILE: ("unreadable on the peer", "unreadable on the peer"),
+    FAMILY_PEER_FILE: ("not delivered by the peer", "not delivered by the peer"),
     FAMILY_LOCAL_STORAGE: ("local storage error", "local storage errors"),
-    FAMILY_UNKNOWN: ("failed without a reason", "failed without a reason"),
+    FAMILY_UNKNOWN: (
+        "with an unrecognised reason", "with an unrecognised reason"),
 }
 
 
@@ -577,20 +588,23 @@ def _capitalized(clause: str) -> str:
     return clause[:1].upper() + clause[1:]
 
 
-def _mixed_family_sentence(groups: Sequence[_ReasonGroup]) -> str:
-    """Two or more families: count them, name none of their messages.
+def _peer_attributable(groups: Sequence[_ReasonGroup]) -> bool:
+    """May this row be attributed to a peer at all?
 
-    The peer phrase is dropped the moment any local-storage evidence is in
-    the set — heading a sentence with "from peer X" when part of the
-    failure was our own share is exactly the fuzzy attribution this module
-    exists to prevent. The breakdown still names every family separately.
+    ONE rule for every layer. The verdict dropped its peer phrase as soon
+    as any local-storage evidence appeared, while the summary re-attached
+    the peer unless EVERY group was storage — so the two layers disagreed
+    about the same row (issue #868 review F6). If any part of the failure
+    was ours, no layer names a peer; the card header still shows the
+    row's username, so nothing is lost.
     """
+    return not any(group.family == FAMILY_LOCAL_STORAGE for group in groups)
+
+
+def _mixed_family_sentence(groups: Sequence[_ReasonGroup]) -> str:
+    """Two or more families: count them, name none of their messages."""
     total = sum(group.count for group in groups)
-    peers = (
-        ()
-        if any(group.family == FAMILY_LOCAL_STORAGE for group in groups)
-        else _all_peers(groups)
-    )
+    peers = _all_peers(groups) if _peer_attributable(groups) else ()
     return (
         f"{_files(total)} failed{_peer_phrase(peers)} "
         f"\u2014 {_family_breakdown(groups)}"
@@ -616,9 +630,7 @@ def _present_transfer_evidence(
         verdict=verdict,
         transfer_message=_transfer_message(groups),
         transfer_message_label=_transfer_message_label(groups),
-        peer_attributable=(
-            _transfer_message_label(groups) != TRANSFER_MESSAGE_LABEL_STORAGE
-        ),
+        peer_attributable=_peer_attributable(groups),
     )
 
 
@@ -652,10 +664,17 @@ def _download_message_context(message: str) -> str | None:
     entirely (issue #868 review #8). The cause still leads; the duration
     rides along.
     """
-    stalled = _STALLED_RE.match(message.strip())
-    if stalled is None:
-        return None
-    return f"no progress for {_duration_phrase(int(stalled.group(1)))}"
+    probe = message.strip()
+    stalled = _STALLED_RE.match(probe)
+    if stalled is not None:
+        return f"no progress for {_duration_phrase(int(stalled.group(1)))}"
+    # Symmetry: #7 stopped this message leading when evidence exists, which
+    # would otherwise lose the fact #8 was raised to preserve one message
+    # over (issue #868 review F5).
+    queued = _REMOTE_QUEUE_RE.match(probe)
+    if queued is not None:
+        return f"still queued after {_duration_phrase(int(queued.group(1)))}"
+    return None
 
 
 _VANISHED_WITH_EVIDENCE: Final = "transfers no longer in slskd — last observed:"
@@ -1065,10 +1084,7 @@ def _present_failure(evidence: FailureEvidence) -> FailurePresentation:
                 verdict=f"{verdict} — {_family_clause(groups)}",
                 transfer_message=_transfer_message(groups),
                 transfer_message_label=_transfer_message_label(groups),
-                peer_attributable=(
-                    _transfer_message_label(groups)
-                    != TRANSFER_MESSAGE_LABEL_STORAGE
-                ),
+                peer_attributable=_peer_attributable(groups),
             )
         return FailurePresentation(verdict=verdict)
 
@@ -1106,4 +1122,5 @@ __all__ = [
     "materialize_reason_copy",
     "peer_failure_family",
     "present_failure",
+    "transfer_detail_unreadable",
 ]

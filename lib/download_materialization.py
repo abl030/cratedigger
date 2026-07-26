@@ -108,8 +108,10 @@ same specific-but-false claim ``processing_open_failed_`` made about
 writes (issue #868 review B2)."""
 
 REASON_SOURCE_WRITE_FAILED_PREFIX: Final = "source_write_failed_"
-"""Unreachable — nothing writes the share. Present because every subject
-answers every storage fact, so a new one cannot land in another's noun."""
+"""Unreachable: the only write this module makes to the share is
+``unlink_if_same``'s unlink+flush, which never travels as a
+``CopyDestinationWriteError``. Present because every subject answers every
+storage fact, so a new raise site cannot land in another subject's noun."""
 
 REASON_SOURCE_PREFLIGHT_REFUSED: Final = "source_preflight_refused"
 """A refusal of one stamped file with no structured code."""
@@ -160,7 +162,8 @@ REASON_SLSKD_ROOT_READ_FAILED_PREFIX: Final = "slskd_root_read_failed_"
 """Prefix for a read failure on the already-open shared share."""
 
 REASON_SLSKD_ROOT_WRITE_FAILED_PREFIX: Final = "slskd_root_write_failed_"
-"""Unreachable — Cratedigger never writes the shared share."""
+"""Unreachable for the same reason as its source-file sibling; kept so the
+vocabulary stays total over every storage fact."""
 
 REASON_SLSKD_ROOT_REFUSED: Final = "slskd_root_refused"
 """A refusal of the shared download root with no structured code."""
