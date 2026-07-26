@@ -968,7 +968,7 @@ def _materialize_processing_dir(
                     # second half.
                     with open_shared_download_root(
                         ctx.cfg.slskd_download_dir,
-                    ) as slskd_fd:
+                    ) as slskd_root:
                         for file in album_data.files:
                             if file.local_path is None:
                                 return _record_materialize_failure(
@@ -979,9 +979,7 @@ def _materialize_processing_dir(
                                 )
                             try:
                                 opened_sources.append(open_regular_under_held_root(
-                                    ctx.cfg.slskd_download_dir,
-                                    slskd_fd,
-                                    file.local_path,
+                                    slskd_root, file.local_path,
                                 ))
                             except FilesystemAuthorityError as exc:
                                 return _record_materialize_failure(

@@ -454,10 +454,15 @@ class OpenedRegularFile:
 
 @dataclass
 class HeldDirectory:
-    """A configured quarantine directory held open for its whole use.
+    """A configured directory held open for its whole use.
 
-    ``display_path`` is audit/UI metadata only.  Consumers must traverse
-    ``fd`` rather than closing it and opening that pathname again.
+    ``display_path`` is audit/UI metadata and LEXICAL input only.
+    Consumers must traverse ``fd`` rather than closing it and opening that
+    pathname again — the sanctioned lexical use is computing a candidate's
+    relative path for the containment check, which still opens beneath
+    ``fd``. Pairing the two here is deliberate: a caller handed a separate
+    ``root``/``root_fd`` could pass a mismatched pair and compute the
+    relative name against a root the descriptor does not name.
     """
 
     fd: int
@@ -550,7 +555,7 @@ def open_regular_relative(root_fd: int, relative_path: str) -> OpenedRegularFile
 
 
 def open_regular_under_held_root(
-    root: str, root_fd: int, candidate: str,
+    held: HeldDirectory, candidate: str,
 ) -> OpenedRegularFile:
     """Open an absolute candidate through an ALREADY-HELD authority root.
 
@@ -567,14 +572,16 @@ def open_regular_under_held_root(
       the root is swapped mid-loop. One held descriptor makes the whole
       batch provably one root — the module's own doctrine.
 
-    ``root`` is still needed for the lexical containment check; ``root_fd``
-    is the authority everything is actually opened beneath.
+    Takes the paired :class:`HeldDirectory` rather than a separate
+    path/descriptor so the lexical containment check cannot be computed
+    against a root the descriptor does not name.
     """
-    return open_regular_relative(root_fd, _relative_to(root, candidate))
+    return open_regular_relative(
+        held.fd, _relative_to(held.display_path, candidate))
 
 
 @contextmanager
-def open_shared_download_root(path: str) -> Generator[int, None, None]:
+def open_shared_download_root(path: str) -> Generator[HeldDirectory, None, None]:
     """Hold the UNTRUSTED shared download root open for a whole batch.
 
     A refusal of the root ITSELF is raised as
@@ -583,13 +590,16 @@ def open_shared_download_root(path: str) -> Generator[int, None, None]:
     a caller say "the share is unreachable" instead of blaming one file
     (issue #868). Only the open is guarded — an exception thrown into the
     body is the caller's and passes through untouched.
+
+    This context manager owns the descriptor; callers must NOT call
+    ``close()`` on the yielded :class:`HeldDirectory`.
     """
     with ExitStack() as scope:
         try:
             fd = scope.enter_context(open_directory_path(path))
         except FilesystemAuthorityError as exc:
             raise SharedDownloadRootError.wrapping(exc) from exc
-        yield fd
+        yield HeldDirectory(fd=fd, display_path=path)
 
 
 def unlink_if_same(opened: OpenedRegularFile) -> bool:

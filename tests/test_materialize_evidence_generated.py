@@ -575,8 +575,8 @@ class TestGeneratedSharedRootLegAttribution(unittest.TestCase):
 
             raised: BaseException | None = None
             try:
-                with open_shared_download_root(root) as root_fd:
-                    opened = open_regular_under_held_root(root, root_fd, candidate)
+                with open_shared_download_root(root) as held_root:
+                    opened = open_regular_under_held_root(held_root, candidate)
                     opened.close()
             except FilesystemAuthorityError as exc:
                 raised = exc

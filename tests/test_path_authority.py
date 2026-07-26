@@ -230,11 +230,10 @@ class TestAuthorityFailureClassification(unittest.TestCase):
 
             healthy_root = os.path.join(parent, "downloads")
             os.mkdir(healthy_root)
-            with open_shared_download_root(healthy_root) as root_fd:
+            with open_shared_download_root(healthy_root) as held_root:
                 with self.assertRaises(FilesystemAuthorityError) as file_caught:
                     open_regular_under_held_root(
-                        healthy_root, root_fd,
-                        os.path.join(healthy_root, "absent.mp3"),
+                        held_root, os.path.join(healthy_root, "absent.mp3"),
                     )
             # Same code, deliberately NOT the same type: a healthy share
             # missing one file is the file's problem, not the share's.
@@ -265,10 +264,10 @@ class TestAuthorityFailureClassification(unittest.TestCase):
             for index, name in enumerate(names):
                 with open(os.path.join(root, "peer", name), "wb") as handle:
                     handle.write(bytes([index]) * 4)
-            with open_shared_download_root(root) as root_fd:
+            with open_shared_download_root(root) as held_root:
                 for index, name in enumerate(names):
                     opened = open_regular_under_held_root(
-                        root, root_fd, os.path.join(root, "peer", name),
+                        held_root, os.path.join(root, "peer", name),
                     )
                     try:
                         self.assertEqual(os.read(opened.fd, 8), bytes([index]) * 4)
