@@ -780,9 +780,9 @@ class TestClassifyBadge(unittest.TestCase):
             outcome="rejected", beets_scenario="audio_corrupt"))
         self.assertEqual(result.badge, "Rejected")
 
-    def test_rejected_no_candidates(self):
+    def test_rejected_mbid_not_found(self):
         result = classify_log_entry(_entry(
-            outcome="rejected", beets_scenario="no_candidates"))
+            outcome="rejected", beets_scenario="mbid_not_found"))
         self.assertEqual(result.badge, "Rejected")
 
     def test_rejected_album_name_mismatch(self):
@@ -1046,11 +1046,22 @@ class TestClassifyVerdict(unittest.TestCase):
         self.assertIn("duplicate remove guard failed", result.verdict.lower())
         self.assertIn("2 duplicates", result.verdict.lower())
 
-    def test_no_candidates_verdict(self):
+    def test_mbid_not_found_verdict(self):
+        """The producer's own fact: the requested ID was not in the set.
+
+        ``lib/beets.py`` writes this from ``if not result.mbid_found``,
+        whether or not that set was empty; the empty case gets its own
+        sentence (pinned in ``tests/test_classify_producer_audit.py``).
+        The copy this replaces was keyed on ``no_candidates`` — a literal
+        ``lib/beets.py`` has never emitted — and claimed the stronger,
+        false fact that no match existed at all (issue #882).
+        """
         result = classify_log_entry(_entry(
-            outcome="rejected", beets_scenario="no_candidates"))
-        self.assertIn("no", result.verdict.lower())
-        self.assertIn("match", result.verdict.lower())
+            outcome="rejected", beets_scenario="mbid_not_found"))
+        self.assertEqual(
+            result.verdict,
+            "Requested release ID not among the match candidates",
+        )
 
     def test_album_name_mismatch_verdict(self):
         result = classify_log_entry(_entry(

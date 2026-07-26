@@ -257,6 +257,50 @@ Browser → https://music.ablz.au
   Materialize failures render PR1's persisted reason (`download_log.beets_detail`),
   keeping storage errnos and containment refusals in separate vocabularies;
   historical rows without a reason degrade to the generic staging sentence.
+- **Rejection copy is minted only for decision names a producer emits
+  (#882)** — every decision-name literal `web/classify.py` matches is a claim
+  about what some producer writes, so each is traced to the production file
+  that SPELLS it (parsed, not grepped: a mention in a comment or docstring is
+  not a spelling), and an unhandled name is humanized to words rather than
+  acquiring an invented sentence. That is now the module's ONE fallback
+  doctrine — `_rejection_verdict` used to dump the raw machine token while its
+  sibling `_wrong_match_action_label` humanized, so 123 live rows read as
+  `extra_tracks` / `import_failed` / `strong_match`.
+  `tests/test_classify_producer_audit.py`
+  derives the match targets from the module itself (inline comparison grammar,
+  literal containers at ANY scope, and module-level tables) and fails closed on
+  an unregistered one; a literal a past revision emitted and live rows still
+  carry is registered as historical with structured evidence — source
+  expression, row count, last-seen date — so a reviewer has one falsifiable
+  query.
+  The audit's first run convicted `no_candidates`: fluent copy ("No
+  MusicBrainz match found") behind a scenario nothing has ever written, while
+  the real producing literal `mbid_not_found` fell through to the raw token.
+  `lib/beets.py` writes that from `if not result.mbid_found`, whether or not
+  the candidate set was empty, and the two cases send the operator to
+  different places — so the copy splits on the persisted `candidates` list:
+  32 live rows with a populated set read "Requested release ID not among the
+  match candidates" (a pressing mismatch), 18 with an empty one read "Beets
+  returned no match candidates for the requested release ID". The empty arm
+  names the LOOKUP, not the folder, and asserts no mechanism: `lib/beets.py`
+  always passes `--search-id`, so beets' `tag_album` takes its `if
+  search_ids:` branch and derives candidates from `albums_for_ids` alone —
+  the folder cannot decide whether a candidate exists, and every one of the
+  13 requests behind those 18 rows has sibling attempts on the same release
+  ID that did return candidates. It says "Beets" rather than "MusicBrainz"
+  because two of the 18 requested Discogs release IDs.
+  The empty arm requires positive proof beets actually ran — the `items` and
+  `recommendation` its `choose_match` handler writes — because a synthesized
+  rejection stub carries an empty `candidates` list by default: of every live
+  row with a zero-candidate validation blob, only 18 carry both signals and
+  911 carry neither. A row without that proof falls back to the general
+  sentence, which is the weaker claim and holds of an empty candidate set
+  either way.
+  The paired generated properties additionally hold every rendered decision
+  claim — verdict and collapsed summary alike — against what the importer
+  really does with that decision (`dispatch_action`, `decision_denylists`), so
+  a proof lock cannot claim the search continues and a no-denylist reject
+  cannot claim the source was banned.
 - **Wrong Matches evidence provenance** — candidate rows keep the downloaded
   source codec, configured target contract, and temporary V0 probe separate.
   A lossless candidate destined for Opus therefore reads `FLAC → OPUS 128

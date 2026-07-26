@@ -12,6 +12,7 @@ import unittest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from tests.test_final_gate_receipt import HELPER, _FAKE_NIX_SHELL
 
 

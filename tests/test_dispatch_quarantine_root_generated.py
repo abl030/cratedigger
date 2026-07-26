@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import unittest
 
-from hypothesis import given, strategies as st
+from hypothesis import assume, given, strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from tests.test_dispatch_core import TestDispatchCoreOrchestration
 
 
@@ -23,8 +24,12 @@ class TestDispatchQuarantineRootGenerated(unittest.TestCase):
     def test_real_dispatch_uses_staging_for_distinct_configured_roots(
         self, staging_name: str, slskd_name: str,
     ) -> None:
-        if staging_name == slskd_name:
-            return
+        # Identical roots are discarded, not asserted: the oracle's claim is
+        # "staging was chosen INSTEAD OF slskd", which is unanswerable when
+        # they are the same directory. A bare ``return`` spent the example as
+        # a PASS; ``assume`` marks it invalid so Hypothesis refills the budget
+        # with worlds that actually reach dispatch (#882).
+        assume(staging_name != slskd_name)
         staging = f"/configured/{staging_name}"
         slskd = f"/configured/{slskd_name}"
         world = TestDispatchCoreOrchestration()._dispatch(

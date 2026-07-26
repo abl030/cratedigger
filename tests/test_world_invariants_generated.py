@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 import msgspec
-from hypothesis import given, strategies as st
+from hypothesis import assume, given, strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads active profile)
 from lib.beets_db import (
@@ -256,9 +256,7 @@ class TestWorldInvariantGenerated(unittest.TestCase):
         evidence_fingerprint: str,
         actual_fingerprint: str,
     ) -> None:
-        assume_distinct = evidence_fingerprint != actual_fingerprint
-        if not assume_distinct:
-            return
+        assume(evidence_fingerprint != actual_fingerprint)
         violations = check_evidence_disk_coherence((EvidenceDiskSnapshot(
             request_id=request_id,
             release_id=release_id,

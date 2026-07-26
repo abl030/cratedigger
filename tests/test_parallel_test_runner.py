@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import os
 import subprocess
 import sys
@@ -9,16 +10,23 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from hypothesis import given, settings
+from hypothesis import strategies as st
+
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from scripts.run_python_tests import (
     HOTSPOT_SHARD_POLICIES,
     WORLD_MODEL_MODULE,
     TestModule,
+    _iter_test_cases,
     assert_exact_target_coverage,
     assert_exact_schedule,
+    assert_hypothesis_deadlines_disabled,
     complete_test_modules,
     discover_test_modules,
     list_module_test_ids,
     recommended_worker_count,
+    resolve_hypothesis_settings,
     schedule_modules,
     shard_test_ids,
     test_subprocess_environment,
@@ -364,6 +372,181 @@ class TestRunnerProcessContract(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("Ran 0 tests", result.stdout)
+
+
+def _planted_case(
+    deadline: int | datetime.timedelta | None,
+) -> type[unittest.TestCase]:
+    """One real Hypothesis TestCase class carrying exactly this deadline."""
+
+    @settings(deadline=deadline, max_examples=1)
+    @given(value=st.integers())
+    def test_property(self: unittest.TestCase, value: int) -> None:
+        self.assertIsInstance(value, int)
+
+    return type("PlantedWorld", (unittest.TestCase,), {
+        "test_property": test_property,
+    })
+
+
+def _plain_case() -> type[unittest.TestCase]:
+    def test_ordinary(self: unittest.TestCase) -> None:
+        self.assertTrue(True)
+
+    return type("PlainWorld", (unittest.TestCase,), {
+        "test_ordinary": test_ordinary,
+    })
+
+
+# Held in a dict, never bound as module attributes, so unittest never collects
+# them — the deadline-bearing ones would otherwise fail this very module under
+# the contract they exist to test. Built here rather than loaded from a temp
+# package because an arbitrary ``sys.path`` insert is the #95/#445 dual-load
+# hazard the sys.path audit forbids.
+PLANTED_CASES: dict[str, type[unittest.TestCase]] = {
+    "none": _planted_case(None),
+    "ms_1": _planted_case(1),
+    "ms_200": _planted_case(200),
+    "ms_60000": _planted_case(60_000),
+    "timedelta": _planted_case(datetime.timedelta(milliseconds=200)),
+    "plain": _plain_case(),
+}
+
+#: Planted kinds whose Hypothesis tests carry a deadline the contract rejects.
+DEADLINE_BEARING_KINDS = frozenset({"ms_1", "ms_200", "ms_60000", "timedelta"})
+
+#: Planted kinds that are Hypothesis tests at all.
+HYPOTHESIS_KINDS = frozenset(set(PLANTED_CASES) - {"plain"})
+
+
+def planted_suite(kinds: tuple[str, ...]) -> unittest.TestSuite:
+    """Compose one suite from the planted catalogue, in order."""
+    suite = unittest.TestSuite()
+    for kind in kinds:
+        suite.addTests(
+            unittest.defaultTestLoader.loadTestsFromTestCase(PLANTED_CASES[kind]),
+        )
+    return suite
+
+
+class TestSuiteDeadlineContract(unittest.TestCase):
+    """Issue #882 B1b: the suite tier enforces what fuzz discovery already did.
+
+    A source audit can only police one spelling in one position. This is the
+    runtime fact itself — resolved settings, not source text — so a module
+    that imports the profile tier below its decorators (which the static audit
+    catches) and any shape it does NOT catch both fail here.
+    """
+
+    # An "unwired module" cannot be reproduced IN THIS PROCESS: something has
+    # already imported tests._hypothesis_profiles, and load_profile mutates
+    # settings.default globally, so a freshly loaded unwired module inherits
+    # the tier anyway. That process-global inheritance IS the #882 defect. The
+    # unwired case is therefore pinned end-to-end below, in a fresh child that
+    # loads nothing else; the in-process pins cover the contract itself.
+
+    def test_a_deadline_pinned_to_none_passes_the_runtime_contract(self) -> None:
+        """Must-still-work guard: the ordinary shape is not rejected."""
+        assert_hypothesis_deadlines_disabled(planted_suite(("none",)))
+
+    def test_an_explicit_deadline_is_rejected_however_the_module_is_wired(
+        self,
+    ) -> None:
+        """Spelling and position cannot buy an explicit deadline back."""
+        with self.assertRaisesRegex(RuntimeError, "non-None deadline"):
+            assert_hypothesis_deadlines_disabled(planted_suite(("ms_200",)))
+
+    def test_one_deadline_condemns_an_otherwise_clean_suite(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "non-None deadline"):
+            assert_hypothesis_deadlines_disabled(
+                planted_suite(("none", "plain", "timedelta")),
+            )
+
+    def test_a_suite_without_hypothesis_tests_is_accepted(self) -> None:
+        suite = planted_suite(("plain", "plain"))
+
+        assert_hypothesis_deadlines_disabled(suite)
+        for test in _iter_test_cases(suite):
+            self.assertIsNone(resolve_hypothesis_settings(test))
+
+    def test_an_unclassifiable_hypothesis_test_fails_closed(self) -> None:
+        """A Hypothesis test whose settings cannot be read must raise, not be
+        quietly skipped past the deadline contract."""
+        broken = _planted_case(None)
+        setattr(
+            getattr(broken, "test_property"),
+            "_hypothesis_internal_use_settings",
+            object(),
+        )
+        suite = unittest.defaultTestLoader.loadTestsFromTestCase(broken)
+
+        with self.assertRaisesRegex(TypeError, "invalid settings"):
+            assert_hypothesis_deadlines_disabled(suite)
+
+    def test_planted_cases_are_never_collected_from_this_module(self) -> None:
+        """The deadline-bearing plants must stay out of unittest discovery —
+        otherwise this module fails the very contract it defines."""
+        suite = unittest.defaultTestLoader.loadTestsFromName(__name__)
+        collected = {type(test).__name__ for test in _iter_test_cases(suite)}
+
+        self.assertNotIn("PlantedWorld", collected)
+        self.assertNotIn("PlainWorld", collected)
+        assert_hypothesis_deadlines_disabled(suite)
+
+    def test_the_child_runner_refuses_to_run_an_unwired_module(self) -> None:
+        """End-to-end: the real ``--_run-target`` child, not just the helper.
+
+        A fresh interpreter that loads ONLY this module has never imported the
+        profile tier, so the bare ``@given`` really does resolve the stock
+        200ms deadline — the exact #882 item-1 shape.
+        """
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            package = root / "child_deadline_fixture"
+            package.mkdir()
+            (package / "__init__.py").write_text("", encoding="utf-8")
+            (package / "test_unwired.py").write_text(
+                "import unittest\n"
+                "from hypothesis import given\n"
+                "from hypothesis import strategies as st\n"
+                "\n"
+                "class Planted(unittest.TestCase):\n"
+                "    @given(value=st.integers())\n"
+                "    def test_property(self, value):\n"
+                "        self.assertIsInstance(value, int)\n",
+                encoding="utf-8",
+            )
+            env = {
+                **os.environ,
+                "PYTHONPATH": os.pathsep.join(
+                    part
+                    for part in (
+                        str(root),
+                        str(REPO_ROOT),
+                        os.environ.get("PYTHONPATH", ""),
+                    )
+                    if part
+                ),
+            }
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(RUNNER),
+                    "--_run-target",
+                    '["child_deadline_fixture.test_unwired"]',
+                    "0",
+                    str(root / "result.json"),
+                ],
+                cwd=REPO_ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("non-None deadline", completed.stderr)
+        self.assertFalse((root / "result.json").exists())
 
 
 class TestRunTestsWiring(unittest.TestCase):

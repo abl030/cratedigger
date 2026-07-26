@@ -75,6 +75,7 @@ Hunting — Generated-First".
 | `tests/test_convergence_runner_generated.py` | `lib/convergence.py::run_convergence_steps` | every registered convergence step is attempted exactly once in declared order even when any arbitrary subset raises; Phase 0 order and the end-of-cycle harvest-before-purge constraint are pinned as registry data rather than source inspection; import failures are isolated like call failures |
 | `tests/test_current_library_quality_generated.py` | `BeetsDB.check_mbids_detail` + `lib.banding.band_from_detail` | current beets projections preserve the positive-track minimum as floor data, expose the positive-track mean explicitly, and select that mean for codec-aware rank; the known-bad min-selected mutant is rejected |
 | `tests/test_unused_import_audit_generated.py` | pinned Ruff `F401`/`F811` source-local analysis plus exact Vulture-whitelist freshness | an import is live only through its own binding in the importing module; same-named peer uses, parameter/comprehension shadows, and rebindings cannot mask it; exact intentional redundant-alias baselines reject expansions, duplicate identities, and stale entries even though Ruff accepts explicit re-exports; unchanged Vulture entries remain valid while any generated source-location move is stale byte-for-byte; planted aggregate-name, baseline-delta, and name-only Vulture faults qualify the checkers |
+| `tests/test_property_input_audit_generated.py` | the bounded drawn-input audit in `tests/test_property_input_audit.py`, which scans every Hypothesis property under `tests/` | a property's unused-input verdict equals an independent oracle across module/method/nested containers, keyword/positional `@given` and stateful `@rule` forms, and call/attribute/f-string/closure/comprehension uses versus `del`/never-mentioned/assign-only inputs; the checker trips exactly when an input is ignored and reports a stale allowlist entry otherwise; bare, `*args`, `**kwargs`, mixed, surplus-positional, unknown-keyword, and variadic shapes fail closed even when allowlisted; a `del`-only checker that misses never-mentioned inputs is known-bad. The #868 shape (a nested property that discards `album`/`download`) is pinned as an `@example` |
 | `tests/test_import_one_argparse_generated.py` | the bounded `harness/import_one.py` argparse destination/direct-read contract | generated declared/read destination worlds pass exactly on equality and reject either-direction drift; the historical conditional `args.filetype` read is pinned, hyphen normalization and explicit `dest` values come from real argparse actions, and a union-based checker that would hide an undeclared read is known-bad |
 | `tests/test_js_ast_generated.py` | flake-pinned tree-sitter JavaScript structural audits | supported direct payload literals produce exactly the independent field oracle across raw/escaped identifiers, shorthand, quoted/computed, nested, array, comment, string, template, Unicode, and ordering worlds; production payload fixtures use exact local aliases registered from the real renderer module, while raw renderer references, default/namespace/alternate imports, non-top-level or shadowed `__test__` registrations, computed `__test__` fixture calls, spreads, elisions, fixture indirection, and methods fail closed without attempting JavaScript dataflow inference; independent boundary worlds vary lexical scopes, repeated names, `let`/`const`, before/after member mutation, duplicate keys, registration/import shapes, unknown selectors, full browser-global-rooted semantic Object chains, and target expressions; unrelated modules and inert strings remain valid; emitted window handlers preserve ECMAScript raw/cooked escape semantics (including Unicode line continuations and lone surrogates), while bindings normalize escaped keys, treat full member chains rooted at `window`/`globalThis`/`self` as browser globals, reject every computed call rooted at semantic `Object` in a window-binding owner, and accept only exact direct `Object.assign(window, {...})` shapes across multiple blocks; planted quoted-key, template-interpolation, state-boundary, fail-open binding, and missing-binding mutants qualify the checkers |
 | `tests/test_issue_reference_contract_generated.py` | `scripts/audit_issue_references.py` | implementation PR bodies and branch commit messages never use any GitHub auto-closing keyword with same-repo, cross-repo, or full-URL issue references across case, colon, whitespace, and issue-number worlds; canonical `Refs #N` and plain issue URLs remain valid, with the real premature-close shapes for issues #598 and #609 pinned as known-bad examples |
@@ -315,6 +316,42 @@ nix-shell --run "bash scripts/fuzz_burst.sh"                    # all generated 
 nix-shell --run "bash scripts/fuzz_burst.sh tests.test_quality_generated"  # subset
 ```
 
+Loading a tier is an **import side effect**, so every module that uses
+Hypothesis must import the profile module itself — at module level, and
+**above the module's first `class`/`def`**:
+
+```python
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
+```
+
+A `@given`/`@settings(...)` resolves every knob it does not name from
+`settings.default` **at decoration time**, i.e. while the class body runs.
+That makes position load-bearing, not cosmetic: the same statement at the
+BOTTOM of a module is a no-op for every decorator above it. A module without
+the import (or with it too late) inherits whichever default happened to be
+loaded when unittest imported it — the registered tier if an earlier module
+pulled it in, stock Hypothesis defaults otherwise. Stock defaults are
+randomized, example-database-backed and carry a 200ms deadline; a non-`None`
+deadline is a hard failure in `scripts/run_fuzz_tests.py`'s discovery, so a
+single unwired module stops the whole burst before it starts (issue #882).
+
+Two independent gates enforce this:
+
+- `tests/test_hypothesis_profile_audit.py` — the static half. That exact
+  spelling in that position is the whole grammar; an alias, a `from`-import,
+  a statement nested inside a function or an `if`, a canonical statement
+  below the first definition, or no import at all all fail the suite. It
+  scans **every** `.py` under `tests/` recursively, not the
+  `test_*_generated.py` glob, because an unwired module outside that glob is
+  invisible to the burst while still dragging stock defaults into the
+  deterministic suite. `tests/_hypothesis_profiles.py` is the only exclusion.
+- `scripts/run_python_tests.py::assert_hypothesis_deadlines_disabled` — the
+  runtime half, run by every suite target child (and by fuzz discovery, which
+  shares the same owner). It reads resolved settings rather than source, so
+  no spelling or position can evade it. Scoped to `deadline` alone:
+  `derandomize` and `database` are legitimately varied by
+  `tests/world_model/state_machine.py` under `CRATEDIGGER_WORLD_RANDOMIZED=1`.
+
 `scripts/fuzz_burst.sh` discovers the exact unittest IDs and effective
 Hypothesis settings in every generated module. Ordinary deterministic pins run
 once as a batch, and fixed per-test `@settings(max_examples=...)` budgets remain
@@ -435,8 +472,73 @@ deeper randomized entropy, 2 survivors fixed in PR #555
 (`assert_below_gate_never_stops_search` and the
 `_SPECTRAL_OVERRIDE_DECISIVE_WORLD` parity pin).
 
+## Every property must use every input it draws
+
+Issue #882 item 5. During the #868 series one generated property invoked no
+production symbol at all: it `del`'d its generated input and then asserted a
+relation between two test-local constants, under a "real materialize worlds,
+real filesystem" docstring banner. It survived **0 of 7** planted mutants,
+including one that deleted a containment check outright and failed 25 other
+tests. A property that ignores its world patrols nothing, and nothing stopped
+the next one.
+
+`tests/test_property_input_audit.py` catches the detectable tell: it walks
+every `.py` under `tests/` with the stdlib `ast` module and requires that each
+parameter bound by `@given`, `@rule`, or `@initialize` is loaded somewhere in
+that function's body. Never mentioned, only `del`'d, or only assigned over —
+all three are the defect. `@invariant` is out of scope because it binds no
+arguments at all (its pinned signature is
+`invariant(*, check_during_init: bool = False)`).
+
+**Read the guarantee in one direction only.** "Every drawn input is used" does
+NOT mean "every property drives production". The audit run against the pre-fix
+#868 module (`git show 20f309ac^:tests/test_materialize_evidence_generated.py`)
+does flag that property — but on its unused third input, `leaf`. The primary
+defect, indexing two test-local dicts instead of driving production, is
+invisible to this criterion and to any criterion the repository is willing to
+build (see the rejected criterion below). A property that passes this audit
+may still patrol nothing; only review and mutant-kill counts show that.
+
+- The audit **fails closed**: a decorator or signature shape it cannot map
+  (bare decorator, `*args`, `**kwargs`, mixed positional/keyword, surplus
+  positional strategies, a keyword that is not a parameter, a variadic
+  signature) fails rather than passes, and the allowlist cannot excuse it.
+  Aliasing a decorator import (`from hypothesis import given as g`) fails
+  too, since discovery is by decorator name. A future DRY idiom such as
+  `@given(**_COMMON_STRATEGIES)` is therefore a hard build break until the
+  audit is extended — deliberate: an unmappable decorator must not pass.
+- `PROPERTY_INPUT_ALLOWLIST` is **empty and armed**, the same ratchet shape as
+  `WEB_HARNESS_MOCK_BASELINE` in `tests/_mock_audit_scanner.py`. The one
+  property that used to flag — the planted-bad-decider self-test in
+  `tests/test_quality_generated.py` — now passes its world to a decider that
+  ignores it, which models "a decider that ignores its world" more faithfully
+  than discarding the world did. A stale entry that no longer flags also fails
+  the audit.
+- It is a **bounded syntactic fact**, not a semantic scanner
+  (`.claude/rules/code-quality.md` § "Semantic source scanners are
+  prohibited"). It never infers what the body does with the value. The module
+  docstring names the ceiling — all fail-open, all with zero live instances
+  today, none to be closed case by case: a drawn input loaded only inside an
+  assertion message or `subTest` label (the likeliest escape, and one that
+  reads as better failure text); binding constructs that mask an unused input
+  (`for x in ...`, `with ... as x`, `except E as x`, comprehension targets);
+  non-import decorator aliases (`_g = given`, wrapper functions,
+  `partial(given)`); `given(...)(func)` call form; and shadowing or rebinding
+  before a load.
+- The criterion issue #882 originally proposed — "every property must
+  reference at least one production symbol" — was **measured and rejected**:
+  44 of the 352 properties in `tests/test_*_generated.py` (12.5%) flag
+  falsely, because they drive production through a module path inside a
+  string passed to `node`, through a subprocessed script, or through
+  `self.<attr>` in a state machine. Making it work needs a string-path
+  registry plus subprocess argv analysis, which is the prohibited scanner.
+  The module docstring records the measurement so it is not re-proposed.
+
 ## Writing new generated tests
 
+- **Every drawn input must be used.** See the section above; the audit is
+  automatic, so the practical rule is: if a property does not need an input,
+  do not draw it.
 - **Invariants come first.** New features with a generated-testable surface
   (pure decisions, lifecycles/state machines, wire or event ingestion)
   write their policy invariants down in the issue/plan before
@@ -449,8 +551,15 @@ deeper randomized entropy, 2 survivors fixed in PR #555
 - Invariant checkers are module-level functions so a known-bad self-test
   can prove each one trips. Every checker owes one — a property that has
   never failed anything is unfalsifiable until proven otherwise.
-- Import `tests._hypothesis_profiles` for the side effect before using
-  `@given` — that is what wires the module into the suite/fuzz tiers.
+- Import `tests._hypothesis_profiles` for the side effect **above the first
+  `class`/`def`** — that is what wires the module into the suite/fuzz tiers,
+  and both `tests/test_hypothesis_profile_audit.py` and the suite runner's
+  own `assert_hypothesis_deadlines_disabled` fail without it.
+- Discard an unanswerable world with `assume(...)`, never a bare `return`.
+  A `return` spends the example as a PASS and silently shrinks the real
+  budget; `assume` marks it invalid so Hypothesis refills. Issue #882 found
+  a property burning 29% of a 20,000-example budget this way. If the world
+  has a defined answer, assert it instead of discarding it.
 - Reuse the shared fakes/builders (`tests/fakes/`, `tests/helpers.py`)
   per `.claude/rules/code-quality.md`; leaf-seam mock rules apply to
   generated tests like any other test.

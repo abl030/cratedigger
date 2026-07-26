@@ -12,13 +12,13 @@ import tempfile
 import time
 import unittest
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
 import msgspec
-from hypothesis import is_hypothesis_test, settings
+from hypothesis import settings
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
@@ -27,6 +27,8 @@ if str(REPO_ROOT) not in sys.path:
 from scripts.run_python_tests import (  # noqa: E402
     ChildTargetResult,
     _iter_test_cases,
+    assert_hypothesis_deadlines_disabled,
+    resolve_hypothesis_settings,
 )
 
 
@@ -278,15 +280,6 @@ def assert_exact_fuzz_coverage(
             raise ValueError(f"changed fuzz property budget: {test_id}")
 
 
-def _test_method(test: unittest.TestCase) -> Callable[..., object] | None:
-    method_name = test._testMethodName
-    for owner in type(test).__mro__:
-        candidate = vars(owner).get(method_name)
-        if callable(candidate):
-            return candidate
-    return None
-
-
 def _settings_max_examples(configured: settings) -> int:
     raw_max_examples: object = getattr(configured, "max_examples", None)
     if isinstance(raw_max_examples, bool) or not isinstance(
@@ -295,11 +288,6 @@ def _settings_max_examples(configured: settings) -> int:
     ):
         raise TypeError("Hypothesis max_examples is not an integer")
     return raw_max_examples
-
-
-def _settings_deadline(configured: settings) -> object:
-    """Return the effective deadline so fuzz work never depends on timing."""
-    return getattr(configured, "deadline", None)
 
 
 def _discover_module_child(module_name: str, result_path: Path) -> int:
@@ -311,51 +299,19 @@ def _discover_module_child(module_name: str, result_path: Path) -> int:
     if default_settings is None:
         raise RuntimeError("Hypothesis has no active default settings")
     default_max_examples = _settings_max_examples(default_settings)
+    # One owner for the deadline contract, shared with the deterministic
+    # suite runner so neither tier can drift from the other (#882 B1b).
+    assert_hypothesis_deadlines_disabled(suite)
     for test in cases:
-        method = _test_method(test)
-        if method is None or not is_hypothesis_test(method):
+        resolved = resolve_hypothesis_settings(test)
+        if resolved is None:
             continue
-        raw_configured: object | None = getattr(
-            method,
-            "_hypothesis_internal_use_settings",
-            None,
+        configured = resolved.configured
+        uses_default_settings = (
+            _settings_max_examples(configured) == default_max_examples
+            if resolved.from_state_machine_class
+            else configured is default_settings
         )
-        if raw_configured is not None and not isinstance(
-            raw_configured,
-            settings,
-        ):
-            raise TypeError(f"Hypothesis test has invalid settings: {test.id()}")
-        configured: settings | None = raw_configured
-        uses_default_settings = configured is default_settings
-        if configured is None and hasattr(
-            method,
-            "_hypothesis_state_machine_class",
-        ):
-            raw_stateful_settings: object | None = getattr(
-                type(test),
-                "settings",
-                None,
-            )
-            if raw_stateful_settings is not None and not isinstance(
-                raw_stateful_settings,
-                settings,
-            ):
-                raise TypeError(
-                    f"State-machine test has invalid settings: {test.id()}"
-                )
-            configured = raw_stateful_settings
-            uses_default_settings = (
-                configured is not None
-                and _settings_max_examples(configured) == default_max_examples
-            )
-        if configured is None:
-            raise TypeError(f"Hypothesis test has no settings: {test.id()}")
-        deadline = _settings_deadline(configured)
-        if deadline is not None:
-            raise RuntimeError(
-                "Hypothesis test has non-None deadline: "
-                f"{test.id()}: {deadline!r}"
-            )
         configured_max_examples = _settings_max_examples(configured)
         hypothesis_tests.append(
             FuzzPropertyManifest(

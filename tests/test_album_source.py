@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from album_source import AlbumRecord, DatabaseSource, MB_API_BASE
 from lib.grab_list import GrabListEntry, DownloadFile
 from lib.quality import DownloadInfo, ValidationResult
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 

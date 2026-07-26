@@ -89,6 +89,13 @@ class ValidationResultEnvelope(msgspec.Struct, frozen=True):
     source_dirs: list[str] = []
     items: list[dict[str, object]] = []
     candidates: list[dict[str, object]] = []
+    # beets' own confidence for the match it proposed. Written ONLY by
+    # ``lib/beets.py``'s ``choose_match`` handler, from the harness message,
+    # in the same block as ``items`` — so a non-empty value is positive
+    # evidence that beets actually ran on this album, which a synthesized
+    # rejection stub (``ValidationResult(distance=…, scenario=…, detail=…)``)
+    # can never supply. Issue #882 review F4.
+    recommendation: str | None = None
     wrong_match_triage: WrongMatchTriageAudit | None = None
 
 
