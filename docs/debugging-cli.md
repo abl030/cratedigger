@@ -98,10 +98,12 @@ remains after a purge failure.
 `pipeline-delete`, `set-quality`, `upgrade`, `wrong-match-converge`, and
 `resolve-rg` call the canonical web route. The Nix wrapper supplies the
 configured trusted-loopback origin; standalone/dev defaults to
-`http://127.0.0.1:8090`, overridden globally with `--api-base ORIGIN`. Route
-JSON is relayed on stdout. Any 2xx exits 0; 404 exits 2; 400/422 exits 3; 409
-exits 4; 5xx, transport failures, and malformed/non-object JSON exit 5 with a
-structured error on stderr. `pipeline-delete ID --confirm DELETE` and
+`http://127.0.0.1:8085`, overridden globally with `--api-base ORIGIN`. Valid
+JSON HTTP responses, including 5xx responses, are relayed on stdout. Any 2xx
+exits 0; 404 exits 2; 400/422 exits 3; 409 exits 4; other statuses exit 5.
+Locally generated transport/protocol failures (including malformed origins or
+non-object JSON responses) exit 5 with a structured error on stderr.
+`pipeline-delete ID --confirm DELETE` and
 `wrong-match-converge ID THRESHOLD_MILLI --apply` make no HTTP call when the
 local intent gate is missing. Future CD-SEC-02 perimeter work must provide CLI
 credentials/authorization or explicitly retain the trusted-loopback contract;

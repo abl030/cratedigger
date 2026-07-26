@@ -6,9 +6,11 @@ import argparse
 from email.message import Message
 import io
 import json
+import threading
 import unittest
 import urllib.error
 from contextlib import redirect_stdout, redirect_stderr
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest.mock import patch
 
 from scripts.pipeline_cli import api_mutations
@@ -29,6 +31,36 @@ class _Response:
         return self
 
     def __exit__(self, *_values: object) -> None:
+        return None
+
+
+class _RedirectingApiHandler(BaseHTTPRequestHandler):
+    redirect_status = 301
+    initial_methods: list[str] = []
+    target_methods: list[str] = []
+
+    def _json(self, status: int, payload: bytes, *, location: str | None = None) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        if location is not None:
+            self.send_header("Location", location)
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def do_POST(self) -> None:
+        if self.path == "/initial":
+            self.initial_methods.append("POST")
+            self._json(self.redirect_status, b'{"error":"redirect"}',
+                       location="/target")
+            return
+        self.target_methods.append("POST")
+        self._json(200, b'{"status":"redirected"}')
+
+    def do_GET(self) -> None:
+        self.target_methods.append("GET")
+        self._json(200, b'{"status":"redirected"}')
+
+    def log_message(self, format: str, *_args: object) -> None:
         return None
 
 
@@ -70,7 +102,7 @@ class TestApiMutationCli(unittest.TestCase):
         ]
         for command, values, path, body in cases:
             with self.subTest(command=command), patch(
-                "scripts.pipeline_cli.api_mutations.urllib.request.urlopen",
+                "scripts.pipeline_cli.api_mutations.urllib.request.OpenerDirector.open",
                 return_value=_Response(200),
             ) as urlopen:
                 code, output, error = self._run(command, **values)
@@ -86,7 +118,7 @@ class TestApiMutationCli(unittest.TestCase):
         for status, expected in [(200, 0), (201, 0), (404, 2), (400, 3),
                                  (422, 3), (409, 4), (500, 5)]:
             with self.subTest(status=status), patch(
-                "scripts.pipeline_cli.api_mutations.urllib.request.urlopen",
+                "scripts.pipeline_cli.api_mutations.urllib.request.OpenerDirector.open",
                 return_value=_Response(status, b'{"error":"route"}'),
             ):
                 code, output, _error = self._run(
@@ -97,24 +129,33 @@ class TestApiMutationCli(unittest.TestCase):
     def test_http_error_transport_and_malformed_responses_are_fail_closed(self) -> None:
         error = urllib.error.HTTPError("http://api", 404, "missing", Message(),
                                        io.BytesIO(b'{"error":"missing"}'))
-        with patch("scripts.pipeline_cli.api_mutations.urllib.request.urlopen",
+        with patch("scripts.pipeline_cli.api_mutations.urllib.request.OpenerDirector.open",
                    side_effect=error):
             code, output, _stderr = self._run("upgrade", api_base="http://api", release_id="r")
         self.assertEqual(code, 2)
         self.assertEqual(json.loads(output), {"error": "missing"})
-        with patch("scripts.pipeline_cli.api_mutations.urllib.request.urlopen",
+        with patch("scripts.pipeline_cli.api_mutations.urllib.request.OpenerDirector.open",
                    return_value=_Response(200, b"not-json")):
             code, _output, stderr = self._run("upgrade", api_base="http://api", release_id="r")
         self.assertEqual(code, 5)
         self.assertEqual(json.loads(stderr)["error"], "api_protocol_error")
-        with patch("scripts.pipeline_cli.api_mutations.urllib.request.urlopen",
+        with patch("scripts.pipeline_cli.api_mutations.urllib.request.OpenerDirector.open",
                    side_effect=urllib.error.URLError("down")):
             code, _output, stderr = self._run("upgrade", api_base="http://api", release_id="r")
         self.assertEqual(code, 5)
         self.assertEqual(json.loads(stderr)["error"], "api_unavailable")
 
+    def test_malformed_api_origins_are_structured_local_protocol_failures(self) -> None:
+        for origin in ("http://[::1", "not an origin"):
+            with self.subTest(origin=origin):
+                code, output, stderr = self._run(
+                    "upgrade", api_base=origin, release_id="r")
+                self.assertEqual(code, 5)
+                self.assertEqual(output, "")
+                self.assertEqual(json.loads(stderr)["error"], "api_protocol_error")
+
     def test_confirmation_gates_make_no_http_call(self) -> None:
-        with patch("scripts.pipeline_cli.api_mutations.urllib.request.urlopen") as urlopen:
+        with patch("scripts.pipeline_cli.api_mutations.urllib.request.OpenerDirector.open") as urlopen:
             code, _out, _err = self._run("pipeline-delete", api_base="http://api",
                                          request_id=1, confirm=None)
             self.assertEqual(code, 3)
@@ -138,7 +179,7 @@ class TestApiMutationCli(unittest.TestCase):
                 "web.api_bases.configure_api_bases_from_runtime_config",
                 side_effect=AssertionError,
             ), patch(
-                "scripts.pipeline_cli.api_mutations.urllib.request.urlopen",
+                "scripts.pipeline_cli.api_mutations.urllib.request.OpenerDirector.open",
                 return_value=_Response(200),
             ) as urlopen, patch("sys.argv", [
                 "pipeline-cli", "--api-base", "http://api", *command,
@@ -188,3 +229,37 @@ class TestApiMutationRealRouteRoundTrips(_FakeDbWebServerCase):
         self.db.update_request_fields(105, mb_release_group_id="rg-already-set")
         code, body = self._call(api_mutations.cmd_resolve_rg, request_id=105)
         self.assertEqual((code, body["status"]), (0, "resolved"))
+
+
+class TestApiMutationRedirectSafety(unittest.TestCase):
+    """A redirect must remain the route's response, never a second request."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.server = HTTPServer(("127.0.0.1", 0), _RedirectingApiHandler)
+        cls.base = f"http://127.0.0.1:{cls.server.server_port}"
+        cls.thread = threading.Thread(target=cls.server.serve_forever)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join()
+
+    def test_redirects_are_not_followed_or_replayed(self) -> None:
+        for status in (301, 302, 303, 307, 308):
+            with self.subTest(status=status):
+                _RedirectingApiHandler.redirect_status = status
+                _RedirectingApiHandler.initial_methods.clear()
+                _RedirectingApiHandler.target_methods.clear()
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    code = api_mutations._relay(self.base, api_mutations._ApiMutation(
+                        path="/initial", body={"request_id": 1}))
+                self.assertEqual(code, 5)
+                self.assertEqual(json.loads(stdout.getvalue()), {"error": "redirect"})
+                self.assertEqual(stderr.getvalue(), "")
+                self.assertEqual(_RedirectingApiHandler.initial_methods, ["POST"])
+                self.assertEqual(_RedirectingApiHandler.target_methods, [])

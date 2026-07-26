@@ -31,6 +31,21 @@ class _ApiResult(msgspec.Struct, frozen=True):
     body: bytes
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Return the original redirect response; never replay a mutation."""
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: object,
+        code: int,
+        msg: str,
+        headers: object,
+        newurl: str,
+    ) -> None:
+        return None
+
+
 def _failure(error: str, detail: str) -> int:
     print(json.dumps({"error": error, "detail": detail}), file=sys.stderr)
     return 5
@@ -49,18 +64,22 @@ def _exit_code(status: int) -> int:
 
 
 def _post(api_base: str, mutation: _ApiMutation) -> _ApiResult | None:
-    request = urllib.request.Request(
-        f"{api_base.rstrip('/')}{mutation.path}",
-        data=msgspec.json.encode(mutation.body),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(request, timeout=_TIMEOUT_SECONDS) as response:
+        request = urllib.request.Request(
+            f"{api_base.rstrip('/')}{mutation.path}",
+            data=msgspec.json.encode(mutation.body),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        opener = urllib.request.build_opener(_NoRedirectHandler())
+        with opener.open(request, timeout=_TIMEOUT_SECONDS) as response:
             return _ApiResult(status=response.status, body=response.read())
     except urllib.error.HTTPError as exc:
         with exc:
             return _ApiResult(status=exc.code, body=exc.read())
+    except ValueError as exc:
+        _failure("api_protocol_error", str(exc))
+        return None
     except (urllib.error.URLError, TimeoutError, socket.timeout, OSError) as exc:
         _failure("api_unavailable", str(exc))
         return None

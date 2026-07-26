@@ -34,7 +34,7 @@ class _Response:
 class TestApiMutationGenerated(unittest.TestCase):
     @given(status=st.integers(min_value=100, max_value=599))
     def test_real_relay_obeys_every_http_status_class(self, status: int) -> None:
-        with patch("scripts.pipeline_cli.api_mutations.urllib.request.urlopen",
+        with patch("scripts.pipeline_cli.api_mutations.urllib.request.OpenerDirector.open",
                    return_value=_Response(status)), patch("sys.stdout", new_callable=io.StringIO):
             actual = api_mutations._relay("http://api", api_mutations._ApiMutation(
                 path="/api/pipeline/upgrade", body={"mb_release_id": "r"}))
