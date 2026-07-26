@@ -8,29 +8,41 @@ import stat
 import subprocess
 import tempfile
 import unittest
+from collections.abc import Mapping
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TMPFS_SETUP = REPO_ROOT / "scripts" / "test_tmpfs.sh"
 NIX_SHELL = REPO_ROOT / "nix" / "shell.nix"
+TMPFS_SETUP_AND_PRINT_TMPDIR = (
+    'source "$1" && setup_cratedigger_test_tmpfs && printf "%s" "$TMPDIR"'
+)
+
+
+def run_tmpfs_setup_and_print_tmpdir(
+    *, env: Mapping[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Drive the real shell helper and report the TMPDIR it selected."""
+    return subprocess.run(
+        [
+            "bash",
+            "-c",
+            TMPFS_SETUP_AND_PRINT_TMPDIR,
+            "bash",
+            str(TMPFS_SETUP),
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 class TestTmpfsSetup(unittest.TestCase):
     def test_allocates_isolated_tmpfs_directory_and_cleans_it_on_exit(self) -> None:
-        completed = subprocess.run(
-            [
-                "bash",
-                "-c",
-                'source "$1"; setup_cratedigger_test_tmpfs; printf "%s" "$TMPDIR"',
-                "bash",
-                str(TMPFS_SETUP),
-            ],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        completed = run_tmpfs_setup_and_print_tmpdir()
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
         selected = Path(completed.stdout)
@@ -40,6 +52,27 @@ class TestTmpfsSetup(unittest.TestCase):
         self.assertEqual(selected.parent, runtime_dir)
         self.assertTrue(selected.name.startswith("cratedigger-tests."))
         self.assertFalse(selected.exists())
+
+    def test_low_headroom_does_not_report_inherited_tmpdir_as_allocation(self) -> None:
+        runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+        inherited_tmpdir = "/tmp/cratedigger-inherited-tmpdir"
+        minimum_bytes = 1 << 50
+
+        completed = run_tmpfs_setup_and_print_tmpdir(
+            env={
+                **os.environ,
+                "TMPDIR": inherited_tmpdir,
+                "CRATEDIGGER_TEST_RAM_MIN_BYTES": str(minimum_bytes),
+            },
+        )
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(completed.stdout, "")
+        self.assertRegex(
+            completed.stderr,
+            rf"^Test RAM root lacks headroom: {runtime_dir} has \d+ bytes, "
+            rf"needs {minimum_bytes}\n$",
+        )
 
     def test_active_tmpdir_has_private_ancestry(self) -> None:
         current = Path(tempfile.gettempdir()).resolve()
