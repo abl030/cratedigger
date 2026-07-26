@@ -15,6 +15,8 @@ from tests.fakes.deploy_pin import FakeDeployPinCommands
 
 
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "pin_nixosconfig.sh"
+RECEIPT_REF = "refs/cratedigger-deploy/cratedigger-src"
+PENDING_REF = "refs/cratedigger-deploy/cratedigger-src-pending"
 
 
 def assert_deploy_lifecycle_invariants(
@@ -157,7 +159,103 @@ def assert_same_target_divergent_invariants(
         assert not pushes
 
 
+def assert_pending_recovery_invariants(
+    state: dict[str, Any], *, receipt: str, pending: str, event_start: int,
+    commit_count: int, outcome: str,
+) -> None:
+    """An interrupted pending candidate is fail-closed until its remote is safe."""
+    events = state["events"][event_start:]
+    private_mutations = [
+        event for event in events
+        if event[0] in {"update-ref", "delete-ref"}
+        and event[1] in {RECEIPT_REF, PENDING_REF}
+    ]
+    commits = [event for event in events if event[0] == "commit"]
+    pushes = [event for event in events if event[0] == "push"]
+
+    if outcome in {"candidate", "parent"}:
+        assert state["pending_rev"] is None
+        assert state["receipt_rev"] is not None
+        assert state["remote_rev"] == state["receipt_rev"]
+        assert private_mutations[0] == ["update-ref", RECEIPT_REF, pending, receipt]
+        assert private_mutations[1] == ["delete-ref", PENDING_REF, pending]
+        if outcome == "candidate":
+            assert state["receipt_rev"] == pending
+            assert state["commit_count"] == commit_count
+            assert not commits
+            assert not pushes
+            assert len(private_mutations) == 2
+        else:
+            replacement = state["receipt_rev"]
+            assert replacement != pending
+            assert len(commits) == len(pushes) == 1
+            assert private_mutations[2:] == [
+                [
+                    "update-ref",
+                    PENDING_REF,
+                    state["commits"][replacement]["parent"],
+                    "",
+                ],
+                ["update-ref", RECEIPT_REF, replacement, pending],
+                ["delete-ref", PENDING_REF, replacement],
+            ]
+            assert state["commit_count"] == commit_count + 1
+    else:
+        assert state["receipt_rev"] == receipt
+        assert state["pending_rev"] == pending
+        assert state["commit_count"] == commit_count
+        assert not private_mutations
+        assert not commits
+        assert not pushes
+
+
 class TestDeployLifecycleCheckerKnownBad(unittest.TestCase):
+    def test_pending_recovery_checker_rejects_early_private_ref_mutations(self) -> None:
+        cases = (
+            (
+                "receipt promotion",
+                [["update-ref", RECEIPT_REF, "pending", "receipt"]],
+                {"receipt_rev": "pending", "pending_rev": "pending"},
+                "bad_signature",
+            ),
+            (
+                "pending deletion",
+                [["delete-ref", PENDING_REF, "pending"]],
+                {"receipt_rev": "receipt", "pending_rev": None},
+                "wrong_target",
+            ),
+            (
+                "wrong receipt CAS",
+                [
+                    ["update-ref", RECEIPT_REF, "pending", "other"],
+                    ["delete-ref", PENDING_REF, "pending"],
+                ],
+                {
+                    "receipt_rev": "pending",
+                    "pending_rev": None,
+                    "remote_rev": "pending",
+                },
+                "candidate",
+            ),
+        )
+        for name, events, refs, outcome in cases:
+            with self.subTest(name=name):
+                bad = {
+                    "events": events,
+                    "commit_count": 1,
+                    "commits": {},
+                    **refs,
+                }
+                with self.assertRaises(AssertionError):
+                    assert_pending_recovery_invariants(
+                        bad,
+                        receipt="receipt",
+                        pending="pending",
+                        event_start=0,
+                        commit_count=1,
+                        outcome=outcome,
+                    )
+
     def test_divergent_checker_rejects_pending_deletion_in_fail_closed_world(self) -> None:
         bad = {
             "events": [
@@ -490,6 +588,82 @@ class TestGeneratedDeployPinLifecycle(unittest.TestCase):
                 target=fake.TARGET_REV,
                 remote_relation=remote_relation,
                 verifier_available=verifier_available,
+            )
+
+    @settings(max_examples=7, deadline=None)
+    @given(
+        outcome=st.sampled_from(
+            (
+                "candidate",
+                "parent",
+                "bad_signature",
+                "unknown_signature",
+                "unreadable_lock",
+                "wrong_target",
+                "movement",
+            )
+        )
+    )
+    @example(outcome="candidate")
+    @example(outcome="parent")
+    @example(outcome="bad_signature")
+    @example(outcome="unknown_signature")
+    @example(outcome="unreadable_lock")
+    @example(outcome="wrong_target")
+    @example(outcome="movement")
+    def test_interrupted_pending_recovery_validates_remote_before_private_mutation(
+        self, outcome: str,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            fake = FakeDeployPinCommands(Path(tempdir))
+            receipt = fake.seed_divergent_receipt()
+            fake.update_state(
+                fault="signal_after_pending_commit", remote_move_on_nix=True,
+            )
+            fake.run(SCRIPT)
+            pending = fake.state["pending_rev"]
+            self.assertIsNotNone(pending)
+            assert pending is not None
+
+            changes: dict[str, Any] = {
+                "fault": None,
+                "remote_move_on_nix": False,
+                "remote_signature_status": "G",
+                "remote_lock_readable": True,
+                "remote_target": fake.OLD_TARGET,
+                "remote_change_on_ls_remote_call": None,
+            }
+            if outcome == "candidate":
+                changes.update(remote_rev=pending, remote_target=fake.TARGET_REV)
+            elif outcome == "bad_signature":
+                changes["remote_signature_status"] = "B"
+            elif outcome == "unknown_signature":
+                changes["remote_signature_status"] = "U"
+            elif outcome == "unreadable_lock":
+                changes["remote_lock_readable"] = False
+            elif outcome == "wrong_target":
+                changes["remote_target"] = "7" * 40
+            elif outcome == "movement":
+                changes.update(
+                    ls_remote_count=0,
+                    remote_change_on_ls_remote_call=2,
+                    moved_remote_rev="8" * 40,
+                    moved_remote_parent=fake.BASE_REV,
+                    moved_remote_target=fake.OLD_TARGET,
+                )
+            event_start = len(fake.state["events"])
+            commit_count = fake.state["commit_count"]
+            fake.update_state(**changes)
+
+            fake.run(SCRIPT)
+
+            assert_pending_recovery_invariants(
+                fake.state,
+                receipt=receipt,
+                pending=pending,
+                event_start=event_start,
+                commit_count=commit_count,
+                outcome=outcome,
             )
 
 
