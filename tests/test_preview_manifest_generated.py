@@ -42,6 +42,7 @@ import os
 import sys
 import tempfile
 import unittest
+from dataclasses import dataclass
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -215,6 +216,15 @@ def _stub_import_one_run() -> ImportOneRun:
     )
 
 
+@dataclass(frozen=True)
+class PreviewActionFileHandoff:
+    """The real action-file path observed at the harness leaf seam."""
+
+    path: str
+    exists_at_handoff: bool
+    resolved_parent: str
+
+
 def _run_owned_preview_action(
     db: FakePipelineDB,
     ctx: CratediggerContext,
@@ -222,25 +232,39 @@ def _run_owned_preview_action(
     request_id: int,
     canonical_dir: str,
     import_job_id: int = 1,
-) -> ImportPreviewResult:
+) -> tuple[ImportPreviewResult, PreviewActionFileHandoff]:
     """Drive the REAL preview fact-gathering (the #859 fire site) against a
     real owned canonical album. ``_write_preview_spectral_evidence_file``
     runs unmocked — only the harness subprocess and the beets exact-release
     lookup (both legitimate external-edge seams) are stubbed."""
     run = _stub_import_one_run()
+    handoffs: list[PreviewActionFileHandoff] = []
+
+    def _capture_action_file_handoff(**kwargs: object) -> ImportOneRun:
+        action_file = kwargs["quality_evidence_action_file"]
+        assert isinstance(action_file, str)
+        handoffs.append(PreviewActionFileHandoff(
+            path=action_file,
+            exists_at_handoff=os.path.isfile(action_file),
+            resolved_parent=os.path.realpath(os.path.dirname(action_file)),
+        ))
+        return run
+
     with patch("lib.beets_db.BeetsDB", lambda **_kwargs: FakeBeetsDB()):
-        return measure_and_persist_candidate_evidence(
+        result = measure_and_persist_candidate_evidence(
             db,
             request_id=request_id,
             path=canonical_dir,
             runtime_config=ctx.cfg,
             import_job_id=import_job_id,
-            run_import_fn=lambda **_kwargs: run,
+            run_import_fn=_capture_action_file_handoff,
             existing_spectral_resolver=lambda _mbid: ExistingSpectralAuditLookup(),
             spectral_detail_analyzer=lambda _path: SpectralAnalysisDetail(
                 attempted=True, grade="genuine", bitrate_kbps=1000,
             ),
         )
+    assert len(handoffs) == 1, "lossless preview must hand off one action file"
+    return result, handoffs[0]
 
 
 def _expected_basenames(
@@ -284,6 +308,34 @@ def assert_canonical_manifest_pure(
             f"after preview (missing="
             f"{sorted(expected_basenames - actual_basenames)} extra="
             f"{sorted(actual_basenames - expected_basenames)})"
+        )
+
+
+def assert_preview_action_file_handoff_is_safe(
+    handoff: PreviewActionFileHandoff,
+    canonical_dir: str,
+    *,
+    label: str,
+) -> None:
+    """The action file must exist at handoff, outside every album tree.
+
+    The canonical album is itself below the system temporary root in these
+    tests, so checking only that the action file is below ``gettempdir()``
+    would permit the relocation-only #859 regression.
+    """
+    expected_parent = os.path.realpath(tempfile.gettempdir())
+    resolved_album = os.path.realpath(canonical_dir)
+    if not handoff.exists_at_handoff:
+        raise AssertionError(f"{label}: action file did not exist at handoff")
+    if handoff.resolved_parent != expected_parent:
+        raise AssertionError(
+            f"{label}: action file parent {handoff.resolved_parent!r} is not "
+            f"the system tempfile directory {expected_parent!r}"
+        )
+    if os.path.commonpath((os.path.realpath(handoff.path), resolved_album)) == resolved_album:
+        raise AssertionError(
+            f"{label}: action file {handoff.path!r} was inside canonical "
+            f"album {canonical_dir!r}"
         )
 
 
@@ -334,7 +386,7 @@ class TestPreviewSidecarManifestPurityPin(unittest.TestCase):
             canonical_dir = staged_album.current_path
             expected_basenames = _expected_basenames(album, staged_album)
 
-            preview_result = _run_owned_preview_action(
+            preview_result, action_handoff = _run_owned_preview_action(
                 db, ctx, request_id=request_id, canonical_dir=canonical_dir,
             )
             self.assertEqual(
@@ -342,6 +394,14 @@ class TestPreviewSidecarManifestPurityPin(unittest.TestCase):
                 f"preview must reach a real verdict, got "
                 f"decision={preview_result.decision!r} "
                 f"detail={preview_result.detail!r}",
+            )
+
+            assert_preview_action_file_handoff_is_safe(
+                action_handoff, canonical_dir, label="preview action handoff",
+            )
+            self.assertFalse(
+                os.path.exists(action_handoff.path),
+                "preview cleanup must remove the action file after handoff",
             )
 
             # (a) manifest purity: the canonical dir holds ONLY the manifest.
@@ -413,8 +473,16 @@ class TestPreviewManifestPurityProperty(unittest.TestCase):
             canonical_dir = staged_album.current_path
             expected_basenames = _expected_basenames(album, staged_album)
 
-            _run_owned_preview_action(
+            _, action_handoff = _run_owned_preview_action(
                 db, ctx, request_id=request_id, canonical_dir=canonical_dir,
+            )
+
+            assert_preview_action_file_handoff_is_safe(
+                action_handoff, canonical_dir, label="generated world",
+            )
+            self.assertFalse(
+                os.path.exists(action_handoff.path),
+                "preview cleanup must remove the action file after handoff",
             )
 
             actual_basenames = frozenset(os.listdir(canonical_dir))
@@ -452,6 +520,19 @@ class TestPreviewManifestCheckersTripOnViolations(unittest.TestCase):
         with self.assertRaises(AssertionError):
             assert_rematerializes_cleanly(
                 MaterializeGuarded(detail="incomplete_or_unsafe_canonical"),
+                label="known-bad",
+            )
+
+    def test_action_file_checker_trips_on_in_album_handoff(self):
+        canonical_dir = os.path.join(tempfile.gettempdir(), "canonical-album")
+        with self.assertRaises(AssertionError):
+            assert_preview_action_file_handoff_is_safe(
+                PreviewActionFileHandoff(
+                    path=f"{canonical_dir}/action.json",
+                    exists_at_handoff=True,
+                    resolved_parent=os.path.realpath(tempfile.gettempdir()),
+                ),
+                canonical_dir,
                 label="known-bad",
             )
 
