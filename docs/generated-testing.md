@@ -371,6 +371,57 @@ host-scaled entropy fan-out. On doc1's 30-core VM on 2026-07-23, the complete
 seconds. The worst subprocess-heavy generated module completed alone in 142.7
 seconds; its unsharded properties had still not completed after ten minutes.
 
+### Per-property depth report
+
+Issue #888 item 1. A budget is not depth: `@given(authorized=st.booleans(),
+missing=st.booleans())` has four distinct worlds, so Hypothesis exhausts it in
+four examples and stops — whether the budget is 150 or 20,000. A mutant that
+widens a quarantine authority boundary survived 215 tests across seven modules
+for exactly that reason, and nothing in the burst output said so.
+
+After the `SLOW` lines, every burst now prints what each property actually
+generated, measured from Hypothesis' own `statistics` collector in the child
+that ran it:
+
+```
+DEPTH 351 properties measured, 68 exhausted their strategy space, 6 discarded at least 10% of their examples
+SHALLOW 2 worlds of 150 examples (1 shards) tests.test_pin_retention_generated.TestGeneratedPinRetention.test_every_status_is_pending_or_terminal
+SHALLOW ... 48 more exhausted
+DISCARD 51% of 307 examples (157 discarded, 150 worlds) tests.test_world_invariants_generated.TestWorldInvariantGenerated.test_any_evidence_fingerprint_drift_is_rejected
+```
+
+- **SHALLOW** — the property ran out of distinct worlds before it ran out of
+  budget (`stopped-because: nothing left to do`), ranked by world count
+  ascending, top 20. Entropy shards are folded into one row first: a
+  default-budget property runs as up to eight children of `budget / shards`
+  examples, so a raw per-shard verdict would flag every sharded property.
+  The reported world count is the largest single shard, because shards
+  re-explore the same space.
+- **DISCARD** — the property threw away at least 10% of its examples through
+  `assume()` or a strategy filter, ranked by rate descending. This is a cost
+  and shape signal, not a defect: `assume` marks a world invalid and
+  Hypothesis refills the budget, which is exactly why it is the correct way
+  to drop an unanswerable world.
+
+**It reports; it never gates.** A small strategy space is often exactly
+right — the 36-world force-import authority property is correct — so a
+threshold would either be trivially satisfiable or block legitimate work. Two
+carve-outs keep the verdict honest: a run that reached an `interesting` case
+stopped because it found its planted bug (every known-bad self-test looks
+exhausted otherwise), and a property whose worlds reach its budget wasted
+nothing.
+
+**It cannot see a bare `return`.** A `return` spends the example as a PASS, so
+a vacuously-discarding property reads as a full budget of valid worlds. That
+is unchanged by this report and is why the `assume`-not-`return` rule below
+still has to be followed by hand.
+
+On doc1 on 2026-07-26, the deterministic-tier burst over all 89 generated
+modules measured 351 properties, of which 68 exhaust their space — the
+smallest at two worlds against 150 examples. Those are the properties for
+which a deeper burst buys nothing at all; widening their strategies is
+separate work this report exists to aim.
+
 All active logs, property tempdirs, and Hypothesis database writes stay in the
 private per-shell tmpfs. A database named by
 `HYPOTHESIS_STORAGE_DIRECTORY` seeds the run read-only. A green run discards
@@ -559,7 +610,12 @@ may still patrol nothing; only review and mutant-kill counts show that.
   A `return` spends the example as a PASS and silently shrinks the real
   budget; `assume` marks it invalid so Hypothesis refills. Issue #882 found
   a property burning 29% of a 20,000-example budget this way. If the world
-  has a defined answer, assert it instead of discarding it.
+  has a defined answer, assert it instead of discarding it. The burst's
+  `DISCARD` lines price the `assume` cost; a `return` shows up nowhere, so
+  this one is still enforced by hand.
+- **Check the burst's `SHALLOW` lines for the property you just wrote.** A
+  strategy space smaller than the budget is a fact worth knowing before the
+  next mutant hunt reports a survivor.
 - Reuse the shared fakes/builders (`tests/fakes/`, `tests/helpers.py`)
   per `.claude/rules/code-quality.md`; leaf-seam mock rules apply to
   generated tests like any other test.

@@ -8,15 +8,24 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 
-from hypothesis import given, settings
+import msgspec
+from hypothesis import HealthCheck, assume, given, settings
 from hypothesis import strategies as st
+from hypothesis.internal.conjecture.data import Status
+from hypothesis.statistics import collector
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from scripts.run_python_tests import (
     HOTSPOT_SHARD_POLICIES,
+    HYPOTHESIS_CASE_STATUSES,
+    STRATEGY_SPACE_EXHAUSTED,
     WORLD_MODEL_MODULE,
+    ChildTargetResult,
+    HypothesisPropertyStats,
+    HypothesisStatsRecorder,
     TestModule,
     _iter_test_cases,
     assert_exact_target_coverage,
@@ -24,6 +33,7 @@ from scripts.run_python_tests import (
     assert_hypothesis_deadlines_disabled,
     complete_test_modules,
     discover_test_modules,
+    hypothesis_example_budgets,
     list_module_test_ids,
     recommended_worker_count,
     resolve_hypothesis_settings,
@@ -547,6 +557,209 @@ class TestSuiteDeadlineContract(unittest.TestCase):
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("non-None deadline", completed.stderr)
         self.assertFalse((root / "result.json").exists())
+
+
+@settings(deadline=None, max_examples=50, database=None)
+@given(first=st.booleans(), second=st.booleans())
+def _tiny_space_property(first: bool, second: bool) -> None:
+    """Four distinct worlds against a fifty-example budget (#888 item 1)."""
+    assert isinstance(first, bool)
+    assert isinstance(second, bool)
+
+
+@settings(
+    deadline=None,
+    max_examples=50,
+    database=None,
+    suppress_health_check=[HealthCheck.filter_too_much],
+)
+@given(value=st.integers())
+def _discarding_property(value: int) -> None:
+    """Half of every generated world is discarded by ``assume``."""
+    assume(value % 2 == 0)
+    assert value % 2 == 0
+
+
+@settings(deadline=None, max_examples=50, database=None, print_blob=False)
+@given(value=st.integers(min_value=0, max_value=3))
+def _planted_failing_property(value: int) -> None:
+    """The known-bad shape every self-test has: it finds its planted bug."""
+    raise AssertionError(f"planted failure for {value}")
+
+
+class TestHypothesisStatsRecorder(unittest.TestCase):
+    """Per-property depth measured from real Hypothesis statistics (#888).
+
+    Every statistics mapping under test is produced by Hypothesis itself
+    through the real ``collector`` seam — a hand-typed statistics literal
+    would prove nothing about what the engine emits (`.claude/rules/
+    test-fidelity.md` Rule C).
+    """
+
+    def _record(
+        self,
+        prop: Callable[[], None],
+        *,
+        budget: int,
+        test_id: str = "planted.Property.test_property",
+        expect_failure: bool = False,
+    ) -> HypothesisPropertyStats:
+        recorder = HypothesisStatsRecorder({test_id: budget})
+        recorder.start(test_id)
+        with collector.with_value(recorder.note):  # pyright: ignore[reportArgumentType]
+            if expect_failure:
+                with self.assertRaises(AssertionError):
+                    prop()
+            else:
+                prop()
+        self.assertEqual(len(recorder.records), 1, recorder.records)
+        return recorder.records[0]
+
+    def test_an_exhausted_strategy_space_is_measured_below_its_budget(self) -> None:
+        record = self._record(_tiny_space_property, budget=50)
+
+        self.assertEqual(record.stopped_because, STRATEGY_SPACE_EXHAUSTED)
+        self.assertEqual(record.valid, 4)
+        self.assertEqual(record.interesting, 0)
+        self.assertEqual(record.max_examples, 50)
+
+    def test_assume_discards_are_measured_as_invalid_worlds(self) -> None:
+        record = self._record(_discarding_property, budget=50)
+
+        self.assertEqual(record.valid, 50)
+        self.assertGreater(record.invalid, 0)
+
+    def test_a_planted_bug_is_measured_as_an_interesting_case(self) -> None:
+        record = self._record(
+            _planted_failing_property,
+            budget=50,
+            expect_failure=True,
+        )
+
+        self.assertGreater(record.interesting, 0)
+
+    def test_statistics_arriving_with_no_started_test_are_dropped(self) -> None:
+        """Impossible by construction; a report must never break its own run."""
+        recorder = HypothesisStatsRecorder({})
+        with collector.with_value(recorder.note):  # pyright: ignore[reportArgumentType]
+            _tiny_space_property()
+
+        self.assertEqual(recorder.records, ())
+
+    def test_an_unbudgeted_test_records_a_zero_budget(self) -> None:
+        recorder = HypothesisStatsRecorder({})
+        recorder.start("planted.Property.test_property")
+        with collector.with_value(recorder.note):  # pyright: ignore[reportArgumentType]
+            _tiny_space_property()
+
+        self.assertEqual(recorder.records[0].max_examples, 0)
+
+    def test_counted_statuses_match_the_hypothesis_vocabulary(self) -> None:
+        """A new engine status must not silently vanish from the report."""
+        self.assertEqual(
+            set(HYPOTHESIS_CASE_STATUSES),
+            {status.name.lower() for status in Status},
+        )
+
+    def test_budget_map_covers_every_hypothesis_test_and_nothing_else(self) -> None:
+        suite = planted_suite(("none", "plain"))
+
+        budgets = hypothesis_example_budgets(suite)
+
+        hypothesis_ids = [
+            test.id()
+            for test in _iter_test_cases(suite)
+            if resolve_hypothesis_settings(test) is not None
+        ]
+        self.assertEqual(sorted(budgets), sorted(hypothesis_ids))
+        self.assertEqual(set(budgets.values()), {1})
+
+    def test_the_child_runner_reports_per_property_generated_depth(self) -> None:
+        """End-to-end: the real ``--_run-target`` child, over the real wire.
+
+        Proves the collected depth survives ``ChildTargetResult`` — the fake
+        cannot show that, because the runner reads what the child encoded.
+        """
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            package = root / "child_depth_fixture"
+            package.mkdir()
+            (package / "__init__.py").write_text("", encoding="utf-8")
+            (package / "test_tiny_generated.py").write_text(
+                "import unittest\n"
+                "from hypothesis import given, settings\n"
+                "from hypothesis import strategies as st\n"
+                "\n"
+                "import tests._hypothesis_profiles  # noqa: F401\n"
+                "\n"
+                "class Tiny(unittest.TestCase):\n"
+                "    @settings(max_examples=50, database=None)\n"
+                "    @given(first=st.booleans(), second=st.booleans())\n"
+                "    def test_property(self, first, second):\n"
+                "        self.assertIsInstance(first, bool)\n"
+                "        self.assertIsInstance(second, bool)\n"
+                "\n"
+                "    def test_pin(self):\n"
+                "        self.assertTrue(True)\n",
+                encoding="utf-8",
+            )
+            result_path = root / "result.json"
+            env = {
+                **os.environ,
+                "PYTHONPATH": os.pathsep.join(
+                    part
+                    for part in (
+                        str(root),
+                        str(REPO_ROOT),
+                        os.environ.get("PYTHONPATH", ""),
+                    )
+                    if part
+                ),
+            }
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(RUNNER),
+                    "--_run-target",
+                    '["child_depth_fixture.test_tiny_generated"]',
+                    "0",
+                    str(result_path),
+                ],
+                cwd=REPO_ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(
+                completed.returncode,
+                0,
+                completed.stdout + completed.stderr,
+            )
+            child = msgspec.json.decode(
+                result_path.read_bytes(),
+                type=ChildTargetResult,
+            )
+
+        self.assertEqual(child.tests_run, 2)
+        self.assertEqual(
+            tuple(record.test_id for record in child.hypothesis_stats),
+            ("child_depth_fixture.test_tiny_generated.Tiny.test_property",),
+        )
+        self.assertEqual(
+            child.hypothesis_stats[0],
+            HypothesisPropertyStats(
+                test_id=(
+                    "child_depth_fixture.test_tiny_generated.Tiny.test_property"
+                ),
+                max_examples=50,
+                valid=4,
+                invalid=0,
+                overrun=0,
+                interesting=0,
+                stopped_because=STRATEGY_SPACE_EXHAUSTED,
+            ),
+        )
 
 
 class TestRunTestsWiring(unittest.TestCase):

@@ -25,16 +25,27 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.run_python_tests import (  # noqa: E402
+    STRATEGY_SPACE_EXHAUSTED,
     ChildTargetResult,
+    HypothesisPropertyStats,
     _iter_test_cases,
     assert_hypothesis_deadlines_disabled,
     resolve_hypothesis_settings,
+    settings_max_examples,
 )
 
 
 TARGET_RUNNER = REPO_ROOT / "scripts" / "run_python_tests.py"
 DEFAULT_PROFILE = "fuzz"
 DEFAULT_DURATIONS = 5
+
+#: Ranked depth-report lines printed per section before truncation.
+DEPTH_REPORT_LIMIT = 20
+
+#: Discard rate at which a property's ``assume()`` cost is worth naming. Not a
+#: defect: ``assume`` marks a world invalid and Hypothesis refills the budget,
+#: which is exactly why it is the correct way to drop an unanswerable world.
+DISCARD_RATE_THRESHOLD = 0.10
 
 
 class FuzzPropertyManifest(msgspec.Struct, frozen=True):
@@ -75,6 +86,28 @@ class FuzzRunResult:
     tests_run: int
     elapsed_seconds: float
     log_path: Path
+    hypothesis_stats: tuple[HypothesisPropertyStats, ...] = ()
+
+
+@dataclass(frozen=True)
+class PropertyDepth:
+    """One property's generated depth, aggregated across its entropy shards.
+
+    ``distinct_world_bound`` is the largest world count any single shard
+    reached. Shards re-explore the same strategy space with different entropy,
+    so summing them would overcount distinct worlds; the maximum is the honest
+    bound on how much of its space the property can reach.
+    """
+
+    test_id: str
+    budget: int
+    shards: int
+    exhausted_shards: int
+    distinct_world_bound: int
+    valid: int
+    invalid: int
+    overrun: int
+    interesting: int
 
 
 @dataclass(frozen=True)
@@ -280,14 +313,126 @@ def assert_exact_fuzz_coverage(
             raise ValueError(f"changed fuzz property budget: {test_id}")
 
 
-def _settings_max_examples(configured: settings) -> int:
-    raw_max_examples: object = getattr(configured, "max_examples", None)
-    if isinstance(raw_max_examples, bool) or not isinstance(
-        raw_max_examples,
-        int,
-    ):
-        raise TypeError("Hypothesis max_examples is not an integer")
-    return raw_max_examples
+def aggregate_property_depth(
+    records: Sequence[HypothesisPropertyStats],
+) -> tuple[PropertyDepth, ...]:
+    """Fold every entropy shard's statistics into one row per property.
+
+    Sharding is invisible to depth: a default-budget property runs as up to
+    eight children of ``budget / shards`` examples each, so judging a raw
+    record would flag every sharded property as under-run. Budgets and case
+    counts sum; the distinct-world bound is the maximum single shard.
+    """
+    grouped: dict[str, list[HypothesisPropertyStats]] = {}
+    for record in records:
+        grouped.setdefault(record.test_id, []).append(record)
+    return tuple(
+        sorted(
+            (
+                PropertyDepth(
+                    test_id=test_id,
+                    budget=sum(shard.max_examples for shard in shards),
+                    shards=len(shards),
+                    exhausted_shards=sum(
+                        shard.stopped_because == STRATEGY_SPACE_EXHAUSTED
+                        for shard in shards
+                    ),
+                    distinct_world_bound=max(shard.valid for shard in shards),
+                    valid=sum(shard.valid for shard in shards),
+                    invalid=sum(shard.invalid for shard in shards),
+                    overrun=sum(shard.overrun for shard in shards),
+                    interesting=sum(shard.interesting for shard in shards),
+                )
+                for test_id, shards in grouped.items()
+            ),
+            key=lambda depth: depth.test_id,
+        )
+    )
+
+
+def attempted_examples(depth: PropertyDepth) -> int:
+    """Every example Hypothesis actually spent on this property."""
+    return depth.valid + depth.invalid + depth.overrun
+
+
+def discard_rate(depth: PropertyDepth) -> float:
+    """Share of spent examples that ``assume()`` (or a filter) threw away."""
+    attempted = attempted_examples(depth)
+    if attempted == 0:
+        return 0.0
+    return depth.invalid / attempted
+
+
+def is_structurally_shallow(depth: PropertyDepth) -> bool:
+    """True when a property ran out of worlds long before it ran out of budget.
+
+    The disclosure #888 item 1 exists for: ``@given(a=st.booleans(),
+    b=st.booleans())`` against a 20,000-example budget is exhausted in four
+    worlds, so a mutant outside those four worlds survives however deep the
+    burst runs.
+
+    Two carve-outs keep the verdict honest:
+
+    * a run that reached an ``interesting`` case stopped early BECAUSE it
+      found what it was looking for — every known-bad self-test in the
+      repository looks exactly like an exhausted run otherwise;
+    * a property whose worlds reach its budget spent everything it was given,
+      whatever the tier's budget happens to be.
+
+    It reports; it never gates. A small strategy space can be exactly right
+    (the 36-world force-import authority property is correct), and a
+    ``return``-based discard is invisible here by construction — a bare
+    ``return`` spends the example as a PASS, so it counts as a valid world.
+    """
+    if depth.interesting:
+        return False
+    if depth.exhausted_shards != depth.shards:
+        return False
+    return depth.distinct_world_bound < depth.budget
+
+
+def format_depth_report(depths: Sequence[PropertyDepth]) -> tuple[str, ...]:
+    """Render the ranked per-property depth disclosure for one burst."""
+    if not depths:
+        return ()
+    shallow = sorted(
+        (depth for depth in depths if is_structurally_shallow(depth)),
+        key=lambda depth: (depth.distinct_world_bound, depth.test_id),
+    )
+    discarding = sorted(
+        (
+            depth
+            for depth in depths
+            if discard_rate(depth) >= DISCARD_RATE_THRESHOLD
+        ),
+        key=lambda depth: (-discard_rate(depth), depth.test_id),
+    )
+    lines = [
+        f"DEPTH {len(depths)} properties measured, "
+        f"{len(shallow)} exhausted their strategy space, "
+        f"{len(discarding)} discarded at least "
+        f"{DISCARD_RATE_THRESHOLD:.0%} of their examples"
+    ]
+    for depth in shallow[:DEPTH_REPORT_LIMIT]:
+        lines.append(
+            f"SHALLOW {depth.distinct_world_bound} worlds of "
+            f"{depth.budget} examples ({depth.shards} shards) {depth.test_id}"
+        )
+    if len(shallow) > DEPTH_REPORT_LIMIT:
+        lines.append(
+            f"SHALLOW ... {len(shallow) - DEPTH_REPORT_LIMIT} more exhausted"
+        )
+    for depth in discarding[:DEPTH_REPORT_LIMIT]:
+        lines.append(
+            f"DISCARD {discard_rate(depth):.0%} of {attempted_examples(depth)} "
+            f"examples ({depth.invalid} discarded, {depth.valid} worlds) "
+            f"{depth.test_id}"
+        )
+    if len(discarding) > DEPTH_REPORT_LIMIT:
+        lines.append(
+            f"DISCARD ... {len(discarding) - DEPTH_REPORT_LIMIT} more discarding"
+        )
+    return tuple(lines)
 
 
 def _discover_module_child(module_name: str, result_path: Path) -> int:
@@ -298,7 +443,7 @@ def _discover_module_child(module_name: str, result_path: Path) -> int:
     default_settings = settings.default
     if default_settings is None:
         raise RuntimeError("Hypothesis has no active default settings")
-    default_max_examples = _settings_max_examples(default_settings)
+    default_max_examples = settings_max_examples(default_settings)
     # One owner for the deadline contract, shared with the deterministic
     # suite runner so neither tier can drift from the other (#882 B1b).
     assert_hypothesis_deadlines_disabled(suite)
@@ -308,11 +453,11 @@ def _discover_module_child(module_name: str, result_path: Path) -> int:
             continue
         configured = resolved.configured
         uses_default_settings = (
-            _settings_max_examples(configured) == default_max_examples
+            settings_max_examples(configured) == default_max_examples
             if resolved.from_state_machine_class
             else configured is default_settings
         )
-        configured_max_examples = _settings_max_examples(configured)
+        configured_max_examples = settings_max_examples(configured)
         hypothesis_tests.append(
             FuzzPropertyManifest(
                 test_id=test.id(),
@@ -458,6 +603,7 @@ def _execute_fuzz_target(
         tests_run=child.tests_run,
         elapsed_seconds=elapsed_seconds,
         log_path=log_path,
+        hypothesis_stats=child.hypothesis_stats,
     )
 
 
@@ -744,6 +890,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(
                 f"SLOW {result.elapsed_seconds:.1f}s {result.target.label}"
             )
+        for line in format_depth_report(
+            aggregate_property_depth(
+                tuple(
+                    record
+                    for result in results
+                    for record in result.hypothesis_stats
+                )
+            )
+        ):
+            print(line)
         if failed_results or infrastructure_failures:
             for result in sorted(
                 failed_results,
