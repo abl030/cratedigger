@@ -956,6 +956,26 @@ class TestAuthorityInvariantCheckers(unittest.TestCase):
                 allowed_result_types=(MaterializeFailed,),
             )
 
+    def test_publication_checker_default_refuses_a_failed_materialize(self) -> None:
+        """Issue #882 item 6: the DEFAULT tuple is itself a proof surface.
+
+        Callers that omit ``allowed_result_types`` rely on the default, and
+        every other known-bad pin here passes an explicit tuple — so a mutant
+        widening the default to admit ``MaterializeFailed`` survived the whole
+        suite. It must not: a refusal reaching a call site that asserts
+        publication is a finding, not an accepted outcome.
+        """
+        with self.assertRaises(AssertionError):
+            assert_publication_invariant(
+                result=MaterializeFailed(reason="slskd_root_missing"),
+                source_exists=True,
+                expected_source_exists=True,
+                destination_names=set(),
+                expected_names=set(),
+                artifact_names=[],
+                name_max=255,
+            )
+
     def test_publication_checker_still_refuses_an_unexpected_result_type(self) -> None:
         with self.assertRaises(AssertionError):
             assert_publication_invariant(

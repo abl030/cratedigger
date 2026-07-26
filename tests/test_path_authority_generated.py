@@ -30,6 +30,7 @@ from lib.import_preview import (
     remove_preview_snapshot,
 )
 from lib.download_materialization import (
+    MaterializeFailed,
     MaterializeGuarded,
     Materialized,
     _materialize_processing_dir,
@@ -42,6 +43,7 @@ from lib.quality_evidence import EvidenceBuildResult
 from lib.staged_album import StagedAlbum
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_ctx_with_fake_db, make_grab_list_entry
+from tests.test_path_authority import assert_publication_invariant
 from web.wrong_match_file_service import (
     WrongMatchExplorerLimits,
     build_wrong_match_explorer,
@@ -185,6 +187,49 @@ def assert_generated_publication_invariant(
         raise AssertionError("materialize lock is not a bounded shard lock")
     if len({name.rsplit("-", 1)[-1] for name in lock_names}) > 256:
         raise AssertionError("materialize used more than 256 lock shards")
+
+
+_RESULT_TYPES: dict[str, type] = {
+    "materialized": Materialized,
+    "guarded": MaterializeGuarded,
+    "failed": MaterializeFailed,
+}
+
+_RESULT_FACTORIES: dict[str, Callable[[], object]] = {
+    "materialized": Materialized,
+    "guarded": lambda: MaterializeGuarded(detail="incomplete_or_unsafe_canonical"),
+    "failed": lambda: MaterializeFailed(reason="slskd_root_missing"),
+}
+
+# Stated here rather than read off the production default, for the same
+# reason as #868 I3: an assertion derived from the thing under test cannot
+# detect that thing widening.
+DEFAULT_PUBLICATION_RESULT_KINDS = frozenset({"materialized", "guarded"})
+
+
+def assert_result_type_gate(
+    *,
+    accepted: bool,
+    result_kind: str,
+    allowed_kinds: frozenset[str] | None,
+) -> None:
+    """The publication checker's result-type gate, stated independently.
+
+    ``allowed_kinds is None`` means the call site took the DEFAULT tuple,
+    which admits exactly a publication and a guard — never a refusal (#882
+    item 6: the default was the one arm no known-bad pin exercised).
+    """
+    effective = (
+        DEFAULT_PUBLICATION_RESULT_KINDS
+        if allowed_kinds is None
+        else allowed_kinds
+    )
+    if accepted != (result_kind in effective):
+        verdict = "accepted" if accepted else "rejected"
+        raise AssertionError(
+            f"materialize result {result_kind!r} was {verdict} against "
+            f"allowed kinds {sorted(effective)!r}",
+        )
 
 
 def assert_generated_preview_invariant(
@@ -763,8 +808,92 @@ class TestGeneratedRootRelocation(unittest.TestCase):
             )
 
 
+class TestGeneratedPublicationResultTypeGate(unittest.TestCase):
+    """#882 item 6: patrol every (result kind × allowed tuple) world.
+
+    The deterministic pin in ``test_path_authority.py`` proves the default
+    rejects a ``MaterializeFailed``; this ranges over the whole cross product
+    so a widening of the default — or of any explicit tuple — is killed
+    wherever it lands.
+    """
+
+    @given(
+        result_kind=st.sampled_from(sorted(_RESULT_FACTORIES)),
+        allowed_kinds=st.one_of(
+            st.none(),
+            st.frozensets(
+                st.sampled_from(sorted(_RESULT_FACTORIES)),
+                min_size=1,
+            ),
+        ),
+    )
+    @example(result_kind="failed", allowed_kinds=None)
+    @example(result_kind="materialized", allowed_kinds=None)
+    @example(result_kind="guarded", allowed_kinds=None)
+    def test_only_allowed_result_kinds_pass_the_publication_checker(
+        self,
+        result_kind: str,
+        allowed_kinds: frozenset[str] | None,
+    ) -> None:
+        # Every other arm of the checker is satisfied, so the result-type
+        # gate is the only thing that can refuse this world.
+        result = _RESULT_FACTORIES[result_kind]()
+        try:
+            if allowed_kinds is None:
+                assert_publication_invariant(
+                    result=result,
+                    source_exists=True,
+                    expected_source_exists=True,
+                    destination_names=set(),
+                    expected_names=set(),
+                    artifact_names=[],
+                    name_max=255,
+                )
+            else:
+                assert_publication_invariant(
+                    result=result,
+                    source_exists=True,
+                    expected_source_exists=True,
+                    destination_names=set(),
+                    expected_names=set(),
+                    artifact_names=[],
+                    name_max=255,
+                    allowed_result_types=tuple(
+                        _RESULT_TYPES[kind] for kind in sorted(allowed_kinds)
+                    ),
+                )
+        except AssertionError:
+            accepted = False
+        else:
+            accepted = True
+
+        assert_result_type_gate(
+            accepted=accepted,
+            result_kind=result_kind,
+            allowed_kinds=allowed_kinds,
+        )
+
+
 class TestPathAuthorityProofCheckers(unittest.TestCase):
     """Known-bad proof checks: every invariant checker must reject a lie."""
+
+    def test_result_type_gate_trips_when_the_default_admits_a_refusal(
+        self,
+    ) -> None:
+        with self.assertRaises(AssertionError):
+            assert_result_type_gate(
+                accepted=True, result_kind="failed", allowed_kinds=None,
+            )
+
+    def test_result_type_gate_trips_when_an_allowed_kind_is_refused(
+        self,
+    ) -> None:
+        with self.assertRaises(AssertionError):
+            assert_result_type_gate(
+                accepted=False,
+                result_kind="failed",
+                allowed_kinds=frozenset({"failed"}),
+            )
 
     def test_publication_checker_rejects_overwrite_source_loss(self) -> None:
         with self.assertRaises(AssertionError):
