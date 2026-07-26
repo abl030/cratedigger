@@ -1101,6 +1101,37 @@ class TestFabricatedCopyIsGone(unittest.TestCase):
                     action.replace("_", " "),
                 )
 
+    def test_the_unmatched_run_literals_name_a_real_producer(self) -> None:
+        """Issue #888's two new sentences needed no registry entry, and the
+        audit is what proves that rather than the author asserting it:
+        ``scenario`` already names ``lib/beets.py`` as a producer, and
+        ``lib/beets.py`` spells both literals — taken here from the
+        producer's own exported constants, never retyped
+        (``.claude/rules/test-fidelity.md`` Rule C).
+
+        The end-to-end pins — REAL ``beets_validate`` runs producing each
+        scenario and the classifier rendering its verdict — live in
+        ``tests/test_beets_harness_session.py``.
+        """
+        from lib.beets import (
+            NO_CHOOSE_MATCH_SCENARIO,
+            VALIDATION_ERROR_SCENARIO,
+        )
+
+        producers = MATCH_SUBJECTS["scenario"]
+        self.assertIn("lib/beets.py", producers.files)
+        spellings = producer_spellings(producers.files)
+        for literal in (NO_CHOOSE_MATCH_SCENARIO, VALIDATION_ERROR_SCENARIO):
+            with self.subTest(literal):
+                self.assertIsNone(check_literal_has_a_producer(
+                    literal, producers, spellings))
+                self.assertIn(
+                    literal,
+                    classify_match_targets()["scenario"],
+                    "the classifier no longer matches a literal it renders "
+                    "copy for",
+                )
+
     def test_the_historical_literals_keep_their_copy(self) -> None:
         """One live row from 2026-03-24 still renders as a sentence."""
         self.assertEqual(

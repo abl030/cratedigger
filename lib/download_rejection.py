@@ -255,9 +255,14 @@ def _handle_rejected_result(
         bv_result.detail,
         ", ".join(usernames),
     )
-    scenario = bv_result.scenario or "validation_rejected"
+    # ``beets_validate`` names a scenario on every result it returns — a
+    # decided ``choose_match``, or ``no_choose_match`` with its
+    # harness-session evidence (issue #888). The placeholder this used to
+    # fall back to, ``validation_rejected``, was a token no producer ever
+    # emitted and zero live rows ever carried; it is deleted rather than
+    # kept "just in case".
     detail = bv_result.detail or bv_result.error
-    message = f"Rejected: {scenario}"
+    message = f"Rejected: {bv_result.scenario}"
     if detail:
         message = f"{message} - {detail}"
     return DispatchOutcome(

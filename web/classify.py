@@ -1567,6 +1567,49 @@ def _rejection_verdict(entry: LogEntry) -> str:
             )
         return "Requested release ID not among the match candidates"
 
+    # ``lib/beets.py`` writes this when its stdout loop finished, WITHOUT
+    # recording an error, and never decoded a ``choose_match``: beets
+    # offered nothing for the folder, so nothing was weighed against the
+    # requested release ID.
+    #
+    # The sentence names that OBSERVATION and stops there, because the
+    # observation is all the producer knows. No importable audio, a session
+    # cut short, and a harness that exited quietly are all consistent with
+    # it — the discriminating facts (which harness messages arrived, whether
+    # a session_end was announced, the stderr tail) are persisted as
+    # ``validation_result.harness_session`` and summarised into
+    # ``beets_detail``, which the card shows beneath this line. Claiming a
+    # cause here would be exactly the #868/#882 defect in a new place.
+    #
+    # The error branches are deliberately a DIFFERENT name below, because
+    # one of them — the strict-decode refusal — is a case where beets DID
+    # offer a match and Cratedigger declined to decode it. Merging them
+    # would put a falsehood on the card at exactly the moment a beets
+    # version bump changes a field type, which is the 2026-06-28/29 shape
+    # this branch exists to explain (issue #888 review F1).
+    #
+    # 276 live rows across 215 requests carried this rejection with a NULL
+    # scenario before issue #888 named it, so the card read "Rejected" and
+    # nothing else; 254 of those fell on 2026-06-28/29, the beets 2.12
+    # migration window.
+    if scenario == "no_choose_match":
+        return "Beets ended without offering a match to review"
+
+    # ``lib/beets.py`` writes this when validation recorded an error before
+    # any match could be reviewed: the harness would not start, the strict
+    # wire decode refused a ``choose_match``, the read loop raised, or the
+    # 120s timeout fired. The sentence claims only that — never that beets
+    # offered nothing — and points at the error the producer recorded rather
+    # than interpreting it.
+    if scenario == "validation_error":
+        recorded = (entry.error_message or "").strip()
+        if recorded:
+            return (
+                "Validation failed before a match could be reviewed: "
+                f"{recorded}"
+            )
+        return "Validation failed before a match could be reviewed"
+
     # Historical: emitted by a pre-2026-03-24 revision, one live row, no
     # current producer — which is why the audit registers it as historical.
     if scenario == "album_name_mismatch":

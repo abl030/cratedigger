@@ -372,6 +372,41 @@ projects them centrally; writers must not pass the same values separately.
 Payloads that genuinely omit those envelope keys, such as
 `MeasurementFailure`, may supply explicit top-level metadata.
 
+`beets_validate` always names a scenario — exactly one of three (issue #888):
+
+- a `choose_match` was decoded and decided: `strong_match` / `high_distance` /
+  `extra_tracks` / `mbid_not_found`;
+- no error was recorded and none was ever offered: `no_choose_match`;
+- an error was recorded first — the harness would not start, the strict wire
+  decode refused a `choose_match`, the read loop raised, or the 120s timeout
+  fired: `validation_error`. This is a separate name on purpose. The
+  strict-decode case is one where beets DID offer a match and Cratedigger
+  declined to decode it, so folding it into `no_choose_match` would assert the
+  opposite of what happened — and its mass trigger is a beets version bump
+  changing a field type, i.e. every album at once.
+
+The last two carry a `validation_result.harness_session` audit
+(`message_types`, `session_end_seen`, `stderr_tail`): the observation of how
+the run ended, plus what the next person needs to work out why.
+
+**`harness_session` is written only by runs that happen after issue #888
+shipped.** It is absent on every historical row, including the 276 the #888
+backfill named — the backfill could set the scenario honestly but could not
+invent evidence for a run that already happened. So it discriminates
+*new* rows only; use `beets_scenario` for the cohort itself.
+
+```sql
+-- Runs where beets offered nothing to review, with what the harness said.
+-- `messages` is NULL on rows named by the backfill rather than by a live run.
+SELECT id, created_at, beets_scenario,
+       validation_result->'harness_session'->>'message_types'   AS messages,
+       validation_result->'harness_session'->>'session_end_seen' AS session_end,
+       left(validation_result->'harness_session'->>'stderr_tail', 200) AS stderr
+FROM download_log
+WHERE beets_scenario IN ('no_choose_match', 'validation_error')
+ORDER BY id DESC LIMIT 20;
+```
+
 For `abandoned_auto_import` audit rows, `validation_result.failed_path`
 points at the prefixed failed-import folder when a leftover staged
 directory existed. A missing staged directory may produce the same audit

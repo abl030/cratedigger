@@ -67,7 +67,16 @@ def make_should_resume():
 
 
 class TestBeetsValidate(unittest.TestCase):
-    """Test beets_validate() function with mocked subprocess."""
+    """Test beets_validate() function with mocked subprocess.
+
+    Every mocked proc sets ``stderr.read.return_value`` to a real string:
+    since issue #888 ``beets_validate`` PERSISTS what that call returns into
+    ``validation_result.harness_session``, so a bare ``MagicMock`` would feed
+    a mock object into a JSONB audit field — test infrastructure more
+    permissive than production (``.claude/rules/test-fidelity.md`` Rule B).
+    The pins that drive a REAL harness subprocess over that boundary live in
+    ``tests/test_beets_harness_session.py``.
+    """
 
     HARNESS = "/fake/harness.sh"
 
@@ -82,6 +91,7 @@ class TestBeetsValidate(unittest.TestCase):
         ])
         proc.stdin = MagicMock()
         proc.wait.return_value = 0
+        proc.stderr.read.return_value = ""
         mock_popen.return_value = proc
 
         result = beets_validate(self.HARNESS, "/test/album", mbid, 0.15)
@@ -105,6 +115,7 @@ class TestBeetsValidate(unittest.TestCase):
         ])
         proc.stdin = MagicMock()
         proc.wait.return_value = 0
+        proc.stderr.read.return_value = ""
         mock_popen.return_value = proc
 
         result = beets_validate(self.HARNESS,"/test/album", mbid, 0.15)
@@ -126,6 +137,7 @@ class TestBeetsValidate(unittest.TestCase):
         ])
         proc.stdin = MagicMock()
         proc.wait.return_value = 0
+        proc.stderr.read.return_value = ""
         mock_popen.return_value = proc
 
         result = beets_validate(self.HARNESS,"/test/album", target_mbid, 0.15)
@@ -149,6 +161,7 @@ class TestBeetsValidate(unittest.TestCase):
         ])
         proc.stdin = MagicMock()
         proc.wait.return_value = 0
+        proc.stderr.read.return_value = ""
         mock_popen.return_value = proc
 
         result = beets_validate(self.HARNESS,"/test/album", "some-mbid", 0.15)
@@ -234,6 +247,7 @@ class TestBeetsValidate(unittest.TestCase):
         ])
         proc.stdin = MagicMock()
         proc.wait.return_value = 0
+        proc.stderr.read.return_value = ""
         mock_popen.return_value = proc
 
         beets_validate(self.HARNESS, "/test/album", mbid, 0.15)
@@ -265,6 +279,7 @@ class TestBeetsValidate(unittest.TestCase):
         ])
         proc.stdin = MagicMock()
         proc.wait.return_value = 0
+        proc.stderr.read.return_value = ""
         mock_popen.return_value = proc
 
         result = beets_validate(self.HARNESS,"/test/album", mbid, 0.15)
@@ -284,6 +299,7 @@ class TestBeetsValidate(unittest.TestCase):
         ])
         proc.stdin = MagicMock()
         proc.wait.return_value = 0
+        proc.stderr.read.return_value = ""
         mock_popen.return_value = proc
 
         result = beets_validate(self.HARNESS,"/test/album", mbid, 0.15)
@@ -301,6 +317,7 @@ class TestBeetsValidate(unittest.TestCase):
         ])
         proc.stdin = MagicMock()
         proc.wait.return_value = 0
+        proc.stderr.read.return_value = ""
         mock_popen.return_value = proc
 
         result = beets_validate(self.HARNESS,"/test/album", mbid, 0.15)
@@ -319,6 +336,7 @@ class TestBeetsValidate(unittest.TestCase):
         ])
         proc.stdin = MagicMock()
         proc.wait.return_value = 0
+        proc.stderr.read.return_value = ""
         mock_popen.return_value = proc
 
         result = beets_validate(self.HARNESS,"/test/album", mbid, 0.15)
@@ -347,6 +365,7 @@ class TestBeetsValidate(unittest.TestCase):
         proc.stdout = iter([msg + "\n", make_session_end() + "\n"])
         proc.stdin = MagicMock()
         proc.wait.return_value = 0
+        proc.stderr.read.return_value = ""
         mock_popen.return_value = proc
 
         result = beets_validate(self.HARNESS,"/test/album", mbid, 0.15)
@@ -372,6 +391,7 @@ class TestBeetsValidate(unittest.TestCase):
         proc.stdout = iter([msg + "\n", make_session_end() + "\n"])
         proc.stdin = MagicMock()
         proc.wait.return_value = 0
+        proc.stderr.read.return_value = ""
         mock_popen.return_value = proc
 
         result = beets_validate(self.HARNESS,"/test/album", mbid, 0.15)
@@ -405,6 +425,7 @@ class TestBeetsValidate(unittest.TestCase):
         proc.stdout = iter([msg + "\n", make_session_end() + "\n"])
         proc.stdin = MagicMock()
         proc.wait.return_value = 0
+        proc.stderr.read.return_value = ""
         mock_popen.return_value = proc
 
         result = beets_validate(self.HARNESS, "/test/album", target_mbid, 0.15)
@@ -446,6 +467,7 @@ class TestBeetsValidate(unittest.TestCase):
         proc.stdout = iter([msg + "\n", make_session_end() + "\n"])
         proc.stdin = MagicMock()
         proc.wait.return_value = 0
+        proc.stderr.read.return_value = ""
         mock_popen.return_value = proc
 
         result = beets_validate(self.HARNESS, "/test/album", target_mbid, 0.15)
@@ -476,6 +498,7 @@ class TestBeetsValidate(unittest.TestCase):
         proc.stdout = iter([msg + "\n", make_session_end() + "\n"])
         proc.stdin = MagicMock()
         proc.wait.return_value = 0
+        proc.stderr.read.return_value = ""
         mock_popen.return_value = proc
 
         result = beets_validate(self.HARNESS,"/test/album", mbid, 0.15)

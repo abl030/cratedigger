@@ -301,6 +301,34 @@ Browser → https://music.ablz.au
   really does with that decision (`dispatch_action`, `decision_denylists`), so
   a proof lock cannot claim the search continues and a no-denylist reject
   cannot claim the source was banned.
+- **A run that reviewed no match names itself (#888)** — when
+  `beets_validate` returns without a decoded `choose_match`, the result used
+  to leave `scenario`, `detail` and `error` all NULL, so the card read the
+  bare word "Rejected" and nothing else. 276 live rows across 215 requests
+  (2026-04-19 → 2026-07-21, 254 of them in the 2026-06-28/29 beets 2.12
+  window) landed there, and 181 were later re-previewed as importable.
+  `lib/beets.py` now names the run and persists a `harness_session` audit —
+  the harness message types it saw, whether a `session_end` was announced,
+  and the bounded TAIL of the harness's stderr.
+  **Two names, split on whether an error was recorded**, which is the same
+  discriminator the #888 RCA used. A clean run that offered nothing is
+  `no_choose_match` → "Beets ended without offering a match to review". A
+  run that recorded an error first — harness would not start, strict wire
+  decode refused a `choose_match`, read loop raised, 120s timeout — is
+  `validation_error` → "Validation failed before a match could be
+  reviewed: `<the recorded error>`". Merging them would be a fabricated
+  cause: in the strict-decode world beets DID offer a match and Cratedigger
+  declined to decode it, and `harness_session.message_types` says
+  `choose_match` in the same row. Its mass trigger is a beets version bump
+  changing a field type — precisely the 2026-06-28/29 shape this copy exists
+  to explain.
+  Both sentences name the OBSERVATION only and never a cause, and the clause
+  Cratedigger composes for `beets_detail` is the first `;`-separated segment
+  so wire-controlled text can never be read as our assertion. Neither
+  scenario is added to `WRONG_MATCH_EXCLUDED_REJECTION_SCENARIOS`, so the
+  download lands in the same `wrong_matches/` tree and stays on the same
+  operator worklist an unnamed `NULL` scenario always did — naming changes
+  copy and audit, not routing.
 - **Wrong Matches evidence provenance** — candidate rows keep the downloaded
   source codec, configured target contract, and temporary V0 probe separate.
   A lossless candidate destined for Opus therefore reads `FLAC → OPUS 128
