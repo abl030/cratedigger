@@ -205,9 +205,11 @@ non-replaceable ancestry, so filesystem-authority tests can use the same
 scratch root instead of escaping into the checkout. The dev shell fails closed
 if that directory is unavailable, disk-backed, replaceable, or lacks headroom
 rather than silently writing the suite's disposable workload to disk. This
-runner never reads or mutates production. A root left by a hard interruption
-requires explicit operator cleanup after inspecting that exact path; the test
-infrastructure has no automatic deletion authority.
+runner never reads or mutates production. Normal EXIT handling still cleans the
+current owned root automatically. A root left by a hard interruption requires
+explicit operator cleanup after inspecting that exact path; the test
+infrastructure has no automatic discovery or deletion authority over abandoned
+roots.
 The deterministic direct budget is six examples of eight stateful steps. On
 doc1 on 2026-07-19, the initial census-seeded lifecycle module reported 10.431
 test-seconds (excluding dev-shell startup). That is a historical baseline, not

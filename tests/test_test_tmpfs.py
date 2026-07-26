@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import stat
 import subprocess
 import tempfile
@@ -18,10 +19,12 @@ NIX_SHELL = REPO_ROOT / "nix" / "shell.nix"
 TMPFS_SETUP_AND_PRINT_TMPDIR = (
     'source "$1" && setup_cratedigger_test_tmpfs && printf "%s" "$TMPDIR"'
 )
+LOW_HEADROOM_MINIMUM_BYTES = 1 << 50
 
 
 def run_tmpfs_setup_and_print_tmpdir(
-    *, env: Mapping[str, str] | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Drive the real shell helper and report the TMPDIR it selected."""
     return subprocess.run(
@@ -40,6 +43,49 @@ def run_tmpfs_setup_and_print_tmpdir(
     )
 
 
+def tmpfs_runtime_root() -> str:
+    """Return the helper's default root when no explicit override is set."""
+    return os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+
+
+def low_headroom_environment(
+    *,
+    inherited_tmpdir: str,
+    minimum_bytes: int,
+) -> dict[str, str]:
+    """Force the helper's real default tmpfs root below the headroom gate."""
+    env = dict(os.environ)
+    env.pop("CRATEDIGGER_TEST_RAM_ROOT", None)
+    env["TMPDIR"] = inherited_tmpdir
+    env["CRATEDIGGER_TEST_RAM_MIN_BYTES"] = str(minimum_bytes)
+    return env
+
+
+def assert_tmpfs_setup_failure_contract(
+    completed: subprocess.CompletedProcess[str],
+    *,
+    inherited_tmpdir: str,
+    runtime_dir: str,
+    minimum_bytes: int,
+) -> None:
+    """Reject masked setup failure or any inherited TMPDIR success shape."""
+    if completed.returncode == 0:
+        raise AssertionError("tmpfs setup failure was reported as success")
+    if completed.stdout != "":
+        raise AssertionError(
+            "tmpfs setup failure exposed a selected TMPDIR: "
+            f"{completed.stdout!r} (inherited {inherited_tmpdir!r})"
+        )
+    expected_diagnostic = re.compile(
+        rf"^Test RAM root lacks headroom: {re.escape(runtime_dir)} has \d+ "
+        rf"bytes, needs {minimum_bytes}\n$",
+    )
+    if not expected_diagnostic.fullmatch(completed.stderr):
+        raise AssertionError(
+            f"tmpfs setup failure lost its headroom diagnostic: {completed.stderr!r}"
+        )
+
+
 class TestTmpfsSetup(unittest.TestCase):
     def test_allocates_isolated_tmpfs_directory_and_cleans_it_on_exit(self) -> None:
         completed = run_tmpfs_setup_and_print_tmpdir()
@@ -54,24 +100,21 @@ class TestTmpfsSetup(unittest.TestCase):
         self.assertFalse(selected.exists())
 
     def test_low_headroom_does_not_report_inherited_tmpdir_as_allocation(self) -> None:
-        runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+        runtime_dir = tmpfs_runtime_root()
         inherited_tmpdir = "/tmp/cratedigger-inherited-tmpdir"
-        minimum_bytes = 1 << 50
 
         completed = run_tmpfs_setup_and_print_tmpdir(
-            env={
-                **os.environ,
-                "TMPDIR": inherited_tmpdir,
-                "CRATEDIGGER_TEST_RAM_MIN_BYTES": str(minimum_bytes),
-            },
+            env=low_headroom_environment(
+                inherited_tmpdir=inherited_tmpdir,
+                minimum_bytes=LOW_HEADROOM_MINIMUM_BYTES,
+            ),
         )
 
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertEqual(completed.stdout, "")
-        self.assertRegex(
-            completed.stderr,
-            rf"^Test RAM root lacks headroom: {runtime_dir} has \d+ bytes, "
-            rf"needs {minimum_bytes}\n$",
+        assert_tmpfs_setup_failure_contract(
+            completed,
+            inherited_tmpdir=inherited_tmpdir,
+            runtime_dir=runtime_dir,
+            minimum_bytes=LOW_HEADROOM_MINIMUM_BYTES,
         )
 
     def test_active_tmpdir_has_private_ancestry(self) -> None:
@@ -162,7 +205,7 @@ class TestTmpfsSetup(unittest.TestCase):
             [
                 "bash",
                 "-c",
-                'source "$1"; setup_cratedigger_test_tmpfs; exit 7',
+                'source "$1" && setup_cratedigger_test_tmpfs && exit 7',
                 "bash",
                 str(TMPFS_SETUP),
             ],
