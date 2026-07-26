@@ -371,6 +371,74 @@ host-scaled entropy fan-out. On doc1's 30-core VM on 2026-07-23, the complete
 seconds. The worst subprocess-heavy generated module completed alone in 142.7
 seconds; its unsharded properties had still not completed after ten minutes.
 
+### Per-property depth report
+
+Issue #888 item 1. A budget is not depth: `@given(authorized=st.booleans(),
+missing=st.booleans())` has four distinct worlds, so Hypothesis exhausts it in
+four examples and stops — whether the budget is 150 or 20,000. A mutant that
+widens a quarantine authority boundary survived 215 tests across seven modules
+for exactly that reason, and nothing in the burst output said so.
+
+After the `SLOW` lines, every burst now prints what each property actually
+generated, measured from Hypothesis' own `statistics` collector in the child
+that ran it:
+
+```
+DEPTH 351 properties measured, 68 shallow (space exhausted below budget), 6 discarding at least 10% of their examples
+SHALLOW 2 worlds vs 150 examples per shard (1 shard, 150 total) tests.test_pin_retention_generated.TestGeneratedPinRetention.test_every_status_is_pending_or_terminal
+SHALLOW ... 48 more shallow
+DISCARD 51% of 307 examples (157 discarded, 150 worlds) tests.test_world_invariants_generated.TestWorldInvariantGenerated.test_any_evidence_fingerprint_drift_is_rejected
+```
+
+- **SHALLOW** — the property ran out of distinct worlds before it ran out of
+  budget (`stopped-because: nothing left to do`), ranked by world count
+  ascending, top 20. Entropy shards are folded into one row first. That
+  folding does not change WHICH properties are flagged — a shard that stops
+  at its own budget reports `settings.max_examples=…`, never exhaustion, so
+  an unfolded verdict picks out the same set. It de-duplicates eight
+  identical rows out of the ranked list and reports the property's real total
+  budget against one distinct-world bound: the largest single shard, since
+  shards re-explore the same space.
+- **DISCARD** — the property threw away at least 10% of its examples through
+  `assume()` or a strategy filter, ranked by rate descending. This is a cost
+  and shape signal, not a defect: `assume` marks a world invalid and
+  Hypothesis refills the budget, which is exactly why it is the correct way
+  to drop an unanswerable world.
+
+Only properties are counted. A plain test whose body declares and calls its
+own `@given` — the shape every known-bad self-test uses — emits statistics
+too, under the enclosing test's id; those are dropped, so the denominator is
+exactly the number of real `@given` property tests.
+
+**It reports; it never gates.** A small strategy space is often exactly
+right — the 36-world force-import authority property is correct — so a
+threshold would either be trivially satisfiable or block legitimate work. Two
+carve-outs keep the verdict honest: a run that reached an `interesting` case
+stopped because it found its planted bug, and a property whose worlds reach
+its budget wasted nothing. The first is defensive rather than load-bearing
+today: no repository property reaches that state, precisely because the
+known-bad self-tests plant their bug in a dropped inner `@given`.
+
+**The ceiling is the per-child budget.** Only a space smaller than the
+`N examples per shard` figure — 150 at the deterministic tier, `budget /
+shards` (2,500 on a 30-core host) at the fuzz tier — can be observed at all.
+A 5,000-world property never exhausts, so it is reported as deep at both
+tiers, and every non-shallow property's worlds are bounded by that per-shard
+budget rather than by its real space. An empty SHALLOW section means "none
+found below the ceiling", never "no shallow properties".
+
+**It cannot see a bare `return`.** A `return` spends the example as a PASS, so
+a vacuously-discarding property reads as a full budget of valid worlds. That
+is unchanged by this report and is why the `assume`-not-`return` rule below
+still has to be followed by hand.
+
+Measured on doc1, 2026-07-26, deterministic tier, all 89 generated modules
+(963 tests, 58.3s): 351 properties, 68 of them shallow — the smallest at two
+worlds against 150 examples. Those are the properties for which a deeper
+burst buys nothing at all; widening their strategies is separate work this
+report exists to aim. Every figure here moves with each property added or
+strategy widened, so re-run the burst rather than trusting these numbers.
+
 All active logs, property tempdirs, and Hypothesis database writes stay in the
 private per-shell tmpfs. A database named by
 `HYPOTHESIS_STORAGE_DIRECTORY` seeds the run read-only. A green run discards
@@ -559,7 +627,12 @@ may still patrol nothing; only review and mutant-kill counts show that.
   A `return` spends the example as a PASS and silently shrinks the real
   budget; `assume` marks it invalid so Hypothesis refills. Issue #882 found
   a property burning 29% of a 20,000-example budget this way. If the world
-  has a defined answer, assert it instead of discarding it.
+  has a defined answer, assert it instead of discarding it. The burst's
+  `DISCARD` lines price the `assume` cost; a `return` shows up nowhere, so
+  this one is still enforced by hand.
+- **Check the burst's `SHALLOW` lines for the property you just wrote.** A
+  strategy space smaller than the budget is a fact worth knowing before the
+  next mutant hunt reports a survivor.
 - Reuse the shared fakes/builders (`tests/fakes/`, `tests/helpers.py`)
   per `.claude/rules/code-quality.md`; leaf-seam mock rules apply to
   generated tests like any other test.

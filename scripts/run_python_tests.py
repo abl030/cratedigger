@@ -20,6 +20,13 @@ from pathlib import Path
 
 import msgspec
 from hypothesis import is_hypothesis_test, settings
+from hypothesis.statistics import collector
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from lib.json_narrow import json_dict, json_list  # noqa: E402 - after path setup
 
 
 DEFAULT_MAX_WORKERS = 12
@@ -33,6 +40,17 @@ HOTSPOT_SHARD_POLICIES = {
 }
 HOTSPOT_CLASS_BATCHES = 8
 HOTSPOT_METHOD_BATCHES = 12
+
+#: Hypothesis' ``stopped-because`` reason when a strategy space ran out of
+#: distinct worlds before the example budget ran out
+#: (``ExitReason.finished``). This is the signal that a property is
+#: structurally incapable of spending its budget, however large that budget is.
+STRATEGY_SPACE_EXHAUSTED = "nothing left to do"
+
+#: The generate-phase case statuses Hypothesis reports, lower-cased. Pinned by
+#: ``tests/test_parallel_test_runner.py`` against the live ``Status`` enum: a
+#: new status would otherwise be silently uncounted in the depth report.
+HYPOTHESIS_CASE_STATUSES = ("valid", "invalid", "overrun", "interesting")
 
 
 @dataclass(frozen=True)
@@ -77,6 +95,23 @@ class TargetInfrastructureFailure:
     detail: str
 
 
+class HypothesisPropertyStats(msgspec.Struct, frozen=True):
+    """One Hypothesis property's generate-phase depth in one child process.
+
+    ``max_examples`` is the budget that child actually ran under — the
+    per-shard budget when ``scripts/run_fuzz_tests.py`` split a property
+    across entropy shards, so the shards sum back to the property's total.
+    """
+
+    test_id: str
+    max_examples: int
+    valid: int
+    invalid: int
+    overrun: int
+    interesting: int
+    stopped_because: str
+
+
 class ChildTargetResult(msgspec.Struct, frozen=True):
     """Wire result written by one fresh target interpreter."""
 
@@ -84,6 +119,7 @@ class ChildTargetResult(msgspec.Struct, frozen=True):
     tests_run: int
     test_ids: tuple[str, ...]
     output: str
+    hypothesis_stats: tuple[HypothesisPropertyStats, ...] = ()
 
 
 class ListedTestIds(msgspec.Struct, frozen=True):
@@ -102,6 +138,73 @@ class RecordingTextTestResult(unittest.TextTestResult):
             self.test_ids = []
         self.test_ids.append(test.id())
         super().startTest(test)
+
+
+class HypothesisStatsRecorder:
+    """Attribute each Hypothesis statistics callback to its running test.
+
+    Hypothesis reports one statistics mapping per property run through
+    ``hypothesis.statistics.collector``, and that mapping names no test. The
+    running test is therefore read from the one canonical record of what
+    started — ``RecordingTextTestResult.startTest`` — which the child bridges
+    into :meth:`start`.
+
+    Only tests that ARE properties are recorded. A plain test whose body
+    declares and calls its own ``@given`` function also emits statistics, and
+    the running test is then the enclosing plain test — the repository's
+    known-bad self-test shape. Absence from the budget map is exactly the
+    "not a property test method" signal, so those runs are dropped: filing
+    them under the enclosing test would inflate the property count and, when
+    one body runs two inner properties, fold them into a single row whose
+    shard count and world bound are both fiction.
+
+    The recorder never raises and never fails a run: a burst depth report is a
+    disclosure, not a gate. A callback with no running test, a test that is
+    not a property, or an unreadable statistics shape degrades to a dropped
+    record instead of breaking the suite that produced it.
+    """
+
+    def __init__(self, budgets: Mapping[str, int]) -> None:
+        self._budgets = budgets
+        self._current_test_id: str | None = None
+        self._records: list[HypothesisPropertyStats] = []
+
+    @property
+    def records(self) -> tuple[HypothesisPropertyStats, ...]:
+        """Every property's statistics, in the order Hypothesis reported them."""
+        return tuple(self._records)
+
+    def start(self, test_id: str) -> None:
+        """Mark the test whose statistics arrive next."""
+        self._current_test_id = test_id
+
+    def note(self, statistics: Mapping[str, object]) -> None:
+        """Record one property's generate-phase case statuses."""
+        test_id = self._current_test_id
+        if test_id is None or test_id not in self._budgets:
+            return
+        generate_phase = json_dict(statistics.get("generate-phase"))
+        statuses = [
+            json_dict(case).get("status")
+            for case in json_list(generate_phase.get("test-cases"))
+        ]
+        counts = {
+            status: statuses.count(status) for status in HYPOTHESIS_CASE_STATUSES
+        }
+        stopped_because = statistics.get("stopped-because")
+        self._records.append(
+            HypothesisPropertyStats(
+                test_id=test_id,
+                max_examples=self._budgets[test_id],
+                valid=counts["valid"],
+                invalid=counts["invalid"],
+                overrun=counts["overrun"],
+                interesting=counts["interesting"],
+                stopped_because=(
+                    stopped_because if isinstance(stopped_because, str) else ""
+                ),
+            )
+        )
 
 
 def _line_weight(path: Path) -> int:
@@ -478,6 +581,28 @@ def resolve_hypothesis_settings(
     raise TypeError(f"Hypothesis test has no settings: {test.id()}")
 
 
+def settings_max_examples(configured: settings) -> int:
+    """Read one resolved settings object's integer example budget."""
+    raw_max_examples: object = getattr(configured, "max_examples", None)
+    if isinstance(raw_max_examples, bool) or not isinstance(
+        raw_max_examples,
+        int,
+    ):
+        raise TypeError("Hypothesis max_examples is not an integer")
+    return raw_max_examples
+
+
+def hypothesis_example_budgets(suite: unittest.TestSuite) -> dict[str, int]:
+    """Map each Hypothesis test in this suite to the budget it will run under."""
+    budgets: dict[str, int] = {}
+    for test in _iter_test_cases(suite):
+        resolved = resolve_hypothesis_settings(test)
+        if resolved is None:
+            continue
+        budgets[test.id()] = settings_max_examples(resolved.configured)
+    return budgets
+
+
 def assert_hypothesis_deadlines_disabled(suite: unittest.TestSuite) -> None:
     """Every Hypothesis test in this suite must resolve ``deadline=None``.
 
@@ -585,12 +710,27 @@ def _run_test_target_child(
             discovered_by_id[test_id] for test_id in selected_test_ids
         )
     assert_hypothesis_deadlines_disabled(suite)
-    result = unittest.TextTestRunner(
-        stream=stream,
-        verbosity=2,
-        durations=durations,
-        resultclass=RecordingTextTestResult,  # pyright: ignore[reportArgumentType]
-    ).run(suite)
+    recorder = HypothesisStatsRecorder(hypothesis_example_budgets(suite))
+
+    class _StatsRecordingResult(RecordingTextTestResult):
+        """Bridge the canonical started-test record to the stats recorder."""
+
+        def startTest(self, test: unittest.TestCase) -> None:
+            super().startTest(test)
+            recorder.start(test.id())
+
+    # Hypothesis types the collector as ``DynamicVariable[None]``, so pyright
+    # reads any callback as a bad argument; the runtime contract is a callable
+    # taking one statistics mapping (``hypothesis.statistics.note_statistics``).
+    with collector.with_value(
+        recorder.note,  # pyright: ignore[reportArgumentType]
+    ):
+        result = unittest.TextTestRunner(
+            stream=stream,
+            verbosity=2,
+            durations=durations,
+            resultclass=_StatsRecordingResult,  # pyright: ignore[reportArgumentType]
+        ).run(suite)
     if not isinstance(result, RecordingTextTestResult):
         raise TypeError("unittest runner returned an unexpected result type")
     result_path.write_bytes(
@@ -600,6 +740,7 @@ def _run_test_target_child(
                 tests_run=result.testsRun,
                 test_ids=tuple(result.test_ids or ()),
                 output=stream.getvalue(),
+                hypothesis_stats=recorder.records,
             )
         )
     )
