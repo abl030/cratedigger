@@ -135,6 +135,8 @@ import unittest
 from hypothesis import strategies as st
 from hypothesis.stateful import invariant
 
+import tests._hypothesis_profiles  # noqa: F401 - loads the active profile
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TESTS_DIR = REPO_ROOT / "tests"
