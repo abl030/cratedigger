@@ -50,12 +50,19 @@ tuning problem; it is the wrong criterion. Keep this paragraph: the
 measurement is the expensive part of the finding.
 
 The adopted criterion, by contrast, measured over the whole ``tests/`` tree
-at that same revision: 383
-property-shaped functions (351 ``@given``, 23 ``@rule``, 1 ``@initialize``,
-8 ``@invariant``), of which 375 are in scope here; zero unclassifiable
-shapes; and exactly **one** flagged function — the deliberate known-bad
-self-test in ``PROPERTY_INPUT_ALLOWLIST`` below. A one-entry allowlist over
-the whole repository, and it would have caught the #868 defect.
+at that same revision: 383 property-shaped functions (351 ``@given``, 23
+``@rule``, 1 ``@initialize``, 8 ``@invariant``), of which 375 are in scope
+here; zero unclassifiable shapes; and exactly **one** flagged function — the
+deliberate known-bad self-test in ``tests/test_quality_generated.py``, whose
+planted decider now RECEIVES the world it ignores, so it uses its drawn
+inputs and the allowlist below is **permanently empty**.
+
+Independently confirmed against the real defect: the audit run over the
+pre-fix ``tests/test_materialize_evidence_generated.py``
+(``git show 20f309ac^``) flags
+``test_distinct_causes_never_share_a_reason`` on its unused ``leaf`` input.
+Note what that does and does not prove — see the one-directional caveat in
+``docs/generated-testing.md``.
 
 Scope: ``@given``, ``@rule``, ``@initialize``
 --------------------------------------------
@@ -65,32 +72,68 @@ are in scope. ``@rule``/``@initialize``'s ``target=`` / ``targets=`` keywords
 name Bundles for the *return* value and bind no parameter, so they are not
 drawn inputs.
 
-``@invariant`` is deliberately **out** of scope: it binds no arguments at all
-(its only keyword, ``check_during_reuse``, is a setting, not a strategy), so
-an invariant method has no drawn inputs and the check would be vacuous.
-Treating its settings keyword as a drawn input would fail closed on a
-perfectly ordinary member, which is a false positive, not a guard.
+``@invariant`` is deliberately **out** of scope: it binds no arguments at
+all. Its signature in the pinned Hypothesis 6.156.1 is
+``invariant(*, check_during_init: bool = False)`` — one setting, no
+strategies, and passing a strategy (``@invariant(world=st.none())``) raises
+``TypeError``. So an invariant method has no drawn inputs and the check would
+be vacuous, while treating its setting as a drawn input would fail closed on
+a perfectly ordinary member: a false positive, not a guard.
 
-Known limits (documented, not accidental): a property constructed by calling
-``given(...)(func)`` instead of decorating is outside the grammar; a drawn
-name shadowed by a nested function's own parameter of the same name reads as
-used; and a name that is rebound and then loaded reads as used, because
-distinguishing that from an ordinary use needs the flow analysis this audit
-refuses to do. All three are misses, not build breaks — the audit never
-guesses. A name with no ``Load`` at all (never mentioned, only ``del``'d,
-only assigned) is the defect it does catch.
+Known limits — the ceiling, stated so it is not mistaken for coverage
+--------------------------------------------------------------------
+Every one of these is a **miss** (fail-open), never a false build break, and
+each has **zero live instances** in ``tests/`` today. Closing them needs the
+data-flow, scope, or alias tracking that
+``.claude/rules/code-quality.md`` forbids, and its "Good enough is a valid
+stopping condition" clause applies: the production contract is stated
+plainly and behaviour tests pin the known failure modes. Do not extend this
+audit syntax case by syntax case.
 
-Aliasing the decorator import (``from hypothesis import given as g``) would
-also evade discovery, so ``assert_unaliased_property_imports`` fails closed
-on it.
+1. **The diagnostic-position escape — the likeliest one.** A drawn input
+   loaded only inside an assertion message passes:
+   ``assert A == B, f"world={world}"``, ``self.assertEqual(a, b, world)``,
+   ``with self.subTest(world=world):``. It is one keystroke out of a trip
+   and it *reads* as an improvement (better failure text) — the #868 fix
+   itself added exactly such an f-string. A ``Load`` is a ``Load``; this
+   audit does not judge position.
+2. **Binding constructs that mask an unused input**, the same family as the
+   rebind limit: ``for world in ...``, ``with ... as world``,
+   ``except E as world``, and comprehension targets — ``[world for world in
+   xs]`` is a separate scope that never touches the drawn name, yet leaves a
+   ``Load`` of it behind.
+3. **Discovery is by decorator NAME only.** ``assert_unaliased_property_imports``
+   fails closed on ``from hypothesis import given as g``, but a module-level
+   rebind (``_g = given``), a local wrapper (``def my_given(**kw): return
+   given(**kw)``), or ``partial(given)`` evade discovery silently. These are
+   deliberate-circumvention shapes and are outside the grammar by
+   construction.
+4. A property constructed by calling ``given(...)(func)`` instead of
+   decorating is outside the grammar; a drawn name shadowed by a nested
+   function's own parameter reads as used; and a name rebound before it is
+   loaded reads as used.
+
+What it does catch, always: a drawn name with no ``Load`` anywhere in the
+body — never mentioned, only ``del``'d, only assigned over.
+
+The fail-closed edge cuts the other way too: ``@given(*strategies)`` and
+``@given(**strategies)`` are unclassifiable with no allowlist escape, so a
+future DRY idiom such as ``@given(**_COMMON_STRATEGIES)`` is a hard build
+break until this audit is extended to map it. That is the intended trade —
+an unmappable decorator must never pass silently.
 """
 
 from __future__ import annotations
 
 import ast
 from dataclasses import dataclass
+import functools
+import inspect
 from pathlib import Path
 import unittest
+
+from hypothesis import strategies as st
+from hypothesis.stateful import invariant
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -112,16 +155,15 @@ _UNALIASABLE_IMPORTS = PROPERTY_DECORATORS | {"invariant"}
 
 _IMPLICIT_FIRST_PARAMETERS = frozenset({"self", "cls"})
 
-# The list is the contract: one line of rationale per entry, keyed by
-# ``<repo-relative path>::<qualname>`` so it survives line shifts.
-PROPERTY_INPUT_ALLOWLIST: dict[str, str] = {
-    "tests/test_quality_generated.py::TestInvariantCheckersTripOnViolations."
-    "test_hypothesis_harness_detects_planted_bad_decider.prop": (
-        "Deliberate known-bad self-test: the planted decider ignores its world, "
-        "so the property must discard its drawn inputs to prove Hypothesis plus "
-        "the checker still trip. Using them would destroy the RED proof."
-    ),
-}
+# EMPTY, and armed — the same ratchet shape as
+# ``WEB_HARNESS_MOCK_BASELINE`` in ``tests/_mock_audit_scanner.py``. The one
+# property that used to flag (the planted-bad-decider self-test in
+# ``tests/test_quality_generated.py``) now passes its world to a decider that
+# ignores it, which models the planted defect more faithfully than discarding
+# the world did. If an entry ever becomes necessary, key it
+# ``<repo-relative path>::<qualname>`` (line shifts must not break it) and give
+# it one line of rationale — the list is the contract.
+PROPERTY_INPUT_ALLOWLIST: dict[str, str] = {}
 
 
 @dataclass(frozen=True)
@@ -267,16 +309,19 @@ def _walk_scopes(
         _walk_scopes(child, qualname, relpath, found)
 
 
-def find_property_functions(source: str, relpath: str) -> tuple[PropertyFunction, ...]:
-    """Return every Hypothesis property declared in one source file."""
+def _find_in_tree(tree: ast.Module, relpath: str) -> tuple[PropertyFunction, ...]:
     found: list[PropertyFunction] = []
-    _walk_scopes(ast.parse(source), "", relpath, found)
+    _walk_scopes(tree, "", relpath, found)
     return tuple(found)
 
 
-def assert_unaliased_property_imports(source: str, relpath: str) -> None:
-    """Reject aliased Hypothesis decorator imports, which evade discovery."""
-    for node in ast.walk(ast.parse(source)):
+def find_property_functions(source: str, relpath: str) -> tuple[PropertyFunction, ...]:
+    """Return every Hypothesis property declared in one source file."""
+    return _find_in_tree(ast.parse(source), relpath)
+
+
+def _check_unaliased_imports(tree: ast.Module, relpath: str) -> None:
+    for node in ast.walk(tree):
         if not isinstance(node, ast.ImportFrom):
             continue
         module = node.module or ""
@@ -290,16 +335,26 @@ def assert_unaliased_property_imports(source: str, relpath: str) -> None:
             )
 
 
+def assert_unaliased_property_imports(source: str, relpath: str) -> None:
+    """Reject aliased Hypothesis decorator imports, which evade discovery."""
+    _check_unaliased_imports(ast.parse(source), relpath)
+
+
+@functools.cache
 def scan_test_tree() -> tuple[PropertyFunction, ...]:
-    """Return every Hypothesis property under ``tests/``, imports checked."""
+    """Return every Hypothesis property under ``tests/``, imports checked.
+
+    Parses each file once and caches the whole sweep: several tests need the
+    live verdict and the tree does not change within a run.
+    """
     found: list[PropertyFunction] = []
     for path in sorted(TESTS_DIR.rglob("*.py")):
         if "__pycache__" in path.parts:
             continue
         relpath = path.relative_to(REPO_ROOT).as_posix()
-        source = path.read_text(encoding="utf-8")
-        assert_unaliased_property_imports(source, relpath)
-        found.extend(find_property_functions(source, relpath))
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        _check_unaliased_imports(tree, relpath)
+        found.extend(_find_in_tree(tree, relpath))
     return tuple(found)
 
 
@@ -338,21 +393,34 @@ def assert_every_drawn_input_used(
 
 
 class TestPropertyInputAudit(unittest.TestCase):
-    def test_live_tree_uses_every_drawn_input_outside_the_allowlist(self) -> None:
+    def test_live_tree_uses_every_drawn_input(self) -> None:
         properties = scan_test_tree()
 
         # A discovery break must not pass vacuously.
         self.assertGreater(len(properties), 300, "property discovery collapsed")
         assert_every_drawn_input_used(properties, PROPERTY_INPUT_ALLOWLIST)
 
-    def test_allowlisted_property_still_discards_its_drawn_inputs(self) -> None:
-        (key,) = PROPERTY_INPUT_ALLOWLIST
+    def test_allowlist_is_an_empty_armed_ratchet(self) -> None:
+        self.assertEqual(
+            PROPERTY_INPUT_ALLOWLIST,
+            {},
+            "the drawn-input allowlist is a permanently empty ratchet: a new "
+            "entry must be keyed '<repo-relative path>::<qualname>' and carry "
+            "one line of rationale, and must be argued for rather than added "
+            "to silence a trip",
+        )
+
+    def test_planted_bad_decider_property_uses_the_world_it_ignores(self) -> None:
+        key = (
+            "tests/test_quality_generated.py::TestInvariantCheckersTripOnViolations."
+            "test_hypothesis_harness_detects_planted_bad_decider.prop"
+        )
         by_key = {prop.key: prop for prop in scan_test_tree()}
 
         self.assertIn(key, by_key)
         self.assertEqual(by_key[key].drawn_inputs, ("album", "download"))
-        self.assertEqual(by_key[key].unused_inputs, ("album", "download"))
-        self.assertEqual(by_key[key].deleted_inputs, ("album", "download"))
+        self.assertEqual(by_key[key].unused_inputs, ())
+        self.assertEqual(by_key[key].deleted_inputs, ())
 
     def test_deleted_drawn_input_is_flagged(self) -> None:
         source = (
@@ -494,12 +562,20 @@ class TestPropertyInputAudit(unittest.TestCase):
     def test_invariant_members_are_deliberately_out_of_scope(self) -> None:
         source = (
             "class Machine(RuleBasedStateMachine):\n"
-            "    @invariant(check_during_reuse=False)\n"
+            "    @invariant(check_during_init=True)\n"
             "    def holds(self):\n"
             "        assert True\n"
         )
 
         self.assertEqual(find_property_functions(source, "tests/test_ok.py"), ())
+
+    def test_invariant_binds_no_strategies_in_the_pinned_hypothesis(self) -> None:
+        """The reason ``@invariant`` is out of scope, checked not asserted."""
+        parameters = inspect.signature(invariant).parameters
+
+        self.assertEqual(list(parameters), ["check_during_init"])
+        with self.assertRaises(TypeError):
+            invariant(world=st.none())  # pyright: ignore[reportCallIssue]
 
     def test_unclassifiable_shapes_fail_closed(self) -> None:
         cases = {
