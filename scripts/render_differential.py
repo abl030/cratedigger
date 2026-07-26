@@ -6,7 +6,7 @@ stays directly testable:
 
 * ``render`` reads a corpus JSONL (one DB row object per line), applies a
   render target, and writes a rendered JSONL: one object per line carrying
-  the row's id and every text-bearing field the target produces.
+  the row's id and every watched output field.
 * ``diff`` reads two rendered JSONL files and reports total rows, changed
   rows, and the changed-row count for EVERY field, plus a bounded sample of
   concrete before/after pairs per field.
@@ -16,11 +16,19 @@ ref out into a ``git worktree``, run ``render`` there, run ``render`` in the
 working tree, then ``diff`` the two outputs. Full recipe in
 ``.claude/rules/test-fidelity.md`` under "Rule D".
 
-Why every field and not just the ones you expect to move: a differential
-that only diffs the fields you already suspected is worthless. Proving the
-other fields are byte-identical is most of the evidence, so the field set is
-derived from the render target's output type by introspection and never
-hand-listed.
+Two rules keep the differential from making the very kind of fluent-but-wrong
+claim it exists to catch:
+
+* **The watched field set is derived and fails CLOSED.** A field is watched
+  unless its declared type is PROVABLY non-text. Nested Structs, ``Any``,
+  and ``object``-valued containers are watched, not skipped — an earlier
+  fail-open version silently left ``comparison_basis`` (a
+  ``dict[str, object]`` carrying eight operator-visible strings) unwatched,
+  so deleting the whole "Compared" evidence row from every card rendered as
+  zero changes.
+* **Nothing text-bearing may escape that set.** Every render checks the
+  unwatched fields for text at runtime and fails closed if any holds a
+  string. The derivation and its converse are checked in both directions.
 """
 
 from __future__ import annotations
@@ -29,7 +37,8 @@ import argparse
 import importlib
 import os
 import sys
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from typing import Protocol, runtime_checkable
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
@@ -38,16 +47,16 @@ if REPO_ROOT not in sys.path:
 import msgspec
 import msgspec.inspect
 
-from lib.json_narrow import is_object_list
+from lib.json_narrow import is_object_list, is_str_object_dict
 from lib.pipeline_db.download_log import _DownloadLogMixin
-from web.classify import ClassifiedEntry, LogEntry, classify_log_entry
+from web.classify import ClassifiedEntry
+from web.routes.pipeline import (
+    _classify_pipeline_log_item,
+    _project_current_library_have,
+    _project_linked_import_evidence,
+)
 
 DEFAULT_SAMPLES_PER_FIELD = 3
-
-# One rendered field value. Text-bearing output is a string, a list of
-# strings, or absent — anything else fails closed at render time rather
-# than being silently stringified into a diff that cannot be read.
-FieldValue = str | list[str] | None
 
 
 class RenderDifferentialError(Exception):
@@ -55,10 +64,15 @@ class RenderDifferentialError(Exception):
 
 
 class RenderedRow(msgspec.Struct, frozen=True):
-    """One corpus row's rendered text, keyed by output field name."""
+    """One corpus row's rendered output, keyed by output field name.
+
+    Values are whatever JSON the renderer produced for a watched field —
+    strings, lists of strings, and the nested objects a field like
+    ``comparison_basis`` carries.
+    """
 
     id: int
-    fields: dict[str, FieldValue]
+    fields: dict[str, object]
 
 
 class FieldChange(msgspec.Struct, frozen=True):
@@ -66,162 +80,314 @@ class FieldChange(msgspec.Struct, frozen=True):
 
     id: int
     field: str
-    base: FieldValue
-    current: FieldValue
+    base: object
+    current: object
 
 
 class DiffReport(msgspec.Struct, frozen=True):
     """The differential: totals, per-field change counts, bounded samples.
 
-    ``changed_by_field`` covers EVERY field in the rendered corpus, zeros
-    included — "badge: 0" is the evidence that badge did not move.
+    ``changed_by_field`` covers EVERY field compared, zeros included —
+    "badge: 0" is the evidence that badge did not move. ``base_only_fields``
+    and ``current_only_fields`` are empty unless the run was explicitly
+    allowed to tolerate a changed output-field set, and name every field
+    that could not be compared.
     """
 
     total_rows: int
     changed_rows: int
     changed_by_field: dict[str, int]
     samples: list[FieldChange]
+    base_only_fields: list[str] = msgspec.field(default_factory=lambda: [])
+    current_only_fields: list[str] = msgspec.field(default_factory=lambda: [])
 
 
-RenderTarget = Callable[[dict[str, object]], RenderedRow]
+@runtime_checkable
+class RenderTarget(Protocol):
+    """A render target: optionally observe the corpus, then render each row."""
+
+    def prepare(self, rows: Iterable[Mapping[str, object]]) -> None:
+        """Observe the whole corpus before rendering (cross-row projections)."""
+
+    def render(self, row: Mapping[str, object]) -> RenderedRow:
+        """Render one corpus row into its watched output fields."""
+        ...
 
 
 # ---------------------------------------------------------------------------
-# Output-field derivation
+# Output-field derivation — fails closed
 # ---------------------------------------------------------------------------
 
-def _mentions_str(field_type: msgspec.inspect.Type) -> bool:
-    """Whether a declared msgspec type carries operator-visible text.
+_NON_TEXT_LEAVES = (
+    msgspec.inspect.IntType,
+    msgspec.inspect.FloatType,
+    msgspec.inspect.BoolType,
+    msgspec.inspect.NoneType,
+    msgspec.inspect.DateTimeType,
+    msgspec.inspect.DateType,
+    msgspec.inspect.TimeType,
+    msgspec.inspect.TimeDeltaType,
+    msgspec.inspect.UUIDType,
+    msgspec.inspect.DecimalType,
+)
 
-    Unions and sequence element types are followed. For mappings only the
-    VALUE type is followed: a JSON object's keys are always strings, so
-    recursing into ``key_type`` would call every dict field text-bearing.
+
+def _provably_non_text(field_type: msgspec.inspect.Type) -> bool:
+    """Whether a declared msgspec type can NEVER carry operator-visible text.
+
+    Deliberately inverted relative to the obvious reading: only the leaf
+    types listed above, and containers built exclusively from them, are
+    provably text-free. Everything else — ``str``, a nested ``Struct``,
+    ``Any``, ``object``, an enum, a type this function has never seen — is
+    watched. Fail-open here is invisible under-reporting, which is the worst
+    failure this tool can have.
     """
-    if isinstance(field_type, msgspec.inspect.StrType):
+    if isinstance(field_type, _NON_TEXT_LEAVES):
         return True
     if isinstance(field_type, msgspec.inspect.UnionType):
-        return any(_mentions_str(member) for member in field_type.types)
-    if isinstance(field_type, msgspec.inspect.ListType):
-        return _mentions_str(field_type.item_type)
-    if isinstance(field_type, msgspec.inspect.SetType):
-        return _mentions_str(field_type.item_type)
-    if isinstance(field_type, msgspec.inspect.VarTupleType):
-        return _mentions_str(field_type.item_type)
+        return all(_provably_non_text(member) for member in field_type.types)
+    if isinstance(field_type, (msgspec.inspect.ListType,
+                               msgspec.inspect.SetType,
+                               msgspec.inspect.FrozenSetType,
+                               msgspec.inspect.VarTupleType)):
+        return _provably_non_text(field_type.item_type)
     if isinstance(field_type, msgspec.inspect.TupleType):
-        return any(_mentions_str(member) for member in field_type.item_types)
+        return all(
+            _provably_non_text(member) for member in field_type.item_types)
     if isinstance(field_type, msgspec.inspect.DictType):
-        return _mentions_str(field_type.value_type)
+        # A JSON object's keys are always strings, so a dict is text-free
+        # only when its keys are not strings AND its values are text-free.
+        return (
+            _provably_non_text(field_type.key_type)
+            and _provably_non_text(field_type.value_type)
+        )
     return False
 
 
-def text_bearing_field_names(
+def _struct_fields(
     struct_type: type[msgspec.Struct],
-) -> tuple[str, ...]:
-    """Every text-bearing field of a render target's output Struct.
-
-    Derived from the declared type, in declaration order — the whole point
-    of the differential is that nobody chooses which fields it watches.
-    """
+) -> tuple[msgspec.inspect.Field, ...]:
     info = msgspec.inspect.type_info(struct_type)
     if not isinstance(info, msgspec.inspect.StructType):
         raise RenderDifferentialError(
             f"{struct_type.__name__} is not a msgspec Struct type")
+    return tuple(info.fields)
+
+
+def watched_field_names(
+    struct_type: type[msgspec.Struct],
+) -> tuple[str, ...]:
+    """Every field of a render target's output Struct that may carry text.
+
+    Derived from the declared types, in declaration order — the whole point
+    of the differential is that nobody chooses which fields it watches.
+    """
     return tuple(
-        field.encode_name for field in info.fields if _mentions_str(field.type)
+        field.encode_name for field in _struct_fields(struct_type)
+        if not _provably_non_text(field.type)
     )
 
 
-def _text_value(field: str, value: object) -> FieldValue:
-    """Narrow one rendered value, failing closed on anything untextual."""
-    if value is None or isinstance(value, str):
+def unwatched_field_names(
+    struct_type: type[msgspec.Struct],
+) -> tuple[str, ...]:
+    """The complement of :func:`watched_field_names` on the same Struct."""
+    return tuple(
+        field.encode_name for field in _struct_fields(struct_type)
+        if _provably_non_text(field.type)
+    )
+
+
+def contains_text(value: object) -> bool:
+    """Whether an already-rendered JSON value exposes operator-visible text.
+
+    A string is text; so is any non-empty mapping, because a JSON object's
+    keys are themselves rendered text. An empty container is not.
+    """
+    if isinstance(value, str):
+        return True
+    if is_object_list(value):
+        return any(contains_text(item) for item in value)
+    if is_str_object_dict(value):
+        return bool(value)
+    return False
+
+
+def _json_plain(field: str, value: object) -> object:
+    """Validate one rendered value is plain JSON, failing closed otherwise."""
+    if value is None or isinstance(value, (str, bool, int, float)):
         return value
     if is_object_list(value):
-        items: list[str] = []
-        for item in value:
-            if not isinstance(item, str):
-                raise RenderDifferentialError(
-                    f"field {field!r} rendered a non-text list item: "
-                    f"{type(item).__name__}")
-            items.append(item)
-        return items
+        return [_json_plain(field, item) for item in value]
+    if is_str_object_dict(value):
+        return {key: _json_plain(field, item) for key, item in value.items()}
     raise RenderDifferentialError(
-        f"field {field!r} rendered a non-text value: {type(value).__name__}")
+        f"field {field!r} rendered a non-JSON value: {type(value).__name__}")
 
 
-def rendered_fields(
-    output: msgspec.Struct, names: Sequence[str],
-) -> dict[str, FieldValue]:
-    """Project a render target's output Struct onto its text fields."""
-    payload: dict[str, object] = msgspec.to_builtins(output)
-    return {name: _text_value(name, payload[name]) for name in names}
+def project_output_fields(
+    item: Mapping[str, object],
+    watched: Sequence[str],
+    unwatched: Sequence[str],
+) -> dict[str, object]:
+    """Project a rendered item onto its watched fields, converse-checked.
+
+    The converse is the half that matters: if any field the derivation
+    decided to IGNORE holds text at runtime, the derivation is wrong and
+    this render fails rather than under-reporting.
+    """
+    for name in unwatched:
+        if name in item and contains_text(item[name]):
+            raise RenderDifferentialError(
+                f"unwatched field {name!r} rendered text ({item[name]!r}): "
+                "the watched-field derivation missed operator-facing copy")
+    missing = [name for name in watched if name not in item]
+    if missing:
+        raise RenderDifferentialError(
+            f"rendered item is missing watched fields: {missing}")
+    return {name: _json_plain(name, item[name]) for name in watched}
 
 
 # ---------------------------------------------------------------------------
 # Render targets
 # ---------------------------------------------------------------------------
 
-_CLASSIFIED_TEXT_FIELDS = text_bearing_field_names(ClassifiedEntry)
+_CLASSIFIED_WATCHED = watched_field_names(ClassifiedEntry)
+_CLASSIFIED_UNWATCHED = unwatched_field_names(ClassifiedEntry)
 
 
-def classify_render_target(row: dict[str, object]) -> RenderedRow:
-    """Render one ``download_log`` row exactly as Recents renders it.
+class ClassifyRenderTarget:
+    """Render a ``download_log`` row through the whole Recents render path.
 
-    The corpus rows come from the production read seam's SELECT, so the
-    production evidence overlay runs here too — otherwise every row whose
-    measurement lives on ``album_quality_evidence`` would be rendered from
-    NULL denorm columns and the differential would under-cover the fields
-    that matter most.
+    Recents does not stop at ``classify_log_entry``. The route continues
+    through two more production projections that overwrite watched text
+    fields, so both run here — by CALLING production, never by copying it:
+
+    * ``_project_current_library_have`` selects a provably pre-attempt HAVE
+      snapshot from the ``_current_evidence_*`` aliases, overwriting
+      ``existing_format`` / ``existing_spectral_grade`` /
+      ``existing_v0_probe_kind`` / ``existing_spectral_error`` and their
+      numeric siblings. Its third parameter is deliberately unused by
+      production, so the empty mapping passed here is not a simplification.
+    * ``_project_linked_import_evidence`` back-fills ``existing_*``,
+      ``materialized_*`` and ``target_contract_format`` from a successor
+      import that points back through ``source_download_log_id``.
+
+    The second one is cross-row, which is why this target has a ``prepare``
+    pass: it indexes every corpus row that points back at another row, by
+    that target id. That index is purely structural — the join key, no
+    policy — so production's own filters still decide which successors
+    count. Production computes an origin's successor set as the page's own
+    rows plus ``get_linked_import_logs`` over the page's ids, which is
+    exactly "every successor of this origin"; feeding the real function one
+    origin plus that origin's successors is the same computation, and
+    ``tests/test_render_differential.py`` pins the equivalence against a
+    whole-set call.
+
+    Successors are classified with the same evidence overlay as any other
+    corpus row. Production's separate successor query does not carry that
+    overlay, but the two are indistinguishable here: the overlay writes
+    only ``source_*`` / ``spectral_*`` / ``v0_probe_*``, and the back-fill
+    copies only ``existing_*`` / ``materialized_*`` /
+    ``target_contract_format`` — disjoint key sets.
     """
-    row_id = row.get("id")
-    if not isinstance(row_id, int) or isinstance(row_id, bool):
-        raise RenderDifferentialError(
-            f"corpus row has no integer id: {row_id!r}")
-    overlaid = _DownloadLogMixin._overlay_evidence_onto_download_log_row(
-        dict(row))
-    classified = classify_log_entry(LogEntry.from_row(overlaid))
-    return RenderedRow(
-        id=row_id,
-        fields=rendered_fields(classified, _CLASSIFIED_TEXT_FIELDS),
-    )
+
+    def __init__(self) -> None:
+        self._successors: dict[int, list[dict[str, object]]] = {}
+
+    def prepare(self, rows: Iterable[Mapping[str, object]]) -> None:
+        self._successors = {}
+        for row in rows:
+            source_id = row.get("source_download_log_id")
+            if not isinstance(source_id, int) or isinstance(source_id, bool):
+                continue
+            overlaid = (
+                _DownloadLogMixin._overlay_evidence_onto_download_log_row(
+                    dict(row)))
+            self._successors.setdefault(source_id, []).append(
+                _classify_pipeline_log_item(overlaid))
+
+    def render(self, row: Mapping[str, object]) -> RenderedRow:
+        row_id = row.get("id")
+        if not isinstance(row_id, int) or isinstance(row_id, bool):
+            raise RenderDifferentialError(
+                f"corpus row has no integer id: {row_id!r}")
+        # The corpus is the production read seam's SELECT, so the production
+        # evidence overlay runs first — otherwise every row whose
+        # measurement lives on album_quality_evidence would be rendered from
+        # NULL denorm columns.
+        overlaid = _DownloadLogMixin._overlay_evidence_onto_download_log_row(
+            dict(row))
+        item = _classify_pipeline_log_item(overlaid)
+        _project_current_library_have(item, overlaid, {})
+        _project_linked_import_evidence(
+            [item], self._successors.get(row_id, []))
+        return RenderedRow(
+            id=row_id,
+            fields=project_output_fields(
+                item, _CLASSIFIED_WATCHED, _CLASSIFIED_UNWATCHED),
+        )
 
 
-DEFAULT_TARGET_SPEC = "scripts.render_differential:classify_render_target"
+class _CallableTarget:
+    """Adapter so ``--target module:function`` can stay a plain function."""
+
+    def __init__(
+        self, spec: str, render_one: Callable[..., object],
+    ) -> None:
+        self._spec = spec
+        self._render_one = render_one
+
+    def prepare(self, rows: Iterable[Mapping[str, object]]) -> None:
+        """A plain function target has no cross-row state to build."""
+
+    def render(self, row: Mapping[str, object]) -> RenderedRow:
+        rendered = self._render_one(row)
+        if not isinstance(rendered, RenderedRow):
+            raise RenderDifferentialError(
+                f"render target {self._spec!r} returned "
+                f"{type(rendered).__name__}, expected RenderedRow")
+        return rendered
+
+
+DEFAULT_TARGET_SPEC = "scripts.render_differential:ClassifyRenderTarget"
 
 
 def load_render_target(spec: str | None) -> RenderTarget:
-    """Resolve a ``module:function`` render target, or the classify default.
+    """Resolve a ``module:attribute`` render target, or the classify default.
 
-    The default is returned as the module-local object rather than being
+    The default is constructed from the module-local class rather than
     imported by dotted path: this file is normally executed as a script, so
     importing ``scripts.render_differential`` would load a second copy of
     this module under a different name.
+
+    The attribute may be a ``RenderTarget`` class, a ready ``RenderTarget``
+    instance, or a plain ``row -> RenderedRow`` function.
     """
     if spec is None or spec == DEFAULT_TARGET_SPEC:
-        return classify_render_target
+        return ClassifyRenderTarget()
     module_name, _, attribute = spec.partition(":")
     if not module_name or not attribute:
         raise RenderDifferentialError(
-            f"render target must be 'module:function', got {spec!r}")
+            f"render target must be 'module:attribute', got {spec!r}")
     try:
         module = importlib.import_module(module_name)
     except ImportError as exc:
         raise RenderDifferentialError(
             f"render target module {module_name!r} is not importable: {exc}"
         ) from exc
-    target = getattr(module, attribute, None)
-    if target is None or not callable(target):
+    resolved = getattr(module, attribute, None)
+    if resolved is None:
         raise RenderDifferentialError(
-            f"render target {spec!r} is not a callable")
-
-    def render_one(row: dict[str, object]) -> RenderedRow:
-        rendered = target(row)
-        if not isinstance(rendered, RenderedRow):
-            raise RenderDifferentialError(
-                f"render target {spec!r} returned "
-                f"{type(rendered).__name__}, expected RenderedRow")
-        return rendered
-
-    return render_one
+            f"render target {spec!r} does not exist")
+    if isinstance(resolved, type):
+        resolved = resolved()
+    if isinstance(resolved, RenderTarget):
+        return resolved
+    if callable(resolved):
+        return _CallableTarget(spec, resolved)
+    raise RenderDifferentialError(
+        f"render target {spec!r} is neither a RenderTarget nor a callable")
 
 
 # ---------------------------------------------------------------------------
@@ -250,8 +416,8 @@ def _sample_ids(ids: Iterable[int], limit: int = 5) -> str:
 
 def _side_field_set(
     rows: Sequence[RenderedRow], side: str,
-) -> frozenset[str] | None:
-    """The one field set every row on a side must carry, or None if empty."""
+) -> frozenset[str]:
+    """The one field set every row on a side must carry."""
     expected: frozenset[str] | None = None
     for row in rows:
         names = frozenset(row.fields)
@@ -262,22 +428,7 @@ def _side_field_set(
                 f"{side} corpus row {row.id} has a different field set: "
                 f"missing {sorted(expected - names)}, "
                 f"extra {sorted(names - expected)}")
-    return expected
-
-
-def _require_stable_field_set(
-    base: Sequence[RenderedRow], current: Sequence[RenderedRow],
-) -> tuple[str, ...]:
-    base_fields = _side_field_set(base, "base")
-    current_fields = _side_field_set(current, "current")
-    if base_fields is None and current_fields is None:
-        return ()
-    if base_fields != current_fields:
-        raise RenderDifferentialError(
-            "rendered field sets differ between base and current: "
-            f"base-only {sorted((base_fields or frozenset()) - (current_fields or frozenset()))}, "
-            f"current-only {sorted((current_fields or frozenset()) - (base_fields or frozenset()))}")
-    return tuple(sorted(base_fields or frozenset()))
+    return expected if expected is not None else frozenset()
 
 
 def summarize_render_diff(
@@ -285,6 +436,7 @@ def summarize_render_diff(
     current: Sequence[RenderedRow],
     *,
     samples_per_field: int = DEFAULT_SAMPLES_PER_FIELD,
+    allow_field_drift: bool = False,
 ) -> DiffReport:
     """Compare two rendered corpora, field by field, over the same row ids.
 
@@ -292,6 +444,10 @@ def summarize_render_diff(
     on one side only, a repeated id, or a field set that drifted between
     the two renders. Skipping any of those silently is exactly how a
     changed row goes unreported.
+
+    ``allow_field_drift`` is the one sanctioned relaxation, for the PR shape
+    that adds or removes an output field: the shared fields are compared and
+    the unshared ones are named in the report, never dropped quietly.
     """
     if samples_per_field < 0:
         raise ValueError("samples_per_field must be non-negative")
@@ -304,18 +460,28 @@ def summarize_render_diff(
             "rendered corpora cover different rows: "
             f"missing from current [{_sample_ids(missing)}], "
             f"absent from base [{_sample_ids(extra)}]")
-    field_names = _require_stable_field_set(base, current)
+    base_fields = _side_field_set(base, "base")
+    current_fields = _side_field_set(current, "current")
+    base_only = sorted(base_fields - current_fields)
+    current_only = sorted(current_fields - base_fields)
+    if (base_only or current_only) and not allow_field_drift:
+        raise RenderDifferentialError(
+            "rendered field sets differ between base and current: "
+            f"base-only {base_only}, current-only {current_only}. "
+            "Re-run with --allow-field-drift to compare the shared fields "
+            "and have the unshared ones named in the report.")
+    field_names = tuple(sorted(base_fields & current_fields))
 
     counts = {name: 0 for name in field_names}
     sampled = {name: 0 for name in field_names}
     samples: list[FieldChange] = []
     changed_rows = 0
     for row_id in sorted(base_by_id):
-        base_fields = base_by_id[row_id].fields
-        current_fields = current_by_id[row_id].fields
+        base_row = base_by_id[row_id].fields
+        current_row = current_by_id[row_id].fields
         row_changed = False
         for name in field_names:
-            if base_fields[name] == current_fields[name]:
+            if base_row[name] == current_row[name]:
                 continue
             row_changed = True
             counts[name] += 1
@@ -324,8 +490,8 @@ def summarize_render_diff(
                 samples.append(FieldChange(
                     id=row_id,
                     field=name,
-                    base=base_fields[name],
-                    current=current_fields[name],
+                    base=base_row[name],
+                    current=current_row[name],
                 ))
         if row_changed:
             changed_rows += 1
@@ -335,6 +501,8 @@ def summarize_render_diff(
         changed_rows=changed_rows,
         changed_by_field=dict(sorted(counts.items())),
         samples=samples,
+        base_only_fields=base_only,
+        current_only_fields=current_only,
     )
 
 
@@ -343,8 +511,12 @@ def format_report(report: DiffReport) -> str:
     lines = [
         f"rows: {report.total_rows}",
         f"changed rows: {report.changed_rows}",
-        "changed rows by field:",
     ]
+    if report.base_only_fields or report.current_only_fields:
+        lines.append(
+            f"NOT COMPARED — base only: {report.base_only_fields}, "
+            f"current only: {report.current_only_fields}")
+    lines.append("changed rows by field:")
     width = max((len(name) for name in report.changed_by_field), default=0)
     for name, count in report.changed_by_field.items():
         lines.append(f"  {name.ljust(width)}  {count}")
@@ -375,8 +547,8 @@ def _corpus_rows(path: str) -> Iterator[dict[str, object]]:
                 yield msgspec.json.decode(line, type=dict[str, object])
             except (msgspec.DecodeError, msgspec.ValidationError) as exc:
                 raise RenderDifferentialError(
-                    f"{path}:{line_number}: corpus line is not a JSON object: {exc}"
-                ) from exc
+                    f"{path}:{line_number}: corpus line is not a JSON object: "
+                    f"{exc}") from exc
 
 
 def read_rendered(path: str) -> list[RenderedRow]:
@@ -390,20 +562,27 @@ def read_rendered(path: str) -> list[RenderedRow]:
                 rows.append(msgspec.json.decode(line, type=RenderedRow))
             except (msgspec.DecodeError, msgspec.ValidationError) as exc:
                 raise RenderDifferentialError(
-                    f"{path}:{line_number}: not a rendered row: {exc}") from exc
+                    f"{path}:{line_number}: not a rendered row: {exc}"
+                ) from exc
     return rows
 
 
 def render_corpus(
     corpus_path: str, out_path: str | None, target: RenderTarget,
 ) -> int:
-    """Render every corpus row, streaming so a large corpus stays bounded."""
+    """Render every corpus row.
+
+    Two passes over the file: the target observes the whole corpus first
+    (cross-row projections need that), then rows stream through the
+    renderer so a large corpus stays memory-bounded.
+    """
+    target.prepare(_corpus_rows(corpus_path))
     handle = sys.stdout if out_path is None else open(
         out_path, "w", encoding="utf-8")
     count = 0
     try:
         for row in _corpus_rows(corpus_path):
-            handle.write(msgspec.json.encode(target(row)).decode())
+            handle.write(msgspec.json.encode(target.render(row)).decode())
             handle.write("\n")
             count += 1
     finally:
@@ -442,7 +621,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Rendered JSONL output path (default: stdout)")
     render.add_argument(
         "--target", default=None,
-        help=f"Render target as module:function (default: {DEFAULT_TARGET_SPEC})")
+        help=f"Render target as module:attribute (default: {DEFAULT_TARGET_SPEC})")
 
     diff = sub.add_parser(
         "diff", help="Compare two rendered JSONL files field by field")
@@ -451,6 +630,10 @@ def _build_parser() -> argparse.ArgumentParser:
     diff.add_argument(
         "--samples", type=_non_negative_int, default=DEFAULT_SAMPLES_PER_FIELD,
         help="Concrete before/after pairs to show per changed field")
+    diff.add_argument(
+        "--allow-field-drift", action="store_true",
+        help=("Compare the shared fields when the output field set changed, "
+              "naming the unshared fields in the report"))
     diff.add_argument(
         "--json", action="store_true", help="Print the report as JSON")
     return parser
@@ -468,6 +651,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             read_rendered(args.base),
             read_rendered(args.current),
             samples_per_field=args.samples,
+            allow_field_drift=args.allow_field_drift,
         )
         if args.json:
             print(msgspec.json.encode(report).decode())

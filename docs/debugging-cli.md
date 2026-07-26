@@ -174,12 +174,16 @@ old renderer vs new, over the whole corpus, reporting changed-row counts by
 changed field. `scripts/render_differential.py` is that harness. This section
 owns the one step that needs live-DB access — exporting the corpus.
 
-The corpus is **one JSON row object per line**, in the shape the production
-read seam hands the renderer. For the default classify target that is
-`lib/pipeline_db/download_log.py::get_log`'s SELECT: `download_log`, its
-candidate-evidence overlay aliases (the harness applies the production
-overlay itself), the originating row's distance, and the joined
-`album_requests` fields.
+The corpus is **one JSON row object per line, in the exact shape the
+production read seam hands the renderer** — that is the whole fidelity
+claim, so it is copied from `lib/pipeline_db/download_log.py::get_log`'s
+unfiltered SELECT rather than trimmed to what looks needed. Both evidence
+joins are load-bearing: the candidate-evidence aliases (`_evidence_*`, which
+the harness feeds to the production overlay) and the **current-evidence
+aliases (`_current_evidence_*`), which `_project_current_library_have` reads
+to overwrite `existing_format` and its siblings on 2,603 of 36,312 live
+rows**. Dropping them does not fail — it silently renders four watched text
+fields against values production never shows.
 
 ```bash
 ssh doc2 'export PGPASSWORD=$(sudo cat /run/secrets/cratedigger-pgpass | grep "^PGPASSWORD=" | cut -d= -f2); pipeline-cli query --json -' <<'SQL' > /tmp/corpus.json
@@ -195,18 +199,40 @@ SELECT dl.*,
        e.v0_min_bitrate_kbps AS _evidence_v0_probe_min_bitrate,
        e.v0_avg_bitrate_kbps AS _evidence_v0_probe_avg_bitrate,
        e.v0_median_bitrate_kbps AS _evidence_v0_probe_median_bitrate,
+       current_evidence.id AS _current_evidence_id,
+       (current_evidence.measured_at <= dl.created_at)
+           AS _current_evidence_is_pre_attempt,
+       current_evidence.format AS _current_evidence_format,
+       current_evidence.min_bitrate_kbps AS _current_evidence_min_bitrate,
+       current_evidence.avg_bitrate_kbps AS _current_evidence_avg_bitrate,
+       current_evidence.median_bitrate_kbps AS _current_evidence_median_bitrate,
+       current_evidence.spectral_grade AS _current_evidence_spectral_grade,
+       current_evidence.spectral_bitrate_kbps AS _current_evidence_spectral_bitrate,
+       current_evidence.v0_subject AS _current_evidence_v0_probe_kind,
+       current_evidence.v0_min_bitrate_kbps AS _current_evidence_v0_probe_min_bitrate,
+       current_evidence.v0_avg_bitrate_kbps AS _current_evidence_v0_probe_avg_bitrate,
+       current_evidence.v0_median_bitrate_kbps AS _current_evidence_v0_probe_median_bitrate,
        origin.beets_distance AS original_beets_distance,
        ar.album_title, ar.artist_name, ar.mb_release_id,
-       ar.status AS request_status, ar.min_bitrate AS request_min_bitrate,
-       ar.search_filetype_override, ar.source AS request_source
+       ar.year, ar.country, ar.status AS request_status,
+       ar.min_bitrate AS request_min_bitrate,
+       ar.prev_min_bitrate, ar.search_filetype_override,
+       ar.source AS request_source
 FROM download_log dl
 LEFT JOIN album_quality_evidence e ON e.id = dl.candidate_evidence_id
 LEFT JOIN download_log origin ON origin.id = dl.source_download_log_id
 JOIN album_requests ar ON dl.request_id = ar.id
+LEFT JOIN album_quality_evidence current_evidence
+    ON current_evidence.id = ar.current_evidence_id
 WHERE dl.id > 0 AND dl.id <= 4000
 ORDER BY dl.id;
 SQL
 ```
+
+**Export the whole table, not a filtered slice.** The classify target's
+`prepare` pass indexes every row that points back at another through
+`source_download_log_id`, so a successor import outside the export would
+silently drop the linked-evidence back-fill that production performs.
 
 `pipeline-cli query --json` prints one indented JSON array, so a whole-table
 export is hundreds of megabytes in a single payload. **Batch it by id** — the

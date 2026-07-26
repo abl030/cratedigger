@@ -190,21 +190,46 @@ nix-shell --run "python3 scripts/render_differential.py diff \
 
 The harness never does git surgery: the two-render dance is the runbook's
 job, which is also what keeps both modes directly testable. `--target
-module:function` renders through something other than the default classify
-adapter. If the base ref predates the harness, copy
+module:attribute` renders through something other than the default classify
+target. If the base ref predates the harness, copy
 `scripts/render_differential.py` into the base worktree first — each side
 still renders with its own tree's renderer. An agent working in an isolated
 worktree can materialize the base tree with
 `git archive <base-ref> | tar -x -C /tmp/rd-base` instead of `git worktree
 add`; the render step is identical.
 
-**Read the zeros, not just the changes.** The watched field set is derived
-from the render target's output type, never hand-listed, precisely so the
-report can prove the fields you did NOT expect to move did not move.
+**When the PR adds or removes an output field**, the run correctly fails
+closed: the base tree cannot produce the new field, so the two field sets
+differ. That is not a reason to skip the differential. Re-run the `diff`
+with `--allow-field-drift`: the shared fields are compared as usual and the
+unshared ones are printed under `NOT COMPARED` and carried in the report's
+`base_only_fields` / `current_only_fields`. Say in the PR body which field
+was added and that it had no base value to compare.
+
+**Read the zeros, but only after checking what produced them.** A zero is
+evidence only if the field was actually watched and actually rendered by
+the production path. Both halves have failed in review:
+
+- The watched set is derived from the render target's output type and
+  **fails closed** — a field is unwatched only when its declared type is
+  provably numeric/boolean/null. An earlier fail-open version skipped
+  `comparison_basis` (`dict[str, object]`, eight operator-visible strings
+  behind the card's "Compared" row), so nulling every basis on the whole
+  live corpus reported **0 changed rows**. Every render now also checks the
+  converse — no unwatched field may hold text at runtime — and fails
+  closed if one does.
+- The render target must be the **whole** production render path, not its
+  first stage. Recents continues past `classify_log_entry` through
+  `_project_current_library_have` and `_project_linked_import_evidence`,
+  which overwrite watched text fields on thousands of live rows. A target
+  that stops early reports zeros measured against values production never
+  shows. If you add a render target, call every production stage; do not
+  reimplement one.
+
 #885's differential is the shape to copy: 36,303 rows, 173 changed, every
 one in `verdict` + `summary`, with `badge` / `badge_class` /
 `border_color` / `downloaded_label` byte-identical. Half that evidence is
-in the four zeros.
+in the four zeros — which is exactly why a zero has to be earned.
 
 **What this catches:** copy keyed on a scenario no producer emits reports
 0 changed rows — a fluent sentence nothing can reach, which is exactly the
