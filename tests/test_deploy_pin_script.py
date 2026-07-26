@@ -305,8 +305,9 @@ class TestDeployPinScript(unittest.TestCase):
         parent = state["commits"][pending]["parent"]
         self.assertNotEqual(first.returncode, 0)
 
+        incompatible_target = "7" * 40
         self.fake.update_state(fault=None, remote_rev=self.fake.OTHER_REV,
-                               remote_target=self.fake.OLD_TARGET)
+                               remote_target=incompatible_target)
         second = self.fake.run(SCRIPT)
         self.assertNotEqual(second.returncode, 0)
         self.assertIn(f"pending={pending}", second.stderr)
@@ -332,6 +333,65 @@ class TestDeployPinScript(unittest.TestCase):
         self.assertEqual(
             sum(event[0] == "push" for event in state["events"]), 1
         )
+
+    def test_equivalent_sibling_same_target_reports_current_signed_remote(
+        self,
+    ) -> None:
+        receipt = self.fake.seed_divergent_receipt(
+            receipt_target=self.fake.TARGET_REV,
+            remote_target=self.fake.TARGET_REV,
+        )
+
+        proc = self.fake.run(SCRIPT)
+        state = self.fake.state
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(state["receipt_rev"], receipt)
+        self.assertEqual(state["commit_count"], 0)
+        self.assertFalse(any(event[0] == "push" for event in state["events"]))
+        self.assertIn("remote preserves pending target", proc.stdout)
+
+    def test_retry_replaces_candidate_rejected_after_equivalence_check(self) -> None:
+        for move_hook in (
+            "remote_move_on_worktree_add",
+            "remote_move_on_nix",
+            "remote_move_on_push",
+        ):
+            with self.subTest(move_hook=move_hook), tempfile.TemporaryDirectory() as td:
+                fake = FakeDeployPinCommands(Path(td))
+                stale_receipt = fake.seed_divergent_receipt()
+                fake.update_state(**{move_hook: True})
+
+                first = fake.run(SCRIPT)
+                rejected_candidate = fake.state["receipt_rev"]
+
+                self.assertNotEqual(first.returncode, 0)
+                self.assertNotEqual(rejected_candidate, stale_receipt)
+                self.assertEqual(fake.state["remote_rev"], "6" * 40)
+                self.assertEqual(fake.state["commit_count"], 1)
+                self.assertEqual(
+                    fake.state["commits"][rejected_candidate]["parent"],
+                    fake.OTHER_REV,
+                )
+
+                fake.update_state(**{move_hook: False})
+                retry = fake.run(SCRIPT)
+                state = fake.state
+
+                self.assertEqual(retry.returncode, 0, retry.stderr)
+                self.assertEqual(state["commit_count"], 2)
+                self.assertEqual(state["receipt_rev"], state["remote_rev"])
+                self.assertNotEqual(state["receipt_rev"], rejected_candidate)
+                self.assertEqual(
+                    state["commits"][state["receipt_rev"]]["parent"], "6" * 40
+                )
+                receipt_updates = [
+                    event for event in state["events"]
+                    if event[:2] == [
+                        "update-ref", "refs/cratedigger-deploy/cratedigger-src"
+                    ]
+                ]
+                self.assertEqual(receipt_updates[-1][3], rejected_candidate)
 
     def test_divergent_receipt_fails_closed_without_equivalent_verified_remote(
         self,

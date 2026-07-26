@@ -15,7 +15,7 @@ INTENDED_REV=''
 INTENDED_TARGET=''
 INTENDED_BASE=''
 PENDING_BASE=''
-EQUIVALENT_REMOTE_TARGET=''
+VERIFIED_REMOTE_TARGET=''
 
 die() {
   printf 'pin-nixosconfig: ERROR: %s\n' "$*" >&2
@@ -161,20 +161,16 @@ verify_pin_commit() {
   VERIFIED_PARENT=$parent
 }
 
-remote_preserves_verified_receipt_target() {
-  local remote_revision=$1 receipt_revision=$2 receipt_target=$3
-  local receipt_parent=$4 requested_target=$5 remote_target
-
+verify_stable_remote_pin() {
+  local remote_revision=$1 remote_target
   verify_ssh_signature "$remote_revision" || return $?
   if ! remote_target=$(commit_locked_revision "$remote_revision"); then
     die "could not read cratedigger-src lock from remote revision $remote_revision"
     return 1
   fi
-  if [[ "$remote_target" != "$receipt_target" ]]; then
-    die "different pin is still pending: requested=$requested_target pending_target=$receipt_target pending=$receipt_revision base=$receipt_parent remote=$remote_revision"
-    return 2
-  fi
-  EQUIVALENT_REMOTE_TARGET=$remote_target
+  [[ "$(remote_master_with_token)" == "$remote_revision" ]] \
+    || die "Forgejo master changed while confirming remote pin: fetched=$remote_revision"
+  VERIFIED_REMOTE_TARGET=$remote_target
 }
 
 forgejo_with_token() (
@@ -241,7 +237,8 @@ push_and_verify_with_token() {
 
 main() {
   local target_revision commit_message remote_revision receipt_revision=''
-  local pending_revision='' remote_target status_output previous_receipt=''
+  local pending_revision='' remote_target receipt_parent_target status_output
+  local previous_receipt=''
   local candidate_revision git_common_dir origin_url verification_rc
   local fetch_url_output push_url_output
   local -a fetch_urls push_urls
@@ -352,37 +349,49 @@ main() {
       fi
       if git -C "$NIXOSCONFIG_REPO" merge-base --is-ancestor \
         "$receipt_revision" "$remote_revision"; then
-        remote_target=$(commit_locked_revision "$remote_revision")
-        [[ "$remote_target" == "$target_revision" ]] \
-          || die "Forgejo advanced past pending=$receipt_revision but no longer pins target=$target_revision (remote=$remote_revision remote_target=$remote_target)"
-        verify_ssh_signature "$remote_revision"
+        verify_stable_remote_pin "$remote_revision"
+        [[ "$VERIFIED_REMOTE_TARGET" == "$target_revision" ]] \
+          || die "Forgejo advanced past pending=$receipt_revision but no longer pins target=$target_revision (remote=$remote_revision remote_target=$VERIFIED_REMOTE_TARGET)"
         printf 'remote contains pending revision: %s current=%s\n' \
           "$receipt_revision" "$remote_revision"
         printf 'signed nixosconfig revision: %s\n' "$remote_revision"
         return 0
       fi
-      if [[ "$remote_revision" != "$VERIFIED_PARENT" ]]; then
+      if [[ "$remote_revision" == "$VERIFIED_PARENT" ]]; then
+        push_and_verify_with_token "$receipt_revision"
+        printf 'signed nixosconfig revision: %s\n' "$receipt_revision"
+        return 0
+      fi
+      verify_stable_remote_pin "$remote_revision"
+      if [[ "$VERIFIED_REMOTE_TARGET" == "$target_revision" ]]; then
+        printf 'remote preserves pending target: %s current=%s\n' \
+          "$receipt_revision" "$remote_revision"
+        printf 'signed nixosconfig revision: %s\n' "$remote_revision"
+        return 0
+      fi
+      if ! receipt_parent_target=$(commit_locked_revision "$VERIFIED_PARENT"); then
+        die "could not read cratedigger-src lock from receipt parent $VERIFIED_PARENT"
+        return 1
+      fi
+      if [[ "$VERIFIED_REMOTE_TARGET" != "$receipt_parent_target" ]]; then
         die "incompatible remote advancement: pending=$receipt_revision base=$VERIFIED_PARENT remote=$remote_revision"
       fi
-      push_and_verify_with_token "$receipt_revision"
-      printf 'signed nixosconfig revision: %s\n' "$receipt_revision"
-      return 0
-    fi
-
-    remote_revision=$(remote_master_with_token)
-    if [[ "$remote_revision" != "$receipt_revision" ]] \
-      && ! git -C "$NIXOSCONFIG_REPO" merge-base --is-ancestor \
-        "$receipt_revision" "$remote_revision"; then
-      remote_preserves_verified_receipt_target \
-        "$remote_revision" "$receipt_revision" "$VERIFIED_TARGET" \
-        "$VERIFIED_PARENT" "$target_revision"
-      [[ "$(remote_master_with_token)" == "$remote_revision" ]] \
-        || die "Forgejo master changed while confirming equivalent receipt: fetched=$remote_revision"
+      printf 'replacing rejected pending revision: %s base=%s remote=%s\n' \
+        "$receipt_revision" "$VERIFIED_PARENT" "$remote_revision"
+    else
+      remote_revision=$(remote_master_with_token)
+      if [[ "$remote_revision" != "$receipt_revision" ]] \
+        && ! git -C "$NIXOSCONFIG_REPO" merge-base --is-ancestor \
+          "$receipt_revision" "$remote_revision"; then
+        verify_stable_remote_pin "$remote_revision"
+        [[ "$VERIFIED_REMOTE_TARGET" == "$VERIFIED_TARGET" ]] \
+          || die "different pin is still pending: requested=$target_revision pending_target=$VERIFIED_TARGET pending=$receipt_revision base=$VERIFIED_PARENT remote=$remote_revision"
+      fi
     fi
   fi
 
-  if [[ -n "$EQUIVALENT_REMOTE_TARGET" ]]; then
-    remote_target=$EQUIVALENT_REMOTE_TARGET
+  if [[ -n "$VERIFIED_REMOTE_TARGET" ]]; then
+    remote_target=$VERIFIED_REMOTE_TARGET
   else
     remote_target=$(commit_locked_revision "$remote_revision")
   fi

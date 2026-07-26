@@ -47,6 +47,36 @@ def lock_payload(revision):
     }) + "\n"
 
 
+def live_remote_object():
+    return {
+        "parent": state["remote_parent"],
+        "target": state["remote_target"],
+        "signature_status": state["remote_signature_status"],
+        "lock_readable": state["remote_lock_readable"],
+    }
+
+
+def capture_live_remote():
+    revision = state["remote_rev"]
+    state["remote_objects"][revision] = live_remote_object()
+    state["captured_objects"][revision] = dict(state["remote_objects"][revision])
+    state["fetched_rev"] = revision
+    return revision
+
+
+def move_live_remote():
+    state["remote_rev"] = state["moved_remote_rev"]
+    state["remote_parent"] = state["moved_remote_parent"]
+    state["remote_target"] = state["moved_remote_target"]
+    state["remote_signature_status"] = state["moved_remote_signature_status"]
+    state["remote_lock_readable"] = state["moved_remote_lock_readable"]
+    state["remote_objects"][state["remote_rev"]] = live_remote_object()
+
+
+def captured_object(revision):
+    return state["commits"].get(revision) or state["captured_objects"].get(revision)
+
+
 state["argv_calls"].append([command, *raw_args])
 
 if (
@@ -74,6 +104,8 @@ if command == "nix":
         fail("fake nix update failed")
     if raw_args != ["flake", "update", "cratedigger-src"]:
         fail(f"unexpected nix argv: {raw_args!r}")
+    if state["remote_move_on_nix"]:
+        move_live_remote()
     Path.cwd().joinpath("flake.lock").write_text(
         lock_payload(os.environ["DEPLOY_PIN_FAKE_TARGET"]),
         encoding="utf-8",
@@ -91,7 +123,7 @@ if args[:1] == ["-C"]:
     args = args[2:]
 
 if args[:1] == ["fetch"]:
-    state["events"].append(["fetch"])
+    state["events"].append(["fetch", capture_live_remote()])
 elif args == ["remote", "get-url", "origin"]:
     print(state["origin_url"])
 elif args == ["remote", "get-url", "--all", "origin"]:
@@ -101,7 +133,7 @@ elif args == ["remote", "get-url", "--push", "--all", "origin"]:
 elif args == ["rev-parse", "--path-format=absolute", "--git-common-dir"]:
     print(state["git_common_dir"])
 elif args == ["rev-parse", "refs/remotes/origin/master"]:
-    print(state["remote_rev"])
+    print(state["fetched_rev"])
 elif args[:3] == ["rev-parse", "--verify", "--quiet"]:
     ref = args[3]
     value = (
@@ -145,13 +177,19 @@ elif args[:2] == ["rev-parse", "--verify"]:
     print(value)
 elif args[:3] == ["worktree", "add", "--detach"]:
     worktree = Path(args[3])
+    revision = args[4]
+    commit = captured_object(revision)
+    if commit is None:
+        fail(f"worktree revision was not captured: {revision}")
+    if state["remote_move_on_worktree_add"]:
+        move_live_remote()
     worktree.mkdir(parents=True)
     worktree.joinpath("flake.lock").write_text(
-        lock_payload(state["remote_target"]), encoding="utf-8"
+        lock_payload(commit["target"]), encoding="utf-8"
     )
     state["worktree"] = str(worktree)
-    state["worktree_base"] = state["remote_rev"]
-    state["events"].append(["worktree-add", str(worktree)])
+    state["worktree_base"] = revision
+    state["events"].append(["worktree-add", str(worktree), revision])
 elif args == ["status", "--porcelain"]:
     print(" M flake.lock")
 elif args == ["add", "flake.lock"]:
@@ -200,9 +238,11 @@ elif args[:3] == ["log", "-1", "--format=%G?"]:
     revision = args[3]
     if state.get("fault") == "post_commit_verify":
         fail("fake post-commit verification failed")
-    commit = state["commits"].get(revision)
-    if revision == state["remote_rev"]:
-        signature_status = state["remote_signature_status"]
+    commit = captured_object(revision)
+    if commit is None:
+        fail(f"uncaptured fake commit: {revision}")
+    if revision in state["captured_objects"]:
+        signature_status = commit.get("signature_status", "G")
     elif state.get("fault") == "signature_unknown":
         signature_status = "U"
     elif commit is not None and commit["signature_material"] == "bad":
@@ -212,16 +252,17 @@ elif args[:3] == ["log", "-1", "--format=%G?"]:
     state["events"].append(["signature-status", revision, signature_status])
     print(signature_status)
 elif args[:2] == ["cat-file", "commit"]:
+    commit = captured_object(args[2])
+    if commit is None:
+        fail(f"uncaptured fake commit: {args[2]}")
     print("tree deadbeef")
-    print("parent " + state["commits"].get(args[2], {}).get(
-        "parent", state["remote_rev"]
-    ))
+    print("parent " + commit["parent"])
     print("gpgsig -----BEGIN SSH SIGNATURE-----")
     print(" fake")
     print(" -----END SSH SIGNATURE-----")
 elif args[:3] == ["rev-list", "--parents", "-n1"]:
     revision = args[3]
-    commit = state["commits"].get(revision)
+    commit = captured_object(revision)
     if commit is None:
         fail(f"unknown fake commit: {revision}")
     print(revision, commit["parent"])
@@ -242,15 +283,12 @@ elif args[:4] == ["diff-tree", "--no-commit-id", "--name-only", "-r"]:
     print("flake.lock")
 elif args[:1] == ["show"] and args[1].endswith(":flake.lock"):
     revision = args[1].split(":", 1)[0]
-    if revision in state["commits"]:
-        target = state["commits"][revision]["target"]
-    elif revision == state["remote_rev"]:
-        if not state["remote_lock_readable"]:
-            fail("fake remote flake.lock is unreadable")
-        target = state["remote_target"]
-    else:
-        fail(f"unknown fake revision: {revision}")
-    print(lock_payload(target), end="")
+    commit = captured_object(revision)
+    if commit is None:
+        fail(f"uncaptured fake revision: {revision}")
+    if not commit.get("lock_readable", True):
+        fail("fake remote flake.lock is unreadable")
+    print(lock_payload(commit["target"]), end="")
 elif args[:1] == ["update-ref"]:
     if args[1] == "-d":
         ref = args[2]
@@ -278,7 +316,7 @@ elif args[:1] == ["update-ref"]:
         state["pending_rev"] = args[2]
     else:
         state["receipt_rev"] = args[2]
-    state["events"].append(["update-ref", ref, args[2]])
+    state["events"].append(["update-ref", ref, args[2], expected_old])
 elif args[:1] == ["push"]:
     revision = args[2].split(":", 1)[0]
     state["events"].append([
@@ -287,18 +325,28 @@ elif args[:1] == ["push"]:
     ])
     if state.get("fault") == "push":
         fail("fake push rejected")
+    if state["remote_move_on_push"]:
+        move_live_remote()
     commit = state["commits"][revision]
     if state["remote_rev"] != commit["parent"]:
         fail("fake non-fast-forward push rejected")
     state["remote_rev"] = revision
+    state["remote_parent"] = commit["parent"]
     state["remote_target"] = commit["target"]
+    state["remote_signature_status"] = "G"
+    state["remote_lock_readable"] = True
+    state["remote_objects"][revision] = {
+        "parent": commit["parent"],
+        "target": commit["target"],
+        "signature_status": "G",
+        "lock_readable": True,
+    }
     state["remote_ancestors"] = [*state["remote_ancestors"], commit["parent"]]
 elif args[:1] == ["ls-remote"] and args[-1] == "refs/heads/master":
     state["events"].append(["ls-remote"])
     state["ls_remote_count"] += 1
     if state["ls_remote_count"] == state["remote_change_on_ls_remote_call"]:
-        state["remote_rev"] = state["changed_remote_rev"]
-        state["remote_target"] = state["changed_remote_target"]
+        move_live_remote()
     print(f'{state["remote_rev"]}\trefs/heads/master')
 elif args[:2] == ["worktree", "remove"]:
     worktree = Path(args[-1])
@@ -351,14 +399,31 @@ class FakeDeployPinCommands:
             "fault": None,
             "nix_delay_seconds": 0,
             "remote_rev": self.BASE_REV,
+            "remote_parent": "0" * 40,
             "remote_target": self.OLD_TARGET,
             "remote_ancestors": [],
             "remote_signature_status": "G",
             "remote_lock_readable": True,
+            "remote_objects": {},
+            "captured_objects": {
+                self.BASE_REV: {
+                    "parent": "0" * 40,
+                    "target": self.OLD_TARGET,
+                    "signature_status": "G",
+                    "lock_readable": True,
+                },
+            },
+            "fetched_rev": self.BASE_REV,
             "ls_remote_count": 0,
             "remote_change_on_ls_remote_call": None,
-            "changed_remote_rev": "6" * 40,
-            "changed_remote_target": self.OLD_TARGET,
+            "remote_move_on_nix": False,
+            "remote_move_on_worktree_add": False,
+            "remote_move_on_push": False,
+            "moved_remote_rev": "6" * 40,
+            "moved_remote_parent": self.BASE_REV,
+            "moved_remote_target": self.OLD_TARGET,
+            "moved_remote_signature_status": "G",
+            "moved_remote_lock_readable": True,
             "receipt_rev": None,
             "pending_rev": None,
             "worktree": None,
@@ -387,20 +452,22 @@ class FakeDeployPinCommands:
         self.update_state(fault=None)
 
     def seed_divergent_receipt(
-        self, *, remote_target: str | None = None
+        self, *, receipt_target: str | None = None,
+        remote_target: str | None = None,
     ) -> str:
         """Seed a signed sibling receipt and current remote master."""
         receipt = "5" * 40
         state = self.state
         state["commits"][receipt] = {
             "parent": self.BASE_REV,
-            "target": self.OLD_TARGET,
+            "target": receipt_target or self.OLD_TARGET,
             "message": "cratedigger: prior pin",
             "signature_material": "good",
         }
         state.update(
             receipt_rev=receipt,
             remote_rev=self.OTHER_REV,
+            remote_parent=self.BASE_REV,
             remote_target=remote_target or self.OLD_TARGET,
             remote_ancestors=[],
         )

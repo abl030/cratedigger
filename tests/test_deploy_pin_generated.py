@@ -18,7 +18,8 @@ SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "pin_nixosconfig.s
 
 
 def assert_deploy_lifecycle_invariants(
-    state: dict[str, Any], *, target: str
+    state: dict[str, Any], *, target: str, max_signed_commits: int = 1,
+    max_receipt_updates: int = 1,
 ) -> None:
     """Assert retry safety, ordering, ownership, and cleanup invariants."""
     events = state["events"]
@@ -29,6 +30,11 @@ def assert_deploy_lifecycle_invariants(
         and event[1] == "refs/cratedigger-deploy/cratedigger-src"
     ]
     pushes = [event for event in events if event[0] == "push"]
+    ref_updates = [event for event in events if event[0] == "update-ref"]
+
+    for event in ref_updates:
+        assert len(event) == 4
+        assert isinstance(event[3], str)
 
     if state["receipt_rev"] is not None:
         assert state["receipt_rev"] in state["commits"]
@@ -47,8 +53,8 @@ def assert_deploy_lifecycle_invariants(
         == "good"
     ]
     assert len(set(commits)) == len(commits)
-    assert len(signed_commits) <= 1
-    assert len(receipt_updates) <= 1
+    assert len(signed_commits) <= max_signed_commits
+    assert len(receipt_updates) <= max_receipt_updates
     for push in pushes:
         revision = push[1]
         assert revision in receipt_updates
@@ -70,22 +76,123 @@ def assert_divergent_receipt_invariants(
         if event[:2] == ["update-ref", "refs/cratedigger-deploy/cratedigger-src"]
     ]
     pushes = [event for event in state["events"] if event[0] == "push"]
+    pending_updates = [
+        event for event in state["events"]
+        if event[:2] == ["update-ref", "refs/cratedigger-deploy/cratedigger-src-pending"]
+    ]
     if remote_matches_receipt and verifier_available:
         assert len(commits) == 1
         revision = commits[0][1]
         assert state["commits"][revision]["parent"] == remote
         assert state["commits"][revision]["target"] == new_target
         assert state["receipt_rev"] == revision
-        assert len(receipt_updates) == 1
+        assert receipt_updates == [
+            ["update-ref", "refs/cratedigger-deploy/cratedigger-src", revision, receipt]
+        ]
+        assert pending_updates == [
+            ["update-ref", "refs/cratedigger-deploy/cratedigger-src-pending", remote, ""]
+        ]
         assert len(pushes) == 1
     else:
         assert state["receipt_rev"] == receipt
         assert not commits
         assert not receipt_updates
+        assert not pending_updates
+        assert not pushes
+
+
+def assert_same_target_divergent_invariants(
+    state: dict[str, Any], *, receipt: str, remote: str, target: str,
+    remote_relation: str, verifier_available: bool,
+) -> None:
+    """A same-target sibling is current, replaced, or left untouched."""
+    commits = [event for event in state["events"] if event[0] == "commit"]
+    receipt_updates = [
+        event for event in state["events"]
+        if event[:2] == ["update-ref", "refs/cratedigger-deploy/cratedigger-src"]
+    ]
+    pending_updates = [
+        event for event in state["events"]
+        if event[:2] == ["update-ref", "refs/cratedigger-deploy/cratedigger-src-pending"]
+    ]
+    pushes = [event for event in state["events"] if event[0] == "push"]
+    if verifier_available and remote_relation == "parent":
+        assert len(commits) == 1
+        revision = commits[0][1]
+        assert state["commits"][revision]["parent"] == remote
+        assert state["commits"][revision]["target"] == target
+        assert state["receipt_rev"] == revision
+        assert receipt_updates == [
+            ["update-ref", "refs/cratedigger-deploy/cratedigger-src", revision, receipt]
+        ]
+        assert pending_updates == [
+            ["update-ref", "refs/cratedigger-deploy/cratedigger-src-pending", remote, ""]
+        ]
+        assert len(pushes) == 1
+    else:
+        assert state["receipt_rev"] == receipt
+        assert not commits
+        assert not receipt_updates
+        assert not pending_updates
         assert not pushes
 
 
 class TestDeployLifecycleCheckerKnownBad(unittest.TestCase):
+    def test_same_target_checker_rejects_unnecessary_current_pin(self) -> None:
+        bad = {
+            "events": [["commit", "new"]],
+            "commits": {"new": {"parent": "remote", "target": "target"}},
+            "receipt_rev": "receipt",
+        }
+        with self.assertRaises(AssertionError):
+            assert_same_target_divergent_invariants(
+                bad,
+                receipt="receipt",
+                remote="remote",
+                target="target",
+                remote_relation="requested",
+                verifier_available=True,
+            )
+
+    def test_divergent_checker_rejects_pending_mutation_in_fail_closed_world(self) -> None:
+        bad = {
+            "events": [
+                ["update-ref", "refs/cratedigger-deploy/cratedigger-src-pending", "remote", ""],
+            ],
+            "commits": {},
+            "receipt_rev": "receipt",
+        }
+        with self.assertRaises(AssertionError):
+            assert_divergent_receipt_invariants(
+                bad,
+                receipt="receipt",
+                remote="remote",
+                new_target="new-target",
+                remote_matches_receipt=False,
+                verifier_available=True,
+            )
+
+    def test_divergent_checker_rejects_non_cas_receipt_overwrite(self) -> None:
+        bad = {
+            "events": [
+                ["commit", "new"],
+                ["update-ref", "refs/cratedigger-deploy/cratedigger-src-pending", "remote", ""],
+                ["update-ref", "refs/cratedigger-deploy/cratedigger-src", "new", "other"],
+                ["push", "new", "header-present"],
+            ],
+            "commits": {"new": {"parent": "remote", "target": "new-target"}},
+            "receipt_rev": "new",
+        }
+        with self.assertRaises(AssertionError):
+            assert_divergent_receipt_invariants(
+                bad,
+                receipt="receipt",
+                remote="remote",
+                new_target="new-target",
+                remote_matches_receipt=True,
+                verifier_available=True,
+            )
+
     def test_divergent_checker_rejects_a_pin_after_untrusted_remote(self) -> None:
         bad = {
             "events": [
@@ -262,8 +369,16 @@ class TestGeneratedDeployPinLifecycle(unittest.TestCase):
             ):
                 self.assertEqual(fake.state["pending_rev"], pending_before_retry)
                 self.assertEqual(fake.state["commit_count"], commits_before_retry)
+            replacement_recovery = (
+                pending is not None
+                and remote_after_failure == "other"
+                and recovery_verifier == "available"
+            )
             assert_deploy_lifecycle_invariants(
-                fake.state, target=fake.TARGET_REV
+                fake.state,
+                target=fake.TARGET_REV,
+                max_signed_commits=2 if replacement_recovery else 1,
+                max_receipt_updates=2 if replacement_recovery else 1,
             )
 
     @settings(max_examples=12, deadline=None)
@@ -297,6 +412,44 @@ class TestGeneratedDeployPinLifecycle(unittest.TestCase):
                 remote=fake.OTHER_REV,
                 new_target=fake.TARGET_REV,
                 remote_matches_receipt=remote_matches_receipt,
+                verifier_available=verifier_available,
+            )
+
+    @settings(max_examples=18, deadline=None)
+    @given(
+        remote_relation=st.sampled_from(("requested", "parent", "other")),
+        verifier_available=st.booleans(),
+    )
+    @example(remote_relation="requested", verifier_available=True)
+    @example(remote_relation="parent", verifier_available=True)
+    @example(remote_relation="parent", verifier_available=False)
+    @example(remote_relation="other", verifier_available=True)
+    def test_same_target_divergent_receipt_recovery_is_bounded(
+        self, remote_relation: str, verifier_available: bool,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            fake = FakeDeployPinCommands(Path(tempdir))
+            remote_target = {
+                "requested": fake.TARGET_REV,
+                "parent": fake.OLD_TARGET,
+                "other": "7" * 40,
+            }[remote_relation]
+            receipt = fake.seed_divergent_receipt(
+                receipt_target=fake.TARGET_REV,
+                remote_target=remote_target,
+            )
+            fake.update_state(
+                remote_signature_status="G" if verifier_available else "U"
+            )
+
+            fake.run(SCRIPT)
+
+            assert_same_target_divergent_invariants(
+                fake.state,
+                receipt=receipt,
+                remote=fake.OTHER_REV,
+                target=fake.TARGET_REV,
+                remote_relation=remote_relation,
                 verifier_available=verifier_available,
             )
 

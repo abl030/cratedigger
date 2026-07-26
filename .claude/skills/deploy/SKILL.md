@@ -59,9 +59,11 @@ already at the pending revision, it reports success without creating another
 commit; and if Forgejo advanced to an incompatible revision, it fails with the
 exact pending, base, and remote SHAs. A sibling receipt may advance only for a
 new target when current signed Forgejo master itself verifies and pins the
-receipt's exact old target; the ordinary signed transaction then compare-and-
-swaps the receipt after the helper rechecks that master has not moved. Never
-delete or rewrite either private
+receipt's exact old target. For a same-target sibling, a verified remote at
+that target reports success; a verified remote at the receipt parent's target
+is a rejected candidate, so the helper creates one replacement from current
+master through the ordinary receipt compare-and-swap. The helper rechecks
+master before either transaction. Never delete or rewrite either private
 recovery ref by hand during a retry. A transient or inconclusive verification
 result (for example, unavailable allowed-signers configuration) retains the
 pending candidate; only a definitively bad or unsigned candidate is discarded
