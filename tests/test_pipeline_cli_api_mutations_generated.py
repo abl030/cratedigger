@@ -6,6 +6,7 @@ import io
 import unittest
 from unittest.mock import patch
 
+import tests._hypothesis_profiles  # noqa: F401
 from hypothesis import given, strategies as st
 
 from scripts.pipeline_cli import api_mutations
