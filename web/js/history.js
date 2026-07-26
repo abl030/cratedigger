@@ -599,6 +599,19 @@ export function renderDownloadHistoryItem(h) {
     rows.push(['Distance', withApplyDistance('—', h.apply_beets_distance)]);
   }
 
+  // The raw per-transfer text behind a humanized failure verdict (issue
+  // #868). The verdict interprets ("Peer X rejected all 29 files before
+  // transfer"); this row keeps the peer's own words visible, bounded and
+  // deduplicated by the server. The label is server-owned too, because a
+  // slskd write failure on OUR storage must not be captioned as something
+  // a peer said.
+  if (h.transfer_message) {
+    rows.push([
+      esc(h.transfer_message_label || 'Peer message'),
+      `<span style="color:#888;">${esc(h.transfer_message)}</span>`,
+    ]);
+  }
+
   const badExtensions = Array.isArray(h.bad_extensions) ? h.bad_extensions : [];
   if (badExtensions.length > 0) {
     rows.push([

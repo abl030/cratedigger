@@ -1138,6 +1138,90 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(len(by_msg), 1)
         self.assertEqual(by_msg[0]["apply_beets_distance"], 0.5637)
 
+    def test_pipeline_detail_history_humanizes_peer_refusals(self):
+        """Issue #868: download_log 38272's shape — 29 files, one peer, all
+        ``Completed, Rejected`` at zero bytes with the peer exception
+        ``Verification required``. The card must say the PEER refused, and
+        must still show the peer's own words (``transfer_detail`` itself is
+        log-only by contract, so this projection is the only place they
+        reach the operator)."""
+        self.db.log_download(
+            request_id=100,
+            outcome="timeout",
+            soulseek_username="Tymemage",
+            error_message="all 29 files errored — 29× 'Verification required'",
+            transfer_detail=[
+                {
+                    "username": "Tymemage",
+                    "filename": f"@@share\\Beefeater\\{index:02d} - Track.flac",
+                    "last_state": "Completed, Rejected",
+                    "last_exception": "Verification required",
+                    "bytes_transferred": 0,
+                    "retry_count": 0,
+                }
+                for index in range(1, 30)
+            ],
+        )
+
+        status, data = self._get("/api/pipeline/100")
+
+        self.assertEqual(status, 200)
+        item = next(
+            row for row in data["history"] if row["outcome"] == "timeout")
+        _assert_required_fields(self, item, self.HISTORY_REQUIRED_FIELDS,
+                                "pipeline detail history item")
+        self.assertEqual(
+            item["verdict"],
+            'Peer Tymemage rejected all 29 files before transfer '
+            '— "Verification required"',
+        )
+        self.assertEqual(item["transfer_message"], '29× "Verification required"')
+        self.assertEqual(item["transfer_message_label"], "Peer message")
+        # The raw audit column stays log-only; the row still carries the
+        # untouched persisted message.
+        self.assertNotIn("transfer_detail", item)
+        self.assertEqual(
+            item["error_message"],
+            "all 29 files errored — 29× 'Verification required'",
+        )
+
+    def test_pipeline_detail_history_blames_storage_not_the_peer(self):
+        """Issue #868: slskd failing to write to OUR share is not peer
+        behaviour — neither the verdict nor the evidence label may say so."""
+        self.db.log_download(
+            request_id=100,
+            outcome="timeout",
+            soulseek_username="Tymemage",
+            error_message="all 3 files errored",
+            transfer_detail=[
+                {
+                    "username": "Tymemage",
+                    "filename": f"{index:02d} - Track.flac",
+                    "last_state": "Completed, Errored",
+                    "last_exception": (
+                        f"Failed to create file {index:02d} - Track.flac: "
+                        "Stale file handle : "
+                        "'/mnt/virtio/music/slskd/incomplete/x'"
+                    ),
+                    "bytes_transferred": 0,
+                    "retry_count": 0,
+                }
+                for index in range(1, 4)
+            ],
+        )
+
+        status, data = self._get("/api/pipeline/100")
+
+        self.assertEqual(status, 200)
+        item = next(
+            row for row in data["history"] if row["outcome"] == "timeout")
+        self.assertTrue(
+            str(item["verdict"]).startswith("Local storage error writing 3 files"),
+            item["verdict"],
+        )
+        self.assertNotIn("Tymemage", str(item["verdict"]))
+        self.assertEqual(item["transfer_message_label"], "Storage error")
+
     def test_pipeline_detail_history_apply_distance_null_for_legacy_rows(self):
         """Rows predating #863 have no apply_beets_distance key — the derived
         field must be null, never an error."""

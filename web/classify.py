@@ -12,6 +12,12 @@ from typing import Any, Optional
 
 import msgspec
 
+from lib.failure_presentation import (
+    FailureEvidence,
+    FailurePresentation,
+    decode_transfer_detail,
+    present_failure,
+)
 from lib.import_evidence import HaveAnalysisFailure
 from lib.import_queue import ImportJob
 from lib.quality import ImportResult, QualityComparisonBasis, dispatch_action
@@ -48,7 +54,10 @@ class LogEntry:
     validation_result: Optional[dict[str, object] | str] = None
     # Per-file failure detail audit blob (issue #564 C7, migration 043) —
     # a list of FileFailureDetail dicts behind a download-timeout row's
-    # composed error_message summary. Not currently rendered; audit-only.
+    # composed error_message summary. Read by lib/failure_presentation.py
+    # (issue #868): the humane verdict and the bounded raw peer message on
+    # the classified entry are BOTH derived from it at render time; this
+    # column itself is never rewritten.
     transfer_detail: Optional[list[dict[str, object]]] = None
 
     # download quality
@@ -191,6 +200,16 @@ class ClassifiedEntry(msgspec.Struct):
     existing_v0_probe_min_bitrate: int | None = None
     existing_v0_probe_avg_bitrate: int | None = None
     existing_v0_probe_median_bitrate: int | None = None
+    # Bounded, deduplicated raw per-transfer text behind a failure verdict
+    # (issue #868). ``transfer_detail`` is deliberately excluded from the
+    # payload, so without this field humanizing the verdict would delete the
+    # peer's own words from the UI entirely. ``transfer_message_label`` is
+    # server-owned display copy: "Peer message" when the failures belong to
+    # peers, "Storage error" when every one of them was slskd failing to
+    # write to OUR share — a local storage fault must never be rendered as
+    # something a peer said.
+    transfer_message: str | None = None
+    transfer_message_label: str | None = None
     # Environment-failure diagnostics for ``have_analysis_error``. These are
     # intentionally distinct from quality evidence: the installed copy could
     # not be analysed, so the attempt aborted before a quality verdict.
@@ -345,10 +364,12 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
     """
     triage = _extract_wrong_match_triage(entry)
     have_analysis = _extract_have_analysis_diagnostics(entry)
+    failure = _present_entry_failure(entry)
     core = _classify(
         entry,
         triage_action=triage["action"],
         have_analysis=have_analysis,
+        failure=failure,
     )
     summary = _build_summary(
         entry, core.badge, core.verdict, triage["summary"]
@@ -500,11 +521,30 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
             current_v0.median_bitrate_kbps
             if current_v0 is not None else entry.existing_v0_probe_median_bitrate
         ),
+        transfer_message=failure.transfer_message,
+        transfer_message_label=failure.transfer_message_label,
         failure_category=have_analysis.failure_category,
         analysis_error=have_analysis.error,
         installed_path=have_analysis.installed_path,
         candidate_reference=have_analysis.candidate_reference,
     )
+
+
+def _present_entry_failure(entry: LogEntry) -> FailurePresentation:
+    """Derive this row's failure copy from its persisted evidence.
+
+    The ONE place Recents turns a failure row's raw persisted text into
+    operator copy (issue #868). Everything it needs is already on the row;
+    it writes nothing back.
+    """
+    return present_failure(FailureEvidence(
+        outcome=entry.outcome,
+        error_message=entry.error_message,
+        beets_detail=entry.beets_detail,
+        beets_scenario=entry.beets_scenario,
+        soulseek_username=entry.soulseek_username,
+        transfer_detail=decode_transfer_detail(entry.transfer_detail),
+    ))
 
 
 def _extract_have_analysis_diagnostics(
@@ -862,10 +902,16 @@ def _candidate_audio_is_corrupt(
 def _classify(
     entry: LogEntry,
     *,
+    failure: FailurePresentation,
     triage_action: str | None = None,
     have_analysis: _HaveAnalysisDiagnostics | None = None,
 ) -> _Classification:
-    """Build the typed core classification for one log entry."""
+    """Build the typed core classification for one log entry.
+
+    ``failure`` is the row's already-derived failure copy — required, so the
+    presenter runs exactly once per entry and the three failure branches
+    cannot quietly grow a second wording.
+    """
 
     # --- Installed-HAVE analysis failure (environment, not quality) ---
     if entry.outcome == "have_analysis_error":
@@ -914,36 +960,32 @@ def _classify(
     # The worker persists the exact operator-facing diagnostic in
     # ``error_message``. Historical rows predate that write contract but carry
     # the same detail in ``beets_detail``, so keep those cards readable too.
+    # ``lib.failure_presentation`` owns the wording (issue #868).
     if entry.outcome == "measurement_failed":
-        diagnostic = entry.error_message or entry.beets_detail
-        verdict = (
-            f"Measurement failed: {diagnostic}"
-            if diagnostic
-            else "Measurement failed"
-        )
         return _Classification(
-            "Measurement failed", "badge-failed", "#a33", verdict,
+            "Measurement failed", "badge-failed", "#a33",
+            failure.verdict or "Measurement failed",
         )
 
     # --- Timeout (download-phase; outcome="timeout" is written ONLY by
     # lib/download.py::_timeout_album — error_message is the real
-    # per-file evidence summary, issue #564 C5, when any was captured) ---
+    # per-file evidence summary, issue #564 C5, when any was captured, and
+    # transfer_detail is the per-file audit behind it) ---
     if entry.outcome == "timeout":
-        verdict = (
-            f"Download failed: {entry.error_message}"
-            if entry.error_message
-            else "Download failed"
+        return _Classification(
+            "Failed", "badge-failed", "#a33",
+            failure.verdict or "Download failed",
         )
-        return _Classification("Failed", "badge-failed", "#a33", verdict)
 
-    # --- Failed (import-phase) ---
+    # --- Failed (import-phase, plus the materialize/staging failures that
+    # never reached an import — the presenter labels those honestly instead
+    # of prefixing "Import error:" onto everything) ---
     if entry.outcome == "failed":
-        if entry.beets_scenario == "timeout":
-            verdict = "Import timed out"
-        elif entry.error_message:
-            verdict = f"Import error: {entry.error_message}"
-        else:
-            verdict = _quality_verdict_from_import_result(entry) or "Import error"
+        verdict = (
+            failure.verdict
+            or _quality_verdict_from_import_result(entry)
+            or "Import error"
+        )
         return _Classification("Failed", "badge-failed", "#a33", verdict)
 
     # --- Force import ---
@@ -1514,7 +1556,12 @@ def _build_summary(
     if badge.startswith("Triaged · ") and triage_summary:
         parts.append(triage_summary)
 
-    if entry.soulseek_username:
+    # The peer is the summary's trailing attribution \u2014 unless a humanized
+    # failure verdict already named it (issue #868), in which case repeating
+    # it reads as "Peer X rejected all 29 files \u2026 \u00b7 X".
+    if entry.soulseek_username and not any(
+        entry.soulseek_username in part for part in parts
+    ):
         parts.append(entry.soulseek_username)
 
     return " \u00b7 ".join(p for p in parts if p)

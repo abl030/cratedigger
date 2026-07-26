@@ -866,7 +866,12 @@ class TestClassifyBadge(unittest.TestCase):
         ))
 
         self.assertEqual(result.badge, "Failed")
-        self.assertIn("Abandoned interrupted auto-import", result.verdict)
+        # Issue #868: nothing was imported, so the row is not an import
+        # error — and the internal "queued for redownload" phrasing is the
+        # presenter's job now.
+        self.assertEqual(
+            result.verdict, "Interrupted import abandoned and requeued")
+        self.assertNotIn("Import error", result.verdict)
 
     def test_timeout(self):
         result = classify_log_entry(_entry(outcome="timeout", beets_scenario="timeout"))
@@ -1098,8 +1103,12 @@ class TestClassifyVerdict(unittest.TestCase):
             outcome="timeout", beets_scenario=None,
             error_message="all transfers vanished from slskd before any "
                           "status was observed (slskd restart?)"))
-        self.assertIn("download failed", result.verdict.lower())
-        self.assertIn("vanished", result.verdict.lower())
+        self.assertEqual(
+            result.verdict,
+            "Transfers disappeared from slskd before the download finished",
+        )
+        # Issue #868: "(slskd restart?)" is a guess, not evidence.
+        self.assertNotIn("restart", result.verdict)
 
     def test_user_offline_verdict_uses_error_message(self):
         result = classify_log_entry(_entry(

@@ -25,6 +25,7 @@ from lib.current_library_display import (
     current_library_display,
     resolve_request_current_library,
 )
+from lib.failure_presentation import FailureEvidence, present_failure
 from lib.import_evidence import HaveAnalysisFailure
 from lib.quality import ImportResult
 
@@ -246,6 +247,25 @@ def _render_download_history_header(row: "Mapping[str, object]") -> str:
     )
 
 
+def _render_failure_presentation(row: "Mapping[str, object]") -> list[str]:
+    """Render the SAME failure copy the web UI shows (issue #868).
+
+    CLI and API are thin adapters over one presenter, so an operator
+    reading ``pipeline-cli show`` and an operator reading Recents cannot be
+    told two different stories about the same row. The raw persisted
+    ``error_message`` / ``transfer_detail`` are untouched by this — the
+    bounded peer text is printed alongside the verdict, not instead of it.
+    """
+    presentation = present_failure(FailureEvidence.from_row(row))
+    lines: list[str] = []
+    if presentation.verdict:
+        lines.append(f"      verdict:   {presentation.verdict}")
+    if presentation.transfer_message:
+        label = presentation.transfer_message_label or "Peer message"
+        lines.append(f"      {label}: {presentation.transfer_message}")
+    return lines
+
+
 def _render_youtube_metadata(row: "Mapping[str, object]") -> list[str]:
     if (row.get("source") or "slskd") != "youtube":
         return []
@@ -445,6 +465,8 @@ def cmd_show(
         print(f"\n  Download History ({len(history)}):")
         for h in history:
             print(_render_download_history_header(h))
+            for line in _render_failure_presentation(h):
+                print(line)
             for line in _render_youtube_metadata(h):
                 print(line)
             for line in _render_have_analysis_failure(h):

@@ -57,6 +57,13 @@ success 0, not found 2, input/semantic violation 3, conflict 4, transient 5.
 - Start quality diagnosis with `pipeline-cli show`, `quality`, and
   `import-preview`; raw SQL is for bounded diagnostics or the deliberate
   escape hatch above.
+- `show`'s download history prints the same failure `verdict` the web UI
+  renders, plus the bounded per-transfer evidence behind it (labelled
+  `Peer message`, or `Storage error` when the failures were slskd writing to
+  our own share). Both surfaces wrap `lib/failure_presentation.py`, so they
+  cannot disagree. The line is derived, not stored: `error_message` and
+  `transfer_detail` in the DB and the journal stay raw, so query them
+  directly when you need the untruncated text.
 - `import-job-recovery --resolution close` records an explicitly reconciled
   operation without replay. Use `--resolution retry` only after proving Beets
   did not apply the prior operation; both require an audit reason.

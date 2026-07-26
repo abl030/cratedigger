@@ -217,6 +217,31 @@ Browser → https://music.ablz.au
   `v0_probe`, and `materialized_measurement` directly. Historical v1/v2 rows
   are marked by `legacy_projection_version`; equality-based lineage inference
   is confined to that legacy display path.
+- **Failure copy is derived at render time (#868)** — `download_log.error_message`
+  and `download_log.transfer_detail` stay raw and audit-faithful; the operator
+  sentence is derived from them on every read by `lib/failure_presentation.py`,
+  which `web/classify.py` and `pipeline-cli show` both wrap, so the two
+  surfaces cannot drift. Nothing is written, so improving the wording improves
+  every historical row instead of only new ones. Peer-supplied per-file text is
+  classified into four families — refusal before transfer, transport/connection
+  failure, peer-side file problem, and local storage failure — by an ordered
+  prefix table over the messages Soulseek peers actually send; unrecognised
+  text is quoted verbatim (bounded, whitespace-collapsed, truncated) rather
+  than diagnosed. Identical reasons are grouped, and a group owned by one peer
+  is attributed to that peer in the sentence. **Local storage failures are
+  never attributed to a peer**: slskd failing to write to our share is our
+  fault, needs a different operator response, and carries the `Storage error`
+  label instead of `Peer message`. The card's `Peer message` row is the bounded
+  projection of that raw text (`transfer_message` / `transfer_message_label` on
+  the payload) — `transfer_detail` itself remains log-only by contract, so
+  without that row humanizing the verdict would delete the peer's own words
+  from the UI. Cratedigger's own messages are humanized on the same seam:
+  retry-limit give-ups name the file's basename instead of dumping a peer's
+  absolute path, stall/queue timeouts read as durations instead of config
+  tokens, and materialize/abandon rows drop the wrong `Import error:` label.
+  Materialize failures render PR1's persisted reason (`download_log.beets_detail`),
+  keeping storage errnos and containment refusals in separate vocabularies;
+  historical rows without a reason degrade to the generic staging sentence.
 - **Wrong Matches evidence provenance** — candidate rows keep the downloaded
   source codec, configured target contract, and temporary V0 probe separate.
   A lossless candidate destined for Opus therefore reads `FLAC → OPUS 128

@@ -2947,6 +2947,78 @@ class TestCmdShowSearchForensics(unittest.TestCase):
         self.assertIn("installed_path:     /music/Artist/Album", out)
         self.assertIn("candidate_reference: /incoming/candidate", out)
 
+    def test_show_renders_the_same_failure_copy_as_the_web_ui(self):
+        """Issue #868 CLI ⇄ API symmetry: ``pipeline-cli show`` and Recents
+        wrap ONE presenter, so they cannot tell two stories about one row."""
+        db = _ForensicsDB()
+        db.seed_request(self._row(id=7))
+        db.set_stub_download_history([{
+            "id": 38272,
+            "request_id": 7,
+            "created_at": "2026-07-25T02:10:00+00:00",
+            "outcome": "timeout",
+            "source": "slskd",
+            "soulseek_username": "Tymemage",
+            "beets_distance": None,
+            "error_message": "all 29 files errored — 29× 'Verification required'",
+            "transfer_detail": [
+                {
+                    "username": "Tymemage",
+                    "filename": f"@@share\\Beefeater\\{index:02d} - Track.flac",
+                    "last_state": "Completed, Rejected",
+                    "last_exception": "Verification required",
+                    "bytes_transferred": 0,
+                    "retry_count": 0,
+                }
+                for index in range(1, 30)
+            ],
+            "import_result": None,
+        }])
+
+        out = self._capture(db, 7)
+
+        self.assertIn(
+            'verdict:   Peer Tymemage rejected all 29 files before transfer '
+            '— "Verification required"',
+            out,
+        )
+        self.assertIn('Peer message: 29× "Verification required"', out)
+
+    def test_show_does_not_blame_the_peer_for_local_storage(self):
+        db = _ForensicsDB()
+        db.seed_request(self._row(id=8))
+        db.set_stub_download_history([{
+            "id": 38273,
+            "request_id": 8,
+            "created_at": "2026-07-25T02:10:00+00:00",
+            "outcome": "timeout",
+            "source": "slskd",
+            "soulseek_username": "Tymemage",
+            "beets_distance": None,
+            "error_message": "all 2 files errored",
+            "transfer_detail": [
+                {
+                    "username": "Tymemage",
+                    "filename": f"{index:02d} - Track.flac",
+                    "last_state": "Completed, Errored",
+                    "last_exception": (
+                        "Failed to create file: Stale file handle : "
+                        "'/mnt/virtio/music/slskd/incomplete/x'"
+                    ),
+                    "bytes_transferred": 0,
+                    "retry_count": 0,
+                }
+                for index in range(1, 3)
+            ],
+            "import_result": None,
+        }])
+
+        out = self._capture(db, 8)
+
+        self.assertIn("verdict:   Local storage error writing 2 files", out)
+        self.assertIn("Storage error: ", out)
+        self.assertNotIn("Peer message", out)
+
 
 class TestCmdSearchPlanShow(unittest.TestCase):
     """U6 read-only inspection CLI: ``pipeline-cli search-plan show``.
