@@ -766,16 +766,21 @@ def _humanize_token(value: str | None) -> str | None:
 
 
 def _wrong_match_action_label(action: str | None) -> str | None:
+    """Operator label for a persisted wrong-match triage action.
+
+    Every literal matched here is one ``lib/wrong_match_cleanup_service.py``
+    or ``lib/wrong_match_delete_service.py`` actually writes, except
+    ``preview_backfilled`` which is historical (59 live rows, 2026-04-26 to
+    2026-04-28). Anything else falls through to the humanized token, so an
+    unhandled producer action still reads as words rather than inventing a
+    fact. Audited by ``tests/test_classify_producer_audit.py``.
+    """
     if action == "deleted_reject":
         return "download deleted"
     if action == "deleted_verified_lossless_parent":
         return "download deleted: verified-lossless parent"
     if action == "delete_failed":
         return "delete failed"
-    if action == "stale_path_cleared":
-        return "stale path cleared"
-    if action == "stale_path_clear_failed":
-        return "stale path clear failed"
     if action == "kept_would_import":
         return "download kept: would import"
     if action == "kept_uncertain":
@@ -895,6 +900,38 @@ def _extract_wrong_match_triage(entry: LogEntry) -> dict[str, Any]:
         "current_v0_probe": triage.current_v0_probe,
         "comparison_basis": triage.comparison_basis,
     }
+
+
+def _beets_returned_no_candidates(entry: LogEntry) -> bool:
+    """Whether a real beets run POSITIVELY recorded an empty candidate set.
+
+    ``lib/beets.py`` writes ``mbid_not_found`` whenever the requested release
+    ID is absent from ``cm.candidates``, empty set or not, so only the blob it
+    wrote alongside separates "beets returned nothing" from "beets returned
+    siblings". The discriminator has to prove beets RAN, not merely that the
+    blob is ValidationResult-shaped: ``valid`` defaults to ``False`` and is
+    always emitted, so most rejection blobs on disk are synthesized stubs
+    (``ValidationResult(distance=…, scenario=…, detail=…)`` in
+    ``lib/download_rejection.py`` / ``lib/dispatch/outcome_actions.py``) that
+    carry an empty ``candidates`` list purely because beets was never
+    consulted (issue #882 review F4).
+
+    ``items`` and ``recommendation`` are written together, and only, by the
+    ``choose_match`` handler in ``lib/beets.py`` — the local tracks the
+    harness reported and beets' own confidence in the match it proposed — so
+    both non-empty is positive evidence of a real run. Live on 2026-07-26 the
+    two populations separate cleanly: of every row carrying a zero-candidate
+    validation blob, the 18 with both signals all have
+    ``recommendation='none'`` and 2-20 items, and the other 911 have neither.
+    Anything short of both fails closed to the general sentence, which is
+    true of an empty candidate set anyway.
+    """
+    try:
+        envelope = decode_validation_envelope(entry.validation_result)
+    except (msgspec.ValidationError, json.JSONDecodeError):
+        return False
+    beets_ran = bool(envelope.items) and bool(envelope.recommendation)
+    return beets_ran and not envelope.candidates
 
 
 def _candidate_audio_is_corrupt(
@@ -1449,12 +1486,6 @@ def _rejection_verdict(entry: LogEntry) -> str:
     # evidence in the row payload.
     scenario = _entry_rejection_decision(entry)
 
-    # Proof lock: the decision is current-proof-driven, so the quality
-    # comparison sentence built from the ImportResult would mislabel it —
-    # return the dedicated policy sentence before any delegation.
-    if scenario == "verified_lossless_locked":
-        return _verified_lossless_locked_verdict()
-
     # Quality comparison scenarios — delegate to ImportResult when available
     if scenario in (
         "downgrade",
@@ -1505,16 +1536,50 @@ def _rejection_verdict(entry: LogEntry) -> str:
             return f"Duplicate remove guard failed: {entry.beets_detail}"
         return "Duplicate remove guard failed"
 
-    if scenario == "no_candidates":
-        return "No MusicBrainz match found"
+    # ``lib/beets.py`` sets this from ``if not result.mbid_found``: the
+    # requested release ID is not in the candidate set beets emitted. That
+    # fires whether or not the set was empty — 18 of the 50 live rows carry
+    # an empty one — and the two cases send the operator to different
+    # places, so each gets the sentence its own evidence supports.
+    #
+    # The empty arm names the release-ID LOOKUP, not the folder, because
+    # the folder cannot be the discriminator: ``lib/beets.py`` always
+    # passes ``--search-id``, the harness maps it to
+    # ``config["import"]["search_ids"]``, and beets' ``tag_album`` then
+    # takes its ``if search_ids:`` branch — deriving candidates from
+    # ``albums_for_ids`` alone and skipping the metadata/text search
+    # entirely. Live confirmation: every one of the 13 requests behind
+    # those 18 rows has sibling attempts on the SAME release ID that did
+    # return candidates (1 to 115 each). It says "Beets" rather than
+    # "MusicBrainz" because the ID is not always an MBID — two of the 18
+    # requested Discogs release IDs, which ``albums_for_ids`` dispatches
+    # across metadata plugins.
+    #
+    # The copy this replaced was keyed on ``no_candidates``, a string no
+    # producer has ever emitted (issue #882): the 50 live rows carrying the
+    # real literal fell through to the raw-token fallback while the fluent
+    # sentence sat behind a key nothing could reach.
+    if scenario == "mbid_not_found":
+        if _beets_returned_no_candidates(entry):
+            return (
+                "Beets returned no match candidates for the requested "
+                "release ID"
+            )
+        return "Requested release ID not among the match candidates"
 
+    # Historical: emitted by a pre-2026-03-24 revision, one live row, no
+    # current producer — which is why the audit registers it as historical.
     if scenario == "album_name_mismatch":
         return "Album name mismatch"
 
     if scenario == "nested_layout":
         return "Nested folder layout (flatten first)"
 
-    return str(scenario) if scenario else "Rejected"
+    # An unhandled producer scenario reads as words, not as a machine token —
+    # the same doctrine ``_wrong_match_action_label`` has always applied, and
+    # the one this module had two answers to before #882. Humanizing invents
+    # no fact: it is the token itself, spelled for a human.
+    return _humanize_token(scenario) or "Rejected"
 
 
 def _upgrade_verdict(prev_br: Optional[int], cur_br: Optional[int],
