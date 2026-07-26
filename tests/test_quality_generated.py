@@ -1967,7 +1967,17 @@ class TestGeneratedEvidenceDecider(unittest.TestCase):
 # decider must be caught end-to-end through the Hypothesis machinery.
 # ===========================================================================
 
-def _planted_bad_import() -> SimResult:
+def _planted_bad_import(
+    album: AlbumState | None = None,
+    download: DownloadScenario | None = None,
+) -> SimResult:
+    """A decider handed a world that it ignores — it always imports.
+
+    The parameters exist so the planted defect is modelled faithfully: the
+    world REACHES this decider and never reaches the decision. Callers that
+    only need the bad result omit them.
+    """
+    del album, download  # the planted defect: the world never reaches the decision
     return SimResult(
         imported=True,
         keep_searching=False,
@@ -2323,9 +2333,9 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                download=lossy_downloads())
         @settings(max_examples=5, derandomize=True, database=None)
         def prop(album, download):
-            del album, download  # the planted decider ignores its world
+            # The world reaches the planted decider, which ignores it.
             assert_lossy_not_imported_over_verified_lossless(
-                _planted_bad_import())
+                _planted_bad_import(album, download))
 
         with self.assertRaises(AssertionError):
             prop()
