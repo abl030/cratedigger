@@ -288,7 +288,8 @@
     export PATH="${runtimePath}:$PATH"
     export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
     exec ${pythonEnv}/bin/python ${src}/scripts/pipeline_cli/__main__.py \
-      --dsn "${pipelineDsn}" "$@"
+      --dsn "${pipelineDsn}" \
+      --api-base "http://127.0.0.1:${toString cfg.web.port}" "$@"
   '';
 
   pipelineMigrate = pkgs.writeShellScriptBin "pipeline-migrate" ''

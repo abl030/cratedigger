@@ -134,7 +134,7 @@ Web UI / CLI → PostgreSQL (wanted → downloading → imported; wanted ↔ uns
 
 ## CLI ⇄ API surface symmetry
 
-Every operator action lives on **both** `pipeline-cli` and the web API, wrapping the same service-layer method; the two are thin adapters with matched exit-code/status-code mappings. Full pattern table in `.claude/rules/code-quality.md` § "CLI ⇄ API Surface Symmetry" (always loaded).
+Every operator action lives on **both** `pipeline-cli` and the web API through exactly one canonical execution path: normally both are thin adapters over one service; an existing canonical web mutation route may instead be called by a thin CLI HTTP adapter. Either shape preserves matched exit-code/status-code mappings and never gains a duplicate direct-DB fallback. Full pattern table in `.claude/rules/code-quality.md` § "CLI ⇄ API Surface Symmetry" (always loaded).
 
 ## Decision architecture
 

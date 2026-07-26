@@ -14,6 +14,8 @@ mechanical pattern as the ``lib/quality/`` split, issue #477):
     quality.py           quality / repair-spectral (quality-gate debug)
     imports.py           force-import / import-jobs / import-job-recovery /
                        import-preview
+    api_mutations.py     API-backed pipeline-delete / set-quality / upgrade /
+                         wrong-match-converge / resolve-rg
     wrong_match.py       wrong-match-triage / -delete / -delete-group
     search_plan.py       search-plan show / regenerate / dry-run /
                        saturation / advance / history
