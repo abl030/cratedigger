@@ -173,6 +173,92 @@ print("BAD_RIP_CLEANUP_OK")
 '''
 
 
+# Real wrapper contract for issue #862. This is deliberately a successful
+# dry-run assertion only: it proves the completed ``--pretend`` path leaves
+# the source manifest untouched, not that no transient create/delete event
+# occurred while beets was running.
+_PRETEND_SOURCE_PURITY_CONTRACT = r'''
+import hashlib
+import json
+import os
+import subprocess
+import tempfile
+
+
+def recursive_manifest(root):
+    entries = []
+    for current, dirs, files in os.walk(root):
+        dirs.sort()
+        files.sort()
+        rel_dir = os.path.relpath(current, root)
+        for dirname in dirs:
+            entries.append(("dir", os.path.join(rel_dir, dirname)))
+        for filename in files:
+            path = os.path.join(current, filename)
+            digest = hashlib.sha256()
+            with open(path, "rb") as handle:
+                for chunk in iter(lambda: handle.read(65536), b""):
+                    digest.update(chunk)
+            entries.append(("file", os.path.join(rel_dir, filename), digest.hexdigest()))
+    return entries
+
+
+with tempfile.TemporaryDirectory(prefix="cratedigger-pretend-purity-") as root:
+    source = os.path.join(root, "source")
+    library = os.path.join(root, "library")
+    beetsdir = os.path.join(root, "beets")
+    os.makedirs(source)
+    os.makedirs(library)
+    os.makedirs(beetsdir)
+
+    flac = os.path.join(source, "01 - Source.flac")
+    subprocess.run([
+        "ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i",
+        "sine=frequency=440:duration=0.1", "-metadata", "artist=Purity Artist",
+        "-metadata", "album=Purity Album", "-metadata", "title=Source",
+        "-c:a", "flac", flac,
+    ], check=True)
+    with open(os.path.join(source, "cratedigger-sentinel.json"), "w", encoding="utf-8") as handle:
+        json.dump({"must": "survive"}, handle)
+
+    with open(os.path.join(beetsdir, "config.yaml"), "w", encoding="utf-8") as handle:
+        handle.write("""library: %s\ndirectory: %s\nplugins: scrub\nimport:\n  copy: no\n  write: yes\n  move: yes\n  incremental: no\n  duplicate_keys:\n    album: [mb_albumid, discogs_albumid]\n    item: [artist, title]\n""" % (os.path.join(library, "library.db"), library))
+
+    before = recursive_manifest(source)
+    env = {**os.environ, "BEETSDIR": beetsdir}
+    proc = subprocess.Popen(
+        [os.environ["HARNESS_WRAPPER"], "--pretend", "--noincremental", source],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    assert proc.stdin is not None
+    assert proc.stdout is not None
+    saw_choose_match = False
+    saw_session_end = False
+    transcript = []
+    for line in proc.stdout:
+        message = json.loads(line)
+        transcript.append(message)
+        if message["type"] == "choose_match":
+            saw_choose_match = True
+            proc.stdin.write(json.dumps({"action": "skip"}) + "\n")
+            proc.stdin.flush()
+        elif message["type"] == "session_end":
+            saw_session_end = True
+    stderr = proc.stderr.read() if proc.stderr is not None else ""
+    returncode = proc.wait()
+    assert returncode == 0, (returncode, transcript, stderr)
+    assert saw_choose_match, transcript
+    assert saw_session_end, transcript
+    after = recursive_manifest(source)
+    assert after == before, (before, after)
+    print("PRETEND_SOURCE_PURITY_OK")
+'''
+
+
 # Fresh-interpreter sweep of the SHIPPED aunique config against real beets.
 # The Passenger collision class (2026-07-18): beets' %aunique picks the first
 # disambiguator field whose values are all-distinct across the same-key album
@@ -315,6 +401,32 @@ class TestAuniqueCollisionContract(unittest.TestCase):
 
 
 class TestHarnessBeets2Contract(unittest.TestCase):
+    def test_real_harness_pretend_keeps_source_manifest_unchanged(self):
+        """A completed pretend run leaves its source tree unchanged.
+
+        This is not a claim about transient filesystem events during the run;
+        it is the successful dry-run source-purity contract at the real
+        wrapper boundary.
+        """
+        proc = subprocess.run(
+            [sys.executable, "-c", _PRETEND_SOURCE_PURITY_CONTRACT],
+            cwd=_REPO,
+            env={
+                **os.environ,
+                "PYTHONPATH": _REPO + os.pathsep + os.environ.get("PYTHONPATH", ""),
+                "HARNESS_WRAPPER": os.path.join(
+                    _REPO, "harness", "run_beets_harness.sh"),
+            },
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            proc.returncode, 0,
+            f"real harness pretend source-purity contract failed\n"
+            f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}",
+        )
+        self.assertIn("PRETEND_SOURCE_PURITY_OK", proc.stdout)
+
     def test_real_beets_import_library_and_duplicate_action(self):
         proc = subprocess.run(
             [sys.executable, "-c", _CONTRACT],
