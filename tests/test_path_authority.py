@@ -12,17 +12,20 @@ from collections.abc import Callable
 from unittest.mock import MagicMock
 
 from lib.download_materialization import (
+    REASON_PROCESSING_AUTHORITY_UNSAFE,
     MaterializeFailed,
     MaterializeGuarded,
     Materialized,
     _materialize_token,
     _materialize_processing_dir,
+    materialize_authority_reason,
 )
 from lib.fs_authority import (
     FilesystemAuthorityError,
     SharedDownloadRootError,
     open_configured_quarantine_directory,
     open_directory_path,
+    open_private_child_directory,
     open_private_processing_root,
     open_regular_relative,
     open_regular_under_held_root,
@@ -316,9 +319,44 @@ class TestPrivateProcessingAuthority(unittest.TestCase):
             os.chmod(unsafe_ancestor, 0o770)
             processing = os.path.join(unsafe_ancestor, "processing")
             os.mkdir(processing, 0o700)
-            with self.assertRaisesRegex(FilesystemAuthorityError, "ancestor"):
+            with self.assertRaisesRegex(
+                FilesystemAuthorityError, "ancestor",
+            ) as caught:
                 with open_private_processing_root(processing, source):
                     pass
+            # Issue #868 review A8: an ownership/permission downgrade of the
+            # tree the whole boundary rests on is a containment finding, not
+            # the "renameat2 is unsupported" miscellany ``unspecified``
+            # collects — it used to fuse ~13 causes into one reason.
+            self.assertEqual(caught.exception.code, "untrusted_ownership")
+            self.assertEqual(
+                materialize_authority_reason(caught.exception),
+                REASON_PROCESSING_AUTHORITY_UNSAFE,
+            )
+
+    def test_ownership_downgrades_all_carry_the_containment_code(self) -> None:
+        """Every private-tree ownership assertion, not just the ancestor."""
+        with tempfile.TemporaryDirectory() as parent:
+            source = os.path.join(parent, "source")
+            os.mkdir(source)
+            processing = os.path.join(parent, "processing")
+            os.mkdir(processing, 0o750)
+            with self.assertRaises(FilesystemAuthorityError) as mode_caught:
+                with open_private_processing_root(processing, source):
+                    pass
+            self.assertEqual(mode_caught.exception.code, "untrusted_ownership")
+
+            os.chmod(processing, 0o700)
+            os.mkdir(os.path.join(processing, "albums"), 0o750)
+            with open_private_processing_root(processing, source) as root_fd:
+                with self.assertRaises(FilesystemAuthorityError) as child:
+                    with open_private_child_directory(root_fd, "albums"):
+                        pass
+            self.assertEqual(child.exception.code, "untrusted_ownership")
+            self.assertEqual(
+                materialize_authority_reason(child.exception),
+                REASON_PROCESSING_AUTHORITY_UNSAFE,
+            )
 
     def test_no_follow_file_open_rejects_symlink_and_parent_escape(self) -> None:
         with tempfile.TemporaryDirectory() as parent:

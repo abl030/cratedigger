@@ -23,6 +23,8 @@ from lib.download_recovery import ProcessingPathLocation, classify_processing_pa
 from lib.grab_list import DownloadFile, GrabListEntry
 from lib.dispatch import _build_download_info
 from lib.fs_authority import (
+    CopyDestinationWriteError,
+    CopySourceReadError,
     FilesystemAuthorityError,
     OpenedRegularFile,
     SharedDownloadRootError,
@@ -109,7 +111,19 @@ REASON_PROCESSING_OPEN_FAILED_PREFIX: Final = "processing_open_failed_"
 """Prefix for a storage-layer failure on the private tree; errno-suffixed."""
 
 REASON_MATERIALIZE_AUTHORITY_FAILED: Final = "materialize_authority_failed"
-"""An authority refusal on the private tree with no structured code."""
+"""An authority refusal on the private tree with no structured code.
+
+Deliberately the LAST resort, and now genuinely narrow. The private
+tree's ownership and permission assertions — a group/other-writable
+ancestor, a root not owned by the service identity, a root or child that
+is not mode 0700 — used to land here alongside "renameat2 is
+unsupported", fusing security-relevant authority downgrades with
+environment miscellany. They carry ``untrusted_ownership`` since #868's
+review and answer ``processing_authority_unsafe`` instead. What remains
+here is the residue that says nothing about trust: an unsupported
+``renameat2``, a lock that could not be taken, the ``unknown private
+processing child`` programming guard.
+"""
 
 REASON_SLSKD_ROOT_UNSAFE: Final = "slskd_root_unsafe"
 """The configured shared download root failed the containment boundary."""
@@ -189,6 +203,12 @@ def _reason_in_vocabulary(
             | "unsafe_symlink"
             | "not_a_directory"
             | "not_regular_file"
+            # An ownership/permission downgrade of the tree we hold is a
+            # containment failure too: a group-writable ancestor means the
+            # guarantee the whole boundary rests on no longer holds. It
+            # used to arrive as ``unspecified`` and fuse with "renameat2 is
+            # unsupported" (issue #868 review).
+            | "untrusted_ownership"
         ):
             return vocabulary.unsafe
         case "missing":
@@ -1061,6 +1081,26 @@ def _materialize_processing_dir(
                     # adversarial slskd replacement is never unlinked.
                     for opened in opened_sources:
                         unlink_if_same(opened)
+    except CopySourceReadError as exc:
+        # The share is read in FULL here, so this is where the convicted
+        # nested-virtiofs ESTALE/EIO actually fires. Before #868's review
+        # it landed in the generic ``OSError`` arm below as
+        # ``private_materialize_failed`` — our own tree blamed for the
+        # share's fault, with the errno discarded.
+        return _record_materialize_failure(
+            request_id,
+            source_preflight_reason(exc),
+            f"source read failed during copy: {exc}",
+            level=logging.ERROR,
+        )
+    except CopyDestinationWriteError as exc:
+        # The mirror image: ENOSPC/EIO writing OUR private tree.
+        return _record_materialize_failure(
+            request_id,
+            materialize_authority_reason(exc),
+            f"destination write failed during copy: {exc}",
+            level=logging.ERROR,
+        )
     except SharedDownloadRootError as exc:
         # ``open_private_processing_root`` opens the shared slskd share
         # too (for its physical-overlap proof), and that share is the one

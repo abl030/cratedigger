@@ -210,6 +210,10 @@ class ClassifiedEntry(msgspec.Struct):
     # something a peer said.
     transfer_message: str | None = None
     transfer_message_label: str | None = None
+    # Label for the raw ``beets_detail`` forensics row. PR1 persists the
+    # materialize reason there, so the card must not caption a machine
+    # token as beets prose (issue #868 review).
+    beets_detail_label: str | None = None
     # Environment-failure diagnostics for ``have_analysis_error``. These are
     # intentionally distinct from quality evidence: the installed copy could
     # not be analysed, so the attempt aborted before a quality verdict.
@@ -523,6 +527,7 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
         ),
         transfer_message=failure.transfer_message,
         transfer_message_label=failure.transfer_message_label,
+        beets_detail_label=failure.beets_detail_label,
         failure_category=have_analysis.failure_category,
         analysis_error=have_analysis.error,
         installed_path=have_analysis.installed_path,
@@ -1557,10 +1562,17 @@ def _build_summary(
         parts.append(triage_summary)
 
     # The peer is the summary's trailing attribution \u2014 unless a humanized
-    # failure verdict already named it (issue #868), in which case repeating
-    # it reads as "Peer X rejected all 29 files \u2026 \u00b7 X".
+    # failure verdict already named it AS a peer (issue #868), in which case
+    # repeating it reads as "Peer X rejected all 29 files \u2026 \u00b7 X".
+    #
+    # The test is our own attribution grammar ("peer <name>"), not a bare
+    # substring: a short or common username occurring inside a filename,
+    # album title or a longer peer's name would otherwise silently lose its
+    # attribution, and non-peer verdicts (curator_ban's "denylisted X")
+    # keep the trailing attribution they have always had.
     if entry.soulseek_username and not any(
-        entry.soulseek_username in part for part in parts
+        f"peer {entry.soulseek_username}".casefold() in part.casefold()
+        for part in parts
     ):
         parts.append(entry.soulseek_username)
 

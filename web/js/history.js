@@ -640,8 +640,11 @@ export function renderDownloadHistoryItem(h) {
   // The raw beets/harness detail (e.g. "Target MBID … not in candidates")
   // explains WHY a match-failure verdict fired — reachable, but debug-tier.
   // Skipped when it just repeats the verdict.
+  // The server labels this row: since #868's evidence work the column can
+  // hold a machine reason code (``source_open_failed_ESTALE``) rather than
+  // beets prose, and "Detail" would mis-caption it.
   if (h.beets_detail && h.beets_detail !== verdict) {
-    forensicRows.push(['Detail', esc(h.beets_detail)]);
+    forensicRows.push([esc(h.beets_detail_label || 'Detail'), esc(h.beets_detail)]);
   }
   const previewParts = [
     h.wrong_match_triage_preview_verdict,

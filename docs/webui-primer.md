@@ -235,7 +235,15 @@ Browser → https://music.ablz.au
   projection of that raw text (`transfer_message` / `transfer_message_label` on
   the payload) — `transfer_detail` itself remains log-only by contract, so
   without that row humanizing the verdict would delete the peer's own words
-  from the UI. **A Cratedigger decision never suppresses the cause**: our own
+  from the UI. The label names the owner of that text: `Peer message`,
+  `Storage error` when every failure was slskd writing to our own share, and
+  `Transfer state` when the evidence is an slskd terminal state token
+  (`Completed, Errored`) rather than peer speech — a state machine is not a
+  peer talking, and the verdict qualifies such quotes as `slskd state "…"`.
+  The forensics `Detail` row is labelled by the server too: since #868's
+  evidence work `beets_detail` can hold a machine reason code, which renders
+  as `Reason code` rather than being captioned as beets prose.
+  **A Cratedigger decision never suppresses the cause**: our own
   headline (we stopped retrying; the peer never started) leads the sentence
   but the dominant evidence family is always appended — `Gave up on
   "05 Seventeen.flac" after 5 failed attempts — local storage error writing

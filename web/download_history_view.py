@@ -63,6 +63,7 @@ class DownloadHistoryViewRow(msgspec.Struct, frozen=True):
     # operator-visible projection of the peer's own words.
     transfer_message: str | None
     transfer_message_label: str | None
+    beets_detail_label: str | None
     failure_category: str | None
     analysis_error: str | None
     installed_path: str | None

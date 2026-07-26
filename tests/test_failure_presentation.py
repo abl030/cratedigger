@@ -16,7 +16,9 @@ failing rather than a peer refusing to upload.
 
 import os
 import sys
+import tempfile
 import unittest
+from dataclasses import dataclass
 
 import msgspec
 
@@ -32,6 +34,7 @@ from lib.failure_presentation import (
     MAX_RAW_MESSAGE_CHARS,
     TRANSFER_MESSAGE_LABEL_MIXED,
     TRANSFER_MESSAGE_LABEL_PEER,
+    TRANSFER_MESSAGE_LABEL_STATE,
     TRANSFER_MESSAGE_LABEL_STORAGE,
     FailureEvidence,
     bounded_text,
@@ -40,8 +43,21 @@ from lib.failure_presentation import (
     peer_failure_family,
     present_failure,
 )
+from lib.fs_authority import (
+    FilesystemAuthorityError,
+    open_configured_quarantine_directory,
+)
 from lib.quality import FileFailureDetail
 from web.classify import LogEntry, classify_log_entry
+
+
+@dataclass(frozen=True)
+class _QuarantineRoots:
+    """The three attributes ``open_configured_quarantine_directory`` reads."""
+
+    slskd_download_dir: str
+    beets_staging_dir: str
+    processing_dir: str
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +227,10 @@ class TestPeerFailureFamily(unittest.TestCase):
         ("The operation was canceled.", FAMILY_TRANSPORT),
         ("Failed to read 16384 bytes from 1.2.3.4:5: Remote connection closed",
          FAMILY_TRANSPORT),
+        ("Failed to write 16384 bytes to 1.2.3.4:5: Remote connection closed",
+         FAMILY_TRANSPORT),
+        ("An attempt was made to transition a task to a final state when it "
+         "had already completed", FAMILY_TRANSPORT),
         ("Download failed to enqueue remotely after hard time limit of 60 secs",
          FAMILY_TRANSPORT),
         ("Completed, TimedOut", FAMILY_TRANSPORT),
@@ -402,6 +422,54 @@ class TestPeerFamilyCopy(unittest.TestCase):
         self.assertEqual(
             presentation.transfer_message_label, TRANSFER_MESSAGE_LABEL_MIXED)
         self.assertIn("1 local storage error", presentation.verdict or "")
+
+    def test_slskd_state_tokens_are_not_presented_as_peer_speech(self):
+        """Review finding #5: ``Completed, Errored`` is slskd's state
+        machine, not something the peer said."""
+        presentation = self._present([
+            _transfer_row("bob", "f0", last_state="Completed, Errored"),
+        ])
+        self.assertEqual(
+            presentation.verdict,
+            'Peer bob failed 1 file — slskd state "Completed, Errored"',
+        )
+        self.assertEqual(
+            presentation.transfer_message_label, TRANSFER_MESSAGE_LABEL_STATE)
+
+    def test_a_state_derived_refusal_still_says_who_refused(self):
+        presentation = self._present([
+            _transfer_row("bob", f"f{index}", last_state="Completed, Rejected")
+            for index in range(3)
+        ])
+        self.assertEqual(
+            presentation.verdict,
+            "Peer bob rejected all 3 files before transfer "
+            '— slskd state "Completed, Rejected"',
+        )
+        self.assertEqual(
+            presentation.transfer_message_label, TRANSFER_MESSAGE_LABEL_STATE)
+
+    def test_mixed_state_and_peer_text_uses_the_neutral_label(self):
+        presentation = self._present([
+            _transfer_row("bob", "f0", last_exception="Verification required"),
+            _transfer_row("bob", "f1", last_state="Completed, Errored"),
+        ])
+        self.assertEqual(
+            presentation.transfer_message_label, TRANSFER_MESSAGE_LABEL_MIXED)
+
+    def test_a_refusal_after_bytes_moved_drops_the_before_transfer_claim(self):
+        """Review finding #7: 11 of 945 live refusal files had already moved
+        bytes. "before transfer" is an observation, not a family property."""
+        presentation = self._present([
+            _transfer_row(
+                "bob", "f0", last_exception="Transfer rejected: Banned",
+                bytes_transferred=4096),
+        ])
+        self.assertEqual(
+            presentation.verdict,
+            'Peer bob rejected 1 file — "Transfer rejected: Banned"',
+        )
+        self.assertNotIn("before transfer", presentation.verdict or "")
 
     def test_files_without_evidence_contribute_nothing(self):
         presentation = self._present([
@@ -845,11 +913,6 @@ class TestMeasurementFailureCopy(unittest.TestCase):
             "Measurement failed: could not read the installed library copy",
         ),
         (
-            "authority path escape",
-            "FilesystemAuthorityError: path is outside the library root",
-            "Measurement failed: installed path is outside the library root",
-        ),
-        (
             "other authority errors lose only the class name",
             "FilesystemAuthorityError: open failed on the album directory",
             "Measurement failed: open failed on the album directory",
@@ -867,6 +930,50 @@ class TestMeasurementFailureCopy(unittest.TestCase):
                 presentation = present_failure(_evidence(
                     outcome="measurement_failed", error_message=message))
                 self.assertEqual(presentation.verdict, expected)
+
+    def test_authority_refusal_repeats_the_producer_word_for_word(self):
+        """Test-fidelity Rule B, the hard way: the input is produced by the
+        REAL authority function, not by a literal a test author invented.
+
+        The pin this replaces fed ``"FilesystemAuthorityError: path is
+        outside the library root"`` — a string that exists nowhere in the
+        codebase — and asserted copy that named the wrong root AND the
+        wrong subject. The only string production can raise here is
+        ``lib.fs_authority``'s, about the CANDIDATE's quarantine trees
+        (live download_log 38273).
+        """
+        with tempfile.TemporaryDirectory() as parent:
+            roots = _QuarantineRoots(
+                slskd_download_dir=os.path.join(parent, "slskd"),
+                beets_staging_dir=os.path.join(parent, "Incoming"),
+                processing_dir=os.path.join(parent, "processing"),
+            )
+            for directory in (
+                roots.slskd_download_dir,
+                roots.beets_staging_dir,
+                roots.processing_dir,
+            ):
+                os.mkdir(directory, 0o700)
+            outside = os.path.join(parent, "elsewhere", "Album")
+            os.makedirs(outside)
+            with self.assertRaises(FilesystemAuthorityError) as caught:
+                with open_configured_quarantine_directory(outside, roots):
+                    pass
+
+        # Exactly how lib/import_preview.py composes the persisted detail.
+        detail = f"{type(caught.exception).__name__}: {caught.exception}"
+        presentation = present_failure(_evidence(
+            outcome="measurement_failed", error_message=detail))
+
+        self.assertEqual(
+            presentation.verdict,
+            "Measurement failed: path is outside configured quarantine roots",
+        )
+        # The class name is the only thing dropped; every word the producer
+        # chose survives, and no root or subject is invented.
+        self.assertIn(str(caught.exception), presentation.verdict or "")
+        self.assertNotIn("library root", presentation.verdict or "")
+        self.assertNotIn("installed", presentation.verdict or "")
 
     def test_legacy_rows_fall_back_to_beets_detail(self):
         presentation = present_failure(_evidence(
@@ -909,6 +1016,237 @@ class TestDecodeAndBound(unittest.TestCase):
         bounded = bounded_text("x" * (MAX_RAW_MESSAGE_CHARS + 50))
         self.assertEqual(len(bounded), MAX_RAW_MESSAGE_CHARS)
         self.assertTrue(bounded.endswith("\u2026"))
+
+
+@dataclass(frozen=True)
+class _Trigger:
+    """One string the presenter matches against, and who produces it."""
+
+    trigger: str
+    produced_by: str
+    """Production file whose text must contain ``evidence`` — ``""`` for a
+    trigger that only exists in historical rows."""
+    evidence: str
+    probe: str
+    """A full message shaped exactly as the producer emits it."""
+    expect: str
+    outcome: str = "timeout"
+    """The ``download_log.outcome`` the producer writes it under."""
+
+
+_REPO_ROOT = os.path.join(os.path.dirname(__file__), "..")
+
+_OWN_MESSAGE_TRIGGERS: tuple[_Trigger, ...] = (
+    _Trigger(
+        trigger="file exceeded retry limit after ",
+        produced_by="lib/quality/download_state.py",
+        evidence="file exceeded retry limit after ",
+        probe="file exceeded retry limit after 3 retries: d:\\music\\x.flac",
+        expect='Gave up on "x.flac" after 3 failed attempts',
+    ),
+    _Trigger(
+        trigger="no download progress for ",
+        produced_by="lib/quality/download_state.py",
+        evidence="no download progress for ",
+        probe="no download progress for 600s (stalled_timeout 600s)",
+        expect="Transfer stalled",
+    ),
+    _Trigger(
+        trigger="remote_queue_timeout ",
+        produced_by="lib/quality/download_state.py",
+        evidence="remote_queue_timeout ",
+        probe="remote_queue_timeout 3600s exceeded",
+        expect="Peer never started the transfer",
+    ),
+    _Trigger(
+        trigger=" files errored",
+        produced_by="lib/quality/download_state.py",
+        evidence=" files errored",
+        probe="all 12 files errored",
+        expect="All 12 files failed",
+    ),
+    _Trigger(
+        trigger="transfers no longer in slskd — last observed:",
+        produced_by="lib/download.py",
+        evidence="transfers no longer in slskd — last observed:",
+        probe="transfers no longer in slskd — last observed: 2× 'File read error.'",
+        expect="Transfers disappeared from slskd — last observed:",
+    ),
+    _Trigger(
+        trigger="transfers vanished from slskd",
+        produced_by="lib/download.py",
+        evidence="transfers vanished from slskd",
+        probe="transfers vanished from slskd before any status was observed "
+              "(slskd restart?)",
+        expect="Transfers disappeared from slskd",
+    ),
+    _Trigger(
+        # Emitted by a pre-#564 revision; still on 22 live rows. No current
+        # producer, which is exactly why it carries no ``produced_by``.
+        trigger="all transfers vanished from slskd",
+        produced_by="",
+        evidence="",
+        probe="all transfers vanished from slskd",
+        expect="Transfers disappeared from slskd",
+    ),
+    _Trigger(
+        trigger="completed download could not be materialized within",
+        produced_by="lib/download.py",
+        evidence="Completed download could not be materialized within",
+        probe="Completed download could not be materialized within 3600s of "
+              "processing start; resetting to wanted for re-download",
+        expect="Download could not be staged for import in time",
+        outcome="failed",
+    ),
+    _Trigger(
+        trigger="abandoned interrupted auto-import",
+        produced_by="lib/download_materialization.py",
+        evidence="Abandoned interrupted auto-import",
+        probe="Abandoned interrupted auto-import; queued for redownload",
+        expect="Interrupted import abandoned and requeued",
+        outcome="failed",
+    ),
+)
+
+_MEASUREMENT_TRIGGERS: tuple[_Trigger, ...] = (
+    _Trigger(
+        trigger="current beets authority resolution raised",
+        produced_by="lib/import_preview.py",
+        evidence="current Beets authority resolution raised",
+        probe="failed: current Beets authority resolution raised",
+        expect="could not read the installed library copy",
+        outcome="measurement_failed",
+    ),
+    _Trigger(
+        trigger="current beets path was not returned",
+        produced_by="lib/import_preview.py",
+        evidence="current Beets path was not returned",
+        probe="failed: current Beets path was not returned",
+        expect="the installed library copy has no path on record",
+        outcome="measurement_failed",
+    ),
+    _Trigger(
+        # Composed at runtime as f"{type(exc).__name__}: {exc}"; the class
+        # name is the fragment that has to exist in production.
+        trigger="filesystemauthorityerror:",
+        produced_by="lib/fs_authority.py",
+        evidence="class FilesystemAuthorityError",
+        probe="FilesystemAuthorityError: path is outside configured "
+              "quarantine roots",
+        expect="path is outside configured quarantine roots",
+        outcome="measurement_failed",
+    ),
+)
+
+
+def check_trigger_has_a_producer(entry: _Trigger) -> str | None:
+    """Return why this trigger is unproducible, or None when it is real.
+
+    Module-level so the known-bad self-test can hand it the exact
+    fabricated entry that shipped.
+    """
+    if not entry.produced_by:
+        if entry.evidence:
+            return "a historical trigger must name no producer evidence"
+        return None
+    if len(entry.evidence) < 6:
+        return f"evidence {entry.evidence!r} is too short to prove anything"
+    path = os.path.join(_REPO_ROOT, entry.produced_by)
+    try:
+        with open(path, encoding="utf-8") as handle:
+            source = handle.read()
+    except OSError:
+        return f"{entry.produced_by} does not exist"
+    if entry.evidence.casefold() not in source.casefold():
+        return f"{entry.produced_by} cannot produce {entry.trigger!r}"
+    return None
+
+
+class TestEveryTriggerHasAProducer(unittest.TestCase):
+    """The class fix behind the fabricated-copy defect (issue #868).
+
+    A trigger the presenter matches against is a claim about what some
+    producer emits. The measurement table once claimed
+    ``"filesystemauthorityerror: path is outside"`` and rendered "installed
+    path is outside the library root" — but the only string production can
+    raise there is about the CANDIDATE's quarantine roots, and its pin fed
+    a literal that exists nowhere in the codebase. The fixture was more
+    permissive than production (``.claude/rules/test-fidelity.md`` Rule B),
+    so the copy shipped fluent and wrong.
+
+    Every trigger for a message CRATEDIGGER produces is therefore traced to
+    the file that produces it, and driven end-to-end from a
+    producer-shaped probe. (Peer-supplied prefixes are deliberately out of
+    scope: slskd and Soulseek.NET are their producers, and the presenter
+    quotes unrecognised peer text verbatim rather than interpreting it.)
+    """
+
+    ALL_TRIGGERS = _OWN_MESSAGE_TRIGGERS + _MEASUREMENT_TRIGGERS
+
+    def test_every_trigger_literal_exists_in_its_named_producer(self):
+        for entry in self.ALL_TRIGGERS:
+            with self.subTest(entry.trigger):
+                violation = check_trigger_has_a_producer(entry)
+                self.assertIsNone(violation, violation)
+
+    def test_the_checker_rejects_the_defect_that_shipped(self):
+        """Known-bad self-test: the exact fabricated entry, verbatim."""
+        fabricated = _Trigger(
+            trigger="filesystemauthorityerror: path is outside",
+            produced_by="lib/fs_authority.py",
+            evidence="path is outside the library root",
+            probe="FilesystemAuthorityError: path is outside the library root",
+            expect="installed path is outside the library root",
+            outcome="measurement_failed",
+        )
+        self.assertIsNotNone(check_trigger_has_a_producer(fabricated))
+        # …and a trigger propped up by a too-generic literal is rejected too.
+        self.assertIsNotNone(check_trigger_has_a_producer(_Trigger(
+            trigger="whatever", produced_by="lib/fs_authority.py",
+            evidence="path", probe="whatever", expect="",
+        )))
+        self.assertIsNotNone(check_trigger_has_a_producer(_Trigger(
+            trigger="whatever", produced_by="", evidence="path is outside",
+            probe="whatever", expect="",
+        )))
+
+    def test_every_trigger_fires_on_a_producer_shaped_message(self):
+        for entry in self.ALL_TRIGGERS:
+            with self.subTest(entry.trigger):
+                presentation = present_failure(_evidence(
+                    outcome=entry.outcome, error_message=entry.probe))
+                self.assertIn(entry.expect, presentation.verdict or "")
+
+    def test_registry_covers_every_table_driven_trigger(self):
+        """A new table entry must be registered before it can ship."""
+        from lib import failure_presentation as presenter
+
+        registered = {entry.trigger for entry in self.ALL_TRIGGERS}
+        self.assertLessEqual(
+            set(presenter._MEASUREMENT_COPY), registered,
+            "a measurement copy key has no registered producer",
+        )
+        self.assertLessEqual(
+            set(presenter._VANISHED_PREFIXES), registered,
+            "a vanished-transfer trigger has no registered producer",
+        )
+
+    def test_materialize_reason_keys_come_from_their_producer(self):
+        """The same rule for PR1's reason vocabulary."""
+        path = os.path.join(_REPO_ROOT, "lib/download_materialization.py")
+        with open(path, encoding="utf-8") as handle:
+            source = handle.read()
+        from lib import failure_presentation as presenter
+
+        historical = {"event_path_missing"}
+        for reason in presenter._MATERIALIZE_REASON_COPY:
+            if reason in historical:
+                continue
+            with self.subTest(reason):
+                self.assertIn(
+                    reason, source,
+                    f"no producer emits the reason {reason!r}",
+                )
 
 
 class TestNonFailureOutcomes(unittest.TestCase):

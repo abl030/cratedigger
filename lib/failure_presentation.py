@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final, Literal
 
 import msgspec
@@ -90,6 +90,16 @@ MAX_PEER_NAME_CHARS: Final = 40
 TRANSFER_MESSAGE_LABEL_PEER: Final = "Peer message"
 TRANSFER_MESSAGE_LABEL_STORAGE: Final = "Storage error"
 TRANSFER_MESSAGE_LABEL_MIXED: Final = "Transfer messages"
+TRANSFER_MESSAGE_LABEL_STATE: Final = "Transfer state"
+
+DETAIL_LABEL_REASON_CODE: Final = "Reason code"
+"""Forensics-row label for a ``beets_detail`` holding a machine reason.
+
+PR1 started persisting the materialize reason in ``beets_detail``, which
+the card already renders as a forensics ``Detail`` row — so those rows now
+show ``source_open_failed_ESTALE`` under a label that says "beets detail".
+The token belongs there (forensics is where internals go, and the verdict
+carries the sentence), but it should say what it is."""
 
 
 # --------------------------------------------------------------------------
@@ -128,6 +138,7 @@ _FAMILY_PREFIXES: Final[tuple[tuple[str, PeerFailureFamily], ...]] = (
     ("transfer aborted: the remote size of", FAMILY_PEER_FILE),
     # --- 2. Transport / connection ---
     ("a task was canceled.", FAMILY_TRANSPORT),
+    ("an attempt was made to transition a task", FAMILY_TRANSPORT),
     ("application shut down", FAMILY_TRANSPORT),
     ("completed, cancelled", FAMILY_TRANSPORT),
     ("completed, canceled", FAMILY_TRANSPORT),
@@ -139,6 +150,7 @@ _FAMILY_PREFIXES: Final[tuple[tuple[str, PeerFailureFamily], ...]] = (
     ("failed to establish a direct or indirect transfer connection",
      FAMILY_TRANSPORT),
     ("failed to read ", FAMILY_TRANSPORT),
+    ("failed to write ", FAMILY_TRANSPORT),
     ("inactivity timeout of ", FAMILY_TRANSPORT),
     ("the operation was canceled.", FAMILY_TRANSPORT),
     ("the wait timed out after ", FAMILY_TRANSPORT),
@@ -217,6 +229,9 @@ class FailurePresentation:
     verdict: str | None = None
     transfer_message: str | None = None
     transfer_message_label: str | None = None
+    beets_detail_label: str | None = None
+    """Label for the row's raw ``beets_detail`` forensics line, when that
+    column holds a machine reason code rather than beets prose."""
 
 
 def decode_transfer_detail(raw: object) -> tuple[FileFailureDetail, ...]:
@@ -253,6 +268,13 @@ def _quoted(text: str) -> str:
     return f'"{bounded_text(text)}"'
 
 
+def _quoted_evidence(group: "_ReasonGroup") -> str:
+    """Quote one group's text, saying whose words they are."""
+    if group.from_state:
+        return f"slskd state {_quoted(group.message)}"
+    return _quoted(group.message)
+
+
 def _peer_name(name: str | None) -> str | None:
     if not name:
         return None
@@ -286,20 +308,27 @@ class _ReasonGroup:
     count: int
     zero_byte_count: int
     peers: tuple[str, ...] = ()
+    # True when the message is slskd's own terminal state token rather
+    # than something the peer said. An slskd state machine is not peer
+    # speech, and rendering ``Completed, Errored`` under a "Peer message"
+    # label puts words in a peer's mouth.
+    from_state: bool = False
 
 
-def _file_reason(detail: FileFailureDetail) -> str | None:
-    """The reason one file failed, mirroring ``summarize_file_failures``.
+def _file_reason(detail: FileFailureDetail) -> tuple[str, bool] | None:
+    """The reason one file failed and whether it is peer speech.
 
-    Prefer slskd's per-transfer exception; fall back to a terminal
-    ``Completed, *`` state that is not a success. Files with neither
-    contribute no evidence at all.
+    Mirrors ``summarize_file_failures``: prefer slskd's per-transfer
+    exception, fall back to a terminal ``Completed, *`` state that is not a
+    success. Files with neither contribute no evidence at all. The second
+    element is ``True`` for the state fallback — the caller must not
+    present a state token as something a peer said.
     """
     if detail.last_exception:
-        return detail.last_exception
+        return detail.last_exception, False
     state = detail.last_state
     if state and state.startswith("Completed,") and state != "Completed, Succeeded":
-        return state
+        return state, True
     return None
 
 
@@ -316,11 +345,14 @@ def _group_reasons(
     counts: dict[str, int] = {}
     zero_bytes: dict[str, int] = {}
     peers: dict[str, list[str]] = {}
+    from_state: dict[str, bool] = {}
     for detail in transfer_detail:
-        reason = _file_reason(detail)
-        if not reason:
+        observed = _file_reason(detail)
+        if observed is None:
             continue
+        reason, state_derived = observed
         counts[reason] = counts.get(reason, 0) + 1
+        from_state[reason] = state_derived
         if detail.bytes_transferred <= 0:
             zero_bytes[reason] = zero_bytes.get(reason, 0) + 1
         peer = _peer_name(detail.username) or _peer_name(fallback_username)
@@ -335,6 +367,7 @@ def _group_reasons(
             count=count,
             zero_byte_count=zero_bytes.get(message, 0),
             peers=tuple(sorted(peers.get(message, []))),
+            from_state=from_state.get(message, False),
         )
         for message, count in ordered
     )
@@ -361,13 +394,30 @@ def _transfer_message(groups: Sequence[_ReasonGroup]) -> str:
     return rendered
 
 
+def _group_kind(group: _ReasonGroup) -> str:
+    """Who this evidence belongs to: our storage, slskd, or the peer."""
+    if group.family == FAMILY_LOCAL_STORAGE:
+        return "storage"
+    if group.from_state:
+        return "state"
+    return "peer"
+
+
 def _transfer_message_label(groups: Sequence[_ReasonGroup]) -> str:
-    families = {group.family for group in groups}
-    if families == {FAMILY_LOCAL_STORAGE}:
+    """Name the owner of the raw text — never "Peer message" by default.
+
+    A local write failure is ours, and an slskd terminal state token is
+    slskd's; captioning either as something a peer said is the same
+    misattribution one field over.
+    """
+    kinds = {_group_kind(group) for group in groups}
+    if kinds == {"storage"}:
         return TRANSFER_MESSAGE_LABEL_STORAGE
-    if FAMILY_LOCAL_STORAGE in families:
-        return TRANSFER_MESSAGE_LABEL_MIXED
-    return TRANSFER_MESSAGE_LABEL_PEER
+    if kinds == {"state"}:
+        return TRANSFER_MESSAGE_LABEL_STATE
+    if kinds == {"peer"}:
+        return TRANSFER_MESSAGE_LABEL_PEER
+    return TRANSFER_MESSAGE_LABEL_MIXED
 
 
 # --------------------------------------------------------------------------
@@ -413,12 +463,16 @@ def _single_family_clause(
         # I2: our storage, our fault — this clause has no place for a peer.
         return f"local storage error writing {files}"
     if family == FAMILY_REFUSAL:
+        # "before transfer" is an OBSERVATION, not a property of the
+        # family: 11 of 945 live refusal files had already moved bytes.
+        # Zero bytes is what licenses the claim.
+        when = " before transfer" if zero_bytes else ""
         if peer:
             scope = f"all {files}" if count > 1 else files
-            return f"peer {peer} rejected {scope} before transfer"
+            return f"peer {peer} rejected {scope}{when}"
         if many_peers:
-            return f"{len(peers)} peers rejected {files} before transfer"
-        return f"{files} rejected before transfer"
+            return f"{len(peers)} peers rejected {files}{when}"
+        return f"{files} rejected{when}"
     if family == FAMILY_TRANSPORT:
         outcome = (
             "failed before any data arrived" if zero_bytes
@@ -512,7 +566,7 @@ def _present_transfer_evidence(
     if len(families) == 1:
         verdict = (
             f"{_capitalized(_family_clause(groups))} "
-            f"\u2014 {_quoted(groups[0].message)}"
+            f"\u2014 {_quoted_evidence(groups[0])}"
         )
         other_reasons = len(groups) - 1
         if other_reasons > 0:
@@ -801,7 +855,15 @@ _MEASUREMENT_COPY: Final[dict[str, str]] = {
     ),
 }
 _MEASUREMENT_AUTHORITY_PREFIX: Final = "filesystemauthorityerror:"
-_MEASUREMENT_OUTSIDE_ROOT: Final = "filesystemauthorityerror: path is outside"
+# NOTE: there is deliberately no per-message table for authority failures.
+# The one that existed rendered "installed path is outside the library
+# root" for the ONLY string production can raise here —
+# ``lib.fs_authority``'s "path is outside configured quarantine roots",
+# which is the CANDIDATE's quarantine tree, not the installed library copy.
+# Wrong root and wrong subject: a containment fact rewritten into a
+# different containment fact, which is worse than the raw string it
+# replaced (live download_log 38273). Stripping the class name and passing
+# the producer's own words through is honest and needs no table.
 
 
 def _present_measurement_message(diagnostic: str | None) -> str:
@@ -816,8 +878,6 @@ def _present_measurement_message(diagnostic: str | None) -> str:
     if probe.casefold().startswith("failed:"):
         probe = probe.split(":", 1)[1].strip()
     lowered = probe.casefold()
-    if lowered.startswith(_MEASUREMENT_OUTSIDE_ROOT):
-        return "Measurement failed: installed path is outside the library root"
     if lowered.startswith(_MEASUREMENT_AUTHORITY_PREFIX):
         probe = probe.split(":", 1)[1].strip()
         lowered = probe.casefold()
@@ -839,6 +899,14 @@ def present_failure(evidence: FailureEvidence) -> FailurePresentation:
     Pure: same evidence in, same copy out (I5). ``verdict is None`` means
     "no message-level evidence here" — never an invented sentence.
     """
+    presentation = _present_failure(evidence)
+    if materialize_reason_copy(evidence.beets_detail) is None:
+        return presentation
+    return replace(presentation, beets_detail_label=DETAIL_LABEL_REASON_CODE)
+
+
+def _present_failure(evidence: FailureEvidence) -> FailurePresentation:
+    """The outcome-keyed body of :func:`present_failure`."""
     if evidence.outcome == "measurement_failed":
         return FailurePresentation(
             verdict=_present_measurement_message(
@@ -894,6 +962,7 @@ def present_failure(evidence: FailureEvidence) -> FailurePresentation:
 
 
 __all__ = [
+    "DETAIL_LABEL_REASON_CODE",
     "FAMILY_LOCAL_STORAGE",
     "FAMILY_PEER_FILE",
     "FAMILY_REFUSAL",
@@ -907,6 +976,7 @@ __all__ = [
     "PeerFailureFamily",
     "TRANSFER_MESSAGE_LABEL_MIXED",
     "TRANSFER_MESSAGE_LABEL_PEER",
+    "TRANSFER_MESSAGE_LABEL_STATE",
     "TRANSFER_MESSAGE_LABEL_STORAGE",
     "bounded_text",
     "decode_transfer_detail",

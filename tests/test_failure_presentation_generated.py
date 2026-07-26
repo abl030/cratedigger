@@ -38,7 +38,7 @@ import unittest
 from collections.abc import Sequence
 
 import msgspec
-from hypothesis import example, given, strategies as st
+from hypothesis import assume, example, given, strategies as st
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -57,6 +57,8 @@ from lib.failure_presentation import (
     FAMILY_TRANSPORT,
     MAX_RAW_MESSAGE_CHARS,
     MAX_RAW_MESSAGE_GROUPS,
+    TRANSFER_MESSAGE_LABEL_PEER,
+    TRANSFER_MESSAGE_LABEL_STATE,
     TRANSFER_MESSAGE_LABEL_STORAGE,
     FailureEvidence,
     FailurePresentation,
@@ -125,6 +127,18 @@ _FAMILY_MESSAGES: dict[PeerFailureFamily, tuple[str, ...]] = {
         "Could not find a part of the path.",
     ),
 }
+
+_TERMINAL_ERROR_STATES = tuple(
+    state for state in _TERMINAL_STATES
+    if state.startswith("Completed,") and state != "Completed, Succeeded"
+)
+
+# Everything the measurement path recognises; anything else must survive
+# verbatim. Kept as data so a new copy entry has to be considered here too.
+_KNOWN_MEASUREMENT_TRIGGERS = frozenset(
+    {"current beets authority resolution raised",
+     "current beets path was not returned"}
+)
 
 _KNOWN_MESSAGES = st.sampled_from(
     tuple(message for pool in _FAMILY_MESSAGES.values() for message in pool)
@@ -298,6 +312,48 @@ def check_storage_cause_is_never_suppressed(
     for peer in peers:
         if peer and peer in verdict:
             return f"storage-caused verdict names peer {peer!r}: {verdict!r}"
+    return None
+
+
+def check_unrecognised_text_is_passed_through(
+    diagnostic: str,
+    presentation: FailurePresentation,
+) -> str | None:
+    """I4 for measurement rows — copy is substituted only for text a
+    producer actually emits; everything else survives verbatim.
+
+    The defect this patrols: a copy table entry keyed on a string no
+    producer emits ("path is outside the library root") replaced the
+    producer's real words with a different, wrong fact. Anything the
+    presenter does not recognise must reach the operator unedited.
+    """
+    verdict = presentation.verdict or ""
+    expected = bounded_text(diagnostic, limit=200)
+    if expected and expected not in verdict:
+        return (
+            f"unrecognised diagnostic was rewritten: {diagnostic!r} -> "
+            f"{verdict!r}"
+        )
+    return None
+
+
+def check_state_tokens_are_not_peer_speech(
+    presentation: FailurePresentation,
+) -> str | None:
+    """Review finding #5 — slskd's state machine is not a peer talking."""
+    if presentation.transfer_message_label == TRANSFER_MESSAGE_LABEL_PEER:
+        return (
+            "an slskd state token was labelled as a peer message: "
+            f"{presentation.transfer_message!r}"
+        )
+    verdict = presentation.verdict or ""
+    # A breakdown verdict quotes nothing, so there is nothing to attribute;
+    # the moment it DOES quote, it must say the words are slskd's.
+    if '"' in verdict and "slskd state" not in verdict:
+        return (
+            "a state-derived verdict quotes without saying whose words "
+            f"they are: {verdict!r}"
+        )
     return None
 
 
@@ -630,6 +686,48 @@ class TestUnknownTextStaysBounded(unittest.TestCase):
         violation = check_gave_up_names_only_a_filename(presentation.verdict)
         self.assertIsNone(violation, violation)
 
+    @given(diagnostic=st.text(
+        alphabet=st.characters(blacklist_characters=":"),
+        min_size=1, max_size=200,
+    ))
+    def test_unrecognised_measurement_text_is_never_rewritten(
+        self, diagnostic: str,
+    ) -> None:
+        assume(bounded_text(diagnostic))
+        assume(diagnostic.strip().casefold() not in _KNOWN_MEASUREMENT_TRIGGERS)
+        presentation = present_failure(FailureEvidence(
+            outcome="measurement_failed", error_message=diagnostic))
+        violation = check_unrecognised_text_is_passed_through(
+            diagnostic, presentation)
+        self.assertIsNone(violation, violation)
+
+    @given(
+        states=st.lists(
+            st.sampled_from(_TERMINAL_ERROR_STATES), min_size=1, max_size=20),
+        peers=_PEER_NAMES,
+    )
+    def test_state_only_worlds_are_never_labelled_peer_speech(
+        self, states: list[str], peers: str,
+    ) -> None:
+        files = [
+            {
+                "username": peers,
+                "filename": f"{index}.flac",
+                "last_state": state,
+                "last_exception": None,
+                "bytes_transferred": 0,
+                "retry_count": 0,
+            }
+            for index, state in enumerate(states)
+        ]
+        presentation = present_failure(FailureEvidence(
+            outcome="timeout",
+            error_message="all files errored",
+            transfer_detail=decode_transfer_detail(files),
+        ))
+        violation = check_state_tokens_are_not_peer_speech(presentation)
+        self.assertIsNone(violation, violation)
+
     @given(message=st.text(max_size=500))
     def test_family_classification_is_total(self, message: str) -> None:
         self.assertIn(
@@ -814,6 +912,41 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             'Gave up on "x.flac" after 3 failed attempts'))
         self.assertIsNone(check_gave_up_names_only_a_filename(
             "Transfer stalled — no progress for 10 minutes"))
+
+    def test_passthrough_checker_trips_on_a_rewritten_diagnostic(self) -> None:
+        self.assertIsNotNone(check_unrecognised_text_is_passed_through(
+            "path is outside configured quarantine roots",
+            FailurePresentation(
+                verdict="Measurement failed: installed path is outside the "
+                        "library root"),
+        ))
+        self.assertIsNone(check_unrecognised_text_is_passed_through(
+            "path is outside configured quarantine roots",
+            FailurePresentation(
+                verdict="Measurement failed: path is outside configured "
+                        "quarantine roots"),
+        ))
+
+    def test_state_checker_trips_on_a_peer_label(self) -> None:
+        self.assertIsNotNone(check_state_tokens_are_not_peer_speech(
+            FailurePresentation(
+                verdict='Peer QQQQQ failed 1 file — "Completed, Errored"',
+                transfer_message='1× "Completed, Errored"',
+                transfer_message_label=TRANSFER_MESSAGE_LABEL_PEER),
+        ))
+        self.assertIsNotNone(check_state_tokens_are_not_peer_speech(
+            FailurePresentation(
+                verdict='Peer QQQQQ failed 1 file — "Completed, Errored"',
+                transfer_message='1× "Completed, Errored"',
+                transfer_message_label=TRANSFER_MESSAGE_LABEL_STATE),
+        ))
+        self.assertIsNone(check_state_tokens_are_not_peer_speech(
+            FailurePresentation(
+                verdict='Peer QQQQQ failed 1 file — slskd state '
+                        '"Completed, Errored"',
+                transfer_message='1× "Completed, Errored"',
+                transfer_message_label=TRANSFER_MESSAGE_LABEL_STATE),
+        ))
 
     def test_bounded_checker_trips_on_control_characters(self) -> None:
         self.assertIsNotNone(check_rendered_text_is_bounded(

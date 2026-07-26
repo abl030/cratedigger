@@ -845,6 +845,10 @@ class TestClassifyBadge(unittest.TestCase):
         self.assertEqual(result.badge_class, "badge-rejected")
         self.assertIn("H@rco", result.verdict)
         self.assertIn("Marked bad rip", result.verdict)
+        # The summary keeps its trailing peer attribution: this verdict
+        # names the uploader as a denylist target, not with the presenter's
+        # "peer <name>" grammar (issue #868 review finding #4).
+        self.assertEqual(result.summary, f"{result.verdict} \u00b7 H@rco")
 
     def test_curator_ban_without_username(self):
         """E1.1 — no uploader resolved → still surfaces, terser verdict."""

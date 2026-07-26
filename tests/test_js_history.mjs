@@ -1717,5 +1717,41 @@ console.log('renderDownloadHistoryItem() escapes a hostile transfer message and 
   assertExcludes(html, '<script>bad', 'label is escaped');
 }
 
+console.log('renderDownloadHistoryItem() labels a machine reason code as such in forensics');
+{
+  // Issue #868 review A4: PR1 persists the materialize reason in
+  // beets_detail, which this card renders as a forensics row. The server
+  // owns the label so a machine token is not captioned as beets prose.
+  const html = renderDownloadHistoryFixture({
+    outcome: 'failed',
+    badge: 'Failed',
+    badge_class: 'badge-failed',
+    soulseek_username: 'testuser',
+    created_at: '2026-07-25T02:10:00+00:00',
+    verdict: 'Could not read a downloaded file from the slskd share (ESTALE); requeued',
+    beets_detail: 'source_open_failed_ESTALE',
+    beets_detail_label: 'Reason code',
+  });
+
+  assertContains(html, 'class="p-hist-label">Reason code</span>',
+    'server-owned forensics label renders');
+  assertContains(html, 'source_open_failed_ESTALE', 'the raw token stays visible');
+  assertExcludes(html, 'class="p-hist-label">Detail</span>',
+    'a reason code is not captioned as beets detail');
+}
+
+console.log('renderDownloadHistoryItem() keeps the Detail label for beets prose');
+{
+  const html = renderDownloadHistoryFixture({
+    outcome: 'rejected',
+    soulseek_username: 'testuser',
+    created_at: '2026-07-25T02:10:00+00:00',
+    verdict: 'Wrong match (dist 0.190)',
+    beets_detail: 'Target MBID not in candidates',
+  });
+  assertContains(html, 'class="p-hist-label">Detail</span>',
+    'unlabelled details keep the historical caption');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

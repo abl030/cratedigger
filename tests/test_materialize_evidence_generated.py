@@ -63,6 +63,7 @@ import os
 import socket
 import tempfile
 import unittest
+import unittest.mock
 from datetime import datetime, timedelta, timezone
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
@@ -80,6 +81,7 @@ from lib.download_materialization import (
     REASON_EVENT_PATH_GONE_FROM_DISK,
     REASON_EVENT_PATH_NEVER_STAMPED,
     REASON_MATERIALIZE_AUTHORITY_FAILED,
+    REASON_PRIVATE_MATERIALIZE_FAILED,
     REASON_PROCESSING_AUTHORITY_UNSAFE,
     REASON_PROCESSING_OPEN_FAILED_PREFIX,
     REASON_PROCESSING_PATH_MISSING,
@@ -139,12 +141,16 @@ _STORAGE_PREFIXES = (
 _UNCLASSIFIED_REASONS = frozenset({
     REASON_SOURCE_PREFLIGHT_REFUSED,
     REASON_MATERIALIZE_AUTHORITY_FAILED,
+    REASON_PRIVATE_MATERIALIZE_FAILED,
     REASON_SLSKD_ROOT_REFUSED,
 })
 # Restated, not imported: a checker that groups by the same object
 # production groups by would only echo the implementation back.
 _CONTAINMENT_CODES = frozenset({
     "path_escape", "unsafe_symlink", "not_a_directory", "not_regular_file",
+    # An ownership/permission downgrade of the tree we hold: the guarantee
+    # the boundary rests on no longer holds (issue #868 review A8).
+    "untrusted_ownership",
 })
 
 
@@ -437,7 +443,15 @@ def _build_world(parent: str, world: str, leaf: str) -> _World:
     built = _World(cfg, file)
     stamped = os.path.join(source, f"{leaf}.mp3")
 
-    if world == "never_stamped":
+    if world == "healthy":
+        # The only world whose copy phase actually runs — where 100% of the
+        # share's bytes are read, and where a flaky mount is most likely to
+        # fire (issue #868 review A1).
+        with open(stamped, "wb") as handle:
+            handle.write(b"audio")
+        file.local_path = stamped
+        built.source_path = stamped
+    elif world == "never_stamped":
         file.local_path = None
     elif world == "gone_from_disk":
         file.local_path = stamped
@@ -664,17 +678,50 @@ class TestGeneratedMaterializeFailureReasons(unittest.TestCase):
         self, world: str, other: str, leaf: str,
     ) -> None:
         """I2 stated negatively: two worlds share a reason only when they
-        are the same containment violation."""
-        same_reason = _WORLD_REASONS[world] == _WORLD_REASONS[other]
+        are the same containment violation.
+
+        Both reasons are PRODUCED by ``_materialize_processing_dir`` over a
+        real filesystem. The earlier version of this test compared two
+        test-local dictionaries, `del`'d its generated input and invoked no
+        production symbol at all — it survived every mutant a reviewer
+        planted, including deleting the containment check outright, while
+        reading as coverage (issue #868 review).
+        """
+        produced = tuple(
+            self._produced_reason(name, leaf) for name in (world, other)
+        )
+        same_reason = produced[0] == produced[1]
         both_containment = (
             _WORLD_FAMILIES[world] == "containment"
             and _WORLD_FAMILIES[other] == "containment"
         )
-        del leaf
         if world != other:
-            self.assertEqual(same_reason, both_containment)
+            self.assertEqual(
+                same_reason, both_containment,
+                f"{world}->{produced[0]} vs {other}->{produced[1]}",
+            )
         else:
             self.assertTrue(same_reason)
+
+    def _produced_reason(self, world: str, leaf: str) -> str:
+        """Materialize one world for real and return the reason it records."""
+        with tempfile.TemporaryDirectory() as parent:
+            built = _build_world(parent, world, leaf)
+            album = make_grab_list_entry(
+                files=[built.file], artist="Artist", title="Album", year="2020")
+            canonical = canonical_folder_for_row(
+                album, processing_albums_dir(built.cfg.processing_dir))
+            try:
+                result = _materialize_processing_dir(
+                    album,
+                    StagedAlbum.from_entry(album, default_path=canonical),
+                    make_ctx_with_fake_db(FakePipelineDB(), cfg=built.cfg),
+                )
+            finally:
+                built.close()
+        self.assertIsInstance(result, MaterializeFailed)
+        assert isinstance(result, MaterializeFailed)
+        return result.reason
 
 
 # ============================================================================
@@ -891,6 +938,149 @@ class TestMaterializeEvidenceCheckersTripOnViolations(unittest.TestCase):
                 expected_family="containment",
                 errno_symbol=None,
             )
+
+
+# ============================================================================
+# Property 4 — the copy phase names its own subject (issue #868 review A1)
+# ============================================================================
+#
+# ``copy_opened_file`` reads the shared slskd share and writes our private
+# tree. Both failures used to land in ``_materialize_processing_dir``'s
+# generic ``except OSError`` arm as ``private_materialize_failed`` with the
+# errno discarded — so an ESTALE on the SHARE (the convicted live nested-
+# virtiofs shape) was recorded as a fault of OUR OWN tree, in the one phase
+# that reads every byte the share has.
+
+_COPY_ERRNOS = ("ESTALE", "EIO", "ENOSPC", "EACCES", "EBADF")
+
+
+def check_copy_failure_names_its_subject(
+    subject: str,
+    errno_name: str,
+    reason: str,
+) -> str | None:
+    """Return why a copy-phase reason is wrong, or None when it is right.
+
+    Module-level so the known-bad self-test can hand it the exact opaque
+    string that shipped.
+    """
+    expected_prefix = (
+        REASON_SOURCE_OPEN_FAILED_PREFIX if subject == "source"
+        else REASON_PROCESSING_OPEN_FAILED_PREFIX
+    )
+    wrong_prefix = (
+        REASON_PROCESSING_OPEN_FAILED_PREFIX if subject == "source"
+        else REASON_SOURCE_OPEN_FAILED_PREFIX
+    )
+    if reason == REASON_PRIVATE_MATERIALIZE_FAILED:
+        return f"{subject} failure collapsed into {reason!r} with no errno"
+    if reason.startswith(wrong_prefix):
+        return f"{subject} failure was attributed to the other subject: {reason!r}"
+    if not reason.startswith(expected_prefix):
+        return f"{subject} failure did not name its subject: {reason!r}"
+    if not reason.endswith(errno_name):
+        return f"{subject} failure lost its errno: {reason!r} (want {errno_name})"
+    return None
+
+
+class TestGeneratedCopyPhaseSubjects(unittest.TestCase):
+
+    def _reason_for(self, subject: str, errno_name: str) -> str:
+        """Materialize a healthy world with ONE syscall failing for real.
+
+        ``os.read`` / ``os.write`` are the syscalls ``copy_opened_file``
+        forwards to — the outermost external edge, and the only reader and
+        writer inside this call. Patching them injects the exact failure a
+        sick mount produces without faking any of our own logic.
+        """
+        code = getattr(errno, errno_name)
+
+        def failing(*_args: object, **_kwargs: object) -> int:
+            raise OSError(code, os.strerror(code))
+
+        with tempfile.TemporaryDirectory() as parent:
+            built = _build_world(parent, "healthy", "track")
+            album = make_grab_list_entry(
+                files=[built.file], artist="Artist", title="Album", year="2020")
+            canonical = canonical_folder_for_row(
+                album, processing_albums_dir(built.cfg.processing_dir))
+            staged = StagedAlbum.from_entry(album, default_path=canonical)
+            ctx = make_ctx_with_fake_db(FakePipelineDB(), cfg=built.cfg)
+            target = "os.read" if subject == "source" else "os.write"
+            try:
+                with unittest.mock.patch(target, side_effect=failing):
+                    result = _materialize_processing_dir(album, staged, ctx)
+            finally:
+                built.close()
+            self.assertFalse(os.path.isdir(canonical))
+        self.assertIsInstance(result, MaterializeFailed)
+        assert isinstance(result, MaterializeFailed)
+        return result.reason
+
+    @given(
+        subject=st.sampled_from(("source", "destination")),
+        errno_name=st.sampled_from(_COPY_ERRNOS),
+    )
+    @example(subject="source", errno_name="ESTALE")
+    @example(subject="source", errno_name="EIO")
+    @example(subject="destination", errno_name="ENOSPC")
+    @settings(deadline=None, max_examples=10)
+    def test_a_mid_copy_failure_names_its_subject_and_errno(
+        self, subject: str, errno_name: str,
+    ) -> None:
+        reason = self._reason_for(subject, errno_name)
+        violation = check_copy_failure_names_its_subject(
+            subject, errno_name, reason)
+        self.assertIsNone(violation, violation)
+
+    def test_the_live_share_shapes_are_pinned_exactly(self) -> None:
+        """The three failures a reviewer injected at the real copy boundary."""
+        self.assertEqual(
+            self._reason_for("source", "ESTALE"),
+            f"{REASON_SOURCE_OPEN_FAILED_PREFIX}ESTALE",
+        )
+        self.assertEqual(
+            self._reason_for("source", "EIO"),
+            f"{REASON_SOURCE_OPEN_FAILED_PREFIX}EIO",
+        )
+        self.assertEqual(
+            self._reason_for("destination", "ENOSPC"),
+            f"{REASON_PROCESSING_OPEN_FAILED_PREFIX}ENOSPC",
+        )
+
+    def test_a_healthy_world_still_publishes(self) -> None:
+        """The must-still-work guard: the new handlers are not fail-closed."""
+        with tempfile.TemporaryDirectory() as parent:
+            built = _build_world(parent, "healthy", "track")
+            album = make_grab_list_entry(
+                files=[built.file], artist="Artist", title="Album", year="2020")
+            canonical = canonical_folder_for_row(
+                album, processing_albums_dir(built.cfg.processing_dir))
+            try:
+                result = _materialize_processing_dir(
+                    album,
+                    StagedAlbum.from_entry(album, default_path=canonical),
+                    make_ctx_with_fake_db(FakePipelineDB(), cfg=built.cfg),
+                )
+                self.assertIsInstance(result, Materialized)
+                self.assertEqual(os.listdir(canonical), ["track.mp3"])
+            finally:
+                built.close()
+
+    def test_checker_trips_on_the_defect_that_shipped(self) -> None:
+        self.assertIsNotNone(check_copy_failure_names_its_subject(
+            "source", "ESTALE", REASON_PRIVATE_MATERIALIZE_FAILED))
+        self.assertIsNotNone(check_copy_failure_names_its_subject(
+            "destination", "ENOSPC", REASON_PRIVATE_MATERIALIZE_FAILED))
+        self.assertIsNotNone(check_copy_failure_names_its_subject(
+            "source", "ESTALE",
+            f"{REASON_PROCESSING_OPEN_FAILED_PREFIX}ESTALE"))
+        self.assertIsNotNone(check_copy_failure_names_its_subject(
+            "source", "ESTALE",
+            f"{REASON_SOURCE_OPEN_FAILED_PREFIX}EIO"))
+        self.assertIsNone(check_copy_failure_names_its_subject(
+            "source", "ESTALE",
+            f"{REASON_SOURCE_OPEN_FAILED_PREFIX}ESTALE"))
 
 
 if __name__ == "__main__":
