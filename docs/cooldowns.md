@@ -33,7 +33,35 @@ CREATE TABLE user_cooldowns (
 
 ## Data flow
 
-1. **Trigger**: `_timeout_album()` (download.py), `reject_and_requeue()` (album_source.py), and the `_enqueue_completed_processing()` materialize-grace-expired reset (`download.py`, issue #822 item 4 — the residual materialize-failure path with no other cooldown coverage) all call `db.check_and_apply_cooldown(username)` after logging the outcome. That reset's row records the machine reason in `beets_detail` (issue #868: `event_path_never_stamped`, `event_path_gone_from_disk`, `unsafe_source_path`, `source_open_failed_<ERRNO>`, `slskd_root_*`, `processing_*`), and the cooldown is applied identically whichever reason it was.
+1. **Trigger**: `_timeout_album()` (download.py), `reject_and_requeue()` (album_source.py), and the `_enqueue_completed_processing()` materialize-grace-expired reset (`download.py`, issue #822 item 4 — the residual materialize-failure path with no other cooldown coverage) all call `db.check_and_apply_cooldown(username)` after logging the outcome. That reset's row records the machine reason in `beets_detail` (issue #868).
+
+   Inclusion rule for the list below: every reason the vocabulary can emit is
+   named, and the ones that are unreachable by construction are marked — the
+   vocabulary is deliberately total over (containment, missing, open, read,
+   write, unclassified) × (source file, shared share, private tree) so a new
+   raise site cannot land in another subject's noun.
+
+   - Source file: `event_path_never_stamped`, `event_path_gone_from_disk`,
+     `unsafe_source_path`, `source_open_failed_<ERRNO>`,
+     `source_read_failed_<ERRNO>`, `source_write_failed_<ERRNO>` (unreachable:
+     nothing writes the share), `source_preflight_refused` (unreachable: every
+     code the preflight can hit is classified).
+   - Shared slskd share: `slskd_root_unsafe`, `slskd_root_missing`,
+     `slskd_root_open_failed_<ERRNO>`, `slskd_root_read_failed_<ERRNO>`
+     (unreachable: the share is opened, never read as a directory),
+     `slskd_root_write_failed_<ERRNO>` (unreachable), `slskd_root_refused`.
+   - Our private processing tree: `processing_authority_unsafe`,
+     `processing_path_missing`, `processing_open_failed_<ERRNO>`,
+     `processing_read_failed_<ERRNO>`, `processing_write_failed_<ERRNO>`,
+     `materialize_authority_failed`, `private_materialize_failed`.
+   - Staged-path readiness: `staged_path_missing`,
+     `staged_path_missing_tracked_files`, `empty_manifest`,
+     `duplicate_final_basename`, `abandoned_interrupted_auto_import`.
+
+   The cooldown is applied identically whichever reason it was — the reason is
+   evidence, never a lifecycle input. `lib/failure_presentation.py` turns each
+   of them into operator copy at render time; the raw token stays in the column.
+
 2. **Decision**: `check_and_apply_cooldown()` queries `download_log` for last N outcomes, delegates to `should_cooldown()` pure function.
 3. **Storage**: If triggered, upserts `user_cooldowns` with `cooldown_until = NOW() + 3 days`.
 4. **Cache**: `ctx.cooled_down_users` populated at cycle start in `cratedigger.py main()`, shared with Phase 1 thread. Updated in real-time when new cooldowns are applied mid-cycle.

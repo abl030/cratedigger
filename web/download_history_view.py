@@ -57,6 +57,13 @@ class DownloadHistoryViewRow(msgspec.Struct, frozen=True):
     downloaded_label: str
     verdict: str
     summary: str
+    # Bounded, deduplicated raw per-transfer text behind the verdict, plus
+    # the server-owned label for it (issue #868). The full
+    # ``transfer_detail`` array stays log-only by contract; this is the one
+    # operator-visible projection of the peer's own words.
+    transfer_message: str | None
+    transfer_message_label: str | None
+    beets_detail_label: str | None
     failure_category: str | None
     analysis_error: str | None
     installed_path: str | None

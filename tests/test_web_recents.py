@@ -845,6 +845,10 @@ class TestClassifyBadge(unittest.TestCase):
         self.assertEqual(result.badge_class, "badge-rejected")
         self.assertIn("H@rco", result.verdict)
         self.assertIn("Marked bad rip", result.verdict)
+        # The summary keeps its trailing peer attribution: this verdict
+        # names the uploader as a denylist target, not with the presenter's
+        # "peer <name>" grammar (issue #868 review finding #4).
+        self.assertEqual(result.summary, f"{result.verdict} \u00b7 H@rco")
 
     def test_curator_ban_without_username(self):
         """E1.1 — no uploader resolved → still surfaces, terser verdict."""
@@ -866,7 +870,12 @@ class TestClassifyBadge(unittest.TestCase):
         ))
 
         self.assertEqual(result.badge, "Failed")
-        self.assertIn("Abandoned interrupted auto-import", result.verdict)
+        # Issue #868: nothing was imported, so the row is not an import
+        # error — and the internal "queued for redownload" phrasing is the
+        # presenter's job now.
+        self.assertEqual(
+            result.verdict, "Interrupted import abandoned and requeued")
+        self.assertNotIn("Import error", result.verdict)
 
     def test_timeout(self):
         result = classify_log_entry(_entry(outcome="timeout", beets_scenario="timeout"))
@@ -1098,8 +1107,12 @@ class TestClassifyVerdict(unittest.TestCase):
             outcome="timeout", beets_scenario=None,
             error_message="all transfers vanished from slskd before any "
                           "status was observed (slskd restart?)"))
-        self.assertIn("download failed", result.verdict.lower())
-        self.assertIn("vanished", result.verdict.lower())
+        self.assertEqual(
+            result.verdict,
+            "Transfers disappeared from slskd before the download finished",
+        )
+        # Issue #868: "(slskd restart?)" is a guess, not evidence.
+        self.assertNotIn("restart", result.verdict)
 
     def test_user_offline_verdict_uses_error_message(self):
         result = classify_log_entry(_entry(

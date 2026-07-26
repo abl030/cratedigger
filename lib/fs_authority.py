@@ -25,8 +25,11 @@ FsAuthorityCode = Literal[
     "unsafe_symlink",
     "not_a_directory",
     "not_regular_file",
+    "untrusted_ownership",
     "missing",
     "open_failed",
+    "read_failed",
+    "write_failed",
 ]
 """Machine-stable classification of one filesystem-authority refusal.
 
@@ -38,12 +41,24 @@ symlink, a path escape, a component that is not a directory, or a
 non-regular file — can never be reported as an ordinary storage error,
 nor a storage errno as a containment violation.
 
-``path_escape``, ``unsafe_symlink``, ``not_a_directory`` and
-``not_regular_file`` are the containment codes: the name itself is
-untrustworthy. ``missing`` and ``open_failed`` are not — they say nothing
-about trust. Consumers that translate these into their own vocabulary do
+``path_escape``, ``unsafe_symlink``, ``not_a_directory``,
+``not_regular_file`` and ``untrusted_ownership`` are the containment
+codes: the name — or the authority the tree is held under — is
+untrustworthy. ``untrusted_ownership`` covers the private-tree ownership
+and permission assertions (a group/other-writable ancestor, a root that
+is not owned by the service identity, a root or child that is not mode
+0700). Those are security-relevant authority downgrades, not the
+"renameat2 is unsupported" miscellany ``unspecified`` collects, and
+lumping them together fused ~13 causes into one reason (issue #868). ``missing``, ``open_failed``, ``read_failed`` and ``write_failed`` are
+not — they say nothing about trust. Consumers that translate these into their own vocabulary do
 so with an exhaustive ``match`` so a new code cannot be silently lumped
 in with either group.
+
+``open_failed``, ``read_failed`` and ``write_failed`` are three DIFFERENT
+storage facts and must not borrow each other's nouns: a destination that
+ran out of space opened perfectly well, and saying it "could not be
+opened" is a specific claim that is simply false (issue #868 review B2).
+Each carries its errno.
 
 ``unspecified`` is the default for every raise site that predates the
 classification (configured-root policy checks, preview/quarantine
@@ -57,8 +72,9 @@ class FilesystemAuthorityError(ValueError):
 
     ``code`` is the structured discriminator (see :data:`FsAuthorityCode`);
     ``errno_symbol`` carries the originating errno name (``"ESTALE"``,
-    ``"EIO"``, …) whenever ``code`` is ``"open_failed"``, so a caller can
-    record *which* storage failure happened without parsing ``strerror``.
+    ``"EIO"``, …) for every storage code — ``"open_failed"``,
+    ``"read_failed"`` and ``"write_failed"`` — so a caller can record
+    *which* storage failure happened without parsing ``strerror``.
     """
 
     def __init__(
@@ -94,6 +110,27 @@ class SharedDownloadRootError(FilesystemAuthorityError):
             code=exc.code,
             errno_symbol=exc.errno_symbol,
         )
+
+
+class CopySourceReadError(FilesystemAuthorityError):
+    """Reading the already-authorized SOURCE failed mid-copy.
+
+    Its own type for the same reason as :class:`SharedDownloadRootError`:
+    the copy phase touches two subjects, and which one failed is a
+    dispatch decision. The share is read in full here — it is where a
+    flaky mount is most likely to fire — and reporting an ESTALE on the
+    source as a failure of our own private tree names the wrong subsystem
+    (issue #868 review).
+    """
+
+
+class CopyDestinationWriteError(FilesystemAuthorityError):
+    """Writing or flushing the DESTINATION failed (e.g. ENOSPC, EIO).
+
+    Carries ``write_failed`` — never ``open_failed``: the destination was
+    opened successfully, and the whole point of the structured code is
+    that a consumer's copy can state what actually went wrong.
+    """
 
 
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
@@ -147,8 +184,12 @@ def _raise_path_error(path: str, exc: OSError) -> FilesystemAuthorityError:
         return FilesystemAuthorityError(
             f"unsafe symlink: {path}", code="unsafe_symlink")
     if exc.errno == errno.ENOTDIR:
+        # openat(O_DIRECTORY|O_NOFOLLOW) answers ENOTDIR — not ELOOP — for
+        # a symlink to a directory, so this branch cannot tell the two
+        # apart and must not claim to (issue #868 review).
         return FilesystemAuthorityError(
-            f"path component is not a directory: {path}", code="not_a_directory")
+            f"path component is not a directory, or is a symlink to one: {path}",
+            code="not_a_directory")
     if exc.errno in _SPECIAL_FILE_ERRNOS:
         return FilesystemAuthorityError(
             f"not a regular file: {path}", code="not_regular_file")
@@ -234,17 +275,27 @@ def _assert_private_parent(path: str) -> None:
             try:
                 info = os.fstat(fd)
             except OSError as exc:
+                # The directory is already OPEN; it is the stat that failed.
+                # ``open_failed`` here rendered "could not be opened
+                # (ESTALE)" — the same verb-borrow B2 was chartered to
+                # remove (issue #868 review F4).
                 raise FilesystemAuthorityError(
-                    f"cannot inspect {current}: {exc.strerror}") from exc
+                    f"cannot inspect {current}: {exc.strerror}",
+                    code="read_failed",
+                    errno_symbol=errno_symbol(exc),
+                ) from exc
             if info.st_mode & 0o022:
                 raise FilesystemAuthorityError(
-                    f"private processing ancestor is group/other writable: {current}")
+                    f"private processing ancestor is group/other writable: {current}",
+                    code="untrusted_ownership")
             if current == root and info.st_uid != expected_uid:
                 raise FilesystemAuthorityError(
-                    f"private processing root is not owned by service identity: {current}")
+                    f"private processing root is not owned by service identity: {current}",
+                    code="untrusted_ownership")
             if current == root and stat.S_IMODE(info.st_mode) != 0o700:
                 raise FilesystemAuthorityError(
-                    f"private processing root is not mode 0700: {current}")
+                    f"private processing root is not mode 0700: {current}",
+                    code="untrusted_ownership")
     finally:
         os.close(fd)
 
@@ -432,7 +483,8 @@ def open_private_child_directory(
         info = os.fstat(fd)
         if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
             raise FilesystemAuthorityError(
-                f"private processing child is not service-owned 0700: {name}")
+                f"private processing child is not service-owned 0700: {name}",
+                code="untrusted_ownership")
         yield fd
     finally:
         os.close(fd)
@@ -543,11 +595,17 @@ def open_regular_relative(root_fd: int, relative_path: str) -> OpenedRegularFile
             fd = os.open(parts[-1], _FILE_FLAGS, dir_fd=parent_fd)
         except OSError as exc:
             raise _raise_path_error(relative_path, exc) from exc
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode):
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise FilesystemAuthorityError(
+                    f"not a regular file: {relative_path}",
+                    code="not_regular_file")
+        except Exception:
+            # The outer handler only owns ``parent_fd``; an ``fstat`` that
+            # raises here would otherwise leak the file descriptor.
             os.close(fd)
-            raise FilesystemAuthorityError(
-                f"not a regular file: {relative_path}", code="not_regular_file")
+            raise
         return OpenedRegularFile(fd=fd, parent_fd=parent_fd, name=parts[-1], stat_result=info)
     except Exception:
         os.close(parent_fd)
@@ -638,7 +696,14 @@ def copy_opened_file(
         if remaining is not None and remaining < 0:
             raise FilesystemAuthorityError("source grew beyond copy limit")
         read_size = 1024 * 1024 if remaining is None else min(1024 * 1024, remaining + 1)
-        chunk = os.read(source_fd, read_size)
+        try:
+            chunk = os.read(source_fd, read_size)
+        except OSError as exc:
+            raise CopySourceReadError(
+                f"cannot read source: {exc.strerror}",
+                code="read_failed",
+                errno_symbol=errno_symbol(exc),
+            ) from exc
         if not chunk:
             break
         if max_bytes is not None and len(chunk) > max_bytes - copied:
@@ -647,8 +712,22 @@ def copy_opened_file(
             before_write(len(chunk))
         view = memoryview(chunk)
         while view:
-            written = os.write(destination_fd, view)
+            try:
+                written = os.write(destination_fd, view)
+            except OSError as exc:
+                raise CopyDestinationWriteError(
+                    f"cannot write destination: {exc.strerror}",
+                    code="write_failed",
+                    errno_symbol=errno_symbol(exc),
+                ) from exc
             view = view[written:]
         copied += len(chunk)
-    os.fsync(destination_fd)
+    try:
+        os.fsync(destination_fd)
+    except OSError as exc:
+        raise CopyDestinationWriteError(
+            f"cannot flush destination: {exc.strerror}",
+            code="write_failed",
+            errno_symbol=errno_symbol(exc),
+        ) from exc
     return copied

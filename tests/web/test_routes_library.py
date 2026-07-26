@@ -68,6 +68,9 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
         "bitrate", "was_converted", "original_filetype", "actual_filetype",
         "actual_min_bitrate", "slskd_filetype",
         "downloaded_label", "verdict", "comparison_basis",
+        # Issue #868: web/js/library.js renders renderDownloadHistoryItem
+        # too, so this surface owes the same failure-evidence fields.
+        "transfer_message", "transfer_message_label", "beets_detail_label",
         "disambiguation_failure",
         "disambiguation_detail", "bad_extensions", "spectral_grade",
         "spectral_bitrate", "existing_min_bitrate",

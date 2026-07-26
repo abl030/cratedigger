@@ -1649,5 +1649,109 @@ console.log('renderDownloadHistoryItem() omits the forensics Detail row when bee
     'no forensics toggle for a redundant beets_detail');
 }
 
+console.log('renderDownloadHistoryItem() shows the raw peer message behind a humanized verdict');
+{
+  // Issue #868: the verdict interprets ("Peer X rejected all 29 files"),
+  // so the peer's own words need their own row — transfer_detail is
+  // log-only, and this bounded projection is the only place they appear.
+  const html = renderDownloadHistoryFixture({
+    outcome: 'timeout',
+    badge: 'Failed',
+    badge_class: 'badge-failed',
+    soulseek_username: 'Tymemage',
+    created_at: '2026-07-25T02:10:00+00:00',
+    verdict: 'Peer Tymemage rejected all 29 files before transfer \u2014 "Verification required"',
+    transfer_message: '29\u00d7 "Verification required"',
+    transfer_message_label: 'Peer message',
+  });
+
+  assertContains(html, 'class="p-hist-label">Peer message</span>',
+    'server-owned evidence label renders as its own row');
+  assertContains(html, '29\u00d7 &quot;Verification required&quot;',
+    'raw peer text is escaped and visible');
+  assertContains(html, 'color:#888;', 'raw peer text renders dim');
+}
+
+console.log('renderDownloadHistoryItem() labels a local storage failure as storage, not a peer message');
+{
+  const html = renderDownloadHistoryFixture({
+    outcome: 'timeout',
+    badge: 'Failed',
+    badge_class: 'badge-failed',
+    soulseek_username: 'Tymemage',
+    created_at: '2026-07-25T02:10:00+00:00',
+    verdict: 'Local storage error writing 3 files \u2014 "Failed to create file 01.flac: Stale file handle"',
+    transfer_message: '3\u00d7 "Failed to create file 01.flac: Stale file handle"',
+    transfer_message_label: 'Storage error',
+  });
+
+  assertContains(html, 'class="p-hist-label">Storage error</span>',
+    'storage failures keep their own label');
+  assertExcludes(html, 'class="p-hist-label">Peer message</span>',
+    'our own storage fault is never captioned as something a peer said');
+}
+
+console.log('renderDownloadHistoryItem() omits the evidence row when no transfer message exists');
+{
+  const html = renderDownloadHistoryFixture({
+    outcome: 'failed',
+    badge: 'Failed',
+    badge_class: 'badge-failed',
+    soulseek_username: 'testuser',
+    created_at: '2026-07-25T02:10:00+00:00',
+    verdict: 'Download could not be staged for import in time; returned to the queue',
+  });
+  assertExcludes(html, 'Peer message', 'no evidence row without evidence');
+}
+
+console.log('renderDownloadHistoryItem() escapes a hostile transfer message and label');
+{
+  const html = renderDownloadHistoryFixture({
+    outcome: 'timeout',
+    soulseek_username: 'x',
+    created_at: '2026-07-25T02:10:00+00:00',
+    transfer_message: '1\u00d7 "<img src=x onerror=alert(1)>"',
+    transfer_message_label: '<script>bad</script>',
+  });
+  assertExcludes(html, '<img src=x', 'peer text is escaped');
+  assertExcludes(html, '<script>bad', 'label is escaped');
+}
+
+console.log('renderDownloadHistoryItem() labels a machine reason code as such in forensics');
+{
+  // Issue #868 review A4: PR1 persists the materialize reason in
+  // beets_detail, which this card renders as a forensics row. The server
+  // owns the label so a machine token is not captioned as beets prose.
+  const html = renderDownloadHistoryFixture({
+    outcome: 'failed',
+    badge: 'Failed',
+    badge_class: 'badge-failed',
+    soulseek_username: 'testuser',
+    created_at: '2026-07-25T02:10:00+00:00',
+    verdict: 'Could not read a downloaded file from the slskd share (ESTALE); requeued',
+    beets_detail: 'source_open_failed_ESTALE',
+    beets_detail_label: 'Reason code',
+  });
+
+  assertContains(html, 'class="p-hist-label">Reason code</span>',
+    'server-owned forensics label renders');
+  assertContains(html, 'source_open_failed_ESTALE', 'the raw token stays visible');
+  assertExcludes(html, 'class="p-hist-label">Detail</span>',
+    'a reason code is not captioned as beets detail');
+}
+
+console.log('renderDownloadHistoryItem() keeps the Detail label for beets prose');
+{
+  const html = renderDownloadHistoryFixture({
+    outcome: 'rejected',
+    soulseek_username: 'testuser',
+    created_at: '2026-07-25T02:10:00+00:00',
+    verdict: 'Wrong match (dist 0.190)',
+    beets_detail: 'Target MBID not in candidates',
+  });
+  assertContains(html, 'class="p-hist-label">Detail</span>',
+    'unlabelled details keep the historical caption');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

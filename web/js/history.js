@@ -599,6 +599,19 @@ export function renderDownloadHistoryItem(h) {
     rows.push(['Distance', withApplyDistance('—', h.apply_beets_distance)]);
   }
 
+  // The raw per-transfer text behind a humanized failure verdict (issue
+  // #868). The verdict interprets ("Peer X rejected all 29 files before
+  // transfer"); this row keeps the peer's own words visible, bounded and
+  // deduplicated by the server. The label is server-owned too, because a
+  // slskd write failure on OUR storage must not be captioned as something
+  // a peer said.
+  if (h.transfer_message) {
+    rows.push([
+      esc(h.transfer_message_label || 'Peer message'),
+      `<span style="color:#888;">${esc(h.transfer_message)}</span>`,
+    ]);
+  }
+
   const badExtensions = Array.isArray(h.bad_extensions) ? h.bad_extensions : [];
   if (badExtensions.length > 0) {
     rows.push([
@@ -627,8 +640,11 @@ export function renderDownloadHistoryItem(h) {
   // The raw beets/harness detail (e.g. "Target MBID … not in candidates")
   // explains WHY a match-failure verdict fired — reachable, but debug-tier.
   // Skipped when it just repeats the verdict.
+  // The server labels this row: since #868's evidence work the column can
+  // hold a machine reason code (``source_open_failed_ESTALE``) rather than
+  // beets prose, and "Detail" would mis-caption it.
   if (h.beets_detail && h.beets_detail !== verdict) {
-    forensicRows.push(['Detail', esc(h.beets_detail)]);
+    forensicRows.push([esc(h.beets_detail_label || 'Detail'), esc(h.beets_detail)]);
   }
   const previewParts = [
     h.wrong_match_triage_preview_verdict,
