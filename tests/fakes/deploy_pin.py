@@ -58,8 +58,7 @@ def live_remote_object():
 
 def capture_live_remote():
     revision = state["remote_rev"]
-    state["remote_objects"][revision] = live_remote_object()
-    state["captured_objects"][revision] = dict(state["remote_objects"][revision])
+    state["captured_objects"][revision] = live_remote_object()
     state["fetched_rev"] = revision
     return revision
 
@@ -70,7 +69,6 @@ def move_live_remote():
     state["remote_target"] = state["moved_remote_target"]
     state["remote_signature_status"] = state["moved_remote_signature_status"]
     state["remote_lock_readable"] = state["moved_remote_lock_readable"]
-    state["remote_objects"][state["remote_rev"]] = live_remote_object()
 
 
 def captured_object(revision):
@@ -147,10 +145,16 @@ elif args[:3] == ["rev-parse", "--verify", "--quiet"]:
             and state.get("pending_rev") in state["commits"]
         ):
             fail("fake post-commit rev-parse failed")
-        if state.get("fault") in {
-            "signal_after_commit",
-            "invalid_signature_signal_after_commit",
-        } and value in state["commits"]:
+        if (
+            state.get("fault") in {
+                "signal_after_commit",
+                "invalid_signature_signal_after_commit",
+            } and value in state["commits"]
+        ) or (
+            state.get("fault") == "signal_after_pending_commit"
+            and value == state.get("pending_rev")
+            and value in state["commits"]
+        ):
             save()
             os.kill(os.getppid(), signal.SIGTERM)
             time.sleep(0.1)
@@ -166,10 +170,16 @@ elif args[:2] == ["rev-parse", "--verify"]:
         fail(f"unknown fake ref: {ref}")
     if state.get("fault") == "post_commit_rev_parse" and value in state["commits"]:
         fail("fake post-commit rev-parse failed")
-    if state.get("fault") in {
-        "signal_after_commit",
-        "invalid_signature_signal_after_commit",
-    } and value in state["commits"]:
+    if (
+        state.get("fault") in {
+            "signal_after_commit",
+            "invalid_signature_signal_after_commit",
+        } and value in state["commits"]
+    ) or (
+        state.get("fault") == "signal_after_pending_commit"
+        and value == state.get("pending_rev")
+        and value in state["commits"]
+    ):
         save()
         os.kill(os.getppid(), signal.SIGTERM)
         time.sleep(0.1)
@@ -241,10 +251,10 @@ elif args[:3] == ["log", "-1", "--format=%G?"]:
     commit = captured_object(revision)
     if commit is None:
         fail(f"uncaptured fake commit: {revision}")
-    if revision in state["captured_objects"]:
-        signature_status = commit.get("signature_status", "G")
-    elif state.get("fault") == "signature_unknown":
+    if revision in state["commits"] and state.get("fault") == "signature_unknown":
         signature_status = "U"
+    elif revision in state["captured_objects"]:
+        signature_status = commit.get("signature_status", "G")
     elif commit is not None and commit["signature_material"] == "bad":
         signature_status = "B"
     else:
@@ -292,9 +302,17 @@ elif args[:1] == ["show"] and args[1].endswith(":flake.lock"):
 elif args[:1] == ["update-ref"]:
     if args[1] == "-d":
         ref = args[2]
+        expected_old = args[3] if len(args) == 4 else None
+        current = (
+            state.get("pending_rev")
+            if ref == "refs/cratedigger-deploy/cratedigger-src-pending"
+            else state.get("receipt_rev")
+        )
+        if expected_old is None or (current or "") != expected_old:
+            fail("fake delete-ref compare-and-swap failed")
         if ref == "refs/cratedigger-deploy/cratedigger-src-pending":
             state["pending_rev"] = None
-        state["events"].append(["delete-ref", ref])
+        state["events"].append(["delete-ref", ref, expected_old])
         save()
         raise SystemExit(0)
     ref = args[1]
@@ -335,12 +353,6 @@ elif args[:1] == ["push"]:
     state["remote_target"] = commit["target"]
     state["remote_signature_status"] = "G"
     state["remote_lock_readable"] = True
-    state["remote_objects"][revision] = {
-        "parent": commit["parent"],
-        "target": commit["target"],
-        "signature_status": "G",
-        "lock_readable": True,
-    }
     state["remote_ancestors"] = [*state["remote_ancestors"], commit["parent"]]
 elif args[:1] == ["ls-remote"] and args[-1] == "refs/heads/master":
     state["events"].append(["ls-remote"])
@@ -404,7 +416,6 @@ class FakeDeployPinCommands:
             "remote_ancestors": [],
             "remote_signature_status": "G",
             "remote_lock_readable": True,
-            "remote_objects": {},
             "captured_objects": {
                 self.BASE_REV: {
                     "parent": "0" * 40,

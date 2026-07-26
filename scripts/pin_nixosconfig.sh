@@ -237,7 +237,8 @@ push_and_verify_with_token() {
 
 main() {
   local target_revision commit_message remote_revision receipt_revision=''
-  local pending_revision='' remote_target receipt_parent_target status_output
+  local pending_revision='' pending_parent_target remote_target
+  local receipt_parent_target status_output
   local previous_receipt=''
   local candidate_revision git_common_dir origin_url verification_rc
   local fetch_url_output push_url_output
@@ -296,39 +297,56 @@ main() {
 
   if pending_revision=$(git -C "$NIXOSCONFIG_REPO" \
     rev-parse --verify --quiet "$PENDING_REF"); then
-    if [[ "$pending_revision" == "$remote_revision" ]]; then
-      git -C "$NIXOSCONFIG_REPO" update-ref -d \
-        "$PENDING_REF" "$pending_revision"
-      pending_revision=''
+    printf 'recovering durable pending candidate: %s ref=%s\n' \
+      "$pending_revision" "$PENDING_REF"
+    if verify_pin_commit "$pending_revision"; then
+      :
     else
-      printf 'recovering durable pending candidate: %s ref=%s\n' \
-        "$pending_revision" "$PENDING_REF"
-      if verify_pin_commit "$pending_revision"; then
-        :
-      else
-        verification_rc=$?
-        if ((verification_rc == 2)); then
-          git -C "$NIXOSCONFIG_REPO" update-ref -d \
-            "$PENDING_REF" "$pending_revision"
-          printf 'pin-nixosconfig: definitively invalid pending candidate discarded: revision=%s ref=%s\n' \
-            "$pending_revision" "$PENDING_REF" >&2
-        fi
-        return "$verification_rc"
+      verification_rc=$?
+      if ((verification_rc == 2)); then
+        git -C "$NIXOSCONFIG_REPO" update-ref -d \
+          "$PENDING_REF" "$pending_revision"
+        printf 'pin-nixosconfig: definitively invalid pending candidate discarded: revision=%s ref=%s\n' \
+          "$pending_revision" "$PENDING_REF" >&2
       fi
-      [[ "$VERIFIED_TARGET" == "$target_revision" ]] \
-        || die "different candidate is pending: requested=$target_revision pending_target=$VERIFIED_TARGET pending=$pending_revision ref=$PENDING_REF"
-      previous_receipt=$receipt_revision
-      if [[ "$receipt_revision" != "$pending_revision" ]]; then
-        git -C "$NIXOSCONFIG_REPO" update-ref "$RECEIPT_REF" \
-          "$pending_revision" "$previous_receipt"
-      fi
-      INTENDED_REV=$pending_revision
-      INTENDED_TARGET=$VERIFIED_TARGET
-      INTENDED_BASE=$VERIFIED_PARENT
-      git -C "$NIXOSCONFIG_REPO" update-ref -d \
-        "$PENDING_REF" "$pending_revision"
-      receipt_revision=$pending_revision
+      return "$verification_rc"
     fi
+    [[ "$VERIFIED_TARGET" == "$target_revision" ]] \
+      || die "different candidate is pending: requested=$target_revision pending_target=$VERIFIED_TARGET pending=$pending_revision ref=$PENDING_REF"
+
+    remote_revision=$(remote_master_with_token)
+    if [[ "$remote_revision" == "$VERIFIED_PARENT" ]]; then
+      [[ "$(remote_master_with_token)" == "$remote_revision" ]] \
+        || die "Forgejo master changed while confirming pending base: fetched=$remote_revision"
+    elif [[ "$remote_revision" == "$pending_revision" ]] \
+      || git -C "$NIXOSCONFIG_REPO" merge-base --is-ancestor \
+        "$pending_revision" "$remote_revision"; then
+      verify_stable_remote_pin "$remote_revision"
+      [[ "$VERIFIED_REMOTE_TARGET" == "$VERIFIED_TARGET" ]] \
+        || die "Forgejo advanced past pending=$pending_revision but no longer pins target=$VERIFIED_TARGET (remote=$remote_revision remote_target=$VERIFIED_REMOTE_TARGET)"
+    else
+      verify_stable_remote_pin "$remote_revision"
+      if [[ "$VERIFIED_REMOTE_TARGET" != "$VERIFIED_TARGET" ]]; then
+        if ! pending_parent_target=$(commit_locked_revision "$VERIFIED_PARENT"); then
+          die "could not read cratedigger-src lock from pending parent $VERIFIED_PARENT"
+          return 1
+        fi
+        [[ "$VERIFIED_REMOTE_TARGET" == "$pending_parent_target" ]] \
+          || die "different candidate is pending: requested=$target_revision pending_target=$VERIFIED_TARGET pending=$pending_revision ref=$PENDING_REF"
+      fi
+    fi
+
+    previous_receipt=$receipt_revision
+    if [[ "$receipt_revision" != "$pending_revision" ]]; then
+      git -C "$NIXOSCONFIG_REPO" update-ref "$RECEIPT_REF" \
+        "$pending_revision" "$previous_receipt"
+    fi
+    INTENDED_REV=$pending_revision
+    INTENDED_TARGET=$VERIFIED_TARGET
+    INTENDED_BASE=$VERIFIED_PARENT
+    git -C "$NIXOSCONFIG_REPO" update-ref -d \
+      "$PENDING_REF" "$pending_revision"
+    receipt_revision=$pending_revision
   fi
 
   if [[ -n "$receipt_revision" ]]; then

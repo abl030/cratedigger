@@ -279,6 +279,96 @@ class TestDeployPinScript(unittest.TestCase):
         self.assertEqual(final_state["receipt_rev"], pending)
         self.assertIsNone(final_state["pending_rev"])
 
+    def test_pending_recovery_leaves_private_refs_untouched_when_remote_is_untrusted(
+        self,
+    ) -> None:
+        cases = (
+            ("bad signature", {"remote_signature_status": "B"}),
+            ("unknown signature", {"remote_signature_status": "U"}),
+            ("unreadable lock", {"remote_lock_readable": False}),
+            ("wrong target", {"remote_target": "7" * 40}),
+        )
+        for name, changes in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as td:
+                fake = FakeDeployPinCommands(Path(td))
+                receipt = fake.seed_divergent_receipt()
+                fake.update_state(
+                    fault="signal_after_pending_commit", remote_move_on_nix=True
+                )
+                interrupted = fake.run(SCRIPT)
+                pending = fake.state["pending_rev"]
+                self.assertNotEqual(interrupted.returncode, 0)
+                self.assertIsNotNone(pending)
+
+                event_count = len(fake.state["events"])
+                fake.update_state(
+                    fault=None, remote_move_on_nix=False, **changes
+                )
+                retry = fake.run(SCRIPT)
+                state = fake.state
+
+                self.assertNotEqual(retry.returncode, 0)
+                self.assertEqual(state["receipt_rev"], receipt)
+                self.assertEqual(state["pending_rev"], pending)
+                self.assertEqual(state["commit_count"], 1)
+                private_ref_mutations = [
+                    event for event in state["events"][event_count:]
+                    if event[0] in {"update-ref", "delete-ref"}
+                    and event[1] in {
+                        "refs/cratedigger-deploy/cratedigger-src",
+                        "refs/cratedigger-deploy/cratedigger-src-pending",
+                    }
+                ]
+                self.assertEqual(private_ref_mutations, [])
+
+    def test_pending_recovery_rebuilds_from_trusted_divergent_parent_target(
+        self,
+    ) -> None:
+        receipt = self.fake.seed_divergent_receipt()
+        self.fake.update_state(
+            fault="signal_after_pending_commit", remote_move_on_nix=True
+        )
+        interrupted = self.fake.run(SCRIPT)
+        pending = self.fake.state["pending_rev"]
+
+        self.assertNotEqual(interrupted.returncode, 0)
+        self.assertIsNotNone(pending)
+
+        self.fake.update_state(fault=None, remote_move_on_nix=False)
+        retry = self.fake.run(SCRIPT)
+        state = self.fake.state
+
+        self.assertEqual(retry.returncode, 0, retry.stderr)
+        self.assertEqual(state["commit_count"], 2)
+        self.assertEqual(state["receipt_rev"], state["remote_rev"])
+        self.assertNotEqual(state["receipt_rev"], pending)
+        self.assertEqual(
+            state["commits"][state["receipt_rev"]]["parent"], "6" * 40
+        )
+        self.assertNotEqual(state["receipt_rev"], receipt)
+
+    def test_pending_recovery_accepts_trusted_remote_at_candidate(self) -> None:
+        self.fake.update_state(fault="signal_after_commit")
+        interrupted = self.fake.run(SCRIPT)
+        pending = self.fake.state["pending_rev"]
+
+        self.assertNotEqual(interrupted.returncode, 0)
+        self.assertIsNotNone(pending)
+
+        self.fake.update_state(
+            fault=None,
+            remote_rev=pending,
+            remote_target=self.fake.TARGET_REV,
+        )
+        retry = self.fake.run(SCRIPT)
+        state = self.fake.state
+
+        self.assertEqual(retry.returncode, 0, retry.stderr)
+        self.assertEqual(state["commit_count"], 1)
+        self.assertEqual(state["receipt_rev"], pending)
+        self.assertEqual(state["remote_rev"], pending)
+        self.assertIsNone(state["pending_rev"])
+
     def test_cleanup_failure_reports_recoverable_remote_revision(self) -> None:
         self.fake.update_state(fault="cleanup")
         first = self.fake.run(SCRIPT)

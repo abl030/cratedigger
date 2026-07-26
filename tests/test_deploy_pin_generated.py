@@ -31,10 +31,14 @@ def assert_deploy_lifecycle_invariants(
     ]
     pushes = [event for event in events if event[0] == "push"]
     ref_updates = [event for event in events if event[0] == "update-ref"]
+    ref_deletes = [event for event in events if event[0] == "delete-ref"]
 
     for event in ref_updates:
         assert len(event) == 4
         assert isinstance(event[3], str)
+    for event in ref_deletes:
+        assert len(event) == 3
+        assert isinstance(event[2], str)
 
     if state["receipt_rev"] is not None:
         assert state["receipt_rev"] in state["commits"]
@@ -80,6 +84,10 @@ def assert_divergent_receipt_invariants(
         event for event in state["events"]
         if event[:2] == ["update-ref", "refs/cratedigger-deploy/cratedigger-src-pending"]
     ]
+    pending_deletes = [
+        event for event in state["events"]
+        if event[:2] == ["delete-ref", "refs/cratedigger-deploy/cratedigger-src-pending"]
+    ]
     if remote_matches_receipt and verifier_available:
         assert len(commits) == 1
         revision = commits[0][1]
@@ -92,12 +100,16 @@ def assert_divergent_receipt_invariants(
         assert pending_updates == [
             ["update-ref", "refs/cratedigger-deploy/cratedigger-src-pending", remote, ""]
         ]
+        assert pending_deletes == [
+            ["delete-ref", "refs/cratedigger-deploy/cratedigger-src-pending", revision]
+        ]
         assert len(pushes) == 1
     else:
         assert state["receipt_rev"] == receipt
         assert not commits
         assert not receipt_updates
         assert not pending_updates
+        assert not pending_deletes
         assert not pushes
 
 
@@ -115,6 +127,10 @@ def assert_same_target_divergent_invariants(
         event for event in state["events"]
         if event[:2] == ["update-ref", "refs/cratedigger-deploy/cratedigger-src-pending"]
     ]
+    pending_deletes = [
+        event for event in state["events"]
+        if event[:2] == ["delete-ref", "refs/cratedigger-deploy/cratedigger-src-pending"]
+    ]
     pushes = [event for event in state["events"] if event[0] == "push"]
     if verifier_available and remote_relation == "parent":
         assert len(commits) == 1
@@ -128,16 +144,38 @@ def assert_same_target_divergent_invariants(
         assert pending_updates == [
             ["update-ref", "refs/cratedigger-deploy/cratedigger-src-pending", remote, ""]
         ]
+        assert pending_deletes == [
+            ["delete-ref", "refs/cratedigger-deploy/cratedigger-src-pending", revision]
+        ]
         assert len(pushes) == 1
     else:
         assert state["receipt_rev"] == receipt
         assert not commits
         assert not receipt_updates
         assert not pending_updates
+        assert not pending_deletes
         assert not pushes
 
 
 class TestDeployLifecycleCheckerKnownBad(unittest.TestCase):
+    def test_divergent_checker_rejects_pending_deletion_in_fail_closed_world(self) -> None:
+        bad = {
+            "events": [
+                ["delete-ref", "refs/cratedigger-deploy/cratedigger-src-pending", "pending"],
+            ],
+            "commits": {},
+            "receipt_rev": "receipt",
+        }
+        with self.assertRaises(AssertionError):
+            assert_divergent_receipt_invariants(
+                bad,
+                receipt="receipt",
+                remote="remote",
+                new_target="new-target",
+                remote_matches_receipt=False,
+                verifier_available=True,
+            )
+
     def test_same_target_checker_rejects_unnecessary_current_pin(self) -> None:
         bad = {
             "events": [["commit", "new"]],
@@ -292,6 +330,7 @@ class TestGeneratedDeployPinLifecycle(unittest.TestCase):
                 "post_commit_verify",
                 "post_commit_update_ref",
                 "signal_after_commit",
+                "signal_after_pending_commit",
                 "invalid_signature_signal_after_commit",
                 "push",
                 "cleanup",
@@ -338,7 +377,7 @@ class TestGeneratedDeployPinLifecycle(unittest.TestCase):
             fake.update_state(fault=first_fault)
             fake.run(SCRIPT)
             after_first = fake.state
-            pending = after_first["receipt_rev"]
+            pending = after_first["receipt_rev"] or after_first["pending_rev"]
 
             if pending is not None and remote_after_failure != "unchanged":
                 if remote_after_failure == "pending":

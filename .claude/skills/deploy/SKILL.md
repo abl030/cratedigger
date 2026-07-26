@@ -54,8 +54,10 @@ durably reachable in the commit transaction itself, then promotes that exact
 commit to `refs/cratedigger-deploy/cratedigger-src` before pushing. Retry the
 exact same invocation after any failure: it recovers
 `refs/cratedigger-deploy/cratedigger-src-pending` first; if Forgejo master is
-still at the pin's parent, it pushes the already-created commit; if Forgejo is
-already at the pending revision, it reports success without creating another
+still at the pin's parent, it pushes the already-created commit; first it
+checks a stable current master before mutating either private ref, retaining a
+pending candidate whenever that remote is untrusted or incompatible. If Forgejo
+is already at the pending revision, it reports success without creating another
 commit; and if Forgejo advanced to an incompatible revision, it fails with the
 exact pending, base, and remote SHAs. A sibling receipt may advance only for a
 new target when current signed Forgejo master itself verifies and pins the
