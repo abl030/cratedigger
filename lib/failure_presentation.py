@@ -94,6 +94,17 @@ MAX_RAW_MESSAGE_GROUPS: Final = 3
 MAX_PEER_NAME_CHARS: Final = 40
 """Longest peer name rendered inside a sentence."""
 
+MAX_DIAGNOSTIC_CHARS: Final = 200
+"""Longest OUR-OWN diagnostic quoted inside a verdict.
+
+Wider than :data:`MAX_RAW_MESSAGE_CHARS` because these are our own
+components explaining themselves — a beets exception, a post-import
+inconsistency, a measurement failure — where the useful part is often past
+where a peer's chatter would have been cut. Still a bound: the verdict is
+the collapsed list row, and one long traceback must not become the
+operator's whole worklist line. Shared with ``web/classify.py``, which
+quotes the same producer text on rejection rows."""
+
 TRANSFER_MESSAGE_LABEL_PEER: Final = "Peer message"
 TRANSFER_MESSAGE_LABEL_STORAGE: Final = "Storage error"
 TRANSFER_MESSAGE_LABEL_MIXED: Final = "Transfer messages"
@@ -775,7 +786,7 @@ def _present_download_message(
         # evidence, so it does not reach the operator.
         return "Transfers disappeared from slskd before the download finished"
 
-    return f"Download failed: {bounded_text(probe, limit=200)}"
+    return f"Download failed: {bounded_text(probe, limit=MAX_DIAGNOSTIC_CHARS)}"
 
 
 # --------------------------------------------------------------------------
@@ -961,7 +972,7 @@ def _present_failed_message(
         return "Interrupted import abandoned and requeued"
     # Genuinely import-phase text (harness rc, beets exceptions) keeps the
     # "Import error:" label — it is accurate there, and only there.
-    return f"Import error: {bounded_text(probe, limit=200)}"
+    return f"Import error: {bounded_text(probe, limit=MAX_DIAGNOSTIC_CHARS)}"
 
 
 # --------------------------------------------------------------------------
@@ -1008,7 +1019,7 @@ def _present_measurement_message(diagnostic: str | None) -> str:
         return f"Measurement failed: {mapped}"
     if not probe:
         return "Measurement failed"
-    return f"Measurement failed: {bounded_text(probe, limit=200)}"
+    return f"Measurement failed: {bounded_text(probe, limit=MAX_DIAGNOSTIC_CHARS)}"
 
 
 # --------------------------------------------------------------------------
@@ -1109,6 +1120,7 @@ __all__ = [
     "FAMILY_UNKNOWN",
     "FailureEvidence",
     "FailurePresentation",
+    "MAX_DIAGNOSTIC_CHARS",
     "MAX_PEER_NAME_CHARS",
     "MAX_RAW_MESSAGE_CHARS",
     "MAX_RAW_MESSAGE_GROUPS",
