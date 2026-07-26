@@ -265,7 +265,11 @@ Browser → https://music.ablz.au
   acquiring an invented sentence. That is now the module's ONE fallback
   doctrine — `_rejection_verdict` used to dump the raw machine token while its
   sibling `_wrong_match_action_label` humanized, so 123 live rows read as
-  `extra_tracks` / `import_failed` / `strong_match`.
+  `extra_tracks` / `import_failed` / `strong_match`. `extra_tracks` and
+  `import_failed` — and five more producible names — earned real copy in the
+  #888 PR4 bullet below; humanized words remain the fallback for a name the
+  module says nothing about, which after that PR is `strong_match` (5 live
+  rendered rows).
   `tests/test_classify_producer_audit.py`
   derives the match targets from the module itself (inline comparison grammar,
   literal containers at ANY scope, and module-level tables) and fails closed on
@@ -329,6 +333,59 @@ Browser → https://music.ablz.au
   download lands in the same `wrong_matches/` tree and stays on the same
   operator worklist an unnamed `NULL` scenario always did — naming changes
   copy and audit, not routing.
+- **The remaining producible rejections say what their producer knows
+  (#888 PR4)** — seven scenarios a producer really writes still fell through
+  to the humanized-token fallback, so 148 live rows read "extra tracks" /
+  "import failed" / "untracked audio": words, not an explanation. Each now
+  carries a sentence claiming exactly what the site that writes the scenario
+  records, and no more.
+  - `extra_tracks` (45 rows) → "Requested release has *N* track(s) with no
+    matching local file". `lib/beets.py` writes it from inside the branch
+    that FOUND the requested release, so the pressing is right and part of
+    it has no local audio. *N* is read from the producer's own
+    `extra_tracks` array on the `is_target` candidate — the array it counts
+    for its own `detail` — never parsed out of the sentence, and a row
+    without that array renders no number at all. It says nothing about WHY
+    (partial download, incomplete rip and a different track layout are all
+    consistent) and nothing about the match distance, which this branch
+    pre-empts.
+  - `import_failed` (47) → "Import failed: `<recorded reason>`", degrading to
+    "Import did not leave beets in the expected state". Five
+    `harness/import_one.py` sites share the decision and differ only in the
+    reason each records, so the reason is the discriminator and is passed
+    through bounded.
+  - `crash` (11) → "Import crashed: `<recorded reason>`". The importer's
+    top-level exception envelope records `Type: message` and nothing else;
+    the live pair are a `UnicodeDecodeError` on beets output and a missing
+    `beet` binary.
+  - `mbid_missing` (10) → "Requested release ID was not among the import
+    candidates; nothing was applied". `run_import` returns rc 4 from ONE
+    place, so the decision name already fixes the reason and the sentence
+    states it instead of quoting the uninformative "Harness returned rc=4"
+    all 10 rows carry. It is the import-time twin of the validation-time
+    `mbid_not_found`; naming each candidate SET is what keeps them apart.
+  - `quality_evidence_action_failed` (2) → "Quality-evidence action failed
+    before beets ran: `<recorded reason>`". Both producer sites exit before
+    `run_import`, so "before beets ran" is structural, not inferred.
+  - `untracked_audio` (14) → "Import folder does not match the selected
+    audio manifest". Deliberately NOT "contains extra audio", true though
+    that is of every live row: `check_audio_manifest` reports extra AND
+    missing audio and both guards label either one `untracked_audio`.
+  - `exception` (19) → "Auto-import raised an unhandled exception; the
+    traceback is in the service log". `lib/dispatch/core.py` calls
+    `logger.exception` and then persists only the words "exception" and
+    "unhandled exception in auto-import", so quoting the row would hand the
+    operator their own token back.
+
+  Whether a branch quotes is DERIVED in
+  `tests/test_classify_producer_audit_generated.py` by rendering each
+  scenario with and without a recorded diagnostic, and the derived set is
+  pinned; the paired properties hold the rendered count to the producer's
+  count, require a quoting branch to carry the producer's text verbatim and
+  to invent none when the row is silent, and require a non-quoting branch to
+  stay invariant under the diagnostic. Measured against the live corpus
+  (Rule D, 36,323 rows): 148 changed rows, every one in `verdict` +
+  `summary`, each token moving exactly its own rows.
 - **Wrong Matches evidence provenance** — candidate rows keep the downloaded
   source codec, configured target contract, and temporary V0 probe separate.
   A lossless candidate destined for Opus therefore reads `FLAC → OPUS 128

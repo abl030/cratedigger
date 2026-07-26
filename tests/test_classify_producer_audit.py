@@ -66,8 +66,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import msgspec
 
 import web.classify as classify
-from lib.quality import CandidateSummary, ValidationResult, dispatch_action
+from lib.quality import (
+    CandidateSummary,
+    HarnessTrackInfo,
+    ValidationResult,
+    dispatch_action,
+)
 from lib.quality.dispatch_actions import decision_denylists
+from tests.helpers import make_import_result
 from web.classify import LogEntry, classify_log_entry
 
 _REPO_ROOT = os.path.join(os.path.dirname(__file__), "..")
@@ -107,6 +113,22 @@ _QUALITY_DECISIONS = (
 _REJECTION_SCENARIOS = _QUALITY_DECISIONS + (
     "lib/dispatch/core.py",
     "lib/beets.py",
+    # The importer subprocess is a first-class producer of this column: its
+    # ``ImportResult.decision`` becomes ``beets_scenario`` (and wins over it
+    # in ``_entry_rejection_decision`` whenever ``dispatch_action`` records a
+    # rejection). ``import_failed`` / ``mbid_missing`` / ``crash`` /
+    # ``quality_evidence_action_failed`` are spelled ONLY here — the mention
+    # in ``lib/quality/dispatch_actions.py`` is a comment, which this audit
+    # deliberately does not count as a spelling.
+    "harness/import_one.py",
+    # The two manifest guards that reject before beets is consulted.
+    "lib/download_validation.py",
+    "lib/dispatch/manifest_guard.py",
+    # Widening this tuple widens the FILE-level evidence base for EVERY
+    # literal under ``scenario`` — the first bound named in the module
+    # docstring. That is the price of the bound and it is paid knowingly:
+    # each file added here really does write ``download_log.beets_scenario``
+    # values, which is the whole subject.
 )
 _TRIAGE_ACTIONS = (
     "lib/wrong_match_cleanup_service.py",
@@ -984,6 +1006,59 @@ def mbid_not_found_blob(candidate_count: int) -> dict[str, object]:
     return blob
 
 
+def _rejected_with_error(
+    scenario: str, recorded: str, *, with_import_result: bool = True,
+) -> LogEntry:
+    """A rejection row shaped the way its producer persists one.
+
+    ``harness/import_one.py`` sets ``ImportResult.error`` and the rejection
+    writer denormalizes it into ``error_message``; every live
+    ``import_failed`` (47), ``crash`` (11), ``mbid_missing`` (10) and
+    ``quality_evidence_action_failed`` (2) row carries both, byte-equal.
+    ``lib/dispatch/core.py``'s ``exception`` rows carry no ImportResult at
+    all, which is what the flag is for.
+    """
+    entry = _rejected(scenario)
+    entry.error_message = recorded
+    if with_import_result:
+        entry.import_result = msgspec.to_builtins(
+            make_import_result(decision=scenario, error=recorded))
+    return entry
+
+
+def extra_tracks_blob(unmatched_tracks: int) -> dict[str, object]:
+    """The blob ``lib/beets.py`` writes beside ``extra_tracks``.
+
+    Built from the producer's own Structs (``.claude/rules/test-fidelity.md``
+    Rule C). The handler flags the requested release's candidate with
+    ``is_target`` and persists beets' ``extra_tracks`` — the release tracks
+    its item assignment left unmatched — which is the same array it counts
+    for its ``detail`` string.
+    """
+    result = ValidationResult(
+        valid=False,
+        scenario="extra_tracks",
+        mbid_found=True,
+        distance=0.03,
+        detail=f"MB has {unmatched_tracks} more tracks than local files",
+        recommendation="strong",
+        local_track_count=9,
+        items=[{"title": f"track {index}"} for index in range(9)],
+        candidate_count=1,
+        candidates=[CandidateSummary(
+            mbid="rel-1",
+            distance=0.03,
+            is_target=True,
+            extra_tracks=[
+                HarnessTrackInfo(title=f"unmatched {index}")
+                for index in range(unmatched_tracks)
+            ],
+        )],
+    )
+    blob: dict[str, object] = msgspec.to_builtins(result)
+    return blob
+
+
 def synthesized_rejection_blob(scenario: str) -> dict[str, object]:
     """A rejection stub built WITHOUT beets — the F4 hazard shape.
 
@@ -1152,6 +1227,13 @@ class TestUnhandledScenariosReadAsWords(unittest.TestCase):
     rows read as ``extra_tracks`` / ``import_failed``. Humanizing invents
     no fact — it is the token itself, spelled for a human.
 
+    Six of the seven tokens this class used to cover earned real copy in
+    issue #888 PR4 and moved to
+    ``TestProducibleRejectionScenariosNameTheirProducersFact``. What is
+    left is the case the fallback exists FOR: a token classify matches
+    nothing on, which reaches the operator as words rather than as a
+    machine string.
+
     ``changed_rows`` is measured, not assumed: it is how many live rows
     RENDER this text, from replaying both classifiers over all 36,303
     ``download_log`` rows on 2026-07-26. It is NOT the count of rows
@@ -1159,23 +1241,14 @@ class TestUnhandledScenariosReadAsWords(unittest.TestCase):
     prefers a rejection-recording ``ImportResult`` decision, so a row can
     render under a different token than its own column holds. 477 rows
     carry ``strong_match``; 5 render "strong match", and 3 more render
-    "import failed" because their ``ImportResult.decision`` says so
+    under ``import_failed`` because their ``ImportResult.decision`` says so
     (issue #882 review F5 — the same by-scenario-vs-by-rendered-row trap,
     caught a second time).
     """
 
     CASES = [
-        ("extra_tracks", "extra tracks", 45),
-        ("import_failed", "import failed", 47),
-        ("untracked_audio", "untracked audio", 14),
-        ("mbid_missing", "mbid missing", 10),
         ("strong_match", "strong match", 5),
-        ("quality_evidence_action_failed", "quality evidence action failed", 2),
     ]
-
-    # Single tokens humanize to themselves: no change, and no new claim.
-    # These carry 19 and 11 live rejected rows and re-render identically.
-    UNCHANGED = [("exception", 19), ("crash", 11)]
 
     def test_live_raw_token_scenarios_now_read_as_words(self) -> None:
         for scenario, expected, changed_rows in self.CASES:
@@ -1183,14 +1256,194 @@ class TestUnhandledScenariosReadAsWords(unittest.TestCase):
                 self.assertEqual(
                     classify_log_entry(_rejected(scenario)).verdict, expected)
 
-    def test_single_token_scenarios_are_unchanged(self) -> None:
-        for scenario, live_rows in self.UNCHANGED:
-            with self.subTest(scenario, live_rows=live_rows):
-                self.assertEqual(
-                    classify_log_entry(_rejected(scenario)).verdict, scenario)
-
     def test_an_empty_scenario_still_says_rejected(self) -> None:
         self.assertEqual(classify_log_entry(_rejected("")).verdict, "Rejected")
+
+
+class TestProducibleRejectionScenariosNameTheirProducersFact(
+    unittest.TestCase,
+):
+    """Issue #888 PR4: the seven live rejections that had no copy.
+
+    Each one fell through to ``_humanize_token``, so the operator read
+    "extra tracks" / "import failed" / "untracked audio" — the machine
+    token spelled for a human, which names the discriminator and explains
+    nothing. Every sentence below claims exactly what the producer records
+    at the site that writes the scenario, and no more.
+
+    The triggers are persisted enum values: four are written by the
+    ``harness/import_one.py`` subprocess and two by workers that reject
+    before beets is consulted, so they cannot be produced in-process. That
+    is the case ``.claude/rules/test-fidelity.md`` Rule C admits a literal
+    for, on the condition that a producer audit traces it — which
+    ``test_every_producible_literal_is_traced_to_its_producer`` does here,
+    through the same checker the audit itself runs.
+
+    Live row counts (2026-07-26), measured by driving the real
+    ``_rejection_verdict`` over every live decision × scenario pair:
+    ``import_failed`` 47, ``extra_tracks`` 45, ``exception`` 19,
+    ``untracked_audio`` 14, ``crash`` 11, ``mbid_missing`` 10,
+    ``quality_evidence_action_failed`` 2 — 148 rows in total.
+    """
+
+    #: literal -> live rejected rows that RENDER under it.
+    LIVE_ROWS = {
+        "import_failed": 47,
+        "extra_tracks": 45,
+        "exception": 19,
+        "untracked_audio": 14,
+        "crash": 11,
+        "mbid_missing": 10,
+        "quality_evidence_action_failed": 2,
+    }
+
+    def test_every_producible_literal_is_traced_to_its_producer(self) -> None:
+        """Rule C's condition for allowing a literal trigger at all."""
+        producers = MATCH_SUBJECTS["scenario"]
+        spellings = producer_spellings(producers.files)
+        matched = classify_match_targets()["scenario"]
+        for literal in self.LIVE_ROWS:
+            with self.subTest(literal):
+                self.assertIsNone(
+                    check_literal_has_a_producer(
+                        literal, producers, spellings))
+                self.assertIn(
+                    literal, matched,
+                    "the classifier no longer matches a literal it renders "
+                    "copy for")
+
+    # -- lib/beets.py, the choose_match handler ------------------------
+    def test_extra_tracks_counts_the_producers_own_unmatched_tracks(self):
+        """``lib/beets.py`` writes this the moment the requested release IS
+        the matched candidate and beets left tracks of it unassigned.
+
+        The count is read from the producer's own ``extra_tracks`` array on
+        the target candidate — the array it counted to compose its own
+        ``detail`` — so nothing parses the sentence. All 45 live rows carry
+        that array, and its length equals the number in their persisted
+        detail on every one of them.
+        """
+        classified = classify_log_entry(
+            _rejected("extra_tracks", extra_tracks_blob(3)))
+        self.assertEqual(
+            classified.verdict,
+            "Requested release has 3 tracks with no matching local file")
+
+    def test_extra_tracks_agrees_in_number_with_one_missing_track(self) -> None:
+        """29 of the 45 live rows are a single unmatched track."""
+        classified = classify_log_entry(
+            _rejected("extra_tracks", extra_tracks_blob(1)))
+        self.assertEqual(
+            classified.verdict,
+            "Requested release has 1 track with no matching local file")
+
+    def test_extra_tracks_without_the_array_states_only_the_shape(self) -> None:
+        """No structured evidence, no number — never a guessed one."""
+        for blob in (None, {"scenario": "extra_tracks"}, "not json at all",
+                     synthesized_rejection_blob("extra_tracks")):
+            with self.subTest(blob=blob):
+                self.assertEqual(
+                    classify_log_entry(_rejected("extra_tracks", blob)).verdict,
+                    "Requested release has tracks with no matching local file")
+
+    # -- harness/import_one.py ------------------------------------------
+    def test_import_failed_quotes_the_importers_own_recorded_reason(self) -> None:
+        """Five producer sites share this decision and differ only in the
+        reason each records, so the reason IS the discriminator."""
+        recorded = (
+            "Post-import: release 07d51bc7 has multiple beets album rows "
+            "[10583, 19190]")
+        classified = classify_log_entry(_rejected_with_error(
+            "import_failed", recorded))
+        self.assertEqual(classified.verdict, f"Import failed: {recorded}")
+
+    def test_import_failed_without_a_reason_claims_only_the_end_state(self):
+        self.assertEqual(
+            classify_log_entry(_rejected("import_failed")).verdict,
+            "Import did not leave beets in the expected state")
+
+    def test_crash_quotes_the_unhandled_exception_it_recorded(self) -> None:
+        """``import_one.py``'s top-level envelope records
+        ``f"{type(exc).__name__}: {exc}"`` and nothing else."""
+        recorded = "FileNotFoundError: [Errno 2] No such file or directory: 'beet'"
+        classified = classify_log_entry(_rejected_with_error("crash", recorded))
+        self.assertEqual(classified.verdict, f"Import crashed: {recorded}")
+
+    def test_crash_without_a_reason_still_names_the_unhandled_exception(self):
+        self.assertEqual(
+            classify_log_entry(_rejected("crash")).verdict,
+            "Import crashed with an unhandled exception")
+
+    def test_mbid_missing_names_the_import_candidate_set_it_was_absent_from(
+        self,
+    ) -> None:
+        """rc=4 has ONE producer site: ``run_import`` answered ``skip``
+        because the requested release was not among the candidates beets
+        offered at import, so nothing was applied.
+
+        Unlike ``import_failed`` the decision name already fixes the
+        reason, so the sentence states it instead of quoting a recorded
+        string that adds nothing — all 10 live rows record the pre-#865
+        fallback "Harness returned rc=4", which the card still shows as its
+        Detail row.
+        """
+        expected = (
+            "Requested release ID was not among the import candidates; "
+            "nothing was applied")
+        self.assertEqual(
+            classify_log_entry(_rejected("mbid_missing")).verdict, expected)
+        self.assertEqual(
+            classify_log_entry(
+                _rejected_with_error("mbid_missing", "Harness returned rc=4")
+            ).verdict,
+            expected,
+            "a recorded string that adds no fact must not enter the sentence")
+
+    def test_quality_evidence_action_failure_says_beets_never_ran(self) -> None:
+        """Both producer sites ``_emit_and_exit`` before ``run_import``."""
+        recorded = "10 opus 128 conversions failed"
+        classified = classify_log_entry(_rejected_with_error(
+            "quality_evidence_action_failed", recorded))
+        self.assertEqual(
+            classified.verdict,
+            f"Quality-evidence action failed before beets ran: {recorded}")
+        self.assertEqual(
+            classify_log_entry(
+                _rejected("quality_evidence_action_failed")).verdict,
+            "Quality-evidence action failed before beets ran")
+
+    # -- the manifest guards --------------------------------------------
+    def test_untracked_audio_claims_a_mismatch_not_extra_audio(self) -> None:
+        """``check_audio_manifest`` reports extra AND missing audio, and
+        ``_check_staged_audio_manifest`` labels either one
+        ``untracked_audio`` — so "contains extra audio" would be false of a
+        source that is merely short, however the live rows read today."""
+        verdict = classify_log_entry(_rejected("untracked_audio")).verdict
+        self.assertEqual(
+            verdict, "Import folder does not match the selected audio manifest")
+        self.assertNotIn("extra", verdict.casefold())
+
+    # -- lib/dispatch/core.py -------------------------------------------
+    def test_exception_says_where_the_traceback_went(self) -> None:
+        """The producer logs the traceback and persists only the words
+        "exception" / "unhandled exception in auto-import", so quoting the
+        row would hand the operator the token back."""
+        self.assertEqual(
+            classify_log_entry(_rejected_with_error("exception", "exception")
+                               ).verdict,
+            "Auto-import raised an unhandled exception; the traceback is in "
+            "the service log")
+
+    # -- the shared bound ------------------------------------------------
+    def test_a_long_recorded_reason_is_bounded_not_dumped(self) -> None:
+        """The verdict is the collapsed list row; one 4KB beets traceback
+        must not become the operator's whole worklist line."""
+        recorded = "sqlite3.OperationalError: " + ("x" * 900)
+        verdict = classify_log_entry(
+            _rejected_with_error("import_failed", recorded)).verdict
+        self.assertTrue(verdict.startswith("Import failed: sqlite3."))
+        self.assertLess(len(verdict), len(recorded))
+        self.assertTrue(verdict.endswith("…"))
 
 
 class TestQualityVerdictCopyMatchesTheProducersAction(unittest.TestCase):

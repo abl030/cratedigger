@@ -36,6 +36,27 @@ C2. **A decision name no producer emits is never rewritten into a
 C3. **A decision name classify DOES match renders words, not its own raw
     token.** The other half of the same defect.
 
+C4. **A rendered count is the producer's own count.** ``extra_tracks`` is
+    the one branch that puts a NUMBER in front of the operator, and a
+    wrong number is the classic fluent lie: it reads exactly like a right
+    one. The property drives the real classifier over every unmatched-track
+    count and requires the verdict to carry that number, agree with it in
+    grammatical number, and carry no other number — and to carry NO number
+    when the producer's array is absent (issue #888 PR4).
+
+C5. **A quoted producer diagnostic reaches the operator, and a row with
+    none never gains one.** Some branches quote the reason their producer
+    recorded because the decision name alone does not fix it. Whether a
+    branch quotes is DERIVED here by rendering each scenario with and
+    without a recorded diagnostic, never hand-listed; the derived set is
+    then pinned, so a new quoting branch has to be reasoned about rather
+    than merely appearing.
+
+C6. **A branch that deliberately does not quote is invariant under the
+    diagnostic.** ``mbid_missing`` states the fact its single producer
+    site fixes instead of quoting a recorded string that adds nothing; the
+    property is what stops that reasoning being quietly reversed.
+
 Known limitation (issue #882 review N6): C1's forbidden vocabulary is a
 DENYLIST of phrasings, so a novel wording of a false claim — "…; the hunt
 goes on" for a proof-locked request — escapes it. That is inherent to
@@ -52,6 +73,7 @@ directly with a planted violation.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import unittest
 
@@ -65,7 +87,10 @@ import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.quality import dispatch_action
 from lib.quality.dispatch_actions import decision_denylists
 from tests.helpers import make_import_result
-from tests.test_classify_producer_audit import classify_match_targets
+from tests.test_classify_producer_audit import (
+    classify_match_targets,
+    extra_tracks_blob,
+)
 from web.classify import LogEntry, classify_log_entry
 
 # ---------------------------------------------------------------------------
@@ -239,6 +264,103 @@ def check_unproduced_name_is_not_rewritten(
     return None
 
 
+_NUMBERS = re.compile(r"\d+")
+
+#: The exact literal ``lib/beets.py`` writes when the requested release is
+#: the matched candidate and beets left tracks of it unassigned. Taken from
+#: the producer audit's own discovery rather than retyped as policy.
+EXTRA_TRACKS_SCENARIO = "extra_tracks"
+
+
+def check_rendered_count_is_the_producers(
+    unmatched_tracks: int | None,
+    verdict: str,
+) -> str | None:
+    """C4 — the number on the card is the producer's number.
+
+    ``unmatched_tracks`` is ``None`` when the row carries no target
+    candidate at all, in which case the verdict owes NO number: the count
+    is the one fact this branch cannot degrade gracefully into inventing.
+    """
+    found = [int(match) for match in _NUMBERS.findall(verdict)]
+    if unmatched_tracks is None:
+        if found:
+            return (
+                f"a row with no unmatched-track evidence rendered {found}: "
+                f"{verdict!r}"
+            )
+        return None
+    if found != [unmatched_tracks]:
+        return (
+            f"{unmatched_tracks} unmatched tracks rendered as {found}: "
+            f"{verdict!r}"
+        )
+    plural = " tracks " in verdict
+    if plural != (unmatched_tracks != 1):
+        return (
+            f"{unmatched_tracks} unmatched tracks disagrees in number with "
+            f"the sentence: {verdict!r}"
+        )
+    return None
+
+
+def check_recorded_diagnostic_reaches_the_operator(
+    scenario: str,
+    recorded: str,
+    verdict: str,
+) -> str | None:
+    """C5, first half — a quoting branch carries the producer's own text.
+
+    The generated ``recorded`` worlds are already collapsed and short
+    enough that bounding is the identity, so this asks the decidable
+    question ("is the producer's text there?") without restating the
+    bounding rule production applies — comparing production to production
+    is what the ``humanized`` note above warns against. The truncation
+    behaviour is pinned deterministically instead.
+    """
+    if recorded not in verdict:
+        return (
+            f"{scenario}'s verdict dropped the reason its producer "
+            f"recorded ({recorded!r}): {verdict!r}"
+        )
+    return None
+
+
+def check_no_diagnostic_is_invented(
+    scenario: str,
+    verdict: str,
+) -> str | None:
+    """C5, second half — no reason on the row, no reason in the sentence.
+
+    ``": "`` is this module's own "and here is what the producer said"
+    marker: every quoting branch composes ``<lead>: <recorded text>``. A
+    row that recorded nothing must therefore reach the operator without
+    one, or the sentence is manufacturing the very fact it exists to
+    relay.
+    """
+    if ": " in verdict:
+        return (
+            f"{scenario} recorded no reason but its verdict still quotes "
+            f"one: {verdict!r}"
+        )
+    return None
+
+
+def check_verdict_ignores_the_diagnostic(
+    scenario: str,
+    bare_verdict: str,
+    with_diagnostic_verdict: str,
+) -> str | None:
+    """C6 — a deliberately non-quoting branch is diagnostic-invariant."""
+    if bare_verdict != with_diagnostic_verdict:
+        return (
+            f"{scenario} claims to state its own fact but changed with the "
+            f"recorded diagnostic: {bare_verdict!r} -> "
+            f"{with_diagnostic_verdict!r}"
+        )
+    return None
+
+
 def check_matched_name_renders_words(
     scenario: str,
     verdict: str,
@@ -292,6 +414,68 @@ def _outcomes_for(decision: str) -> tuple[str, ...]:
     # that carry the same decision are logged as ``failed`` and reach the
     # SECOND renderer of the same claim.
     return ("rejected", "failed")
+
+
+def _rejection_entry(
+    scenario: str,
+    *,
+    validation_result: object = None,
+    error_message: str | None = None,
+) -> LogEntry:
+    """A bare rejection row carrying only what a property varies."""
+    return LogEntry(
+        id=1,
+        request_id=2,
+        outcome="rejected",
+        beets_scenario=scenario,
+        error_message=error_message,
+        validation_result=(
+            validation_result  # pyright: ignore[reportArgumentType]
+        ),
+    )
+
+
+#: A diagnostic no bounding rule alters: printable, single-spaced, and far
+#: shorter than the module's limit. Truncation is pinned deterministically
+#: instead, so this property never has to restate production's bounding.
+_RECORDED_DIAGNOSTICS = (
+    st.text(
+        alphabet=(
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+            "0123456789 .,-_[]()="
+        ),
+        min_size=1,
+        max_size=120,
+    )
+    .map(lambda text: " ".join(text.split()))
+    .filter(bool)
+)
+
+#: A probe that appears in no sentence this module writes, so "did the
+#: verdict change?" answers only the question being asked.
+_QUOTING_PROBE = "PRODUCERSAIDTHIS"
+
+
+def quoting_rejection_scenarios(probe: str = _QUOTING_PROBE) -> frozenset[str]:
+    """Which matched rejection scenarios quote the row's recorded reason.
+
+    DERIVED by rendering every matched scenario with and without a recorded
+    diagnostic, never hand-listed — a branch that starts or stops quoting
+    turns up as a changed set rather than as a stale constant nobody
+    revisits.
+    """
+    return frozenset(
+        scenario
+        for scenario in REJECTION_SCENARIO_LITERALS
+        if classify_log_entry(_rejection_entry(scenario)).verdict
+        != classify_log_entry(
+            _rejection_entry(scenario, error_message=probe)).verdict
+    )
+
+
+QUOTING_SCENARIOS = quoting_rejection_scenarios()
+NON_QUOTING_SCENARIOS = (
+    frozenset(REJECTION_SCENARIO_LITERALS) - QUOTING_SCENARIOS)
 
 
 # ---------------------------------------------------------------------------
@@ -371,7 +555,10 @@ class TestUnproducedNamesAreNeverRewritten(unittest.TestCase):
     @given(scenario=st.text(min_size=1, max_size=60))
     @example(scenario="no_candidates")
     @example(scenario="stale_path_cleared")
-    @example(scenario="extra_tracks")
+    # 477 live rows carry ``strong_match`` and 5 render under it; issue
+    # #888 PR4 gave the other live raw-token scenarios real copy, so this
+    # is the surviving live example of a name the module says nothing about.
+    @example(scenario="strong_match")
     def test_an_unmatched_decision_name_reaches_the_operator_unedited(
         self, scenario: str,
     ) -> None:
@@ -401,6 +588,101 @@ class TestMatchedNamesRenderWords(unittest.TestCase):
                      beets_scenario=scenario))
         violation = check_matched_name_renders_words(
             scenario, classified.verdict)
+        self.assertIsNone(violation, violation)
+
+
+class TestRenderedCountsAreTheProducers(unittest.TestCase):
+    """C4 — issue #888 PR4's one rendered number."""
+
+    @given(unmatched=st.integers(min_value=1, max_value=120))
+    @example(unmatched=1)
+    @example(unmatched=3)
+    @example(unmatched=9)
+    def test_the_unmatched_track_count_is_rendered_exactly(
+        self, unmatched: int,
+    ) -> None:
+        classified = classify_log_entry(_rejection_entry(
+            EXTRA_TRACKS_SCENARIO,
+            validation_result=extra_tracks_blob(unmatched)))
+        violation = check_rendered_count_is_the_producers(
+            unmatched, classified.verdict)
+        self.assertIsNone(violation, violation)
+
+    @given(blob=st.one_of(
+        st.none(),
+        st.just({"scenario": EXTRA_TRACKS_SCENARIO}),
+        st.just(extra_tracks_blob(0)),
+        st.text(max_size=24),
+    ))
+    def test_a_row_without_the_producers_array_renders_no_number(
+        self, blob: object,
+    ) -> None:
+        """Including the fail-closed case: a target candidate whose array
+        is EMPTY is not evidence of zero unmatched tracks — the producer
+        only writes this scenario when the array is non-empty."""
+        classified = classify_log_entry(
+            _rejection_entry(EXTRA_TRACKS_SCENARIO, validation_result=blob))
+        violation = check_rendered_count_is_the_producers(
+            None, classified.verdict)
+        self.assertIsNone(violation, violation)
+
+
+class TestQuotedDiagnosticsAreTheProducers(unittest.TestCase):
+    """C5 / C6 — issue #888 PR4."""
+
+    def test_the_quoting_branches_are_the_ones_reasoned_about(self) -> None:
+        """The derived set, pinned. Each member quotes because its decision
+        name does NOT fix the reason: ``validation_error`` covers four
+        different validation failures, ``import_failed`` five producer
+        sites, ``crash`` any unhandled exception, and
+        ``quality_evidence_action_failed`` a refusal plus every exception
+        the evidence-action block can raise."""
+        self.assertEqual(QUOTING_SCENARIOS, frozenset({
+            "validation_error",
+            "import_failed",
+            "crash",
+            "quality_evidence_action_failed",
+        }))
+
+    @given(
+        scenario=st.sampled_from(sorted(QUOTING_SCENARIOS)),
+        recorded=_RECORDED_DIAGNOSTICS,
+    )
+    def test_a_quoting_branch_carries_the_recorded_reason(
+        self, scenario: str, recorded: str,
+    ) -> None:
+        verdict = classify_log_entry(
+            _rejection_entry(scenario, error_message=recorded)).verdict
+        violation = check_recorded_diagnostic_reaches_the_operator(
+            scenario, recorded, verdict)
+        self.assertIsNone(violation, violation)
+
+    def test_a_quoting_branch_invents_nothing_when_the_row_is_silent(self):
+        for scenario in sorted(QUOTING_SCENARIOS):
+            with self.subTest(scenario):
+                verdict = classify_log_entry(
+                    _rejection_entry(scenario)).verdict
+                violation = check_no_diagnostic_is_invented(scenario, verdict)
+                self.assertIsNone(violation, violation)
+
+    @given(
+        scenario=st.sampled_from(sorted(NON_QUOTING_SCENARIOS)),
+        recorded=_RECORDED_DIAGNOSTICS,
+    )
+    @example(scenario="mbid_missing", recorded="Harness returned rc=4")
+    @example(scenario="untracked_audio", recorded="extra audio: 01 Intro.mp3")
+    def test_a_non_quoting_branch_is_invariant_under_the_diagnostic(
+        self, scenario: str, recorded: str,
+    ) -> None:
+        """The single probe that derived the set proves one string; this
+        proves every string, so a branch that quotes only certain text
+        cannot pass as non-quoting."""
+        violation = check_verdict_ignores_the_diagnostic(
+            scenario,
+            classify_log_entry(_rejection_entry(scenario)).verdict,
+            classify_log_entry(
+                _rejection_entry(scenario, error_message=recorded)).verdict,
+        )
         self.assertIsNone(violation, violation)
 
 
@@ -508,6 +790,49 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         self.assertEqual(humanized("exception"), "exception")
         self.assertEqual(humanized("stale-path"), "stale path")
         self.assertEqual(humanized("  x_y  "), "x y")
+
+    def test_count_checker_trips_on_every_way_a_number_can_lie(self) -> None:
+        real = "Requested release has 3 tracks with no matching local file"
+        self.assertIsNone(check_rendered_count_is_the_producers(3, real))
+        # The wrong number, reading exactly as fluently as the right one.
+        self.assertIsNotNone(check_rendered_count_is_the_producers(4, real))
+        # A number the row cannot support at all.
+        self.assertIsNotNone(check_rendered_count_is_the_producers(None, real))
+        # A second number smuggled in beside the producer's.
+        self.assertIsNotNone(check_rendered_count_is_the_producers(
+            3, "Requested release has 3 of 11 tracks with no local file"))
+        # Grammatical number disagreeing with the count it renders.
+        self.assertIsNotNone(check_rendered_count_is_the_producers(
+            1, "Requested release has 1 tracks with no matching local file"))
+        self.assertIsNone(check_rendered_count_is_the_producers(
+            1, "Requested release has 1 track with no matching local file"))
+        self.assertIsNone(check_rendered_count_is_the_producers(
+            None, "Requested release has tracks with no matching local file"))
+
+    def test_quote_checkers_trip_on_a_dropped_and_on_an_invented_reason(self):
+        self.assertIsNone(check_recorded_diagnostic_reaches_the_operator(
+            "crash", "FileNotFoundError: no such file",
+            "Import crashed: FileNotFoundError: no such file"))
+        # The producer's words replaced by our own summary of them.
+        self.assertIsNotNone(check_recorded_diagnostic_reaches_the_operator(
+            "crash", "FileNotFoundError: no such file",
+            "Import crashed: a file was missing"))
+        self.assertIsNone(check_no_diagnostic_is_invented(
+            "crash", "Import crashed with an unhandled exception"))
+        self.assertIsNotNone(check_no_diagnostic_is_invented(
+            "crash", "Import crashed: the beets binary was not found"))
+
+    def test_invariance_checker_trips_when_a_branch_starts_quoting(self) -> None:
+        self.assertIsNone(check_verdict_ignores_the_diagnostic(
+            "mbid_missing", "Requested release ID was not among the import "
+            "candidates; nothing was applied",
+            "Requested release ID was not among the import candidates; "
+            "nothing was applied"))
+        self.assertIsNotNone(check_verdict_ignores_the_diagnostic(
+            "mbid_missing", "Requested release ID was not among the import "
+            "candidates; nothing was applied",
+            "Requested release ID was not among the import candidates; "
+            "nothing was applied: Harness returned rc=4"))
 
     def test_raw_token_checker_trips_on_the_other_half_of_the_defect(self) -> None:
         self.assertIsNotNone(check_matched_name_renders_words(

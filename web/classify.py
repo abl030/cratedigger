@@ -15,12 +15,15 @@ import msgspec
 from lib.failure_presentation import (
     FailureEvidence,
     FailurePresentation,
+    MAX_DIAGNOSTIC_CHARS,
+    bounded_text,
     decode_transfer_detail,
     present_failure,
     transfer_detail_unreadable,
 )
 from lib.import_evidence import HaveAnalysisFailure
 from lib.import_queue import ImportJob
+from lib.json_narrow import is_list_like, json_list
 from lib.quality import ImportResult, QualityComparisonBasis, dispatch_action
 from lib.validation_envelope import decode_validation_envelope
 
@@ -934,6 +937,56 @@ def _beets_returned_no_candidates(entry: LogEntry) -> bool:
     return beets_ran and not envelope.candidates
 
 
+def _target_extra_track_count(entry: LogEntry) -> int | None:
+    """How many of the matched release's tracks had no local file.
+
+    Read from the producer's own structured evidence, never from its prose:
+    ``lib/beets.py``'s ``choose_match`` handler flags the requested
+    release's candidate with ``is_target`` and persists beets'
+    ``extra_tracks`` — the release tracks its item assignment left
+    unmatched — inside ``validation_result.candidates``. That array is
+    exactly what the producer counts to compose its own ``detail`` string,
+    so this reads the count rather than parsing the sentence. Live on
+    2026-07-26 all 45 ``extra_tracks`` rows carry the array and its length
+    equals the number in their persisted detail.
+
+    ``None`` when no target candidate carries a non-empty array: the
+    producer only writes this scenario when the array is non-empty, so an
+    empty or absent one is missing evidence, not a count of zero.
+    """
+    try:
+        envelope = decode_validation_envelope(entry.validation_result)
+    except (msgspec.ValidationError, json.JSONDecodeError):
+        return None
+    for candidate in envelope.candidates:
+        if candidate.get("is_target") is not True:
+            continue
+        extra = candidate.get("extra_tracks")
+        if not is_list_like(extra):
+            continue
+        count = len(json_list(extra))
+        if count > 0:
+            return count
+    return None
+
+
+def _recorded_import_error(entry: LogEntry) -> str | None:
+    """The importer's own recorded reason for this attempt, bounded.
+
+    ``harness/import_one.py`` sets ``ImportResult.error`` at every decision
+    site that ends an import early, and the rejection writer denormalizes
+    it into ``error_message``; both are read here so a row missing the
+    typed blob still shows what its producer said. The text is passed
+    through, never interpreted — it is the only thing that separates the
+    several producer sites sharing one decision name.
+    """
+    ir = _parse_import_result(entry)
+    recorded = (ir.error if ir is not None else None) or entry.error_message
+    if not recorded:
+        return None
+    return bounded_text(recorded, limit=MAX_DIAGNOSTIC_CHARS) or None
+
+
 def _candidate_audio_is_corrupt(
     entry: LogEntry,
     triage_preview_decision: str | None,
@@ -1523,6 +1576,43 @@ def _rejection_verdict(entry: LogEntry) -> str:
     if scenario == "mixed_source":
         return "Mixed lossless+lossy source"
 
+    # ``lib/beets.py`` writes this from inside the branch that FOUND the
+    # requested release among beets' candidates: ``cand.mbid ==
+    # mb_release_id`` set ``mbid_found``, recorded the distance, and then
+    # saw ``len(cand.extra_tracks) > 0`` — release tracks that beets' own
+    # item-to-track assignment left unmatched.
+    #
+    # Two things the producer knows and the sentence therefore says: the
+    # release is the right one, and part of it has no local audio. Two it
+    # does NOT know, and the sentence therefore avoids: WHY (a partial
+    # download, a peer's own incomplete rip and a different track layout
+    # are all consistent with an unmatched track), and whether the pressing
+    # was otherwise a good match — this branch fires BEFORE the distance
+    # threshold is consulted, so the candidate may well have been inside it.
+    if scenario == "extra_tracks":
+        unmatched = _target_extra_track_count(entry)
+        if unmatched is None:
+            return "Requested release has tracks with no matching local file"
+        return (
+            f"Requested release has {unmatched} "
+            f"track{'' if unmatched == 1 else 's'} with no matching local file"
+        )
+
+    # Written by the two manifest guards that reject before beets is ever
+    # consulted: ``lib/download_validation.py`` on the staged auto-import
+    # folder and ``lib/dispatch/manifest_guard.py`` on a force/manual
+    # import source. Both compare the folder against the audio manifest
+    # this attempt selected and both record the difference in
+    # ``beets_detail``, which the card shows underneath.
+    #
+    # The sentence says MISMATCH and stops there. ``check_audio_manifest``
+    # reports extra AND missing audio and ``_check_staged_audio_manifest``
+    # labels either one ``untracked_audio``, so "contains extra audio" —
+    # true of every live row today — is a claim the producer does not make
+    # and would be false of a source that is merely short.
+    if scenario == "untracked_audio":
+        return "Import folder does not match the selected audio manifest"
+
     if scenario == "duplicate_remove_guard_failed":
         ir = _parse_import_result(entry)
         guard = ir.postflight.duplicate_remove_guard if ir is not None else None
@@ -1609,6 +1699,86 @@ def _rejection_verdict(entry: LogEntry) -> str:
                 f"{recorded}"
             )
         return "Validation failed before a match could be reviewed"
+
+    # --- The importer subprocess's own decision names -------------------
+    #
+    # ``harness/import_one.py`` owns the group below. They share one shape:
+    # the decision names the STAGE that ended the attempt, and
+    # ``ImportResult.error`` names the reason. What differs is whether the
+    # decision name already FIXES that reason, and that is what decides
+    # whether the sentence quotes.
+    #
+    # Where one name covers several producer sites and arbitrary beets/OS
+    # exceptions, the recorded text is the only discriminator and is passed
+    # through bounded. Where the name is written from exactly one condition,
+    # the sentence states that condition instead — the recorded string there
+    # adds nothing the name has not already said, and the card's Detail row
+    # still shows it verbatim.
+
+    # Set wherever beets RAN and the library did not end up as expected: a
+    # nonzero harness rc that is not the duplicate-guard or MBID-missing
+    # one, plus the four post-import / post-flight consistency checks
+    # (release absent, two rows for one release, post-flight lookup empty,
+    # post-flight resolving to a different album id). All 47 live rows
+    # carry a recorded reason.
+    if scenario == "import_failed":
+        recorded = _recorded_import_error(entry)
+        if recorded:
+            return f"Import failed: {recorded}"
+        # True of every site: the rc branches never created a row, and the
+        # consistency branches found the wrong one. "Did not complete"
+        # would be false of the latter, which completed and completed wrong.
+        return "Import did not leave beets in the expected state"
+
+    # ``import_one.py``'s top-level ``except Exception`` envelope: the
+    # helper died before any normal exit, recording only
+    # ``f"{type(exc).__name__}: {exc}"``. Live examples are a
+    # UnicodeDecodeError on beets output and a missing ``beet`` binary —
+    # environment faults, which is exactly why the raw text leads.
+    if scenario == "crash":
+        recorded = _recorded_import_error(entry)
+        if recorded:
+            return f"Import crashed: {recorded}"
+        return "Import crashed with an unhandled exception"
+
+    # ``run_import`` returns rc 4 from ONE place: the ``choose_match``
+    # handler found no candidate whose album id is the requested release,
+    # answered ``skip``, and returned. Other candidates may well have been
+    # offered — the requested one was not among them — and nothing was
+    # applied, so beets was left untouched.
+    #
+    # This is the import-time twin of the validation-time
+    # ``mbid_not_found`` above; naming the candidate SET each one looked in
+    # is what keeps two identically-worded rejections apart.
+    if scenario == "mbid_missing":
+        return (
+            "Requested release ID was not among the import candidates; "
+            "nothing was applied"
+        )
+
+    # Both producer sites sit inside the block that applies the preview's
+    # persisted quality-evidence action, and both ``_emit_and_exit`` before
+    # ``run_import`` is reached: one when the recorded decision does not
+    # authorize an import at all, one for any exception raised loading,
+    # snapshot-checking or materializing the action (the live pair are
+    # conversion failures). "Before beets ran" is structural, not inferred.
+    if scenario == "quality_evidence_action_failed":
+        recorded = _recorded_import_error(entry)
+        if recorded:
+            return f"Quality-evidence action failed before beets ran: {recorded}"
+        return "Quality-evidence action failed before beets ran"
+
+    # ``lib/dispatch/core.py``'s auto-import ``except Exception``. It calls
+    # ``logger.exception`` — so the traceback exists, in the journal — and
+    # then persists the bare words "exception" and "unhandled exception in
+    # auto-import" and nothing else. Quoting either would hand the operator
+    # their own token back, so the sentence says what happened and where
+    # the detail actually is.
+    if scenario == "exception":
+        return (
+            "Auto-import raised an unhandled exception; the traceback is in "
+            "the service log"
+        )
 
     # Historical: emitted by a pre-2026-03-24 revision, one live row, no
     # current producer — which is why the audit registers it as historical.
