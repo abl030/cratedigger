@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 
 from hypothesis import given, strategies as st
 
-from tests import _hypothesis_profiles  # noqa: F401 — registers active profile
+import tests._hypothesis_profiles  # noqa: F401 — registers active profile
 from lib.va_identity import MB_VA_ARTIST_MBID
 from web.mb import (
     _quote_mb_identifier,

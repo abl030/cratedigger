@@ -39,6 +39,7 @@ from hypothesis.stateful import (
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 import conftest  # noqa: E402, F401
 
+import tests._hypothesis_profiles  # noqa: E402, F401  (loads the active profile)
 from tests.beets_world import (  # noqa: E402
     BeetsWorldRelease,
     HISTORICAL_PASSENGER_PATH_TEMPLATE,

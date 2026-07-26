@@ -5,7 +5,7 @@ from __future__ import annotations
 import keyword
 import unittest
 
-from hypothesis import example, given, strategies as st
+from hypothesis import assume, example, given, strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401 - registers suite/fuzz tiers
 from tests.test_unused_import_audit import (
@@ -250,8 +250,7 @@ class TestGeneratedVultureWhitelistFreshness(unittest.TestCase):
         old_line: int,
         new_line: int,
     ) -> None:
-        if old_line == new_line:
-            return
+        assume(old_line != new_line)
         committed = (_vulture_entry(symbol, old_line),)
         generated = (_vulture_entry(symbol, new_line),)
 
