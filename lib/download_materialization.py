@@ -17,7 +17,7 @@ import shutil
 import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, TYPE_CHECKING
+from typing import Any, Final, TYPE_CHECKING, assert_never
 
 from lib.download_recovery import ProcessingPathLocation, classify_processing_path
 from lib.grab_list import DownloadFile, GrabListEntry
@@ -25,13 +25,15 @@ from lib.dispatch import _build_download_info
 from lib.fs_authority import (
     FilesystemAuthorityError,
     OpenedRegularFile,
+    SharedDownloadRootError,
     copy_opened_file,
     exclusive_relative_lock,
     open_private_child_directory,
     open_private_processing_root,
     open_relative_directory,
     open_regular_relative,
-    open_regular_under_root,
+    open_regular_under_held_root,
+    open_shared_download_root,
     rename_relative_noreplace,
     remove_relative_tree,
     same_open_directory,
@@ -63,6 +65,167 @@ _ABANDON_PATH_ABSENT = "absent"
 _ABANDON_PATH_UNKNOWN = "unknown"
 
 
+# === Materialize failure reasons (issue #868) ===
+#
+# Short machine-stable codes, never operator copy: the web UI's wording
+# is owned elsewhere. Every one is DERIVED — from a structured
+# ``FsAuthorityCode`` or from an explicit branch — never parsed back out
+# of an exception message.
+#
+# Historically the four distinguishable source-preflight outcomes
+# collapsed into two strings: a missing event stamp and a stamped file
+# that had vanished from disk both surfaced as ``event_path_missing``
+# (the string-sniffed ``"No such file" in str(exc)`` branch), while a
+# genuine containment violation and an ordinary storage error (ESTALE /
+# EIO from virtiofs) both surfaced as ``unsafe_source_path``. Those are
+# four different operator problems with four different remedies.
+#
+# THREE subjects can refuse, and each owns its own nouns. Reporting one
+# subject's failure in another's vocabulary is the same defect one layer
+# up: "the private processing tree is sick" when the shared slskd share
+# is, or "this file's event stamp is stale" when the whole share is gone.
+REASON_EVENT_PATH_NEVER_STAMPED: Final = "event_path_never_stamped"
+"""slskd never emitted a completion event carrying this file's location."""
+
+REASON_EVENT_PATH_GONE_FROM_DISK: Final = "event_path_gone_from_disk"
+"""The event stamp exists, but nothing is at that path any more."""
+
+REASON_UNSAFE_SOURCE_PATH: Final = "unsafe_source_path"
+"""The stamped name failed the containment boundary (symlink/escape/special)."""
+
+REASON_SOURCE_OPEN_FAILED_PREFIX: Final = "source_open_failed_"
+"""Prefix for a storage-layer open failure; suffixed with the errno name."""
+
+REASON_SOURCE_PREFLIGHT_REFUSED: Final = "source_preflight_refused"
+"""A refusal of one stamped file with no structured code."""
+
+REASON_PROCESSING_AUTHORITY_UNSAFE: Final = "processing_authority_unsafe"
+"""Our own private processing tree failed the containment boundary."""
+
+REASON_PROCESSING_PATH_MISSING: Final = "processing_path_missing"
+"""A required private processing path was absent."""
+
+REASON_PROCESSING_OPEN_FAILED_PREFIX: Final = "processing_open_failed_"
+"""Prefix for a storage-layer failure on the private tree; errno-suffixed."""
+
+REASON_MATERIALIZE_AUTHORITY_FAILED: Final = "materialize_authority_failed"
+"""An authority refusal on the private tree with no structured code."""
+
+REASON_SLSKD_ROOT_UNSAFE: Final = "slskd_root_unsafe"
+"""The configured shared download root failed the containment boundary."""
+
+REASON_SLSKD_ROOT_MISSING: Final = "slskd_root_missing"
+"""The configured shared download root is not there at all."""
+
+REASON_SLSKD_ROOT_OPEN_FAILED_PREFIX: Final = "slskd_root_open_failed_"
+"""Prefix for a storage-layer failure on the shared share; errno-suffixed."""
+
+REASON_SLSKD_ROOT_REFUSED: Final = "slskd_root_refused"
+"""A refusal of the shared download root with no structured code."""
+
+REASON_PRIVATE_MATERIALIZE_FAILED: Final = "private_materialize_failed"
+"""An unclassified ``OSError`` escaped the private publish transaction."""
+
+
+@dataclass(frozen=True)
+class _ReasonVocabulary:
+    """One subject's four nouns for the same four authority outcomes.
+
+    Kept as data rather than three near-identical mappers so the
+    containment / missing / storage partition is decided ONCE. A new
+    subject cannot accidentally file a storage errno under its
+    containment noun, because it never gets to make that choice.
+    """
+
+    unsafe: str
+    missing: str
+    open_failed_prefix: str
+    unclassified: str
+
+
+_SOURCE_FILE_VOCABULARY: Final = _ReasonVocabulary(
+    unsafe=REASON_UNSAFE_SOURCE_PATH,
+    missing=REASON_EVENT_PATH_GONE_FROM_DISK,
+    open_failed_prefix=REASON_SOURCE_OPEN_FAILED_PREFIX,
+    # NOT ``unsafe_source_path``: reporting a refusal we could not
+    # classify as a containment violation manufactures a security finding
+    # out of ignorance, which is the same lie as reporting one subject's
+    # failure in another's vocabulary. Every subject says "refused" when
+    # it does not know. (Unreachable in practice — every code the source
+    # preflight can hit is classified — so this is consistency, not a
+    # live branch.)
+    unclassified=REASON_SOURCE_PREFLIGHT_REFUSED,
+)
+_PRIVATE_TREE_VOCABULARY: Final = _ReasonVocabulary(
+    unsafe=REASON_PROCESSING_AUTHORITY_UNSAFE,
+    missing=REASON_PROCESSING_PATH_MISSING,
+    open_failed_prefix=REASON_PROCESSING_OPEN_FAILED_PREFIX,
+    unclassified=REASON_MATERIALIZE_AUTHORITY_FAILED,
+)
+_SHARED_ROOT_VOCABULARY: Final = _ReasonVocabulary(
+    unsafe=REASON_SLSKD_ROOT_UNSAFE,
+    missing=REASON_SLSKD_ROOT_MISSING,
+    open_failed_prefix=REASON_SLSKD_ROOT_OPEN_FAILED_PREFIX,
+    unclassified=REASON_SLSKD_ROOT_REFUSED,
+)
+
+
+def _reason_in_vocabulary(
+    exc: FilesystemAuthorityError, vocabulary: _ReasonVocabulary,
+) -> str:
+    """Translate one structured refusal into one subject's vocabulary.
+
+    Total over :data:`~lib.fs_authority.FsAuthorityCode` and exhaustive by
+    construction (pyright rejects an unhandled code at this single site).
+    Containment codes never produce a storage reason and storage errnos
+    never produce a containment reason — that separation is the point:
+    ``unsafe_source_path`` is a security finding, ``source_open_failed_ESTALE``
+    is a sick mount.
+    """
+    code = exc.code
+    match code:
+        case (
+            "path_escape"
+            | "unsafe_symlink"
+            | "not_a_directory"
+            | "not_regular_file"
+        ):
+            return vocabulary.unsafe
+        case "missing":
+            return vocabulary.missing
+        case "open_failed":
+            return f"{vocabulary.open_failed_prefix}{exc.errno_symbol or 'UNKNOWN'}"
+        case "unspecified":
+            return vocabulary.unclassified
+    assert_never(code)
+
+
+def source_preflight_reason(exc: FilesystemAuthorityError) -> str:
+    """Name a refusal of ONE event-stamped file inside the shared share."""
+    return _reason_in_vocabulary(exc, _SOURCE_FILE_VOCABULARY)
+
+
+def materialize_authority_reason(exc: FilesystemAuthorityError) -> str:
+    """Name a refusal of OUR OWN private processing tree.
+
+    The source-preflight vocabulary would lie here: nothing about the
+    private tree is an event stamp.
+    """
+    return _reason_in_vocabulary(exc, _PRIVATE_TREE_VOCABULARY)
+
+
+def shared_download_root_reason(exc: FilesystemAuthorityError) -> str:
+    """Name a refusal of the whole configured shared download root.
+
+    Neither other vocabulary fits. ``processing_open_failed_ESTALE``
+    accuses our own tree of a fault that belongs to a third-party share on
+    a different (and here, historically flaky nested-virtiofs) mount;
+    ``event_path_gone_from_disk`` claims something about one file's event
+    stamp when the entire share is unreachable.
+    """
+    return _reason_in_vocabulary(exc, _SHARED_ROOT_VOCABULARY)
+
+
 # === Tagged results for the completion-processing ownership protocol (#474) ===
 #
 # ``_materialize_processing_dir`` and ``process_completed_album`` used to
@@ -91,7 +254,11 @@ class MaterializeFailed:
     the request back to ``wanted``. Historical bare ``False``.
 
     ``reason`` is a short, machine-stable diagnostic code — consumers
-    must branch on the type tag, never on this string.
+    must branch on the type tag, never on this string. It IS persisted
+    as evidence though (``download_log.beets_detail`` on the grace-expiry
+    reset, and ``CompletionFailed.reason`` on the completion path), so it
+    is derived structurally and never parsed out of a message: see
+    :func:`source_preflight_reason` / :func:`materialize_authority_reason`.
     """
 
     reason: str
@@ -111,6 +278,38 @@ class MaterializeGuarded:
 
 
 MaterializeResult = Materialized | MaterializeFailed | MaterializeGuarded
+
+
+def _record_materialize_failure(
+    request_id: int | None,
+    reason: str,
+    detail: str,
+    *,
+    level: int = logging.WARNING,
+    exc_info: bool = False,
+) -> MaterializeFailed:
+    """Journal the cause, then return the tagged failure (issue #868).
+
+    The ONE construction site for ``MaterializeFailed`` in this module.
+    A materialize failure eventually self-heals the request back to
+    ``wanted``; before #868 several of these returns were silent, so six
+    grace expiries on 2026-07-22 left no recoverable cause anywhere. Now
+    every one names its request and its machine-stable reason, whether or
+    not the caller goes on to write a ``download_log`` row.
+
+    ``level`` preserves each site's pre-existing severity rather than
+    flattening it: the previously-silent returns journal at WARNING, and
+    the ones that already shouted keep shouting.
+    """
+    logger.log(
+        level,
+        "MATERIALIZE FAILED request=%s reason=%s %s",
+        request_id,
+        reason,
+        detail,
+        exc_info=exc_info,
+    )
+    return MaterializeFailed(reason=reason)
 
 
 def _materialize_token(canonical_name: str) -> str:
@@ -528,8 +727,11 @@ def _evaluate_staged_path_readiness(
                 ),
             )
             if handled:
-                return MaterializeFailed(
-                    reason="abandoned_interrupted_auto_import")
+                return _record_materialize_failure(
+                    request_id,
+                    "abandoned_interrupted_auto_import",
+                    f"current_path={staged_album.current_path}",
+                )
             return MaterializeGuarded(
                 detail="abandon_blocked_release_lock_or_probe_unknown")
         if subprocess_started is None:
@@ -563,8 +765,12 @@ def _evaluate_staged_path_readiness(
             )
             return MaterializeGuarded(
                 detail="post_move_dir_missing_resume_blocked")
-        logger.error(f"Current staged path missing: {staged_album.current_path}")
-        return MaterializeFailed(reason="staged_path_missing")
+        return _record_materialize_failure(
+            request_id,
+            "staged_path_missing",
+            f"current_path={staged_album.current_path}",
+            level=logging.ERROR,
+        )
 
     staged_album.bind_import_paths(album_data.files)
     missing_paths: list[str] = []
@@ -590,11 +796,12 @@ def _evaluate_staged_path_readiness(
             )
             return MaterializeGuarded(
                 detail="post_move_files_missing_resume_blocked")
-        logger.error(
-            "Current staged path is missing tracked files: %s",
-            ", ".join(missing_paths),
+        return _record_materialize_failure(
+            request_id,
+            "staged_path_missing_tracked_files",
+            f"missing_paths={', '.join(missing_paths)}",
+            level=logging.ERROR,
         )
-        return MaterializeFailed(reason="staged_path_missing_tracked_files")
 
     if (
         current_path_location.blocks_auto_import_dispatch
@@ -684,9 +891,15 @@ def _materialize_processing_dir(
     destination_names = [os.path.basename(staged_album.import_path_for(file))
                          for file in album_data.files]
     if not destination_names:
-        return MaterializeFailed(reason="empty_manifest")
+        return _record_materialize_failure(
+            request_id, "empty_manifest", "the attempt tracked no files",
+        )
     if len(destination_names) != len(set(destination_names)):
-        return MaterializeFailed(reason="duplicate_final_basename")
+        return _record_materialize_failure(
+            request_id,
+            "duplicate_final_basename",
+            f"destination_names={sorted(destination_names)}",
+        )
 
     for file in album_data.files:
         file.import_path = staged_album.import_path_for(file)
@@ -735,17 +948,46 @@ def _materialize_processing_dir(
                     # Preflight *all* event-stamped sources before creating a
                     # destination. Missing stamps, path escapes, symlinks and
                     # special files all leave every byte untouched.
-                    for file in album_data.files:
-                        if file.local_path is None:
-                            raise FilesystemAuthorityError("event_path_missing")
-                        try:
-                            opened_sources.append(open_regular_under_root(
-                                ctx.cfg.slskd_download_dir, file.local_path,
-                            ))
-                        except FilesystemAuthorityError as exc:
-                            if "No such file" in str(exc):
-                                raise FilesystemAuthorityError("event_path_missing") from exc
-                            raise FilesystemAuthorityError("unsafe_source_path") from exc
+                    #
+                    # Each refusal reports its own cause. An unstamped file
+                    # means slskd never told us where it landed; a stamped
+                    # file that will not open is a different problem
+                    # entirely, and WHICH open failure it was decides
+                    # whether the operator is looking at a hostile peer
+                    # path or a sick mount.
+                    #
+                    # The share is opened ONCE and held across the whole
+                    # manifest. Re-opening it per file gave a flaky mount N
+                    # chances per album to refuse, and every one of those
+                    # would have been blamed on a single file's event stamp
+                    # rather than on the share; a root refusal now leaves
+                    # here as SharedDownloadRootError and is attributed by
+                    # the handler below. Holding one proven descriptor also
+                    # means the whole manifest is opened beneath the SAME
+                    # inode, so a root swapped mid-loop cannot redirect its
+                    # second half.
+                    with open_shared_download_root(
+                        ctx.cfg.slskd_download_dir,
+                    ) as slskd_root:
+                        for file in album_data.files:
+                            if file.local_path is None:
+                                return _record_materialize_failure(
+                                    request_id,
+                                    REASON_EVENT_PATH_NEVER_STAMPED,
+                                    f"no completion event stamped {file.filename!r}",
+                                    level=logging.ERROR,
+                                )
+                            try:
+                                opened_sources.append(open_regular_under_held_root(
+                                    slskd_root, file.local_path,
+                                ))
+                            except FilesystemAuthorityError as exc:
+                                return _record_materialize_failure(
+                                    request_id,
+                                    source_preflight_reason(exc),
+                                    f"local_path={file.local_path!r}: {exc}",
+                                    level=logging.ERROR,
+                                )
 
                     temp_name = f"{transaction_prefix}{secrets.token_hex(16)}"
                     os.mkdir(temp_name, 0o700, dir_fd=albums_fd)
@@ -819,12 +1061,39 @@ def _materialize_processing_dir(
                     # adversarial slskd replacement is never unlinked.
                     for opened in opened_sources:
                         unlink_if_same(opened)
+    except SharedDownloadRootError as exc:
+        # ``open_private_processing_root`` opens the shared slskd share
+        # too (for its physical-overlap proof), and that share is the one
+        # with a live history of transient ESTALE/EIO. Its refusals MUST
+        # NOT be reported in the private tree's vocabulary — the except
+        # ordering makes that structural rather than inferred.
+        return _record_materialize_failure(
+            request_id,
+            shared_download_root_reason(exc),
+            str(exc),
+            level=logging.ERROR,
+        )
     except FilesystemAuthorityError as exc:
-        logger.error("MATERIALIZE AUTHORITY FAILED request=%s: %s", request_id, exc)
-        return MaterializeFailed(reason=str(exc).split(":", 1)[0])
-    except OSError:
-        logger.exception("MATERIALIZE FAILED request=%s", request_id)
-        return MaterializeFailed(reason="private_materialize_failed")
+        # Not the source preflight — that returns directly above — and not
+        # the shared share. This is our own private processing tree, its
+        # shard lock, or its transaction directory refusing. The reason
+        # comes from the structured code; splitting the message on its
+        # first colon used to truncate the very strerror that told a
+        # containment violation and a storage error apart.
+        return _record_materialize_failure(
+            request_id,
+            materialize_authority_reason(exc),
+            f"authority refusal: {exc}",
+            level=logging.ERROR,
+        )
+    except OSError as exc:
+        return _record_materialize_failure(
+            request_id,
+            REASON_PRIVATE_MATERIALIZE_FAILED,
+            f"unclassified OSError: {exc}",
+            level=logging.ERROR,
+            exc_info=True,
+        )
     finally:
         for opened in opened_sources:
             opened.close()

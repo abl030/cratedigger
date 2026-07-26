@@ -134,6 +134,7 @@ class DownloadDB(transitions.TransitionsDB, Protocol):
         soulseek_username: str | None = None,
         filetype: str | None = None,
         outcome: DownloadLogOutcome | None = None,
+        beets_detail: str | None = None,
         error_message: str | None = None,
         transfer_detail: Any = None,
     ) -> int: ...
@@ -847,17 +848,22 @@ def _enqueue_completed_processing(
             state.processing_started_at,
             datetime.now(timezone.utc),
         )
-        if action == "reset":
+        # ``materialize_failure_action`` answers "reset" only for
+        # ``MaterializeFailed`` (``MaterializeGuarded`` is always
+        # "leave"), so the reason is always available here — the
+        # isinstance keeps that typed rather than casting it away.
+        if action == "reset" and isinstance(materialized, MaterializeFailed):
             detail = (
                 "Completed download could not be materialized within "
                 f"{PROCESSING_MATERIALIZE_GRACE_S}s of processing start; "
                 "resetting to wanted for re-download"
             )
             logger.error(
-                "MATERIALIZE GRACE EXPIRED: request_id=%s %s - %s — %s",
+                "MATERIALIZE GRACE EXPIRED: request_id=%s %s - %s reason=%s — %s",
                 request_id,
                 entry.artist,
                 entry.title,
+                materialized.reason,
                 detail,
             )
             dl_info = _build_download_info(entry)
@@ -871,6 +877,12 @@ def _enqueue_completed_processing(
                 soulseek_username=dl_info.username,
                 filetype=dl_info.filetype,
                 outcome="failed",
+                # ``error_message`` stays the grace sentence; the machine
+                # reason rides alongside it so the row records WHY the
+                # materialize never succeeded, not merely that it didn't.
+                # Seven distinct causes used to land here indistinguishable
+                # (issue #868).
+                beets_detail=materialized.reason,
                 error_message=detail,
             )
             # Issue #822 item 4: apply the standard user cooldown on this
@@ -984,6 +996,15 @@ def _processing_path_ready_for_importer(
         return False
 
     assert isinstance(result, MaterializeFailed)
+    # This gate writes no ``download_log`` row (deliberately — it fails
+    # closed BEFORE any import attempt exists to audit), so the journal is
+    # the only place the cause can land. Name it (issue #868).
+    logger.warning(
+        "PRE-ENQUEUE GATE RESET: request_id=%s reason=%s current_path=%s",
+        request_id,
+        result.reason,
+        state.current_path,
+    )
     transitions.require_transition_applied(transitions.finalize_request(
         db,
         request_id,

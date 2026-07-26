@@ -2605,13 +2605,19 @@ class TestEventPathMaterialization(unittest.TestCase):
 
     FNAME = "04 How To Disappear Completely.mp3"
 
-    def _album(self, tmpdir, *, local_path):
-        files = [make_download_file(
-            filename=f"@@wcren\\Music\\Radiohead\\Kid A\\{self.FNAME}",
-            file_dir="@@wcren\\Music\\Radiohead\\Kid A",
-            size=len("fake audio"),
-        )]
-        files[0].local_path = local_path
+    def _album(self, tmpdir, *, local_path, files=None):
+        """Build one album wired to ``tmpdir`` as the slskd download root.
+
+        Pass ``files`` for a multi-file manifest; ``local_path`` is then
+        ignored (each supplied file carries its own stamp).
+        """
+        if files is None:
+            files = [make_download_file(
+                filename=f"@@wcren\\Music\\Radiohead\\Kid A\\{self.FNAME}",
+                file_dir="@@wcren\\Music\\Radiohead\\Kid A",
+                size=len("fake audio"),
+            )]
+            files[0].local_path = local_path
         album = make_grab_list_entry(
             files=files, mb_release_id="", artist="Radiohead",
             title="Kid A", year="2000")
@@ -2687,6 +2693,12 @@ class TestEventPathMaterialization(unittest.TestCase):
         # No event was ever ingested for this file (pre-bootstrap
         # completion or cursor gap) — hard failure with diagnostics, no
         # guessing at on-disk locations.
+        #
+        # Issue #868 I2: this is the live request-8889 shape (14
+        # consecutive preflight refusals before its grace expired). It
+        # must NOT share a reason with the stale-stamp case below — slskd
+        # never told us where the file landed, which is a different
+        # operator problem from a stamp pointing at nothing.
         from lib.download_processing import CompletionFailed, process_completed_album
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2703,13 +2715,38 @@ class TestEventPathMaterialization(unittest.TestCase):
                     album, ctx, import_job_id=1)
 
             self.assertIsInstance(result, CompletionFailed)
+            assert isinstance(result, CompletionFailed)
+            self.assertEqual(result.reason, "event_path_never_stamped")
             self.assertTrue(os.path.exists(src))
             joined = "\n".join(logs.output)
-            self.assertIn("event_path_missing", joined)
+            self.assertIn("reason=event_path_never_stamped", joined)
+
+    def test_repeated_unstamped_preflight_reports_the_same_reason(self):
+        """Issue #868: request 8889 refused 14 times in a row before its
+        materialize grace expired. The reason must be STABLE across
+        retries — an unstable reason would make the persisted evidence
+        depend on which cycle happened to expire."""
+        from lib.download_processing import CompletionFailed, process_completed_album
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            album, ctx = self._album(tmpdir, local_path=None)
+
+            reasons = []
+            for _ in range(14):
+                result = process_completed_album(album, ctx, import_job_id=1)
+                self.assertIsInstance(result, CompletionFailed)
+                assert isinstance(result, CompletionFailed)
+                reasons.append(result.reason)
+
+            self.assertEqual(set(reasons), {"event_path_never_stamped"})
 
     def test_stale_stamp_without_dst_is_hard_failure(self):
         # Stamped path vanished and the destination has no already-moved
         # copy — hard failure, diagnostics name the stale stamp.
+        #
+        # Issue #868 I2: distinct from the never-stamped case above. The
+        # event feed DID report a location; the bytes are simply not
+        # there any more.
         from lib.download_processing import CompletionFailed, process_completed_album
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2721,8 +2758,117 @@ class TestEventPathMaterialization(unittest.TestCase):
                     album, ctx, import_job_id=1)
 
             self.assertIsInstance(result, CompletionFailed)
+            assert isinstance(result, CompletionFailed)
+            self.assertEqual(result.reason, "event_path_gone_from_disk")
             joined = "\n".join(logs.output)
-            self.assertIn("event_path_missing", joined)
+            self.assertIn("reason=event_path_gone_from_disk", joined)
+
+    def test_one_missing_file_in_a_healthy_share_is_not_blamed_on_the_share(self):
+        """Issue #868 D1: the share is now opened ONCE and held for the
+        whole manifest, so a refusal of the ROOT is attributable. The other
+        direction must still hold: a healthy share missing one file is the
+        FILE's problem, and must not escalate to a `slskd_root_*` reason.
+        """
+        from lib.download_processing import CompletionFailed, process_completed_album
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            present = os.path.join(tmpdir, "Kid A", "01 Present.mp3")
+            os.makedirs(os.path.dirname(present))
+            with open(present, "w") as fp:
+                fp.write("fake audio")
+            files = [
+                make_download_file(
+                    filename="@@w\\Music\\R\\Kid A\\01 Present.mp3",
+                    file_dir="@@w\\Music\\R\\Kid A", size=len("fake audio"),
+                ),
+                make_download_file(
+                    filename="@@w\\Music\\R\\Kid A\\02 Absent.mp3",
+                    file_dir="@@w\\Music\\R\\Kid A", size=10,
+                ),
+            ]
+            files[0].local_path = present
+            files[1].local_path = os.path.join(tmpdir, "Kid A", "02 Absent.mp3")
+            album, ctx = self._album(tmpdir, local_path=None, files=files)
+
+            result = process_completed_album(album, ctx, import_job_id=1)
+
+            self.assertIsInstance(result, CompletionFailed)
+            assert isinstance(result, CompletionFailed)
+            self.assertEqual(result.reason, "event_path_gone_from_disk")
+            self.assertFalse(result.reason.startswith("slskd_root_"))
+            # The first file's bytes are untouched: a refused preflight
+            # copies and unlinks nothing.
+            self.assertTrue(os.path.exists(present))
+
+    def test_symlinked_stamp_is_a_containment_reason_not_a_storage_one(self):
+        """Issue #868 I3: a symlinked source path is a SECURITY refusal.
+
+        Before the split it shared ``unsafe_source_path`` with ordinary
+        ESTALE/EIO storage failures, so a containment violation and a sick
+        mount were indistinguishable in the audit trail.
+        """
+        from lib.download_processing import CompletionFailed, process_completed_album
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outside = os.path.join(tmpdir, "outside.mp3")
+            with open(outside, "w") as fp:
+                fp.write("fake audio")
+            stamped = os.path.join(tmpdir, "Kid A", self.FNAME)
+            os.makedirs(os.path.dirname(stamped))
+            os.symlink(outside, stamped)
+            album, ctx = self._album(tmpdir, local_path=stamped)
+
+            result = process_completed_album(album, ctx, import_job_id=1)
+
+            self.assertIsInstance(result, CompletionFailed)
+            assert isinstance(result, CompletionFailed)
+            self.assertEqual(result.reason, "unsafe_source_path")
+            # The symlink target is untouched: preflight copies nothing.
+            self.assertTrue(os.path.exists(outside))
+
+    def test_escaping_stamp_is_a_containment_reason(self):
+        """Issue #868 I3: a stamp naming a path outside the slskd root is
+        a containment violation, never a storage error."""
+        from lib.download_processing import CompletionFailed, process_completed_album
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = os.path.join(tmpdir, "downloads")
+            os.makedirs(root)
+            escaped = os.path.join(tmpdir, "elsewhere.mp3")
+            with open(escaped, "w") as fp:
+                fp.write("fake audio")
+            album, ctx = self._album(root, local_path=escaped)
+
+            result = process_completed_album(album, ctx, import_job_id=1)
+
+            self.assertIsInstance(result, CompletionFailed)
+            assert isinstance(result, CompletionFailed)
+            self.assertEqual(result.reason, "unsafe_source_path")
+            self.assertTrue(os.path.exists(escaped))
+
+    def test_storage_open_failure_carries_its_errno_not_a_containment_reason(self):
+        """Issue #868 I2/I3: an unreadable-but-present stamped file is a
+        STORAGE failure and records which errno it was. The live shape is
+        virtiofs ESTALE/EIO; EACCES reproduces it without a sick mount."""
+        from lib.download_processing import CompletionFailed, process_completed_album
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            locked_dir = os.path.join(tmpdir, "Kid A")
+            os.makedirs(locked_dir)
+            stamped = os.path.join(locked_dir, self.FNAME)
+            with open(stamped, "w") as fp:
+                fp.write("fake audio")
+            os.chmod(stamped, 0o000)
+            album, ctx = self._album(tmpdir, local_path=stamped)
+            try:
+                result = process_completed_album(album, ctx, import_job_id=1)
+            finally:
+                os.chmod(stamped, 0o600)
+
+            self.assertIsInstance(result, CompletionFailed)
+            assert isinstance(result, CompletionFailed)
+            self.assertEqual(result.reason, "source_open_failed_EACCES")
+            self.assertTrue(os.path.exists(stamped))
 
     def test_mixed_album_fails_preflight_without_moving_stamped_file(self):
         """One stamped file, one unstamped: the pre-flight check fails the
@@ -2749,21 +2895,17 @@ class TestEventPathMaterialization(unittest.TestCase):
                 ),
             ]
             files[0].local_path = event_src
-            album = make_grab_list_entry(
-                files=files, mb_release_id="", artist="Radiohead",
-                title="Kid A", year="2000")
-            ctx = _make_ctx()
-            cfg = cast(Any, ctx.cfg)
-            cfg.slskd_download_dir = tmpdir
-            cfg.beets_validation_enabled = False
+            album, ctx = self._album(tmpdir, local_path=None, files=files)
 
             with self.assertLogs("cratedigger", level=logging.ERROR) as logs:
                 result = process_completed_album(
                     album, ctx, import_job_id=1)
 
             self.assertIsInstance(result, CompletionFailed)
+            assert isinstance(result, CompletionFailed)
+            self.assertEqual(result.reason, "event_path_never_stamped")
             self.assertTrue(os.path.exists(event_src))
-            self.assertIn("event_path_missing", "\n".join(logs.output))
+            self.assertIn("reason=event_path_never_stamped", "\n".join(logs.output))
             dst_dir = self._canonical_dir(ctx, album.files)
             self.assertTrue(
                 not os.path.isdir(dst_dir) or os.listdir(dst_dir) == [])
@@ -4118,6 +4260,75 @@ class TestPollActiveDownloads(unittest.TestCase):
         # Issue #822 item 4: the standard user cooldown is applied on
         # this reset, same as the retry/timeout paths.
         self.assertEqual(fake_db.cooldowns_applied, ["user1"])
+        # Issue #868 I1: the reset row records WHY the materialize never
+        # succeeded. ``error_message`` stays the operator-facing grace
+        # sentence; the machine reason rides alongside it, so 48 rows in
+        # 21 days are no longer one indistinguishable message.
+        self.assertEqual(
+            fake_db.download_logs[0].beets_detail, "event_path_never_stamped",
+        )
+        self.assertIn(
+            "could not be materialized",
+            fake_db.download_logs[0].error_message or "",
+        )
+
+    def test_grace_expiry_rows_distinguish_never_stamped_from_gone_from_disk(self):
+        """Issue #868 I1/I2: two grace expiries with different causes
+        must be tellable apart from the persisted row alone.
+
+        Before the split both wrote the identical ``error_message`` and no
+        cause at all, so the 2026-07-22 expiries were unrecoverable after
+        the journal rolled.
+        """
+        from lib.download import poll_active_downloads
+
+        old = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        details: list[str | None] = []
+        for stamp_is_stale in (False, True):
+            row = self._make_downloading_row(state_dict={
+                "filetype": "flac",
+                "enqueued_at": old,
+                "last_progress_at": _utc_now_iso(),
+                "processing_started_at": old,
+                "files": [
+                    {"username": "user1",
+                     "filename": "user1\\Music\\01.flac",
+                     "file_dir": "user1\\Music", "size": 30000000,
+                     "local_path": None,
+                     "last_state": "Completed, Succeeded",
+                     "bytes_transferred": 30000000},
+                ],
+            })
+            ctx, fake_db = self._make_poll_ctx(
+                downloading_rows=[row],
+                slskd_downloads=[{
+                    "username": "user1",
+                    "directories": [{"directory": "user1\\Music", "files": [{
+                        "filename": "user1\\Music\\01.flac",
+                        "id": "tid-1",
+                        "state": "Completed, Succeeded",
+                        "bytesTransferred": 30000000,
+                    }]}],
+                }],
+            )
+            if stamp_is_stale:
+                # A stamp INSIDE the authority root naming a file that is
+                # no longer there — the event feed did its job, the bytes
+                # went away afterwards.
+                seeded = fake_db.request(1)["active_download_state"]
+                assert isinstance(seeded, dict)
+                seeded["files"][0]["local_path"] = os.path.join(
+                    ctx.cfg.slskd_download_dir, "Music", "vanished.flac")
+
+            poll_active_downloads(ctx)
+
+            self.assertEqual(fake_db.request(1)["status"], "wanted")
+            self.assertEqual(len(fake_db.download_logs), 1)
+            details.append(fake_db.download_logs[0].beets_detail)
+
+        self.assertEqual(
+            details, ["event_path_never_stamped", "event_path_gone_from_disk"],
+        )
 
     def test_materialize_failure_defers_v1_refresh_until_after_wanted(self):
         from lib.beets_db import AlbumInfo
@@ -5574,7 +5785,7 @@ class TestPollActiveDownloads(unittest.TestCase):
                 {"username": "user1", "filename": "user1\\Music\\01.flac",
                  "file_dir": "user1\\Music", "size": 30000000,
                  # Unstamped: no event-stamped local_path, so
-                 # materialize cannot recover -> event_path_missing.
+                 # materialize cannot recover -> event_path_never_stamped.
                  "local_path": None},
             ]
             fp = attempt_fingerprint([(f["username"], f["filename"]) for f in files])

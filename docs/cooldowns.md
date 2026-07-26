@@ -33,7 +33,7 @@ CREATE TABLE user_cooldowns (
 
 ## Data flow
 
-1. **Trigger**: `_timeout_album()` (download.py), `reject_and_requeue()` (album_source.py), and the `_enqueue_completed_processing()` materialize-grace-expired reset (`download.py`, issue #822 item 4 — the residual EVENT-PATH-MISSING path with no other cooldown coverage) all call `db.check_and_apply_cooldown(username)` after logging the outcome.
+1. **Trigger**: `_timeout_album()` (download.py), `reject_and_requeue()` (album_source.py), and the `_enqueue_completed_processing()` materialize-grace-expired reset (`download.py`, issue #822 item 4 — the residual materialize-failure path with no other cooldown coverage) all call `db.check_and_apply_cooldown(username)` after logging the outcome. That reset's row records the machine reason in `beets_detail` (issue #868: `event_path_never_stamped`, `event_path_gone_from_disk`, `unsafe_source_path`, `source_open_failed_<ERRNO>`, `slskd_root_*`, `processing_*`), and the cooldown is applied identically whichever reason it was.
 2. **Decision**: `check_and_apply_cooldown()` queries `download_log` for last N outcomes, delegates to `should_cooldown()` pure function.
 3. **Storage**: If triggered, upserts `user_cooldowns` with `cooldown_until = NOW() + 3 days`.
 4. **Cache**: `ctx.cooled_down_users` populated at cycle start in `cratedigger.py main()`, shared with Phase 1 thread. Updated in real-time when new cooldowns are applied mid-cycle.

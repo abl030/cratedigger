@@ -1918,7 +1918,7 @@ class TestImporterWorker(unittest.TestCase):
 
         with patch(
             "lib.download._run_completed_processing",
-            return_value=CompletionFailed(reason="event_path_missing"),
+            return_value=CompletionFailed(reason="event_path_never_stamped"),
         ):
             updated = importer.process_claimed_job(
                 db,  # pyright: ignore[reportArgumentType]
@@ -1930,7 +1930,7 @@ class TestImporterWorker(unittest.TestCase):
         self.assertEqual(updated.status, "failed")
         self.assertEqual(
             updated.message,
-            "Automation import processing failed: event_path_missing",
+            "Automation import processing failed: event_path_never_stamped",
         )
 
     def test_automation_job_fails_from_dispatch_outcome(self):

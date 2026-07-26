@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import shutil
+import socket
 import tempfile
 import threading
 import unittest
@@ -18,9 +20,13 @@ from lib.download_materialization import (
 )
 from lib.fs_authority import (
     FilesystemAuthorityError,
+    SharedDownloadRootError,
     open_configured_quarantine_directory,
+    open_directory_path,
     open_private_processing_root,
     open_regular_relative,
+    open_regular_under_held_root,
+    open_shared_download_root,
 )
 from lib.grab_list import DownloadFile
 from lib.import_preview import (
@@ -43,11 +49,16 @@ def assert_publication_invariant(
     expected_names: set[str],
     artifact_names: list[str],
     name_max: int,
+    allowed_result_types: tuple[type, ...] = (Materialized, MaterializeGuarded),
 ) -> None:
     """Check the materialize outcome without reimplementing its publication.
 
     Kept module-level so the known-bad pin proves this proof surface really
     rejects a planted overwrite/source-loss outcome.
+
+    ``allowed_result_types`` lets a REFUSED materialize be held to the same
+    artifact contract (issue #868): a preflight that declines still owes an
+    ``albums/`` root with no leaked ``.materialize-tmp-*`` transaction.
     """
     if source_exists != expected_source_exists:
         raise AssertionError(
@@ -61,7 +72,7 @@ def assert_publication_invariant(
         raise AssertionError("materialize artifact exceeded NAME_MAX")
     if any(name.startswith(".materialize-tmp-") for name in artifact_names):
         raise AssertionError("unpublished materialize temp was retained")
-    if not isinstance(result, (Materialized, MaterializeGuarded)):
+    if not isinstance(result, allowed_result_types):
         raise AssertionError(f"unexpected materialize result {result!r}")
 
 
@@ -97,6 +108,182 @@ def assert_relocation_invariant(
         raise AssertionError("relocation guard lost the authoritative source")
     if replacement_has_canonical:
         raise AssertionError("relocation guard wrote into the replacement root")
+
+
+# Stated here rather than imported: the containment grouping the tests
+# assert against must not be the same object production groups by, or the
+# assertion is the implementation echoing itself back (issue #868 I3).
+_CONTAINMENT_CODES = frozenset({
+    "path_escape", "unsafe_symlink", "not_a_directory", "not_regular_file",
+})
+
+
+class TestAuthorityFailureClassification(unittest.TestCase):
+    """Issue #868: the refusal carries a structured code, not prose.
+
+    Before this, callers recovered the cause by sniffing the exception's
+    message (``"No such file" in str(exc)``) and by splitting it on its
+    first colon — which discarded the very ``strerror`` that separated a
+    containment violation from a storage error.
+    """
+
+    def test_missing_file_is_classified_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            with open_directory_path(root) as root_fd:
+                with self.assertRaises(FilesystemAuthorityError) as caught:
+                    open_regular_relative(root_fd, "absent.mp3")
+        self.assertEqual(caught.exception.code, "missing")
+        self.assertIsNone(caught.exception.errno_symbol)
+
+    def test_symlink_is_classified_as_containment_not_storage(self) -> None:
+        with tempfile.TemporaryDirectory() as parent:
+            root = os.path.join(parent, "root")
+            outside = os.path.join(parent, "outside")
+            os.mkdir(root)
+            with open(outside, "wb") as handle:
+                handle.write(b"outside")
+            os.symlink(outside, os.path.join(root, "track.mp3"))
+            with open_directory_path(root) as root_fd:
+                with self.assertRaises(FilesystemAuthorityError) as caught:
+                    open_regular_relative(root_fd, "track.mp3")
+        self.assertEqual(caught.exception.code, "unsafe_symlink")
+        self.assertIn(caught.exception.code, _CONTAINMENT_CODES)
+        self.assertIsNone(caught.exception.errno_symbol)
+
+    def test_parent_escape_is_classified_path_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            with open_directory_path(root) as root_fd:
+                with self.assertRaises(FilesystemAuthorityError) as caught:
+                    open_regular_relative(root_fd, "../outside")
+        self.assertEqual(caught.exception.code, "path_escape")
+        self.assertIn(caught.exception.code, _CONTAINMENT_CODES)
+
+    def test_non_regular_file_is_classified_as_containment(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            os.mkfifo(os.path.join(root, "pipe"))
+            with open_directory_path(root) as root_fd:
+                with self.assertRaises(FilesystemAuthorityError) as caught:
+                    open_regular_relative(root_fd, "pipe")
+        self.assertEqual(caught.exception.code, "not_regular_file")
+        self.assertIn(caught.exception.code, _CONTAINMENT_CODES)
+
+    def test_unix_socket_is_containment_despite_failing_at_open(self) -> None:
+        """A socket answers ENXIO before a descriptor exists, so the
+        ``S_ISREG`` check never runs. Classifying by errno alone would
+        file a containment-class shape under a storage reason (I3)."""
+        with tempfile.TemporaryDirectory() as root:
+            sock = socket.socket(socket.AF_UNIX)
+            try:
+                sock.bind(os.path.join(root, "sock"))
+                with open_directory_path(root) as root_fd:
+                    with self.assertRaises(FilesystemAuthorityError) as caught:
+                        open_regular_relative(root_fd, "sock")
+            finally:
+                sock.close()
+        self.assertEqual(caught.exception.code, "not_regular_file")
+        self.assertIn(caught.exception.code, _CONTAINMENT_CODES)
+        self.assertIsNone(caught.exception.errno_symbol)
+
+    def test_regular_file_used_as_a_directory_is_not_called_a_symlink(self) -> None:
+        """ENOTDIR gets its own code: naming it ``unsafe_symlink`` would
+        be a lie the exception's own message immediately contradicts."""
+        with tempfile.TemporaryDirectory() as root:
+            with open(os.path.join(root, "notadir"), "wb") as handle:
+                handle.write(b"regular")
+            with open_directory_path(root) as root_fd:
+                with self.assertRaises(FilesystemAuthorityError) as caught:
+                    open_regular_relative(root_fd, "notadir/child.mp3")
+        self.assertEqual(caught.exception.code, "not_a_directory")
+        self.assertIn(caught.exception.code, _CONTAINMENT_CODES)
+
+    def test_storage_open_failure_carries_its_errno_symbol(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "track.mp3")
+            with open(path, "wb") as handle:
+                handle.write(b"audio")
+            os.chmod(path, 0o000)
+            try:
+                with open_directory_path(root) as root_fd:
+                    with self.assertRaises(FilesystemAuthorityError) as caught:
+                        open_regular_relative(root_fd, "track.mp3")
+            finally:
+                os.chmod(path, 0o600)
+        self.assertEqual(caught.exception.code, "open_failed")
+        self.assertEqual(caught.exception.errno_symbol, "EACCES")
+        self.assertNotIn(caught.exception.code, _CONTAINMENT_CODES)
+
+    def test_shared_root_refusal_is_typed_but_a_descendant_refusal_is_not(self) -> None:
+        """Issue #868 D1: WHICH LEG failed decides the vocabulary.
+
+        The preflight used to re-open the share pathname once per file, so
+        a refusal of the whole share arrived indistinguishable from a
+        refusal of one stamped file and was reported as
+        ``event_path_gone_from_disk`` — a claim about one file's event
+        stamp when the entire mount was unreachable.
+        """
+        with tempfile.TemporaryDirectory() as parent:
+            absent_root = os.path.join(parent, "never-created")
+            with self.assertRaises(SharedDownloadRootError) as root_caught:
+                with open_shared_download_root(absent_root):
+                    pass
+            self.assertEqual(root_caught.exception.code, "missing")
+
+            healthy_root = os.path.join(parent, "downloads")
+            os.mkdir(healthy_root)
+            with open_shared_download_root(healthy_root) as held_root:
+                with self.assertRaises(FilesystemAuthorityError) as file_caught:
+                    open_regular_under_held_root(
+                        held_root, os.path.join(healthy_root, "absent.mp3"),
+                    )
+            # Same code, deliberately NOT the same type: a healthy share
+            # missing one file is the file's problem, not the share's.
+            self.assertEqual(file_caught.exception.code, "missing")
+            self.assertNotIsInstance(file_caught.exception, SharedDownloadRootError)
+
+    def test_unreadable_shared_root_keeps_its_errno_through_re_attribution(self) -> None:
+        with tempfile.TemporaryDirectory() as parent:
+            root = os.path.join(parent, "downloads")
+            os.mkdir(root)
+            os.chmod(root, 0o000)
+            try:
+                with self.assertRaises(SharedDownloadRootError) as caught:
+                    with open_shared_download_root(root):
+                        pass
+            finally:
+                os.chmod(root, 0o700)
+        self.assertEqual(caught.exception.code, "open_failed")
+        self.assertEqual(caught.exception.errno_symbol, "EACCES")
+
+    def test_held_root_opens_every_manifest_file_under_one_descriptor(self) -> None:
+        """Must-still-work guard for D1: holding the share open once must
+        not break an ordinary multi-file manifest."""
+        with tempfile.TemporaryDirectory() as parent:
+            root = os.path.join(parent, "downloads")
+            os.makedirs(os.path.join(root, "peer"))
+            names = ["01.mp3", "02.mp3", "03.mp3"]
+            for index, name in enumerate(names):
+                with open(os.path.join(root, "peer", name), "wb") as handle:
+                    handle.write(bytes([index]) * 4)
+            with open_shared_download_root(root) as held_root:
+                for index, name in enumerate(names):
+                    opened = open_regular_under_held_root(
+                        held_root, os.path.join(root, "peer", name),
+                    )
+                    try:
+                        self.assertEqual(os.read(opened.fd, 8), bytes([index]) * 4)
+                    finally:
+                        opened.close()
+
+    def test_unclassified_raise_sites_keep_the_default_code(self) -> None:
+        """Every pre-#868 raise site stays ``unspecified`` — deliberately
+        not a synonym for safe: consumers fail closed on it."""
+        with tempfile.TemporaryDirectory() as parent:
+            source = os.path.join(parent, "source")
+            os.mkdir(source)
+            with self.assertRaises(FilesystemAuthorityError) as caught:
+                with open_private_processing_root(source, source):
+                    pass
+        self.assertEqual(caught.exception.code, "unspecified")
 
 
 class TestPrivateProcessingAuthority(unittest.TestCase):
@@ -347,6 +534,101 @@ class TestAtomicPrivateMaterialization(unittest.TestCase):
             self.assertTrue(os.path.exists(first))
             self.assertTrue(os.path.exists(second))
 
+    def _stamped_album(self, source: str, processing: str):
+        source_path = os.path.join(source, "track.mp3")
+        with open(source_path, "wb") as handle:
+            handle.write(b"audio")
+        file = DownloadFile(
+            filename="peer\\track.mp3", username="peer", id="1",
+            file_dir="peer", size=5,
+        )
+        file.local_path = source_path
+        album = make_grab_list_entry(
+            files=[file], artist="A", title="B", year="2020")
+        staged = StagedAlbum.from_entry(
+            album,
+            default_path=canonical_folder_for_row(
+                album, processing_albums_dir(processing)),
+        )
+        return album, staged, source_path
+
+    def test_private_tree_absence_reports_a_processing_reason(self) -> None:
+        """Issue #868: a refusal on OUR OWN tree gets its own vocabulary.
+
+        The retired derivation split the message on its first colon, so
+        this failure was persisted as the prose fragment ``cannot open
+        albums`` — which is neither machine-stable nor a cause.
+        """
+        parent, source, processing = self._world()
+        with parent:
+            album, staged, source_path = self._stamped_album(source, processing)
+            os.rmdir(os.path.join(processing, "albums"))
+            result = _materialize_processing_dir(
+                album, staged, self._ctx(source, processing))
+            self.assertIsInstance(result, MaterializeFailed)
+            assert isinstance(result, MaterializeFailed)
+            self.assertEqual(result.reason, "processing_path_missing")
+            self.assertNotIn(":", result.reason)
+            self.assertTrue(os.path.exists(source_path))
+
+    def test_absent_shared_download_root_is_not_blamed_on_the_private_tree(self) -> None:
+        """Issue #868 B1: ``open_private_processing_root`` opens the shared
+        slskd share too, for its physical-overlap proof. A refusal THERE
+        must not be persisted in the private tree's vocabulary — otherwise
+        "our albums/ dir is gone" and "the whole share is gone" both read
+        ``processing_path_missing``, the exact collapse #868 removes.
+        """
+        parent, source, processing = self._world()
+        with parent:
+            album, staged, source_path = self._stamped_album(source, processing)
+            shutil.rmtree(source)
+            result = _materialize_processing_dir(
+                album, staged, self._ctx(source, processing))
+            self.assertIsInstance(result, MaterializeFailed)
+            assert isinstance(result, MaterializeFailed)
+            self.assertEqual(result.reason, "slskd_root_missing")
+            self.assertNotEqual(result.reason, "processing_path_missing")
+            del source_path
+
+    def test_unreadable_shared_download_root_names_the_share_not_our_tree(self) -> None:
+        """Issue #868 B1: the live failure is transient ESTALE/EIO on the
+        nested-virtiofs share. Reporting it as ``processing_open_failed_*``
+        would send the operator to inspect the wrong filesystem. EACCES
+        reproduces the shape without a sick mount."""
+        parent, source, processing = self._world()
+        with parent:
+            album, staged, _ = self._stamped_album(source, processing)
+            os.chmod(source, 0o000)
+            try:
+                result = _materialize_processing_dir(
+                    album, staged, self._ctx(source, processing))
+            finally:
+                os.chmod(source, 0o700)
+            self.assertIsInstance(result, MaterializeFailed)
+            assert isinstance(result, MaterializeFailed)
+            self.assertEqual(result.reason, "slskd_root_open_failed_EACCES")
+            # The private tree's identical-errno reason is a DIFFERENT
+            # string: same errno, different subsystem, different remedy.
+            self.assertNotEqual(result.reason, "processing_open_failed_EACCES")
+
+    def test_private_tree_storage_failure_carries_its_errno(self) -> None:
+        """Issue #868 I3: our own tree gets the same containment/storage
+        separation the slskd source does."""
+        parent, source, processing = self._world()
+        with parent:
+            album, staged, source_path = self._stamped_album(source, processing)
+            albums = os.path.join(processing, "albums")
+            os.chmod(albums, 0o000)
+            try:
+                result = _materialize_processing_dir(
+                    album, staged, self._ctx(source, processing))
+            finally:
+                os.chmod(albums, 0o700)
+            self.assertIsInstance(result, MaterializeFailed)
+            assert isinstance(result, MaterializeFailed)
+            self.assertEqual(result.reason, "processing_open_failed_EACCES")
+            self.assertTrue(os.path.exists(source_path))
+
     def test_existing_empty_destination_is_guarded_without_overwrite(self) -> None:
         parent, source, processing = self._world()
         with parent:
@@ -585,6 +867,37 @@ class TestAuthorityInvariantCheckers(unittest.TestCase):
                 expected_names={"track.mp3"},
                 artifact_names=[".materialize-tmp-orphan"],
                 name_max=255,
+            )
+
+    def test_publication_checker_trips_on_temp_leaked_by_a_refused_materialize(
+        self,
+    ) -> None:
+        """Issue #868: a REFUSED materialize is held to the same artifact
+        contract as a successful one — a leaked transaction directory is a
+        finding whichever tag came back."""
+        with self.assertRaises(AssertionError):
+            assert_publication_invariant(
+                result=MaterializeFailed(reason="slskd_root_missing"),
+                source_exists=True,
+                expected_source_exists=True,
+                destination_names=set(),
+                expected_names=set(),
+                artifact_names=[".materialize-tmp-leaked"],
+                name_max=255,
+                allowed_result_types=(MaterializeFailed,),
+            )
+
+    def test_publication_checker_still_refuses_an_unexpected_result_type(self) -> None:
+        with self.assertRaises(AssertionError):
+            assert_publication_invariant(
+                result=Materialized(),
+                source_exists=True,
+                expected_source_exists=True,
+                destination_names=set(),
+                expected_names=set(),
+                artifact_names=[],
+                name_max=255,
+                allowed_result_types=(MaterializeFailed,),
             )
 
     def test_preview_checker_trips_on_failed_snapshot_residue(self) -> None:
