@@ -82,6 +82,10 @@ from lib.download_materialization import (
     REASON_EVENT_PATH_NEVER_STAMPED,
     REASON_MATERIALIZE_AUTHORITY_FAILED,
     REASON_PRIVATE_MATERIALIZE_FAILED,
+    REASON_PROCESSING_WRITE_FAILED_PREFIX,
+    REASON_SOURCE_READ_FAILED_PREFIX,
+    _fsync_private_directory,
+    materialize_authority_reason,
     REASON_PROCESSING_AUTHORITY_UNSAFE,
     REASON_PROCESSING_OPEN_FAILED_PREFIX,
     REASON_PROCESSING_PATH_MISSING,
@@ -101,6 +105,7 @@ from lib.download_materialization import (
     source_preflight_reason,
 )
 from lib.fs_authority import (
+    CopyDestinationWriteError,
     FilesystemAuthorityError,
     SharedDownloadRootError,
     _raise_path_error,
@@ -142,6 +147,8 @@ _UNCLASSIFIED_REASONS = frozenset({
     REASON_SOURCE_PREFLIGHT_REFUSED,
     REASON_MATERIALIZE_AUTHORITY_FAILED,
     REASON_PRIVATE_MATERIALIZE_FAILED,
+    REASON_PROCESSING_WRITE_FAILED_PREFIX,
+    REASON_SOURCE_READ_FAILED_PREFIX,
     REASON_SLSKD_ROOT_REFUSED,
 })
 # Restated, not imported: a checker that groups by the same object
@@ -964,18 +971,30 @@ def check_copy_failure_names_its_subject(
     Module-level so the known-bad self-test can hand it the exact opaque
     string that shipped.
     """
+    # Read and write are different facts from open: a destination that ran
+    # out of space opened perfectly well, and ``processing_open_failed_``
+    # rendered "could not be opened" for every ENOSPC (issue #868 review
+    # B2). The subject AND the verb have to be right.
     expected_prefix = (
-        REASON_SOURCE_OPEN_FAILED_PREFIX if subject == "source"
-        else REASON_PROCESSING_OPEN_FAILED_PREFIX
+        REASON_SOURCE_READ_FAILED_PREFIX if subject == "source"
+        else REASON_PROCESSING_WRITE_FAILED_PREFIX
     )
-    wrong_prefix = (
-        REASON_PROCESSING_OPEN_FAILED_PREFIX if subject == "source"
-        else REASON_SOURCE_OPEN_FAILED_PREFIX
+    wrong_prefixes = (
+        (REASON_PROCESSING_WRITE_FAILED_PREFIX,
+         REASON_PROCESSING_OPEN_FAILED_PREFIX,
+         REASON_SOURCE_OPEN_FAILED_PREFIX)
+        if subject == "source"
+        else (REASON_SOURCE_READ_FAILED_PREFIX,
+              REASON_SOURCE_OPEN_FAILED_PREFIX,
+              REASON_PROCESSING_OPEN_FAILED_PREFIX)
     )
     if reason == REASON_PRIVATE_MATERIALIZE_FAILED:
         return f"{subject} failure collapsed into {reason!r} with no errno"
-    if reason.startswith(wrong_prefix):
-        return f"{subject} failure was attributed to the other subject: {reason!r}"
+    for wrong in wrong_prefixes:
+        if reason.startswith(wrong):
+            return (
+                f"{subject} failure named the wrong subject or verb: {reason!r}"
+            )
     if not reason.startswith(expected_prefix):
         return f"{subject} failure did not name its subject: {reason!r}"
     if not reason.endswith(errno_name):
@@ -1037,15 +1056,42 @@ class TestGeneratedCopyPhaseSubjects(unittest.TestCase):
         """The three failures a reviewer injected at the real copy boundary."""
         self.assertEqual(
             self._reason_for("source", "ESTALE"),
-            f"{REASON_SOURCE_OPEN_FAILED_PREFIX}ESTALE",
+            f"{REASON_SOURCE_READ_FAILED_PREFIX}ESTALE",
         )
         self.assertEqual(
             self._reason_for("source", "EIO"),
-            f"{REASON_SOURCE_OPEN_FAILED_PREFIX}EIO",
+            f"{REASON_SOURCE_READ_FAILED_PREFIX}EIO",
         )
         self.assertEqual(
             self._reason_for("destination", "ENOSPC"),
-            f"{REASON_PROCESSING_OPEN_FAILED_PREFIX}ENOSPC",
+            f"{REASON_PROCESSING_WRITE_FAILED_PREFIX}ENOSPC",
+        )
+
+    def test_a_failing_directory_flush_answers_the_same_vocabulary(self) -> None:
+        """Review B2: the transaction directory's own flush is the same
+        physical fault one line after the copy's, and used to answer
+        ``private_materialize_failed`` — one mount failure, two
+        vocabularies.
+
+        Driven at the helper rather than through a whole materialize:
+        patching ``os.fsync`` globally also breaks the transaction
+        rollback's own flush, whose failure then replaces this one (the
+        pre-existing leak noted as review #14 and deliberately not fixed
+        here). The helper IS the production raise site, and the mapping it
+        feeds is the production mapper.
+        """
+        read_fd, write_fd = os.pipe()
+        try:
+            with self.assertRaises(CopyDestinationWriteError) as caught:
+                _fsync_private_directory(write_fd, "transaction directory")
+        finally:
+            os.close(read_fd)
+            os.close(write_fd)
+        self.assertEqual(caught.exception.code, "write_failed")
+        self.assertEqual(
+            materialize_authority_reason(caught.exception),
+            f"{REASON_PROCESSING_WRITE_FAILED_PREFIX}"
+            f"{caught.exception.errno_symbol}",
         )
 
     def test_a_healthy_world_still_publishes(self) -> None:
@@ -1074,13 +1120,21 @@ class TestGeneratedCopyPhaseSubjects(unittest.TestCase):
             "destination", "ENOSPC", REASON_PRIVATE_MATERIALIZE_FAILED))
         self.assertIsNotNone(check_copy_failure_names_its_subject(
             "source", "ESTALE",
-            f"{REASON_PROCESSING_OPEN_FAILED_PREFIX}ESTALE"))
+            f"{REASON_PROCESSING_WRITE_FAILED_PREFIX}ESTALE"))
+        # The verb matters as much as the subject: an open failure is not
+        # what a mid-copy read did.
         self.assertIsNotNone(check_copy_failure_names_its_subject(
             "source", "ESTALE",
-            f"{REASON_SOURCE_OPEN_FAILED_PREFIX}EIO"))
+            f"{REASON_SOURCE_OPEN_FAILED_PREFIX}ESTALE"))
+        self.assertIsNotNone(check_copy_failure_names_its_subject(
+            "destination", "ENOSPC",
+            f"{REASON_PROCESSING_OPEN_FAILED_PREFIX}ENOSPC"))
+        self.assertIsNotNone(check_copy_failure_names_its_subject(
+            "source", "ESTALE",
+            f"{REASON_SOURCE_READ_FAILED_PREFIX}EIO"))
         self.assertIsNone(check_copy_failure_names_its_subject(
             "source", "ESTALE",
-            f"{REASON_SOURCE_OPEN_FAILED_PREFIX}ESTALE"))
+            f"{REASON_SOURCE_READ_FAILED_PREFIX}ESTALE"))
 
 
 if __name__ == "__main__":

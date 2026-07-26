@@ -28,6 +28,8 @@ FsAuthorityCode = Literal[
     "untrusted_ownership",
     "missing",
     "open_failed",
+    "read_failed",
+    "write_failed",
 ]
 """Machine-stable classification of one filesystem-authority refusal.
 
@@ -51,6 +53,12 @@ lumping them together fused ~13 causes into one reason (issue #868). ``missing``
 about trust. Consumers that translate these into their own vocabulary do
 so with an exhaustive ``match`` so a new code cannot be silently lumped
 in with either group.
+
+``open_failed``, ``read_failed`` and ``write_failed`` are three DIFFERENT
+storage facts and must not borrow each other's nouns: a destination that
+ran out of space opened perfectly well, and saying it "could not be
+opened" is a specific claim that is simply false (issue #868 review B2).
+Each carries its errno.
 
 ``unspecified`` is the default for every raise site that predates the
 classification (configured-root policy checks, preview/quarantine
@@ -116,7 +124,12 @@ class CopySourceReadError(FilesystemAuthorityError):
 
 
 class CopyDestinationWriteError(FilesystemAuthorityError):
-    """Writing or flushing the DESTINATION failed mid-copy (e.g. ENOSPC)."""
+    """Writing or flushing the DESTINATION failed (e.g. ENOSPC, EIO).
+
+    Carries ``write_failed`` — never ``open_failed``: the destination was
+    opened successfully, and the whole point of the structured code is
+    that a consumer's copy can state what actually went wrong.
+    """
 
 
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
@@ -683,7 +696,7 @@ def copy_opened_file(
         except OSError as exc:
             raise CopySourceReadError(
                 f"cannot read source: {exc.strerror}",
-                code="open_failed",
+                code="read_failed",
                 errno_symbol=errno_symbol(exc),
             ) from exc
         if not chunk:
@@ -699,7 +712,7 @@ def copy_opened_file(
             except OSError as exc:
                 raise CopyDestinationWriteError(
                     f"cannot write destination: {exc.strerror}",
-                    code="open_failed",
+                    code="write_failed",
                     errno_symbol=errno_symbol(exc),
                 ) from exc
             view = view[written:]
@@ -709,7 +722,7 @@ def copy_opened_file(
     except OSError as exc:
         raise CopyDestinationWriteError(
             f"cannot flush destination: {exc.strerror}",
-            code="open_failed",
+            code="write_failed",
             errno_symbol=errno_symbol(exc),
         ) from exc
     return copied

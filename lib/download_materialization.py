@@ -26,6 +26,7 @@ from lib.fs_authority import (
     CopyDestinationWriteError,
     CopySourceReadError,
     FilesystemAuthorityError,
+    errno_symbol,
     OpenedRegularFile,
     SharedDownloadRootError,
     copy_opened_file,
@@ -98,6 +99,18 @@ REASON_UNSAFE_SOURCE_PATH: Final = "unsafe_source_path"
 REASON_SOURCE_OPEN_FAILED_PREFIX: Final = "source_open_failed_"
 """Prefix for a storage-layer open failure; suffixed with the errno name."""
 
+REASON_SOURCE_READ_FAILED_PREFIX: Final = "source_read_failed_"
+"""Prefix for a read failure on an ALREADY-OPEN stamped file; errno-suffixed.
+
+Distinct from ``source_open_failed_``: the copy phase reads every byte the
+share has, and reporting a mid-copy ESTALE as an *open* failure is the
+same specific-but-false claim ``processing_open_failed_`` made about
+writes (issue #868 review B2)."""
+
+REASON_SOURCE_WRITE_FAILED_PREFIX: Final = "source_write_failed_"
+"""Unreachable — nothing writes the share. Present because every subject
+answers every storage fact, so a new one cannot land in another's noun."""
+
 REASON_SOURCE_PREFLIGHT_REFUSED: Final = "source_preflight_refused"
 """A refusal of one stamped file with no structured code."""
 
@@ -108,7 +121,16 @@ REASON_PROCESSING_PATH_MISSING: Final = "processing_path_missing"
 """A required private processing path was absent."""
 
 REASON_PROCESSING_OPEN_FAILED_PREFIX: Final = "processing_open_failed_"
-"""Prefix for a storage-layer failure on the private tree; errno-suffixed."""
+"""Prefix for a storage-layer open failure on the private tree; errno-suffixed."""
+
+REASON_PROCESSING_READ_FAILED_PREFIX: Final = "processing_read_failed_"
+"""Prefix for a read failure on our own already-open private tree."""
+
+REASON_PROCESSING_WRITE_FAILED_PREFIX: Final = "processing_write_failed_"
+"""Prefix for a write/flush failure on the private tree; errno-suffixed.
+
+ENOSPC and a failing fsync are the live shapes. They are NOT open
+failures — the destination opened fine."""
 
 REASON_MATERIALIZE_AUTHORITY_FAILED: Final = "materialize_authority_failed"
 """An authority refusal on the private tree with no structured code.
@@ -132,7 +154,13 @@ REASON_SLSKD_ROOT_MISSING: Final = "slskd_root_missing"
 """The configured shared download root is not there at all."""
 
 REASON_SLSKD_ROOT_OPEN_FAILED_PREFIX: Final = "slskd_root_open_failed_"
-"""Prefix for a storage-layer failure on the shared share; errno-suffixed."""
+"""Prefix for a storage-layer open failure on the shared share; errno-suffixed."""
+
+REASON_SLSKD_ROOT_READ_FAILED_PREFIX: Final = "slskd_root_read_failed_"
+"""Prefix for a read failure on the already-open shared share."""
+
+REASON_SLSKD_ROOT_WRITE_FAILED_PREFIX: Final = "slskd_root_write_failed_"
+"""Unreachable — Cratedigger never writes the shared share."""
 
 REASON_SLSKD_ROOT_REFUSED: Final = "slskd_root_refused"
 """A refusal of the shared download root with no structured code."""
@@ -154,6 +182,8 @@ class _ReasonVocabulary:
     unsafe: str
     missing: str
     open_failed_prefix: str
+    read_failed_prefix: str
+    write_failed_prefix: str
     unclassified: str
 
 
@@ -161,6 +191,8 @@ _SOURCE_FILE_VOCABULARY: Final = _ReasonVocabulary(
     unsafe=REASON_UNSAFE_SOURCE_PATH,
     missing=REASON_EVENT_PATH_GONE_FROM_DISK,
     open_failed_prefix=REASON_SOURCE_OPEN_FAILED_PREFIX,
+    read_failed_prefix=REASON_SOURCE_READ_FAILED_PREFIX,
+    write_failed_prefix=REASON_SOURCE_WRITE_FAILED_PREFIX,
     # NOT ``unsafe_source_path``: reporting a refusal we could not
     # classify as a containment violation manufactures a security finding
     # out of ignorance, which is the same lie as reporting one subject's
@@ -174,12 +206,16 @@ _PRIVATE_TREE_VOCABULARY: Final = _ReasonVocabulary(
     unsafe=REASON_PROCESSING_AUTHORITY_UNSAFE,
     missing=REASON_PROCESSING_PATH_MISSING,
     open_failed_prefix=REASON_PROCESSING_OPEN_FAILED_PREFIX,
+    read_failed_prefix=REASON_PROCESSING_READ_FAILED_PREFIX,
+    write_failed_prefix=REASON_PROCESSING_WRITE_FAILED_PREFIX,
     unclassified=REASON_MATERIALIZE_AUTHORITY_FAILED,
 )
 _SHARED_ROOT_VOCABULARY: Final = _ReasonVocabulary(
     unsafe=REASON_SLSKD_ROOT_UNSAFE,
     missing=REASON_SLSKD_ROOT_MISSING,
     open_failed_prefix=REASON_SLSKD_ROOT_OPEN_FAILED_PREFIX,
+    read_failed_prefix=REASON_SLSKD_ROOT_READ_FAILED_PREFIX,
+    write_failed_prefix=REASON_SLSKD_ROOT_WRITE_FAILED_PREFIX,
     unclassified=REASON_SLSKD_ROOT_REFUSED,
 )
 
@@ -215,6 +251,10 @@ def _reason_in_vocabulary(
             return vocabulary.missing
         case "open_failed":
             return f"{vocabulary.open_failed_prefix}{exc.errno_symbol or 'UNKNOWN'}"
+        case "read_failed":
+            return f"{vocabulary.read_failed_prefix}{exc.errno_symbol or 'UNKNOWN'}"
+        case "write_failed":
+            return f"{vocabulary.write_failed_prefix}{exc.errno_symbol or 'UNKNOWN'}"
         case "unspecified":
             return vocabulary.unclassified
     assert_never(code)
@@ -330,6 +370,25 @@ def _record_materialize_failure(
         exc_info=exc_info,
     )
     return MaterializeFailed(reason=reason)
+
+
+def _fsync_private_directory(fd: int, subject: str) -> None:
+    """Flush one private directory, naming the fault if the flush fails.
+
+    ``copy_opened_file``'s own ``fsync`` already answers
+    ``CopyDestinationWriteError``; these two directory flushes are the same
+    physical fault one line later and used to fall into the generic
+    ``OSError`` arm as ``private_materialize_failed`` — one mount failure,
+    two vocabularies (issue #868 review B2).
+    """
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        raise CopyDestinationWriteError(
+            f"cannot flush {subject}: {exc.strerror}",
+            code="write_failed",
+            errno_symbol=errno_symbol(exc),
+        ) from exc
 
 
 def _materialize_token(canonical_name: str) -> str:
@@ -1031,14 +1090,15 @@ def _materialize_processing_dir(
                                 copy_opened_file(opened.fd, destination_fd)
                             finally:
                                 os.close(destination_fd)
-                        os.fsync(temp_fd)
+                        _fsync_private_directory(
+                            temp_fd, "transaction directory")
                         if before_publish is not None:
                             before_publish(albums_fd, canonical_name)
                         published = rename_relative_noreplace(
                             albums_fd, temp_name, canonical_name,
                         )
                         if published:
-                            os.fsync(albums_fd)
+                            _fsync_private_directory(albums_fd, "albums directory")
                     finally:
                         os.close(temp_fd)
                         if not published:

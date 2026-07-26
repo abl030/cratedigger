@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import lib.download_materialization as materialization
 from lib.failure_presentation import (
+    transfer_detail_unreadable,
     FAMILY_LOCAL_STORAGE,
     FAMILY_PEER_FILE,
     FAMILY_REFUSAL,
@@ -106,6 +107,7 @@ def _evidence(
     beets_scenario: str | None = None,
     soulseek_username: str | None = None,
     transfer_detail: tuple[FileFailureDetail, ...] = (),
+    transfer_detail_unreadable: bool = False,
 ) -> FailureEvidence:
     return FailureEvidence(
         outcome=outcome,
@@ -114,6 +116,7 @@ def _evidence(
         beets_scenario=beets_scenario,
         soulseek_username=soulseek_username,
         transfer_detail=transfer_detail,
+        transfer_detail_unreadable=transfer_detail_unreadable,
     )
 
 
@@ -320,7 +323,8 @@ class TestPeerFamilyCopy(unittest.TestCase):
         ])
         self.assertEqual(
             presentation.verdict,
-            'Peer bob could not read 12 of its own files — "File read error."',
+            "Peer bob could not deliver 12 of the files it was sharing "
+            '— "File read error."',
         )
 
     def test_local_storage_is_never_attributed_to_the_peer(self):
@@ -490,12 +494,12 @@ class TestOwnDownloadMessages(unittest.TestCase):
             "retry limit keeps only the basename",
             "file exceeded retry limit after 3 retries: d:\\new music\\my "
             "music\\ambient; dark ambient; drone\\05 - The Rooster Moans.flac",
-            'Gave up on "05 - The Rooster Moans.flac" after 3 failed attempts',
+            'Gave up on "05 - The Rooster Moans.flac" after 3 retries',
         ),
         (
             "retry limit with a posix path",
             "file exceeded retry limit after 1 retries: /music/x/y.mp3",
-            'Gave up on "y.mp3" after 1 failed attempt',
+            'Gave up on "y.mp3" after 1 retry',
         ),
         (
             "stalled timeout loses the config token",
@@ -552,7 +556,7 @@ class TestOwnDownloadMessages(unittest.TestCase):
         ))
         self.assertEqual(
             presentation.verdict,
-            'Gave up on "10 - saturday\'s ash.flac" after 5 failed attempts',
+            'Gave up on "10 - saturday\'s ash.flac" after 5 retries',
         )
 
     def test_retry_limit_with_an_unusable_path_names_no_file(self):
@@ -562,7 +566,7 @@ class TestOwnDownloadMessages(unittest.TestCase):
         presentation = present_failure(_evidence(
             error_message="file exceeded retry limit after 1 retries:  \\ ",
         ))
-        self.assertEqual(presentation.verdict, "Gave up after 1 failed attempt")
+        self.assertEqual(presentation.verdict, "Gave up after 1 retry")
 
     def test_stall_that_overran_its_threshold_reads_as_minutes(self):
         """Live row 38245: the poll cycle notices at 622s, not at 600s."""
@@ -600,13 +604,16 @@ class TestOwnDownloadMessages(unittest.TestCase):
         ))
         self.assertEqual(
             presentation.verdict,
-            'Gave up on "05 - The Rooster Moans.flac" after 3 failed attempts '
+            'Gave up on "05 - The Rooster Moans.flac" after 3 retries '
             "— transfer from peer bob failed before any data arrived",
         )
         self.assertIn("reported as failed by bob",
                       presentation.transfer_message or "")
 
-    def test_remote_queue_timeout_leads_but_still_names_the_cause(self):
+    def test_remote_queue_timeout_defers_to_contradicting_evidence(self):
+        """Review #7: ``all_remote_queued`` is a snapshot taken BEFORE error
+        handling, so "the peer never started" can be contradicted by the
+        very evidence appended to it. The specific truth wins."""
         presentation = present_failure(_evidence(
             error_message="remote_queue_timeout 3600s exceeded",
             soulseek_username="bob",
@@ -616,11 +623,21 @@ class TestOwnDownloadMessages(unittest.TestCase):
         ))
         self.assertEqual(
             presentation.verdict,
-            "Peer never started the transfer — still queued after 60 minutes "
-            "— peer bob rejected 1 file before transfer",
+            'Peer bob rejected 1 file before transfer — "Verification required"',
         )
+        self.assertNotIn("never started", presentation.verdict or "")
         self.assertEqual(
             presentation.transfer_message, '1× "Verification required"')
+
+    def test_remote_queue_timeout_leads_when_nothing_contradicts_it(self):
+        presentation = present_failure(_evidence(
+            error_message="remote_queue_timeout 3600s exceeded",
+            soulseek_username="bob",
+        ))
+        self.assertEqual(
+            presentation.verdict,
+            "Peer never started the transfer — still queued after 60 minutes",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -631,7 +648,7 @@ class TestDecisionHeadlinesNeverSuppressTheCause(unittest.TestCase):
     """I6, from live-data review of 400 rows.
 
     Ten of the fourteen local-storage rows rendered as ``Gave up on "05
-    Seventeen.flac" after 5 failed attempts`` — a sentence an operator reads
+    Seventeen.flac" after 5 retries`` — a sentence an operator reads
     as "flaky peer, retry it" — while the evidence underneath was our own
     virtiofs share refusing the write (live rows 38203 / 38187 / 38186 /
     38185 / 38184 / 38183 / 38176 / 38173 / 38160 / 38119). Our decision to
@@ -661,7 +678,7 @@ class TestDecisionHeadlinesNeverSuppressTheCause(unittest.TestCase):
         verdict = presentation.verdict or ""
         self.assertEqual(
             verdict,
-            'Gave up on "05 Seventeen.flac" after 5 failed attempts '
+            'Gave up on "05 Seventeen.flac" after 5 retries '
             "— local storage error writing 1 file",
         )
         self.assertNotIn("Tymemage", verdict)
@@ -689,7 +706,7 @@ class TestDecisionHeadlinesNeverSuppressTheCause(unittest.TestCase):
         verdict = presentation.verdict or ""
         self.assertEqual(
             verdict,
-            'Gave up on "03 - Track.flac" after 5 failed attempts '
+            'Gave up on "03 - Track.flac" after 5 retries '
             "— local storage error writing 10 files",
         )
         self.assertNotIn("peer", verdict.lower())
@@ -719,7 +736,7 @@ class TestDecisionHeadlinesNeverSuppressTheCause(unittest.TestCase):
         self.assertEqual(
             presentation.verdict,
             'Gave up on "121 - Bob B. Soxx and the Blue Jeans - Not Too Young '
-            'To Get Married.flac" after 5 failed attempts '
+            'To Get Married.flac" after 5 retries '
             "— peer phil rejected all 58 files before transfer",
         )
 
@@ -736,8 +753,8 @@ class TestDecisionHeadlinesNeverSuppressTheCause(unittest.TestCase):
         ))
         self.assertEqual(
             presentation.verdict,
-            "Peer never started the transfer — still queued after 60 minutes "
-            "— 1 local storage error, 1 rejected before transfer",
+            "2 files failed — 1 local storage error, "
+            "1 rejected before transfer",
         )
 
     def test_mixed_evidence_with_storage_drops_the_peer_headline(self):
@@ -762,6 +779,123 @@ class TestDecisionHeadlinesNeverSuppressTheCause(unittest.TestCase):
         self.assertIn("local storage error", verdict)
         self.assertNotIn("phil", verdict)
         self.assertNotIn("from peer", verdict)
+
+
+class TestReviewedCopyClaims(unittest.TestCase):
+    """The claims a third review measured against live rows."""
+
+    def test_peer_file_clause_holds_for_the_size_mismatch_member(self):
+        """B1: 25 of 39 live rows carried a phrase true of the OTHER member.
+        The peer read that file fine; slskd aborted on a stale index."""
+        presentation = present_failure(_evidence(
+            error_message="all 3 files errored",
+            soulseek_username="bob",
+            transfer_detail=decode_transfer_detail([
+                _transfer_row(
+                    "bob", f"f{index}",
+                    last_state="Completed, Errored",
+                    last_exception=(
+                        "Transfer aborted: the remote size of 11413316 does "
+                        "not match expected size 11205995"))
+                for index in range(3)
+            ]),
+        ))
+        verdict = presentation.verdict or ""
+        self.assertIn("could not deliver 3 of the files it was sharing", verdict)
+        self.assertNotIn("could not read", verdict)
+        self.assertNotIn("its own files", verdict)
+
+    def test_a_write_failure_never_says_the_storage_could_not_be_opened(self):
+        """B2: ENOSPC opened the destination perfectly well."""
+        for reason, expect, forbidden in (
+            (f"{materialization.REASON_PROCESSING_WRITE_FAILED_PREFIX}ENOSPC",
+             "could not be written", "opened"),
+            (f"{materialization.REASON_SOURCE_READ_FAILED_PREFIX}ESTALE",
+             "could not be read", "opened"),
+            (f"{materialization.REASON_PROCESSING_OPEN_FAILED_PREFIX}EACCES",
+             "could not be opened", "written"),
+        ):
+            with self.subTest(reason):
+                copy = materialize_reason_copy(reason) or ""
+                self.assertIn(expect, copy)
+                self.assertNotIn(forbidden, copy)
+
+    def test_the_containment_sentence_covers_every_producing_code(self):
+        """B3: five codes produce this reason; naming two reads exhaustive."""
+        copy = materialize_reason_copy(
+            materialization.REASON_UNSAFE_SOURCE_PATH) or ""
+        self.assertIn("failed the download share\'s containment check", copy)
+        self.assertNotIn("symlink", copy)
+        self.assertNotIn("escaped", copy)
+
+    def test_a_bare_all_errored_row_pluralises_and_claims_nothing_false(self):
+        self.assertEqual(
+            present_failure(_evidence(error_message="all 1 files errored")).verdict,
+            "1 file failed; slskd reported no reason",
+        )
+        # Review #6: a decode fail-open must not be laundered into a claim.
+        self.assertEqual(
+            present_failure(_evidence(
+                error_message="all 12 files errored",
+                transfer_detail_unreadable=True,
+            )).verdict,
+            "All 12 files failed",
+        )
+
+    def test_a_stall_keeps_its_duration_when_the_evidence_leads(self):
+        """Review #8: an evidence-led stall row used to lose the duration."""
+        presentation = present_failure(_evidence(
+            error_message="no download progress for 600s (stalled_timeout 600s)",
+            soulseek_username="bob",
+            transfer_detail=decode_transfer_detail([
+                _transfer_row(
+                    "bob", "f0", last_state="Completed, Errored",
+                    last_exception="Transfer failed: Read error: Remote "
+                                   "connection closed",
+                    bytes_transferred=99),
+            ]),
+        ))
+        self.assertEqual(
+            presentation.verdict,
+            "Transfer from peer bob dropped mid-download "
+            '— "Transfer failed: Read error: Remote connection closed" '
+            "(no progress for 10 minutes)",
+        )
+
+    def test_one_malformed_record_does_not_discard_its_siblings(self):
+        """Review #6: the fail-open was array-wide."""
+        rows: list[dict[str, object]] = [
+            _transfer_row("bob", f"f{index}", last_exception="File read error.")
+            for index in range(3)
+        ]
+        rows.append({"username": 7, "filename": None})
+        decoded = decode_transfer_detail(rows)
+        self.assertEqual(len(decoded), 3)
+        self.assertFalse(transfer_detail_unreadable(rows))
+        self.assertTrue(transfer_detail_unreadable([{"username": 7}]))
+        self.assertFalse(transfer_detail_unreadable(None))
+
+    def test_a_storage_verdict_keeps_the_peer_out_of_the_summary(self):
+        """Review #12: the list row is the line the operator reads."""
+        entry = LogEntry(
+            id=1, request_id=2, outcome="timeout",
+            soulseek_username="jmkirchoff",
+            error_message="all 1 files errored",
+            transfer_detail=[_transfer_row(
+                "jmkirchoff", "f0", last_state="Completed, Errored",
+                last_exception="Failed to create file f0: Stale file handle")],
+        )
+        classified = classify_log_entry(entry)
+        self.assertNotIn("jmkirchoff", classified.summary)
+        self.assertEqual(classified.summary, classified.verdict)
+
+    def test_a_peer_verdict_still_carries_its_attribution(self):
+        entry = LogEntry(
+            id=1, request_id=2, outcome="success",
+            soulseek_username="jmkirchoff",
+            actual_filetype="mp3", actual_min_bitrate=320,
+        )
+        self.assertIn("jmkirchoff", classify_log_entry(entry).summary)
 
 
 class TestMaterializeReasonCopy(unittest.TestCase):
@@ -1042,7 +1176,7 @@ _OWN_MESSAGE_TRIGGERS: tuple[_Trigger, ...] = (
         produced_by="lib/quality/download_state.py",
         evidence="file exceeded retry limit after ",
         probe="file exceeded retry limit after 3 retries: d:\\music\\x.flac",
-        expect='Gave up on "x.flac" after 3 failed attempts',
+        expect='Gave up on "x.flac" after 3 retries',
     ),
     _Trigger(
         trigger="no download progress for ",
@@ -1162,6 +1296,59 @@ def check_trigger_has_a_producer(entry: _Trigger) -> str | None:
     return None
 
 
+_NON_TRIGGER_TABLES: dict[str, str] = {
+    "_FAMILY_PREFIXES": (
+        "peer-supplied text: slskd and Soulseek.NET are the producers, and "
+        "unrecognised peer messages are quoted verbatim rather than "
+        "interpreted, so there is no Cratedigger producer to trace"
+    ),
+    "_FAMILY_BREAKDOWN_LABELS": (
+        "keyed by failure family, not by a matched string — these are "
+        "output copy, never a match target"
+    ),
+    "_MATERIALIZE_REASON_COPY": (
+        "reason codes, covered by "
+        "test_materialize_reason_keys_come_from_their_producer against "
+        "their producing module"
+    ),
+    "_MATERIALIZE_REASON_PREFIX_COPY": (
+        "reason-code prefixes, covered by the same producer test"
+    ),
+}
+
+
+def _match_tables() -> dict[str, tuple[str, ...]]:
+    """Every module-level literal-keyed table in the presenter.
+
+    Discovery, not enumeration: a dict with string keys or a tuple of
+    strings / string-keyed pairs is a match table until it is explicitly
+    exempted with a reason.
+    """
+    from lib import failure_presentation as presenter
+
+    tables: dict[str, tuple[str, ...]] = {}
+    for name, value in vars(presenter).items():
+        if name.startswith("__"):
+            continue
+        if isinstance(value, dict):
+            keys = tuple(k for k in value if isinstance(k, str))
+            if keys and len(keys) == len(value):
+                tables[name] = keys
+        elif isinstance(value, tuple) and value:
+            if all(isinstance(item, str) for item in value):
+                tables[name] = tuple(item for item in value
+                                     if isinstance(item, str))
+            elif all(
+                isinstance(item, tuple) and item and isinstance(item[0], str)
+                for item in value
+            ):
+                tables[name] = tuple(
+                    item[0] for item in value
+                    if isinstance(item, tuple) and isinstance(item[0], str)
+                )
+    return tables
+
+
 class TestEveryTriggerHasAProducer(unittest.TestCase):
     """The class fix behind the fabricated-copy defect (issue #868).
 
@@ -1217,36 +1404,68 @@ class TestEveryTriggerHasAProducer(unittest.TestCase):
                     outcome=entry.outcome, error_message=entry.probe))
                 self.assertIn(entry.expect, presentation.verdict or "")
 
-    def test_registry_covers_every_table_driven_trigger(self):
-        """A new table entry must be registered before it can ship."""
-        from lib import failure_presentation as presenter
+    def test_registry_covers_every_match_table_in_the_module(self):
+        """The registry is DERIVED from the module, not hand-listed.
 
-        registered = {entry.trigger for entry in self.ALL_TRIGGERS}
-        self.assertLessEqual(
-            set(presenter._MEASUREMENT_COPY), registered,
-            "a measurement copy key has no registered producer",
+        A hand list closes the instances someone remembered; a reviewer
+        added a fresh ``_FABRICATED_COPY`` dict plus a three-line lookup
+        and every test stayed green. Every literal-keyed match table in
+        the module is now discovered by introspection and must have its
+        keys registered — an unknown table fails closed, so a new one
+        cannot ship silently.
+        """
+        registered = {entry.trigger.casefold() for entry in self.ALL_TRIGGERS}
+        unregistered: list[str] = []
+        for table, keys in _match_tables().items():
+            if table in _NON_TRIGGER_TABLES:
+                continue
+            for key in keys:
+                if key.casefold() not in registered:
+                    unregistered.append(f"{table}[{key!r}]")
+        self.assertEqual(
+            unregistered, [],
+            "these match targets claim a producer nobody registered",
         )
-        self.assertLessEqual(
-            set(presenter._VANISHED_PREFIXES), registered,
-            "a vanished-transfer trigger has no registered producer",
-        )
+
+    def test_the_table_scan_is_fail_closed(self):
+        """Known-bad self-test for the discovery half: an unknown table is
+        a failure, and an exempted one must justify itself."""
+        self.assertIn("_MEASUREMENT_COPY", _match_tables())
+        self.assertIn("_VANISHED_PREFIXES", _match_tables())
+        for table, reason in _NON_TRIGGER_TABLES.items():
+            with self.subTest(table):
+                self.assertIn(
+                    table, _match_tables(),
+                    f"{table} is exempted but no longer exists",
+                )
+                self.assertGreater(len(reason), 20, "exemptions carry a reason")
 
     def test_materialize_reason_keys_come_from_their_producer(self):
-        """The same rule for PR1's reason vocabulary."""
+        """The same rule for PR1's reason vocabulary.
+
+        The literal must appear QUOTED in the producer: a whole-file
+        substring check passes on a mention in a comment or docstring,
+        which is exactly how a fabricated trigger would hide.
+        """
         path = os.path.join(_REPO_ROOT, "lib/download_materialization.py")
         with open(path, encoding="utf-8") as handle:
             source = handle.read()
         from lib import failure_presentation as presenter
 
         historical = {"event_path_missing"}
-        for reason in presenter._MATERIALIZE_REASON_COPY:
+        reasons = list(presenter._MATERIALIZE_REASON_COPY) + [
+            prefix for prefix, _copy in presenter._MATERIALIZE_REASON_PREFIX_COPY
+        ]
+        for reason in reasons:
             if reason in historical:
                 continue
             with self.subTest(reason):
                 self.assertIn(
-                    reason, source,
-                    f"no producer emits the reason {reason!r}",
+                    f'"{reason}"', source,
+                    f"no producer emits the reason {reason!r} as a literal",
                 )
+
+
 
 
 class TestNonFailureOutcomes(unittest.TestCase):

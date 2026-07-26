@@ -17,6 +17,7 @@ from lib.failure_presentation import (
     FailurePresentation,
     decode_transfer_detail,
     present_failure,
+    transfer_detail_unreadable,
 )
 from lib.import_evidence import HaveAnalysisFailure
 from lib.import_queue import ImportJob
@@ -376,7 +377,8 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
         failure=failure,
     )
     summary = _build_summary(
-        entry, core.badge, core.verdict, triage["summary"]
+        entry, core.badge, core.verdict, triage["summary"],
+        peer_attributable=failure.peer_attributable,
     )
     downloaded_label = _build_downloaded_label(entry)
     (
@@ -549,6 +551,8 @@ def _present_entry_failure(entry: LogEntry) -> FailurePresentation:
         beets_scenario=entry.beets_scenario,
         soulseek_username=entry.soulseek_username,
         transfer_detail=decode_transfer_detail(entry.transfer_detail),
+        transfer_detail_unreadable=transfer_detail_unreadable(
+            entry.transfer_detail),
     ))
 
 
@@ -1538,6 +1542,8 @@ def _build_summary(
     badge: str,
     verdict: str,
     triage_summary: str | None,
+    *,
+    peer_attributable: bool = True,
 ) -> str:
     """Build a one-line summary for the collapsed card view.
 
@@ -1570,9 +1576,17 @@ def _build_summary(
     # album title or a longer peer's name would otherwise silently lose its
     # attribution, and non-peer verdicts (curator_ban's "denylisted X")
     # keep the trailing attribution they have always had.
-    if entry.soulseek_username and not any(
-        f"peer {entry.soulseek_username}".casefold() in part.casefold()
-        for part in parts
+    # ``peer_attributable`` is False when the failure was OURS (slskd
+    # writing to our own share). The list row is the one line the operator
+    # reads, and appending the peer there put their name back on our fault
+    # on 25 live rows (issue #868 review #12).
+    if (
+        entry.soulseek_username
+        and peer_attributable
+        and not any(
+            f"peer {entry.soulseek_username}".casefold() in part.casefold()
+            for part in parts
+        )
     ):
         parts.append(entry.soulseek_username)
 

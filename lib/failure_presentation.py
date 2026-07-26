@@ -59,14 +59,21 @@ from lib.download_materialization import (
     REASON_PROCESSING_AUTHORITY_UNSAFE,
     REASON_PROCESSING_OPEN_FAILED_PREFIX,
     REASON_PROCESSING_PATH_MISSING,
+    REASON_PROCESSING_READ_FAILED_PREFIX,
+    REASON_PROCESSING_WRITE_FAILED_PREFIX,
     REASON_SLSKD_ROOT_MISSING,
     REASON_SLSKD_ROOT_OPEN_FAILED_PREFIX,
+    REASON_SLSKD_ROOT_READ_FAILED_PREFIX,
     REASON_SLSKD_ROOT_REFUSED,
     REASON_SLSKD_ROOT_UNSAFE,
+    REASON_SLSKD_ROOT_WRITE_FAILED_PREFIX,
     REASON_SOURCE_OPEN_FAILED_PREFIX,
     REASON_SOURCE_PREFLIGHT_REFUSED,
+    REASON_SOURCE_READ_FAILED_PREFIX,
+    REASON_SOURCE_WRITE_FAILED_PREFIX,
     REASON_UNSAFE_SOURCE_PATH,
 )
+from lib.json_narrow import is_list_like, json_list
 from lib.quality import FileFailureDetail
 
 # --------------------------------------------------------------------------
@@ -202,17 +209,21 @@ class FailureEvidence:
     beets_scenario: str | None = None
     soulseek_username: str | None = None
     transfer_detail: tuple[FileFailureDetail, ...] = ()
+    transfer_detail_unreadable: bool = False
+    """A non-empty audit blob yielded no usable record."""
 
     @classmethod
     def from_row(cls, row: Mapping[str, object]) -> "FailureEvidence":
         """Build from a raw ``download_log`` row mapping (CLI side)."""
+        raw_detail = row.get("transfer_detail")
         return cls(
             outcome=_row_str(row, "outcome") or "",
             error_message=_row_str(row, "error_message"),
             beets_detail=_row_str(row, "beets_detail"),
             beets_scenario=_row_str(row, "beets_scenario"),
             soulseek_username=_row_str(row, "soulseek_username"),
-            transfer_detail=decode_transfer_detail(row.get("transfer_detail")),
+            transfer_detail=decode_transfer_detail(raw_detail),
+            transfer_detail_unreadable=transfer_detail_unreadable(raw_detail),
         )
 
 
@@ -232,23 +243,44 @@ class FailurePresentation:
     beets_detail_label: str | None = None
     """Label for the row's raw ``beets_detail`` forensics line, when that
     column holds a machine reason code rather than beets prose."""
+    peer_attributable: bool = True
+    """False when the failure was OURS. The list-row summary appends the
+    row's peer as a trailing attribution; on a local-storage verdict that
+    put the peer's name back on our own fault in the one line the operator
+    reads (issue #868 review #12)."""
 
 
 def decode_transfer_detail(raw: object) -> tuple[FileFailureDetail, ...]:
     """Decode the ``transfer_detail`` JSONB array into typed records.
 
-    The single wire-boundary decode for this column. A malformed historical
-    blob degrades to "no per-file evidence" rather than 500ing a card — the
-    same display-boundary fail-open the classifier already applies to
-    ``import_result`` / ``validation_result``.
+    The single wire-boundary decode for this column, PER RECORD: one
+    malformed historical element no longer discards its 28 healthy
+    siblings. A card degrades rather than 500ing — the same
+    display-boundary fail-open the classifier applies to ``import_result``
+    / ``validation_result``.
     """
-    if raw is None:
+    if not is_list_like(raw):
         return ()
-    try:
-        decoded = msgspec.convert(raw, type=list[FileFailureDetail], strict=True)
-    except (msgspec.ValidationError, TypeError):
-        return ()
+    decoded: list[FileFailureDetail] = []
+    for element in json_list(raw):
+        try:
+            decoded.append(
+                msgspec.convert(element, type=FileFailureDetail, strict=True))
+        except (msgspec.ValidationError, TypeError):
+            continue
     return tuple(decoded)
+
+
+def transfer_detail_unreadable(raw: object) -> bool:
+    """Did a non-empty audit blob fail to yield ANY usable record?
+
+    A fail-open must not be laundered into a claim: without this, a row
+    whose evidence could not be decoded still asserted "slskd reported no
+    reason" (issue #868 review #6).
+    """
+    if not is_list_like(raw):
+        return raw is not None
+    return bool(json_list(raw)) and not decode_transfer_detail(raw)
 
 
 # --------------------------------------------------------------------------
@@ -484,17 +516,23 @@ def _single_family_clause(
             return f"transfers from {len(peers)} peers {outcome}"
         return f"{files} {outcome}"
     if family == FAMILY_PEER_FILE:
+        # NOT "could not read": the family's other census member is
+        # ``Transfer aborted: the remote size of N does not match expected
+        # size N``, where the peer read its file perfectly well and slskd
+        # aborted because the share index disagreed with what was offered
+        # — 25 of 39 live rows carrying the old phrase (issue #868 review
+        # B1). "Could not deliver" is true of both members.
         if peer:
             owned = (
-                "one of its own files" if count == 1
-                else f"{count} of its own files"
+                "one of the files it was sharing" if count == 1
+                else f"{count} of the files it was sharing"
             )
-            return f"peer {peer} could not read {owned}"
+            return f"peer {peer} could not deliver {owned}"
         if many_peers:
             return (
-                f"{len(peers)} peers could not read {files} they were sharing"
+                f"{len(peers)} peers could not deliver {files} they were sharing"
             )
-        return f"{files} could not be read by the sharing peer"
+        return f"{files} could not be delivered by the sharing peer"
     if peer:
         scope = f"all {files}" if count > 1 else files
         return f"peer {peer} failed {scope}"
@@ -578,6 +616,9 @@ def _present_transfer_evidence(
         verdict=verdict,
         transfer_message=_transfer_message(groups),
         transfer_message_label=_transfer_message_label(groups),
+        peer_attributable=(
+            _transfer_message_label(groups) != TRANSFER_MESSAGE_LABEL_STORAGE
+        ),
     )
 
 
@@ -603,6 +644,19 @@ every timeout reason. Inside the retry-limit message that tail sits AFTER
 the peer's file path, so parsing the path without removing it first yields
 a "filename" made of half a path and someone's exception text (live rows
 37535 / 38203 / 37483). The grouped reasons are rendered separately."""
+
+def _download_message_context(message: str) -> str | None:
+    """A short parenthetical for an evidence-led verdict.
+
+    A stalled-timeout row is evidence-led, so its duration used to vanish
+    entirely (issue #868 review #8). The cause still leads; the duration
+    rides along.
+    """
+    stalled = _STALLED_RE.match(message.strip())
+    if stalled is None:
+        return None
+    return f"no progress for {_duration_phrase(int(stalled.group(1)))}"
+
 
 _VANISHED_WITH_EVIDENCE: Final = "transfers no longer in slskd — last observed:"
 _VANISHED_PREFIXES: Final = (
@@ -646,18 +700,24 @@ def _basename(path: str) -> str:
     return segments[-1] if segments else ""
 
 
-def _present_download_message(message: str) -> str:
+def _present_download_message(
+    message: str, *, evidence_unreadable: bool = False,
+) -> str:
     """Humanize one of Cratedigger's OWN download-phase timeout reasons."""
     probe = message.strip()
 
     retry = _RETRY_LIMIT_RE.match(probe)
     if retry is not None:
-        attempts = int(retry.group(1))
+        # The producer's number is the configured RETRY cap counted
+        # against our own re-enqueue counter, so "N failed attempts"
+        # invented both the noun and the value — 5 retries is 6 attempts
+        # (issue #868 review #5). Repeat what was recorded.
+        retries = int(retry.group(1))
         name = bounded_text(_basename(_EVIDENCE_TAIL_RE.sub("", retry.group(2))))
-        tries = "attempt" if attempts == 1 else "attempts"
+        tries = "retry" if retries == 1 else "retries"
         if not name:
-            return f"Gave up after {attempts} failed {tries}"
-        return f'Gave up on "{name}" after {attempts} failed {tries}'
+            return f"Gave up after {retries} {tries}"
+        return f'Gave up on "{name}" after {retries} {tries}'
 
     stalled = _STALLED_RE.match(probe)
     if stalled is not None:
@@ -675,9 +735,14 @@ def _present_download_message(message: str) -> str:
 
     errored = _ALL_ERRORED_RE.match(probe)
     if errored is not None:
-        return (
-            f"All {errored.group(1)} files failed; slskd reported no reason"
-        )
+        count = int(errored.group(1))
+        counted = _files(count) if count == 1 else f"All {_files(count)}"
+        if evidence_unreadable:
+            # A fail-open must never manufacture a negative claim: the row
+            # HAS per-file evidence, we just could not decode it (issue
+            # #868 review #6).
+            return f"{counted} failed"
+        return f"{counted} failed; slskd reported no reason"
 
     lowered = probe.casefold()
     if lowered.startswith(_VANISHED_WITH_EVIDENCE.casefold()):
@@ -708,8 +773,14 @@ _MATERIALIZE_REASON_COPY: Final[dict[str, str]] = {
         "Downloaded files disappeared before import; requeued"
     ),
     REASON_UNSAFE_SOURCE_PATH: (
-        "Refused to import: a downloaded path was a symlink or escaped the "
-        "download directory; requeued"
+        # Five codes produce this reason (path_escape, unsafe_symlink,
+        # not_a_directory, not_regular_file, untrusted_ownership). Naming
+        # two of them reads as exhaustive and is wrong for a FIFO, socket
+        # or device node under the adversarial share — and a specific
+        # false claim matters most on a security-boundary message (issue
+        # #868 review B3).
+        "Refused to import: a downloaded path failed the download share's "
+        "containment check; requeued"
     ),
     REASON_SOURCE_PREFLIGHT_REFUSED: (
         "A downloaded file was refused before import for an unrecorded "
@@ -733,7 +804,9 @@ _MATERIALIZE_REASON_COPY: Final[dict[str, str]] = {
         "check; requeued"
     ),
     REASON_PROCESSING_PATH_MISSING: (
-        "Our processing storage was missing a required directory; requeued"
+        # The same reason answers for a missing FILE under that tree, so
+        # it must not say "directory" (issue #868 review #10).
+        "Our processing storage was missing a required path; requeued"
     ),
     REASON_MATERIALIZE_AUTHORITY_FAILED: (
         "Our processing storage refused the import for an unrecorded reason; "
@@ -753,7 +826,8 @@ _MATERIALIZE_REASON_COPY: Final[dict[str, str]] = {
         "The download attempt tracked no files; requeued"
     ),
     "duplicate_final_basename": (
-        "Two downloaded files would import to the same filename; requeued"
+        # The row records no count, so it must not invent "two".
+        "Downloaded files would import to the same filename; requeued"
     ),
     "abandoned_interrupted_auto_import": (
         "Interrupted import abandoned and requeued"
@@ -766,19 +840,48 @@ _MATERIALIZE_REASON_COPY: Final[dict[str, str]] = {
     ),
 }
 
+# Open, read and write are three different facts. A destination that ran
+# out of space opened perfectly well; "could not be opened" is a specific
+# claim, and it was false for every ENOSPC/EIO write and every failed
+# flush (issue #868 review B2).
 _MATERIALIZE_REASON_PREFIX_COPY: Final[tuple[tuple[str, str], ...]] = (
     (
         REASON_SOURCE_OPEN_FAILED_PREFIX,
-        "Could not read a downloaded file from the slskd share ({errno}); "
+        "A downloaded file on the slskd share could not be opened ({errno}); "
         "requeued",
+    ),
+    (
+        REASON_SOURCE_READ_FAILED_PREFIX,
+        "A downloaded file could not be read from the slskd share ({errno}); "
+        "requeued",
+    ),
+    (
+        REASON_SOURCE_WRITE_FAILED_PREFIX,
+        "A write to the slskd share failed ({errno}); requeued",
     ),
     (
         REASON_SLSKD_ROOT_OPEN_FAILED_PREFIX,
         "The slskd download share could not be opened ({errno}); requeued",
     ),
     (
+        REASON_SLSKD_ROOT_READ_FAILED_PREFIX,
+        "The slskd download share could not be read ({errno}); requeued",
+    ),
+    (
+        REASON_SLSKD_ROOT_WRITE_FAILED_PREFIX,
+        "A write to the slskd download share failed ({errno}); requeued",
+    ),
+    (
         REASON_PROCESSING_OPEN_FAILED_PREFIX,
         "Our processing storage could not be opened ({errno}); requeued",
+    ),
+    (
+        REASON_PROCESSING_READ_FAILED_PREFIX,
+        "Our processing storage could not be read ({errno}); requeued",
+    ),
+    (
+        REASON_PROCESSING_WRITE_FAILED_PREFIX,
+        "Our processing storage could not be written ({errno}); requeued",
     ),
 )
 
@@ -919,18 +1022,34 @@ def _present_failure(evidence: FailureEvidence) -> FailurePresentation:
             evidence.transfer_detail, evidence.soulseek_username,
         )
         message = (evidence.error_message or "").strip()
-        # Two message classes LEAD the sentence because they record a
-        # Cratedigger DECISION rather than a peer's behaviour: we stopped
-        # retrying, or the peer never started at all. Leading is all they
-        # do — see below.
+        # The retry-limit message LEADS because it records a Cratedigger
+        # DECISION taken ON TOP of whatever the evidence says: we stopped
+        # retrying. Leading is all it does — the cause is appended below.
+        #
+        # The remote-queue message does NOT lead when evidence exists:
+        # ``all_remote_queued`` is a snapshot taken before error handling,
+        # so "the peer never started the transfer" can be flatly
+        # contradicted by the very clause appended to it (issue #868
+        # review #7). The more specific truth wins.
         own_first = bool(message) and (
             _RETRY_LIMIT_RE.match(message) is not None
-            or _REMOTE_QUEUE_RE.match(message) is not None
+            or (not groups and _REMOTE_QUEUE_RE.match(message) is not None)
         )
         if groups and not own_first:
-            return _present_transfer_evidence(groups)
+            presentation = _present_transfer_evidence(groups)
+            context = _download_message_context(message)
+            if context is None or presentation.verdict is None:
+                return presentation
+            # A stalled-timeout row is evidence-led, so its duration would
+            # otherwise be lost entirely (review #8).
+            return replace(
+                presentation, verdict=f"{presentation.verdict} ({context})")
         verdict = (
-            _present_download_message(message) if message else "Download failed"
+            _present_download_message(
+                message,
+                evidence_unreadable=evidence.transfer_detail_unreadable,
+            )
+            if message else "Download failed"
         )
         if groups:
             # I6: our decision is CONTEXT, never a substitute for the cause.
@@ -946,6 +1065,10 @@ def _present_failure(evidence: FailureEvidence) -> FailurePresentation:
                 verdict=f"{verdict} — {_family_clause(groups)}",
                 transfer_message=_transfer_message(groups),
                 transfer_message_label=_transfer_message_label(groups),
+                peer_attributable=(
+                    _transfer_message_label(groups)
+                    != TRANSFER_MESSAGE_LABEL_STORAGE
+                ),
             )
         return FailurePresentation(verdict=verdict)
 

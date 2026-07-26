@@ -260,9 +260,17 @@ def _render_failure_presentation(row: "Mapping[str, object]") -> list[str]:
     lines: list[str] = []
     if presentation.verdict:
         lines.append(f"      verdict:   {presentation.verdict}")
-    if presentation.transfer_message:
-        label = presentation.transfer_message_label or "Peer message"
-        lines.append(f"      {label}: {presentation.transfer_message}")
+    if presentation.transfer_message and presentation.transfer_message_label:
+        lines.append(
+            f"      {presentation.transfer_message_label}: "
+            f"{presentation.transfer_message}"
+        )
+    # The web card captions a machine reason code as "Reason code"; the CLI
+    # never showed ``beets_detail`` at all, so the two surfaces disagreed
+    # about what this row records (issue #868 review #13).
+    detail = row.get("beets_detail")
+    if presentation.beets_detail_label and isinstance(detail, str):
+        lines.append(f"      {presentation.beets_detail_label}: {detail}")
     return lines
 
 

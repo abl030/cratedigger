@@ -1225,7 +1225,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
     def test_pipeline_detail_history_never_hides_storage_behind_a_giveup(self):
         """Issue #868 I6, from live-data review: the retry-limit headline used
         to be the WHOLE verdict, so 10 of 14 local-storage rows rendered as
-        "Gave up on <file> after 5 failed attempts" — an operator reads that
+        "Gave up on <file> after 5 retries" — an operator reads that
         as a flaky peer and retries the peer, while our own share is what
         failed. The cause is appended, never suppressed (live row 38203)."""
         self.db.log_download(
@@ -1257,7 +1257,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
             row for row in data["history"] if row["outcome"] == "timeout")
         self.assertEqual(
             item["verdict"],
-            'Gave up on "05 Seventeen.flac" after 5 failed attempts '
+            'Gave up on "05 Seventeen.flac" after 5 retries '
             "— local storage error writing 1 file",
         )
         self.assertNotIn("Tymemage", str(item["verdict"]))

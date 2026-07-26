@@ -259,11 +259,63 @@ def check_evidence_survives_rendering(
     return None
 
 
+# A family clause is a claim about EVERY message in the family. These are
+# the words each family may NOT use, because at least one census member
+# contradicts them — the defect: "could not read N of its own files" was
+# false for ``Transfer aborted: the remote size of N does not match
+# expected size N``, where the peer read its file perfectly well and the
+# share index was stale (25 of 39 live rows, issue #868 review B1).
+_FORBIDDEN_FAMILY_CLAIMS: dict[PeerFailureFamily, tuple[tuple[str, str], ...]] = {
+    FAMILY_PEER_FILE: (
+        ("could not read",
+         "the size-mismatch member read its file fine; slskd aborted"),
+        ("its own files",
+         "a size mismatch is about what was advertised, not ownership"),
+        ("rejected", "nothing in this family is a refusal"),
+    ),
+    FAMILY_REFUSAL: (
+        ("could not read", "a refusal never got as far as reading"),
+        ("dropped mid-download", "a refusal is not a dropped transfer"),
+    ),
+    FAMILY_TRANSPORT: (
+        ("rejected", "a transport failure is not a refusal"),
+        ("could not read", "the peer's own read is not what failed"),
+    ),
+    FAMILY_LOCAL_STORAGE: (
+        ("peer", "our storage, our fault"),
+        ("rejected", "nobody refused anything"),
+    ),
+}
+
+
+def check_family_clause_holds_for_every_member(
+    family: PeerFailureFamily,
+    message: str,
+    verdict: str,
+) -> str | None:
+    """B1 — the clause must be true of the whole family, not one member."""
+    lowered = verdict.casefold()
+    for forbidden, why in _FORBIDDEN_FAMILY_CLAIMS.get(family, ()):
+        if forbidden in lowered:
+            return (
+                f"{family} clause claims {forbidden!r} ({why}); "
+                f"message={message!r} verdict={verdict!r}"
+            )
+    return None
+
+
 def check_local_storage_not_peer_attributed(
     peers: Sequence[str],
     presentation: FailurePresentation,
+    summary: str | None = None,
 ) -> str | None:
-    """I2 — our own storage failing is never rendered as peer behaviour."""
+    """I2 — our own storage failing is never rendered as peer behaviour.
+
+    ``summary`` is the list-row line the operator actually reads: it
+    appends the row's peer as a trailing attribution, which put the peer's
+    name back onto our own fault on 25 live rows while this checker was
+    looking only at the verdict (issue #868 review #12).
+    """
     verdict = presentation.verdict or ""
     if "peer" in verdict.casefold():
         return f"local-storage verdict uses peer vocabulary: {verdict!r}"
@@ -275,6 +327,12 @@ def check_local_storage_not_peer_attributed(
             "local-storage evidence was labelled "
             f"{presentation.transfer_message_label!r}"
         )
+    if summary is not None:
+        if "peer" in summary.casefold():
+            return f"local-storage summary uses peer vocabulary: {summary!r}"
+        for peer in peers:
+            if peer and peer in summary:
+                return f"local-storage summary names peer {peer!r}: {summary!r}"
     return None
 
 
@@ -511,7 +569,16 @@ class TestLocalStorageIsNeverPeerAttributed(unittest.TestCase):
         peers = [str(row["username"]) for row in files]
         if username:
             peers.append(username)
-        violation = check_local_storage_not_peer_attributed(peers, presentation)
+        # The list row, not just the verdict — that is the line the
+        # operator reads (review #12).
+        classified = classify_log_entry(LogEntry(
+            id=1, request_id=2, outcome="timeout",
+            error_message="all files errored",
+            soulseek_username=username,
+            transfer_detail=files,
+        ))
+        violation = check_local_storage_not_peer_attributed(
+            peers, presentation, classified.summary)
         self.assertIsNone(violation, violation)
 
     @given(
@@ -585,6 +652,59 @@ class TestLocalStorageIsNeverPeerAttributed(unittest.TestCase):
         violation = check_storage_cause_is_never_suppressed(
             files, peers, presentation)
         self.assertIsNone(violation, violation)
+
+
+class TestFamilyClausesHoldForEveryMember(unittest.TestCase):
+    """B1 — a clause is a claim about the whole family."""
+
+    @given(
+        family=st.sampled_from(tuple(_FAMILY_MESSAGES)),
+        data=st.data(),
+        count=st.integers(min_value=1, max_value=12),
+        transferred=st.integers(min_value=0, max_value=10**6),
+        peer=_PEER_NAMES,
+    )
+    @example(
+        family=FAMILY_PEER_FILE,
+        data=None,
+        count=12,
+        transferred=0,
+        peer="QXZJK",
+    )
+    def test_no_clause_claims_something_a_member_contradicts(
+        self,
+        family: PeerFailureFamily,
+        data: st.DataObject | None,
+        count: int,
+        transferred: int,
+        peer: str,
+    ) -> None:
+        messages = _FAMILY_MESSAGES[family]
+        chosen = (
+            messages
+            if data is None
+            else (data.draw(st.sampled_from(messages)),)
+        )
+        for message in chosen:
+            files = [
+                {
+                    "username": peer,
+                    "filename": f"{index}.flac",
+                    "last_state": "Completed, Errored",
+                    "last_exception": message,
+                    "bytes_transferred": transferred,
+                    "retry_count": 0,
+                }
+                for index in range(count)
+            ]
+            presentation = present_failure(FailureEvidence(
+                outcome="timeout",
+                error_message="all files errored",
+                transfer_detail=decode_transfer_detail(files),
+            ))
+            violation = check_family_clause_holds_for_every_member(
+                family, message, presentation.verdict or "")
+            self.assertIsNone(violation, violation)
 
 
 class TestReasonPartition(unittest.TestCase):
@@ -829,6 +949,36 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             files,
             FailurePresentation(
                 verdict="…", transfer_message='1× "Verification required"'),
+        ))
+
+    def test_family_claim_checker_trips_on_the_defect_that_shipped(self) -> None:
+        self.assertIsNotNone(check_family_clause_holds_for_every_member(
+            FAMILY_PEER_FILE,
+            "Transfer aborted: the remote size of 1 does not match expected size 2",
+            'Peer QXZJK could not read 12 of its own files — "…"',
+        ))
+        self.assertIsNone(check_family_clause_holds_for_every_member(
+            FAMILY_PEER_FILE,
+            "Transfer aborted: the remote size of 1 does not match expected size 2",
+            'Peer QXZJK could not deliver 12 of the files it was sharing — "…"',
+        ))
+
+    def test_local_storage_checker_trips_on_the_summary_suffix(self) -> None:
+        self.assertIsNotNone(check_local_storage_not_peer_attributed(
+            ["QXZJK"],
+            FailurePresentation(
+                verdict="Local storage error writing 1 file",
+                transfer_message_label=TRANSFER_MESSAGE_LABEL_STORAGE,
+            ),
+            "Local storage error writing 1 file · QXZJK",
+        ))
+        self.assertIsNone(check_local_storage_not_peer_attributed(
+            ["QXZJK"],
+            FailurePresentation(
+                verdict="Local storage error writing 1 file",
+                transfer_message_label=TRANSFER_MESSAGE_LABEL_STORAGE,
+            ),
+            "Local storage error writing 1 file",
         ))
 
     def test_local_storage_checker_trips_on_peer_vocabulary(self) -> None:
