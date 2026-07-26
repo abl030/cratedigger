@@ -655,7 +655,11 @@ class TestGeneratedDeployPinLifecycle(unittest.TestCase):
             commit_count = fake.state["commit_count"]
             fake.update_state(**changes)
 
-            fake.run(SCRIPT)
+            retry = fake.run(SCRIPT)
+            if outcome in {"candidate", "parent"}:
+                self.assertEqual(retry.returncode, 0, retry.stderr)
+            else:
+                self.assertNotEqual(retry.returncode, 0, retry.stderr)
 
             assert_pending_recovery_invariants(
                 fake.state,
