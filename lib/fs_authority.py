@@ -15,7 +15,7 @@ import fcntl
 import os
 import stat
 from collections.abc import Callable, Generator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from typing import Literal
 
@@ -23,6 +23,7 @@ FsAuthorityCode = Literal[
     "unspecified",
     "path_escape",
     "unsafe_symlink",
+    "not_a_directory",
     "not_regular_file",
     "missing",
     "open_failed",
@@ -33,15 +34,16 @@ Consumers branch on ``FilesystemAuthorityError.code`` and NEVER on the
 exception message (issue #868). The message is human diagnostics and is
 free to change; the code is the contract. The families are deliberately
 kept apart so a *containment* violation — the security boundary: a
-symlink, a path escape, or a non-regular file — can never be reported as
-an ordinary storage error, nor a storage errno as a containment
-violation.
+symlink, a path escape, a component that is not a directory, or a
+non-regular file — can never be reported as an ordinary storage error,
+nor a storage errno as a containment violation.
 
-``path_escape``, ``unsafe_symlink`` and ``not_regular_file`` are the
-containment codes: the name itself is untrustworthy. ``missing`` and
-``open_failed`` are not — they say nothing about trust. Consumers that
-translate these into their own vocabulary do so with an exhaustive
-``match`` so a new code cannot be silently lumped in with either group.
+``path_escape``, ``unsafe_symlink``, ``not_a_directory`` and
+``not_regular_file`` are the containment codes: the name itself is
+untrustworthy. ``missing`` and ``open_failed`` are not — they say nothing
+about trust. Consumers that translate these into their own vocabulary do
+so with an exhaustive ``match`` so a new code cannot be silently lumped
+in with either group.
 
 ``unspecified`` is the default for every raise site that predates the
 classification (configured-root policy checks, preview/quarantine
@@ -71,6 +73,29 @@ class FilesystemAuthorityError(ValueError):
         self.errno_symbol: str | None = errno_symbol
 
 
+class SharedDownloadRootError(FilesystemAuthorityError):
+    """A refusal to open the UNTRUSTED shared download root.
+
+    Deliberately its own type rather than a flag: WHOSE root failed is a
+    dispatch decision, and an ``except`` clause makes it structural.
+    Callers that hold both a private tree and a third-party download
+    share must never report a refusal of the share as a refusal of their
+    own tree — on this deployment the share is a nested virtiofs mount
+    with a convicted history of transient ESTALE/EIO, so "the private
+    processing tree is sick" would name the wrong subsystem entirely
+    (issue #868). The underlying refusal's ``code`` and ``errno_symbol``
+    are preserved so the cause survives the re-attribution.
+    """
+
+    @classmethod
+    def wrapping(cls, exc: FilesystemAuthorityError) -> "SharedDownloadRootError":
+        return cls(
+            f"shared download root refused: {exc}",
+            code=exc.code,
+            errno_symbol=exc.errno_symbol,
+        )
+
+
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
 _FILE_FLAGS = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
 _RENAME_NOREPLACE = 1
@@ -95,19 +120,38 @@ def errno_symbol(exc: OSError) -> str:
     return errno.errorcode.get(exc.errno, f"ERRNO{exc.errno}")
 
 
+# A no-follow ``open`` of a special file fails BEFORE the descriptor
+# exists, so ``open_regular_relative``'s ``S_ISREG`` check never gets to
+# run: a unix-domain socket answers ENXIO and a device node with no
+# driver answers ENODEV. Both describe the *kind* of thing at the name,
+# not the health of the storage, so they belong with the containment
+# codes — otherwise a socket planted at a stamped path would be reported
+# as a storage failure (issue #868).
+_SPECIAL_FILE_ERRNOS = (errno.ENXIO, errno.ENODEV)
+
+
 def _raise_path_error(path: str, exc: OSError) -> FilesystemAuthorityError:
     """Classify one failed no-follow open into a structured refusal.
 
-    ELOOP/ENOTDIR mean the *name* betrayed us (a symlink or a file used as
-    a directory) — the containment boundary. ENOENT means the name is
+    ELOOP (a symlink), ENOTDIR (a non-directory used as a path component)
+    and the special-file errnos all mean the *name* is not what we
+    require — the containment boundary; each gets its own code because a
+    code that says "symlink" about a regular-file-as-directory is a lie
+    the message would immediately contradict. ENOENT means the name is
     simply gone. Every other errno is the storage layer failing (ESTALE
     and EIO are the live virtiofs shapes); those must never be confused
     with a containment violation, so the errno name travels with the
     error instead of only reaching a human-readable ``strerror``.
     """
-    if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+    if exc.errno == errno.ELOOP:
         return FilesystemAuthorityError(
-            f"unsafe symlink or non-directory: {path}", code="unsafe_symlink")
+            f"unsafe symlink: {path}", code="unsafe_symlink")
+    if exc.errno == errno.ENOTDIR:
+        return FilesystemAuthorityError(
+            f"path component is not a directory: {path}", code="not_a_directory")
+    if exc.errno in _SPECIAL_FILE_ERRNOS:
+        return FilesystemAuthorityError(
+            f"not a regular file: {path}", code="not_regular_file")
     if exc.errno == errno.ENOENT:
         return FilesystemAuthorityError(
             f"cannot open {path}: {exc.strerror}", code="missing")
@@ -312,7 +356,14 @@ def remove_relative_tree(parent_fd: int, name: str) -> None:
 def open_private_processing_root(
     processing_dir: str, slskd_download_dir: str,
 ) -> Generator[int, None, None]:
-    """Open the configured private root after its complete trust checks."""
+    """Open the configured private root after its complete trust checks.
+
+    This opens BOTH roots — the private tree and, for the physical-overlap
+    proof, the untrusted shared download share. A refusal of the share is
+    raised as :class:`SharedDownloadRootError` so callers can attribute it
+    to the right subsystem instead of inferring ownership from ordering or
+    from the message (issue #868).
+    """
     if not os.path.isabs(processing_dir):
         raise FilesystemAuthorityError("processing_dir must be absolute")
     if paths_overlap(processing_dir, slskd_download_dir):
@@ -322,7 +373,13 @@ def open_private_processing_root(
     # bind mount or a symlinked slskd ancestor. Both roots must be physically
     # openable without following links and must stay disjoint after canonical
     # resolution.
-    with open_directory_path(slskd_download_dir):
+    with ExitStack() as shared_root:
+        try:
+            shared_root.enter_context(open_directory_path(slskd_download_dir))
+        except FilesystemAuthorityError as exc:
+            # ONLY the share's own open is re-attributed. The overlap proof
+            # below concerns both roots and stays unattributed.
+            raise SharedDownloadRootError.wrapping(exc) from exc
         try:
             physical_overlap = paths_overlap(
                 os.path.realpath(processing_dir),

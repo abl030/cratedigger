@@ -25,6 +25,7 @@ from lib.dispatch import _build_download_info
 from lib.fs_authority import (
     FilesystemAuthorityError,
     OpenedRegularFile,
+    SharedDownloadRootError,
     copy_opened_file,
     exclusive_relative_lock,
     open_private_child_directory,
@@ -77,6 +78,11 @@ _ABANDON_PATH_UNKNOWN = "unknown"
 # genuine containment violation and an ordinary storage error (ESTALE /
 # EIO from virtiofs) both surfaced as ``unsafe_source_path``. Those are
 # four different operator problems with four different remedies.
+#
+# THREE subjects can refuse, and each owns its own nouns. Reporting one
+# subject's failure in another's vocabulary is the same defect one layer
+# up: "the private processing tree is sick" when the shared slskd share
+# is, or "this file's event stamp is stale" when the whole share is gone.
 REASON_EVENT_PATH_NEVER_STAMPED: Final = "event_path_never_stamped"
 """slskd never emitted a completion event carrying this file's location."""
 
@@ -99,53 +105,116 @@ REASON_PROCESSING_OPEN_FAILED_PREFIX: Final = "processing_open_failed_"
 """Prefix for a storage-layer failure on the private tree; errno-suffixed."""
 
 REASON_MATERIALIZE_AUTHORITY_FAILED: Final = "materialize_authority_failed"
-"""An authority refusal with no structured classification (fail closed)."""
+"""An authority refusal on the private tree with no structured code."""
+
+REASON_SLSKD_ROOT_UNSAFE: Final = "slskd_root_unsafe"
+"""The configured shared download root failed the containment boundary."""
+
+REASON_SLSKD_ROOT_MISSING: Final = "slskd_root_missing"
+"""The configured shared download root is not there at all."""
+
+REASON_SLSKD_ROOT_OPEN_FAILED_PREFIX: Final = "slskd_root_open_failed_"
+"""Prefix for a storage-layer failure on the shared share; errno-suffixed."""
+
+REASON_SLSKD_ROOT_REFUSED: Final = "slskd_root_refused"
+"""A refusal of the shared download root with no structured code."""
 
 REASON_PRIVATE_MATERIALIZE_FAILED: Final = "private_materialize_failed"
 """An unclassified ``OSError`` escaped the private publish transaction."""
 
 
-def source_preflight_reason(exc: FilesystemAuthorityError) -> str:
-    """Map one authority refusal on an slskd source file to a reason.
+@dataclass(frozen=True)
+class _ReasonVocabulary:
+    """One subject's four nouns for the same four authority outcomes.
+
+    Kept as data rather than three near-identical mappers so the
+    containment / missing / storage partition is decided ONCE. A new
+    subject cannot accidentally file a storage errno under its
+    containment noun, because it never gets to make that choice.
+    """
+
+    unsafe: str
+    missing: str
+    open_failed_prefix: str
+    unclassified: str
+
+
+_SOURCE_FILE_VOCABULARY: Final = _ReasonVocabulary(
+    unsafe=REASON_UNSAFE_SOURCE_PATH,
+    missing=REASON_EVENT_PATH_GONE_FROM_DISK,
+    open_failed_prefix=REASON_SOURCE_OPEN_FAILED_PREFIX,
+    # Fail closed: an authority refusal we could not classify is
+    # untrusted, not benign.
+    unclassified=REASON_UNSAFE_SOURCE_PATH,
+)
+_PRIVATE_TREE_VOCABULARY: Final = _ReasonVocabulary(
+    unsafe=REASON_PROCESSING_AUTHORITY_UNSAFE,
+    missing=REASON_PROCESSING_PATH_MISSING,
+    open_failed_prefix=REASON_PROCESSING_OPEN_FAILED_PREFIX,
+    unclassified=REASON_MATERIALIZE_AUTHORITY_FAILED,
+)
+_SHARED_ROOT_VOCABULARY: Final = _ReasonVocabulary(
+    unsafe=REASON_SLSKD_ROOT_UNSAFE,
+    missing=REASON_SLSKD_ROOT_MISSING,
+    open_failed_prefix=REASON_SLSKD_ROOT_OPEN_FAILED_PREFIX,
+    unclassified=REASON_SLSKD_ROOT_REFUSED,
+)
+
+
+def _reason_in_vocabulary(
+    exc: FilesystemAuthorityError, vocabulary: _ReasonVocabulary,
+) -> str:
+    """Translate one structured refusal into one subject's vocabulary.
 
     Total over :data:`~lib.fs_authority.FsAuthorityCode` and exhaustive by
-    construction (pyright rejects an unhandled code). Containment codes
-    never produce a storage reason and storage errnos never produce the
-    containment reason — that separation is the point: ``unsafe_source_path``
-    is a security finding, ``source_open_failed_ESTALE`` is a sick mount.
-
-    ``unspecified`` fails closed onto the containment reason: an authority
-    refusal we could not classify is untrusted, not benign.
+    construction (pyright rejects an unhandled code at this single site).
+    Containment codes never produce a storage reason and storage errnos
+    never produce a containment reason — that separation is the point:
+    ``unsafe_source_path`` is a security finding, ``source_open_failed_ESTALE``
+    is a sick mount.
     """
     code = exc.code
     match code:
-        case "path_escape" | "unsafe_symlink" | "not_regular_file" | "unspecified":
-            return REASON_UNSAFE_SOURCE_PATH
+        case (
+            "path_escape"
+            | "unsafe_symlink"
+            | "not_a_directory"
+            | "not_regular_file"
+        ):
+            return vocabulary.unsafe
         case "missing":
-            return REASON_EVENT_PATH_GONE_FROM_DISK
+            return vocabulary.missing
         case "open_failed":
-            return f"{REASON_SOURCE_OPEN_FAILED_PREFIX}{exc.errno_symbol or 'UNKNOWN'}"
+            return f"{vocabulary.open_failed_prefix}{exc.errno_symbol or 'UNKNOWN'}"
+        case "unspecified":
+            return vocabulary.unclassified
     assert_never(code)
+
+
+def source_preflight_reason(exc: FilesystemAuthorityError) -> str:
+    """Name a refusal of ONE event-stamped file inside the shared share."""
+    return _reason_in_vocabulary(exc, _SOURCE_FILE_VOCABULARY)
 
 
 def materialize_authority_reason(exc: FilesystemAuthorityError) -> str:
-    """Map one authority refusal on the PRIVATE processing tree to a reason.
+    """Name a refusal of OUR OWN private processing tree.
 
     The source-preflight vocabulary would lie here: nothing about the
-    private tree is an event stamp. Same totality and same containment /
-    storage separation, different nouns.
+    private tree is an event stamp.
     """
-    code = exc.code
-    match code:
-        case "path_escape" | "unsafe_symlink" | "not_regular_file":
-            return REASON_PROCESSING_AUTHORITY_UNSAFE
-        case "missing":
-            return REASON_PROCESSING_PATH_MISSING
-        case "open_failed":
-            return f"{REASON_PROCESSING_OPEN_FAILED_PREFIX}{exc.errno_symbol or 'UNKNOWN'}"
-        case "unspecified":
-            return REASON_MATERIALIZE_AUTHORITY_FAILED
-    assert_never(code)
+    return _reason_in_vocabulary(exc, _PRIVATE_TREE_VOCABULARY)
+
+
+def shared_download_root_reason(exc: FilesystemAuthorityError) -> str:
+    """Name a refusal of the whole configured shared download root.
+
+    Neither other vocabulary fits. ``processing_open_failed_ESTALE``
+    accuses our own tree of a fault that belongs to a third-party share on
+    a different (and here, historically flaky nested-virtiofs) mount;
+    ``event_path_gone_from_disk`` claims something about one file's event
+    stamp when the entire share is unreachable.
+    """
+    return _reason_in_vocabulary(exc, _SHARED_ROOT_VOCABULARY)
 
 
 # === Tagged results for the completion-processing ownership protocol (#474) ===
@@ -969,12 +1038,25 @@ def _materialize_processing_dir(
                     # adversarial slskd replacement is never unlinked.
                     for opened in opened_sources:
                         unlink_if_same(opened)
+    except SharedDownloadRootError as exc:
+        # ``open_private_processing_root`` opens the shared slskd share
+        # too (for its physical-overlap proof), and that share is the one
+        # with a live history of transient ESTALE/EIO. Its refusals MUST
+        # NOT be reported in the private tree's vocabulary — the except
+        # ordering makes that structural rather than inferred.
+        return _record_materialize_failure(
+            request_id,
+            shared_download_root_reason(exc),
+            str(exc),
+            level=logging.ERROR,
+        )
     except FilesystemAuthorityError as exc:
-        # Not the source preflight — that returns directly above. This is
-        # our own private processing tree, its shard lock, or its
-        # transaction directory refusing. The reason comes from the
-        # structured code; splitting the message on its first colon used
-        # to truncate the very strerror that told the two apart.
+        # Not the source preflight — that returns directly above — and not
+        # the shared share. This is our own private processing tree, its
+        # shard lock, or its transaction directory refusing. The reason
+        # comes from the structured code; splitting the message on its
+        # first colon used to truncate the very strerror that told a
+        # containment violation and a storage error apart.
         return _record_materialize_failure(
             request_id,
             materialize_authority_reason(exc),

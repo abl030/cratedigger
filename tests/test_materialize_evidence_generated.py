@@ -10,16 +10,31 @@ around them.
 Invariants under patrol
 -----------------------
 
-**I2 — the four distinguishable preflight outcomes never collapse.**
-"slskd never stamped a location", "the stamp points at nothing",
-"the name failed containment" and "the storage layer refused the open"
-are four different operator problems. Before #868 they collapsed into
-two strings, one of them produced by sniffing ``"No such file"`` out of
-an exception message.
+**I1 — a materialize failure never resets a request uncaused.** The
+reason reaches the journal at every failure site, and wherever the reset
+also writes a ``download_log`` row, that row carries the reason. (The
+pre-enqueue gate ``lib.download._processing_path_ready_for_importer``
+deliberately writes no row at all — it fails closed before any import
+attempt exists to audit — so the journal is its only record. Giving that
+path an audit row is a lifecycle change, tracked separately.)
 
-**I3 — containment and storage never cross.** A symlink, a path escape
-or a special file is a SECURITY finding; ESTALE/EIO from virtiofs is a
-sick mount. Neither may ever be reported as the other.
+**I2 — distinguishable outcomes never collapse.** "slskd never stamped a
+location", "the stamp points at nothing", "the name failed containment"
+and "the storage layer refused the open" are four different operator
+problems. Before #868 they collapsed into two strings, one of them
+produced by sniffing ``"No such file"`` out of an exception message.
+
+**I2b — the three subjects keep their own vocabulary.** One file inside
+the share, the whole shared download root, and our own private
+processing tree are three different subsystems. The same errno on two of
+them must not produce the same reason: ``processing_open_failed_ESTALE``
+for a sick slskd share sends the operator to the wrong filesystem.
+
+**I3 — containment and storage never cross.** A symlink, a path escape,
+a non-directory component or a special file is a SECURITY finding;
+ESTALE/EIO from virtiofs is a sick mount. Neither may ever be reported
+as the other — including the shapes that fail at ``open`` before an
+``S_ISREG`` check can run (a unix socket answers ENXIO).
 
 **I4 — the reason is derived from a structured field.** Never parsed out
 of an exception's message text, so no reason can be truncated by a
@@ -45,6 +60,7 @@ from __future__ import annotations
 
 import errno
 import os
+import socket
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -66,6 +82,9 @@ from lib.download_materialization import (
     REASON_PROCESSING_AUTHORITY_UNSAFE,
     REASON_PROCESSING_OPEN_FAILED_PREFIX,
     REASON_PROCESSING_PATH_MISSING,
+    REASON_SLSKD_ROOT_MISSING,
+    REASON_SLSKD_ROOT_OPEN_FAILED_PREFIX,
+    REASON_SLSKD_ROOT_UNSAFE,
     REASON_SOURCE_OPEN_FAILED_PREFIX,
     REASON_UNSAFE_SOURCE_PATH,
     MaterializeFailed,
@@ -73,6 +92,7 @@ from lib.download_materialization import (
     Materialized,
     _materialize_processing_dir,
     materialize_authority_reason,
+    shared_download_root_reason,
     source_preflight_reason,
 )
 from lib.fs_authority import _raise_path_error
@@ -82,6 +102,7 @@ from lib.quality import ActiveDownloadState
 from lib.staged_album import StagedAlbum
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_ctx_with_fake_db, make_grab_list_entry, make_request_row
+from tests.test_path_authority import assert_publication_invariant
 
 
 # ============================================================================
@@ -91,18 +112,23 @@ from tests.helpers import make_ctx_with_fake_db, make_grab_list_entry, make_requ
 _CONTAINMENT_REASONS = frozenset({
     REASON_UNSAFE_SOURCE_PATH,
     REASON_PROCESSING_AUTHORITY_UNSAFE,
+    REASON_SLSKD_ROOT_UNSAFE,
 })
 _MISSING_REASONS = frozenset({
     REASON_EVENT_PATH_GONE_FROM_DISK,
     REASON_PROCESSING_PATH_MISSING,
+    REASON_SLSKD_ROOT_MISSING,
 })
 _STORAGE_PREFIXES = (
     REASON_SOURCE_OPEN_FAILED_PREFIX,
     REASON_PROCESSING_OPEN_FAILED_PREFIX,
+    REASON_SLSKD_ROOT_OPEN_FAILED_PREFIX,
 )
 # Restated, not imported: a checker that groups by the same object
 # production groups by would only echo the implementation back.
-_CONTAINMENT_CODES = frozenset({"path_escape", "unsafe_symlink", "not_regular_file"})
+_CONTAINMENT_CODES = frozenset({
+    "path_escape", "unsafe_symlink", "not_a_directory", "not_regular_file",
+})
 
 
 def reason_family(reason: str) -> str:
@@ -175,6 +201,10 @@ def assert_lifecycle_unchanged_by_reason(
     Expired grace always resets to ``wanted`` with one cooldown and one
     ``failed`` row carrying the reason; an open grace window always
     leaves the row alone with no audit at all — whatever the reason is.
+
+    I1 is scoped to THIS path, which does write a row. The poller's own
+    pre-enqueue gate resets without writing one at all and records its
+    cause in the journal only; that is deliberate and out of scope here.
     """
     if not grace_expired:
         if status != "downloading":
@@ -208,11 +238,16 @@ def assert_lifecycle_unchanged_by_reason(
 # ============================================================================
 
 _ALL_ERRNOS = sorted(errno.errorcode)
-_CONTAINMENT_ERRNOS = (errno.ELOOP, errno.ENOTDIR)
+_CONTAINMENT_ERRNOS = (errno.ELOOP, errno.ENOTDIR, errno.ENXIO, errno.ENODEV)
+_SUBJECT_MAPPERS = {
+    "source_file": source_preflight_reason,
+    "private_tree": materialize_authority_reason,
+    "shared_root": shared_download_root_reason,
+}
 
 
 class TestGeneratedAuthorityCodeMapping(unittest.TestCase):
-    """I2/I3/I4 over the REAL ``_raise_path_error`` classifier."""
+    """I2/I2b/I3/I4 over the REAL ``_raise_path_error`` classifier."""
 
     @given(
         number=st.sampled_from(_ALL_ERRNOS),
@@ -221,21 +256,22 @@ class TestGeneratedAuthorityCodeMapping(unittest.TestCase):
             min_size=1,
             max_size=48,
         ),
-        private_tree=st.booleans(),
+        subject=st.sampled_from(sorted(_SUBJECT_MAPPERS)),
     )
-    # The live virtiofs shapes, plus the two that used to be conflated.
-    @example(number=errno.ESTALE, path="a/b.mp3", private_tree=False)
-    @example(number=errno.EIO, path="a/b.mp3", private_tree=False)
-    @example(number=errno.ELOOP, path="a/b.mp3", private_tree=False)
-    @example(number=errno.ENOENT, path="a/b.mp3", private_tree=False)
+    # The live virtiofs shapes, plus the ones that used to be conflated.
+    @example(number=errno.ESTALE, path="a/b.mp3", subject="source_file")
+    @example(number=errno.EIO, path="a/b.mp3", subject="shared_root")
+    @example(number=errno.ELOOP, path="a/b.mp3", subject="source_file")
+    @example(number=errno.ENOENT, path="a/b.mp3", subject="source_file")
+    @example(number=errno.ENXIO, path="a/b.mp3", subject="source_file")
     # A path whose own text contains a colon: the retired colon-split
     # derivation truncated exactly here.
-    @example(number=errno.ESTALE, path="weird: name.mp3", private_tree=False)
+    @example(number=errno.ESTALE, path="weird: name.mp3", subject="private_tree")
     def test_every_errno_maps_to_exactly_one_stable_reason(
-        self, number: int, path: str, private_tree: bool,
+        self, number: int, path: str, subject: str,
     ) -> None:
         exc = _raise_path_error(path, OSError(number, os.strerror(number), path))
-        mapper = materialize_authority_reason if private_tree else source_preflight_reason
+        mapper = _SUBJECT_MAPPERS[subject]
 
         if number in _CONTAINMENT_ERRNOS:
             expected_family = "containment"
@@ -255,6 +291,32 @@ class TestGeneratedAuthorityCodeMapping(unittest.TestCase):
             expected_family == "containment",
         )
 
+    @given(
+        number=st.sampled_from(_ALL_ERRNOS),
+        path=st.text(
+            alphabet="abcdefghijklmnopqrstuvwxyz0123456789_-",
+            min_size=1,
+            max_size=24,
+        ),
+    )
+    @example(number=errno.ESTALE, path="share")
+    @example(number=errno.ENOENT, path="share")
+    def test_the_three_subjects_never_share_a_reason(
+        self, number: int, path: str,
+    ) -> None:
+        """I2b: the SAME refusal, read as three subjects, gives three
+        distinct answers. Anything less means an operator cannot tell
+        which filesystem to go look at."""
+        exc = _raise_path_error(path, OSError(number, os.strerror(number), path))
+        reasons = [mapper(exc) for mapper in _SUBJECT_MAPPERS.values()]
+        self.assertEqual(
+            len(set(reasons)), len(reasons),
+            f"subjects collapsed onto a shared reason: {reasons}",
+        )
+        # ...and all three still land in the SAME family: the subject
+        # decides the nouns, never the containment/storage partition.
+        self.assertEqual(len({reason_family(r) for r in reasons}), 1)
+
 
 # ============================================================================
 # Property 2 — real materialize worlds, real filesystem, one reason each
@@ -265,39 +327,63 @@ _FAILING_WORLDS = (
     "gone_from_disk",
     "symlink",
     "escape",
-    "special_file",
+    "special_fifo",
+    "special_socket",
     "unreadable",
+    "shared_root_missing",
+    "shared_root_unreadable",
 )
 _WORLD_REASONS = {
     "never_stamped": REASON_EVENT_PATH_NEVER_STAMPED,
     "gone_from_disk": REASON_EVENT_PATH_GONE_FROM_DISK,
     "symlink": REASON_UNSAFE_SOURCE_PATH,
     "escape": REASON_UNSAFE_SOURCE_PATH,
-    "special_file": REASON_UNSAFE_SOURCE_PATH,
+    "special_fifo": REASON_UNSAFE_SOURCE_PATH,
+    "special_socket": REASON_UNSAFE_SOURCE_PATH,
     "unreadable": f"{REASON_SOURCE_OPEN_FAILED_PREFIX}EACCES",
+    "shared_root_missing": REASON_SLSKD_ROOT_MISSING,
+    "shared_root_unreadable": f"{REASON_SLSKD_ROOT_OPEN_FAILED_PREFIX}EACCES",
 }
 _WORLD_FAMILIES = {
     "never_stamped": "never_stamped",
     "gone_from_disk": "missing",
     "symlink": "containment",
     "escape": "containment",
-    "special_file": "containment",
+    "special_fifo": "containment",
+    "special_socket": "containment",
     "unreadable": "storage",
+    "shared_root_missing": "missing",
+    "shared_root_unreadable": "storage",
 }
 
 
-def _build_world(
-    parent: str, world: str, leaf: str,
-) -> tuple[CratediggerConfig, DownloadFile, list[str]]:
-    """Materialize one generated failure world onto a real filesystem.
+class _World:
+    """One generated failure world, materialized onto a real filesystem."""
 
-    Returns the config, the single tracked file, and the paths whose
-    chmod must be restored before the tempdir is torn down.
+    def __init__(self, cfg: CratediggerConfig, file: DownloadFile) -> None:
+        self.cfg = cfg
+        self.file = file
+        self.restore_modes: list[str] = []
+        self.sockets: list[socket.socket] = []
+
+    def close(self) -> None:
+        for path in self.restore_modes:
+            os.chmod(path, 0o700)
+        for sock in self.sockets:
+            sock.close()
+
+
+def _build_world(parent: str, world: str, leaf: str) -> _World:
+    """Build one failure world; the caller must ``close()`` it.
+
+    ``close`` restores any mode-000 path so the tempdir can be torn down,
+    and releases bound unix sockets.
     """
     source = os.path.join(parent, "downloads")
     processing = os.path.join(parent, "processing")
     incoming = os.path.join(parent, "Incoming")
-    os.mkdir(source)
+    if world != "shared_root_missing":
+        os.mkdir(source)
     os.mkdir(processing, 0o700)
     os.mkdir(os.path.join(processing, "albums"), 0o700)
     os.mkdir(os.path.join(processing, "preview"), 0o700)
@@ -312,14 +398,12 @@ def _build_world(
         filename=f"peer\\\\{leaf}.mp3", username="user1", id="1",
         file_dir="peer", size=5,
     )
-    restore: list[str] = []
+    built = _World(cfg, file)
+    stamped = os.path.join(source, f"{leaf}.mp3")
 
     if world == "never_stamped":
         file.local_path = None
-        return cfg, file, restore
-
-    stamped = os.path.join(source, f"{leaf}.mp3")
-    if world == "gone_from_disk":
+    elif world == "gone_from_disk":
         file.local_path = stamped
     elif world == "symlink":
         outside = os.path.join(parent, "outside.mp3")
@@ -332,18 +416,36 @@ def _build_world(
         with open(escaped, "wb") as handle:
             handle.write(b"audio")
         file.local_path = escaped
-    elif world == "special_file":
+    elif world == "special_fifo":
         os.mkfifo(stamped)
+        file.local_path = stamped
+    elif world == "special_socket":
+        # A socket fails at ``open`` with ENXIO, BEFORE any descriptor
+        # exists for an ``S_ISREG`` check to inspect — the shape that
+        # errno-only classification files under the wrong family.
+        sock = socket.socket(socket.AF_UNIX)
+        built.sockets.append(sock)
+        sock.bind(stamped)
         file.local_path = stamped
     elif world == "unreadable":
         with open(stamped, "wb") as handle:
             handle.write(b"audio")
         os.chmod(stamped, 0o000)
-        restore.append(stamped)
+        built.restore_modes.append(stamped)
+        file.local_path = stamped
+    elif world == "shared_root_missing":
+        # The whole configured share is gone. Nothing about this is a
+        # statement about our private tree OR about one file's stamp.
+        file.local_path = stamped
+    elif world == "shared_root_unreadable":
+        with open(stamped, "wb") as handle:
+            handle.write(b"audio")
+        os.chmod(source, 0o000)
+        built.restore_modes.append(source)
         file.local_path = stamped
     else:  # pragma: no cover - the strategy only produces the worlds above
         raise AssertionError(f"unknown world {world!r}")
-    return cfg, file, restore
+    return built
 
 
 _LEAVES = st.text(
@@ -360,25 +462,27 @@ class TestGeneratedMaterializeFailureReasons(unittest.TestCase):
     @example(world="never_stamped", leaf="track")
     @example(world="gone_from_disk", leaf="track")
     @example(world="unreadable", leaf="track")
+    @example(world="special_socket", leaf="track")
+    @example(world="shared_root_missing", leaf="track")
+    @example(world="shared_root_unreadable", leaf="track")
     @settings(deadline=None)
     def test_each_failure_world_yields_exactly_its_own_reason(
         self, world: str, leaf: str,
     ) -> None:
         with tempfile.TemporaryDirectory() as parent:
-            cfg, file, restore = _build_world(parent, world, leaf)
+            built = _build_world(parent, world, leaf)
             album = make_grab_list_entry(
-                files=[file], artist="Artist", title="Album", year="2020")
-            canonical = canonical_folder_for_row(
-                album, processing_albums_dir(cfg.processing_dir))
+                files=[built.file], artist="Artist", title="Album", year="2020")
+            albums_root = processing_albums_dir(built.cfg.processing_dir)
+            canonical = canonical_folder_for_row(album, albums_root)
             try:
                 result = _materialize_processing_dir(
                     album,
                     StagedAlbum.from_entry(album, default_path=canonical),
-                    make_ctx_with_fake_db(FakePipelineDB(), cfg=cfg),
+                    make_ctx_with_fake_db(FakePipelineDB(), cfg=built.cfg),
                 )
             finally:
-                for path in restore:
-                    os.chmod(path, 0o600)
+                built.close()
 
             self.assertIsInstance(result, MaterializeFailed)
             assert isinstance(result, MaterializeFailed)
@@ -391,8 +495,20 @@ class TestGeneratedMaterializeFailureReasons(unittest.TestCase):
                 ),
             )
             self.assertEqual(result.reason, _WORLD_REASONS[world])
-            # Nothing was published: a refused preflight copies no bytes.
+            # Nothing was published, and no transaction directory leaked:
+            # a refused materialize owes the same artifact contract as a
+            # successful one, checked by the shared publication proof.
             self.assertFalse(os.path.isdir(canonical))
+            assert_publication_invariant(
+                result=result,
+                source_exists=True,
+                expected_source_exists=True,
+                destination_names=set(),
+                expected_names=set(),
+                artifact_names=os.listdir(albums_root),
+                name_max=os.pathconf(albums_root, "PC_NAME_MAX"),
+                allowed_result_types=(MaterializeFailed,),
+            )
 
     @given(
         world=st.sampled_from(_FAILING_WORLDS),
@@ -440,13 +556,13 @@ class TestGeneratedMaterializeLifecycle(unittest.TestCase):
             else now
         )
         with tempfile.TemporaryDirectory() as parent:
-            cfg, file, restore = _build_world(parent, world, "track")
+            built = _build_world(parent, world, "track")
             album = make_grab_list_entry(
-                files=[file], artist="Artist", title="Album", year="2020",
+                files=[built.file], artist="Artist", title="Album", year="2020",
                 db_request_id=1, mb_release_id="")
             db = FakePipelineDB()
             db.seed_request(make_request_row(id=1, status="downloading"))
-            ctx = make_ctx_with_fake_db(db, cfg=cfg)
+            ctx = make_ctx_with_fake_db(db, cfg=built.cfg)
             # The HAVE-evidence enrichment is a different subsystem; zero
             # budget short-circuits it without stubbing anything.
             ctx.evidence_enrichment_budget = 0
@@ -459,8 +575,7 @@ class TestGeneratedMaterializeLifecycle(unittest.TestCase):
             try:
                 job = _enqueue_completed_processing(album, 1, state, db, ctx)
             finally:
-                for path in restore:
-                    os.chmod(path, 0o600)
+                built.close()
 
             self.assertIsNone(job)
             assert_lifecycle_unchanged_by_reason(
