@@ -17,10 +17,58 @@ import stat
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Literal
+
+FsAuthorityCode = Literal[
+    "unspecified",
+    "path_escape",
+    "unsafe_symlink",
+    "not_regular_file",
+    "missing",
+    "open_failed",
+]
+"""Machine-stable classification of one filesystem-authority refusal.
+
+Consumers branch on ``FilesystemAuthorityError.code`` and NEVER on the
+exception message (issue #868). The message is human diagnostics and is
+free to change; the code is the contract. The families are deliberately
+kept apart so a *containment* violation — the security boundary: a
+symlink, a path escape, or a non-regular file — can never be reported as
+an ordinary storage error, nor a storage errno as a containment
+violation.
+
+``path_escape``, ``unsafe_symlink`` and ``not_regular_file`` are the
+containment codes: the name itself is untrustworthy. ``missing`` and
+``open_failed`` are not — they say nothing about trust. Consumers that
+translate these into their own vocabulary do so with an exhaustive
+``match`` so a new code cannot be silently lumped in with either group.
+
+``unspecified`` is the default for every raise site that predates the
+classification (configured-root policy checks, preview/quarantine
+guards). It is deliberately NOT a synonym for "safe": consumers that map
+codes to their own vocabulary must fail closed on it.
+"""
 
 
 class FilesystemAuthorityError(ValueError):
-    """Configured or untrusted path violates the filesystem boundary."""
+    """Configured or untrusted path violates the filesystem boundary.
+
+    ``code`` is the structured discriminator (see :data:`FsAuthorityCode`);
+    ``errno_symbol`` carries the originating errno name (``"ESTALE"``,
+    ``"EIO"``, …) whenever ``code`` is ``"open_failed"``, so a caller can
+    record *which* storage failure happened without parsing ``strerror``.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: FsAuthorityCode = "unspecified",
+        errno_symbol: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code: FsAuthorityCode = code
+        self.errno_symbol: str | None = errno_symbol
 
 
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
@@ -31,24 +79,51 @@ _LIBC = ctypes.CDLL(None, use_errno=True)
 
 def _parts(relative_path: str) -> tuple[str, ...]:
     if not relative_path or os.path.isabs(relative_path):
-        raise FilesystemAuthorityError("path must be a non-empty relative path")
+        raise FilesystemAuthorityError(
+            "path must be a non-empty relative path", code="path_escape")
     parts = tuple(relative_path.split(os.sep))
     if any(part in ("", ".", "..") for part in parts):
-        raise FilesystemAuthorityError("path contains an unsafe component")
+        raise FilesystemAuthorityError(
+            "path contains an unsafe component", code="path_escape")
     return parts
 
 
+def errno_symbol(exc: OSError) -> str:
+    """Name the errno without ever parsing ``strerror`` (issue #868)."""
+    if exc.errno is None:
+        return "UNKNOWN"
+    return errno.errorcode.get(exc.errno, f"ERRNO{exc.errno}")
+
+
 def _raise_path_error(path: str, exc: OSError) -> FilesystemAuthorityError:
+    """Classify one failed no-follow open into a structured refusal.
+
+    ELOOP/ENOTDIR mean the *name* betrayed us (a symlink or a file used as
+    a directory) — the containment boundary. ENOENT means the name is
+    simply gone. Every other errno is the storage layer failing (ESTALE
+    and EIO are the live virtiofs shapes); those must never be confused
+    with a containment violation, so the errno name travels with the
+    error instead of only reaching a human-readable ``strerror``.
+    """
     if exc.errno in (errno.ELOOP, errno.ENOTDIR):
-        return FilesystemAuthorityError(f"unsafe symlink or non-directory: {path}")
-    return FilesystemAuthorityError(f"cannot open {path}: {exc.strerror}")
+        return FilesystemAuthorityError(
+            f"unsafe symlink or non-directory: {path}", code="unsafe_symlink")
+    if exc.errno == errno.ENOENT:
+        return FilesystemAuthorityError(
+            f"cannot open {path}: {exc.strerror}", code="missing")
+    return FilesystemAuthorityError(
+        f"cannot open {path}: {exc.strerror}",
+        code="open_failed",
+        errno_symbol=errno_symbol(exc),
+    )
 
 
 @contextmanager
 def open_directory_path(path: str) -> Generator[int, None, None]:
     """Open an absolute directory while refusing every symlink component."""
     if not os.path.isabs(path):
-        raise FilesystemAuthorityError("authority root must be absolute")
+        raise FilesystemAuthorityError(
+            "authority root must be absolute", code="path_escape")
     fd = os.open(os.sep, _DIR_FLAGS)
     try:
         relative = path.lstrip(os.sep)
@@ -67,11 +142,13 @@ def open_directory_path(path: str) -> Generator[int, None, None]:
 
 def _relative_to(root: str, path: str) -> str:
     if not os.path.isabs(path):
-        raise FilesystemAuthorityError("candidate path must be absolute")
+        raise FilesystemAuthorityError(
+            "candidate path must be absolute", code="path_escape")
     try:
         relative = os.path.relpath(path, root)
     except ValueError as exc:
-        raise FilesystemAuthorityError("candidate is not beneath authority root") from exc
+        raise FilesystemAuthorityError(
+            "candidate is not beneath authority root", code="path_escape") from exc
     _parts(relative)
     return relative
 
@@ -407,7 +484,8 @@ def open_regular_relative(root_fd: int, relative_path: str) -> OpenedRegularFile
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             os.close(fd)
-            raise FilesystemAuthorityError(f"not a regular file: {relative_path}")
+            raise FilesystemAuthorityError(
+                f"not a regular file: {relative_path}", code="not_regular_file")
         return OpenedRegularFile(fd=fd, parent_fd=parent_fd, name=parts[-1], stat_result=info)
     except Exception:
         os.close(parent_fd)

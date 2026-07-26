@@ -19,6 +19,7 @@ from lib.download_materialization import (
 from lib.fs_authority import (
     FilesystemAuthorityError,
     open_configured_quarantine_directory,
+    open_directory_path,
     open_private_processing_root,
     open_regular_relative,
 )
@@ -97,6 +98,89 @@ def assert_relocation_invariant(
         raise AssertionError("relocation guard lost the authoritative source")
     if replacement_has_canonical:
         raise AssertionError("relocation guard wrote into the replacement root")
+
+
+# Stated here rather than imported: the containment grouping the tests
+# assert against must not be the same object production groups by, or the
+# assertion is the implementation echoing itself back (issue #868 I3).
+_CONTAINMENT_CODES = frozenset({"path_escape", "unsafe_symlink", "not_regular_file"})
+
+
+class TestAuthorityFailureClassification(unittest.TestCase):
+    """Issue #868: the refusal carries a structured code, not prose.
+
+    Before this, callers recovered the cause by sniffing the exception's
+    message (``"No such file" in str(exc)``) and by splitting it on its
+    first colon — which discarded the very ``strerror`` that separated a
+    containment violation from a storage error.
+    """
+
+    def test_missing_file_is_classified_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            with open_directory_path(root) as root_fd:
+                with self.assertRaises(FilesystemAuthorityError) as caught:
+                    open_regular_relative(root_fd, "absent.mp3")
+        self.assertEqual(caught.exception.code, "missing")
+        self.assertIsNone(caught.exception.errno_symbol)
+
+    def test_symlink_is_classified_as_containment_not_storage(self) -> None:
+        with tempfile.TemporaryDirectory() as parent:
+            root = os.path.join(parent, "root")
+            outside = os.path.join(parent, "outside")
+            os.mkdir(root)
+            with open(outside, "wb") as handle:
+                handle.write(b"outside")
+            os.symlink(outside, os.path.join(root, "track.mp3"))
+            with open_directory_path(root) as root_fd:
+                with self.assertRaises(FilesystemAuthorityError) as caught:
+                    open_regular_relative(root_fd, "track.mp3")
+        self.assertEqual(caught.exception.code, "unsafe_symlink")
+        self.assertIn(caught.exception.code, _CONTAINMENT_CODES)
+        self.assertIsNone(caught.exception.errno_symbol)
+
+    def test_parent_escape_is_classified_path_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            with open_directory_path(root) as root_fd:
+                with self.assertRaises(FilesystemAuthorityError) as caught:
+                    open_regular_relative(root_fd, "../outside")
+        self.assertEqual(caught.exception.code, "path_escape")
+        self.assertIn(caught.exception.code, _CONTAINMENT_CODES)
+
+    def test_non_regular_file_is_classified_as_containment(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            os.mkfifo(os.path.join(root, "pipe"))
+            with open_directory_path(root) as root_fd:
+                with self.assertRaises(FilesystemAuthorityError) as caught:
+                    open_regular_relative(root_fd, "pipe")
+        self.assertEqual(caught.exception.code, "not_regular_file")
+        self.assertIn(caught.exception.code, _CONTAINMENT_CODES)
+
+    def test_storage_open_failure_carries_its_errno_symbol(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "track.mp3")
+            with open(path, "wb") as handle:
+                handle.write(b"audio")
+            os.chmod(path, 0o000)
+            try:
+                with open_directory_path(root) as root_fd:
+                    with self.assertRaises(FilesystemAuthorityError) as caught:
+                        open_regular_relative(root_fd, "track.mp3")
+            finally:
+                os.chmod(path, 0o600)
+        self.assertEqual(caught.exception.code, "open_failed")
+        self.assertEqual(caught.exception.errno_symbol, "EACCES")
+        self.assertNotIn(caught.exception.code, _CONTAINMENT_CODES)
+
+    def test_unclassified_raise_sites_keep_the_default_code(self) -> None:
+        """Every pre-#868 raise site stays ``unspecified`` — deliberately
+        not a synonym for safe: consumers fail closed on it."""
+        with tempfile.TemporaryDirectory() as parent:
+            source = os.path.join(parent, "source")
+            os.mkdir(source)
+            with self.assertRaises(FilesystemAuthorityError) as caught:
+                with open_private_processing_root(source, source):
+                    pass
+        self.assertEqual(caught.exception.code, "unspecified")
 
 
 class TestPrivateProcessingAuthority(unittest.TestCase):
