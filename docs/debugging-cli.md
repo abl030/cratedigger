@@ -165,3 +165,70 @@ current-state snapshot: whether a replaced row stayed frozen after supersede,
 whether an earlier operation respected a proof lock, and whether an earlier
 operation widened a lossless-only search tier. Those properties remain owned
 by the stateful world model; a clean live audit does not claim to prove them.
+
+## Live-corpus render differential
+
+`.claude/rules/test-fidelity.md` § "Rule D" requires a PR that changes
+operator-facing derived text to measure the change against the real rows:
+old renderer vs new, over the whole corpus, reporting changed-row counts by
+changed field. `scripts/render_differential.py` is that harness. This section
+owns the one step that needs live-DB access — exporting the corpus.
+
+The corpus is **one JSON row object per line**, in the shape the production
+read seam hands the renderer. For the default classify target that is
+`lib/pipeline_db/download_log.py::get_log`'s SELECT: `download_log`, its
+candidate-evidence overlay aliases (the harness applies the production
+overlay itself), the originating row's distance, and the joined
+`album_requests` fields.
+
+```bash
+ssh doc2 'export PGPASSWORD=$(sudo cat /run/secrets/cratedigger-pgpass | grep "^PGPASSWORD=" | cut -d= -f2); pipeline-cli query --json -' <<'SQL' > /tmp/corpus.json
+SELECT dl.*,
+       e.format AS _evidence_source_format,
+       e.min_bitrate_kbps AS _evidence_source_min_bitrate,
+       e.avg_bitrate_kbps AS _evidence_source_avg_bitrate,
+       e.median_bitrate_kbps AS _evidence_source_median_bitrate,
+       e.lineage_version AS _evidence_lineage_version,
+       e.spectral_grade AS _evidence_spectral_grade,
+       e.spectral_bitrate_kbps AS _evidence_spectral_bitrate,
+       e.v0_subject AS _evidence_v0_probe_kind,
+       e.v0_min_bitrate_kbps AS _evidence_v0_probe_min_bitrate,
+       e.v0_avg_bitrate_kbps AS _evidence_v0_probe_avg_bitrate,
+       e.v0_median_bitrate_kbps AS _evidence_v0_probe_median_bitrate,
+       origin.beets_distance AS original_beets_distance,
+       ar.album_title, ar.artist_name, ar.mb_release_id,
+       ar.status AS request_status, ar.min_bitrate AS request_min_bitrate,
+       ar.search_filetype_override, ar.source AS request_source
+FROM download_log dl
+LEFT JOIN album_quality_evidence e ON e.id = dl.candidate_evidence_id
+LEFT JOIN download_log origin ON origin.id = dl.source_download_log_id
+JOIN album_requests ar ON dl.request_id = ar.id
+WHERE dl.id > 0 AND dl.id <= 4000
+ORDER BY dl.id;
+SQL
+```
+
+`pipeline-cli query --json` prints one indented JSON array, so a whole-table
+export is hundreds of megabytes in a single payload. **Batch it by id** — the
+`WHERE dl.id > … AND dl.id <= …` window above, stepped across `min(id)` to
+`max(id)` — and concatenate the batches into the JSONL the harness reads:
+
+```bash
+nix-shell --run "python3 -c '
+import glob, json
+with open(\"/tmp/corpus.jsonl\", \"w\") as out:
+    for path in sorted(glob.glob(\"/tmp/corpus-batch-*.json\")):
+        for row in json.load(open(path)):
+            out.write(json.dumps(row, separators=(\",\", \":\")) + \"\n\")
+'"
+```
+
+Batch order does not matter: the differential keys rows by id, and it fails
+closed if the two sides ever cover different rows.
+
+This is a read query. Never use `--write` for corpus export. The pipeline DB
+subnet is doc2-local, so the export runs there and the render runs wherever
+the code is.
+
+Then follow the three render/render/diff commands in
+`.claude/rules/test-fidelity.md` § "Rule D".
