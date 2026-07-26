@@ -79,13 +79,16 @@ from lib.download import (
 from lib.download_materialization import (
     REASON_EVENT_PATH_GONE_FROM_DISK,
     REASON_EVENT_PATH_NEVER_STAMPED,
+    REASON_MATERIALIZE_AUTHORITY_FAILED,
     REASON_PROCESSING_AUTHORITY_UNSAFE,
     REASON_PROCESSING_OPEN_FAILED_PREFIX,
     REASON_PROCESSING_PATH_MISSING,
     REASON_SLSKD_ROOT_MISSING,
     REASON_SLSKD_ROOT_OPEN_FAILED_PREFIX,
+    REASON_SLSKD_ROOT_REFUSED,
     REASON_SLSKD_ROOT_UNSAFE,
     REASON_SOURCE_OPEN_FAILED_PREFIX,
+    REASON_SOURCE_PREFLIGHT_REFUSED,
     REASON_UNSAFE_SOURCE_PATH,
     MaterializeFailed,
     MaterializeGuarded,
@@ -95,7 +98,7 @@ from lib.download_materialization import (
     shared_download_root_reason,
     source_preflight_reason,
 )
-from lib.fs_authority import _raise_path_error
+from lib.fs_authority import FilesystemAuthorityError, _raise_path_error
 from lib.grab_list import DownloadFile
 from lib.processing_paths import canonical_folder_for_row, processing_albums_dir
 from lib.quality import ActiveDownloadState
@@ -124,6 +127,14 @@ _STORAGE_PREFIXES = (
     REASON_PROCESSING_OPEN_FAILED_PREFIX,
     REASON_SLSKD_ROOT_OPEN_FAILED_PREFIX,
 )
+# "we could not classify this refusal". Its own family on purpose: a
+# subject that answered a containment noun here would be manufacturing a
+# security finding out of ignorance.
+_UNCLASSIFIED_REASONS = frozenset({
+    REASON_SOURCE_PREFLIGHT_REFUSED,
+    REASON_MATERIALIZE_AUTHORITY_FAILED,
+    REASON_SLSKD_ROOT_REFUSED,
+})
 # Restated, not imported: a checker that groups by the same object
 # production groups by would only echo the implementation back.
 _CONTAINMENT_CODES = frozenset({
@@ -139,6 +150,8 @@ def reason_family(reason: str) -> str:
         return "missing"
     if reason.startswith(_STORAGE_PREFIXES):
         return "storage"
+    if reason in _UNCLASSIFIED_REASONS:
+        return "unclassified"
     if reason == REASON_EVENT_PATH_NEVER_STAMPED:
         return "never_stamped"
     return "other"
@@ -298,16 +311,24 @@ class TestGeneratedAuthorityCodeMapping(unittest.TestCase):
             min_size=1,
             max_size=24,
         ),
+        structured=st.booleans(),
     )
-    @example(number=errno.ESTALE, path="share")
-    @example(number=errno.ENOENT, path="share")
+    @example(number=errno.ESTALE, path="share", structured=True)
+    @example(number=errno.ENOENT, path="share", structured=True)
+    # ``unspecified`` is unreachable from ``_raise_path_error`` but IS
+    # reachable from the module's policy raises, so patrol it explicitly.
+    @example(number=errno.ENOENT, path="share", structured=False)
     def test_the_three_subjects_never_share_a_reason(
-        self, number: int, path: str,
+        self, number: int, path: str, structured: bool,
     ) -> None:
         """I2b: the SAME refusal, read as three subjects, gives three
         distinct answers. Anything less means an operator cannot tell
         which filesystem to go look at."""
-        exc = _raise_path_error(path, OSError(number, os.strerror(number), path))
+        exc = (
+            _raise_path_error(path, OSError(number, os.strerror(number), path))
+            if structured
+            else FilesystemAuthorityError(f"policy refusal for {path}")
+        )
         reasons = [mapper(exc) for mapper in _SUBJECT_MAPPERS.values()]
         self.assertEqual(
             len(set(reasons)), len(reasons),
@@ -693,6 +714,21 @@ class TestMaterializeEvidenceCheckersTripOnViolations(unittest.TestCase):
                 cooldowns_applied=[],
                 log_outcomes=[],
                 persisted_details=[],
+            )
+
+    def test_partition_checker_rejects_ignorance_dressed_as_containment(self) -> None:
+        """The generated I2b property found this one: a subject that answers
+        its containment noun for an UNCLASSIFIED refusal manufactures a
+        security finding out of not knowing."""
+        for reason in _UNCLASSIFIED_REASONS:
+            self.assertEqual(reason_family(reason), "unclassified")
+            self.assertNotIn(reason, _CONTAINMENT_REASONS)
+        with self.assertRaises(AssertionError):
+            assert_reason_partition_invariant(
+                reason=REASON_UNSAFE_SOURCE_PATH,
+                repeated_reason=REASON_UNSAFE_SOURCE_PATH,
+                expected_family="unclassified",
+                errno_symbol=None,
             )
 
     def test_family_bucketing_rejects_an_unknown_reason(self) -> None:

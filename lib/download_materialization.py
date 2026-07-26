@@ -95,6 +95,9 @@ REASON_UNSAFE_SOURCE_PATH: Final = "unsafe_source_path"
 REASON_SOURCE_OPEN_FAILED_PREFIX: Final = "source_open_failed_"
 """Prefix for a storage-layer open failure; suffixed with the errno name."""
 
+REASON_SOURCE_PREFLIGHT_REFUSED: Final = "source_preflight_refused"
+"""A refusal of one stamped file with no structured code."""
+
 REASON_PROCESSING_AUTHORITY_UNSAFE: Final = "processing_authority_unsafe"
 """Our own private processing tree failed the containment boundary."""
 
@@ -143,9 +146,14 @@ _SOURCE_FILE_VOCABULARY: Final = _ReasonVocabulary(
     unsafe=REASON_UNSAFE_SOURCE_PATH,
     missing=REASON_EVENT_PATH_GONE_FROM_DISK,
     open_failed_prefix=REASON_SOURCE_OPEN_FAILED_PREFIX,
-    # Fail closed: an authority refusal we could not classify is
-    # untrusted, not benign.
-    unclassified=REASON_UNSAFE_SOURCE_PATH,
+    # NOT ``unsafe_source_path``: reporting a refusal we could not
+    # classify as a containment violation manufactures a security finding
+    # out of ignorance, which is the same lie as reporting one subject's
+    # failure in another's vocabulary. Every subject says "refused" when
+    # it does not know. (Unreachable in practice — every code the source
+    # preflight can hit is classified — so this is consistency, not a
+    # live branch.)
+    unclassified=REASON_SOURCE_PREFLIGHT_REFUSED,
 )
 _PRIVATE_TREE_VOCABULARY: Final = _ReasonVocabulary(
     unsafe=REASON_PROCESSING_AUTHORITY_UNSAFE,

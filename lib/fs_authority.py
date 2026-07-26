@@ -373,9 +373,9 @@ def open_private_processing_root(
     # bind mount or a symlinked slskd ancestor. Both roots must be physically
     # openable without following links and must stay disjoint after canonical
     # resolution.
-    with ExitStack() as shared_root:
+    with ExitStack() as shared_root_scope:
         try:
-            shared_root.enter_context(open_directory_path(slskd_download_dir))
+            shared_root_scope.enter_context(open_directory_path(slskd_download_dir))
         except FilesystemAuthorityError as exc:
             # ONLY the share's own open is re-attributed. The overlap proof
             # below concerns both roots and stays unattributed.
