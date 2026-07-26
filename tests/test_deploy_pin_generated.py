@@ -59,7 +59,53 @@ def assert_deploy_lifecycle_invariants(
     assert cleanup_attempts == worktree_adds
 
 
+def assert_divergent_receipt_invariants(
+    state: dict[str, Any], *, receipt: str, remote: str, new_target: str,
+    remote_matches_receipt: bool, verifier_available: bool,
+) -> None:
+    """A sibling receipt advances only through an equivalent trusted remote."""
+    commits = [event for event in state["events"] if event[0] == "commit"]
+    receipt_updates = [
+        event for event in state["events"]
+        if event[:2] == ["update-ref", "refs/cratedigger-deploy/cratedigger-src"]
+    ]
+    pushes = [event for event in state["events"] if event[0] == "push"]
+    if remote_matches_receipt and verifier_available:
+        assert len(commits) == 1
+        revision = commits[0][1]
+        assert state["commits"][revision]["parent"] == remote
+        assert state["commits"][revision]["target"] == new_target
+        assert state["receipt_rev"] == revision
+        assert len(receipt_updates) == 1
+        assert len(pushes) == 1
+    else:
+        assert state["receipt_rev"] == receipt
+        assert not commits
+        assert not receipt_updates
+        assert not pushes
+
+
 class TestDeployLifecycleCheckerKnownBad(unittest.TestCase):
+    def test_divergent_checker_rejects_a_pin_after_untrusted_remote(self) -> None:
+        bad = {
+            "events": [
+                ["commit", "new"],
+                ["update-ref", "refs/cratedigger-deploy/cratedigger-src", "new"],
+                ["push", "new", "header-present"],
+            ],
+            "commits": {"new": {"parent": "remote", "target": "new-target"}},
+            "receipt_rev": "new",
+        }
+        with self.assertRaises(AssertionError):
+            assert_divergent_receipt_invariants(
+                bad,
+                receipt="receipt",
+                remote="remote",
+                new_target="new-target",
+                remote_matches_receipt=False,
+                verifier_available=True,
+            )
+
     def test_checker_rejects_second_pin_commit(self) -> None:
         bad = {
             "events": [
@@ -218,6 +264,40 @@ class TestGeneratedDeployPinLifecycle(unittest.TestCase):
                 self.assertEqual(fake.state["commit_count"], commits_before_retry)
             assert_deploy_lifecycle_invariants(
                 fake.state, target=fake.TARGET_REV
+            )
+
+    @settings(max_examples=12, deadline=None)
+    @given(
+        remote_matches_receipt=st.booleans(),
+        verifier_available=st.booleans(),
+    )
+    @example(remote_matches_receipt=True, verifier_available=True)
+    @example(remote_matches_receipt=True, verifier_available=False)
+    @example(remote_matches_receipt=False, verifier_available=True)
+    @example(remote_matches_receipt=False, verifier_available=False)
+    def test_divergent_sibling_receipt_is_superseded_only_by_equivalent_verified_remote(
+        self, remote_matches_receipt: bool, verifier_available: bool,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            fake = FakeDeployPinCommands(Path(tempdir))
+            receipt = fake.seed_divergent_receipt(
+                remote_target=(
+                    fake.OLD_TARGET if remote_matches_receipt else fake.TARGET_REV
+                )
+            )
+            fake.update_state(
+                remote_signature_status="G" if verifier_available else "U"
+            )
+
+            fake.run(SCRIPT)
+
+            assert_divergent_receipt_invariants(
+                fake.state,
+                receipt=receipt,
+                remote=fake.OTHER_REV,
+                new_target=fake.TARGET_REV,
+                remote_matches_receipt=remote_matches_receipt,
+                verifier_available=verifier_available,
             )
 
 

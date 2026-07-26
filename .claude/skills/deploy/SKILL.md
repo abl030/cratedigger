@@ -57,7 +57,11 @@ exact same invocation after any failure: it recovers
 still at the pin's parent, it pushes the already-created commit; if Forgejo is
 already at the pending revision, it reports success without creating another
 commit; and if Forgejo advanced to an incompatible revision, it fails with the
-exact pending, base, and remote SHAs. Never delete or rewrite either private
+exact pending, base, and remote SHAs. A sibling receipt may advance only for a
+new target when current signed Forgejo master itself verifies and pins the
+receipt's exact old target; the ordinary signed transaction then compare-and-
+swaps the receipt after the helper rechecks that master has not moved. Never
+delete or rewrite either private
 recovery ref by hand during a retry. A transient or inconclusive verification
 result (for example, unavailable allowed-signers configuration) retains the
 pending candidate; only a definitively bad or unsigned candidate is discarded

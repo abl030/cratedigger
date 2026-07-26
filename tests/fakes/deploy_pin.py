@@ -201,7 +201,9 @@ elif args[:3] == ["log", "-1", "--format=%G?"]:
     if state.get("fault") == "post_commit_verify":
         fail("fake post-commit verification failed")
     commit = state["commits"].get(revision)
-    if state.get("fault") == "signature_unknown":
+    if revision == state["remote_rev"]:
+        signature_status = state["remote_signature_status"]
+    elif state.get("fault") == "signature_unknown":
         signature_status = "U"
     elif commit is not None and commit["signature_material"] == "bad":
         signature_status = "B"
@@ -243,6 +245,8 @@ elif args[:1] == ["show"] and args[1].endswith(":flake.lock"):
     if revision in state["commits"]:
         target = state["commits"][revision]["target"]
     elif revision == state["remote_rev"]:
+        if not state["remote_lock_readable"]:
+            fail("fake remote flake.lock is unreadable")
         target = state["remote_target"]
     else:
         fail(f"unknown fake revision: {revision}")
@@ -291,6 +295,10 @@ elif args[:1] == ["push"]:
     state["remote_ancestors"] = [*state["remote_ancestors"], commit["parent"]]
 elif args[:1] == ["ls-remote"] and args[-1] == "refs/heads/master":
     state["events"].append(["ls-remote"])
+    state["ls_remote_count"] += 1
+    if state["ls_remote_count"] == state["remote_change_on_ls_remote_call"]:
+        state["remote_rev"] = state["changed_remote_rev"]
+        state["remote_target"] = state["changed_remote_target"]
     print(f'{state["remote_rev"]}\trefs/heads/master')
 elif args[:2] == ["worktree", "remove"]:
     worktree = Path(args[-1])
@@ -345,6 +353,12 @@ class FakeDeployPinCommands:
             "remote_rev": self.BASE_REV,
             "remote_target": self.OLD_TARGET,
             "remote_ancestors": [],
+            "remote_signature_status": "G",
+            "remote_lock_readable": True,
+            "ls_remote_count": 0,
+            "remote_change_on_ls_remote_call": None,
+            "changed_remote_rev": "6" * 40,
+            "changed_remote_target": self.OLD_TARGET,
             "receipt_rev": None,
             "pending_rev": None,
             "worktree": None,
@@ -371,6 +385,27 @@ class FakeDeployPinCommands:
 
     def clear_fault(self) -> None:
         self.update_state(fault=None)
+
+    def seed_divergent_receipt(
+        self, *, remote_target: str | None = None
+    ) -> str:
+        """Seed a signed sibling receipt and current remote master."""
+        receipt = "5" * 40
+        state = self.state
+        state["commits"][receipt] = {
+            "parent": self.BASE_REV,
+            "target": self.OLD_TARGET,
+            "message": "cratedigger: prior pin",
+            "signature_material": "good",
+        }
+        state.update(
+            receipt_rev=receipt,
+            remote_rev=self.OTHER_REV,
+            remote_target=remote_target or self.OLD_TARGET,
+            remote_ancestors=[],
+        )
+        self.write_state(state)
+        return receipt
 
     def environment(
         self, target: str, *, extra_env: dict[str, str] | None = None

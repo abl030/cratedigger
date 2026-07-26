@@ -314,6 +314,56 @@ class TestDeployPinScript(unittest.TestCase):
         self.assertIn(f"remote={self.fake.OTHER_REV}", second.stderr)
         self.assertEqual(self.fake.state["commit_count"], 1)
 
+    def test_equivalent_sibling_receipt_allows_the_next_target(self) -> None:
+        receipt = self.fake.seed_divergent_receipt()
+
+        proc = self.fake.run(SCRIPT)
+        state = self.fake.state
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(state["commit_count"], 1)
+        self.assertEqual(state["remote_target"], self.fake.TARGET_REV)
+        self.assertEqual(state["receipt_rev"], state["remote_rev"])
+        self.assertNotEqual(state["receipt_rev"], receipt)
+        self.assertEqual(
+            state["commits"][state["receipt_rev"]]["parent"],
+            self.fake.OTHER_REV,
+        )
+        self.assertEqual(
+            sum(event[0] == "push" for event in state["events"]), 1
+        )
+
+    def test_divergent_receipt_fails_closed_without_equivalent_verified_remote(
+        self,
+    ) -> None:
+        cases = (
+            ("wrong target", {"remote_target": self.fake.TARGET_REV}),
+            ("bad signature", {"remote_signature_status": "B"}),
+            ("unknown signature", {"remote_signature_status": "U"}),
+            ("unreadable lock", {"remote_lock_readable": False}),
+            ("remote changed", {"remote_change_on_ls_remote_call": 2}),
+        )
+        for name, changes in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as td:
+                fake = FakeDeployPinCommands(Path(td))
+                receipt = fake.seed_divergent_receipt()
+                fake.update_state(**changes)
+
+                proc = fake.run(SCRIPT)
+                state = fake.state
+
+                self.assertNotEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(state["receipt_rev"], receipt)
+                self.assertEqual(state["commit_count"], 0)
+                self.assertFalse(any(event[0] == "push" for event in state["events"]))
+                self.assertFalse(
+                    any(
+                        event[0] == "update-ref"
+                        and event[1] == "refs/cratedigger-deploy/cratedigger-src"
+                        for event in state["events"]
+                    )
+                )
+
     def test_compatible_remote_advancement_allows_the_next_target(self) -> None:
         first = self.fake.run(SCRIPT)
         receipt = self.fake.state["receipt_rev"]

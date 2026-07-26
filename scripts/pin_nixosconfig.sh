@@ -15,6 +15,7 @@ INTENDED_REV=''
 INTENDED_TARGET=''
 INTENDED_BASE=''
 PENDING_BASE=''
+EQUIVALENT_REMOTE_TARGET=''
 
 die() {
   printf 'pin-nixosconfig: ERROR: %s\n' "$*" >&2
@@ -158,6 +159,22 @@ verify_pin_commit() {
     return 1
   fi
   VERIFIED_PARENT=$parent
+}
+
+remote_preserves_verified_receipt_target() {
+  local remote_revision=$1 receipt_revision=$2 receipt_target=$3
+  local receipt_parent=$4 requested_target=$5 remote_target
+
+  verify_ssh_signature "$remote_revision" || return $?
+  if ! remote_target=$(commit_locked_revision "$remote_revision"); then
+    die "could not read cratedigger-src lock from remote revision $remote_revision"
+    return 1
+  fi
+  if [[ "$remote_target" != "$receipt_target" ]]; then
+    die "different pin is still pending: requested=$requested_target pending_target=$receipt_target pending=$receipt_revision base=$receipt_parent remote=$remote_revision"
+    return 2
+  fi
+  EQUIVALENT_REMOTE_TARGET=$remote_target
 }
 
 forgejo_with_token() (
@@ -356,11 +373,19 @@ main() {
     if [[ "$remote_revision" != "$receipt_revision" ]] \
       && ! git -C "$NIXOSCONFIG_REPO" merge-base --is-ancestor \
         "$receipt_revision" "$remote_revision"; then
-      die "different pin is still pending: requested=$target_revision pending_target=$VERIFIED_TARGET pending=$receipt_revision base=$VERIFIED_PARENT remote=$remote_revision"
+      remote_preserves_verified_receipt_target \
+        "$remote_revision" "$receipt_revision" "$VERIFIED_TARGET" \
+        "$VERIFIED_PARENT" "$target_revision"
+      [[ "$(remote_master_with_token)" == "$remote_revision" ]] \
+        || die "Forgejo master changed while confirming equivalent receipt: fetched=$remote_revision"
     fi
   fi
 
-  remote_target=$(commit_locked_revision "$remote_revision")
+  if [[ -n "$EQUIVALENT_REMOTE_TARGET" ]]; then
+    remote_target=$EQUIVALENT_REMOTE_TARGET
+  else
+    remote_target=$(commit_locked_revision "$remote_revision")
+  fi
   if [[ "$remote_target" == "$target_revision" ]]; then
     verify_ssh_signature "$remote_revision"
     [[ "$(remote_master_with_token)" == "$remote_revision" ]] \
