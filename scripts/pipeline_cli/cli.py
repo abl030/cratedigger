@@ -31,6 +31,13 @@ from scripts.pipeline_cli.album_requests import (
     cmd_set_intent,
     cmd_status,
 )
+from scripts.pipeline_cli.api_mutations import (
+    cmd_pipeline_delete,
+    cmd_resolve_rg,
+    cmd_set_quality,
+    cmd_upgrade,
+    cmd_wrong_match_converge,
+)
 from scripts.pipeline_cli.query import cmd_query
 from scripts.pipeline_cli.routes_meta import _build_parser, cmd_routes
 from scripts.pipeline_cli.search_plan import (
@@ -81,6 +88,19 @@ def main():
     # command works without a reachable database.
     if args.command == "routes":
         sys.exit(cmd_routes(None, args))
+
+    # These adapters intentionally call the canonical web route.  They must
+    # return before mirror configuration or PipelineDB construction so an API
+    # mutation never acquires a hidden direct-DB fallback.
+    api_commands = {
+        "pipeline-delete": cmd_pipeline_delete,
+        "set-quality": cmd_set_quality,
+        "upgrade": cmd_upgrade,
+        "wrong-match-converge": cmd_wrong_match_converge,
+        "resolve-rg": cmd_resolve_rg,
+    }
+    if args.command in api_commands:
+        sys.exit(api_commands[args.command](None, args))
 
     # Mirror origins for every web.mb / web.discogs consumer in this
     # process (add --discogs, youtube-album, distance, Replace, field

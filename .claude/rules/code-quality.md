@@ -424,7 +424,7 @@ composition stalled every automation import in production.
 
 ## CLI ⇄ API Surface Symmetry
 - Every operator action must exist on **both** `pipeline-cli` and the web API. Adding only one is a contract drift waiting to happen — operators expect parity and will trip when it isn't there.
-- Both surfaces wrap the same service-layer method (e.g. `SearchPlanService.advance_for_request`). The CLI subcommand and the HTTP handler are thin adapters with matched outcome → exit-code / outcome → status-code mappings. Never duplicate logic across the two; route everything through the service.
+- Both surfaces use exactly one canonical execution path. Normally they wrap the same service-layer method (e.g. `SearchPlanService.advance_for_request`); when an existing web route is the canonical mutation boundary, the CLI may instead be a thin HTTP adapter to that route. In either shape, never duplicate logic or add a direct-DB fallback, and preserve matched outcome → exit-code / outcome → status-code mappings.
 - Reference layout (worked example: `search-plan advance` in PR for the cursor-advance feature):
   - `lib/<thing>_service.py` — service method + typed `Result` dataclass (one outcome string per branch)
   - `lib/pipeline_db/` — atomic mutation with `FOR UPDATE` row lock

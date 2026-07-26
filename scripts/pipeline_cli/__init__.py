@@ -14,6 +14,8 @@ mechanical pattern as the ``lib/quality/`` split, issue #477):
     quality.py           quality / repair-spectral (quality-gate debug)
     imports.py           force-import / import-jobs / import-job-recovery /
                        import-preview
+    api_mutations.py     API-backed pipeline-delete / set-quality / upgrade /
+                         wrong-match-converge / resolve-rg
     wrong_match.py       wrong-match-triage / -delete / -delete-group
     search_plan.py       search-plan show / regenerate / dry-run /
                        saturation / advance / history
@@ -70,6 +72,13 @@ from scripts.pipeline_cli.album_requests import (
     tracks_from_mb_release,
 )
 from scripts.pipeline_cli.audit import cmd_audit_world
+from scripts.pipeline_cli.api_mutations import (
+    cmd_pipeline_delete,
+    cmd_resolve_rg,
+    cmd_set_quality,
+    cmd_upgrade,
+    cmd_wrong_match_converge,
+)
 from scripts.pipeline_cli.query import cmd_query
 from scripts.pipeline_cli.show import cmd_show
 from scripts.pipeline_cli.quality import (
@@ -131,10 +140,12 @@ __all__ = [
     "cmd_list",
     "cmd_library_delete",
     "cmd_long_tail",
+    "cmd_pipeline_delete",
     "cmd_quality",
     "cmd_query",
     "cmd_repair_spectral",
     "cmd_replace",
+    "cmd_resolve_rg",
     "cmd_routes",
     "cmd_search_plan_advance",
     "cmd_search_plan_dry_run",
@@ -144,13 +155,16 @@ __all__ = [
     "cmd_search_plan_show",
     "cmd_set",
     "cmd_set_intent",
+    "cmd_set_quality",
     "cmd_show",
     "cmd_status",
     "cmd_triage_list",
     "cmd_triage_quarantine",
     "cmd_triage_show",
+    "cmd_upgrade",
     "cmd_wrong_match_delete",
     "cmd_wrong_match_delete_group",
+    "cmd_wrong_match_converge",
     "cmd_wrong_match_triage",
     "cmd_youtube_album",
     "cmd_youtube_rescue",

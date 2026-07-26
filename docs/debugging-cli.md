@@ -3,7 +3,9 @@
 `pipeline-cli` is Cratedigger's writable operator and agent control plane. Its
 typed subcommands are the normal interface for routine lifecycle, import,
 destructive, and repair actions; each mutation follows the shared service/API
-contract. `pipeline-cli routes` (or `pipeline-cli routes --json`) discovers the
+contract. Five existing web mutations are deliberately API-backed: the CLI
+relays their canonical route response and does not construct a PipelineDB or
+configure mirrors. `pipeline-cli routes` (or `pipeline-cli routes --json`) discovers the
 live parser surface. This document is the authoritative active command
 reference; `tests/test_docs_audit.py` requires its capability list to match the
 parser exactly.
@@ -91,6 +93,22 @@ infer success from metadata absence. `status=partial` with
 `album_deleted=true` means Beets deletion completed but the named pipeline row
 remains after a purge failure.
 
+## API-backed mutation commands
+
+`pipeline-delete`, `set-quality`, `upgrade`, `wrong-match-converge`, and
+`resolve-rg` call the canonical web route. The Nix wrapper supplies the
+configured trusted-loopback origin; standalone/dev defaults to
+`http://127.0.0.1:8085`, overridden globally with `--api-base ORIGIN`. Valid
+JSON HTTP responses, including 5xx responses, are relayed on stdout. Any 2xx
+exits 0; 404 exits 2; 400/422 exits 3; 409 exits 4; other statuses exit 5.
+Locally generated transport/protocol failures (including malformed origins or
+non-object JSON responses) exit 5 with a structured error on stderr.
+`pipeline-delete ID --confirm DELETE` and
+`wrong-match-converge ID THRESHOLD_MILLI --apply` make no HTTP call when the
+local intent gate is missing. Future CD-SEC-02 perimeter work must provide CLI
+credentials/authorization or explicitly retain the trusted-loopback contract;
+these adapters do not bypass authentication.
+
 ## Command capability surface
 
 - `pipeline-cli add` — Add a MusicBrainz or Discogs request.
@@ -105,10 +123,12 @@ remains after a purge failure.
 - `pipeline-cli library-delete` — Delete one exact server-owned Beets album.
 - `pipeline-cli list` — List album requests.
 - `pipeline-cli long-tail` — Show the wanted long-tail worklist.
+- `pipeline-cli pipeline-delete` — Delete a pipeline request through its canonical web route.
 - `pipeline-cli quality` — Simulate quality decisions and replay current candidate evidence.
 - `pipeline-cli query` — Run one read-only SQL statement, or the explicit write escape hatch.
 - `pipeline-cli repair-spectral` — Repair stale spectral state.
 - `pipeline-cli replace` — Supersede a request with another exact pressing in its release family.
+- `pipeline-cli resolve-rg` — Resolve a request release group through its canonical web route.
 - `pipeline-cli routes` — Discover every parser command, argument, and description.
 - `pipeline-cli search-plan advance` — Advance one persisted search-plan cursor.
 - `pipeline-cli search-plan dry-run` — Generate a request plan without persisting it.
@@ -118,16 +138,19 @@ remains after a purge failure.
 - `pipeline-cli search-plan show` — Show one request's plan, cursor, items, and provenance.
 - `pipeline-cli set` — Apply a typed request lifecycle transition.
 - `pipeline-cli set-intent` — Set lossless-on-disk intent.
+- `pipeline-cli set-quality` — Set request quality through its canonical web route.
 - `pipeline-cli show` — Show a request, attempts, and quality state.
 - `pipeline-cli status` — Show request counts by lifecycle status.
 - `pipeline-cli triage list` — List a named triage cohort.
 - `pipeline-cli triage quarantine` — Read-only unreferenced immediate quarantine-folder scan.
 - `pipeline-cli triage show` — Compose per-request unfindable, field, and search forensics.
 - `pipeline-cli wrong-match-delete` — Delete one visible Wrong Matches source folder.
+- `pipeline-cli wrong-match-converge` — Converge one Wrong Matches request through its canonical web route.
 - `pipeline-cli wrong-match-delete-group` — Delete visible Wrong Matches folders for one request.
 - `pipeline-cli wrong-match-triage` — Converge the full Wrong Matches queue using persisted evidence.
 - `pipeline-cli youtube-album` — Resolve a release to the YouTube Music album matrix.
 - `pipeline-cli youtube-rescue` — Submit a YouTube Music rescue ingest.
+- `pipeline-cli upgrade` — Queue an exact release upgrade through its canonical web route.
 
 ## World audit scope
 

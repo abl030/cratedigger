@@ -17,6 +17,10 @@ from typing import cast, TYPE_CHECKING
 
 from lib.pipeline_db import DEFAULT_DSN
 from scripts.pipeline_cli.audit import add_audit_subparser
+from scripts.pipeline_cli.api_mutations import (
+    DEFAULT_API_BASE,
+    add_api_mutation_subparsers,
+)
 from scripts.pipeline_cli.album_requests import add_album_requests_subparsers
 from scripts.pipeline_cli.beets_distance import add_beets_distance_subparser
 from scripts.pipeline_cli.destructive import add_destructive_subparsers
@@ -45,6 +49,10 @@ def _build_parser() -> tuple[
     """
     parser = argparse.ArgumentParser(description="Pipeline CLI — manage download pipeline DB")
     parser.add_argument("--dsn", default=DEFAULT_DSN, help="PostgreSQL connection string")
+    parser.add_argument(
+        "--api-base", default=DEFAULT_API_BASE,
+        help="Web API origin for API-backed mutation commands.",
+    )
     sub = parser.add_subparsers(dest="command")
 
     # list / add / status / disk-coverage / set / set-intent
@@ -88,6 +96,9 @@ def _build_parser() -> tuple[
 
     # youtube-album / youtube-rescue
     add_youtube_subparsers(sub)
+
+    # API-backed canonical mutation adapters (CD-QUAL-01).
+    add_api_mutation_subparsers(sub)
 
     # routes (U18 step 3): self-document the CLI surface. Mirrors
     # ``GET /api/_index`` on the web side; both are read-only and zero-arg.
