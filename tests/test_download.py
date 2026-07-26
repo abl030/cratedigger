@@ -2605,13 +2605,19 @@ class TestEventPathMaterialization(unittest.TestCase):
 
     FNAME = "04 How To Disappear Completely.mp3"
 
-    def _album(self, tmpdir, *, local_path):
-        files = [make_download_file(
-            filename=f"@@wcren\\Music\\Radiohead\\Kid A\\{self.FNAME}",
-            file_dir="@@wcren\\Music\\Radiohead\\Kid A",
-            size=len("fake audio"),
-        )]
-        files[0].local_path = local_path
+    def _album(self, tmpdir, *, local_path, files=None):
+        """Build one album wired to ``tmpdir`` as the slskd download root.
+
+        Pass ``files`` for a multi-file manifest; ``local_path`` is then
+        ignored (each supplied file carries its own stamp).
+        """
+        if files is None:
+            files = [make_download_file(
+                filename=f"@@wcren\\Music\\Radiohead\\Kid A\\{self.FNAME}",
+                file_dir="@@wcren\\Music\\Radiohead\\Kid A",
+                size=len("fake audio"),
+            )]
+            files[0].local_path = local_path
         album = make_grab_list_entry(
             files=files, mb_release_id="", artist="Radiohead",
             title="Kid A", year="2000")
@@ -2757,6 +2763,43 @@ class TestEventPathMaterialization(unittest.TestCase):
             joined = "\n".join(logs.output)
             self.assertIn("reason=event_path_gone_from_disk", joined)
 
+    def test_one_missing_file_in_a_healthy_share_is_not_blamed_on_the_share(self):
+        """Issue #868 D1: the share is now opened ONCE and held for the
+        whole manifest, so a refusal of the ROOT is attributable. The other
+        direction must still hold: a healthy share missing one file is the
+        FILE's problem, and must not escalate to a `slskd_root_*` reason.
+        """
+        from lib.download_processing import CompletionFailed, process_completed_album
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            present = os.path.join(tmpdir, "Kid A", "01 Present.mp3")
+            os.makedirs(os.path.dirname(present))
+            with open(present, "w") as fp:
+                fp.write("fake audio")
+            files = [
+                make_download_file(
+                    filename="@@w\\Music\\R\\Kid A\\01 Present.mp3",
+                    file_dir="@@w\\Music\\R\\Kid A", size=len("fake audio"),
+                ),
+                make_download_file(
+                    filename="@@w\\Music\\R\\Kid A\\02 Absent.mp3",
+                    file_dir="@@w\\Music\\R\\Kid A", size=10,
+                ),
+            ]
+            files[0].local_path = present
+            files[1].local_path = os.path.join(tmpdir, "Kid A", "02 Absent.mp3")
+            album, ctx = self._album(tmpdir, local_path=None, files=files)
+
+            result = process_completed_album(album, ctx, import_job_id=1)
+
+            self.assertIsInstance(result, CompletionFailed)
+            assert isinstance(result, CompletionFailed)
+            self.assertEqual(result.reason, "event_path_gone_from_disk")
+            self.assertFalse(result.reason.startswith("slskd_root_"))
+            # The first file's bytes are untouched: a refused preflight
+            # copies and unlinks nothing.
+            self.assertTrue(os.path.exists(present))
+
     def test_symlinked_stamp_is_a_containment_reason_not_a_storage_one(self):
         """Issue #868 I3: a symlinked source path is a SECURITY refusal.
 
@@ -2852,13 +2895,7 @@ class TestEventPathMaterialization(unittest.TestCase):
                 ),
             ]
             files[0].local_path = event_src
-            album = make_grab_list_entry(
-                files=files, mb_release_id="", artist="Radiohead",
-                title="Kid A", year="2000")
-            ctx = _make_ctx()
-            cfg = cast(Any, ctx.cfg)
-            cfg.slskd_download_dir = tmpdir
-            cfg.beets_validation_enabled = False
+            album, ctx = self._album(tmpdir, local_path=None, files=files)
 
             with self.assertLogs("cratedigger", level=logging.ERROR) as logs:
                 result = process_completed_album(

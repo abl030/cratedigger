@@ -50,7 +50,7 @@ TESTS_TYPING_RATCHET_BASELINE: dict[str, dict[str, int]] = {
     "tests/test_dispatch_from_db.py": {"any": 1, "cast": 1, "type_ignore": 12},
     "tests/test_dispatch_outcomes_generated.py": {"any": 2, "cast": 2, "type_ignore": 5},
     "tests/test_do_mark.py": {"type_ignore": 2},
-    "tests/test_download.py": {"any": 65, "cast": 57, "type_ignore": 1},
+    "tests/test_download.py": {"any": 64, "cast": 56, "type_ignore": 1},
     "tests/test_download_errors_generated.py": {"any": 10},
     "tests/test_download_reducer.py": {"type_ignore": 3},
     "tests/test_enqueue_fanout.py": {"any": 2, "cast": 14},

@@ -98,7 +98,13 @@ from lib.download_materialization import (
     shared_download_root_reason,
     source_preflight_reason,
 )
-from lib.fs_authority import FilesystemAuthorityError, _raise_path_error
+from lib.fs_authority import (
+    FilesystemAuthorityError,
+    SharedDownloadRootError,
+    _raise_path_error,
+    open_regular_under_held_root,
+    open_shared_download_root,
+)
 from lib.grab_list import DownloadFile
 from lib.processing_paths import canonical_folder_for_row, processing_albums_dir
 from lib.quality import ActiveDownloadState
@@ -386,6 +392,15 @@ class _World:
         self.file = file
         self.restore_modes: list[str] = []
         self.sockets: list[socket.socket] = []
+        # The bytes a refused materialize must not touch, and whether this
+        # world has any in the first place. Measured, never assumed: a
+        # hardcoded ``source_exists=True`` would make the shared
+        # publication proof a tautology.
+        self.source_path: str | None = None
+        self.source_survives = False
+
+    def source_present(self) -> bool:
+        return self.source_path is not None and os.path.lexists(self.source_path)
 
     def close(self) -> None:
         for path in self.restore_modes:
@@ -426,44 +441,67 @@ def _build_world(parent: str, world: str, leaf: str) -> _World:
         file.local_path = None
     elif world == "gone_from_disk":
         file.local_path = stamped
+        built.source_path = stamped
     elif world == "symlink":
         outside = os.path.join(parent, "outside.mp3")
         with open(outside, "wb") as handle:
             handle.write(b"audio")
         os.symlink(outside, stamped)
         file.local_path = stamped
+        # The link is refused; the bytes it points at must be untouched.
+        built.source_path = outside
+        built.source_survives = True
     elif world == "escape":
         escaped = os.path.join(parent, f"{leaf}-escaped.mp3")
         with open(escaped, "wb") as handle:
             handle.write(b"audio")
         file.local_path = escaped
+        built.source_path = escaped
+        built.source_survives = True
     elif world == "special_fifo":
         os.mkfifo(stamped)
         file.local_path = stamped
+        built.source_path = stamped
+        built.source_survives = True
     elif world == "special_socket":
         # A socket fails at ``open`` with ENXIO, BEFORE any descriptor
         # exists for an ``S_ISREG`` check to inspect — the shape that
         # errno-only classification files under the wrong family.
+        #
+        # A FIXED SHORT NAME on purpose: AF_UNIX ``sun_path`` is ~107
+        # bytes, and TMPDIR here comes from XDG_RUNTIME_DIR /
+        # CRATEDIGGER_TEST_RAM_ROOT (scripts/test_tmpfs.sh). A generated
+        # leaf under a longer root overruns it, and ``bind`` would raise
+        # "AF_UNIX path too long" — a hard suite failure, since this repo
+        # bans skips.
+        stamped = os.path.join(source, "s")
         sock = socket.socket(socket.AF_UNIX)
         built.sockets.append(sock)
         sock.bind(stamped)
         file.local_path = stamped
+        built.source_path = stamped
+        built.source_survives = True
     elif world == "unreadable":
         with open(stamped, "wb") as handle:
             handle.write(b"audio")
         os.chmod(stamped, 0o000)
         built.restore_modes.append(stamped)
         file.local_path = stamped
+        built.source_path = stamped
+        built.source_survives = True
     elif world == "shared_root_missing":
         # The whole configured share is gone. Nothing about this is a
         # statement about our private tree OR about one file's stamp.
         file.local_path = stamped
+        built.source_path = stamped
     elif world == "shared_root_unreadable":
         with open(stamped, "wb") as handle:
             handle.write(b"audio")
         os.chmod(source, 0o000)
         built.restore_modes.append(source)
         file.local_path = stamped
+        built.source_path = stamped
+        built.source_survives = True
     else:  # pragma: no cover - the strategy only produces the worlds above
         raise AssertionError(f"unknown world {world!r}")
     return built
@@ -474,6 +512,87 @@ _LEAVES = st.text(
     min_size=1,
     max_size=24,
 )
+
+
+def assert_leg_attribution_invariant(
+    *,
+    leg: str,
+    raised: BaseException,
+    reason: str,
+) -> None:
+    """WHICH LEG refused decides the subject, by exception type alone.
+
+    The share's own open raises the typed refusal; anything beneath it
+    stays ordinary. A caller that got this backwards would report "the
+    whole mount is unreachable" for one absent track, or blame a single
+    event stamp for a dead share.
+    """
+    typed = isinstance(raised, SharedDownloadRootError)
+    if typed != (leg == "root"):
+        raise AssertionError(
+            f"{leg} leg raised {type(raised).__name__}: attribution is "
+            "inverted or absent",
+        )
+    expected_share = leg == "root"
+    is_share_reason = reason.startswith("slskd_root_")
+    if is_share_reason != expected_share:
+        raise AssertionError(
+            f"{leg} leg produced reason {reason!r}, which names the "
+            f"{'share' if is_share_reason else 'file'} — wrong subject",
+        )
+
+
+class TestGeneratedSharedRootLegAttribution(unittest.TestCase):
+    """D1: a root refusal and a descendant refusal are told apart by TYPE."""
+
+    @given(
+        leaf=_LEAVES,
+        breakage=st.sampled_from(("absent", "unreadable")),
+        leg=st.sampled_from(("root", "descendant")),
+    )
+    @example(leaf="track", breakage="absent", leg="root")
+    @example(leaf="track", breakage="absent", leg="descendant")
+    @example(leaf="track", breakage="unreadable", leg="root")
+    @settings(deadline=None)
+    def test_the_failing_leg_decides_the_vocabulary(
+        self, leaf: str, breakage: str, leg: str,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as parent:
+            root = os.path.join(parent, "downloads")
+            candidate = os.path.join(root, f"{leaf}.mp3")
+            broken = root if leg == "root" else candidate
+            os.mkdir(root)
+            if leg == "descendant" or breakage == "unreadable":
+                if leg == "descendant":
+                    with open(candidate, "wb") as handle:
+                        handle.write(b"audio")
+                if breakage == "unreadable":
+                    os.chmod(broken, 0o000)
+                else:
+                    os.unlink(broken)
+            elif breakage == "absent":
+                os.rmdir(root)
+
+            raised: BaseException | None = None
+            try:
+                with open_shared_download_root(root) as root_fd:
+                    opened = open_regular_under_held_root(root, root_fd, candidate)
+                    opened.close()
+            except FilesystemAuthorityError as exc:
+                raised = exc
+            finally:
+                if breakage == "unreadable" and os.path.lexists(broken):
+                    os.chmod(broken, 0o700)
+
+            self.assertIsNotNone(raised)
+            assert raised is not None
+            assert isinstance(raised, FilesystemAuthorityError)
+            reason = (
+                shared_download_root_reason(raised)
+                if isinstance(raised, SharedDownloadRootError)
+                else source_preflight_reason(raised)
+            )
+            assert_leg_attribution_invariant(leg=leg, raised=raised, reason=reason)
 
 
 class TestGeneratedMaterializeFailureReasons(unittest.TestCase):
@@ -522,9 +641,13 @@ class TestGeneratedMaterializeFailureReasons(unittest.TestCase):
             self.assertFalse(os.path.isdir(canonical))
             assert_publication_invariant(
                 result=result,
-                source_exists=True,
-                expected_source_exists=True,
-                destination_names=set(),
+                source_exists=built.source_present(),
+                expected_source_exists=built.source_survives,
+                destination_names=(
+                    set(os.listdir(canonical))
+                    if os.path.isdir(canonical)
+                    else set()
+                ),
                 expected_names=set(),
                 artifact_names=os.listdir(albums_root),
                 name_max=os.pathconf(albums_root, "PC_NAME_MAX"),
@@ -714,6 +837,34 @@ class TestMaterializeEvidenceCheckersTripOnViolations(unittest.TestCase):
                 cooldowns_applied=[],
                 log_outcomes=[],
                 persisted_details=[],
+            )
+
+    def test_leg_checker_rejects_a_root_refusal_blamed_on_one_file(self) -> None:
+        """The exact D1 defect: the share refused, but the reason names a
+        file's event stamp."""
+        with self.assertRaises(AssertionError):
+            assert_leg_attribution_invariant(
+                leg="root",
+                raised=SharedDownloadRootError.wrapping(
+                    FilesystemAuthorityError("gone", code="missing"),
+                ),
+                reason=REASON_EVENT_PATH_GONE_FROM_DISK,
+            )
+
+    def test_leg_checker_rejects_an_untyped_root_refusal(self) -> None:
+        with self.assertRaises(AssertionError):
+            assert_leg_attribution_invariant(
+                leg="root",
+                raised=FilesystemAuthorityError("gone", code="missing"),
+                reason=REASON_SLSKD_ROOT_MISSING,
+            )
+
+    def test_leg_checker_rejects_one_file_escalated_to_the_share(self) -> None:
+        with self.assertRaises(AssertionError):
+            assert_leg_attribution_invariant(
+                leg="descendant",
+                raised=FilesystemAuthorityError("gone", code="missing"),
+                reason=REASON_SLSKD_ROOT_MISSING,
             )
 
     def test_partition_checker_rejects_ignorance_dressed_as_containment(self) -> None:

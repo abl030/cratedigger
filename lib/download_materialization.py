@@ -32,7 +32,8 @@ from lib.fs_authority import (
     open_private_processing_root,
     open_relative_directory,
     open_regular_relative,
-    open_regular_under_root,
+    open_regular_under_held_root,
+    open_shared_download_root,
     rename_relative_noreplace,
     remove_relative_tree,
     same_open_directory,
@@ -954,25 +955,41 @@ def _materialize_processing_dir(
                     # entirely, and WHICH open failure it was decides
                     # whether the operator is looking at a hostile peer
                     # path or a sick mount.
-                    for file in album_data.files:
-                        if file.local_path is None:
-                            return _record_materialize_failure(
-                                request_id,
-                                REASON_EVENT_PATH_NEVER_STAMPED,
-                                f"no completion event stamped {file.filename!r}",
-                                level=logging.ERROR,
-                            )
-                        try:
-                            opened_sources.append(open_regular_under_root(
-                                ctx.cfg.slskd_download_dir, file.local_path,
-                            ))
-                        except FilesystemAuthorityError as exc:
-                            return _record_materialize_failure(
-                                request_id,
-                                source_preflight_reason(exc),
-                                f"local_path={file.local_path!r}: {exc}",
-                                level=logging.ERROR,
-                            )
+                    #
+                    # The share is opened ONCE and held across the whole
+                    # manifest. Re-opening it per file gave a flaky mount N
+                    # chances per album to refuse, and every one of those
+                    # would have been blamed on a single file's event stamp
+                    # rather than on the share; a root refusal now leaves
+                    # here as SharedDownloadRootError and is attributed by
+                    # the handler below. Holding one proven descriptor also
+                    # means the whole manifest is opened beneath the SAME
+                    # inode, so a root swapped mid-loop cannot redirect its
+                    # second half.
+                    with open_shared_download_root(
+                        ctx.cfg.slskd_download_dir,
+                    ) as slskd_fd:
+                        for file in album_data.files:
+                            if file.local_path is None:
+                                return _record_materialize_failure(
+                                    request_id,
+                                    REASON_EVENT_PATH_NEVER_STAMPED,
+                                    f"no completion event stamped {file.filename!r}",
+                                    level=logging.ERROR,
+                                )
+                            try:
+                                opened_sources.append(open_regular_under_held_root(
+                                    ctx.cfg.slskd_download_dir,
+                                    slskd_fd,
+                                    file.local_path,
+                                ))
+                            except FilesystemAuthorityError as exc:
+                                return _record_materialize_failure(
+                                    request_id,
+                                    source_preflight_reason(exc),
+                                    f"local_path={file.local_path!r}: {exc}",
+                                    level=logging.ERROR,
+                                )
 
                     temp_name = f"{transaction_prefix}{secrets.token_hex(16)}"
                     os.mkdir(temp_name, 0o700, dir_fd=albums_fd)

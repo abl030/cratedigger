@@ -20,10 +20,13 @@ from lib.download_materialization import (
 )
 from lib.fs_authority import (
     FilesystemAuthorityError,
+    SharedDownloadRootError,
     open_configured_quarantine_directory,
     open_directory_path,
     open_private_processing_root,
     open_regular_relative,
+    open_regular_under_held_root,
+    open_shared_download_root,
 )
 from lib.grab_list import DownloadFile
 from lib.import_preview import (
@@ -208,6 +211,69 @@ class TestAuthorityFailureClassification(unittest.TestCase):
         self.assertEqual(caught.exception.code, "open_failed")
         self.assertEqual(caught.exception.errno_symbol, "EACCES")
         self.assertNotIn(caught.exception.code, _CONTAINMENT_CODES)
+
+    def test_shared_root_refusal_is_typed_but_a_descendant_refusal_is_not(self) -> None:
+        """Issue #868 D1: WHICH LEG failed decides the vocabulary.
+
+        The preflight used to re-open the share pathname once per file, so
+        a refusal of the whole share arrived indistinguishable from a
+        refusal of one stamped file and was reported as
+        ``event_path_gone_from_disk`` — a claim about one file's event
+        stamp when the entire mount was unreachable.
+        """
+        with tempfile.TemporaryDirectory() as parent:
+            absent_root = os.path.join(parent, "never-created")
+            with self.assertRaises(SharedDownloadRootError) as root_caught:
+                with open_shared_download_root(absent_root):
+                    pass
+            self.assertEqual(root_caught.exception.code, "missing")
+
+            healthy_root = os.path.join(parent, "downloads")
+            os.mkdir(healthy_root)
+            with open_shared_download_root(healthy_root) as root_fd:
+                with self.assertRaises(FilesystemAuthorityError) as file_caught:
+                    open_regular_under_held_root(
+                        healthy_root, root_fd,
+                        os.path.join(healthy_root, "absent.mp3"),
+                    )
+            # Same code, deliberately NOT the same type: a healthy share
+            # missing one file is the file's problem, not the share's.
+            self.assertEqual(file_caught.exception.code, "missing")
+            self.assertNotIsInstance(file_caught.exception, SharedDownloadRootError)
+
+    def test_unreadable_shared_root_keeps_its_errno_through_re_attribution(self) -> None:
+        with tempfile.TemporaryDirectory() as parent:
+            root = os.path.join(parent, "downloads")
+            os.mkdir(root)
+            os.chmod(root, 0o000)
+            try:
+                with self.assertRaises(SharedDownloadRootError) as caught:
+                    with open_shared_download_root(root):
+                        pass
+            finally:
+                os.chmod(root, 0o700)
+        self.assertEqual(caught.exception.code, "open_failed")
+        self.assertEqual(caught.exception.errno_symbol, "EACCES")
+
+    def test_held_root_opens_every_manifest_file_under_one_descriptor(self) -> None:
+        """Must-still-work guard for D1: holding the share open once must
+        not break an ordinary multi-file manifest."""
+        with tempfile.TemporaryDirectory() as parent:
+            root = os.path.join(parent, "downloads")
+            os.makedirs(os.path.join(root, "peer"))
+            names = ["01.mp3", "02.mp3", "03.mp3"]
+            for index, name in enumerate(names):
+                with open(os.path.join(root, "peer", name), "wb") as handle:
+                    handle.write(bytes([index]) * 4)
+            with open_shared_download_root(root) as root_fd:
+                for index, name in enumerate(names):
+                    opened = open_regular_under_held_root(
+                        root, root_fd, os.path.join(root, "peer", name),
+                    )
+                    try:
+                        self.assertEqual(os.read(opened.fd, 8), bytes([index]) * 4)
+                    finally:
+                        opened.close()
 
     def test_unclassified_raise_sites_keep_the_default_code(self) -> None:
         """Every pre-#868 raise site stays ``unspecified`` — deliberately

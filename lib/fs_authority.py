@@ -374,12 +374,12 @@ def open_private_processing_root(
     # openable without following links and must stay disjoint after canonical
     # resolution.
     with ExitStack() as shared_root_scope:
-        try:
-            shared_root_scope.enter_context(open_directory_path(slskd_download_dir))
-        except FilesystemAuthorityError as exc:
-            # ONLY the share's own open is re-attributed. The overlap proof
-            # below concerns both roots and stays unattributed.
-            raise SharedDownloadRootError.wrapping(exc) from exc
+        # ONLY the share's own open is re-attributed (inside the helper).
+        # The overlap proof below concerns the RELATION between two
+        # configured roots, not either subsystem's health, so it stays
+        # unattributed and fails closed.
+        shared_root_scope.enter_context(
+            open_shared_download_root(slskd_download_dir))
         try:
             physical_overlap = paths_overlap(
                 os.path.realpath(processing_dir),
@@ -549,11 +549,47 @@ def open_regular_relative(root_fd: int, relative_path: str) -> OpenedRegularFile
         raise
 
 
-def open_regular_under_root(root: str, candidate: str) -> OpenedRegularFile:
-    """Open an absolute candidate only through the supplied authority root."""
-    relative = _relative_to(root, candidate)
-    with open_directory_path(root) as root_fd:
-        return open_regular_relative(root_fd, relative)
+def open_regular_under_held_root(
+    root: str, root_fd: int, candidate: str,
+) -> OpenedRegularFile:
+    """Open an absolute candidate through an ALREADY-HELD authority root.
+
+    Replaces the former ``open_regular_under_root``, which re-opened the
+    root pathname for every candidate. Two reasons that was wrong for a
+    batch (issue #868):
+
+    * Attribution. Each re-open was a fresh chance for the root itself to
+      refuse, and the caller had no way to tell "the whole share is
+      unreachable" from "this one file is". On a flaky mount that is N
+      chances per album, every one of them mis-attributed.
+    * Identity. Re-resolving a name per candidate means the second half of
+      a manifest can be opened under a *different* inode than the first if
+      the root is swapped mid-loop. One held descriptor makes the whole
+      batch provably one root — the module's own doctrine.
+
+    ``root`` is still needed for the lexical containment check; ``root_fd``
+    is the authority everything is actually opened beneath.
+    """
+    return open_regular_relative(root_fd, _relative_to(root, candidate))
+
+
+@contextmanager
+def open_shared_download_root(path: str) -> Generator[int, None, None]:
+    """Hold the UNTRUSTED shared download root open for a whole batch.
+
+    A refusal of the root ITSELF is raised as
+    :class:`SharedDownloadRootError`; refusals of anything beneath it stay
+    ordinary and are the caller's own to classify. That split is what lets
+    a caller say "the share is unreachable" instead of blaming one file
+    (issue #868). Only the open is guarded — an exception thrown into the
+    body is the caller's and passes through untouched.
+    """
+    with ExitStack() as scope:
+        try:
+            fd = scope.enter_context(open_directory_path(path))
+        except FilesystemAuthorityError as exc:
+            raise SharedDownloadRootError.wrapping(exc) from exc
+        yield fd
 
 
 def unlink_if_same(opened: OpenedRegularFile) -> bool:
