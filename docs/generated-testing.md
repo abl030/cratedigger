@@ -384,6 +384,10 @@ After the `SLOW` lines, every burst now prints what each property actually
 generated, measured from Hypothesis' own `statistics` collector in the child
 that ran it:
 
+Measure depth only with the supported isolated runner/report. Never
+import or load every generated module into one process: the result is
+order-contaminated rather than a valid per-property depth measurement.
+
 ```
 DEPTH 351 properties measured, 68 shallow (space exhausted below budget), 6 discarding at least 10% of their examples
 SHALLOW 2 worlds vs 150 examples per shard (1 shard, 150 total) tests.test_pin_retention_generated.TestGeneratedPinRetention.test_every_status_is_pending_or_terminal
