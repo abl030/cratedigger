@@ -1366,7 +1366,7 @@ def log_validation_result(album_data: GrabListEntry, result: ValidationResult,
 
 def setup_logging(config: configparser.RawConfigParser) -> None:
     section: configparser.SectionProxy | dict[str, str] = (
-        config.get("Logging", {})
+        config["Logging"] if "Logging" in config else {}  # noqa: SIM401 - ConfigParser section, not Mapping.get
     )
     logging.basicConfig(
         level=section.get("level", "INFO"),

@@ -93,7 +93,7 @@ def probe_duration_seconds(path: str) -> float | None:
         # classes) — third-party, not ours to annotate. Same technique as
         # harness.import_one._probe_source_channels.
         import mutagen
-        mutagen_file = mutagen.File
+        mutagen_file = getattr(mutagen, "File")  # noqa: B009 - dynamic untyped factory
         media = mutagen_file(path)
     except Exception:  # noqa: BLE001 - absence/unreadable is a normal fallback
         return None

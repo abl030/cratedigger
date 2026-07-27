@@ -33,7 +33,7 @@ def _make_record(**overrides):
         "year": "2024", "mb_release_id": "",
     }
     defaults.update(overrides)
-    return GrabListEntry(**defaults)  # type: ignore[arg-type]
+    return GrabListEntry(**defaults)
 
 
 SAMPLE_DB_ROW = {

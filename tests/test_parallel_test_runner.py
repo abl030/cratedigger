@@ -490,7 +490,11 @@ class TestSuiteDeadlineContract(unittest.TestCase):
         """A Hypothesis test whose settings cannot be read must raise, not be
         quietly skipped past the deadline contract."""
         broken = _planted_case(None)
-        broken.test_property._hypothesis_internal_use_settings = object()
+        setattr(  # noqa: B010 - plant malformed Hypothesis runtime metadata
+            getattr(broken, "test_property"),  # noqa: B009 - generated test method
+            "_hypothesis_internal_use_settings",
+            object(),
+        )
         suite = unittest.defaultTestLoader.loadTestsFromTestCase(broken)
 
         with self.assertRaisesRegex(TypeError, "invalid settings"):

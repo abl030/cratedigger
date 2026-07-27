@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import io
 import unittest
+from collections.abc import Callable
 from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -79,6 +80,20 @@ def _snapshot_beets(release_id: str) -> FakeBeetsDB:
     beets.set_album_ids_for_release(release_id, [7])
     beets.set_tracks_for_release(release_id, SNAPSHOT_TRACKS)
     return beets
+
+
+def _snapshot_opener(
+    snapshot: FakeBeetsDB,
+) -> Callable[..., FakeBeetsDB]:
+    def open_snapshot(
+        *,
+        path: str | None,
+        library_root: str | None,
+    ) -> FakeBeetsDB:
+        del path, library_root
+        return snapshot
+
+    return open_snapshot
 
 
 def _release(release_id: str, *, suffix: str = "") -> BeetsWorldRelease:
@@ -226,7 +241,7 @@ class TestCurrentLibraryCliRealBeets(unittest.TestCase):
                             beets_db=None,
                             beets_directory=None,
                         ),
-                        open_beets_fn=lambda beets=beets, **_kwargs: beets,
+                        open_beets_fn=_snapshot_opener(beets),
                     )
 
                 self.assertIn(

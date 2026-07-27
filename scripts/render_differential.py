@@ -50,11 +50,7 @@ import msgspec.inspect
 from lib.json_narrow import is_object_list, is_str_object_dict
 from lib.pipeline_db.download_log import _DownloadLogMixin
 from web.classify import ClassifiedEntry
-from web.routes.pipeline import (
-    _classify_pipeline_log_item,
-    _project_current_library_have,
-    _project_linked_import_evidence,
-)
+from web.download_history_view import build_recents_download_log_rows
 
 DEFAULT_SAMPLES_PER_FIELD = 3
 
@@ -259,69 +255,42 @@ _CLASSIFIED_UNWATCHED = unwatched_field_names(ClassifiedEntry)
 class ClassifyRenderTarget:
     """Render a ``download_log`` row through the whole Recents render path.
 
-    Recents does not stop at ``classify_log_entry``. The route continues
-    through two more production projections that overwrite watched text
-    fields, so both run here — by CALLING production, never by copying it:
-
-    * ``_project_current_library_have`` selects a provably pre-attempt HAVE
-      snapshot from the ``_current_evidence_*`` aliases, overwriting
-      ``existing_format`` / ``existing_spectral_grade`` /
-      ``existing_v0_probe_kind`` / ``existing_spectral_error`` and their
-      numeric siblings. Its third parameter is deliberately unused by
-      production, so the empty mapping passed here is not a simplification.
-    * ``_project_linked_import_evidence`` back-fills ``existing_*``,
-      ``materialized_*`` and ``target_contract_format`` from a successor
-      import that points back through ``source_download_log_id``.
-
-    The second one is cross-row, which is why this target has a ``prepare``
-    pass: it indexes every corpus row that points back at another row, by
-    that target id. That index is purely structural — the join key, no
-    policy — so production's own filters still decide which successors
-    count. Production computes an origin's successor set as the page's own
-    rows plus ``get_linked_import_logs`` over the page's ids, which is
-    exactly "every successor of this origin"; feeding the real function one
-    origin plus that origin's successors is the same computation, and
-    ``tests/test_render_differential.py`` pins the equivalence against a
-    whole-set call.
-
-    Successors are classified with the same evidence overlay as any other
-    corpus row. Production's separate successor query does not carry that
-    overlay, but the two are indistinguishable here: the overlay writes
-    only ``source_*`` / ``spectral_*`` / ``v0_probe_*``, and the back-fill
-    copies only ``existing_*`` / ``materialized_*`` /
-    ``target_contract_format`` — disjoint key sets.
+    The differential protocol renders one row at a time, but Recents owns
+    cross-row linked-import projection. ``prepare`` therefore renders the
+    whole corpus once through the production batch owner and ``render`` only
+    selects the prepared item.
     """
 
     def __init__(self) -> None:
-        self._successors: dict[int, list[dict[str, object]]] = {}
+        self._items_by_id: dict[int, dict[str, object]] = {}
 
     def prepare(self, rows: Iterable[Mapping[str, object]]) -> None:
-        self._successors = {}
-        for row in rows:
-            source_id = row.get("source_download_log_id")
-            if not isinstance(source_id, int) or isinstance(source_id, bool):
-                continue
-            overlaid = (
-                _DownloadLogMixin._overlay_evidence_onto_download_log_row(
-                    dict(row)))
-            self._successors.setdefault(source_id, []).append(
-                _classify_pipeline_log_item(overlaid))
+        overlaid = [
+            _DownloadLogMixin._overlay_evidence_onto_download_log_row(
+                dict(row)
+            )
+            for row in rows
+        ]
+        items = build_recents_download_log_rows(
+            overlaid,
+            linked_successor_rows=overlaid,
+        )
+        self._items_by_id = {
+            item_id: item
+            for item in items
+            for item_id in [item.get("id")]
+            if isinstance(item_id, int) and not isinstance(item_id, bool)
+        }
 
     def render(self, row: Mapping[str, object]) -> RenderedRow:
         row_id = row.get("id")
         if not isinstance(row_id, int) or isinstance(row_id, bool):
             raise RenderDifferentialError(
                 f"corpus row has no integer id: {row_id!r}")
-        # The corpus is the production read seam's SELECT, so the production
-        # evidence overlay runs first — otherwise every row whose
-        # measurement lives on album_quality_evidence would be rendered from
-        # NULL denorm columns.
-        overlaid = _DownloadLogMixin._overlay_evidence_onto_download_log_row(
-            dict(row))
-        item = _classify_pipeline_log_item(overlaid)
-        _project_current_library_have(item, overlaid, {})
-        _project_linked_import_evidence(
-            [item], self._successors.get(row_id, []))
+        item = self._items_by_id.get(row_id)
+        if item is None:
+            raise RenderDifferentialError(
+                f"corpus row id {row_id} was not prepared")
         return RenderedRow(
             id=row_id,
             fields=project_output_fields(
@@ -343,11 +312,17 @@ class _CallableTarget:
 
     def render(self, row: Mapping[str, object]) -> RenderedRow:
         rendered = self._render_one(row)
-        if not isinstance(rendered, RenderedRow):
+        try:
+            return msgspec.convert(
+                msgspec.to_builtins(rendered),
+                type=RenderedRow,
+                strict=True,
+            )
+        except (TypeError, msgspec.ValidationError) as exc:
             raise RenderDifferentialError(
                 f"render target {self._spec!r} returned "
-                f"{type(rendered).__name__}, expected RenderedRow")
-        return rendered
+                f"{type(rendered).__name__}, expected RenderedRow wire shape"
+            ) from exc
 
 
 DEFAULT_TARGET_SPEC = "scripts.render_differential:ClassifyRenderTarget"

@@ -16,6 +16,7 @@ from lib.force_import_service import (
     RESULT_REQUEST_MBID_MISSING,
     RESULT_REQUEST_MISSING,
     RESULT_UNAUTHORIZED_PATH,
+    ForceImportEnqueueResult,
     enqueue_force_import,
 )
 from lib.import_queue import ForceImportPayload, force_import_dedupe_key
@@ -82,7 +83,7 @@ class TestForceImportService(unittest.TestCase):
     def _assert_queued(
         self,
         db: FakePipelineDB,
-        result: object,
+        result: ForceImportEnqueueResult,
         *,
         download_log_id: int,
         request_id: int,

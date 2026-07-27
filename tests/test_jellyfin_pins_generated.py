@@ -495,7 +495,7 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             "live_children": [("c1", "2025-01-01T00:00:00Z")],
             "set_fail_ids": set()}
         base.update(kw)
-        return World(**base)  # type: ignore[arg-type]
+        return World(**base)
 
     def test_only_original_checker_trips_on_foreign_value(self):
         res = RunResult(world=self._world(), status="pending",

@@ -10,6 +10,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import warnings
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any, ClassVar, cast
 from unittest.mock import patch
@@ -22,6 +24,32 @@ HARNESS_DIR = os.path.join(ROOT_DIR, "harness")
 sys.path.insert(0, ROOT_DIR)
 
 from tests.fakes import FakeBeetsDB, FakePipelineDB
+from tests.test_beets_harness_session import write_fake_harness
+
+
+def run_import_with_fake_harness(
+    *,
+    process_status: int,
+    stderr_lines: Sequence[str] = (),
+):
+    """Drive real ``run_import`` pipes against an executable fake harness."""
+    from harness import import_one
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        harness_path = write_fake_harness(
+            tmpdir,
+            stdout_lines=[],
+            stderr_text="".join(f"{line}\n" for line in stderr_lines),
+            process_returncode=process_status,
+        )
+
+        with (
+            warnings.catch_warnings(),
+            patch("sys.stderr", io.StringIO()),
+            patch.object(import_one, "HARNESS", harness_path),
+        ):
+            warnings.simplefilter("ignore", ResourceWarning)
+            return import_one.run_import(tmpdir, "release-under-test")
 
 
 def _spectral_collection_precedes_conversion(source: str) -> bool:
@@ -45,10 +73,6 @@ class TestHarnessFailureError(unittest.TestCase):
          "beets apply distance 0.5637 exceeded 0.5"),
         ("last nonempty beets line when no reason",
          None, ["first", "  ", "actual error"], 2, "actual error"),
-        ("rc fallback when nothing else",
-         None, [], 2, "Harness returned rc=2"),
-        ("rc fallback carries the real rc",
-         None, [], 4, "Harness returned rc=4"),
     ]
 
     def test_message_preference_table(self):
@@ -59,6 +83,112 @@ class TestHarnessFailureError(unittest.TestCase):
                     rc, lines, failure_reason=reason)
                 self.assertEqual(
                     _harness_failure_error(outcome, rc), expected)
+
+
+class TestRunImportFailureReasons(unittest.TestCase):
+    """Terminal producer paths explain observed failures without an rc token."""
+
+    def test_nonzero_harness_without_stderr_names_the_observed_status(self):
+        from harness.import_one import _harness_failure_error
+
+        outcome = run_import_with_fake_harness(process_status=23)
+
+        self.assertEqual(outcome.exit_code, 2)
+        self.assertEqual(
+            outcome.failure_reason,
+            "beets harness exited with status 23",
+        )
+        self.assertEqual(
+            _harness_failure_error(outcome, outcome.exit_code),
+            "beets harness exited with status 23",
+        )
+
+    def test_zero_harness_without_apply_names_the_observed_gap(self):
+        from harness.import_one import _harness_failure_error
+
+        outcome = run_import_with_fake_harness(process_status=0)
+
+        self.assertEqual(outcome.exit_code, 2)
+        self.assertEqual(
+            outcome.failure_reason,
+            "beets harness ended without applying requested release "
+            "release-under-test",
+        )
+        self.assertEqual(
+            _harness_failure_error(outcome, outcome.exit_code),
+            outcome.failure_reason,
+        )
+
+    def test_nonzero_harness_stderr_remains_the_diagnostic(self):
+        from harness.import_one import _harness_failure_error
+
+        outcome = run_import_with_fake_harness(
+            process_status=17,
+            stderr_lines=["setup note", "database is locked"],
+        )
+
+        self.assertEqual(outcome.exit_code, 2)
+        self.assertIsNone(outcome.failure_reason)
+        self.assertEqual(outcome.beets_lines, [
+            "setup note",
+            "database is locked",
+        ])
+        self.assertEqual(
+            _harness_failure_error(outcome, outcome.exit_code),
+            "database is locked",
+        )
+
+    def test_filtered_and_blank_stderr_does_not_hide_the_status_reason(self):
+        from harness.import_one import _harness_failure_error
+
+        outcome = run_import_with_fake_harness(
+            process_status=17,
+            stderr_lines=[
+                "Disabled fetchart: no sources configured",
+                "   ",
+                "Disabled fetchart: plugin disabled",
+            ],
+        )
+
+        self.assertEqual(outcome.exit_code, 2)
+        self.assertEqual(outcome.beets_lines, [])
+        self.assertEqual(
+            outcome.failure_reason,
+            "beets harness exited with status 17",
+        )
+        self.assertEqual(
+            _harness_failure_error(outcome, outcome.exit_code),
+            "beets harness exited with status 17",
+        )
+
+    def test_signal_termination_names_the_observed_signal(self):
+        from harness.import_one import _harness_failure_error
+
+        outcome = run_import_with_fake_harness(process_status=-15)
+
+        self.assertEqual(outcome.exit_code, 2)
+        self.assertEqual(
+            outcome.failure_reason,
+            "beets harness terminated by signal 15",
+        )
+        self.assertEqual(
+            _harness_failure_error(outcome, outcome.exit_code),
+            "beets harness terminated by signal 15",
+        )
+
+    def test_no_apply_reason_wins_over_incidental_stderr(self):
+        from harness.import_one import _harness_failure_error
+
+        outcome = run_import_with_fake_harness(
+            process_status=0,
+            stderr_lines=["ordinary beets chatter"],
+        )
+
+        self.assertEqual(
+            _harness_failure_error(outcome, outcome.exit_code),
+            "beets harness ended without applying requested release "
+            "release-under-test",
+        )
 
 
 class TestImportBootstrap(unittest.TestCase):

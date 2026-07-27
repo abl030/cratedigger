@@ -511,7 +511,7 @@ def _make_album_data(**overrides):
         "artist": "Test Artist", "year": "2024", "mb_release_id": "",
     }
     defaults.update(overrides)
-    return GrabListEntry(**defaults)  # type: ignore[arg-type]
+    return GrabListEntry(**defaults)
 
 
 class TestStagedAlbumMoveTo(unittest.TestCase):

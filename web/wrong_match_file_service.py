@@ -379,7 +379,7 @@ def _inspect_audio_file(handle: int) -> tuple[dict[str, list[str]], float | None
         # classes) — third-party, not ours to annotate. Same pattern as
         # harness/import_one.py::_probe_source_channels.
         import mutagen
-        _mutagen_file = mutagen.File
+        _mutagen_file = getattr(mutagen, "File")  # noqa: B009 - dynamic untyped factory
     except ImportError:
         return {}, None, None
 

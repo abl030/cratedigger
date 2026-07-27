@@ -319,11 +319,13 @@ class RunImportOutcome:
     # apply-time distance was journal-only, which hid the tagless-match
     # inflation for a day and made diagnosis journal archaeology).
     applied_distance: float | None = None
-    # Typed reason for a failed run, set where the run itself knows WHY
-    # (over-threshold reject, harness timeout, MBID skip). Preferred over
-    # the last-beets-line/rc fallback when building ImportResult.error —
-    # those paths return with empty ``beets_lines``, which degenerated the
-    # operator-facing message to "Harness returned rc=N" (issue #865).
+    # Typed reason for a failed run, set where the run has a specific
+    # observed fact (over-threshold reject, harness timeout, MBID skip,
+    # terminal process status, or no applied release). Preferred over the
+    # last-beets-line/rc fallback when building ImportResult.error — those
+    # paths can return with empty ``beets_lines``, which otherwise
+    # degenerates the operator-facing message to "Harness returned rc=N"
+    # (issue #865).
     failure_reason: str | None = None
 
 
@@ -1373,11 +1375,12 @@ def run_import(
 
     stderr_out = proc.stderr.read() if proc.stderr else ""
     beets_lines: list[str] = []
-    if stderr_out.strip():
-        for line in stderr_out.strip().split("\n"):
-            if "Disabled fetchart" not in line:
-                print(f"  [BEETS] {line}", file=sys.stderr)
-                beets_lines.append(line.strip())
+    for raw_line in stderr_out.splitlines():
+        line = raw_line.strip()
+        if not line or "Disabled fetchart" in line:
+            continue
+        print(f"  [BEETS] {line}", file=sys.stderr)
+        beets_lines.append(line)
 
     if proc_rc not in (None, 0):
         return RunImportOutcome(
@@ -1386,6 +1389,14 @@ def run_import(
             beets_owned_replacement=beets_owned_replacement,
             replaced_albums=replaced_albums,
             applied_distance=applied_distance,
+            failure_reason=(
+                (
+                    f"beets harness terminated by signal {-proc_rc}"
+                    if proc_rc < 0
+                    else f"beets harness exited with status {proc_rc}"
+                )
+                if not beets_lines else None
+            ),
         )
 
     return RunImportOutcome(
@@ -1394,6 +1405,11 @@ def run_import(
         beets_owned_replacement=beets_owned_replacement,
         replaced_albums=replaced_albums,
         applied_distance=applied_distance,
+        failure_reason=(
+            "beets harness ended without applying requested release "
+            f"{mb_release_id}"
+            if not applied else None
+        ),
     )
 
 

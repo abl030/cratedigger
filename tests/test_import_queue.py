@@ -2482,7 +2482,7 @@ class TestImportPreviewWorker(unittest.TestCase):
             with open(os.path.join(source, "01.mp3"), "wb") as handle:
                 handle.write(b"audio")
             db = FakePipelineDB()
-            db.dsn = "postgresql://fake"
+            setattr(db, "dsn", "postgresql://fake")  # noqa: B010 - test-only protocol seam
             download_log_id = _force_download_log(db, 42, source)
             db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
@@ -2552,7 +2552,7 @@ class TestImportPreviewWorker(unittest.TestCase):
 
         db = FakePipelineDB()
         dsn = "postgresql://fake"
-        db.dsn = dsn
+        setattr(db, "dsn", dsn)  # noqa: B010 - test-only protocol seam
         db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=42,

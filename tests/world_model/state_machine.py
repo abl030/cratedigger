@@ -19,7 +19,6 @@ from __future__ import annotations
 import os
 import sys
 import unittest
-from typing import TypeVar
 from unittest.mock import patch
 
 from beets import config as beets_config
@@ -103,11 +102,12 @@ _MISSING_EVIDENCE_PRESERVED_FIELDS = (
 )
 
 
-_AxisSeed = TypeVar("_AxisSeed")
-
-
-def _axis[AxisSeed](axis: tuple[_AxisSeed, ...], name: str) -> _AxisSeed:
-    return next(seed for seed in axis if seed.name == name)
+def _axis[AxisSeed](axis: tuple[AxisSeed, ...], name: str) -> AxisSeed:
+    return next(
+        seed
+        for seed in axis
+        if getattr(seed, "name") == name  # noqa: B009 - heterogeneous seed protocol
+    )
 
 
 def _assert_missing_evidence_converges(

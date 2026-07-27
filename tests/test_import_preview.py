@@ -2875,7 +2875,10 @@ class TestOwnedProcessingNormalization(unittest.TestCase):
             with open(track, "rb") as handle:
                 self.assertEqual(handle.read(), b"repaired")
             self.assertEqual(len(persisted_files), 1)
-            self.assertEqual(persisted_files[0].size_bytes, len(b"repaired"))
+            self.assertEqual(
+                getattr(persisted_files[0], "size_bytes"),  # noqa: B009 - callback payload is object-typed
+                len(b"repaired"),
+            )
         finally:
             shutil.rmtree(album, ignore_errors=True)
 

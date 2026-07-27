@@ -105,7 +105,7 @@ cat {stdout_file}
 exec 1>&-
 cat {stderr_file} >&2
 exec 2>&-
-sleep 20
+{terminal_action}
 """
 
 
@@ -118,12 +118,15 @@ def write_fake_harness(
     *,
     stdout_lines: Sequence[str],
     stderr_text: str = "",
+    process_returncode: int | None = None,
 ) -> str:
     """Write an executable stand-in for ``run_beets_harness.sh``.
 
     Returns the harness path to hand to ``beets_validate``. The lines are
     emitted verbatim, so a caller can plant malformed JSON, blank lines, or
-    nothing at all.
+    nothing at all. A negative ``process_returncode`` makes the harness
+    terminate itself with that signal so ``Popen`` observes the real negative
+    return code.
     """
     stdout_file = os.path.join(directory, "harness_stdout.txt")
     stderr_file = os.path.join(directory, "harness_stderr.txt")
@@ -138,6 +141,15 @@ def write_fake_harness(
         handle.write(_HARNESS_TEMPLATE.format(
             stdout_file=_shell_quote(stdout_file),
             stderr_file=_shell_quote(stderr_file),
+            terminal_action=(
+                "sleep 20"
+                if process_returncode is None
+                else (
+                    f"kill -{-process_returncode} $$"
+                    if process_returncode < 0
+                    else f"exit {process_returncode}"
+                )
+            ),
         ))
     os.chmod(harness_path, os.stat(harness_path).st_mode | stat.S_IEXEC)
     return harness_path

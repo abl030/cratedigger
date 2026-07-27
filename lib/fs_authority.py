@@ -538,10 +538,18 @@ def open_configured_quarantine_directory(
     from lib.processing_paths import processing_albums_dir
 
     roots = (
-        (cfg.slskd_download_dir, frozenset({"failed_imports", "wrong_matches"})),
-        (cfg.beets_staging_dir, frozenset({"failed_imports"})),
         (
-            processing_albums_dir(cfg.processing_dir),
+            getattr(cfg, "slskd_download_dir"),  # noqa: B009 - structural config boundary
+            frozenset({"failed_imports", "wrong_matches"}),
+        ),
+        (
+            getattr(cfg, "beets_staging_dir"),  # noqa: B009 - structural config boundary
+            frozenset({"failed_imports"}),
+        ),
+        (
+            processing_albums_dir(
+                getattr(cfg, "processing_dir"),  # noqa: B009 - structural config boundary
+            ),
             frozenset({"failed_imports", "wrong_matches"}),
         ),
     )

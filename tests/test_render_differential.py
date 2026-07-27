@@ -7,6 +7,7 @@ import datetime
 import io
 import json
 import os
+import subprocess
 import sys
 import unittest
 from collections.abc import Iterator, Mapping
@@ -42,9 +43,9 @@ from scripts.render_differential import (
     watched_field_names,
 )
 from web.classify import ClassifiedEntry, LogEntry, classify_log_entry
-from web.routes.pipeline import (
+from web.download_history_view import (
     _classify_pipeline_log_item,
-    _project_linked_import_evidence,
+    build_recents_download_log_rows,
 )
 
 
@@ -369,6 +370,74 @@ class TestClassifyRenderTargetIsTheProductionPath(unittest.TestCase):
         )
         return [origin, successor]
 
+    def test_newest_successor_wins_across_all_batch_shapes(self) -> None:
+        origin = _download_log_row(id=100, outcome="rejected")
+        older = _download_log_row(
+            id=101,
+            outcome="force_import",
+            source_download_log_id=100,
+            import_result=_import_result_json(ImportResult(
+                decision="import",
+                materialized_measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=245,
+                    avg_bitrate_kbps=260,
+                    median_bitrate_kbps=255,
+                    format="MP3",
+                    is_cbr=False,
+                ),
+            )),
+        )
+        newer = _download_log_row(
+            id=102,
+            outcome="force_import",
+            source_download_log_id=100,
+            import_result=_import_result_json(ImportResult(
+                decision="import",
+                materialized_measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=118,
+                    avg_bitrate_kbps=124,
+                    median_bitrate_kbps=123,
+                    format="Opus",
+                    is_cbr=False,
+                ),
+            )),
+        )
+        cases = (
+            ("page ascending", [origin, older, newer], []),
+            ("page shuffled", [newer, origin, older], []),
+            ("separately linked", [origin], [older, newer]),
+            ("linked shuffled", [origin], [newer, older]),
+            (
+                "page and linked duplicates",
+                [origin, older, newer],
+                [newer, older],
+            ),
+        )
+        for label, rows, linked in cases:
+            with self.subTest(label=label):
+                rendered = build_recents_download_log_rows(
+                    rows,
+                    linked_successor_rows=linked,
+                )
+                self.assertEqual(
+                    [item["id"] for item in rendered],
+                    [row["id"] for row in rows],
+                )
+                rendered_origin = next(
+                    item for item in rendered if item["id"] == 100
+                )
+                self.assertEqual(
+                    rendered_origin["materialized_format"],
+                    "Opus",
+                )
+
+        conflicting_duplicate = {**older, "id": 102}
+        with self.assertRaisesRegex(ValueError, "conflicting projection data"):
+            build_recents_download_log_rows(
+                [origin, newer],
+                linked_successor_rows=[conflicting_duplicate],
+            )
+
     def test_project_linked_import_evidence_runs(self) -> None:
         rows = self._origin_and_successor()
         target = ClassifyRenderTarget()
@@ -385,20 +454,22 @@ class TestClassifyRenderTargetIsTheProductionPath(unittest.TestCase):
         self.assertIsNone(origin.fields["materialized_format"])
         self.assertIsNone(origin.fields["target_contract_format"])
 
-    def test_per_origin_projection_equals_the_whole_set_call(self) -> None:
-        # The harness feeds the real cross-row function one origin plus that
-        # origin's successors; production feeds it the whole page. Pin the
-        # equivalence rather than asserting it in prose.
+    def test_default_target_equals_the_production_batch_owner(self) -> None:
         rows = self._origin_and_successor()
-        whole_set = [_classify_pipeline_log_item(row) for row in rows]
-        _project_linked_import_evidence(whole_set, [])
+        expected = build_recents_download_log_rows(
+            rows,
+            linked_successor_rows=rows,
+        )
         target = ClassifyRenderTarget()
         target.prepare(rows)
-        for row, expected in zip(rows, whole_set, strict=True):
+        for row, expected_item in zip(rows, expected, strict=True):
             rendered = target.render(row)
             for name in watched_field_names(ClassifiedEntry):
                 with self.subTest(row=row["id"], field=name):
-                    self.assertEqual(rendered.fields[name], expected[name])
+                    self.assertEqual(
+                        rendered.fields[name],
+                        expected_item[name],
+                    )
 
     def test_row_without_an_integer_id_fails_closed(self) -> None:
         with self.assertRaises(RenderDifferentialError):
@@ -666,6 +737,34 @@ class TestCommandLine(unittest.TestCase):
         self.assertEqual(report.changed_by_field["verdict"], 3)
         self.assertEqual(report.changed_by_field["badge"], 0)
         self.assertEqual(report.changed_by_field["summary"], 0)
+
+    def test_plain_function_target_works_through_the_real_script(self) -> None:
+        out = self.dir / "subprocess.jsonl"
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "scripts/render_differential.py",
+                "render",
+                "--corpus",
+                str(self.corpus),
+                "--out",
+                str(out),
+                "--target",
+                "tests.test_render_differential:upper_verdict_target",
+            ],
+            cwd=Path(__file__).resolve().parents[1],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        rendered = read_rendered(str(out))
+        self.assertEqual(len(rendered), 3)
+        self.assertTrue(all(
+            isinstance(row.fields["verdict"], str)
+            and row.fields["verdict"] == row.fields["verdict"].upper()
+            for row in rendered
+        ))
 
     def test_blank_corpus_lines_are_skipped(self) -> None:
         self.corpus.write_text(

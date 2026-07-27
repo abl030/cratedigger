@@ -35,7 +35,7 @@ class TestDecideDownloadAction(unittest.TestCase):
             "processing_started": False,
         }
         defaults.update(overrides)
-        return decide_download_action(**defaults)  # type: ignore[arg-type]
+        return decide_download_action(**defaults)
 
     def test_processing_started(self):
         v = self._decide(processing_started=True)
@@ -133,7 +133,7 @@ class TestReducePollCycle(unittest.TestCase):
             ],
         }
         values.update(overrides)
-        return ActiveDownloadState(**values)  # type: ignore[arg-type]
+        return ActiveDownloadState(**values)
 
     def _snapshot(self, *files, **overrides):
         values = {"files": list(files)}

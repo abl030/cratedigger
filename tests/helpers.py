@@ -128,12 +128,16 @@ def hermetic_beets_config_defaults() -> Generator[tuple[str, str]]:
             return original_from_ini(cls, config, config_dir, var_dir)
 
         CratediggerConfig.__init__ = hermetic_init
-        CratediggerConfig.from_ini = classmethod(hermetic_from_ini)
+        setattr(  # noqa: B010 - test temporarily replaces a classmethod
+            CratediggerConfig, "from_ini", classmethod(hermetic_from_ini),
+        )
         try:
             yield (library_db, library_root)
         finally:
             CratediggerConfig.__init__ = original_init
-            CratediggerConfig.from_ini = classmethod(original_from_ini)
+            setattr(  # noqa: B010 - restore the captured classmethod
+                CratediggerConfig, "from_ini", classmethod(original_from_ini),
+            )
             deployed = [
                 config.beets_library_db
                 for config in constructed_configs

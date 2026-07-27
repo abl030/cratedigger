@@ -55,7 +55,11 @@ _beets_mocks = {
 for name, mock in _beets_mocks.items():
     sys.modules.setdefault(name, mock)
 
-sys.modules["beets.importer.session"].ImportSession = type("ImportSession", (object,), {})
+setattr(  # noqa: B010 - populate a synthetic runtime module
+    sys.modules["beets.importer.session"],
+    "ImportSession",
+    type("ImportSession", (object,), {}),
+)
 
 from harness import beets_harness
 from tests.test_harness_discogs_neutralize import (

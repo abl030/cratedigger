@@ -28,7 +28,7 @@ def _make_entry(**overrides):
         "mb_release_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
     }
     defaults.update(overrides)
-    return GrabListEntry(**defaults)  # type: ignore[arg-type]
+    return GrabListEntry(**defaults)
 
 
 class TestConstruction(unittest.TestCase):
@@ -160,7 +160,7 @@ def _make_file(**overrides):
         "size": 5000000,
     }
     defaults.update(overrides)
-    return DownloadFile(**defaults)  # type: ignore[arg-type]
+    return DownloadFile(**defaults)
 
 
 class TestDownloadFileConstruction(unittest.TestCase):
