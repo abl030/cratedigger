@@ -155,7 +155,7 @@ class WrongMatchCleanupOutcome(msgspec.Struct, frozen=True):
     path_missing: bool = False
     error: str | None = None
     decision: dict[str, Any] = msgspec.field(
-        default_factory=dict[str, Any],
+        default_factory=lambda: {},  # noqa: PIE807 - preserves contextual generic type
     )
     candidate_measurement: AudioQualityMeasurement | None = None
     current_measurement: AudioQualityMeasurement | None = None

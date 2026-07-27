@@ -116,7 +116,7 @@ def full_pipeline_decision(
     # budget for the internal ``result: dict[str, Any]`` this function
     # returns, and the twin ``full_pipeline_decision_from_evidence``
     # returns the identical shape.
-) -> dict[str, Any]:
+) -> "dict[str, Any]":
     """Run the full decision chain and return the final outcome.
 
     This simulates what happens when a download completes and flows through
@@ -819,7 +819,7 @@ def _finalize_denylist(result: dict[str, object]) -> dict[str, object]:
 
 
 def comparison_basis_from_decision(
-    result: dict[str, Any] | None,
+    result: "dict[str, Any] | None",
 ) -> QualityComparisonBasis | None:
     """Re-type the JSON-plain ``comparison_basis`` a decision dict carries.
 

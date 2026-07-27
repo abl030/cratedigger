@@ -107,7 +107,7 @@ class SearchExecutionResult:
     """
 
     responses: list[dict[str, Any]] = field(
-        default_factory=list[dict[str, Any]],
+        default_factory=lambda: [],  # noqa: PIE807 - preserves contextual generic type
     )
     final_state: str | None = None
     response_count_terminal: int | None = None

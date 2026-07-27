@@ -1,4 +1,5 @@
 """Matching helpers extracted from cratedigger.py."""
+# ruff: noqa: UP037 - quoted Any annotation is part of the typing ratchet
 
 from __future__ import annotations
 
@@ -99,7 +100,7 @@ class MatchResult:
     directory: Any
     file_dir: str
     candidates: list[CandidateScore] = field(
-        default_factory=list[CandidateScore],
+        default_factory=lambda: [],  # noqa: PIE807 - preserves contextual generic type
     )
     # Authoritative count of dirs rejected by the asymmetric pre-filter
     # before browse; sample rows in ``candidates`` are bounded by
@@ -495,7 +496,7 @@ def check_for_match(
     username: str,
     ctx: CratediggerContext,
     *,
-    album_match_fn: Callable[..., Any] | None = None,
+    album_match_fn: "Callable[..., Any] | None" = None,
     cross_check_fn: Callable[..., bool] | None = None,
 ) -> MatchResult:
     """Check candidate directories for an album match.

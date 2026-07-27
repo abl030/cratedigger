@@ -12247,8 +12247,8 @@ class TestReadProjectionParity(unittest.TestCase):
     @staticmethod
     def _assert_keyset_parity(
         test: unittest.TestCase,
-        real_rows: Sequence[Mapping[str, Any]],
-        fake_rows: Sequence[Mapping[str, Any]],
+        real_rows: "Sequence[Mapping[str, Any]]",
+        fake_rows: "Sequence[Mapping[str, Any]]",
         label: str,
     ) -> None:
         """Assert real PG and FakePipelineDB return identically-keyed rows.

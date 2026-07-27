@@ -4,6 +4,7 @@
 distance matrix. ``youtube-rescue`` — submit a rescue ingest for one
 request. Both wrap the U7/U4 service layer (CLI ⇄ API surface symmetry).
 """
+# ruff: noqa: UP037 - quoted Any annotation is part of the typing ratchet
 
 from __future__ import annotations
 
@@ -108,7 +109,7 @@ class _YoutubeRescueDB(Protocol):
 
     def find_active_youtube_import_job(
         self, *, request_id: int, browse_id: str,
-    ) -> Any | None: ...
+    ) -> "Any | None": ...
 
 
 class _SubmitsYoutubeRescue(Protocol):

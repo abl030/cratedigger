@@ -17,10 +17,6 @@ if TYPE_CHECKING:
     from lib.config import CratediggerConfig
 
 
-def _empty_prefetched_album_tracks() -> dict[int, list[TrackRecord]]:
-    return {}
-
-
 @runtime_checkable
 class PipelineDBSource(Protocol):
     """Structural surface of the pipeline DB source used throughout the engine.
@@ -73,21 +69,32 @@ class CratediggerContext:
     download_ownership: Any = None
 
     # --- Runtime caches (reset each cycle) ---
-    search_cache: dict[int, Any] = field(default_factory=dict[int, Any])
-    folder_cache: dict[str, Any] = field(default_factory=dict[str, Any])
-    user_upload_speed: dict[str, int] = field(default_factory=dict[str, int])
+    search_cache: dict[int, Any] = field(
+        default_factory=lambda: {},  # noqa: PIE807 - preserves contextual generic type
+    )
+    folder_cache: dict[str, Any] = field(
+        default_factory=lambda: {},  # noqa: PIE807 - preserves contextual generic type
+    )
+    user_upload_speed: dict[str, int] = field(
+        default_factory=lambda: {},  # noqa: PIE807 - preserves contextual generic type
+    )
     broken_user: set[str] = field(default_factory=lambda: set())
     search_dir_audio_count: dict[str, dict[str, int]] = (
-        field(default_factory=dict[str, dict[str, int]]))
+        field(
+            default_factory=lambda: {},  # noqa: PIE807 - preserves contextual generic type
+        ))
     negative_matches: set[tuple[str, str, int, str]] = (
         field(default_factory=lambda: set()))
-    current_album_cache: dict[int, Any] = field(default_factory=dict[int, Any])
+    current_album_cache: dict[int, Any] = field(
+        default_factory=lambda: {},  # noqa: PIE807 - preserves contextual generic type
+    )
     denied_users_cache: dict[int, set[str]] = field(
-        default_factory=dict[int, set[str]],
+        default_factory=lambda: {},  # noqa: PIE807 - preserves contextual generic type
     )
     cooled_down_users: set[str] = field(default_factory=lambda: set())
-    prefetched_album_tracks: dict[int, list[TrackRecord]] = (
-        field(default_factory=_empty_prefetched_album_tracks))
+    prefetched_album_tracks: dict[int, list[TrackRecord]] = field(
+        default_factory=lambda: {},  # noqa: PIE807 - preserves contextual generic type
+    )
     peer_cache: Any = None
     peer_cache_negative_skips: set[tuple[str, str]] = (
         field(default_factory=lambda: set()))

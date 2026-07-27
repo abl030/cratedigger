@@ -15,7 +15,7 @@ import os
 import sqlite3
 import statistics
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, Self, cast
+from typing import TYPE_CHECKING, Literal, Self
 
 import msgspec
 
@@ -1073,10 +1073,10 @@ class BeetsDB:
                 # partially unknown ``list[Unknown]`` even though the
                 # element type is known (same quirk documented on
                 # ``lib.youtube_album_service._json_dict``), which taints
-                # even a re-reference of the narrowed local. The explicit
-                # element cast records the shape that the assertion enforces
-                # at runtime.
-                cast(list[str], entry["paths"]).append(
+                # even a re-reference of the narrowed local. Re-reading the
+                # still-object-typed value keeps the upstream dynamic seam
+                # from leaking Unknown into strict Pyright.
+                getattr(entry["paths"], "append")(  # noqa: B009 - dynamic typed boundary
                     self._resolve_path(raw_path)
                 )
 

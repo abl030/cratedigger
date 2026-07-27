@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Acquire and release Cratedigger's strict systemd deployment hold.
 
 The fixed unit set and root-owned runtime receipt are deliberate. This helper

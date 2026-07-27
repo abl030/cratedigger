@@ -31,6 +31,7 @@ timestamps are backend-assigned/time-anchored), so seeders must never
 put timestamps or random values in row KEYS. Every seeder must produce
 >= 1 row on BOTH backends — a vacuous parity check is worthless.
 """
+# ruff: noqa: UP037 - quoted Any annotations are part of the typing ratchet
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -84,14 +85,14 @@ def enumerate_read_mirrors() -> list[str]:
 # flat ``list[dict]`` so the parity driver only compares row key-sets.
 # --------------------------------------------------------------------------
 
-def _one(row: dict[str, Any] | None) -> list[dict[str, Any]]:
+def _one(row: "dict[str, Any] | None") -> "list[dict[str, Any]]":
     """Single-dict-or-None return → ``[row]`` or ``[]``."""
     return [row] if row is not None else []
 
 
 def _flatten_map_of_lists(
-    mapping: dict[Any, list[dict[str, Any]]],
-) -> list[dict[str, Any]]:
+    mapping: "dict[Any, list[dict[str, Any]]]",
+) -> "list[dict[str, Any]]":
     """``dict[key, list[row]]`` return → flat list of the inner rows."""
     return [row for rows in mapping.values() for row in rows]
 
@@ -103,28 +104,28 @@ def _flatten_map_of_lists(
 
 # --- Request-family (album_requests SELECT * projections) -----------------
 
-def _seed_get_request(db: Any) -> list[dict[str, Any]]:
+def _seed_get_request(db: Any) -> "list[dict[str, Any]]":
     rid = db.add_request(
         "Parity Artist", "Parity Album", "request",
         mb_release_id="mbrel-get-request")
     return _one(db.get_request(rid))
 
 
-def _seed_get_request_by_mb_release_id(db: Any) -> list[dict[str, Any]]:
+def _seed_get_request_by_mb_release_id(db: Any) -> "list[dict[str, Any]]":
     db.add_request(
         "Parity Artist", "Parity Album", "request",
         mb_release_id="mbrel-parity")
     return _one(db.get_request_by_mb_release_id("mbrel-parity"))
 
 
-def _seed_get_request_by_discogs_release_id(db: Any) -> list[dict[str, Any]]:
+def _seed_get_request_by_discogs_release_id(db: Any) -> "list[dict[str, Any]]":
     db.add_request(
         "Parity Artist", "Parity Album", "request",
         discogs_release_id="12345")
     return _one(db.get_request_by_discogs_release_id("12345"))
 
 
-def _seed_get_request_by_release_id(db: Any) -> list[dict[str, Any]]:
+def _seed_get_request_by_release_id(db: Any) -> "list[dict[str, Any]]":
     # A non-UUID / non-numeric id falls back to the mb_release_id lookup on
     # both backends (identical ReleaseIdentity logic).
     db.add_request(
@@ -133,7 +134,7 @@ def _seed_get_request_by_release_id(db: Any) -> list[dict[str, Any]]:
     return _one(db.get_request_by_release_id("relid-parity"))
 
 
-def _seed_get_request_by_replaces_request_id(db: Any) -> list[dict[str, Any]]:
+def _seed_get_request_by_replaces_request_id(db: Any) -> "list[dict[str, Any]]":
     old_id = db.add_request(
         "Parity Artist", "Parity Album", "request",
         mb_release_id="super-old")
@@ -151,35 +152,35 @@ def _seed_get_request_by_replaces_request_id(db: Any) -> list[dict[str, Any]]:
     return _one(db.get_request_by_replaces_request_id(old_id))
 
 
-def _seed_get_wanted(db: Any) -> list[dict[str, Any]]:
+def _seed_get_wanted(db: Any) -> "list[dict[str, Any]]":
     db.add_request(
         "Parity Artist", "Parity Album", "request",
         mb_release_id="wanted-parity", status="wanted")
     return list(db.get_wanted())
 
 
-def _seed_get_by_status(db: Any) -> list[dict[str, Any]]:
+def _seed_get_by_status(db: Any) -> "list[dict[str, Any]]":
     db.add_request(
         "Parity Artist", "Parity Album", "request",
         mb_release_id="bystatus-parity", status="wanted")
     return list(db.get_by_status("wanted"))
 
 
-def _seed_list_non_replaced_requests(db: Any) -> list[dict[str, Any]]:
+def _seed_list_non_replaced_requests(db: Any) -> "list[dict[str, Any]]":
     db.add_request(
         "Parity Artist", "Parity Album", "request",
         mb_release_id="nonreplaced-parity")
     return list(db.list_non_replaced_requests())
 
 
-def _seed_list_requests_by_artist(db: Any) -> list[dict[str, Any]]:
+def _seed_list_requests_by_artist(db: Any) -> "list[dict[str, Any]]":
     db.add_request(
         "Parity Artist", "Parity Album", "request",
         mb_release_id="byartist-parity")
     return list(db.list_requests_by_artist("Parity Artist"))
 
 
-def _seed_list_requests_in_release_group(db: Any) -> list[dict[str, Any]]:
+def _seed_list_requests_in_release_group(db: Any) -> "list[dict[str, Any]]":
     db.add_request(
         "Parity Artist", "Parity Album", "request",
         mb_release_id="inrg-parity", mb_release_group_id="rg-parity")
@@ -188,7 +189,7 @@ def _seed_list_requests_in_release_group(db: Any) -> list[dict[str, Any]]:
 
 # --- Tracks / downloading / denylist / field-resolution -------------------
 
-def _seed_get_tracks(db: Any) -> list[dict[str, Any]]:
+def _seed_get_tracks(db: Any) -> "list[dict[str, Any]]":
     rid = db.add_request(
         "Parity Artist", "Parity Album", "request",
         mb_release_id="tracks-parity")
@@ -199,7 +200,7 @@ def _seed_get_tracks(db: Any) -> list[dict[str, Any]]:
     return list(db.get_tracks(rid))
 
 
-def _seed_get_downloading(db: Any) -> list[dict[str, Any]]:
+def _seed_get_downloading(db: Any) -> "list[dict[str, Any]]":
     rid = db.add_request(
         "Parity Artist", "Parity Album", "request",
         mb_release_id="downloading-parity", status="wanted")
@@ -207,7 +208,7 @@ def _seed_get_downloading(db: Any) -> list[dict[str, Any]]:
     return list(db.get_downloading())
 
 
-def _seed_get_denylisted_users(db: Any) -> list[dict[str, Any]]:
+def _seed_get_denylisted_users(db: Any) -> "list[dict[str, Any]]":
     rid = db.add_request(
         "Parity Artist", "Parity Album", "request",
         mb_release_id="denylist-parity")
@@ -215,7 +216,7 @@ def _seed_get_denylisted_users(db: Any) -> list[dict[str, Any]]:
     return list(db.get_denylisted_users(rid))
 
 
-def _seed_list_denylist_rows(db: Any) -> list[dict[str, Any]]:
+def _seed_list_denylist_rows(db: Any) -> "list[dict[str, Any]]":
     rid = db.add_request(
         "Parity Artist", "Parity Album", "request",
         mb_release_id="denylist-world-parity")
@@ -223,7 +224,7 @@ def _seed_list_denylist_rows(db: Any) -> list[dict[str, Any]]:
     return list(db.list_denylist_rows())
 
 
-def _seed_get_field_resolution(db: Any) -> list[dict[str, Any]]:
+def _seed_get_field_resolution(db: Any) -> "list[dict[str, Any]]":
     rid = db.add_request(
         "Parity Artist", "Parity Album", "request",
         mb_release_id="fieldres-single-parity")
@@ -234,7 +235,7 @@ def _seed_get_field_resolution(db: Any) -> list[dict[str, Any]]:
 
 # --- download_log projections (all share the dl.* history projection) -----
 
-def _seed_get_download_log_entry(db: Any) -> list[dict[str, Any]]:
+def _seed_get_download_log_entry(db: Any) -> "list[dict[str, Any]]":
     rid = db.add_request(
         "Parity Artist", "Parity Album", "request",
         mb_release_id="dlentry-parity")
@@ -242,7 +243,7 @@ def _seed_get_download_log_entry(db: Any) -> list[dict[str, Any]]:
     return _one(db.get_download_log_entry(lid))
 
 
-def _seed_get_download_history(db: Any) -> list[dict[str, Any]]:
+def _seed_get_download_history(db: Any) -> "list[dict[str, Any]]":
     rid = db.add_request(
         "Parity Artist", "Parity Album", "request",
         mb_release_id="dlhistory-parity")
@@ -250,7 +251,7 @@ def _seed_get_download_history(db: Any) -> list[dict[str, Any]]:
     return list(db.get_download_history(rid))
 
 
-def _seed_get_download_history_batch(db: Any) -> list[dict[str, Any]]:
+def _seed_get_download_history_batch(db: Any) -> "list[dict[str, Any]]":
     rid = db.add_request(
         "Parity Artist", "Parity Album", "request",
         mb_release_id="dlbatch-parity")
@@ -258,7 +259,7 @@ def _seed_get_download_history_batch(db: Any) -> list[dict[str, Any]]:
     return _flatten_map_of_lists(db.get_download_history_batch([rid]))
 
 
-def _seed_get_latest_download_summaries(db: Any) -> list[dict[str, Any]]:
+def _seed_get_latest_download_summaries(db: Any) -> "list[dict[str, Any]]":
     rid = db.add_request(
         "Parity Artist", "Parity Album", "request",
         mb_release_id="dlsummary-parity")
@@ -269,7 +270,7 @@ def _seed_get_latest_download_summaries(db: Any) -> list[dict[str, Any]]:
     return [summary["latest"] for summary in summaries.values()]
 
 
-def _seed_get_log(db: Any) -> list[dict[str, Any]]:
+def _seed_get_log(db: Any) -> "list[dict[str, Any]]":
     rid = db.add_request(
         "Parity Artist", "Parity Album", "request",
         mb_release_id="getlog-parity")
@@ -277,7 +278,7 @@ def _seed_get_log(db: Any) -> list[dict[str, Any]]:
     return list(db.get_log())
 
 
-def _seed_get_linked_import_logs(db: Any) -> list[dict[str, Any]]:
+def _seed_get_linked_import_logs(db: Any) -> "list[dict[str, Any]]":
     rid = db.add_request(
         "Parity Artist", "Parity Album", "request",
         mb_release_id="linked-import-log-parity")
@@ -292,7 +293,7 @@ def _seed_get_linked_import_logs(db: Any) -> list[dict[str, Any]]:
 
 # --- search_log projections -----------------------------------------------
 
-def _seed_get_search_history(db: Any) -> list[dict[str, Any]]:
+def _seed_get_search_history(db: Any) -> "list[dict[str, Any]]":
     rid = db.add_request(
         "Parity Artist", "Parity Album", "request",
         mb_release_id="searchhist-parity")
@@ -301,7 +302,7 @@ def _seed_get_search_history(db: Any) -> list[dict[str, Any]]:
     return list(db.get_search_history(rid))
 
 
-def _seed_get_search_plan_stats_history(db: Any) -> list[dict[str, Any]]:
+def _seed_get_search_plan_stats_history(db: Any) -> "list[dict[str, Any]]":
     rid = db.add_request(
         "Parity Artist", "Parity Album", "request",
         mb_release_id="planstatshist-parity")
@@ -310,7 +311,7 @@ def _seed_get_search_plan_stats_history(db: Any) -> list[dict[str, Any]]:
     return list(db.get_search_plan_stats_history(rid))
 
 
-def _seed_get_search_history_page(db: Any) -> list[dict[str, Any]]:
+def _seed_get_search_history_page(db: Any) -> "list[dict[str, Any]]":
     rid = db.add_request(
         "Parity Artist", "Parity Album", "request",
         mb_release_id="searchpage-parity")
@@ -322,7 +323,7 @@ def _seed_get_search_history_page(db: Any) -> list[dict[str, Any]]:
     return list(db.get_search_history_page(rid, limit=10).rows)
 
 
-def _seed_get_legacy_search_log_summary(db: Any) -> list[dict[str, Any]]:
+def _seed_get_legacy_search_log_summary(db: Any) -> "list[dict[str, Any]]":
     rid = db.add_request(
         "Parity Artist", "Parity Album", "request",
         mb_release_id="legacysummary-parity")
@@ -334,7 +335,7 @@ def _seed_get_legacy_search_log_summary(db: Any) -> list[dict[str, Any]]:
     return list(db.get_legacy_search_log_summary(rid, limit=10)[1])
 
 
-def _seed_search_requests(db: Any) -> list[dict[str, Any]]:
+def _seed_search_requests(db: Any) -> "list[dict[str, Any]]":
     db.add_request(
         "Parity Artist", "Parity Album", "request",
         mb_release_id="searchreq-parity")
@@ -343,7 +344,7 @@ def _seed_search_requests(db: Any) -> list[dict[str, Any]]:
 
 # --- import_jobs projection ------------------------------------------------
 
-def _seed_get_active_import_job_for_request(db: Any) -> list[dict[str, Any]]:
+def _seed_get_active_import_job_for_request(db: Any) -> "list[dict[str, Any]]":
     from lib.import_queue import IMPORT_JOB_FORCE
 
     rid = db.add_request(
@@ -366,7 +367,7 @@ def _youtube_mapping_row(**overrides: Any) -> PersistedYoutubeRow:
     ``TestReadProjectionParity._youtube_mapping_row`` — duplicated here
     because the registry module can't reach that test-class staticmethod.
     """
-    fields: dict[str, Any] = {
+    fields: "dict[str, Any]" = {
         "yt_browse_id": "MPREb_parity",
         "yt_audio_playlist_id": "OLAK5uy_parity",
         "yt_url": "https://music.youtube.com/playlist?list=OLAK5uy_parity",
@@ -389,7 +390,7 @@ def _youtube_mapping_row(**overrides: Any) -> PersistedYoutubeRow:
 
 def _seed_find_youtube_album_mapping_for_release(
     db: Any,
-) -> list[dict[str, Any]]:
+) -> "list[dict[str, Any]]":
     db.upsert_youtube_album_mapping(
         "rg-find-parity", "mb",
         [_youtube_mapping_row(
@@ -402,7 +403,7 @@ def _seed_find_youtube_album_mapping_for_release(
 
 # --- plex pins / unfindable probe -----------------------------------------
 
-def _seed_get_pending_plex_added_at_pins(db: Any) -> list[dict[str, Any]]:
+def _seed_get_pending_plex_added_at_pins(db: Any) -> "list[dict[str, Any]]":
     db.add_plex_added_at_pin(
         imported_path="/x",
         original_added_at=1700000000,
@@ -415,7 +416,7 @@ def _seed_get_pending_plex_added_at_pins(db: Any) -> list[dict[str, Any]]:
         captured_before=captured_before, limit=100))
 
 
-def _seed_get_pending_jellyfin_date_created_pins(db: Any) -> list[dict[str, Any]]:
+def _seed_get_pending_jellyfin_date_created_pins(db: Any) -> "list[dict[str, Any]]":
     db.add_jellyfin_date_created_pin(
         imported_path="/x",
         original_date_created="2026-04-26T18:31:04.4425337Z",
@@ -429,7 +430,7 @@ def _seed_get_pending_jellyfin_date_created_pins(db: Any) -> list[dict[str, Any]
         captured_before=captured_before, limit=100))
 
 
-def _seed_list_unfindable_probe_candidates(db: Any) -> list[dict[str, Any]]:
+def _seed_list_unfindable_probe_candidates(db: Any) -> "list[dict[str, Any]]":
     db.add_request(
         "Parity Artist", "Parity Album", "request",
         mb_release_id="probe-parity", status="wanted")

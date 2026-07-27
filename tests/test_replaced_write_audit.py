@@ -62,80 +62,80 @@ class _AlbumRequestUpdate:
 # The ratchet does not infer parameter dataflow: transition SQL must use the
 # canonical direct call grammar below.
 _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
-    ("scripts/pipeline_cli/query.py", 240, "30cb3c56e7e5f6fd"): (
+    ("scripts/pipeline_cli/query.py", 241, "f1e566c44edc8feb"): (
         "deliberate raw-write operator seam, gated by exact "
         "--write --confirm WRITE rather than a lifecycle-safe typed mutation"
     ),
-    ("scripts/pipeline_cli/query.py", 254, "30cb3c56e7e5f6fd"): (
+    ("scripts/pipeline_cli/query.py", 255, "f1e566c44edc8feb"): (
         "default raw-query seam runs in the transaction-enforced read-only "
         "scope on the live connection"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 91, "5fa18d2c1737583f"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 89, "5fa18d2c1737583f"): (
         "terminal metadata keys use the existing validated request-field "
         "vocabulary (issue #784: `dumps=lambda value: msgspec.json.encode("
         "value).decode()` replaced with the shared `_msgspec_json_dumps` "
         "helper from `_shared.py` — same encoder, same output, no SQL change)"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 306, "6cfaff9c6507c211"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 304, "cd644e51f3670265"): (
         "terminal attempt kind is restricted to the fixed retry-counter vocabulary"
     ),
-    ("lib/pipeline_db/download_log.py", 849, "86ec443bac615c3c"): (
+    ("lib/pipeline_db/download_log.py", 850, "86ec443bac615c3c"): (
         "validation key is selected from a closed server-owned vocabulary "
         "(#867 intentionally added terminal/evidence projection and moved final "
         "classification after same-path DISTINCT)"
     ),
-    ("lib/pipeline_db/download_log.py", 911, "e0154e89026dc8ef"): (
+    ("lib/pipeline_db/download_log.py", 912, "e0154e89026dc8ef"): (
         "validation key is selected from a closed server-owned vocabulary "
         "(issue #835 shifted this line only)"
     ),
-    ("lib/pipeline_db/download_log.py", 929, "1ca75e0c21fa6d7e"): (
+    ("lib/pipeline_db/download_log.py", 930, "13517e08e7db52f3"): (
         "validation key is closed vocabulary and IN list is value placeholders "
         "(issue #835 shifted this line only)"
     ),
-    ("lib/pipeline_db/download_log.py", 946, "d87a36ba1d1768e7"): (
+    ("lib/pipeline_db/download_log.py", 947, "d87a36ba1d1768e7"): (
         "JSON path key is selected from a closed server-owned vocabulary "
         "(issue #835 shifted this line only)"
     ),
-    ("lib/pipeline_db/import_jobs.py", 114, "ecf3d1844c67f653"): (
+    ("lib/pipeline_db/import_jobs.py", 115, "ecf3d1844c67f653"): (
         "optional job filter is a fixed literal WHERE clause "
         "(CD-SEC-19 typed payload imports shifted this reviewed SELECT by +3)"
     ),
-    ("lib/pipeline_db/import_jobs.py", 175, "d020bd0235c95c4a"): (
+    ("lib/pipeline_db/import_jobs.py", 176, "d020bd0235c95c4a"): (
         "claim exclusion predicate is assembled from fixed literal clauses "
         "(CD-SEC-19 typed payload imports shifted this reviewed SELECT by +3)"
     ),
-    ("lib/pipeline_db/misc.py", 188, "12cfdd83a367c90e"): (
+    ("lib/pipeline_db/misc.py", 186, "12cfdd83a367c90e"): (
         "track-count batch IN list contains only psycopg value placeholders"
     ),
-    ("lib/pipeline_db/misc.py", 401, "0a14fd5e6252e398"): (
+    ("lib/pipeline_db/misc.py", 399, "0a14fd5e6252e398"): (
         "bulk VALUES fragment contains only fixed value-placeholder tuples "
         "(issue #784: add_denylist/get_denylisted_users annotated above, "
         "shifting this line; no SQL change)"
     ),
-    ("lib/pipeline_db/misc.py", 575, "47e316b5c87e000f"): (
+    ("lib/pipeline_db/misc.py", 574, "9e2beb706a40d1e4"): (
         "triage joins and predicates are selected from closed service enums "
         "(issue #784: add_denylist/get_denylisted_users annotated above, "
         "shifting this line; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 80, "4d6fa5b5b4572953"): (
+    ("lib/pipeline_db/requests.py", 78, "62fd3a1824f79c24"): (
         "INSERT columns derive from the fixed AddRequestInput schema "
         "(issue #784: `add_request` parameters annotated and its return "
         "wrapped in `int(...)`, changing the enclosing-scope fingerprint "
         "and shifting this line by +10; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 114, "723856dd7a3eba80"): (
+    ("lib/pipeline_db/requests.py", 112, "723856dd7a3eba80"): (
         "badge-overlay batch IN list contains only psycopg value placeholders; "
         "the evidence JOIN and identity derivations are static SQL "
         "(issue #784: `add_request` annotated above, shifting this line by "
         "+10; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 260, "fd6c0bbbe61ee7e6"): (
+    ("lib/pipeline_db/requests.py", 258, "fd6c0bbbe61ee7e6"): (
         "release-id lookup selects one of two fixed identity predicates "
         "(issue #765: return type retyped to AlbumRequestRow, no SQL change; "
         "issue #784: `add_request` annotated above, shifting this line by "
         "+10; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 471, "44234eb14b8ecd52"): (
+    ("lib/pipeline_db/requests.py", 469, "44234eb14b8ecd52"): (
         "metadata keys are validated identifiers, lifecycle fields are reserved, "
         "and values use one typed JSONB record parameter "
         "(issue #784: `dumps=lambda value: msgspec.json.encode(value).decode()` "
@@ -143,7 +143,7 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "`_shared.py`, while issue #762 removed the obsolete request path cache; "
         "same encoder, same output, no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 489, "d969cab8f56eead9"): (
+    ("lib/pipeline_db/requests.py", 487, "d969cab8f56eead9"): (
         "metadata keys are validated identifiers, lifecycle fields are reserved, "
         "and values use one typed JSONB record parameter "
         "(issue #784: `dumps=lambda value: msgspec.json.encode(value).decode()` "
@@ -151,21 +151,21 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "`_shared.py`, while issue #762 removed the obsolete request path cache; "
         "same encoder, same output, no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 1338, "ef9d09dcf1118fd0"): (
+    ("lib/pipeline_db/requests.py", 1336, "890d0f2e35ffd73c"): (
         "optional LIMIT is normalized through int before interpolation "
         "(issue #765: return type retyped to list[AlbumRequestRow], no SQL "
         "change; issue #784: `limit` parameter annotated `int | None`, "
         "changing the enclosing-scope fingerprint; issues #784 and #762 shifted "
         "the final merged line; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 1359, "042a7becce5f90f7"): (
+    ("lib/pipeline_db/requests.py", 1357, "042a7becce5f90f7"): (
         "ORDER is selected from two literals and LIMIT remains a value placeholder "
         "(issue #765: return type retyped to list[AlbumRequestRow], no SQL change; "
         "issue #784: `status`/`limit`/`newest_first` parameters annotated, "
         "changing the enclosing-scope fingerprint; issues #784 and #762 shifted "
         "the final merged line; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 1544, "714da98640ff84f0"): (
+    ("lib/pipeline_db/requests.py", 1542, "541767de225f28a3"): (
         "attempt kind is validated against the fixed retry-counter vocabulary "
         "(issues #784 and #762 shifted this line without changing the hash; "
         "this statement is a plain string constant, not scope-bound, so no SQL "
@@ -180,54 +180,54 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
 # beside the implementation they review; movement or SQL-shape drift fails the
 # ratchet just like the dynamic-SQL exceptions above.
 _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
-    ("lib/pipeline_db/terminal_outcomes.py", 133, "e0057766c732179a"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 131, "56802c71d0fd3622"): (
         "atomic terminal transition mirrors typed wanted CAS inside one transaction"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 192, "6d280a5c4dbb4e32"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 190, "249bfbdab2b02ac4"): (
         "atomic preview recovery accepts only downloading as its exact source"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 347, "786d2b82f14ac409"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 345, "4f0561c784e817e9"): (
         "atomic terminal import CASes status with rescue audit in the same transaction"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 387, "0a9c4396d1185b94"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 385, "9b11fb540dfe44e3"): (
         "atomic terminal typed transition CASes the source status selected by the DAG"
     ),
-    ("lib/pipeline_db/download_log.py", 495, "6c7d7519e8c91827"): (
+    ("lib/pipeline_db/download_log.py", 496, "bb557f6f6ba527a3"): (
         "atomic abandoned-import recovery performs downloading-to-wanted CAS "
         "(issue #835 shifted this unchanged lifecycle scope)"
     ),
-    ("lib/pipeline_db/requests.py", 299, "b3d1cf06b29bd1d6"): (
+    ("lib/pipeline_db/requests.py", 297, "b3d1cf06b29bd1d6"): (
         "Replace holds the row lock and CASes the captured active source status "
         "(issue #784 shifted the line and issue #762 removed the obsolete "
         "imported-path assignment from this lifecycle scope; SQL unchanged)"
     ),
-    ("lib/pipeline_db/requests.py", 779, "3c900d15e8bfd2b2"): (
+    ("lib/pipeline_db/requests.py", 777, "3c900d15e8bfd2b2"): (
         "operator idempotence uses a no-op CAS against the observed status "
         "(issues #784 and #762 shifted this line; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 814, "cb4bc190bb194188"): (
+    ("lib/pipeline_db/requests.py", 812, "0f8c762ddc797eea"): (
         "ordinary typed transitions CAS the source status selected by the DAG "
         "(issues #784 and #762 shifted this line; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 912, "c99b75cd27718b63"): (
+    ("lib/pipeline_db/requests.py", 910, "2ad86dbdce02c2ca"): (
         "typed imported transition CASes status with rescue audit atomically "
         "(issues #784 and #762 shifted this line; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 1047, "26ece44e4e17577c"): (
+    ("lib/pipeline_db/requests.py", 1045, "c837e7f8714db236"): (
         "typed reset-to-wanted transition CASes its captured source status; "
         "the Bad Rip priority timestamp is a static CASE update in the same CAS "
         "(issues #784 and #762 shifted this line and removed the obsolete "
         "request path cache)"
     ),
-    ("lib/pipeline_db/requests.py", 1120, "cfedc69363af13f0"): (
+    ("lib/pipeline_db/requests.py", 1118, "3490139cad98e85e"): (
         "automatic recovery accepts only downloading as its exact source "
         "(issues #784 and #762 shifted this line; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 1165, "2b2c27302b2ab78e"): (
+    ("lib/pipeline_db/requests.py", 1163, "a0853139ff6dd9ad"): (
         "typed download claim accepts only the explicit wanted source status "
         "(issues #784 and #762 shifted this line; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 1201, "186e1c3ba3188478"): (
+    ("lib/pipeline_db/requests.py", 1199, "34dd9d8beb763829"): (
         "plan-aware download claim uses an exact wanted source predicate "
         "(issues #784 and #762 shifted this line; no SQL change)"
     ),
@@ -1600,13 +1600,13 @@ def thaw(cur, request_id, expected_status, target_status):
         needle = (
             '        if expected_status == "replaced":\n'
             "            return False\n"
-            "        now = datetime.now(timezone.utc)\n"
+            "        now = datetime.now(UTC)\n"
         )
         replacement = (
             '        if expected_status == "replaced":\n'
             "            return False\n"
             "        helper = lambda value: value; "
-            "now = datetime.now(timezone.utc)\n"
+            "now = datetime.now(UTC)\n"
         )
         self.assertEqual(source.count(needle), 1)
         mutated_source = source.replace(needle, replacement)

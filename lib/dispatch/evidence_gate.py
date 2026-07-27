@@ -6,6 +6,7 @@ action-file consumed by ``import_one.py``, requeue back to preview when
 evidence is unavailable, and refresh current evidence (+ sidecar) after a
 successful import. ``load_current_evidence_for_action`` is looked up here.
 """
+# ruff: noqa: UP037 - quoted Any annotation is part of the typing ratchet
 
 from __future__ import annotations
 
@@ -492,7 +493,7 @@ def _write_album_sidecar_after_import(
     cfg: CratediggerConfig | None,
     beets_library_db_path: str | None = None,
     beets_library_root: str | None = None,
-    beets_factory: Callable[..., Any] | None = None,
+    beets_factory: "Callable[..., Any] | None" = None,
 ) -> SidecarWriteResult:
     """Write the verified-lossless ``cratedigger.json`` sidecar after import.
 
