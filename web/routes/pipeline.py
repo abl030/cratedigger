@@ -75,12 +75,7 @@ def get_pipeline_log(h: RouteHandler, params: dict[str, list[str]]) -> None:
         str(e["mb_release_id"]) for e in entries if e.get("mb_release_id")
     })
     beets_info = _server().check_beets_library_detail(mbids) if mbids else {}
-    source_ids = [
-        item_id
-        for entry in entries
-        for item_id in [entry.get("id")]
-        if isinstance(item_id, int)
-    ]
+    source_ids = [entry["id"] for entry in entries]
     linked_rows = _server()._db().get_linked_import_logs(source_ids)
     result = build_recents_download_log_rows(
         entries,
