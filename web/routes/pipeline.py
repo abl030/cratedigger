@@ -16,7 +16,7 @@ was split out (#546 W4) into ``web/routes/pipeline_mutations.py``.
 """
 
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Literal
 
 import msgspec
@@ -42,175 +42,13 @@ logger = logging.getLogger(__name__)
 from web.download_history_view import (
     build_download_history_row,
     build_download_history_rows,
-    classify_download_log_row,
+    build_recents_download_log_rows,
 )
 from web.classify import classify_import_job_display
 from lib.quality import CandidateScore, top_candidates
 
 DEFAULT_PIPELINE_LOG_LIMIT = 50
 MAX_PIPELINE_LOG_LIMIT = 500
-
-
-def _project_current_library_have(
-    item: dict[str, object],
-    row: Mapping[str, object],
-    _beets: Mapping[str, object],
-) -> None:
-    """Select one complete, provably pre-attempt HAVE snapshot.
-
-    HAVE is historical: what was on disk before this attempt. Successful and
-    explicit import rows may have updated the request's current evidence, so
-    they never receive an overlay. A deleted-triage or failed row may carry a
-    partial embedded snapshot (for example Qigong's V0 probe with no codec or
-    bitrate); when canonical evidence predates the attempt, replace that
-    partial snapshot wholesale instead of mixing fields. Live Beets data has
-    no historical timestamp and is never evidence for HAVE.
-    """
-    attempt_measurement_fields = (
-        "existing_format",
-        "existing_min_bitrate",
-        "existing_avg_bitrate",
-        "existing_median_bitrate",
-        "existing_spectral_grade",
-        "existing_spectral_bitrate",
-        "existing_spectral_error",
-        "existing_v0_probe_kind",
-        "existing_v0_probe_min_bitrate",
-        "existing_v0_probe_avg_bitrate",
-        "existing_v0_probe_median_bitrate",
-        "comparison_basis",
-    )
-    if item.get("outcome") in ("success", "force_import", "manual_import"):
-        return
-
-    attempt_has_any = (
-        item.get("existing_spectral_attempted") is True
-        or any(
-            item.get(field) is not None
-            for field in attempt_measurement_fields
-        )
-    )
-    attempt_has_complete_core = (
-        item.get("existing_format") is not None
-        and item.get("existing_min_bitrate") is not None
-        and item.get("existing_avg_bitrate") is not None
-    )
-    partial_snapshot_can_be_replaced = (
-        item.get("comparison_basis") is None
-        and (
-            item.get("outcome") in (
-                "failed", "timeout", "measurement_failed",
-            )
-            or item.get("wrong_match_triage_action") in (
-                "deleted_reject",
-                "deleted_verified_lossless_parent",
-            )
-        )
-    )
-    if attempt_has_any and (
-        attempt_has_complete_core or not partial_snapshot_can_be_replaced
-    ):
-        return
-
-    current_projection = {
-        "existing_format": row.get("_current_evidence_format"),
-        "existing_min_bitrate": row.get("_current_evidence_min_bitrate"),
-        "existing_avg_bitrate": row.get("_current_evidence_avg_bitrate"),
-        "existing_median_bitrate": row.get(
-            "_current_evidence_median_bitrate"
-        ),
-        "existing_spectral_grade": row.get(
-            "_current_evidence_spectral_grade"
-        ),
-        "existing_spectral_bitrate": row.get(
-            "_current_evidence_spectral_bitrate"
-        ),
-        "existing_v0_probe_kind": row.get(
-            "_current_evidence_v0_probe_kind"
-        ),
-        "existing_v0_probe_min_bitrate": row.get(
-            "_current_evidence_v0_probe_min_bitrate"
-        ),
-        "existing_v0_probe_avg_bitrate": row.get(
-            "_current_evidence_v0_probe_avg_bitrate"
-        ),
-        "existing_v0_probe_median_bitrate": row.get(
-            "_current_evidence_v0_probe_median_bitrate"
-        ),
-    }
-    current_has_complete_core = (
-        current_projection["existing_format"] is not None
-        and current_projection["existing_min_bitrate"] is not None
-        and current_projection["existing_avg_bitrate"] is not None
-    )
-    if (
-        row.get("_current_evidence_id") is not None
-        and row.get("_current_evidence_is_pre_attempt") is True
-        and (not attempt_has_any or current_has_complete_core)
-    ):
-        if attempt_has_any:
-            item["existing_spectral_attempted"] = False
-            item["existing_spectral_error"] = None
-        item.update(current_projection)
-
-
-def _project_linked_import_evidence(
-    items: list[dict[str, object]],
-    linked_successors: Sequence[Mapping[str, object]] = (),
-) -> None:
-    """Attach a successor import's measurements to its source audit row.
-
-    Active force-import rows and historical manual-import rows explicitly
-    point back through ``source_download_log_id``. That is the authoritative
-    bridge from a kept wrong-match card to the conversion which later
-    materialized those bytes; do not infer the relationship from matching
-    albums or measurements.
-    """
-    by_id = {
-        item.get("id"): item
-        for item in items
-        if isinstance(item.get("id"), int)
-    }
-    for successor in (*items, *linked_successors):
-        if successor.get("outcome") not in (
-            "success", "force_import", "manual_import"
-        ):
-            continue
-        source_id = successor.get("source_download_log_id")
-        origin = by_id.get(source_id)
-        if origin is None or successor.get("materialized_format") is None:
-            continue
-        for field in (
-            "existing_format",
-            "existing_min_bitrate",
-            "existing_avg_bitrate",
-            "existing_median_bitrate",
-            "existing_spectral_grade",
-            "existing_spectral_bitrate",
-            "existing_spectral_attempted",
-            "existing_spectral_error",
-            "existing_v0_probe_kind",
-            "existing_v0_probe_min_bitrate",
-            "existing_v0_probe_avg_bitrate",
-            "existing_v0_probe_median_bitrate",
-            "materialized_format",
-            "materialized_min_bitrate",
-            "materialized_avg_bitrate",
-            "materialized_median_bitrate",
-            "target_contract_format",
-        ):
-            if origin.get(field) is None:
-                origin[field] = successor.get(field)
-
-
-def _classify_pipeline_log_item(
-    row: Mapping[str, object],
-) -> dict[str, object]:
-    classified_row = classify_download_log_row(row)
-    return {
-        **classified_row.entry.to_json_dict(),
-        **msgspec.to_builtins(classified_row.classified),
-    }
 
 
 def _pipeline_log_limit(params: dict[str, list[str]]) -> int:
@@ -237,29 +75,25 @@ def get_pipeline_log(h: RouteHandler, params: dict[str, list[str]]) -> None:
         str(e["mb_release_id"]) for e in entries if e.get("mb_release_id")
     })
     beets_info = _server().check_beets_library_detail(mbids) if mbids else {}
-    result: list[dict[str, object]] = []
-    for e in entries:
-        item = _classify_pipeline_log_item(e)
+    source_ids = [
+        item_id
+        for entry in entries
+        for item_id in [entry.get("id")]
+        if isinstance(item_id, int)
+    ]
+    linked_rows = _server()._db().get_linked_import_logs(source_ids)
+    result = build_recents_download_log_rows(
+        entries,
+        linked_successor_rows=linked_rows,
+    )
+    for item in result:
         mbid = item.get("mb_release_id")
         bi = beets_info.get(mbid) if isinstance(mbid, str) else None
         item["in_beets"] = bi is not None
-        _project_current_library_have(item, e, bi or {})
         if bi:
             item["beets_format"] = bi.get("beets_format")
             item["beets_bitrate"] = bi.get("beets_bitrate")
             item["beets_avg_bitrate"] = bi.get("beets_avg_bitrate")
-        result.append(item)
-    source_ids = [
-        item_id
-        for item in result
-        for item_id in [item.get("id")]
-        if isinstance(item_id, int)
-    ]
-    linked_items = [
-        _classify_pipeline_log_item(row)
-        for row in _server()._db().get_linked_import_logs(source_ids)
-    ]
-    _project_linked_import_evidence(result, linked_items)
     # Count recents filters plus found-search enqueue rates (single query).
     counts = _server()._db().get_download_log_counts()
     h._json({

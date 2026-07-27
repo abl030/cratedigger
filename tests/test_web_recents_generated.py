@@ -19,7 +19,7 @@ from lib.quality import (
     V0ProbeEvidence,
 )
 from web.classify import classify_log_entry
-from web.routes.pipeline import (
+from web.download_history_view import (
     _project_current_library_have,
     _project_linked_import_evidence,
 )
@@ -639,11 +639,7 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
             ),
             "existing_spectral_bitrate": 160 if has_attempt_spectral else None,
         }
-        _project_current_library_have(item, {}, {
-            "beets_format": current_format,
-            "beets_bitrate": current_min,
-            "beets_avg_bitrate": current_min + 20,
-        })
+        _project_current_library_have(item, {})
 
         assert_current_library_have_is_projected(
             item,
@@ -712,10 +708,7 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
             "_current_evidence_v0_probe_avg_bitrate": current_v0,
             "_current_evidence_v0_probe_median_bitrate": current_v0,
         }
-        _project_current_library_have(item, row, {
-            "beets_format": "conflicting-beets-format",
-            "beets_bitrate": current_min + 100,
-        })
+        _project_current_library_have(item, row)
 
         assert_current_library_have_is_projected(
             item,
@@ -853,7 +846,7 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
             "_current_evidence_v0_probe_avg_bitrate": current_v0,
             "_current_evidence_v0_probe_median_bitrate": current_v0,
         }
-        _project_current_library_have(item, row, {})
+        _project_current_library_have(item, row)
 
         assert_complete_have_snapshot_is_selected(
             item,
@@ -913,7 +906,7 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
             "_current_evidence_min_bitrate": current_min,
             "_current_evidence_avg_bitrate": current_min + 10,
             "_current_evidence_median_bitrate": current_min + 5,
-        }, {})
+        })
         if is_pre_attempt:
             self.assertEqual(item["existing_format"], current_format)
             self.assertEqual(item["existing_min_bitrate"], current_min)
@@ -953,10 +946,6 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
             "_current_evidence_min_bitrate": current_min,
             "_current_evidence_avg_bitrate": current_avg,
             "_current_evidence_median_bitrate": current_avg,
-        }, {
-            "beets_format": current_format,
-            "beets_bitrate": current_min,
-            "beets_avg_bitrate": current_avg,
         })
         assert_mutating_attempt_has_no_projected_have(item)
 

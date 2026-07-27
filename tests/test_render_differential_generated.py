@@ -38,6 +38,7 @@ from hypothesis import example, given, strategies as st
 
 import msgspec
 
+from lib.quality import AudioQualityMeasurement, ImportResult
 from scripts.render_differential import (
     ClassifyRenderTarget,
     DiffReport,
@@ -50,8 +51,12 @@ from scripts.render_differential import (
     watched_field_names,
 )
 import tests._hypothesis_profiles  # noqa: F401
+from lib.pipeline_db.download_log import _DownloadLogMixin
 from web.classify import ClassifiedEntry
-from web.routes.pipeline import _classify_pipeline_log_item
+from web.download_history_view import (
+    _classify_pipeline_log_item,
+    build_recents_download_log_rows,
+)
 
 FIELD_ALPHABET = ("badge", "verdict", "summary", "comparison_basis")
 
@@ -565,6 +570,110 @@ class TestRealRenderPathConverse(unittest.TestCase):
         target.prepare([origin, successor])
         rendered = target.render(origin)
         check_every_watched_field_rendered(rendered, self.WATCHED)
+
+    @given(origin=download_log_rows(), successor=download_log_rows())
+    def test_default_target_matches_the_production_batch_owner(
+        self, origin: dict[str, object], successor: dict[str, object],
+    ) -> None:
+        successor["source_download_log_id"] = origin["id"]
+        successor["id"] = int(str(origin["id"])) + 100000
+        rows = [origin, successor]
+        overlaid = [
+            _DownloadLogMixin._overlay_evidence_onto_download_log_row(
+                dict(row)
+            )
+            for row in rows
+        ]
+        expected = build_recents_download_log_rows(
+            overlaid,
+            linked_successor_rows=overlaid,
+        )
+        target = ClassifyRenderTarget()
+        target.prepare(rows)
+
+        for row, expected_item in zip(rows, expected):
+            rendered = target.render(row)
+            for field in self.WATCHED:
+                self.assertEqual(rendered.fields[field], expected_item[field])
+
+    @given(
+        origin_id=st.integers(1, 10000),
+        older_gap=st.integers(1, 1000),
+        newer_gap=st.integers(1, 1000),
+        formats=st.sampled_from((
+            ("MP3", "Opus"),
+            ("Opus", "FLAC"),
+            ("FLAC", "MP3"),
+        )),
+        reverse=st.booleans(),
+        placement=st.sampled_from(("page", "linked", "duplicates")),
+    )
+    @example(
+        origin_id=1,
+        older_gap=1,
+        newer_gap=1,
+        formats=("MP3", "Opus"),
+        reverse=False,
+        placement="page",
+    )
+    def test_newest_linked_successor_wins_independent_of_input_shape(
+        self,
+        origin_id: int,
+        older_gap: int,
+        newer_gap: int,
+        formats: tuple[str, str],
+        reverse: bool,
+        placement: str,
+    ) -> None:
+        older_id = origin_id + older_gap
+        newer_id = older_id + newer_gap
+        origin: dict[str, object] = {
+            "id": origin_id,
+            "outcome": "rejected",
+        }
+
+        def successor(row_id: int, fmt: str) -> dict[str, object]:
+            return {
+                "id": row_id,
+                "outcome": "force_import",
+                "source_download_log_id": origin_id,
+                "import_result": msgspec.to_builtins(ImportResult(
+                    decision="import",
+                    materialized_measurement=AudioQualityMeasurement(
+                        min_bitrate_kbps=128,
+                        avg_bitrate_kbps=160,
+                        median_bitrate_kbps=155,
+                        format=fmt,
+                        is_cbr=False,
+                    ),
+                )),
+            }
+
+        successors = [
+            successor(older_id, formats[0]),
+            successor(newer_id, formats[1]),
+        ]
+        if reverse:
+            successors.reverse()
+        if placement == "page":
+            rows, linked = [origin, *successors], []
+        elif placement == "linked":
+            rows, linked = [origin], successors
+        else:
+            rows, linked = [origin, *successors], list(reversed(successors))
+
+        rendered = build_recents_download_log_rows(
+            rows,
+            linked_successor_rows=linked,
+        )
+        self.assertEqual(
+            [item["id"] for item in rendered],
+            [row["id"] for row in rows],
+        )
+        rendered_origin = next(
+            item for item in rendered if item["id"] == origin_id
+        )
+        self.assertEqual(rendered_origin["materialized_format"], formats[1])
 
 
 def _dropping_summarizer(
