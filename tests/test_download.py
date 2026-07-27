@@ -3333,9 +3333,8 @@ class TestEvaluateStagedPathReadiness(unittest.TestCase):
 
     def test_abandon_success_resets_via_shared_decision(self):
         """kind=auto-import-staged + subprocess started + abandon commits
-        cleanly: the shared decision reports ``MaterializeFailed`` (the
-        caller's cue to treat this as a completed self-heal, not a
-        guarded manual-recovery case) and the DB row is already reset."""
+        cleanly: the shared decision reports a handled stop, and the DB row
+        is already reset exactly once."""
         from lib.download_materialization import _evaluate_staged_path_readiness
         with tempfile.TemporaryDirectory() as tmpdir:
             entry, staged_album, location, db = self._seed_and_build(
@@ -3348,10 +3347,11 @@ class TestEvaluateStagedPathReadiness(unittest.TestCase):
             result = _evaluate_staged_path_readiness(
                 entry, staged_album, location, db,
             )
-            self.assertIsInstance(result, MaterializeFailed)
-            assert isinstance(result, MaterializeFailed)
-            self.assertEqual(result.reason, "abandoned_interrupted_auto_import")
+            self.assertIsInstance(result, MaterializeGuarded)
+            assert isinstance(result, MaterializeGuarded)
+            self.assertEqual(result.detail, "abandoned_interrupted_auto_import")
             self.assertEqual(db.request(1)["status"], "wanted")
+            self.assertEqual(db.status_history, [(1, "wanted")])
 
 
 def _fail_file(*, last_state=None, last_exception=None):
@@ -3902,6 +3902,39 @@ class TestHarvestTerminalTransferEvidence(unittest.TestCase):
 
 class TestPollActiveDownloads(unittest.TestCase):
     """Test poll_active_downloads() — core polling function."""
+
+    def _assert_pre_enqueue_failure_event(
+        self,
+        db: FakePipelineDB,
+        *,
+        reason: str,
+        filetype: str,
+        expected_verdict: str,
+    ) -> None:
+        from lib.failure_presentation import FailureEvidence, present_failure
+
+        self.assertEqual(db.status_history, [(1, "wanted")])
+        self.assertEqual(len(db.download_logs), 1)
+        row = db.download_logs[0]
+        self.assertEqual(
+            (
+                row.outcome,
+                row.soulseek_username,
+                row.filetype,
+                row.beets_detail,
+                row.error_message,
+            ),
+            ("failed", None, filetype, reason, reason),
+        )
+        presentation = present_failure(FailureEvidence(
+            outcome=row.outcome or "",
+            soulseek_username=row.soulseek_username,
+            error_message=row.error_message,
+            beets_detail=row.beets_detail,
+        ))
+        self.assertEqual(presentation.verdict, expected_verdict)
+        self.assertEqual(db.cooldowns_applied, [])
+        self.assertEqual(db.list_import_jobs(request_id=1), [])
 
     def _make_downloading_row(self, request_id=1, state_dict=None):
         """Build a mock album_requests row with status='downloading'."""
@@ -5697,7 +5730,7 @@ class TestPollActiveDownloads(unittest.TestCase):
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             row = self._make_downloading_row(state_dict={
-                "filetype": "flac",
+                "filetype": "opus",
                 "enqueued_at": _utc_now_iso(),
                 "processing_started_at": _utc_now_iso(),
                 "current_path": os.path.join(tmpdir, "missing"),
@@ -5711,7 +5744,15 @@ class TestPollActiveDownloads(unittest.TestCase):
             poll_active_downloads(ctx)
 
             self.assertEqual(fake_db.request(1)["status"], "wanted")
-            self.assertIn((1, "wanted"), fake_db.status_history)
+            self._assert_pre_enqueue_failure_event(
+                fake_db,
+                reason="staged_path_missing",
+                filetype="opus",
+                expected_verdict=(
+                    "The staged download folder could not be accessed before "
+                    "import (possible filesystem error); requeued"
+                ),
+            )
 
     def test_poll_missing_canonical_processing_path_queues_importer(self):
         """Missing canonical path can be pre-materialization, not post-move loss."""
@@ -5966,10 +6007,11 @@ class TestPollActiveDownloads(unittest.TestCase):
             cfg = cast(Any, ctx.cfg)
             cfg.beets_staging_dir = staging_root
 
-            poll_active_downloads(ctx)
+            with self.assertLogs("cratedigger", level="WARNING") as logs:
+                poll_active_downloads(ctx)
 
             self.assertEqual(fake_db.request(1)["status"], "wanted")
-            self.assertIn((1, "wanted"), fake_db.status_history)
+            self.assertEqual(fake_db.status_history, [(1, "wanted")])
             self.assertIsNone(fake_db.request(1)["active_download_state"])
             failed_parent = os.path.join(
                 os.path.dirname(resumed_path),
@@ -5992,6 +6034,7 @@ class TestPollActiveDownloads(unittest.TestCase):
             )
             self.assertEqual(fake_db.denylist, [])
             self.assertEqual(fake_db.cooldowns_applied, [])
+            self.assertNotIn("Unhandled exception", "\n".join(logs.output))
 
     def test_poll_subprocess_started_auto_import_waits_for_active_manual_job(self):
         """Any active import job owns the request, not just automation jobs."""
@@ -6250,6 +6293,16 @@ class TestPollActiveDownloads(unittest.TestCase):
                 fake_db.request(1)["status"], "wanted",
                 "Subprocess never launched + missing files = stale "
                 "crash residue; must reset to wanted, not block forever.",
+            )
+            self._assert_pre_enqueue_failure_event(
+                fake_db,
+                reason="staged_path_missing_tracked_files",
+                filetype="flac",
+                expected_verdict=(
+                    "Tracked files in the staged download folder could not be "
+                    "accessed before import (possible filesystem error); "
+                    "requeued"
+                ),
             )
 
     def test_poll_legacy_wedge_row_with_files_present_resumes_via_shared_decision(self):

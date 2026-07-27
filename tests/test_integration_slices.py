@@ -4855,7 +4855,10 @@ class TestPostMoveResumeBlockGuard(unittest.TestCase):
         attempt, preserves leftover files under failed_imports, and
         resets the request for a clean redownload.
         """
-        from lib.download_materialization import MaterializeFailed, _materialize_processing_dir
+        from lib.download_materialization import (
+            MaterializeGuarded,
+            _materialize_processing_dir,
+        )
         from lib.staged_album import StagedAlbum
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -4875,10 +4878,12 @@ class TestPostMoveResumeBlockGuard(unittest.TestCase):
 
         self.assertIsInstance(
             result,
-            MaterializeFailed,
+            MaterializeGuarded,
             "Subprocess-started residue must not retry in place; it should "
             "abandon and let the next search/download cycle own recovery.",
         )
+        assert isinstance(result, MaterializeGuarded)
+        self.assertEqual(result.detail, "abandoned_interrupted_auto_import")
         self.assertEqual(
             ctx.pipeline_db_source._get_db().request(request_id)["status"],
             "wanted",

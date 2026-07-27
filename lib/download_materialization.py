@@ -329,12 +329,13 @@ class MaterializeFailed:
 
 @dataclass(frozen=True)
 class MaterializeGuarded:
-    """Ownership/resume ambiguity: leave the row untouched (an active
-    release lock, unverifiable subprocess-start evidence, a post-move
-    resume block). Historical bare ``None``.
+    """The caller must stop without applying a generic materialize reset.
 
-    ``detail`` is diagnostic only — consumers must branch on the type
-    tag, never on this string.
+    This covers ownership/resume ambiguity (an active release lock,
+    unverifiable subprocess-start evidence, a post-move resume block) and
+    a successful abandonment whose reset and audit already committed.
+    Historical bare ``None``. ``detail`` is diagnostic only — consumers
+    must branch on the type tag, never on this string.
     """
 
     detail: str
@@ -809,10 +810,8 @@ def _evaluate_staged_path_readiness(
                 ),
             )
             if handled:
-                return _record_materialize_failure(
-                    request_id,
-                    "abandoned_interrupted_auto_import",
-                    f"current_path={staged_album.current_path}",
+                return MaterializeGuarded(
+                    detail="abandoned_interrupted_auto_import",
                 )
             return MaterializeGuarded(
                 detail="abandon_blocked_release_lock_or_probe_unknown")

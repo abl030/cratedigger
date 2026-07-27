@@ -2804,6 +2804,65 @@ class TestDownloadLog(unittest.TestCase):
         self.assertIsNone(history[0]["beets_scenario"])
         self.assertIsNone(history[0]["beets_distance"])
 
+    def test_staged_path_failures_round_trip_to_neutral_history_copy(self):
+        """The real writer/read projections feed the real history presenters."""
+        from lib.failure_presentation import FailureEvidence, present_failure
+        from web.classify import LogEntry, classify_log_entry
+
+        cases = (
+            (
+                "staged_path_missing",
+                "The staged download folder could not be accessed before "
+                "import (possible filesystem error); requeued",
+            ),
+            (
+                "staged_path_missing_tracked_files",
+                "Tracked files in the staged download folder could not be "
+                "accessed before import (possible filesystem error); requeued",
+            ),
+        )
+        for reason, expected in cases:
+            with self.subTest(reason=reason):
+                log_id = self.db.log_download(
+                    request_id=self.req_id,
+                    soulseek_username=None,
+                    filetype="opus",
+                    outcome="failed",
+                    beets_detail=reason,
+                    error_message=reason,
+                )
+
+                history_row = next(
+                    row for row in self.db.get_download_history(self.req_id)
+                    if row["id"] == log_id
+                )
+                self.assertEqual(
+                    (
+                        history_row["outcome"],
+                        history_row["soulseek_username"],
+                        history_row["filetype"],
+                        history_row["beets_detail"],
+                        history_row["error_message"],
+                    ),
+                    ("failed", None, "opus", reason, reason),
+                )
+                evidence = FailureEvidence.from_row(dict(history_row))
+                self.assertEqual(
+                    present_failure(evidence).verdict,
+                    expected,
+                )
+
+                recent_row = next(
+                    row for row in self.db.get_log(limit=10)
+                    if row["id"] == log_id
+                )
+                entry = LogEntry.from_row(dict(recent_row))
+                classified = classify_log_entry(entry)
+                self.assertIsNone(entry.soulseek_username)
+                self.assertEqual(entry.outcome, "failed")
+                self.assertEqual(classified.verdict, expected)
+                self.assertEqual(classified.summary, expected)
+
     def test_log_download_round_trip_preserves_transfer_detail(self):
         """Rule A (test-fidelity.md): migration 043's transfer_detail
         JSONB column must actually preserve what log_download writes —
