@@ -4,10 +4,6 @@ from __future__ import annotations
 
 import unittest
 
-from hypothesis import example, given
-from hypothesis import strategies as st
-
-import tests._hypothesis_profiles  # noqa: F401
 from lib.import_queue import (
     IMPORT_JOB_FORCE,
     IMPORT_JOB_PREVIEW_EVIDENCE_READY,
@@ -46,16 +42,15 @@ class TestImportJobRunnableLifecycleGenerated(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "would_import"):
             assert_only_evidence_ready_is_claimable("would_import", True)
 
-    @given(preview_status=st.sampled_from(sorted(IMPORT_JOB_PREVIEW_STATUSES)))
-    @example(preview_status="would_import")
-    @example(preview_status="evidence_ready")
-    def test_only_evidence_ready_preview_status_is_claimable(
-        self, preview_status: str,
-    ) -> None:
-        assert_only_evidence_ready_is_claimable(
-            preview_status,
-            _claimed_for(preview_status),
-        )
+    def test_only_evidence_ready_preview_status_is_claimable(self) -> None:
+        # Exhaustive finite status vocabulary, including the removed
+        # would_import compatibility and the evidence_ready success world.
+        for preview_status in sorted(IMPORT_JOB_PREVIEW_STATUSES):
+            with self.subTest(preview_status=preview_status):
+                assert_only_evidence_ready_is_claimable(
+                    preview_status,
+                    _claimed_for(preview_status),
+                )
 
 
 if __name__ == "__main__":

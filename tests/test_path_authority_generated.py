@@ -11,6 +11,7 @@ import os
 import tempfile
 import unittest
 from collections.abc import Callable
+from itertools import product
 
 from hypothesis import example, given
 from hypothesis import strategies as st
@@ -114,7 +115,7 @@ class TestGeneratedDescriptorAuthority(unittest.TestCase):
                     with open_private_processing_root(processing, source):
                             pass
 
-    @given(entry_count=st.integers(min_value=0, max_value=6))
+    @given(entry_count=st.integers(min_value=0, max_value=256))
     def test_preview_snapshot_total_entry_limit_is_global(
         self, entry_count: int,
     ) -> None:
@@ -474,9 +475,9 @@ class TestGeneratedMaterializePublication(unittest.TestCase):
 
 class TestGeneratedPreviewCopyBounds(unittest.TestCase):
     @given(
-        declared_bytes=st.integers(min_value=0, max_value=5),
-        growth_bytes=st.integers(min_value=0, max_value=2),
-        available_bytes=st.integers(min_value=0, max_value=7),
+        declared_bytes=st.integers(min_value=0, max_value=6),
+        growth_bytes=st.integers(min_value=0, max_value=3),
+        available_bytes=st.integers(min_value=0, max_value=8),
     )
     @example(declared_bytes=4, growth_bytes=0, available_bytes=6)
     @example(declared_bytes=5, growth_bytes=0, available_bytes=7)
@@ -844,61 +845,77 @@ class TestGeneratedPublicationResultTypeGate(unittest.TestCase):
     wherever it lands.
     """
 
-    @given(
-        result_kind=st.sampled_from(sorted(_RESULT_FACTORIES)),
-        allowed_kinds=st.one_of(
-            st.none(),
-            st.frozensets(
-                st.sampled_from(sorted(_RESULT_FACTORIES)),
-                min_size=1,
-            ),
-        ),
-    )
-    @example(result_kind="failed", allowed_kinds=None)
-    @example(result_kind="materialized", allowed_kinds=None)
-    @example(result_kind="guarded", allowed_kinds=None)
     def test_only_allowed_result_kinds_pass_the_publication_checker(
         self,
-        result_kind: str,
-        allowed_kinds: frozenset[str] | None,
     ) -> None:
-        # Every other arm of the checker is satisfied, so the result-type
-        # gate is the only thing that can refuse this world.
-        result = _RESULT_FACTORIES[result_kind]()
-        try:
-            if allowed_kinds is None:
-                assert_publication_invariant(
-                    result=result,
-                    source_exists=True,
-                    expected_source_exists=True,
-                    destination_names=set(),
-                    expected_names=set(),
-                    artifact_names=[],
-                    name_max=255,
+        result_kinds = tuple(sorted(_RESULT_FACTORIES))
+        explicit_allowed_kinds = tuple(
+            frozenset(
+                kind
+                for kind, included in zip(
+                    result_kinds,
+                    included_kinds,
+                    strict=True,
                 )
-            else:
-                assert_publication_invariant(
-                    result=result,
-                    source_exists=True,
-                    expected_source_exists=True,
-                    destination_names=set(),
-                    expected_names=set(),
-                    artifact_names=[],
-                    name_max=255,
-                    allowed_result_types=tuple(
-                        _RESULT_TYPES[kind] for kind in sorted(allowed_kinds)
-                    ),
-                )
-        except AssertionError:
-            accepted = False
-        else:
-            accepted = True
-
-        assert_result_type_gate(
-            accepted=accepted,
-            result_kind=result_kind,
-            allowed_kinds=allowed_kinds,
+                if included
+            )
+            for included_kinds in product((False, True), repeat=len(result_kinds))
+            if any(included_kinds)
         )
+        # Exhaustive result-kind × default-or-nonempty-explicit-allowlist
+        # table. The default failed/materialized/guarded decisive worlds are
+        # retained.
+        allowed_worlds: tuple[frozenset[str] | None, ...] = (
+            None,
+            *explicit_allowed_kinds,
+        )
+        for result_kind, allowed_kinds in product(
+            result_kinds,
+            allowed_worlds,
+        ):
+            with self.subTest(
+                result_kind=result_kind,
+                allowed_kinds=allowed_kinds,
+            ):
+                # Every other arm of the checker is satisfied, so the
+                # result-type gate is the only thing that can refuse this
+                # world.
+                result = _RESULT_FACTORIES[result_kind]()
+                try:
+                    if allowed_kinds is None:
+                        assert_publication_invariant(
+                            result=result,
+                            source_exists=True,
+                            expected_source_exists=True,
+                            destination_names=set(),
+                            expected_names=set(),
+                            artifact_names=[],
+                            name_max=255,
+                        )
+                    else:
+                        assert_publication_invariant(
+                            result=result,
+                            source_exists=True,
+                            expected_source_exists=True,
+                            destination_names=set(),
+                            expected_names=set(),
+                            artifact_names=[],
+                            name_max=255,
+                            allowed_result_types=tuple(
+                                _RESULT_TYPES[kind]
+                                for kind in sorted(allowed_kinds)
+                            ),
+                        )
+                except AssertionError:
+                    accepted = False
+                else:
+                    accepted = True
+
+                assert_result_type_gate(
+                    accepted=accepted,
+                    result_kind=result_kind,
+                    allowed_kinds=allowed_kinds,
+                )
 
 
 class TestPathAuthorityProofCheckers(unittest.TestCase):

@@ -11,6 +11,7 @@ import unittest
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
+from itertools import product
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -585,83 +586,88 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
             ),
         )
 
-    @example(
-        initial_status="imported", authority="unique", delete_succeeds=False,
-    )
-    @example(
-        initial_status="unsearchable", authority="missing",
-        delete_succeeds=True,
-    )
-    @given(
-        initial_status=st.sampled_from(("wanted", "imported", "unsearchable")),
-        authority=st.sampled_from(("unique", "missing")),
-        delete_succeeds=st.booleans(),
-    )
-    def test_ban_completion_is_exactly_authoritative_absence(
-        self,
-        initial_status: str,
-        authority: str,
-        delete_succeeds: bool,
-    ) -> None:
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=41,
-            status=initial_status,
-            mb_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-        ))
-        beets = FakeBeetsDB()
-        if authority == "unique":
-            beets.set_album_ids_for_release(
-                "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-                [7],
-            )
+    def test_ban_completion_is_exactly_authoritative_absence(self) -> None:
+        # Exhaustive status × authority × child-result table. It retains the
+        # imported/unique/failure and unsearchable/missing/success examples.
+        worlds = product(
+            ("wanted", "imported", "unsearchable"),
+            ("unique", "missing"),
+            (False, True),
+        )
+        for initial_status, authority, delete_succeeds in worlds:
+            with self.subTest(
+                initial_status=initial_status,
+                authority=authority,
+                delete_succeeds=delete_succeeds,
+            ):
+                db = FakePipelineDB()
+                db.seed_request(make_request_row(
+                    id=41,
+                    status=initial_status,
+                    mb_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                ))
+                beets = FakeBeetsDB()
+                if authority == "unique":
+                    beets.set_album_ids_for_release(
+                        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                        [7],
+                    )
 
-        def exact_delete(
-            request: BeetsDeleteRequest,
-        ) -> BeetsDeleteCompleted | BeetsDeleteFailed:
-            if delete_succeeds:
-                return BeetsDeleteCompleted(
-                    album_id=request.album_id,
-                    album_name="Album",
-                    artist_name="Artist",
-                    former_album_path="/tmp/fake-beets-library/album-7",
-                    deleted_tracks=1,
-                    deleted_artifacts=1,
-                    preserved_paths=(),
+                def exact_delete(
+                    request: BeetsDeleteRequest,
+                    *,
+                    delete_succeeds: bool = delete_succeeds,
+                ) -> BeetsDeleteCompleted | BeetsDeleteFailed:
+                    if delete_succeeds:
+                        return BeetsDeleteCompleted(
+                            album_id=request.album_id,
+                            album_name="Album",
+                            artist_name="Artist",
+                            former_album_path=(
+                                "/tmp/fake-beets-library/album-7"
+                            ),
+                            deleted_tracks=1,
+                            deleted_artifacts=1,
+                            preserved_paths=(),
+                        )
+                    return BeetsDeleteFailed(
+                        album_id=request.album_id,
+                        reason="filesystem_error",
+                        detail="generated exact-delete failure",
+                        album_still_present=True,
+                    )
+
+                result = ban_source(
+                    pipeline_db=db,
+                    beets_db=beets,
+                    request=BanSourceRequest(41),
+                    beets_delete_fn=exact_delete,
                 )
-            return BeetsDeleteFailed(
-                album_id=request.album_id,
-                reason="filesystem_error",
-                detail="generated exact-delete failure",
-                album_still_present=True,
-            )
 
-        result = ban_source(
-            pipeline_db=db,
-            beets_db=beets,
-            request=BanSourceRequest(41),
-            beets_delete_fn=exact_delete,
-        )
-
-        completed = isinstance(result, BanSourceSuccess)
-        absent_after = authority == "missing" or delete_succeeds
-        assert_ban_completion_truth(
-            completed=completed,
-            absent_after=absent_after,
-        )
-        self.assertEqual(
-            isinstance(result, BanSourceCleanupIncomplete),
-            not absent_after,
-        )
-        assert isinstance(result, (BanSourceSuccess, BanSourceCleanupIncomplete))
-        self.assertEqual(db.request(41)["status"], (
-            "unsearchable" if initial_status == "unsearchable" else "wanted"
-        ))
-        self.assertEqual(db.download_logs[-1].outcome, "curator_ban")
-        self.assertEqual(
-            len(result.cleanup_errors),
-            0 if absent_after else 1,
-        )
+                completed = isinstance(result, BanSourceSuccess)
+                absent_after = authority == "missing" or delete_succeeds
+                assert_ban_completion_truth(
+                    completed=completed,
+                    absent_after=absent_after,
+                )
+                self.assertEqual(
+                    isinstance(result, BanSourceCleanupIncomplete),
+                    not absent_after,
+                )
+                assert isinstance(
+                    result,
+                    (BanSourceSuccess, BanSourceCleanupIncomplete),
+                )
+                self.assertEqual(db.request(41)["status"], (
+                    "unsearchable"
+                    if initial_status == "unsearchable"
+                    else "wanted"
+                ))
+                self.assertEqual(db.download_logs[-1].outcome, "curator_ban")
+                self.assertEqual(
+                    len(result.cleanup_errors),
+                    0 if absent_after else 1,
+                )
 
     @given(
         prefix=st.binary(min_size=0, max_size=24),
@@ -1114,109 +1120,135 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
                         ),
                     )
 
-    @example(
-        reason="subprocess_error", album_present=False, orphan_items=False,
-        path_source="track", purge_pipeline=True,
-    )
-    @example(
-        reason="protocol_error", album_present=False, orphan_items=True,
-        path_source="art", purge_pipeline=True,
-    )
-    @given(
-        reason=st.sampled_from(("subprocess_error", "protocol_error")),
-        album_present=st.booleans(),
-        orphan_items=st.booleans(),
-        path_source=st.sampled_from(("track", "art", "none")),
-        purge_pipeline=st.booleans(),
-    )
-    def test_lost_delete_ack_always_requires_manual_recovery(
-        self,
-        reason: BeetsDeleteFailureReason,
-        album_present: bool,
-        orphan_items: bool,
-        path_source: str,
-        purge_pipeline: bool,
-    ) -> None:
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=41,
-            status="imported",
-            mb_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-        ))
-        album_dir = Path("/music/Artist/Album")
-        detail: dict[str, object] = {
-            "id": 7,
-            "album": "Album",
-            "artist": "Artist",
-            "mb_albumid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-            "discogs_albumid": None,
-            "tracks": [],
-        }
-        if path_source == "track":
-            detail["tracks"] = [{"id": 1, "path": str(album_dir / "01.flac")}]
-        elif path_source == "art":
-            detail["artpath"] = str(album_dir / "cover.jpg")
-        beets = FakeBeetsDB()
-        beets.set_album_detail(7, detail)
-        beets.set_album_ids_for_release(
-            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-            [7],
+    def test_lost_delete_ack_always_requires_manual_recovery(self) -> None:
+        # Exhaustive finite lost-ack table. It retains the decisive subprocess
+        # track world and protocol/art/orphan world from the former examples.
+        reasons: tuple[BeetsDeleteFailureReason, ...] = (
+            "subprocess_error",
+            "protocol_error",
         )
-        beets.set_item_paths(
-            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-            [(1, str(album_dir / "01.flac"))],
+        worlds = product(
+            reasons,
+            (False, True),
+            (False, True),
+            ("track", "art", "none"),
+            (False, True),
         )
-        notifications: list[str] = []
-
-        def failed_child(request: BeetsDeleteRequest) -> BeetsDeleteFailed:
-            if not album_present:
-                beets._album_detail.pop(request.album_id)
-            beets.set_orphan_items_present(request.album_id, orphan_items)
-            return BeetsDeleteFailed(
-                album_id=request.album_id,
+        for (
+            reason,
+            album_present,
+            orphan_items,
+            path_source,
+            purge_pipeline,
+        ) in worlds:
+            typed_reason: BeetsDeleteFailureReason = (
+                "subprocess_error"
+                if reason == "subprocess_error"
+                else "protocol_error"
+            )
+            with self.subTest(
                 reason=reason,
-                detail="generated child boundary failure",
-                album_still_present=album_present,
-            )
+                album_present=album_present,
+                orphan_items=orphan_items,
+                path_source=path_source,
+                purge_pipeline=purge_pipeline,
+            ):
+                db = FakePipelineDB()
+                db.seed_request(make_request_row(
+                    id=41,
+                    status="imported",
+                    mb_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                ))
+                album_dir = Path("/music/Artist/Album")
+                detail: dict[str, object] = {
+                    "id": 7,
+                    "album": "Album",
+                    "artist": "Artist",
+                    "mb_albumid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                    "discogs_albumid": None,
+                    "tracks": [],
+                }
+                if path_source == "track":
+                    detail["tracks"] = [{
+                        "id": 1,
+                        "path": str(album_dir / "01.flac"),
+                    }]
+                elif path_source == "art":
+                    detail["artpath"] = str(album_dir / "cover.jpg")
+                beets = FakeBeetsDB()
+                beets.set_album_detail(7, detail)
+                beets.set_album_ids_for_release(
+                    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                    [7],
+                )
+                beets.set_item_paths(
+                    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                    [(1, str(album_dir / "01.flac"))],
+                )
+                notifications: list[str] = []
 
-        previous_disable = logging.root.manager.disable
-        logging.disable(logging.CRITICAL)
-        try:
-            result = delete_release_from_library(
-                pipeline_db=db,
-                beets_db=beets,
-                request=DeleteRequest(
-                    album_id=7,
-                    purge_pipeline=purge_pipeline,
-                ),
-                beets_delete_fn=failed_child,
-                notify_fn=lambda path: notifications.append(path) or (),
-            )
-        finally:
-            logging.disable(previous_disable)
+                def failed_child(
+                    request: BeetsDeleteRequest,
+                    *,
+                    album_present: bool = album_present,
+                    beets: FakeBeetsDB = beets,
+                    orphan_items: bool = orphan_items,
+                    typed_reason: BeetsDeleteFailureReason = typed_reason,
+                ) -> BeetsDeleteFailed:
+                    if not album_present:
+                        beets._album_detail.pop(request.album_id)
+                    beets.set_orphan_items_present(
+                        request.album_id,
+                        orphan_items,
+                    )
+                    return BeetsDeleteFailed(
+                        album_id=request.album_id,
+                        reason=typed_reason,
+                        detail="generated child boundary failure",
+                        album_still_present=album_present,
+                    )
 
-        # The fresh joined resolver sees the current item path even when the
-        # earlier album-detail projection had no recovery path at all.
-        expected_path = str(album_dir)
-        context_retained = (
-            isinstance(result, DeleteIncomplete)
-            and result.album_name == "Album"
-            and result.artist_name == "Artist"
-            and result.former_album_path == expected_path
-            and result.pipeline_request_id == 41
-            and result.pipeline_status == "imported"
-            and result.acknowledgement_lost
-            and result.deleted_files is None
-            and result.deleted_artifacts is None
-            and "metadata may be gone" in result.detail
-            and "was preserved" in result.detail
-        )
-        assert_ambiguous_delete_fails_closed(
-            completed=isinstance(result, DeleteSuccess),
-            pipeline_present=db.get_request(41) is not None,
-            notification_count=len(notifications),
-            context_retained=context_retained,
-        )
+                previous_disable = logging.root.manager.disable
+                logging.disable(logging.CRITICAL)
+                try:
+                    result = delete_release_from_library(
+                        pipeline_db=db,
+                        beets_db=beets,
+                        request=DeleteRequest(
+                            album_id=7,
+                            purge_pipeline=purge_pipeline,
+                        ),
+                        beets_delete_fn=failed_child,
+                        notify_fn=lambda path, notifications=notifications: (
+                            notifications.append(path) or ()
+                        ),
+                    )
+                finally:
+                    logging.disable(previous_disable)
+
+                # The fresh joined resolver sees the current item path even
+                # when the earlier album-detail projection had no recovery
+                # path at all.
+                expected_path = str(album_dir)
+                context_retained = (
+                    isinstance(result, DeleteIncomplete)
+                    and result.album_name == "Album"
+                    and result.artist_name == "Artist"
+                    and result.former_album_path == expected_path
+                    and result.pipeline_request_id == 41
+                    and result.pipeline_status == "imported"
+                    and result.acknowledgement_lost
+                    and result.deleted_files is None
+                    and result.deleted_artifacts is None
+                    and "metadata may be gone" in result.detail
+                    and "was preserved" in result.detail
+                )
+                assert_ambiguous_delete_fails_closed(
+                    completed=isinstance(result, DeleteSuccess),
+                    pipeline_present=db.get_request(41) is not None,
+                    notification_count=len(notifications),
+                    context_retained=context_retained,
+                )
 
     @example(
         track_presence=[True, True], art_present=True, sidecar_present=True,
@@ -1407,150 +1439,177 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
             if unknown_payload is not None:
                 self.assertEqual(unknown.read_bytes(), unknown_payload)
 
-    @example(fault_stage="pre", purge_pipeline=True)
-    @example(fault_stage="post", purge_pipeline=True)
-    @example(fault_stage="progress", purge_pipeline=False)
-    @example(fault_stage="final", purge_pipeline=True)
-    @given(
-        fault_stage=st.sampled_from(("pre", "post", "progress", "final")),
-        purge_pipeline=st.booleans(),
-    )
     def test_presence_probe_faults_retain_beets_pg_and_notifications(
         self,
-        fault_stage: str,
-        purge_pipeline: bool,
     ) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            track = root / "01.flac"
-            track.write_bytes(b"audio")
-            db = FakePipelineDB()
-            db.seed_request(make_request_row(
-                id=41,
-                status="imported",
-                mb_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-            ))
-            beets = FakeBeetsDB()
-            beets.set_album_detail(7, {
-                "id": 7,
-                "album": "Album",
-                "artist": "Artist",
-                "mb_albumid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-                "discogs_albumid": None,
-                "path": str(root),
-                "tracks": [{"id": 1, "path": str(track)}],
-            })
-            beets.set_album_ids_for_release(
-                "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-                [7],
-            )
-            beets.set_item_paths(
-                "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-                [(1, str(track))],
-            )
-            notifications: list[str] = []
-            probe_calls = 0
-            fault_call = {
-                "pre": 1,
-                "post": 2,
-                "progress": 2,
-                "final": 3,
-            }[fault_stage]
+        # Exhaustive stage × purge table; all four former decisive examples
+        # remain present.
+        for fault_stage, purge_pipeline in product(
+            ("pre", "post", "progress", "final"),
+            (False, True),
+        ):
+            with self.subTest(
+                fault_stage=fault_stage,
+                purge_pipeline=purge_pipeline,
+            ), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                track = root / "01.flac"
+                track.write_bytes(b"audio")
+                db = FakePipelineDB()
+                db.seed_request(make_request_row(
+                    id=41,
+                    status="imported",
+                    mb_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                ))
+                beets = FakeBeetsDB()
+                beets.set_album_detail(7, {
+                    "id": 7,
+                    "album": "Album",
+                    "artist": "Artist",
+                    "mb_albumid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                    "discogs_albumid": None,
+                    "path": str(root),
+                    "tracks": [{"id": 1, "path": str(track)}],
+                })
+                beets.set_album_ids_for_release(
+                    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                    [7],
+                )
+                beets.set_item_paths(
+                    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                    [(1, str(track))],
+                )
+                notifications: list[str] = []
+                probe_calls = 0
+                fault_call = {
+                    "pre": 1,
+                    "post": 2,
+                    "progress": 2,
+                    "final": 3,
+                }[fault_stage]
 
-            def probe(path: str) -> bool:
-                nonlocal probe_calls
-                probe_calls += 1
-                if probe_calls == fault_call:
-                    raise OSError(
-                        f"generated {fault_stage} presence-probe fault",
+                def probe(
+                    path: str,
+                    *,
+                    fault_call: int = fault_call,
+                    fault_stage: str = fault_stage,
+                ) -> bool:
+                    nonlocal probe_calls
+                    probe_calls += 1
+                    if probe_calls == fault_call:
+                        raise OSError(
+                            f"generated {fault_stage} presence-probe fault",
+                        )
+                    try:
+                        os.lstat(path)
+                    except FileNotFoundError:
+                        return False
+                    return True
+
+                def remove(
+                    path: str,
+                    *,
+                    fault_stage: str = fault_stage,
+                ) -> None:
+                    if fault_stage == "progress":
+                        raise OSError("generated removal fault")
+                    os.remove(path)
+
+                def remove_metadata(
+                    *,
+                    beets: FakeBeetsDB = beets,
+                ) -> None:
+                    beets._album_detail.pop(7)
+
+                def failed_probe(
+                    request: BeetsDeleteRequest,
+                    *,
+                    beets: FakeBeetsDB = beets,
+                    root: Path = root,
+                    track: Path = track,
+                ) -> BeetsDeleteCompleted | BeetsDeleteFailed:
+                    return _delete_manifest(
+                        album_id=request.album_id,
+                        album_name="Album",
+                        artist_name="Artist",
+                        owned_paths=(_OwnedPath(str(track), "track"),),
+                        album_dirs=(str(root),),
+                        metadata_remove=remove_metadata,
+                        album_present=lambda: (
+                            beets.get_album_detail(request.album_id) is not None
+                        ),
+                        remove_path=remove,
+                        prune_dir=lambda _path: None,
+                        path_exists=probe,
                     )
-                try:
-                    os.lstat(path)
-                except FileNotFoundError:
-                    return False
-                return True
 
-            def remove(path: str) -> None:
-                if fault_stage == "progress":
-                    raise OSError("generated removal fault")
-                os.remove(path)
-
-            def remove_metadata() -> None:
-                beets._album_detail.pop(7)
-
-            def failed_probe(
-                request: BeetsDeleteRequest,
-            ) -> BeetsDeleteCompleted | BeetsDeleteFailed:
-                return _delete_manifest(
-                    album_id=request.album_id,
-                    album_name="Album",
-                    artist_name="Artist",
-                    owned_paths=(_OwnedPath(str(track), "track"),),
-                    album_dirs=(str(root),),
-                    metadata_remove=remove_metadata,
-                    album_present=lambda: (
-                        beets.get_album_detail(request.album_id) is not None
+                result = delete_release_from_library(
+                    pipeline_db=db,
+                    beets_db=beets,
+                    request=DeleteRequest(
+                        album_id=7,
+                        purge_pipeline=purge_pipeline,
                     ),
-                    remove_path=remove,
-                    prune_dir=lambda _path: None,
-                    path_exists=probe,
+                    beets_delete_fn=failed_probe,
+                    notify_fn=lambda path, notifications=notifications: (
+                        notifications.append(path) or ()
+                    ),
                 )
 
-            result = delete_release_from_library(
-                pipeline_db=db,
-                beets_db=beets,
-                request=DeleteRequest(
-                    album_id=7,
-                    purge_pipeline=purge_pipeline,
-                ),
-                beets_delete_fn=failed_probe,
-                notify_fn=lambda path: notifications.append(path) or (),
-            )
+                assert_presence_probe_failure_fails_closed(
+                    completed=isinstance(result, DeleteSuccess),
+                    beets_present=beets.get_album_detail(7) is not None,
+                    pipeline_present=db.get_request(41) is not None,
+                    notification_count=len(notifications),
+                )
+                self.assertIsInstance(result, DeleteIncomplete)
+                assert isinstance(result, DeleteIncomplete)
+                self.assertIn("presence", result.detail)
+                self.assertEqual(
+                    result.remaining_owned_paths,
+                    (str(track),),
+                )
 
-            assert_presence_probe_failure_fails_closed(
-                completed=isinstance(result, DeleteSuccess),
-                beets_present=beets.get_album_detail(7) is not None,
-                pipeline_present=db.get_request(41) is not None,
-                notification_count=len(notifications),
-            )
-            self.assertIsInstance(result, DeleteIncomplete)
-            assert isinstance(result, DeleteIncomplete)
-            self.assertIn("presence", result.detail)
-            self.assertEqual(result.remaining_owned_paths, (str(track),))
-
-    @given(
-        mismatch_db=st.booleans(),
-        mismatch_root=st.booleans(),
-    )
-    @example(mismatch_db=True, mismatch_root=False)
-    @example(mismatch_db=False, mismatch_root=True)
     def test_delete_configuration_authority_requires_both_exact_paths(
         self,
-        mismatch_db: bool,
-        mismatch_root: bool,
     ) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            base = Path(raw)
-            configured_db = base / "configured.db"
-            configured_db.touch()
-            configured_root = base / "configured-root"
-            configured_root.mkdir()
-            other_db = base / "other.db"
-            other_db.touch()
-            other_root = base / "other-root"
-            other_root.mkdir()
-            request = BeetsDeleteRequest(
-                album_id=7,
-                expected_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-                library_db_path=str(other_db if mismatch_db else configured_db),
-                library_root=str(other_root if mismatch_root else configured_root),
-            )
+        for mismatch_db, mismatch_root in product((False, True), repeat=2):
+            with self.subTest(
+                mismatch_db=mismatch_db,
+                mismatch_root=mismatch_root,
+            ), tempfile.TemporaryDirectory() as raw:
+                base = Path(raw)
+                configured_db = base / "configured.db"
+                configured_db.touch()
+                configured_root = base / "configured-root"
+                configured_root.mkdir()
+                other_db = base / "other.db"
+                other_db.touch()
+                other_root = base / "other-root"
+                other_root.mkdir()
+                request = BeetsDeleteRequest(
+                    album_id=7,
+                    expected_release_id=(
+                        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+                    ),
+                    library_db_path=str(
+                        other_db if mismatch_db else configured_db
+                    ),
+                    library_root=str(
+                        other_root if mismatch_root else configured_root
+                    ),
+                )
 
-            authorized = _configuration_matches(
-                request, str(configured_db), str(configured_root),
-            )
+                authorized = _configuration_matches(
+                    request,
+                    str(configured_db),
+                    str(configured_root),
+                )
 
-            self.assertEqual(authorized, not (mismatch_db or mismatch_root))
+                self.assertEqual(
+                    authorized,
+                    not (mismatch_db or mismatch_root),
+                )
 
 
 class TestDestructiveAuthorityCheckerKnownBad(unittest.TestCase):

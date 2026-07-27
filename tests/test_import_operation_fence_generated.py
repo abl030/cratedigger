@@ -7,10 +7,6 @@ import unittest
 from dataclasses import dataclass
 from unittest.mock import patch
 
-from hypothesis import given
-from hypothesis import strategies as st
-
-import tests._hypothesis_profiles  # noqa: F401
 from lib.config import CratediggerConfig
 from lib.dispatch import dispatch_import_core
 from lib.dispatch.types import EvidenceImportGate, ImportOneRun
@@ -215,36 +211,34 @@ class TestGeneratedImportOperationFence(unittest.TestCase):
         self.runtime.start()
         self.addCleanup(self.runtime.stop)
 
-    @given(
-        job_type=st.sampled_from([
+    def test_stale_authority_never_launches_beets(self) -> None:
+        for job_type in (
             IMPORT_JOB_AUTOMATION,
             IMPORT_JOB_FORCE,
             IMPORT_JOB_YOUTUBE,
-        ]),
-        stale_dimension=st.sampled_from([
-            "release_changed",
-            "status_changed",
-            "source_changed",
-        ]),
-    )
-    def test_stale_authority_never_launches_beets(
-        self,
-        job_type: str,
-        stale_dimension: str,
-    ) -> None:
-        world = OperationWorld(job_type, stale_dimension, False)
-        authorized, status, invocations, replay_claimed = _exercise_world(
-            world, beets=self.beets
-        )
-        self.assertFalse(authorized)
-        self.assertEqual(invocations, [])
-        assert_operation_fence(
-            authorized=authorized,
-            terminal_acknowledged=False,
-            final_status=status,
-            beets_invocations=invocations,
-            replay_claimed=replay_claimed,
-        )
+        ):
+            for stale_dimension in (
+                "release_changed",
+                "status_changed",
+                "source_changed",
+            ):
+                with self.subTest(
+                    job_type=job_type,
+                    stale_dimension=stale_dimension,
+                ):
+                    world = OperationWorld(job_type, stale_dimension, False)
+                    authorized, status, invocations, replay_claimed = _exercise_world(
+                        world, beets=self.beets
+                    )
+                    self.assertFalse(authorized)
+                    self.assertEqual(invocations, [])
+                    assert_operation_fence(
+                        authorized=authorized,
+                        terminal_acknowledged=False,
+                        final_status=status,
+                        beets_invocations=invocations,
+                        replay_claimed=replay_claimed,
+                    )
 
     def test_definitely_not_started_recovery_may_retry(self) -> None:
         for job_type in (

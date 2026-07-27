@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from itertools import product
 
 from hypothesis import example, given
 from hypothesis import strategies as st
@@ -114,58 +115,53 @@ class TestGeneratedHoldLifecycle(unittest.TestCase):
                 acquire_hold(backend)
                 assert_held_invariants(backend)
 
-    @given(release_phase=st.integers(min_value=0, max_value=3))
-    @example(release_phase=3)
-    def test_any_incomplete_release_phase_can_recover_to_strict_hold(
-        self,
-        release_phase: int,
-    ) -> None:
-        backend = FakeDeployHoldBackend()
-        acquire_hold(backend)
-        if release_phase >= 1:
-            prepare_controlled(backend)
-        if release_phase >= 2:
-            open_main_timer(backend)
-        if release_phase >= 3:
-            finish_release(backend, "a" * 32)
+    def test_any_incomplete_release_phase_can_recover_to_strict_hold(self) -> None:
+        # The four numbered phases are the complete finite recovery vocabulary;
+        # phase 3 preserves the former decisive @example.
+        for release_phase in range(4):
+            with self.subTest(release_phase=release_phase):
+                backend = FakeDeployHoldBackend()
+                acquire_hold(backend)
+                if release_phase >= 1:
+                    prepare_controlled(backend)
+                if release_phase >= 2:
+                    open_main_timer(backend)
+                if release_phase >= 3:
+                    finish_release(backend, "a" * 32)
 
-        recover_held(backend)
+                recover_held(backend)
 
-        assert_held_invariants(backend)
-        self.assertIsNone(backend.ordinary_invocation)
+                assert_held_invariants(backend)
+                self.assertIsNone(backend.ordinary_invocation)
 
-    @given(
-        link_states=st.lists(
-            st.sampled_from(("absent", "intent", "materialized")),
-            min_size=len(TIMER_UNITS),
-            max_size=len(TIMER_UNITS),
-        ),
-        manual_state=st.sampled_from(("absent", "intent", "active")),
-    )
-    @example(
-        link_states=["materialized", "intent", "absent"],
-        manual_state="intent",
-    )
     def test_interrupted_acquisition_resumes_only_receipt_owned_intents(
         self,
-        link_states: list[str],
-        manual_state: str,
     ) -> None:
-        backend = FakeDeployHoldBackend()
-        backend.create_receipt()
-        for timer, state in zip(TIMER_UNITS, link_states, strict=True):
-            if state in {"intent", "materialized"}:
-                backend.mark_link_owned(timer)
-            if state == "materialized":
-                backend.create_control_mask(timer)
-        if manual_state in {"intent", "active"}:
-            backend.mark_manual_hold_owned()
-        if manual_state == "active":
-            backend.manual_hold = True
+        states = ("absent", "intent", "materialized")
+        # Exhaustive Cartesian table over every timer link and the manual hold.
+        # It includes the former materialized/intent/absent + intent example.
+        for world in product(states, repeat=len(TIMER_UNITS) + 1):
+            link_states = world[:-1]
+            manual_state = world[-1]
+            with self.subTest(
+                link_states=link_states,
+                manual_state=manual_state,
+            ):
+                backend = FakeDeployHoldBackend()
+                backend.create_receipt()
+                for timer, state in zip(TIMER_UNITS, link_states, strict=True):
+                    if state in {"intent", "materialized"}:
+                        backend.mark_link_owned(timer)
+                    if state == "materialized":
+                        backend.create_control_mask(timer)
+                if manual_state in {"intent", "active"}:
+                    backend.mark_manual_hold_owned()
+                if manual_state == "active":
+                    backend.manual_hold = True
 
-        acquire_hold(backend)
+                acquire_hold(backend)
 
-        assert_held_invariants(backend)
+                assert_held_invariants(backend)
 
     @given(world=job_worlds())
     @example(
