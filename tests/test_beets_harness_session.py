@@ -406,6 +406,23 @@ class TestSessionsThatOfferedNothing(unittest.TestCase):
         self.assertEqual(session.message_types, ["session_end"])
         assert_every_invariant(result)
 
+    def test_session_end_makes_later_malformed_output_unobservable(self):
+        suffixes = (
+            ("non-object JSON", "[1, 2, 3]"),
+            ("undecodable choose_match", UNDECODABLE_CHOOSE_MATCH_LINE),
+        )
+        for name, suffix in suffixes:
+            with self.subTest(name=name):
+                result = run_fake_harness([SESSION_END_LINE, suffix])
+
+                self.assertEqual(result.scenario, NO_CHOOSE_MATCH_SCENARIO)
+                self.assertIsNone(result.error)
+                session = result.harness_session
+                assert session is not None
+                self.assertEqual(session.message_types, ["session_end"])
+                self.assertTrue(session.session_end_seen)
+                assert_every_invariant(result)
+
     def test_a_quiet_harness_that_said_nothing_at_all_is_named(self):
         result = run_fake_harness([])
 

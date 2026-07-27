@@ -130,6 +130,16 @@ def render_transcript(kinds: list[str]) -> list[str]:
     return [LINE_KINDS[kind] for kind in kinds]
 
 
+def controller_consumed_prefix(kinds: list[str]) -> list[str]:
+    """Kinds the controller can observe before its first terminal event."""
+    consumed: list[str] = []
+    for kind in kinds:
+        consumed.append(kind)
+        if kind in ("session_end", "non_object_json"):
+            break
+    return consumed
+
+
 def emitted_message_types(kinds: list[str]) -> set[str]:
     """Every ``type`` this transcript could possibly put on the wire."""
     return {
@@ -295,6 +305,9 @@ class TestNoHarnessTranscriptEverRejectsSilently(unittest.TestCase):
     @example(
         kinds=["undecodable_choose_match", "session_end"], stderr_text="")
     @example(kinds=["non_object_json", "valid_choose_match"], stderr_text="")
+    @example(kinds=["session_end", "non_object_json"], stderr_text="")
+    @example(
+        kinds=["session_end", "undecodable_choose_match"], stderr_text="")
     @example(kinds=["non_string_type", "session_end"], stderr_text="")
     @example(kinds=["garbage", "blank", "typeless_object"], stderr_text="")
     @given(kinds=TRANSCRIPTS, stderr_text=STDERR_TEXTS)
@@ -305,14 +318,16 @@ class TestNoHarnessTranscriptEverRejectsSilently(unittest.TestCase):
     ) -> None:
         result = run_fake_harness(
             render_transcript(kinds), stderr_text=stderr_text)
+        consumed = controller_consumed_prefix(kinds)
 
         assert_scenario_is_always_named(result)
         assert_the_name_matches_the_error_state(result)
-        assert_an_erroring_transcript_is_never_called_matchless(result, kinds)
+        assert_an_erroring_transcript_is_never_called_matchless(
+            result, consumed)
         assert_evidence_accompanies_the_name(result)
         assert_evidence_claims_no_cause(result)
-        assert_no_match_named_exactly_when_none_was_offered(result, kinds)
-        assert_recorded_types_came_from_the_wire(result, kinds)
+        assert_no_match_named_exactly_when_none_was_offered(result, consumed)
+        assert_recorded_types_came_from_the_wire(result, consumed)
         assert_stderr_tail_is_a_real_tail(result, stderr_text)
         assert_stays_a_wrong_match_candidate(result.scenario)
         assert_result_round_trips(result)
@@ -448,6 +463,27 @@ class TestADecodableMatchStillDecides(unittest.TestCase):
 
 class TestCheckersTripOnViolations(unittest.TestCase):
     """Known-bad self-tests for the checkers this module owns."""
+
+    def test_consumed_prefix_stops_only_at_controller_terminal_kinds(
+        self,
+    ) -> None:
+        cases = (
+            (
+                ["session_end", "non_object_json"],
+                ["session_end"],
+            ),
+            (
+                ["non_object_json", "session_end"],
+                ["non_object_json"],
+            ),
+            (
+                ["undecodable_choose_match", "session_end", "garbage"],
+                ["undecodable_choose_match", "session_end"],
+            ),
+        )
+        for kinds, expected in cases:
+            with self.subTest(kinds=kinds):
+                self.assertEqual(controller_consumed_prefix(kinds), expected)
 
     def test_the_oracle_rejects_a_silent_run(self) -> None:
         with self.assertRaises(AssertionError):
