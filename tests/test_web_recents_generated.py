@@ -606,30 +606,22 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
         existing_format=st.one_of(st.none(), st.sampled_from(("MP3", "Opus"))),
         existing_min=st.one_of(st.none(), st.integers(min_value=1, max_value=2_000)),
         has_attempt_spectral=st.booleans(),
-        current_format=st.sampled_from(("MP3", "Opus", "FLAC")),
-        current_min=st.integers(min_value=1, max_value=2_000),
     )
     @example(
         existing_format=None,
         existing_min=None,
         has_attempt_spectral=False,
-        current_format="Opus",
-        current_min=93,
     )
     @example(
         existing_format=None,
         existing_min=None,
         has_attempt_spectral=True,
-        current_format="Opus",
-        current_min=99,
     )
     def test_unproven_current_library_never_backfills_attempt_have(
         self,
         existing_format: str | None,
         existing_min: int | None,
         has_attempt_spectral: bool,
-        current_format: str,
-        current_min: int,
     ) -> None:
         item: dict[str, object] = {
             "existing_format": existing_format,
