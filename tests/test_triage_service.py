@@ -15,7 +15,7 @@ Covers the three deliverables of the service:
 from __future__ import annotations
 
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from lib.triage_service import (
     InvalidFilterError,
@@ -29,7 +29,6 @@ from lib.triage_service import (
 )
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
-
 
 # ---------------------------------------------------------------------------
 # Filter parsing
@@ -131,7 +130,7 @@ class TestParseFilter(unittest.TestCase):
 
 
 def _now() -> datetime:
-    return datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc)
+    return datetime(2026, 5, 26, 12, 0, 0, tzinfo=UTC)
 
 
 class TestComposeTriage(unittest.TestCase):

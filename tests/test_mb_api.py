@@ -6,15 +6,16 @@ rewrite cases are the RED tests for issue #199 — a query carrying
 "Various Artists" tokens must pin `arid:<VA MBID>` instead of letting
 Lucene treat the tokens as title terms.
 """
-
 import json
 import string
 import unittest
 import urllib.parse
 import uuid
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
-from hypothesis import given, strategies as st
+from hypothesis import given
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401 — registers active profile
 from lib.va_identity import MB_VA_ARTIST_MBID
@@ -277,7 +278,7 @@ class TestArtistReleaseGroupsWithAppearances(unittest.TestCase):
     OWN_RG = "fdb22921-b4c5-3c49-b2d0-85cb69eec1f1"
     APPEARANCE_RG = "2e3dd447-ac5e-3b60-b44c-f9e6000ba6e7"
 
-    DIRECT = {
+    DIRECT: ClassVar = {
         "release-group-count": 1,
         "release-groups": [{
             "id": OWN_RG,
@@ -291,7 +292,7 @@ class TestArtistReleaseGroupsWithAppearances(unittest.TestCase):
             }],
         }],
     }
-    TRACK_APPEARANCES = {
+    TRACK_APPEARANCES: ClassVar = {
         "release-count": 2,
         "releases": [
             {
@@ -319,7 +320,7 @@ class TestArtistReleaseGroupsWithAppearances(unittest.TestCase):
             },
         ],
     }
-    DIRECT_RELEASES = {
+    DIRECT_RELEASES: ClassVar = {
         "release-count": 3,
         "releases": [
             {

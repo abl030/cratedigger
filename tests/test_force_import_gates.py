@@ -38,7 +38,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from hypothesis import example, given, strategies as st
+from hypothesis import example, given
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads active profile)
 from lib.beets_db import AlbumInfo
@@ -255,6 +256,7 @@ class TestInspectLocalFilesRecursive(unittest.TestCase):
     def test_multi_disc_layout_detects_mp3(self):
         """Audio files under a subdirectory must be discovered."""
         import os
+
         from lib.measurement import inspect_local_files
 
         tmpdir = tempfile.mkdtemp()
@@ -282,6 +284,7 @@ class TestInspectLocalFilesRecursive(unittest.TestCase):
         """
         import os
         from unittest.mock import patch
+
         from lib.measurement import inspect_local_files
 
         tmpdir = tempfile.mkdtemp()
@@ -319,6 +322,7 @@ class TestInspectLocalFilesRecursive(unittest.TestCase):
     def test_inspect_avg_bitrate_none_when_no_mp3(self):
         """Non-MP3 downloads leave avg_bitrate_bps=None (no mutagen walk)."""
         import os
+
         from lib.measurement import inspect_local_files
 
         tmpdir = tempfile.mkdtemp()
@@ -340,6 +344,7 @@ class TestInspectLocalFilesRecursive(unittest.TestCase):
         the root, no nested file is decoded and corrupt audio silently passes.
         """
         import os
+
         from lib.util import validate_audio
 
         tmpdir = tempfile.mkdtemp()
@@ -368,6 +373,7 @@ class TestInspectLocalFilesRecursive(unittest.TestCase):
         """
         import os
         from unittest.mock import patch
+
         from lib.spectral_check import analyze_album
 
         tmpdir = tempfile.mkdtemp()
@@ -597,7 +603,8 @@ class TestRepairMp3HeadersRecurses(unittest.TestCase):
 
     def test_mp3val_called_on_nested_file(self):
         import os
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import MagicMock, patch
+
         from lib.util import repair_mp3_headers
 
         tmpdir = tempfile.mkdtemp()
@@ -628,6 +635,7 @@ class TestAudioFailuresPreserveSubdirContext(unittest.TestCase):
     def test_nested_failures_keep_subdir_in_name(self):
         import os
         from unittest.mock import patch
+
         from lib.util import validate_audio
 
         tmpdir = tempfile.mkdtemp()
@@ -714,6 +722,7 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
         """is_vbr=None → filesystem inspection fills it in → spectral runs."""
         import os
         from unittest.mock import patch
+
         from lib.measurement import LocalFileInspection, measure_preimport_state
 
         db = FakePipelineDB()
@@ -762,6 +771,7 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
         """
         import os
         from unittest.mock import patch
+
         from lib.measurement import LocalFileInspection, measure_preimport_state
 
         db = FakePipelineDB()
@@ -822,6 +832,7 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
         """
         import os
         from unittest.mock import patch
+
         from lib.measurement import LocalFileInspection, measure_preimport_state
 
         db = FakePipelineDB()
@@ -869,6 +880,7 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
         """
         import os
         from unittest.mock import patch
+
         from lib.measurement import LocalFileInspection, measure_preimport_state
 
         db = FakePipelineDB()
@@ -919,6 +931,7 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
         upload through the gate is cheap and safe.
         """
         from unittest.mock import patch
+
         from lib.measurement import LocalFileInspection, measure_preimport_state
 
         db = FakePipelineDB()

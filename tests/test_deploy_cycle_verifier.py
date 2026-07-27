@@ -8,7 +8,6 @@ from pathlib import Path
 
 from tests.fakes.deploy_cycle import FakeDeployCycleCommands
 
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "verify_cratedigger_cycle.sh"
 SKILL = REPO_ROOT / ".claude" / "skills" / "deploy" / "SKILL.md"

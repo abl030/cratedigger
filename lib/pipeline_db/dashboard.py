@@ -1,7 +1,9 @@
 """Pipeline dashboard metrics, cycle telemetry, peer roster counters."""
-from datetime import datetime, timedelta, timezone
-from typing import Any, Iterable
+from collections.abc import Iterable
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
+from lib.pipeline_db._core import _PipelineDBBase
 from lib.pipeline_db._shared import (
     CACHE_ATTRIBUTION_CYCLE_ONLY,
     DASHBOARD_WANTED_BACKLOG_STATUSES,
@@ -12,8 +14,6 @@ from lib.pipeline_db._shared import (
     _peer_hash,
     pg_execute_values,
 )
-
-from lib.pipeline_db._core import _PipelineDBBase
 
 
 class _DashboardMixin(_PipelineDBBase):
@@ -47,7 +47,7 @@ class _DashboardMixin(_PipelineDBBase):
         wanted_total: int | None = None,
     ) -> int:
         """Persist one completed cratedigger cycle's runtime counters."""
-        completed = completed_at or datetime.now(timezone.utc)
+        completed = completed_at or datetime.now(UTC)
         wanted_snapshot = (
             self._current_wanted_total() if wanted_total is None
             else max(0, int(wanted_total))
@@ -108,9 +108,9 @@ class _DashboardMixin(_PipelineDBBase):
         if not unique:
             return 0
 
-        observed = observed_at or datetime.now(timezone.utc)
+        observed = observed_at or datetime.now(UTC)
         if observed.tzinfo is None:
-            observed = observed.replace(tzinfo=timezone.utc)
+            observed = observed.replace(tzinfo=UTC)
 
         hashes = [_peer_hash(username) for username in unique]
         existing_cur = self._execute(
@@ -264,7 +264,7 @@ class _DashboardMixin(_PipelineDBBase):
         peers["heavy_query_hours"] = 24
         plan_readiness = self.get_search_plan_readiness(plan_generator_id)
         return {
-            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "generated_at": datetime.now(UTC).isoformat(),
             "searches": {
                 "windows": [self._dashboard_search_window(label, hours)
                             for label, hours in DASHBOARD_WINDOWS],
@@ -540,7 +540,7 @@ class _DashboardMixin(_PipelineDBBase):
 
 
     def _dashboard_wanted_trend(self, current_wanted: int) -> dict[str, Any]:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         cur = self._execute("""
             SELECT created_at, wanted_total
             FROM cycle_metrics
@@ -554,9 +554,9 @@ class _DashboardMixin(_PipelineDBBase):
             if not isinstance(created_at, datetime):
                 continue
             if created_at.tzinfo is None:
-                created_at = created_at.replace(tzinfo=timezone.utc)
+                created_at = created_at.replace(tzinfo=UTC)
             else:
-                created_at = created_at.astimezone(timezone.utc)
+                created_at = created_at.astimezone(UTC)
             samples.append((created_at, int(row.get("wanted_total") or 0)))
 
         series_24h = [

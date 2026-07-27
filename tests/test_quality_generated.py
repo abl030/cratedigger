@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generated (property-based) quality-decision tests — issue #548.
 
 Hypothesis-driven properties over the quality decision twins:
@@ -31,29 +30,30 @@ import os
 import sys
 import unittest
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Never
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
-
 import msgspec
 from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
+from lib.dispatch.quality_gate import QualityGatePlan, _check_quality_gate_core
+from lib.dispatch.types import QualityGateState
 from lib.quality import (
+    COMPARISON_BASIS_BRANCHES,
+    EVIDENCE_PROVENANCE_MEASURED,
+    EVIDENCE_SUBJECT_INSTALLED,
+    EVIDENCE_SUBJECT_SOURCE,
+    QUALITY_UPGRADE_TIERS,
     AlbumQualityEvidence,
     AlbumQualityEvidenceDecisionFacts,
     AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
-    COMPARISON_BASIS_BRANCHES,
-    QUALITY_UPGRADE_TIERS,
-    EVIDENCE_PROVENANCE_MEASURED,
-    EVIDENCE_SUBJECT_SOURCE,
-    EVIDENCE_SUBJECT_INSTALLED,
     QualityComparisonBasis,
     QualityRankConfig,
     TargetQualityContract,
@@ -70,8 +70,6 @@ from lib.quality import (
     quality_gate_decision,
     spectral_import_decision,
 )
-from lib.dispatch.quality_gate import QualityGatePlan, _check_quality_gate_core
-from lib.dispatch.types import QualityGateState
 from lib.quality.filetypes import has_mixed_lossless_and_lossy
 from tests.helpers import (
     build_parity_candidate_evidence,
@@ -123,12 +121,16 @@ _VALID_FINAL_STATUSES = ("imported", "wanted")
 def assert_decision_is_definitive(result: SimResult) -> None:
     """Totality: every auto-mode decision is a well-formed, definitive one."""
     if not isinstance(result.imported, bool):
-        raise AssertionError(f"imported is not bool: {result.imported!r}")
+        raise AssertionError(  # noqa: TRY004 - generated invariant failure
+            f"imported is not bool: {result.imported!r}"
+        )
     if not isinstance(result.keep_searching, bool):
-        raise AssertionError(
+        raise AssertionError(  # noqa: TRY004 - generated invariant failure
             f"keep_searching is not bool: {result.keep_searching!r}")
     if not isinstance(result.denylisted, bool):
-        raise AssertionError(f"denylisted is not bool: {result.denylisted!r}")
+        raise AssertionError(  # noqa: TRY004 - generated invariant failure
+            f"denylisted is not bool: {result.denylisted!r}"
+        )
     if result.final_status not in _VALID_FINAL_STATUSES:
         raise AssertionError(
             f"auto-mode decision must end imported/wanted, got "
@@ -845,64 +847,68 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
         result = simulate(_FRESH_ALBUM, download)
         assert_unverified_lossy_never_terminal(result)
 
-    @given(decision=st.sampled_from(tuple(_POST_IMPORT_EXPECTATIONS)))
-    def test_real_quality_gate_matches_post_import_action_table(self, decision):
-        measurement = {
-            "accept": AudioQualityMeasurement(
-                format="opus 64", min_bitrate_kbps=64,
-                avg_bitrate_kbps=64,
-            ),
-            "requeue_lossless": AudioQualityMeasurement(
-                format="MP3", min_bitrate_kbps=320,
-                avg_bitrate_kbps=320, is_cbr=True,
-                spectral_grade="genuine",
-                spectral_subject=EVIDENCE_SUBJECT_INSTALLED,
-                spectral_provenance="measured",
-            ),
-            "requeue_upgrade": AudioQualityMeasurement(
-                format="MP3", min_bitrate_kbps=320,
-                avg_bitrate_kbps=320, is_cbr=True,
-                spectral_grade="suspect", spectral_bitrate_kbps=192,
-                spectral_subject=EVIDENCE_SUBJECT_INSTALLED,
-                spectral_provenance="measured",
-            ),
-        }[decision]
-        self.assertEqual(
-            quality_gate_decision(
-                measurement,
-                verified_lossless_proof=decision == "accept",
-            ),
-            decision,
-        )
-        state = QualityGateState(
-            measurement=measurement,
-            verified_lossless_proof=decision == "accept",
-        )
-        plan = _check_quality_gate_core(
-            mb_id="generated-mbid", label="Generated",
-            request_id=42,
-            files=[SimpleNamespace(username="peer")],
-            db=SimpleNamespace(
-                get_request=lambda _request_id: {
-                    "search_filetype_override": None,
-                },
-            ),  # type: ignore[arg-type]
-            apply=False,
-            state_loader=lambda **_kwargs: state,
-        )
-        self.assertIsNotNone(plan)
-        assert plan is not None
-        raw_override = plan.transition.fields.get("search_filetype_override")
-        if raw_override is not None and not isinstance(raw_override, str):
-            raise AssertionError(
-                f"quality gate wrote a non-string override: {raw_override!r}"
-            )
-        assert_post_import_action_matches(
-            decision=decision,
-            status=plan.transition.target_status,
-            search_filetype_override=raw_override,
-            denylist=bool(plan.denylists),
-        )
+    def test_real_quality_gate_matches_post_import_action_table(self):
+        for decision in _POST_IMPORT_EXPECTATIONS:
+            with self.subTest(decision=decision):
+                measurement = {
+                    "accept": AudioQualityMeasurement(
+                        format="opus 64", min_bitrate_kbps=64,
+                        avg_bitrate_kbps=64,
+                    ),
+                    "requeue_lossless": AudioQualityMeasurement(
+                        format="MP3", min_bitrate_kbps=320,
+                        avg_bitrate_kbps=320, is_cbr=True,
+                        spectral_grade="genuine",
+                        spectral_subject=EVIDENCE_SUBJECT_INSTALLED,
+                        spectral_provenance="measured",
+                    ),
+                    "requeue_upgrade": AudioQualityMeasurement(
+                        format="MP3", min_bitrate_kbps=320,
+                        avg_bitrate_kbps=320, is_cbr=True,
+                        spectral_grade="suspect", spectral_bitrate_kbps=192,
+                        spectral_subject=EVIDENCE_SUBJECT_INSTALLED,
+                        spectral_provenance="measured",
+                    ),
+                }[decision]
+                self.assertEqual(
+                    quality_gate_decision(
+                        measurement,
+                        verified_lossless_proof=decision == "accept",
+                    ),
+                    decision,
+                )
+                state = QualityGateState(
+                    measurement=measurement,
+                    verified_lossless_proof=decision == "accept",
+                )
+                plan = _check_quality_gate_core(
+                    mb_id="generated-mbid", label="Generated",
+                    request_id=42,
+                    files=[SimpleNamespace(username="peer")],
+                    db=SimpleNamespace(
+                        get_request=lambda _request_id: {
+                            "search_filetype_override": None,
+                        },
+                    ),  # type: ignore[arg-type]
+                    apply=False,
+                    state_loader=lambda state=state, **_kwargs: state,
+                )
+                self.assertIsNotNone(plan)
+                assert plan is not None
+                raw_override = plan.transition.fields.get(
+                    "search_filetype_override",
+                )
+                if raw_override is not None and not isinstance(raw_override, str):
+                    raise AssertionError(
+                        "quality gate wrote a non-string override: "
+                        f"{raw_override!r}"
+                    )
+                assert_post_import_action_matches(
+                    decision=decision,
+                    status=plan.transition.target_status,
+                    search_filetype_override=raw_override,
+                    denylist=bool(plan.denylists),
+                )
 
     @given(
         verified_lossless_proof=st.booleans(),
@@ -957,31 +963,31 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
         self.assertIn("reopening full-tier search", "\n".join(captured.output))
         assert_quality_decision_failure_reopens_full_tier(plan)
 
-    @given(subject=st.sampled_from((
-        EVIDENCE_SUBJECT_SOURCE,
-        EVIDENCE_SUBJECT_INSTALLED,
-    )))
-    def test_lossless_narrowing_is_subject_blind_for_genuine_transparent(
-        self, subject
-    ):
+    def test_lossless_narrowing_is_subject_blind_for_genuine_transparent(self):
         # Decision 17: the transparent+genuine narrowing rule keys on the
         # grade, never the subject label — an unconverted import's
         # source-subject grade describes the installed bytes.
-        measurement = AudioQualityMeasurement(
-            format="MP3",
-            min_bitrate_kbps=320,
-            avg_bitrate_kbps=320,
-            is_cbr=True,
-            spectral_grade="genuine",
-            spectral_subject=subject,
-            spectral_provenance=(
-                "measured"
-                if subject == EVIDENCE_SUBJECT_INSTALLED
-                else "carried"
-            ),
+        subjects = (
+            EVIDENCE_SUBJECT_SOURCE,
+            EVIDENCE_SUBJECT_INSTALLED,
         )
-        self.assertEqual(
-            quality_gate_decision(measurement), "requeue_lossless")
+        for subject in subjects:
+            with self.subTest(subject=subject):
+                measurement = AudioQualityMeasurement(
+                    format="MP3",
+                    min_bitrate_kbps=320,
+                    avg_bitrate_kbps=320,
+                    is_cbr=True,
+                    spectral_grade="genuine",
+                    spectral_subject=subject,
+                    spectral_provenance=(
+                        "measured"
+                        if subject == EVIDENCE_SUBJECT_INSTALLED
+                        else "carried"
+                    ),
+                )
+                self.assertEqual(
+                    quality_gate_decision(measurement), "requeue_lossless")
 
     @given(
         target_format=st.sampled_from(_TARGET_FORMATS),
@@ -1242,12 +1248,17 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
     def test_measured_decisions_with_existing_carry_basis(
             self, album, download):
         result = simulate(album, download)
-        if result.stage2_import in ("import", "downgrade",
-                                    "transcode_upgrade",
-                                    "transcode_downgrade"):
-            if result.comparison_basis is None:
-                raise AssertionError(
-                    f"measured decision {result.stage2_import!r} against an "
+        if (
+            result.stage2_import in (
+                "import",
+                "downgrade",
+                "transcode_upgrade",
+                "transcode_downgrade",
+            )
+            and result.comparison_basis is None
+        ):
+            raise AssertionError(
+                f"measured decision {result.stage2_import!r} against an "
                     f"existing album lost its comparison basis: {result!r}")
         assert_basis_consistent(result)
 
@@ -1677,7 +1688,7 @@ def wild_ready_candidate_evidence(draw) -> AlbumQualityEvidence:
         snapshot_fingerprint="sha256:generated-fingerprint",
         source_path="/Incoming/auto-import/generated",
         measurement=measurement,
-        measured_at=datetime(2026, 7, 8, tzinfo=timezone.utc),
+        measured_at=datetime(2026, 7, 8, tzinfo=UTC),
         files=files,
         codec=codec,
         container=container,

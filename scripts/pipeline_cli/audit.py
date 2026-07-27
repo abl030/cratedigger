@@ -45,7 +45,7 @@ def _render_text(report: WorldAuditReport) -> None:
         print(f"{violation.code}: {violation.detail}")
 
 
-def cmd_audit_world(db: "WorldAuditPipelineDB", args: object) -> int:
+def cmd_audit_world(db: WorldAuditPipelineDB, args: object) -> int:
     """Run the shared world invariant bank without mutating either store."""
     typed_args = msgspec.convert(vars(args), type=_AuditWorldArgs)
     try:

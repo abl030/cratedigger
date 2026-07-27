@@ -13,56 +13,76 @@ from __future__ import annotations
 import logging
 import os
 import subprocess as sp
-from collections.abc import Callable
-from datetime import datetime, timezone
-from typing import Sequence, TYPE_CHECKING
+from collections.abc import Callable, Sequence
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from lib import transitions
-from lib.import_queue import IMPORT_JOB_AUTOMATION
-
-from lib.processing_paths import normalize_source_dirs
-from lib.quality import (AlbumQualityEvidenceDecisionFacts, DownloadInfo,
-                         ImportResult, TargetQualityContract, ValidationResult,
-                         comparison_basis_from_decision,
-                         dispatch_action, evidence_decision_name,
-                         full_pipeline_decision_from_evidence,
-                         narrow_override_on_lossless_source_lock,
-                         override_bitrate_from_current_evidence,
-                         resolve_rejection_search_override)
-from lib.quality_evidence import EvidenceBuildResult, audit_v0_probe_from_metric
-from lib.dispatch.types import (DispatchOutcome, EvidenceImportGate,
-                                FORCE_IMPORT_SCENARIOS, ImportAttemptResult,
-                                ImportOneRunner, PostCommitCleanup,
-                                QualityGateFn)
-from lib.dispatch.subprocess_runner import run_import_one
-from lib.dispatch.helpers import (_guard_failure_detail,
-                                  _log_postflight_bad_extensions,
-                                  _populate_dl_info_from_import_result,
-                                  _should_cleanup_path)
-from lib.dispatch.evidence_gate import (_current_evidence_analysis_failed,
-                                        _import_allowed_by_evidence_pipeline,
-                                        _load_evidence_import_gate,
-                                        _refresh_current_evidence_after_import,
-                                        _remove_quality_evidence_action_file,
-                                        _requeue_import_job_to_preview,
-                                        _write_album_sidecar_after_import,
-                                        _write_quality_evidence_action_file)
-from lib.dispatch.outcome_actions import (_do_mark_done,
-                                          _record_have_analysis_error,
-                                          _record_rejection_and_maybe_requeue,
-                                          _reject_import_from_evidence_decision)
-from lib.dispatch.post_import import (_apply_or_stage_denylists,
-                                      _apply_or_stage_transition,
-                                      _apply_post_import_search_action,
-                                      _resolve_post_import_search_policy,
-                                      _run_or_stage_quality_gate)
+from lib.dispatch.evidence_gate import (
+    _current_evidence_analysis_failed,
+    _import_allowed_by_evidence_pipeline,
+    _load_evidence_import_gate,
+    _refresh_current_evidence_after_import,
+    _remove_quality_evidence_action_file,
+    _requeue_import_job_to_preview,
+    _write_album_sidecar_after_import,
+    _write_quality_evidence_action_file,
+)
+from lib.dispatch.helpers import (
+    _guard_failure_detail,
+    _log_postflight_bad_extensions,
+    _populate_dl_info_from_import_result,
+    _should_cleanup_path,
+)
+from lib.dispatch.outcome_actions import (
+    _do_mark_done,
+    _record_have_analysis_error,
+    _record_rejection_and_maybe_requeue,
+    _reject_import_from_evidence_decision,
+)
+from lib.dispatch.post_import import (
+    _apply_or_stage_denylists,
+    _apply_or_stage_transition,
+    _apply_post_import_search_action,
+    _resolve_post_import_search_policy,
+    _run_or_stage_quality_gate,
+)
 from lib.dispatch.quality_gate import _check_quality_gate_core
+from lib.dispatch.subprocess_runner import run_import_one
+from lib.dispatch.types import (
+    FORCE_IMPORT_SCENARIOS,
+    DispatchOutcome,
+    EvidenceImportGate,
+    ImportAttemptResult,
+    ImportOneRunner,
+    PostCommitCleanup,
+    QualityGateFn,
+)
+from lib.import_queue import IMPORT_JOB_AUTOMATION
+from lib.processing_paths import normalize_source_dirs
+from lib.quality import (
+    AlbumQualityEvidenceDecisionFacts,
+    DownloadInfo,
+    ImportResult,
+    TargetQualityContract,
+    ValidationResult,
+    comparison_basis_from_decision,
+    dispatch_action,
+    evidence_decision_name,
+    full_pipeline_decision_from_evidence,
+    narrow_override_on_lossless_source_lock,
+    override_bitrate_from_current_evidence,
+    resolve_rejection_search_override,
+)
+from lib.quality_evidence import EvidenceBuildResult, audit_v0_probe_from_metric
 from lib.terminal_outcomes import PendingImportTerminalOutcome
 
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
-    from lib.import_evidence import (CandidateEvidenceActionResult,
-                                     CurrentEvidenceActionResult)
+    from lib.import_evidence import (
+        CandidateEvidenceActionResult,
+        CurrentEvidenceActionResult,
+    )
     from lib.pipeline_db import DownloadLogOutcome, PipelineDB
     from lib.quality import SpectralDetail
 
@@ -70,7 +90,7 @@ logger = logging.getLogger("cratedigger")
 
 
 def _resolve_dispatch_beets_paths(
-    cfg: "CratediggerConfig | None",
+    cfg: CratediggerConfig | None,
     *,
     db_path: str | None,
     library_root: str | None,
@@ -101,18 +121,18 @@ def dispatch_import_core(
     target_format: str | None = None,
     verified_lossless_target: str = "",
     beets_harness_path: str,
-    db: "PipelineDB",
+    db: PipelineDB,
     dl_info: DownloadInfo,
     distance: float | None = None,
     scenario: str = "auto_import",
     files: Sequence[object] | None = None,
-    cfg: "CratediggerConfig | None" = None,
+    cfg: CratediggerConfig | None = None,
     outcome_label: DownloadLogOutcome = "success",
     requeue_on_failure: bool = True,
     cooled_down_users: set[str] | None = None,
     source_dirs: list[str] | None = None,
     candidate_import_job_id: int | None = None,
-    attempt_spectral_audit: "SpectralDetail | None" = None,
+    attempt_spectral_audit: SpectralDetail | None = None,
     attempt_result: ImportAttemptResult | None = None,
     candidate_download_log_id: int | None = None,
     launch_authority_path: str | None = None,
@@ -121,11 +141,11 @@ def dispatch_import_core(
     run_import_fn: ImportOneRunner | None = None,
     evidence_gate_fn: Callable[..., EvidenceImportGate] = _load_evidence_import_gate,
     current_evidence_loader: Callable[
-        ..., "CurrentEvidenceActionResult | None"
+        ..., CurrentEvidenceActionResult | None
     ] | None = None,
     beets_library_db_path: str | None = None,
     beets_library_root: str | None = None,
-) -> "DispatchOutcome":
+) -> DispatchOutcome:
     """Core import dispatch — takes plain params + PipelineDB directly.
 
     Runs import_one.py, parses result, dispatches on decision (mark_done/failed,
@@ -138,8 +158,8 @@ def dispatch_import_core(
     Used by the auto-import flow in ``lib.download`` and by
     ``dispatch_import_from_db()`` (force-import).
     """
-    from lib.util import trigger_plex_scan as _trigger_plex
     from lib.util import trigger_jellyfin_scan as _trigger_jellyfin
+    from lib.util import trigger_plex_scan as _trigger_plex
 
     source_dirs = normalize_source_dirs(source_dirs or [])
     from lib.config import read_runtime_config
@@ -189,8 +209,7 @@ def dispatch_import_core(
     # the IMPORT lock held by ``dispatch_import_from_db``.
     # See ``docs/advisory-locks.md`` for the full rationale, the
     # ordering rules, and the call-site index.
-    from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_RELEASE,
-                                 release_id_to_lock_key)
+    from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_RELEASE, release_id_to_lock_key
     release_lock_key: int | None
     if mb_release_id:
         release_lock_key = release_id_to_lock_key(mb_release_id)
@@ -518,7 +537,7 @@ def dispatch_import_core(
                 try:
                     stamped = db.mark_import_subprocess_started(
                         request_id,
-                        datetime.now(timezone.utc).isoformat(),
+                        datetime.now(UTC).isoformat(),
                     )
                 except Exception:
                     logger.exception(
@@ -693,22 +712,24 @@ def dispatch_import_core(
                             "after import for request %s",
                             request_id,
                         )
-                    if decision in ("import", "preflight_existing"):
-                        if prev_br is not None or new_br is not None:
-                            try:
-                                delta_transition = transitions.RequestTransition.to_imported(
-                                    from_status="imported",
-                                    prev_min_bitrate=prev_br,
-                                    min_bitrate=new_br,
-                                )
-                                terminal_outcome = _apply_or_stage_transition(
-                                    db,
-                                    request_id,
-                                    terminal_outcome,
-                                    delta_transition,
-                                )
-                            except Exception:
-                                logger.exception("Failed to update upgrade delta")
+                    if (
+                        decision in ("import", "preflight_existing")
+                        and (prev_br is not None or new_br is not None)
+                    ):
+                        try:
+                            delta_transition = transitions.RequestTransition.to_imported(
+                                from_status="imported",
+                                prev_min_bitrate=prev_br,
+                                min_bitrate=new_br,
+                            )
+                            terminal_outcome = _apply_or_stage_transition(
+                                db,
+                                request_id,
+                                terminal_outcome,
+                                delta_transition,
+                            )
+                        except Exception:
+                            logger.exception("Failed to update upgrade delta")
                     outcome_success = True
                     outcome_message = "Import successful"
                 elif action.record_rejection:
@@ -813,7 +834,7 @@ def dispatch_import_core(
                         try:
                             req_row = db.get_request(request_id)
                             current_override = req_row.get("search_filetype_override") if req_row else None
-                        except Exception:
+                        except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                             logger.debug(
                                 "Failed to inspect search_filetype_override before downgrade reset")
                         narrowed_override = resolve_rejection_search_override(
@@ -841,7 +862,7 @@ def dispatch_import_core(
                             )
                             narrowed_override = narrow_override_on_lossless_source_lock(
                                 current_override)
-                        except Exception:
+                        except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                             logger.debug(
                                 "Failed to inspect search_filetype_override"
                                 " before lossless_source_locked narrow")

@@ -9,7 +9,8 @@ columns as mutation authority.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Literal
+from collections.abc import Callable
+from typing import Any, Literal
 
 import msgspec
 
@@ -21,8 +22,8 @@ from lib.beets_db import (
     release_identity_for_lookup,
 )
 from lib.quality import (
-    LOSSLESS_CODECS,
     EVIDENCE_SUBJECT_SOURCE,
+    LOSSLESS_CODECS,
     AlbumQualityEvidence,
     QualityRankConfig,
 )
@@ -316,7 +317,7 @@ def ensure_current_evidence_for_action(
                 beets_library_root=beets_library_root or "",
                 current_release=current_release,
             )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         return CurrentEvidenceActionResult(
             evidence=None,
             provenance=ActionEvidenceProvenance(
@@ -341,7 +342,7 @@ def ensure_current_evidence_for_action(
                 if linked_id is not None
                 else None
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             linked = None
             link_error = f"{type(exc).__name__}: {exc}"
         else:

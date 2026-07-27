@@ -18,15 +18,14 @@ import os
 import sys
 import unittest
 import uuid
-from datetime import datetime, timezone
 
 import msgspec
 
 # Bootstrap ephemeral PostgreSQL if available (sets TEST_DB_DSN).
 sys.path.append(os.path.dirname(__file__))
-import conftest  # noqa: F401,E402
+import conftest  # noqa: F401
 
-from lib.long_tail_service import (  # noqa: E402
+from lib.long_tail_service import (
     BAND_MISSING,
     LongTailResult,
     LongTailRow,
@@ -37,8 +36,8 @@ from lib.long_tail_service import (  # noqa: E402
 # In-library-but-unrankable band, produced by ``compute_library_rank`` /
 # the injected band_fn (not a service constant).
 BAND_UNKNOWN = "unknown"
-from tests.fakes import FakePipelineDB  # noqa: E402
-from tests.helpers import make_request_row  # noqa: E402
+from tests.fakes import FakePipelineDB
+from tests.helpers import make_request_row
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
 

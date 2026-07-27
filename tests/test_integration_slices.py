@@ -8,22 +8,23 @@ The key difference from unit/orchestration tests is that parse_import_result
 and _check_quality_gate_core run for real, not patched.
 """
 
+import configparser
 import os
 import shutil
-import configparser
-from contextlib import AbstractContextManager, contextmanager
 import tempfile
-from typing import Any, Never, cast
 import unittest
+from contextlib import AbstractContextManager, contextmanager
 from types import SimpleNamespace
+from typing import Any, Never, Self, cast
 from unittest.mock import MagicMock, patch
+
+import psycopg2
 
 from lib.beets_db import AlbumInfo
 from lib.config import CratediggerConfig
 from lib.grab_list import GrabListEntry
 from lib.quality import (
     IMPORT_RESULT_SENTINEL,
-    QUALITY_LOSSLESS,
     QUALITY_UPGRADE_TIERS,
     AudioQualityMeasurement,
     ConversionInfo,
@@ -45,6 +46,7 @@ from tests.fakes import (
 from tests.helpers import (
     RecordingQualityGate,
     finalize_claimed_dispatch,
+    hermetic_beets_config_defaults,
     make_album_quality_evidence,
     make_audio_corrupt_validation_report,
     make_ctx_with_fake_db,
@@ -53,9 +55,7 @@ from tests.helpers import (
     make_request_row,
     make_requests_http_error,
     patch_dispatch_externals,
-    hermetic_beets_config_defaults,
 )
-
 
 _HERMETIC_BEETS_DEFAULTS: AbstractContextManager[tuple[str, str]] | None = None
 
@@ -273,11 +273,11 @@ class TestDownloadOwnershipPreclaimRecoverySlice(unittest.TestCase):
 
     def test_preclaimed_missing_transfer_id_recovers_in_fresh_poll_context(self):
         from lib.download import poll_active_downloads
-        from lib.slskd_transfers import SlskdEnqueueOutcome
         from lib.download_ownership import DownloadOwnershipWriter
         from lib.enqueue import try_enqueue
         from lib.grab_list import DownloadFile
         from lib.matching import MatchResult
+        from lib.slskd_transfers import SlskdEnqueueOutcome
 
         cfg = _download_ownership_cfg()
         db = FakePipelineDB()
@@ -376,10 +376,10 @@ class TestAmbiguousEnqueueReasonPropagationSlice(unittest.TestCase):
     was discarded entirely, landing as a bare status="unknown")."""
 
     def test_ambiguous_enqueue_stamps_last_exception_on_persisted_state(self):
-        from lib.slskd_transfers import SlskdEnqueueOutcome
         from lib.download_ownership import DownloadOwnershipWriter
         from lib.enqueue import try_enqueue
         from lib.matching import MatchResult
+        from lib.slskd_transfers import SlskdEnqueueOutcome
 
         cfg = _download_ownership_cfg()
         db = FakePipelineDB()
@@ -631,7 +631,7 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
     """
 
     def _run_dispatch(self, ir, beets_info, request_overrides=None, cfg=None,
-                      distance: "float | None" = 0.05, *, force=False,
+                      distance: float | None = 0.05, *, force=False,
                       scenario="strong_match", quality_gate_fn=None):
         """Dispatch an import and return the FakePipelineDB state."""
         from lib.dispatch import _check_quality_gate_core, dispatch_import_core
@@ -1538,7 +1538,7 @@ class TestLosslessSourceLockedSlice(unittest.TestCase):
 
     def test_lossy_candidate_locked_records_rejection_and_requeues(self):
         from lib.dispatch import dispatch_import_core
-        from lib.quality import V0ProbeEvidence, V0_PROBE_LOSSLESS_SOURCE
+        from lib.quality import V0_PROBE_LOSSLESS_SOURCE, V0ProbeEvidence
 
         existing_probe = V0ProbeEvidence(
             kind=V0_PROBE_LOSSLESS_SOURCE,
@@ -1627,8 +1627,8 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         from lib.dispatch import dispatch_import_core
         from lib.dispatch.types import ImportOneRun
         from lib.quality import (
-            QualityEvidenceActionProvenance,
             QualityComparisonBasis,
+            QualityEvidenceActionProvenance,
             SpectralAnalysisDetail,
             SpectralDetail,
         )
@@ -1779,6 +1779,7 @@ class TestDispatchNoJsonResult(unittest.TestCase):
 
     def test_timeout_after_launch_requires_operator_recovery(self):
         import subprocess as sp
+
         from lib.dispatch import dispatch_import_core
         from lib.dispatch.types import ImportOneRun
         from lib.quality import SpectralAnalysisDetail, SpectralDetail
@@ -2198,7 +2199,8 @@ class TestPreserveSourceSlice(unittest.TestCase):
         never reach the ``target_cleanup_decision`` call, so the FLACs
         remain — matching ``import_one.py``'s line-997 terminal branch."""
         import tempfile
-        from harness.import_one import convert_lossless, V0_SPEC
+
+        from harness.import_one import V0_SPEC, convert_lossless
         with tempfile.TemporaryDirectory() as tmpdir:
             flac_path = self._make_flac(tmpdir, "01.flac")
 
@@ -2216,9 +2218,13 @@ class TestPreserveSourceSlice(unittest.TestCase):
         path runs so beets sees only V0 MP3s. This slice drives the real
         ``target_cleanup_decision`` + ``_remove_lossless_files`` path."""
         import tempfile
-        from harness.import_one import (convert_lossless, V0_SPEC,
-                                        _remove_lossless_files,
-                                        target_cleanup_decision)
+
+        from harness.import_one import (
+            V0_SPEC,
+            _remove_lossless_files,
+            convert_lossless,
+            target_cleanup_decision,
+        )
         with tempfile.TemporaryDirectory() as tmpdir:
             flac_path = self._make_flac(tmpdir, "01.flac")
 
@@ -2255,6 +2261,7 @@ class TestPreserveSourceSlice(unittest.TestCase):
         predicate's verdict is irrelevant and the FLAC survives.
         """
         import tempfile
+
         from harness.import_one import _remove_lossless_files
         with tempfile.TemporaryDirectory() as tmpdir:
             flac_path = self._make_flac(tmpdir, "01.flac")
@@ -2287,8 +2294,8 @@ class TestPreserveSourceSlice(unittest.TestCase):
         remains, V0 MP3s removed.
         """
         import tempfile
-        from harness.import_one import (convert_lossless, V0_SPEC,
-                                        _remove_files_by_ext)
+
+        from harness.import_one import V0_SPEC, _remove_files_by_ext, convert_lossless
         with tempfile.TemporaryDirectory() as tmpdir:
             flac_path = self._make_flac(tmpdir, "01.flac")
             converted, _, _, _ = convert_lossless(
@@ -2317,9 +2324,13 @@ class TestPreserveSourceSlice(unittest.TestCase):
         FLAC+MP3 tree and imports the wrong media.
         """
         import tempfile
-        from harness.import_one import (convert_lossless, V0_SPEC,
-                                        _remove_lossless_files,
-                                        target_cleanup_decision)
+
+        from harness.import_one import (
+            V0_SPEC,
+            _remove_lossless_files,
+            convert_lossless,
+            target_cleanup_decision,
+        )
         with tempfile.TemporaryDirectory() as tmpdir:
             flac_path = self._make_flac(tmpdir, "01.flac")
 
@@ -2714,8 +2725,10 @@ class TestReleaseLockContention(unittest.TestCase):
           not a failure.
         """
         from lib.dispatch import dispatch_import_core
-        from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_RELEASE,
-                                     release_id_to_lock_key)
+        from lib.pipeline_db import (
+            ADVISORY_LOCK_NAMESPACE_RELEASE,
+            release_id_to_lock_key,
+        )
 
         db = self._make_db()
         # Seed the spectral fields that ``measure_preimport_state`` would
@@ -2724,10 +2737,7 @@ class TestReleaseLockContention(unittest.TestCase):
         db.request(42)["current_spectral_grade"] = "genuine"
         db.request(42)["current_spectral_bitrate"] = 245
         def lock_result(namespace: int, key: int) -> bool:
-            if (namespace == ADVISORY_LOCK_NAMESPACE_RELEASE
-                    and key == release_id_to_lock_key(self.MBID)):
-                return False
-            return True
+            return not (namespace == ADVISORY_LOCK_NAMESPACE_RELEASE and key == release_id_to_lock_key(self.MBID))
         db.set_advisory_lock_result(lock_result)
 
         dl_info = DownloadInfo(username="user1")
@@ -2792,8 +2802,10 @@ class TestReleaseLockContention(unittest.TestCase):
         FORCE_IMPORT_SCENARIOS, so force-import leaves the row alone.
         """
         from lib.dispatch import dispatch_import_core
-        from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_RELEASE,
-                                     release_id_to_lock_key)
+        from lib.pipeline_db import (
+            ADVISORY_LOCK_NAMESPACE_RELEASE,
+            release_id_to_lock_key,
+        )
 
         db = FakePipelineDB()
         # Force-import typically runs against an 'imported' or 'unsearchable'
@@ -2801,10 +2813,7 @@ class TestReleaseLockContention(unittest.TestCase):
         db.seed_request(make_request_row(
             id=42, mb_release_id=self.MBID, status="imported"))
         def lock_result(namespace: int, key: int) -> bool:
-            if (namespace == ADVISORY_LOCK_NAMESPACE_RELEASE
-                    and key == release_id_to_lock_key(self.MBID)):
-                return False
-            return True
+            return not (namespace == ADVISORY_LOCK_NAMESPACE_RELEASE and key == release_id_to_lock_key(self.MBID))
         db.set_advisory_lock_result(lock_result)
 
         dl_info = DownloadInfo(username="user1")
@@ -2843,8 +2852,10 @@ class TestReleaseLockContention(unittest.TestCase):
     def test_happy_path_acquires_lock_and_retains_unverified_import(self):
         from lib.dispatch import dispatch_import_core
         from lib.dispatch.types import EvidenceImportGate
-        from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_RELEASE,
-                                     release_id_to_lock_key)
+        from lib.pipeline_db import (
+            ADVISORY_LOCK_NAMESPACE_RELEASE,
+            release_id_to_lock_key,
+        )
 
         db = self._make_db()
         # Default: all locks acquired. Happy path.
@@ -3023,8 +3034,10 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
     def test_contention_returns_deferred_without_staging(self):
         from lib import download_validation as validation_mod
         from lib.grab_list import GrabListEntry
-        from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_RELEASE,
-                                     release_id_to_lock_key)
+        from lib.pipeline_db import (
+            ADVISORY_LOCK_NAMESPACE_RELEASE,
+            release_id_to_lock_key,
+        )
         from lib.quality import ValidationResult
 
         db = FakePipelineDB()
@@ -3032,10 +3045,7 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
             id=42, mb_release_id=self.MBID, status="downloading"))
 
         def lock_result(namespace: int, key: int) -> bool:
-            if (namespace == ADVISORY_LOCK_NAMESPACE_RELEASE
-                    and key == release_id_to_lock_key(self.MBID)):
-                return False
-            return True
+            return not (namespace == ADVISORY_LOCK_NAMESPACE_RELEASE and key == release_id_to_lock_key(self.MBID))
         db.set_advisory_lock_result(lock_result)
 
         from tests.helpers import make_ctx_with_fake_db
@@ -3128,8 +3138,10 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
 
     def test_auto_path_persists_current_path_after_staging(self):
         from lib import download_validation as validation_mod
-        from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_RELEASE,
-                                     release_id_to_lock_key)
+        from lib.pipeline_db import (
+            ADVISORY_LOCK_NAMESPACE_RELEASE,
+            release_id_to_lock_key,
+        )
         from lib.quality import ValidationResult
         from tests.fakes import RecordingDispatchCore
 
@@ -3441,11 +3453,10 @@ class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
         ``CompletionFailed`` branch must not apply a second
         reset-to-wanted transition.
         """
-        from lib import download as dl_mod
-        from lib import download_materialization
-        from lib import transitions
-        from lib import download_validation
         from collections.abc import Callable
+
+        from lib import download as dl_mod
+        from lib import download_materialization, download_validation, transitions
         from lib.context import CratediggerContext
         from lib.dispatch import DispatchCoreFn
         from lib.download_processing import CompletionFailed, CompletionResult
@@ -3610,10 +3621,11 @@ class TestBadAudioHashSlice(unittest.TestCase):
 
     def test_known_bad_hash_surfaces_match_facts(self):
         from pathlib import Path
+
         from lib.audio_hash import hash_audio_content
         from lib.config import CratediggerConfig
-        from lib.pipeline_db import BadAudioHashInput
         from lib.measurement import measure_preimport_state
+        from lib.pipeline_db import BadAudioHashInput
 
         fixture_dir = (
             Path(__file__).parent / "fixtures" / "audio_hash"
@@ -3663,6 +3675,7 @@ class TestBadAudioHashSlice(unittest.TestCase):
         """When ``has_any_bad_audio_hashes`` is False, the gate fast-skips:
         no calls to ``hash_audio_content`` or ``lookup_bad_audio_hash``."""
         from pathlib import Path
+
         from lib.config import CratediggerConfig
         from lib.measurement import measure_preimport_state
 
@@ -3730,6 +3743,7 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         """
         import configparser
         from dataclasses import replace as _replace
+
         from lib.config import CratediggerConfig
         ini = configparser.ConfigParser()
         ini["Slskd"] = {"delete_searches": "False"}
@@ -3750,7 +3764,7 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
                     discogs_release_id=None, mb_release_id="mbid-test",
                     artist_name="Wiggles"):
         """Build an AlbumRecord matching the production from_db_row shape."""
-        from album_source import AlbumRecord, ReleaseRecord, MediaRecord
+        from album_source import AlbumRecord, MediaRecord, ReleaseRecord
 
         media = [MediaRecord(medium_number=1, medium_format="CD", track_count=2)]
         release = ReleaseRecord(
@@ -3845,9 +3859,11 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
     def test_default_variant_passes_response_limit_and_persists_candidates(self):
         """Happy path: default variant, slskd returns peers, candidates persist."""
         import json
+
         import msgspec
+
         from lib.quality import CandidateScore
-        from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
+        from tests.fakes import FakePipelineDB, FakeSlskdAPI
 
         cfg = self._make_cfg(search_response_limit=1500)
         slskd = FakeSlskdAPI()
@@ -3943,7 +3959,7 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         the threshold position; here we seed it directly to assert the
         executor hits it.
         """
-        from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
+        from tests.fakes import FakePipelineDB, FakeSlskdAPI
 
         cfg = self._make_cfg(
             search_escalation_threshold=5, album_prepend_artist=True,
@@ -3977,7 +3993,7 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
 
     def test_unwild_year_variant_at_threshold_plus_one(self):
         """Plan-item strategy='unwild_year' produces an unwild+year query."""
-        from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
+        from tests.fakes import FakePipelineDB, FakeSlskdAPI
 
         cfg = self._make_cfg(
             search_escalation_threshold=5, album_prepend_artist=True,
@@ -4018,7 +4034,7 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         ``cursor_update_status='wrapped'``.
         """
         from album_source import AlbumRecord, MediaRecord, ReleaseRecord
-        from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
+        from tests.fakes import FakePipelineDB, FakeSlskdAPI
 
         cfg = self._make_cfg(search_escalation_threshold=5)
         slskd = FakeSlskdAPI()
@@ -4080,7 +4096,7 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         empty_query). FakePipelineDB serialises ``[]`` to the JSON literal
         ``"[]"``.
         """
-        from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
+        from tests.fakes import FakePipelineDB, FakeSlskdAPI
 
         cfg = self._make_cfg()
         slskd = FakeSlskdAPI()
@@ -4120,11 +4136,14 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         15 highest by (matched_tracks, avg_ratio) DESC land.
         """
         import json
-        from lib.quality import CandidateScore
-        from lib.search import SearchResult
-        from tests.fakes import FakePipelineDB
 
-        from lib.search import PlanExecutionContext, SEARCH_PLAN_GENERATOR_ID
+        from lib.quality import CandidateScore
+        from lib.search import (
+            SEARCH_PLAN_GENERATOR_ID,
+            PlanExecutionContext,
+            SearchResult,
+        )
+        from tests.fakes import FakePipelineDB
         cfg = self._make_cfg()
         db = FakePipelineDB()
         rid = db.add_request(
@@ -4179,7 +4198,8 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
     def test_discogs_source_request_produces_same_blob_shape(self):
         """A Discogs-source request flows through the same forensic capture."""
         import json
-        from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
+
+        from tests.fakes import FakePipelineDB, FakeSlskdAPI
 
         cfg = self._make_cfg()
         slskd = FakeSlskdAPI()
@@ -4264,7 +4284,7 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         The plan generator (U2) materialises track tier slots; here we
         seed a track_0 slot directly to assert the executor uses it.
         """
-        from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
+        from tests.fakes import FakePipelineDB, FakeSlskdAPI
 
         cfg = self._make_cfg(search_escalation_threshold=5)
         slskd = FakeSlskdAPI()
@@ -4308,7 +4328,7 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         non-consuming. Cursor stays at 0; backoff IS applied; the row is
         a pre_attempt stage row with attempt_consumed=False.
         """
-        from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
+        from tests.fakes import FakePipelineDB, FakeSlskdAPI
 
         cfg = self._make_cfg()
         slskd = FakeSlskdAPI()
@@ -4353,7 +4373,7 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
     def test_serial_collection_error_after_accept_is_consumed(self):
         """Once slskd returns a search id, polling/collection failures still
         consume the plan slot through the atomic consumed-attempt seam."""
-        from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
+        from tests.fakes import FakePipelineDB, FakeSlskdAPI
 
         cfg = self._make_cfg()
         slskd = FakeSlskdAPI()
@@ -4483,6 +4503,7 @@ class TestSearchExhaustionResetsCounterSlice(unittest.TestCase):
     def test_requeue_via_apply_transition_clears_state(self):
         """Operator re-queue via the single-seam transition resets state."""
         from typing import cast
+
         from lib.pipeline_db import PipelineDB
         from lib.transitions import apply_transition
         from tests.fakes import FakePipelineDB
@@ -4659,26 +4680,25 @@ class TestImportSubprocessStartedFlag(unittest.TestCase):
         dl_info = DownloadInfo(username="user1")
         stdout = _make_stdout(ir)
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            with patch_dispatch_externals() as ext, \
+        with tempfile.TemporaryDirectory() as tmpdir, patch_dispatch_externals() as ext, \
                  patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
-                ext.run.return_value = MagicMock(
-                    returncode=0, stdout=stdout, stderr="")
-                dispatch_import_core(
-                    path=tmpdir,
-                    mb_release_id="mbid-123",
-                    request_id=42,
-                    label="Test Artist - Test Album",
-                    force=True,
-                    beets_harness_path=_HARNESS,
-                    db=db,  # type: ignore[arg-type]
-                    dl_info=dl_info,
-                    distance=0.05,
-                    scenario="force_import",
-                    files=[MagicMock(username="user1",
-                                     filename="01 - Track.mp3")],
-                    cfg=cfg,
-                )
+            ext.run.return_value = MagicMock(
+                returncode=0, stdout=stdout, stderr="")
+            dispatch_import_core(
+                path=tmpdir,
+                mb_release_id="mbid-123",
+                request_id=42,
+                label="Test Artist - Test Album",
+                force=True,
+                beets_harness_path=_HARNESS,
+                db=db,  # type: ignore[arg-type]
+                dl_info=dl_info,
+                distance=0.05,
+                scenario="force_import",
+                files=[MagicMock(username="user1",
+                                 filename="01 - Track.mp3")],
+                cfg=cfg,
+            )
 
         raw = db.request(42)["active_download_state"]
         if raw is None:
@@ -4827,7 +4847,10 @@ class TestPostMoveResumeBlockGuard(unittest.TestCase):
         Exercises ``_materialize_processing_dir`` (the actual fire site
         seen in production logs at ``lib/download.py:583``).
         """
-        from lib.download_materialization import Materialized, _materialize_processing_dir
+        from lib.download_materialization import (
+            Materialized,
+            _materialize_processing_dir,
+        )
         from lib.staged_album import StagedAlbum
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -4856,7 +4879,10 @@ class TestPostMoveResumeBlockGuard(unittest.TestCase):
         attempt, preserves leftover files under failed_imports, and
         resets the request for a clean redownload.
         """
-        from lib.download_materialization import MaterializeFailed, _materialize_processing_dir
+        from lib.download_materialization import (
+            MaterializeGuarded,
+            _materialize_processing_dir,
+        )
         from lib.staged_album import StagedAlbum
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -4876,10 +4902,12 @@ class TestPostMoveResumeBlockGuard(unittest.TestCase):
 
         self.assertIsInstance(
             result,
-            MaterializeFailed,
+            MaterializeGuarded,
             "Subprocess-started residue must not retry in place; it should "
             "abandon and let the next search/download cycle own recovery.",
         )
+        assert isinstance(result, MaterializeGuarded)
+        self.assertEqual(result.detail, "abandoned_interrupted_auto_import")
         self.assertEqual(
             ctx.pipeline_db_source._get_db().request(request_id)["status"],
             "wanted",
@@ -4898,7 +4926,7 @@ class TestPostMoveResumeBlockGuard(unittest.TestCase):
         from lib.download import _processing_path_ready_for_importer
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            entry, request_id, state, db, ctx, staged_path = (
+            entry, request_id, state, db, ctx, _staged_path = (
                 self._setup_wedged_request(
                     tmpdir, import_subprocess_started_at=None))
 
@@ -4926,8 +4954,9 @@ class TestSearchWatchdogSlice(unittest.TestCase):
 
     def test_stuck_search_fires_watchdog_through_full_collect(self):
         import configparser
-        import cratedigger
         from dataclasses import replace
+
+        import cratedigger
         from lib.config import CratediggerConfig
         from tests.fakes import FakeSlskdAPI
 
@@ -5011,7 +5040,8 @@ class TestStartupReconciliationSlice(unittest.TestCase):
         """Reconciliation must visit every wanted row, not just the
         page-limited / due ones ``get_wanted`` would surface.
         """
-        from datetime import datetime, timedelta, timezone
+        from datetime import UTC, datetime, timedelta
+
         from lib.startup_reconciliation import reconcile_search_plans
         db = FakePipelineDB()
         # 600 wanted rows, 550 backed off, 50 fresh -- larger than any
@@ -5020,7 +5050,7 @@ class TestStartupReconciliationSlice(unittest.TestCase):
         for i in range(600):
             rid = self._seed_wanted(db, f"mbid-{i:04d}")
             rids.append(rid)
-        far_future = datetime.now(timezone.utc) + timedelta(hours=24)
+        far_future = datetime.now(UTC) + timedelta(hours=24)
         for rid in rids[50:]:
             db.update_request_fields(rid, next_retry_after=far_future)
 
@@ -5228,7 +5258,7 @@ class TestStartupReconciliationSlice(unittest.TestCase):
         # Each non-trivial non-empty bucket emits one INFO line carrying
         # its request_ids.
         self.assertIn(
-            f"bucket=deterministic_failed", joined,
+            "bucket=deterministic_failed", joined,
             f"missing deterministic_failed surfacing line: {joined}")
         self.assertIn(
             f"request_ids=[{rid_det}]", joined,
@@ -5292,9 +5322,8 @@ class TestStartupReconciliationSlice(unittest.TestCase):
 
     def test_summary_counts_reconcile_to_wanted_total(self):
         """Sum of all classified buckets == wanted_total. No silent drops."""
-        from datetime import datetime, timedelta, timezone
-        from lib.startup_reconciliation import reconcile_search_plans
         from lib.pipeline_db import SearchPlanItemInput
+        from lib.startup_reconciliation import reconcile_search_plans
         db = FakePipelineDB()
         # 1 active-current, 1 generated, 1 old-gen-replaced, 1 det-failed,
         # 1 malformed active_plan_id that points at a non-active plan.
@@ -5540,6 +5569,7 @@ class TestU5PlanDrivenExecutorSlice(unittest.TestCase):
     def _make_cfg(self, **overrides):
         import configparser
         from dataclasses import replace as _replace
+
         from lib.config import CratediggerConfig
         ini = configparser.ConfigParser()
         ini["Slskd"] = {"delete_searches": "False"}
@@ -5557,7 +5587,7 @@ class TestU5PlanDrivenExecutorSlice(unittest.TestCase):
         return cfg
 
     def _make_album(self, *, request_id):
-        from album_source import AlbumRecord, ReleaseRecord, MediaRecord
+        from album_source import AlbumRecord, MediaRecord, ReleaseRecord
         media = [MediaRecord(medium_number=1, medium_format="CD", track_count=1)]
         release = ReleaseRecord(
             id=-request_id, foreign_release_id="mbid",
@@ -5607,7 +5637,7 @@ class TestU5PlanDrivenExecutorSlice(unittest.TestCase):
 
     def test_AE6_active_plan_ordinal_executes_and_advances_cursor(self):
         """AE6: active plan ordinal executes. On success, log + advance."""
-        from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
+        from tests.fakes import FakePipelineDB, FakeSlskdAPI
 
         cfg = self._make_cfg()
         slskd = FakeSlskdAPI()
@@ -5639,7 +5669,7 @@ class TestU5PlanDrivenExecutorSlice(unittest.TestCase):
 
     def test_AE7_pre_attempt_failure_is_non_consuming(self):
         """AE7: submit failure before accepted search is non-consuming."""
-        from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
+        from tests.fakes import FakePipelineDB, FakeSlskdAPI
 
         cfg = self._make_cfg()
         slskd = FakeSlskdAPI()
@@ -5669,7 +5699,7 @@ class TestU5PlanDrivenExecutorSlice(unittest.TestCase):
 
     def test_AE8_final_ordinal_wraps_with_no_new_exhausted_row(self):
         """AE8: final ordinal wraps cursor + cycle. No new exhausted row."""
-        from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
+        from tests.fakes import FakePipelineDB, FakeSlskdAPI
 
         cfg = self._make_cfg()
         slskd = FakeSlskdAPI()
@@ -5705,11 +5735,13 @@ class TestU5PlanDrivenExecutorSlice(unittest.TestCase):
         plan logs against the executed old plan but does NOT advance the
         new cursor.
         """
-        from tests.fakes import FakePipelineDB
         from lib.pipeline_db import SearchPlanItemInput
         from lib.search import (
-            PlanExecutionContext, SEARCH_PLAN_GENERATOR_ID, SearchResult,
+            SEARCH_PLAN_GENERATOR_ID,
+            PlanExecutionContext,
+            SearchResult,
         )
+        from tests.fakes import FakePipelineDB
 
         cfg = self._make_cfg()
         db = FakePipelineDB()
@@ -5767,12 +5799,13 @@ class TestU5PlanDrivenExecutorSlice(unittest.TestCase):
         ``found`` after the request was regenerated must NOT claim
         download ownership (wanted -> downloading).
         """
-        from tests.fakes import FakePipelineDB
+        from lib.download_ownership import DownloadOwnershipWriter
         from lib.pipeline_db import SearchPlanItemInput
         from lib.search import (
-            PlanExecutionContext, SEARCH_PLAN_GENERATOR_ID,
+            SEARCH_PLAN_GENERATOR_ID,
+            PlanExecutionContext,
         )
-        from lib.download_ownership import DownloadOwnershipWriter
+        from tests.fakes import FakePipelineDB
 
         db = FakePipelineDB()
         rid = db.add_request(
@@ -5809,11 +5842,12 @@ class TestU5PlanDrivenExecutorSlice(unittest.TestCase):
     def test_current_download_ownership_claim_succeeds(self):
         """Sanity: a non-stale claim with the current plan execution
         context still succeeds (regression guard)."""
-        from tests.fakes import FakePipelineDB
-        from lib.search import (
-            PlanExecutionContext, SEARCH_PLAN_GENERATOR_ID,
-        )
         from lib.download_ownership import DownloadOwnershipWriter
+        from lib.search import (
+            SEARCH_PLAN_GENERATOR_ID,
+            PlanExecutionContext,
+        )
+        from tests.fakes import FakePipelineDB
 
         db = FakePipelineDB()
         rid = db.add_request(
@@ -5842,15 +5876,16 @@ class TestU5PlanDrivenExecutorSlice(unittest.TestCase):
         stale, ``_claim_initial_download_ownership`` returns a non-claimed
         result and the request stays wanted.
         """
-        from tests.fakes import FakePipelineDB
         from lib.context import CratediggerContext
         from lib.download_ownership import DownloadOwnershipWriter
         from lib.enqueue import _claim_initial_download_ownership
         from lib.grab_list import DownloadFile
         from lib.pipeline_db import SearchPlanItemInput
         from lib.search import (
-            PlanExecutionContext, SEARCH_PLAN_GENERATOR_ID,
+            SEARCH_PLAN_GENERATOR_ID,
+            PlanExecutionContext,
         )
+        from tests.fakes import FakePipelineDB
 
         cfg = self._make_cfg()
         db = FakePipelineDB()
@@ -5915,6 +5950,7 @@ class TestU5RegressionExecutorDoesNotUseLegacyVariantPicker(unittest.TestCase):
         """
         import configparser
         from dataclasses import replace as _replace
+
         from lib.config import CratediggerConfig
         from lib.context import CratediggerContext
         from lib.pipeline_db import SearchPlanItemInput
@@ -5943,7 +5979,7 @@ class TestU5RegressionExecutorDoesNotUseLegacyVariantPicker(unittest.TestCase):
                     canonical_query_key="x a"),
             ],
         )
-        from album_source import AlbumRecord, ReleaseRecord, MediaRecord
+        from album_source import AlbumRecord, MediaRecord, ReleaseRecord
         media = [MediaRecord(medium_number=1, medium_format="CD", track_count=1)]
         release = ReleaseRecord(
             id=-rid, foreign_release_id="mbid",
@@ -6028,15 +6064,15 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
         )
 
     def test_force_job_with_valid_evidence_short_circuits_no_measurement(self):
+        from lib.dispatch import dispatch_import_from_db
         from lib.import_queue import (
             IMPORT_JOB_FORCE,
             force_import_dedupe_key,
             force_import_payload,
         )
-        from scripts import import_preview_worker
-        from lib.dispatch import dispatch_import_from_db
         from lib.measurement import ExistingSpectralAuditLookup
         from lib.quality import SpectralAnalysisDetail, SpectralDetail
+        from scripts import import_preview_worker
         from tests.helpers import noop_quality_gate
 
         with tempfile.TemporaryDirectory() as root:
@@ -6183,8 +6219,8 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
             IMPORT_JOB_AUTOMATION,
             automation_import_dedupe_key,
         )
-        from scripts import import_preview_worker
         from lib.quality import SpectralAnalysisDetail, SpectralDetail
+        from scripts import import_preview_worker
 
         with tempfile.TemporaryDirectory() as staged:
             with open(os.path.join(staged, "01.flac"), "wb") as handle:
@@ -7033,7 +7069,8 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
         matched_bad_audio_hash_path=None,
         min_bitrate_kbps=245,
     ):
-        from datetime import datetime, timezone
+        from datetime import UTC, datetime
+
         from lib.quality import (
             AlbumQualityEvidence,
             AudioQualityMeasurement,
@@ -7062,7 +7099,7 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
                     "measured" if spectral_grade is not None else None
                 ),
             ),
-            measured_at=datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+            measured_at=datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
             files=files,
             codec="mp3",
             container="mp3",
@@ -7180,6 +7217,7 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
         rejects without clearing unsearchable, download_log carries the scenario,
         beets (sp.run) is never invoked."""
         import msgspec
+
         from lib.quality import SpectralAnalysisDetail, SpectralDetail
         from lib.quality_evidence import snapshot_audio_files
 
@@ -7493,7 +7531,10 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
 # ``python3 -m unittest tests.test_integration_slices`` directly would skip
 # (conftest is only auto-loaded by pytest discovery).
 import sys as _u7_sys
+
 _u7_sys.path.append(os.path.dirname(__file__))
+from datetime import UTC
+
 import conftest as _u7_conftest  # noqa: F401  # boots ephemeral PG + sets DSN
 
 
@@ -7536,6 +7577,7 @@ class TestU7RecoverySweepSlice(unittest.TestCase):
 
     def setUp(self):
         import psycopg2
+
         from lib.pipeline_db import PipelineDB
         self._psycopg2 = psycopg2
         self.db = PipelineDB(_u7_test_dsn())
@@ -7616,7 +7658,7 @@ class TestU7RecoverySweepSlice(unittest.TestCase):
         """AE8 happy path: stuck uncertain row → migration sweep → live
         ``claim_next_import_preview_job`` selects it as the next preview job.
         """
-        rid, job_id = self._seed_stuck_uncertain_job(
+        _rid, job_id = self._seed_stuck_uncertain_job(
             mbid="u7-slice-recover-mbid",
         )
 
@@ -8327,7 +8369,8 @@ class TestWrongMatchCleanupFKChainAvoidsRemeasurement(unittest.TestCase):
 
     def _evidence_for(self, source_dir: str, mb_release_id: str):
         """Build content-addressed evidence matching files on disk."""
-        from datetime import datetime, timezone
+        from datetime import datetime
+
         from lib.quality import (
             AlbumQualityEvidence,
             AlbumQualityEvidenceFile,
@@ -8359,7 +8402,7 @@ class TestWrongMatchCleanupFKChainAvoidsRemeasurement(unittest.TestCase):
                 spectral_subject="source",
                 spectral_provenance="measured",
             ),
-            measured_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            measured_at=datetime(2026, 5, 1, tzinfo=UTC),
             files=files,
             codec="mp3",
             container="mp3",
@@ -8371,8 +8414,9 @@ class TestWrongMatchCleanupFKChainAvoidsRemeasurement(unittest.TestCase):
 
     def _patch_cfg(self):
         """Pin the runtime-config loader so the test doesn't read disk."""
-        from lib.quality import QualityRankConfig
         from types import SimpleNamespace as _SN
+
+        from lib.quality import QualityRankConfig
         cfg = _SN(
             quality_ranks=QualityRankConfig.defaults(),
             verified_lossless_target="",
@@ -8435,8 +8479,9 @@ class TestWrongMatchStaleEvidenceRefreshSlice(unittest.TestCase):
         staging_dir: str = "",
         processing_dir: str = "",
     ):
-        from lib.quality import QualityRankConfig
         from types import SimpleNamespace as _SN
+
+        from lib.quality import QualityRankConfig
         cfg = _SN(
             quality_ranks=QualityRankConfig.defaults(),
             verified_lossless_target="",
@@ -8450,7 +8495,8 @@ class TestWrongMatchStaleEvidenceRefreshSlice(unittest.TestCase):
         return patch("lib.config.read_runtime_config", return_value=cfg)
 
     def test_stale_evidence_refreshes_through_real_preview_and_deletes(self) -> None:
-        from datetime import datetime, timezone
+        from datetime import datetime
+
         from lib.quality import (
             AlbumQualityEvidence,
             AlbumQualityEvidenceFile,
@@ -8500,7 +8546,7 @@ class TestWrongMatchStaleEvidenceRefreshSlice(unittest.TestCase):
                     spectral_subject="source",
                     spectral_provenance="measured",
                 ),
-                measured_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+                measured_at=datetime(2026, 5, 1, tzinfo=UTC),
                 files=stale_files,
                 codec="mp3",
                 container="mp3",
@@ -8600,7 +8646,8 @@ class TestWrongMatchTriageRejectsSameSourceDuplicate(unittest.TestCase):
         ``lossless_source`` lineage and 215 kbps avg. Files on disk are
         snapshot-fingerprinted so freshness checks pass.
         """
-        from datetime import datetime, timezone
+        from datetime import datetime
+
         from lib.quality import (
             AlbumQualityEvidence,
             AlbumQualityV0Metric,
@@ -8632,7 +8679,7 @@ class TestWrongMatchTriageRejectsSameSourceDuplicate(unittest.TestCase):
             snapshot_fingerprint=snapshot_fingerprint(files),
             source_path=source_dir,
             measurement=measurement,
-            measured_at=datetime(2026, 5, 17, 16, 0, 0, tzinfo=timezone.utc),
+            measured_at=datetime(2026, 5, 17, 16, 0, 0, tzinfo=UTC),
             files=files,
             codec="flac",
             container="flac",
@@ -8653,8 +8700,9 @@ class TestWrongMatchTriageRejectsSameSourceDuplicate(unittest.TestCase):
 
     def _patch_cfg(self, *, beets_library_root: str):
         """Pin cleanup to the same explicit Beets DB/root pair as dispatch."""
-        from lib.quality import QualityRankConfig
         from types import SimpleNamespace as _SN
+
+        from lib.quality import QualityRankConfig
         cfg = _SN(
             quality_ranks=QualityRankConfig.defaults(),
             verified_lossless_target="",
@@ -8990,7 +9038,8 @@ class TestWrongMatchTriageRejectsSameSourceDuplicate(unittest.TestCase):
         path which IS the lock, and asserts both the rejection and
         the narrowing land.
         """
-        from datetime import datetime, timezone
+        from datetime import datetime
+
         from lib.quality import AlbumQualityEvidence
         from lib.quality_evidence import (
             snapshot_audio_files,
@@ -9050,7 +9099,7 @@ class TestWrongMatchTriageRejectsSameSourceDuplicate(unittest.TestCase):
                     format="MP3",
                     is_cbr=False,
                 ),
-                measured_at=datetime(2026, 5, 17, 19, 0, 0, tzinfo=timezone.utc),
+                measured_at=datetime(2026, 5, 17, 19, 0, 0, tzinfo=UTC),
                 files=dup_files,
                 codec="mp3",
                 container="mp3",
@@ -9202,15 +9251,16 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
                 spectral_subject="source",
                 spectral_provenance="measured",
             )
+            from datetime import datetime
+
             from lib.quality import AlbumQualityEvidence
-            from datetime import datetime, timezone
             from lib.quality_evidence import snapshot_fingerprint
             candidate_evidence = AlbumQualityEvidence(
                 mb_release_id="mbid-r1",
                 snapshot_fingerprint=snapshot_fingerprint(candidate_files),
                 source_path=source_dir,
                 measurement=candidate_measurement,
-                measured_at=datetime(2026, 5, 16, 12, 0, 0, tzinfo=timezone.utc),
+                measured_at=datetime(2026, 5, 16, 12, 0, 0, tzinfo=UTC),
                 files=candidate_files,
                 codec="flac",
                 container="flac",
@@ -9356,15 +9406,16 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
                 spectral_provenance="measured",
                 was_converted_from="flac",
             )
+            from datetime import datetime
+
             from lib.quality import AlbumQualityEvidence
-            from datetime import datetime, timezone
             from lib.quality_evidence import snapshot_fingerprint
             candidate_evidence = AlbumQualityEvidence(
                 mb_release_id="mbid-t1",
                 snapshot_fingerprint=snapshot_fingerprint(candidate_files),
                 source_path=source_dir,
                 measurement=candidate_measurement,
-                measured_at=datetime(2026, 5, 16, 12, 0, 0, tzinfo=timezone.utc),
+                measured_at=datetime(2026, 5, 16, 12, 0, 0, tzinfo=UTC),
                 files=candidate_files,
                 codec="flac",
                 container="flac",
@@ -9506,15 +9557,16 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
                 spectral_subject="source",
                 spectral_provenance="measured",
             )
+            from datetime import datetime
+
             from lib.quality import AlbumQualityEvidence
-            from datetime import datetime, timezone
             from lib.quality_evidence import snapshot_fingerprint
             candidate_evidence = AlbumQualityEvidence(
                 mb_release_id="mbid-alac-m4a",
                 snapshot_fingerprint=snapshot_fingerprint(candidate_files),
                 source_path=source_dir,
                 measurement=candidate_measurement,
-                measured_at=datetime(2026, 6, 16, 23, 53, 0, tzinfo=timezone.utc),
+                measured_at=datetime(2026, 6, 16, 23, 53, 0, tzinfo=UTC),
                 files=candidate_files,
                 codec="m4a",
                 container="m4a",
@@ -9635,15 +9687,16 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
                 spectral_provenance="measured",
                 was_converted_from=None,
             )
+            from datetime import datetime
+
             from lib.quality import AlbumQualityEvidence
-            from datetime import datetime, timezone
             from lib.quality_evidence import snapshot_fingerprint
             candidate_evidence = AlbumQualityEvidence(
                 mb_release_id="mbid-aac-m4a",
                 snapshot_fingerprint=snapshot_fingerprint(candidate_files),
                 source_path=source_dir,
                 measurement=candidate_measurement,
-                measured_at=datetime(2026, 6, 16, 23, 53, 0, tzinfo=timezone.utc),
+                measured_at=datetime(2026, 6, 16, 23, 53, 0, tzinfo=UTC),
                 files=candidate_files,
                 codec="m4a",
                 container="m4a",
@@ -9760,15 +9813,16 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
                 spectral_provenance="measured",
                 was_converted_from="mp3",
             )
+            from datetime import datetime
+
             from lib.quality import AlbumQualityEvidence
-            from datetime import datetime, timezone
             from lib.quality_evidence import snapshot_fingerprint
             candidate_evidence = AlbumQualityEvidence(
                 mb_release_id="mbid-mp3-opus",
                 snapshot_fingerprint=snapshot_fingerprint(candidate_files),
                 source_path=source_dir,
                 measurement=candidate_measurement,
-                measured_at=datetime(2026, 5, 17, 12, 0, 0, tzinfo=timezone.utc),
+                measured_at=datetime(2026, 5, 17, 12, 0, 0, tzinfo=UTC),
                 files=candidate_files,
                 codec="mp3",
                 container="mp3",
@@ -9853,7 +9907,8 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
         propagation actually wrote ``likely_transcode`` to the library
         row — U5 propagation policy must land first.
         """
-        from datetime import datetime, timezone
+        from datetime import datetime
+
         from lib.dispatch import _refresh_current_evidence_after_import
         from lib.quality import (
             AlbumQualityEvidence,
@@ -9900,7 +9955,7 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
                     spectral_provenance="measured",
                     was_converted_from="flac",
                 ),
-                measured_at=datetime(2026, 5, 17, 14, 0, 0, tzinfo=timezone.utc),
+                measured_at=datetime(2026, 5, 17, 14, 0, 0, tzinfo=UTC),
                 files=compromised_files,
                 codec="flac",
                 container="flac",
@@ -9991,7 +10046,7 @@ class TestU10PostImportEvidencePropagation(unittest.TestCase):
                     spectral_provenance="measured",
                     was_converted_from="flac",
                 ),
-                measured_at=datetime(2026, 5, 17, 15, 0, 0, tzinfo=timezone.utc),
+                measured_at=datetime(2026, 5, 17, 15, 0, 0, tzinfo=UTC),
                 files=clean_files,
                 codec="flac",
                 container="flac",
@@ -10165,6 +10220,7 @@ class TestRefreshCurrentEvidenceUsesBeetsLibraryRoot(unittest.TestCase):
 
     def test_refresh_passes_library_root_to_beets_db(self) -> None:
         import inspect
+
         from lib.dispatch import _refresh_current_evidence_after_import
 
         sig = inspect.signature(_refresh_current_evidence_after_import)
@@ -10303,9 +10359,10 @@ class TestReplaceFullPath(unittest.TestCase):
         return db
 
     def _run(self, *, old_status="wanted", active_download_state=None):
-        from lib.mbid_replace_service import MbidReplaceService
+        from unittest.mock import MagicMock, patch
+
         from lib.config import CratediggerConfig
-        from unittest.mock import patch, MagicMock
+        from lib.mbid_replace_service import MbidReplaceService
 
         db = self._make_target_payload(
             status=old_status,
@@ -10394,7 +10451,7 @@ class TestReplaceFullPath(unittest.TestCase):
         all post-state assertions hold.
         """
         from lib.mbid_replace_service import RESULT_REPLACED
-        db, result, tmpdir, plan_svc, mocks = self._run(old_status="imported")
+        db, result, _tmpdir, plan_svc, mocks = self._run(old_status="imported")
         self.assertEqual(result.outcome, RESULT_REPLACED)
         assert result.new_request_id is not None
         # Old row.
@@ -10443,7 +10500,7 @@ class TestReplaceFullPath(unittest.TestCase):
         old release whenever it resolves uniquely. Staging
         cleanup still runs."""
         from lib.mbid_replace_service import RESULT_REPLACED
-        db, result, _, _, mocks = self._run(old_status="wanted")
+        _db, result, _, _, mocks = self._run(old_status="wanted")
         self.assertEqual(result.outcome, RESULT_REPLACED)
         mocks["delete"].assert_called_once()
         if mocks["stage_path"]:
@@ -10538,8 +10595,8 @@ class TestFieldResolverSlice(unittest.TestCase):
         Bytes are returned via a tiny shim that mimics the
         ``urlopen() -> response`` contract enough for ``json.loads``.
         """
-        from contextlib import contextmanager, ExitStack
         import io
+        from contextlib import ExitStack, contextmanager
         from unittest.mock import patch as _patch
 
         def _make_response(payload: bytes):
@@ -10550,14 +10607,14 @@ class TestFieldResolverSlice(unittest.TestCase):
                 def read(self, *args, **kwargs) -> bytes:
                     return self._buf.read()
 
-                def __enter__(self) -> "_Resp":
+                def __enter__(self) -> Self:
                     return self
 
                 def __exit__(self, *args) -> None:
                     return None
             return _Resp()
 
-        def _urlopen(req, timeout=10):  # noqa: ARG001
+        def _urlopen(req, timeout=10):
             url = req.get_full_url() if hasattr(req, "get_full_url") else str(req)
             for key, payload in monkey_patches.items():
                 if key in url:
@@ -10582,7 +10639,6 @@ class TestFieldResolverSlice(unittest.TestCase):
             FIELD_RELEASE_GROUP_YEAR,
             resolve_release_group_year,
         )
-        from tests.fakes import FakePipelineDB
 
         # Captured shape from the MB mirror's
         # /ws/2/release-group/<mbid>?fmt=json endpoint.
@@ -10611,12 +10667,10 @@ class TestFieldResolverSlice(unittest.TestCase):
 
     def test_discogs_master_year_round_trips_through_real_client(self):
         """Realistic Discogs master payload → resolved year + side-table row."""
+        import web.discogs
         from lib.field_resolver_service import (
-            FIELD_RELEASE_GROUP_YEAR,
             resolve_release_group_year,
         )
-        from tests.fakes import FakePipelineDB
-        import web.discogs
 
         # Mirror-required since tier-2 U6; urlopen is patched below, so a
         # synthetic origin suffices for the real-client round trip.
@@ -10657,13 +10711,13 @@ class TestFieldResolverSlice(unittest.TestCase):
         mapping. Code-review finding #17 split them: 404 → sticky, missing
         year → field_missing_upstream.
         """
+        import urllib.error
+        from unittest.mock import patch as _patch
+
         from lib.field_resolver_service import (
             FIELD_RELEASE_GROUP_YEAR,
             resolve_release_group_year,
         )
-        from tests.fakes import FakePipelineDB
-        from unittest.mock import patch as _patch
-        import urllib.error
 
         db = self._recorder_db(4003)
         req = {
@@ -10674,7 +10728,7 @@ class TestFieldResolverSlice(unittest.TestCase):
             "discogs_release_id": None,
         }
 
-        def _raise_404(req_obj, timeout=10):  # noqa: ARG001
+        def _raise_404(req_obj, timeout=10):
             raise urllib.error.HTTPError(
                 url="x", code=404, msg="Not Found",
                 hdrs=None, fp=None,  # type: ignore[arg-type]
@@ -10702,7 +10756,6 @@ class TestFieldResolverSlice(unittest.TestCase):
             FIELD_RELEASE_GROUP_YEAR,
             resolve_release_group_year,
         )
-        from tests.fakes import FakePipelineDB
 
         db = self._recorder_db(4011)
         req = {
@@ -10744,7 +10797,6 @@ class TestFieldResolverSlice(unittest.TestCase):
             FIELD_TRACK_ARTIST,
             resolve_track_artists,
         )
-        from tests.fakes import FakePipelineDB
 
         # Minimal but realistic MB release payload shape -- direct from
         # the MB mirror, not via web.mb.get_release's normaliser.
@@ -10775,10 +10827,10 @@ class TestFieldResolverSlice(unittest.TestCase):
         # fetcher: a callable that wraps ``_get`` directly, bypassing
         # the normaliser. This matches the production path the
         # backfill / enqueue will use once U3/U4 wire it.
-        import json
-        from web.mb import _get, MB_API_BASE
 
-        def _raw_mb_get_release(mbid, fresh=False):  # noqa: ARG001
+        from web.mb import MB_API_BASE, _get
+
+        def _raw_mb_get_release(mbid, fresh=False):
             return _get(
                 f"{MB_API_BASE}/release/{mbid}"
                 "?inc=recordings+artist-credits+media+release-groups"
@@ -10802,6 +10854,7 @@ class TestFieldResolverSlice(unittest.TestCase):
         # Round-trip the resolver result through msgspec encode/decode
         # so the wire-boundary contract is also exercised end-to-end.
         import msgspec
+
         from lib.field_resolver_service import ResolverResult
         encoded = msgspec.json.encode(results[0])
         decoded = msgspec.json.decode(encoded, type=ResolverResult)
@@ -11309,7 +11362,7 @@ class TestPlanWrapClassificationSlice(unittest.TestCase):
         # Try to wrap with an invalid plan_item_id. Fakes raise, real
         # PG raises a FK violation. Either way the txn must roll back
         # cleanly.
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValueError):
             db.record_consumed_search_attempt(ConsumedAttemptInput(
                 request_id=rid, plan_id=plan_id,
                 plan_item_id=999999, plan_ordinal=1,
@@ -11360,7 +11413,7 @@ class TestUnfindableDetectionSlice(unittest.TestCase):
     """
 
     @staticmethod
-    def _seed_artist(db: "FakePipelineDB", artist: str, **overrides: Any) -> int:
+    def _seed_artist(db: FakePipelineDB, artist: str, **overrides: Any) -> int:
         rid = db.add_request(
             artist_name=artist,
             album_title=f"{artist} - Album",
@@ -11382,7 +11435,7 @@ class TestUnfindableDetectionSlice(unittest.TestCase):
 
     @staticmethod
     def _seed_slskd_search(
-        slskd: "FakeSlskdAPI",
+        slskd: FakeSlskdAPI,
         *,
         search_id: int,
         responses: list[dict[str, Any]],
@@ -11395,7 +11448,7 @@ class TestUnfindableDetectionSlice(unittest.TestCase):
 
     def test_end_to_end_artist_absent(self) -> None:
         """Catalog-empty probe → artist_absent verdict written."""
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
         from lib.unfindable_detection_service import (
             CATEGORY_ARTIST_ABSENT,
@@ -11408,7 +11461,7 @@ class TestUnfindableDetectionSlice(unittest.TestCase):
         rid = self._seed_artist(
             db, "Unknown Indie Band",
             last_artist_probe_at=(
-                datetime.now(timezone.utc) - timedelta(days=14)),
+                datetime.now(UTC) - timedelta(days=14)),
             last_artist_probe_match_count=0,
         )
         # Empty responses → match_count=0, no fuzzy match.
@@ -11493,8 +11546,8 @@ class TestUnfindableDetectionSlice(unittest.TestCase):
         from lib.unfindable_detection_service import (
             CATEGORY_WRONG_PRESSING_AVAILABLE,
             RESULT_CATEGORISED,
-            UnfindableDetectionService,
             WRONG_PRESSING_MIN_HITS,
+            UnfindableDetectionService,
         )
 
         db = FakePipelineDB()
@@ -11541,6 +11594,7 @@ class TestRescueCaptureSlice(unittest.TestCase):
 
     def setUp(self):
         import psycopg2
+
         from lib.pipeline_db import PipelineDB
         self._psycopg2 = psycopg2
         self.db = PipelineDB(_u7_test_dsn())
@@ -11561,7 +11615,7 @@ class TestRescueCaptureSlice(unittest.TestCase):
                 conn.close()
 
     def _seed(self, *, mbid: str, category: str) -> int:
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         self._mbids.append(mbid)
         rid = self.db.add_request(
@@ -11577,7 +11631,7 @@ class TestRescueCaptureSlice(unittest.TestCase):
         # silently no-op the category write.
         self.db.set_unfindable_category(
             rid, category=category,
-            categorised_at=datetime(2026, 5, 20, tzinfo=timezone.utc),
+            categorised_at=datetime(2026, 5, 20, tzinfo=UTC),
         )
         self.db._execute(
             "UPDATE album_requests SET status = 'downloading' WHERE id = %s",
@@ -11625,7 +11679,7 @@ class TestRescueCaptureSlice(unittest.TestCase):
         self.assertEqual(
             before["unfindable_category"], "wrong_pressing_available")
 
-        with self.assertRaises(Exception):
+        with self.assertRaises(psycopg2.errors.UndefinedColumn):
             self.db.mark_imported_with_rescue(
                 rid, column_that_does_not_exist=1,
             )
@@ -11669,7 +11723,8 @@ class TestTriageServiceSlice(unittest.TestCase):
 
     @staticmethod
     def _populated_triage_result():
-        from datetime import datetime, timezone
+        from datetime import datetime
+
         from lib.triage_service import (
             FieldResolutionState,
             RequestMeta,
@@ -11678,7 +11733,7 @@ class TestTriageServiceSlice(unittest.TestCase):
             TriageResult,
             UnfindableState,
         )
-        now = datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 5, 26, 12, 0, 0, tzinfo=UTC)
         return TriageResult(
             request_meta=RequestMeta(
                 id=42,
@@ -11756,7 +11811,9 @@ class TestTriageServiceSlice(unittest.TestCase):
         self.assertEqual(decoded, original)
         # Belt-and-braces: nested types remain Structs (not dicts).
         from lib.triage_service import (
-            FieldResolutionState, RequestMeta, SearchForensicsSummary,
+            FieldResolutionState,
+            RequestMeta,
+            SearchForensicsSummary,
             UnfindableState,
         )
         self.assertIsInstance(decoded.request_meta, RequestMeta)
@@ -11826,15 +11883,16 @@ class TestTriageServiceSlice(unittest.TestCase):
         runs in production: bulk getter → in-memory compose → wire
         encoding.
         """
+        from datetime import datetime
+
         import msgspec
-        from datetime import datetime, timezone
 
         from lib.triage_service import (
             TriageResult,
             compose_triage_for_request,
         )
 
-        now = datetime(2026, 5, 20, 9, 0, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 5, 20, 9, 0, 0, tzinfo=UTC)
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=99,

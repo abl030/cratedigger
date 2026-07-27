@@ -6,17 +6,16 @@ Pure move: every definition is AST-identical to the original.
 
 import configparser
 import json
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from enum import IntEnum, StrEnum
-from typing import Any, Optional
+from typing import Any, Self
 
 from lib.quality.evidence_types import (
+    V0_PROBE_LOSSLESS_SOURCE,
     AudioQualityMeasurement,
     TargetQualityContract,
-    V0_PROBE_LOSSLESS_SOURCE,
     V0ProbeEvidence,
 )
-
 
 # ---------------------------------------------------------------------------
 # Codec-aware quality rank model (issue #60)
@@ -106,7 +105,7 @@ class CodecRankBands:
                 f"CodecRankBands must be monotonic "
                 f"(transparent >= excellent >= good >= acceptable >= 0): {self}")
 
-    def rank_for(self, bitrate_kbps: Optional[int]) -> QualityRank:
+    def rank_for(self, bitrate_kbps: int | None) -> QualityRank:
         """Classify a bitrate against this codec's band table."""
         if bitrate_kbps is None:
             return QualityRank.UNKNOWN
@@ -190,7 +189,7 @@ class QualityRankConfig:
         "wma", "mp3", "vorbis", "aac", "opus", "flac")
 
     @classmethod
-    def defaults(cls) -> "QualityRankConfig":
+    def defaults(cls) -> Self:
         return cls()
 
     # ------------------------------------------------------------------
@@ -202,7 +201,7 @@ class QualityRankConfig:
         cls,
         parser: configparser.RawConfigParser,
         section: str = "Quality Ranks",
-    ) -> "QualityRankConfig":
+    ) -> Self:
         """Parse a [Quality Ranks] section into a QualityRankConfig.
 
         Every key is optional — missing keys fall back to the field's default
@@ -368,7 +367,7 @@ class QualityRankConfig:
         return json.dumps(payload, sort_keys=True)
 
     @classmethod
-    def from_json(cls, raw: str) -> "QualityRankConfig":
+    def from_json(cls, raw: str) -> Self:
         """Inverse of to_json().
 
         Missing keys / invalid enum values raise ValueError with a
@@ -411,7 +410,7 @@ _KNOWN_CODEC_FAMILIES: frozenset[str] = frozenset(
     })
 
 
-def _codec_family_of(format_hint: Optional[str]) -> str:
+def _codec_family_of(format_hint: str | None) -> str:
     """First token of format, lowercased — "opus 128" → "opus", "MP3" → "mp3"."""
     if format_hint is None:
         return "unknown"
@@ -424,7 +423,7 @@ def _codec_family_of(format_hint: Optional[str]) -> str:
     return "unknown"
 
 
-def _parse_vbr_level(format_hint: str) -> Optional[int]:
+def _parse_vbr_level(format_hint: str) -> int | None:
     """Parse V-level from a label like "mp3 v0" / "mp3 v9". Returns None otherwise."""
     parts = format_hint.strip().lower().split()
     if len(parts) < 2 or parts[0] != "mp3":
@@ -437,7 +436,7 @@ def _parse_vbr_level(format_hint: str) -> Optional[int]:
     return None
 
 
-def _parse_bitrate_label(format_hint: str) -> Optional[int]:
+def _parse_bitrate_label(format_hint: str) -> int | None:
     """Parse a numeric bitrate from a label like "opus 128" / "mp3 320"."""
     parts = format_hint.strip().lower().split()
     if len(parts) < 2:
@@ -449,8 +448,8 @@ def _parse_bitrate_label(format_hint: str) -> Optional[int]:
 
 
 def quality_rank(
-    format_hint: Optional[str],
-    bitrate_kbps: Optional[int],
+    format_hint: str | None,
+    bitrate_kbps: int | None,
     is_cbr: bool,
     cfg: QualityRankConfig,
 ) -> QualityRank:
@@ -561,7 +560,7 @@ def _selected_quality_bitrate_with_source(
     measurement: AudioQualityMeasurement,
     cfg: QualityRankConfig,
     v0_probe: V0ProbeEvidence | None = None,
-) -> tuple[Optional[int], str]:
+) -> tuple[int | None, str]:
     """Select a statistic without copying probe values into a measurement."""
 
     if v0_probe is None or v0_probe.kind != V0_PROBE_LOSSLESS_SOURCE:
@@ -577,7 +576,7 @@ def _selected_quality_bitrate_with_source(
 
 
 def _selected_bitrate(m: AudioQualityMeasurement,
-                      cfg: QualityRankConfig) -> Optional[int]:
+                      cfg: QualityRankConfig) -> int | None:
     """Return the bitrate value measurement_rank() would classify for m.
 
     Used by compare_quality() for the same-rank, same-codec tiebreaker.
@@ -590,7 +589,7 @@ def _selected_bitrate(m: AudioQualityMeasurement,
 def _selected_bitrate_with_source(
     m: AudioQualityMeasurement,
     cfg: QualityRankConfig,
-) -> "tuple[Optional[int], str]":
+) -> tuple[int | None, str]:
     """(value, stat-name) pair for the metric measurement_rank() classifies.
 
     The stat name ("min" / "avg" / "median") records the statistic ACTUALLY
@@ -622,7 +621,7 @@ def _selected_bitrate_with_source(
 
 def gate_rank(
     current: AudioQualityMeasurement,
-    cfg: "QualityRankConfig",
+    cfg: QualityRankConfig,
     *,
     target_contract: TargetQualityContract | None = None,
     verified_lossless_proof: bool = False,
@@ -652,6 +651,5 @@ def gate_rank(
     if current.spectral_bitrate_kbps is not None:
         spectral_rank = quality_rank(
             "mp3", current.spectral_bitrate_kbps, is_cbr=False, cfg=cfg)
-        if spectral_rank < rank:
-            rank = spectral_rank
+        rank = min(rank, spectral_rank)
     return rank

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import itertools
 from dataclasses import dataclass
 
 
@@ -29,7 +30,7 @@ def _has_literal_audio_map(elements: list[ast.expr]) -> bool:
     return any(
         _string_literal(current) == "-map"
         and _string_literal(following) == "0:a"
-        for current, following in zip(elements, elements[1:])
+        for current, following in itertools.pairwise(elements)
     )
 
 

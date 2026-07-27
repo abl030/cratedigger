@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generated tests for the ledger-positive ownership flip of
 ``lib.slskd_transfers.converge_slskd_orphans`` (issue #571 PR 3).
 
@@ -43,11 +42,10 @@ from typing import Literal
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
-
 from hypothesis import given
 from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.config import CratediggerConfig
 from lib.context import CratediggerContext
 from lib.pipeline_db import TransferLedgerRow

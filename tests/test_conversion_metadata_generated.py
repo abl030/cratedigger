@@ -35,9 +35,9 @@ from mutagen.oggopus import OggOpus
 
 import tests._hypothesis_profiles  # noqa: F401  (registers/loads profiles)
 from harness.import_one import (
-    ConversionSpec,
-    V0_SPEC,
     FLAC_SPEC,
+    V0_SPEC,
+    ConversionSpec,
     convert_lossless,
     parse_verified_lossless_target,
 )

@@ -33,8 +33,8 @@ from scripts.run_python_tests import (
     HypothesisStatsRecorder,
     TestModule,
     _iter_test_cases,
-    assert_exact_target_coverage,
     assert_exact_schedule,
+    assert_exact_target_coverage,
     assert_hypothesis_deadlines_disabled,
     complete_test_modules,
     discover_test_modules,
@@ -47,7 +47,6 @@ from scripts.run_python_tests import (
     test_subprocess_environment,
     worker_environment,
 )
-
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RUNNER = REPO_ROOT / "scripts" / "run_python_tests.py"
@@ -293,6 +292,7 @@ class TestRunnerProcessContract(unittest.TestCase):
                 capture_output=True,
                 text=True,
                 timeout=30,
+                check=False,
             )
 
     def test_runner_aggregates_every_module_and_test(self) -> None:
@@ -352,6 +352,7 @@ class TestRunnerProcessContract(unittest.TestCase):
                 capture_output=True,
                 text=True,
                 timeout=30,
+                check=False,
             )
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -383,6 +384,7 @@ class TestRunnerProcessContract(unittest.TestCase):
                 capture_output=True,
                 text=True,
                 timeout=30,
+                check=False,
             )
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -488,8 +490,8 @@ class TestSuiteDeadlineContract(unittest.TestCase):
         """A Hypothesis test whose settings cannot be read must raise, not be
         quietly skipped past the deadline contract."""
         broken = _planted_case(None)
-        setattr(
-            getattr(broken, "test_property"),
+        setattr(  # noqa: B010 - plant malformed Hypothesis runtime metadata
+            getattr(broken, "test_property"),  # noqa: B009 - generated test method
             "_hypothesis_internal_use_settings",
             object(),
         )

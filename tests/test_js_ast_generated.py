@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from collections.abc import Callable
 import re
 import unittest
+from collections.abc import Callable
+from dataclasses import dataclass
 
-from hypothesis import given, strategies as st
+from hypothesis import given
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  # profile registration side effect
 from tests.structural_audits.js_ast import (
@@ -18,7 +19,6 @@ from tests.structural_audits.js_ast import (
     exposed_window_bindings,
     fixture_fields_for_call,
 )
-
 
 _CALL_NAME = "renderDownloadHistoryItem"
 _FIXTURE_NAME = "renderDownloadHistoryFixture"
@@ -392,7 +392,7 @@ _UNSUPPORTED_PAYLOADS = st.sampled_from(
 _UNSUPPORTED_RENDERER_REFERENCES = st.sampled_from(
     (
         f'globalThis["{_CALL_NAME}"]({{invented_client_only: 1}});',
-        f'globalThis["renderDownloadHistory\\u0049tem"]({{invented_client_only: 1}});',
+        'globalThis["renderDownloadHistory\\u0049tem"]({invented_client_only: 1});',
         (
             f'const name = "{_CALL_NAME}"; '
             "__test__[name]({invented_client_only: 1});"

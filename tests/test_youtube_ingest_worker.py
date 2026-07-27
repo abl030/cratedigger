@@ -44,7 +44,6 @@ from scripts import youtube_ingest_worker as worker
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 
-
 BROWSE = "MPREb_test_browse"
 YT_URL = "https://music.youtube.com/playlist?list=OLAK5uy-test"
 PLAYLIST = "OLAK5uy-test"

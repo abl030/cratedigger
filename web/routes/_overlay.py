@@ -17,7 +17,7 @@ contract in `web/routes/browse.py`).
 from __future__ import annotations
 
 import logging
-from typing import Iterable
+from collections.abc import Iterable
 
 log = logging.getLogger(__name__)
 
@@ -36,8 +36,8 @@ def _band_from_detail(
     membership / detail queries are the caller's responsibility (batched
     once); this is pure given them.
     """
-    from web import overlay
     from lib.banding import band_from_detail
+    from web import overlay
 
     # Delegate to the shared lib decision, supplying the web process's cached
     # rank cfg. The decision lives in lib/ so the CLI bands without importing
@@ -121,8 +121,8 @@ def overlay_release_rows_in_place(
     """
     # Local import keeps the routes._overlay → server.py edge consistent
     # with the rest of routes/* (which all use the lazy `_server()` shim).
-    from web import server as srv
     from lib.banding import current_library_bitrate
+    from web import server as srv
 
     ids_list = list(release_ids)
     in_library: set[str] = (

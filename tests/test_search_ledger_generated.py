@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generated tests for the slskd search-id write-ahead-ledger sweep
 (issue #576, ``lib.slskd_searches.converge_slskd_searches``).
 
@@ -30,16 +29,15 @@ import configparser
 import os
 import sys
 import unittest
-from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
-import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 
 from hypothesis import given
 from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.config import CratediggerConfig
 from lib.context import CratediggerContext
 from lib.slskd_searches import SEARCH_LEDGER_SWEEP_GRACE_S, converge_slskd_searches
@@ -118,7 +116,7 @@ def _cfg() -> CratediggerConfig:
 def _build_world_fakes(world: SweepWorld) -> tuple[FakePipelineDB, FakeSlskdAPI]:
     db = FakePipelineDB()
     slskd = FakeSlskdAPI()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     for row in world.ledgered:
         db.record_search_id(row.search_id, "plan_search", 1)
         age = _PAST_GRACE_S if row.past_grace else _INSIDE_GRACE_S

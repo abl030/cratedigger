@@ -8,8 +8,8 @@ surfaces it; ``ImportResult`` round-trips it across the JSONB wire boundary.
 
 Generated twin: tests/test_quality_generated.py (basis-consistency property).
 """
-
 import unittest
+from typing import ClassVar
 
 import msgspec
 
@@ -36,47 +36,47 @@ class TestCompareQualityBasisBranches(unittest.TestCase):
     """Each compare_quality branch emits a truthful, branch-aware basis."""
 
     # (desc, new, existing, expected-basis-fields)
-    CASES = [
+    CASES: ClassVar = [
         (
             "rank upgrade on avg — the Say Hello to My Kids case (dl 36608)",
             _m(min_bitrate_kbps=194, avg_bitrate_kbps=288, format="MP3"),
             _m(min_bitrate_kbps=194, avg_bitrate_kbps=196, format="MP3"),
-            dict(verdict="better", branch="rank",
-                 new_rank="transparent", existing_rank="good",
-                 new_value_kbps=288, existing_value_kbps=196,
-                 new_metric="avg", existing_metric="avg",
-                 spectral_clamped=False),
+            {"verdict": "better", "branch": "rank",
+                 "new_rank": "transparent", "existing_rank": "good",
+                 "new_value_kbps": 288, "existing_value_kbps": 196,
+                 "new_metric": "avg", "existing_metric": "avg",
+                 "spectral_clamped": False},
         ),
         (
             "rank downgrade mirrors the same basis",
             _m(min_bitrate_kbps=194, avg_bitrate_kbps=196, format="MP3"),
             _m(min_bitrate_kbps=194, avg_bitrate_kbps=288, format="MP3"),
-            dict(verdict="worse", branch="rank",
-                 new_rank="good", existing_rank="transparent",
-                 new_value_kbps=196, existing_value_kbps=288),
+            {"verdict": "worse", "branch": "rank",
+                 "new_rank": "good", "existing_rank": "transparent",
+                 "new_value_kbps": 196, "existing_value_kbps": 288},
         ),
         (
             "lossless vs lossless is equivalent by identity, not bitrate",
             _m(format="flac"),
             _m(format="flac"),
-            dict(verdict="equivalent", branch="lossless_same_rank",
-                 new_rank="lossless", existing_rank="lossless"),
+            {"verdict": "equivalent", "branch": "lossless_same_rank",
+                 "new_rank": "lossless", "existing_rank": "lossless"},
         ),
         (
             "cross-family same rank: opus transparent vs mp3 transparent",
             _m(avg_bitrate_kbps=120, format="opus"),
             _m(avg_bitrate_kbps=250, format="MP3"),
-            dict(verdict="equivalent", branch="cross_family_same_rank",
-                 new_rank="transparent", existing_rank="transparent"),
+            {"verdict": "equivalent", "branch": "cross_family_same_rank",
+                 "new_rank": "transparent", "existing_rank": "transparent"},
         ),
         (
             "explicit label is a contract: mp3 v0 vs bare MP3 transparent",
             _m(avg_bitrate_kbps=207, format="mp3 v0"),
             _m(avg_bitrate_kbps=250, format="MP3"),
-            dict(verdict="equivalent", branch="label_contract_same_rank",
-                 new_rank="transparent", existing_rank="transparent",
-                 new_metric="contract", new_value_kbps=None,
-                 existing_metric="avg", existing_value_kbps=250),
+            {"verdict": "equivalent", "branch": "label_contract_same_rank",
+                 "new_rank": "transparent", "existing_rank": "transparent",
+                 "new_metric": "contract", "new_value_kbps": None,
+                 "existing_metric": "avg", "existing_value_kbps": 250},
         ),
         (
             "Gas November 89: Opus target is a contract, not the V0 proxy min",
@@ -84,42 +84,42 @@ class TestCompareQualityBasisBranches(unittest.TestCase):
                median_bitrate_kbps=237, format="opus 128"),
             _m(min_bitrate_kbps=128, avg_bitrate_kbps=128,
                median_bitrate_kbps=128, format="MP3", is_cbr=True),
-            dict(verdict="better", branch="rank",
-                 new_rank="transparent", existing_rank="acceptable",
-                 new_metric="contract", new_value_kbps=128,
-                 existing_metric="avg", existing_value_kbps=128),
+            {"verdict": "better", "branch": "rank",
+                 "new_rank": "transparent", "existing_rank": "acceptable",
+                 "new_metric": "contract", "new_value_kbps": 128,
+                 "existing_metric": "avg", "existing_value_kbps": 128},
         ),
         (
             "same-rank tiebreak better: raw metric delta beyond tolerance",
             _m(avg_bitrate_kbps=260, format="MP3"),
             _m(avg_bitrate_kbps=250, format="MP3"),
-            dict(verdict="better", branch="metric_tiebreak",
-                 new_rank="transparent", existing_rank="transparent",
-                 new_value_kbps=260, existing_value_kbps=250,
-                 tolerance_kbps=5),
+            {"verdict": "better", "branch": "metric_tiebreak",
+                 "new_rank": "transparent", "existing_rank": "transparent",
+                 "new_value_kbps": 260, "existing_value_kbps": 250,
+                 "tolerance_kbps": 5},
         ),
         (
             "same-rank tiebreak within tolerance is equivalent",
             _m(avg_bitrate_kbps=250, format="MP3"),
             _m(avg_bitrate_kbps=248, format="MP3"),
-            dict(verdict="equivalent", branch="metric_tiebreak",
-                 new_value_kbps=250, existing_value_kbps=248),
+            {"verdict": "equivalent", "branch": "metric_tiebreak",
+                 "new_value_kbps": 250, "existing_value_kbps": 248},
         ),
         (
             "both sides unmeasurable: metric_missing equivalence",
             _m(format="MP3"),
             _m(format="MP3"),
-            dict(verdict="equivalent", branch="metric_missing",
-                 new_rank="unknown", existing_rank="unknown",
-                 new_value_kbps=None, existing_value_kbps=None),
+            {"verdict": "equivalent", "branch": "metric_missing",
+                 "new_rank": "unknown", "existing_rank": "unknown",
+                 "new_value_kbps": None, "existing_value_kbps": None},
         ),
         (
             "transcode-grade candidate regressing real rank is worse pre-clamp",
             _m(avg_bitrate_kbps=180, format="MP3", spectral_grade="suspect"),
             _m(avg_bitrate_kbps=250, format="MP3", spectral_grade="genuine"),
-            dict(verdict="worse", branch="transcode_rank_regression",
-                 new_rank="good", existing_rank="transparent",
-                 new_value_kbps=180, existing_value_kbps=250),
+            {"verdict": "worse", "branch": "transcode_rank_regression",
+                 "new_rank": "good", "existing_rank": "transparent",
+                 "new_value_kbps": 180, "existing_value_kbps": 250},
         ),
         (
             # Issue #813 Finding 1 line-189 audit: when BOTH sides are
@@ -135,16 +135,16 @@ class TestCompareQualityBasisBranches(unittest.TestCase):
             # (300 > 150, so 150 stands). The clamp correctly scores this a
             # genuine upgrade — removing the early-out would silently
             # regress this case back to a wrong "worse".
-            "transcode-over-transcode routes to the shared clamp, not the "
-            "raw pre-check (line-189 audit)",
+            ("transcode-over-transcode routes to the shared clamp, not the "
+            "raw pre-check (line-189 audit)"),
             _m(avg_bitrate_kbps=150, format="MP3", is_cbr=True,
                spectral_grade="likely_transcode", spectral_bitrate_kbps=300),
             _m(avg_bitrate_kbps=200, format="MP3", is_cbr=True,
                spectral_grade="likely_transcode", spectral_bitrate_kbps=100),
-            dict(verdict="better", branch="rank",
-                 new_rank="acceptable", existing_rank="poor",
-                 new_value_kbps=150, existing_value_kbps=100,
-                 spectral_clamped=True),
+            {"verdict": "better", "branch": "rank",
+                 "new_rank": "acceptable", "existing_rank": "poor",
+                 "new_value_kbps": 150, "existing_value_kbps": 100,
+                 "spectral_clamped": True},
         ),
         (
             # Both sides' spectral estimates are the binding clamp (below
@@ -156,10 +156,10 @@ class TestCompareQualityBasisBranches(unittest.TestCase):
                spectral_grade="genuine", spectral_bitrate_kbps=300),
             _m(avg_bitrate_kbps=500, format="MP3",
                spectral_grade="genuine", spectral_bitrate_kbps=150),
-            dict(verdict="better", branch="rank",
-                 new_rank="excellent", existing_rank="acceptable",
-                 new_value_kbps=300, existing_value_kbps=150,
-                 spectral_clamped=True),
+            {"verdict": "better", "branch": "rank",
+                 "new_rank": "excellent", "existing_rank": "acceptable",
+                 "new_value_kbps": 300, "existing_value_kbps": 150,
+                 "spectral_clamped": True},
         ),
         (
             # Issue #813 Finding 1: BOTH sides are spectral-bound (each raw
@@ -173,16 +173,16 @@ class TestCompareQualityBasisBranches(unittest.TestCase):
             # BOTH sides bound, or this degenerates into comparing raw
             # metrics with no tolerance — this case is deliberately
             # constructed so both sides genuinely are bound.
-            "shared-spectral clamp: differing clamped values decide the "
-            "same-rank tiebreak directly",
+            ("shared-spectral clamp: differing clamped values decide the "
+            "same-rank tiebreak directly"),
             _m(avg_bitrate_kbps=1000, format="MP3",
                spectral_grade="genuine", spectral_bitrate_kbps=200),
             _m(avg_bitrate_kbps=1000, format="MP3",
                spectral_grade="genuine", spectral_bitrate_kbps=196),
-            dict(verdict="better", branch="spectral_tiebreak",
-                 new_rank="good", existing_rank="good",
-                 new_value_kbps=200, existing_value_kbps=196,
-                 spectral_clamped=True),
+            {"verdict": "better", "branch": "spectral_tiebreak",
+                 "new_rank": "good", "existing_rank": "good",
+                 "new_value_kbps": 200, "existing_value_kbps": 196,
+                 "spectral_clamped": True},
         ),
         (
             # A TRUE spectral tie (both sides clamp to the identical 190
@@ -190,16 +190,16 @@ class TestCompareQualityBasisBranches(unittest.TestCase):
             # falls through to the raw configured metric, exactly as before
             # (Mark DeNardo request 1308: a tied spectral floor must not
             # block a genuine raw-bitrate upgrade).
-            "shared-spectral clamp: a TRUE spectral tie still defers to "
-            "the raw metric",
+            ("shared-spectral clamp: a TRUE spectral tie still defers to "
+            "the raw metric"),
             _m(avg_bitrate_kbps=288, format="MP3",
                spectral_grade="genuine", spectral_bitrate_kbps=190),
             _m(avg_bitrate_kbps=196, format="MP3",
                spectral_grade="genuine", spectral_bitrate_kbps=190),
-            dict(verdict="better", branch="metric_tiebreak",
-                 new_rank="acceptable", existing_rank="acceptable",
-                 new_value_kbps=288, existing_value_kbps=196,
-                 spectral_clamped=True, tolerance_kbps=5),
+            {"verdict": "better", "branch": "metric_tiebreak",
+                 "new_rank": "acceptable", "existing_rank": "acceptable",
+                 "new_value_kbps": 288, "existing_value_kbps": 196,
+                 "spectral_clamped": True, "tolerance_kbps": 5},
         ),
         (
             # Issue #813 Finding 1 (second sub-finding): the spectral
@@ -211,25 +211,25 @@ class TestCompareQualityBasisBranches(unittest.TestCase):
             # "excellent") purely from table choice, despite 245 < 300
             # (worse real content, per spectral evidence both sides agree
             # is the direct signal).
-            "shared-spectral clamp: CBR bands classify a spectral-bound "
-            "value even when that side is VBR",
+            ("shared-spectral clamp: CBR bands classify a spectral-bound "
+            "value even when that side is VBR"),
             _m(avg_bitrate_kbps=1000, format="MP3", is_cbr=False,
                spectral_grade="likely_transcode", spectral_bitrate_kbps=245),
             _m(avg_bitrate_kbps=1000, format="MP3", is_cbr=True,
                spectral_grade="likely_transcode", spectral_bitrate_kbps=300),
-            dict(verdict="worse", branch="rank",
-                 new_rank="good", existing_rank="excellent",
-                 new_value_kbps=245, existing_value_kbps=300,
-                 spectral_clamped=True),
+            {"verdict": "worse", "branch": "rank",
+                 "new_rank": "good", "existing_rank": "excellent",
+                 "new_value_kbps": 245, "existing_value_kbps": 300,
+                 "spectral_clamped": True},
         ),
         (
             "per-side metric fallback: legacy existing with only min says so",
             _m(min_bitrate_kbps=194, avg_bitrate_kbps=288, format="MP3"),
             _m(min_bitrate_kbps=194, format="MP3"),
-            dict(verdict="better", branch="rank",
-                 new_rank="transparent", existing_rank="good",
-                 new_value_kbps=288, existing_value_kbps=194,
-                 new_metric="avg", existing_metric="min"),
+            {"verdict": "better", "branch": "rank",
+                 "new_rank": "transparent", "existing_rank": "good",
+                 "new_value_kbps": 288, "existing_value_kbps": 194,
+                 "new_metric": "avg", "existing_metric": "min"},
         ),
     ]
 

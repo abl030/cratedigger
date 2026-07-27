@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import ast
 import importlib
-from pathlib import Path
 import unittest
-
+from pathlib import Path
 
 EXPECTED_VULTURE_SOURCE_ROOTS = (
     "lib",

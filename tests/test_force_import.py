@@ -11,12 +11,11 @@ import json
 import os
 import sys
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 # Bootstrap ephemeral PostgreSQL if available
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401
-
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
 
@@ -58,9 +57,8 @@ class TestImportOneForceFlag(unittest.TestCase):
                 ["import_one.py", "/tmp/staged-album", "mbid-123", "--force"],
             ), patch("harness.import_one._log"), patch(
                 "harness.import_one.BeetsDB", side_effect=_StopAfterForce
-            ):
-                with self.assertRaises(_StopAfterForce):
-                    import_one.main()
+            ), self.assertRaises(_StopAfterForce):
+                import_one.main()
 
             self.assertEqual(import_one.max_distance, 999)
         finally:
@@ -80,9 +78,8 @@ class TestImportOneForceFlag(unittest.TestCase):
                 ["import_one.py", "/tmp/staged-album", "mbid-123"],
             ), patch("harness.import_one._log"), patch(
                 "harness.import_one.BeetsDB", side_effect=_StopBeforeWork
-            ):
-                with self.assertRaises(_StopBeforeWork):
-                    import_one.main()
+            ), self.assertRaises(_StopBeforeWork):
+                import_one.main()
 
             self.assertEqual(import_one.max_distance, original)
         finally:

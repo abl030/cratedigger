@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Pinned-Beets and filesystem contracts for exact library deletion."""
 
 from __future__ import annotations
@@ -21,14 +20,13 @@ from lib.beets_delete import (
     BeetsDeleteCompleted,
     BeetsDeleteFailed,
     BeetsDeleteRequest,
-    _OwnedPath,
     _confined_path,
     _delete_manifest,
+    _OwnedPath,
     _path_exists,
     _remove_album_metadata_atomically,
     run_beets_delete,
 )
-
 
 RELEASE = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 
@@ -265,7 +263,12 @@ class TestDeleteManifestOrdering(unittest.TestCase):
                 metadata_present = True
                 probe_calls = 0
 
-                def probe(path: str) -> bool:
+                def probe(
+                    path: str,
+                    *,
+                    fault_at: int = fault_at,
+                    phase: str = phase,
+                ) -> bool:
                     nonlocal probe_calls
                     probe_calls += 1
                     if probe_calls == fault_at:
@@ -276,7 +279,11 @@ class TestDeleteManifestOrdering(unittest.TestCase):
                         return False
                     return True
 
-                def remove(path: str) -> None:
+                def remove(
+                    path: str,
+                    *,
+                    removal_fault: bool = removal_fault,
+                ) -> None:
                     if removal_fault:
                         raise OSError("planted removal fault")
                     os.remove(path)
@@ -292,7 +299,7 @@ class TestDeleteManifestOrdering(unittest.TestCase):
                     owned_paths=(_OwnedPath(str(track), "track"),),
                     album_dirs=(raw,),
                     metadata_remove=remove_metadata,
-                    album_present=lambda: metadata_present,
+                    album_present=lambda: metadata_present,  # noqa: B023 - mutable iteration state
                     remove_path=remove,
                     prune_dir=lambda _path: None,
                     path_exists=probe,

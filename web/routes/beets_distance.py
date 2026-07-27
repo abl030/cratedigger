@@ -31,7 +31,7 @@ class _RedisFingerprintCache:
             return None
         try:
             raw = self._redis.get(key)
-        except Exception:
+        except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             return None
         if raw is None:
             return None
@@ -47,7 +47,7 @@ class _RedisFingerprintCache:
             return
         try:
             self._redis.setex(key, ttl_seconds, value)
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
             pass
 
 

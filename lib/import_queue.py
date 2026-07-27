@@ -165,7 +165,7 @@ class ImportJob:
     deduped: bool = False
 
     @classmethod
-    def from_row(cls, row: dict[str, Any], *, deduped: bool = False) -> "ImportJob":
+    def from_row(cls, row: dict[str, Any], *, deduped: bool = False) -> ImportJob:
         job_type = validate_job_type(str(row["job_type"]))
         payload = decode_import_job_payload(job_type, row.get("payload"))
         result_raw = row.get("result")

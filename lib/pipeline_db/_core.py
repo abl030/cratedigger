@@ -1,7 +1,8 @@
 """PipelineDB core primitives: connection, _execute, advisory_lock, _atomic."""
 from collections.abc import Generator, Mapping, Sequence
-from contextlib import contextmanager
-from typing import Any, ContextManager, Protocol
+from contextlib import AbstractContextManager, contextmanager
+from typing import Any, Protocol
+
 import psycopg2
 import psycopg2.extras
 
@@ -38,7 +39,7 @@ class _PipelineDBBase:
 
     def _ensure_conn(self) -> None: ...
     def _execute(self, sql: str, params: Any = ()) -> Any: ...
-    def read_only_query_cursor(self) -> ContextManager[ReadOnlyQueryCursor]: ...
+    def read_only_query_cursor(self) -> AbstractContextManager[ReadOnlyQueryCursor]: ...
     def _atomic(self) -> Any: ...
     def advisory_lock(self, namespace: int, key: int) -> Any: ...
     # Cross-cluster calls: declared here so the calling mixin type-checks;
@@ -127,7 +128,7 @@ class _CoreMixin(_PipelineDBBase):
 
 
     @contextmanager
-    def read_only_query_cursor(self) -> Generator[ReadOnlyQueryCursor, None, None]:
+    def read_only_query_cursor(self) -> Generator[ReadOnlyQueryCursor]:
         """Yield a cursor in one non-retrying read-only transaction.
 
         Raw operator diagnostics need a transaction-level safety boundary.
@@ -210,7 +211,7 @@ class _CoreMixin(_PipelineDBBase):
                             (namespace, key),
                         )
                         cur.fetchone()
-                except Exception:  # noqa: BLE001
+                except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                     logger.debug(
                         "advisory_unlock(%s, %s) failed; lock will be "
                         "released at session end",

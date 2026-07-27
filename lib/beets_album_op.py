@@ -12,7 +12,6 @@ from typing import Literal
 
 import msgspec
 
-
 BeetsOpFailureReason = Literal["timeout", "nonzero_rc", "exception"]
 
 

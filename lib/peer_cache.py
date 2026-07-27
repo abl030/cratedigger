@@ -7,10 +7,10 @@ with zstd.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import logging
 import threading
-from typing import Any, TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import msgspec
 import redis
@@ -32,7 +32,7 @@ class PeerCacheStats:
     cache_fuse_tripped: int = 0
     cache_write_errors: int = 0
 
-    def merge(self, other: "PeerCacheStats") -> None:
+    def merge(self, other: PeerCacheStats) -> None:
         self.cache_pos_hits += other.cache_pos_hits
         self.cache_neg_hits += other.cache_neg_hits
         self.cache_misses += other.cache_misses
@@ -40,7 +40,7 @@ class PeerCacheStats:
         self.cache_fuse_tripped += other.cache_fuse_tripped
         self.cache_write_errors += other.cache_write_errors
 
-    def copy(self) -> "PeerCacheStats":
+    def copy(self) -> PeerCacheStats:
         return PeerCacheStats(
             cache_pos_hits=self.cache_pos_hits,
             cache_neg_hits=self.cache_neg_hits,
@@ -81,7 +81,7 @@ class PeerCache:
     def available(self) -> bool:
         return self.client is not None and not self._is_fused()
 
-    def fork(self) -> "PeerCache":
+    def fork(self) -> PeerCache:
         return PeerCache(
             self.client,
             ttl_seconds=self.ttl_seconds,
@@ -164,7 +164,7 @@ class PeerCache:
             return None
         try:
             raw = self.client.get(key)
-        except Exception:
+        except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             self._record(cache_misses=1)
             self._trip_fuse()
             return None
@@ -178,7 +178,7 @@ class PeerCache:
             return False
         try:
             self.client.setex(key, ttl, value)
-        except Exception:
+        except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             self._record(cache_write_errors=1)
             self._trip_fuse()
             return False
@@ -189,7 +189,7 @@ class PeerCache:
             return
         try:
             self.client.delete(*keys)
-        except Exception:
+        except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             self._record(cache_write_errors=1)
             self._trip_fuse()
 
@@ -257,7 +257,7 @@ def connect_from_config(cfg: CratediggerConfig) -> PeerCache:
         # getattr overload, breaking the Unknown cascade without a
         # suppression comment — same technique as
         # lib.beets_distance._item_from_path_fn.
-        getattr(client, "ping")()
+        getattr(client, "ping")()  # noqa: B009 - redis-py method is untyped
     except Exception:
         stats.cache_errors += 1
         logger.info(

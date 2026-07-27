@@ -1,25 +1,23 @@
-#!/usr/bin/env python3
 """Contract tests for web/routes/triage.py.
 
 Split from tests/web/test_routes_pipeline.py (#481 item 3), which itself
 split from tests/test_web_server.py (#408). Shared harness in
 tests/web/_harness.py.
 """
-
-from datetime import datetime, timezone
 import os
 import sys
 import tempfile
 import unittest
+from datetime import UTC, datetime
+from typing import ClassVar
 from unittest.mock import patch
 
 import msgspec
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
-
 from tests.helpers import make_request_row
+from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
 
 
 class TestTriageRouteContracts(_FakeDbWebServerCase):
@@ -44,25 +42,25 @@ class TestTriageRouteContracts(_FakeDbWebServerCase):
     # The frontend triage drawer renders these top-level fields out of
     # ``msgspec.to_builtins(TriageResult)``. Pin every one so a future
     # field rename can't silently break the JS without flipping a test.
-    SHOW_REQUIRED_FIELDS = {
+    SHOW_REQUIRED_FIELDS: ClassVar = {
         "request_meta", "unfindable", "field_quality", "search_forensics",
     }
 
     # ``request_meta`` fields the frontend depends on for the "Artist –
     # Album (year) #N" header + identity probes (failure_class, source,
     # search_filetype_override).
-    SHOW_REQUEST_META_FIELDS = {
+    SHOW_REQUEST_META_FIELDS: ClassVar = {
         "id", "artist_name", "album_title", "year", "status", "source",
         "mb_release_id", "discogs_release_id", "release_group_year",
         "is_va_compilation", "catalog_number", "failure_class",
         "search_filetype_override",
     }
 
-    LIST_REQUIRED_FIELDS = {"results", "next_after", "page_size", "filter"}
-    QUARANTINE_REQUIRED_FIELDS = {
+    LIST_REQUIRED_FIELDS: ClassVar = {"results", "next_after", "page_size", "filter"}
+    QUARANTINE_REQUIRED_FIELDS: ClassVar = {
         "quarantine_root", "wrong_matches_root", "folders", "special_buckets",
     }
-    QUARANTINE_FOLDER_REQUIRED_FIELDS = {"name", "path", "mtime_ns"}
+    QUARANTINE_FOLDER_REQUIRED_FIELDS: ClassVar = {"name", "path", "mtime_ns"}
 
     def _get_quarantine(self, root: str):
         config_path = os.path.join(root, "config.ini")
@@ -152,8 +150,8 @@ class TestTriageRouteContracts(_FakeDbWebServerCase):
             status="wanted",
             failure_class="search_not_converting",
             unfindable_category="artist_absent",
-            unfindable_categorised_at=datetime(2026, 5, 20, tzinfo=timezone.utc),
-            last_artist_probe_at=datetime(2026, 5, 22, tzinfo=timezone.utc),
+            unfindable_categorised_at=datetime(2026, 5, 20, tzinfo=UTC),
+            last_artist_probe_at=datetime(2026, 5, 22, tzinfo=UTC),
             last_artist_probe_match_count=0,
         ))
 
@@ -205,7 +203,7 @@ class TestTriageRouteContracts(_FakeDbWebServerCase):
         self.db.seed_request(make_request_row(
             id=10, artist_name="Stuck Artist",
             unfindable_category="artist_absent",
-            unfindable_categorised_at=datetime(2026, 5, 20, tzinfo=timezone.utc),
+            unfindable_categorised_at=datetime(2026, 5, 20, tzinfo=UTC),
         ))
         # Decoy row without any unfindable signal — must NOT appear in
         # the filtered cohort.

@@ -8,14 +8,15 @@ requests-by-rg, active-rgs, import-jobs) stay in ``web/routes/pipeline.py``.
 
 import logging
 import urllib.error
-from typing import Literal, Mapping
+from collections.abc import Mapping
+from typing import Literal, Self
 
 import msgspec
 from pydantic import BaseModel, Field, model_validator
 
+from lib.config import read_runtime_config
 from lib.pipeline_db import PipelineDB
 from lib.pipeline_db.rows import AlbumRequestRow
-from lib.config import read_runtime_config
 from lib.request_creation_service import (
     RequestCreationInput,
     RequestCreationResult,
@@ -37,18 +38,21 @@ from lib import transitions
 # leaf-seam allowlist in ``tests/_mock_audit_scanner.py``.
 finalize_request = transitions.finalize_operator_request
 from lib.force_import_service import (
-    RESULT_DOWNLOAD_LOG_MISSING,
     FORCE_IMPORT_HTTP_STATUS,
+    RESULT_DOWNLOAD_LOG_MISSING,
     RESULT_QUEUED,
     RESULT_REQUEST_MISSING,
     enqueue_force_import,
 )
-from lib.quality import (QUALITY_LOSSLESS, QUALITY_UPGRADE_TIERS,
-                         resolve_user_requeue_override,
-                         should_clear_lossless_search_override)
+from lib.quality import (
+    QUALITY_LOSSLESS,
+    QUALITY_UPGRADE_TIERS,
+    resolve_user_requeue_override,
+    should_clear_lossless_search_override,
+)
 from lib.release_identity import detect_release_source, normalize_release_id
-from web import mb as mb_api
 from web import discogs as discogs_api
+from web import mb as mb_api
 
 
 def _release_tracks(release: dict[str, object]) -> list[dict[str, object]]:
@@ -235,7 +239,7 @@ class PipelineAddRequest(BaseModel):
     source: str = "request"
 
     @model_validator(mode="after")
-    def _at_least_one_release_id(self) -> "PipelineAddRequest":
+    def _at_least_one_release_id(self) -> Self:
         if not self.mb_release_id and not self.discogs_release_id:
             raise ValueError("Missing mb_release_id or discogs_release_id")
         return self
@@ -374,14 +378,13 @@ def post_pipeline_update(h: RouteHandler, body: dict[str, object]) -> None:
         quality = None
         min_br = None
         b = s._beets_db()
-        if mbid and b:
-            if b.album_exists(mbid):
-                # Preserve a stricter existing override (e.g. "lossless"
-                # set by the quality gate) — reverting status shouldn't
-                # re-open tiers the gate intentionally closed.
-                quality = resolve_user_requeue_override(
-                    req.get("search_filetype_override"))
-                min_br = b.get_min_bitrate(mbid)
+        if mbid and b and b.album_exists(mbid):
+            # Preserve a stricter existing override (e.g. "lossless"
+            # set by the quality gate) — reverting status shouldn't
+            # re-open tiers the gate intentionally closed.
+            quality = resolve_user_requeue_override(
+                req.get("search_filetype_override"))
+            min_br = b.get_min_bitrate(mbid)
         wanted_fields: dict[str, object] = {}
         if quality is not None:
             wanted_fields["search_filetype_override"] = quality
@@ -766,8 +769,8 @@ class PipelineBanSourceRequest(BaseModel):
 
 def post_pipeline_ban_source(h: RouteHandler, body: dict[str, object]) -> None:
     from lib.destructive_release_service import (
-        BanSourceCleanupIncomplete,
         BanSourceBeetsAmbiguous,
+        BanSourceCleanupIncomplete,
         BanSourceImporterBusy,
         BanSourceLockContended,
         BanSourceReleaseMismatch,

@@ -10,7 +10,7 @@ in :mod:`lib.download_rejection`.
 from __future__ import annotations
 
 import logging
-from typing import Protocol, TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from lib import download_materialization
 from lib.dispatch import (
@@ -217,6 +217,7 @@ def _handle_valid_result(
     only stage for manual review and mark the request done.
     """
     from contextlib import nullcontext
+
     from lib.pipeline_db import (
         ADVISORY_LOCK_NAMESPACE_RELEASE,
         release_id_to_lock_key,

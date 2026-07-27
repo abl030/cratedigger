@@ -6,13 +6,11 @@ we mock at the module level before importing, or test via subprocess simulation.
 
 import json
 import os
-import re
 import shutil
 import sys
 import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
-
 
 # Heavy third-party deps (``requests``, ``music_tag``, ``slskd_api``)
 # used to be mocked here at module-discovery time, before the dev shell
@@ -23,7 +21,6 @@ from unittest.mock import MagicMock, patch
 # (e.g. ``lib.youtube_album_service``) that uses real
 # ``requests.Timeout`` / ``ConnectionError`` exception classes.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import cratedigger
 from lib.beets import beets_validate
 from lib.grab_list import GrabListEntry
 from lib.processing_paths import stage_to_ai_path
@@ -509,12 +506,12 @@ class TestBeetsValidate(unittest.TestCase):
 
 def _make_album_data(**overrides):
     """Build a minimal GrabListEntry for tests that need album_data."""
-    defaults = dict(
-        album_id=0, files=[], filetype="mp3", title="Test Album",
-        artist="Test Artist", year="2024", mb_release_id="",
-    )
+    defaults = {
+        "album_id": 0, "files": [], "filetype": "mp3", "title": "Test Album",
+        "artist": "Test Artist", "year": "2024", "mb_release_id": "",
+    }
     defaults.update(overrides)
-    return GrabListEntry(**defaults)  # type: ignore[arg-type]
+    return GrabListEntry(**defaults)
 
 
 class TestStagedAlbumMoveTo(unittest.TestCase):

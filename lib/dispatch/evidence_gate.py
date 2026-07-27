@@ -6,59 +6,67 @@ action-file consumed by ``import_one.py``, requeue back to preview when
 evidence is unavailable, and refresh current evidence (+ sidecar) after a
 successful import. ``load_current_evidence_for_action`` is looked up here.
 """
+# ruff: noqa: UP037 - quoted Any annotation is part of the typing ratchet
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
+from lib.dispatch.types import (
+    DISPATCH_CODE_REQUEUE_FAILED,
+    DISPATCH_CODE_REQUEUED_FOR_PREVIEW,
+    DispatchOutcome,
+    EvidenceImportGate,
+)
 from lib.evidence_action_file import (
     remove_quality_evidence_action_file,
     write_quality_evidence_action_file,
 )
-from lib.quality import (DownloadInfo, QualityEvidenceActionPayload,
-                         QualityEvidenceActionProvenance, SpectralMeasurement,
-                         evidence_decision_name)
+from lib.import_evidence import (
+    CURRENT_STATUS_FAILED,
+    CURRENT_STATUS_MISSING,
+    CandidateEvidenceActionResult,
+    CurrentEvidenceActionResult,
+    ensure_candidate_evidence_for_action,
+    load_current_evidence_for_action,
+)
+from lib.quality import (
+    DownloadInfo,
+    QualityEvidenceActionPayload,
+    QualityEvidenceActionProvenance,
+    SpectralMeasurement,
+    evidence_decision_name,
+)
 from lib.quality_evidence import (
     EvidenceBuildResult,
     audit_v0_probe_from_metric,
     backfill_current_evidence_from_album_info,
     propagate_candidate_evidence_to_current,
 )
-from lib.import_evidence import (
-    CandidateEvidenceActionResult,
-    CurrentEvidenceActionResult,
-    CURRENT_STATUS_FAILED,
-    CURRENT_STATUS_MISSING,
-    ensure_candidate_evidence_for_action,
-    load_current_evidence_for_action,
-)
-
-from lib.dispatch.types import (DISPATCH_CODE_REQUEUED_FOR_PREVIEW,
-                                DISPATCH_CODE_REQUEUE_FAILED, DispatchOutcome,
-                                EvidenceImportGate)
 
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
     from lib.pipeline_db import PipelineDB
-    from lib.quality_evidence import QualityEvidenceDB
     from lib.quality import (
         AlbumQualityEvidence,
         ImportResult,
         QualityRankConfig,
         SpectralAnalysisDetail,
     )
+    from lib.quality_evidence import QualityEvidenceDB
     from lib.sidecar_service import SidecarDB, SidecarWriteResult
 
 logger = logging.getLogger("cratedigger")
 
 
 def _requeue_import_job_to_preview(
-    db: "PipelineDB",
+    db: PipelineDB,
     *,
     import_job_id: int | None,
     reason: str,
-) -> "DispatchOutcome":
+) -> DispatchOutcome:
     """Shared requeue helper for the two outer evidence-required branches.
 
     Called from ``_dispatch_import_from_db_locked`` (force-import) and from
@@ -96,7 +104,7 @@ def _requeue_import_job_to_preview(
         )
     try:
         updated = db.requeue_import_job_for_preview(import_job_id, reason=reason)
-    except Exception as exc:  # noqa: BLE001 — swallow + log for retry
+    except Exception as exc:
         logger.exception(
             "Failed to requeue import_job %s for preview", import_job_id
         )
@@ -210,12 +218,12 @@ def _remove_quality_evidence_action_file(path: str | None) -> None:
 
 
 def _load_evidence_import_gate(
-    db: "PipelineDB",
+    db: PipelineDB,
     *,
     request_id: int,
     mb_release_id: str,
     path: str,
-    quality_ranks: "QualityRankConfig | None",
+    quality_ranks: QualityRankConfig | None,
     candidate_import_job_id: int | None,
     candidate_download_log_id: int | None,
     prevalidated_candidate_result: CandidateEvidenceActionResult | None = None,
@@ -306,11 +314,11 @@ def _load_evidence_import_gate(
 
 
 def _refresh_current_evidence_after_import(
-    db: "QualityEvidenceDB",
+    db: QualityEvidenceDB,
     *,
     request_id: int,
     mb_release_id: str,
-    quality_ranks: "QualityRankConfig | None",
+    quality_ranks: QualityRankConfig | None,
     source_candidate: AlbumQualityEvidence | None = None,
     import_result: ImportResult | None = None,
     beets_library_db_path: str | None = None,
@@ -344,8 +352,8 @@ def _refresh_current_evidence_after_import(
         CurrentBeetsMissing,
         album_info_from_current,
         exact_release_identity_matches,
-        release_identity_for_lookup,
         open_beets_db,
+        release_identity_for_lookup,
     )
     from lib.quality import QualityRankConfig
 
@@ -440,7 +448,7 @@ def _refresh_current_evidence_after_import(
 
 
 def _exact_linked_refresh_result(
-    db: "QualityEvidenceDB",
+    db: QualityEvidenceDB,
     *,
     request_id: int,
     mb_release_id: str,
@@ -457,7 +465,7 @@ def _exact_linked_refresh_result(
             if linked_id is not None
             else None
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         return EvidenceBuildResult(
             None,
             "failed",
@@ -478,15 +486,15 @@ def _exact_linked_refresh_result(
 
 
 def _write_album_sidecar_after_import(
-    db: "SidecarDB",
+    db: SidecarDB,
     *,
     request_id: int,
     mb_release_id: str,
-    cfg: "CratediggerConfig | None",
+    cfg: CratediggerConfig | None,
     beets_library_db_path: str | None = None,
     beets_library_root: str | None = None,
     beets_factory: "Callable[..., Any] | None" = None,
-) -> "SidecarWriteResult":
+) -> SidecarWriteResult:
     """Write the verified-lossless ``cratedigger.json`` sidecar after import.
 
     Reads the request's freshly-persisted current evidence (set by

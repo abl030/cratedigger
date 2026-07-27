@@ -31,16 +31,16 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from lib.config import CratediggerConfig, read_runtime_config  # noqa: E402
-from lib.migrator import SchemaBehindError, assert_schema_current  # noqa: E402
-from lib.slskd_client import SlskdClient  # noqa: E402
-from lib.pipeline_db import DEFAULT_DSN, PipelineDB  # noqa: E402
-from lib.unfindable_detection_service import (  # noqa: E402
+from lib.config import CratediggerConfig, read_runtime_config
+from lib.migrator import SchemaBehindError, assert_schema_current
+from lib.pipeline_db import DEFAULT_DSN, PipelineDB
+from lib.slskd_client import SlskdClient
+from lib.unfindable_detection_service import (
     DEFAULT_BATCH_SIZE,
     RESULT_CATEGORISED,
     RESULT_DOWNGRADED,
-    RESULT_NOT_DUE,
     RESULT_NO_CHANGE,
+    RESULT_NOT_DUE,
     RESULT_PROBE_FAILED,
     RESULT_REQUEST_NOT_FOUND,
     UnfindableDetectionService,

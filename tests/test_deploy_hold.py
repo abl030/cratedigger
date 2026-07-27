@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import unittest
+from pathlib import Path
 
 from scripts.cratedigger_deploy_hold import (
     CONTROL_DIR,
@@ -27,7 +27,6 @@ from scripts.cratedigger_deploy_hold import (
     verify_held,
 )
 from tests.fakes.deploy_hold import FakeDeployHoldBackend
-
 
 INVOCATION = "a" * 32
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -282,9 +281,8 @@ class TestStagedRelease(unittest.TestCase):
         open_main_timer(self.backend)
 
         for invalid in ("", "none", "xyz", "a" * 31, "a" * 33):
-            with self.subTest(invalid=invalid):
-                with self.assertRaisesRegex(DeployHoldError, "InvocationID"):
-                    finish_release(self.backend, invalid)
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(DeployHoldError, "InvocationID"):
+                finish_release(self.backend, invalid)
 
 
 class TestFixedAuthoritySurface(unittest.TestCase):

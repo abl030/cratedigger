@@ -13,15 +13,15 @@ the assembled parser to self-document the CLI surface, mirroring
 
 import argparse
 import json
-from typing import cast, TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from lib.pipeline_db import DEFAULT_DSN
-from scripts.pipeline_cli.audit import add_audit_subparser
+from scripts.pipeline_cli.album_requests import add_album_requests_subparsers
 from scripts.pipeline_cli.api_mutations import (
     DEFAULT_API_BASE,
     add_api_mutation_subparsers,
 )
-from scripts.pipeline_cli.album_requests import add_album_requests_subparsers
+from scripts.pipeline_cli.audit import add_audit_subparser
 from scripts.pipeline_cli.beets_distance import add_beets_distance_subparser
 from scripts.pipeline_cli.destructive import add_destructive_subparsers
 from scripts.pipeline_cli.imports import add_imports_subparsers
@@ -126,9 +126,9 @@ def _describe_argparse_action(
     choices when present. Returns None for the subparsers placeholder
     (those are sibling subcommands, not arguments).
     """
-    if isinstance(action, argparse._SubParsersAction):  # noqa: SLF001
+    if isinstance(action, argparse._SubParsersAction):
         return None
-    if isinstance(action, argparse._HelpAction):  # noqa: SLF001
+    if isinstance(action, argparse._HelpAction):
         return None
     label: str
     if action.option_strings:
@@ -185,8 +185,8 @@ def _collect_cli_routes(
 
     def _walk(p: argparse.ArgumentParser, prefix: str) -> None:
         sub_actions: list[_SubParsers] = [
-            cast("_SubParsers", a) for a in p._actions  # noqa: SLF001
-            if isinstance(a, argparse._SubParsersAction)  # noqa: SLF001
+            cast("_SubParsers", a) for a in p._actions
+            if isinstance(a, argparse._SubParsersAction)
         ]
         if not sub_actions:
             return
@@ -199,9 +199,9 @@ def _collect_cli_routes(
                 # form -- the ``cast`` must land before ``.choices`` is
                 # read, or that member access is still Unknown-typed.
                 nested: list[_SubParsers] = []
-                for raw_nested_action in sub_parser._actions:  # noqa: SLF001
+                for raw_nested_action in sub_parser._actions:
                     if not isinstance(
-                        raw_nested_action, argparse._SubParsersAction,  # noqa: SLF001
+                        raw_nested_action, argparse._SubParsersAction,
                     ):
                         continue
                     typed_nested_action = cast(
@@ -212,7 +212,7 @@ def _collect_cli_routes(
                     _walk(sub_parser, label)
                     continue
                 args: list[str] = []
-                for action in sub_parser._actions:  # noqa: SLF001
+                for action in sub_parser._actions:
                     rendered = _describe_argparse_action(action)
                     if rendered is not None:
                         args.append(rendered)

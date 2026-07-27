@@ -5,7 +5,6 @@ Requires a PostgreSQL server. Set TEST_DB_DSN env var to run, e.g.:
 
 Tests create/drop tables in the target database — use a dedicated test DB.
 """
-
 import dataclasses
 import json
 import os
@@ -13,11 +12,11 @@ import sys
 import threading
 import time
 import unittest
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from collections.abc import Mapping, Sequence
-from typing import Any, cast
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any, ClassVar, cast
 from unittest.mock import patch
 
 import msgspec
@@ -27,9 +26,9 @@ import psycopg2.extras
 # Bootstrap ephemeral PostgreSQL if available
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401 — sets TEST_DB_DSN env var
-from tests.fakes import FakePipelineDB
-from tests.helpers import make_album_quality_evidence
-from lib.pipeline_db import (  # noqa: E402
+
+from lib.json_narrow import json_dict
+from lib.pipeline_db import (
     JELLYFIN_PIN_STATUSES,
     PLEX_PIN_STATUSES,
     DownloadLogOutcome,
@@ -38,16 +37,16 @@ from lib.pipeline_db import (  # noqa: E402
     PersistedYoutubeRow,
     TransferLedgerRow,
 )
-from lib.pipeline_db._shared import REQUEST_METADATA_RESERVED_FIELDS  # noqa: E402
-from lib.json_narrow import json_dict  # noqa: E402
-from lib.quality import (  # noqa: E402
+from lib.pipeline_db._shared import REQUEST_METADATA_RESERVED_FIELDS
+from lib.quality import (
     AlbumQualityEvidenceFile,
     AudioQualityMeasurement,
     AudioToolDiagnostic,
     AudioValidationReport,
     legacy_unrecorded_audio_validation_report,
 )
-
+from tests.fakes import FakePipelineDB
+from tests.helpers import make_album_quality_evidence
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
 
@@ -275,12 +274,12 @@ class TestPlexAddedAtPinsRoundTrip(unittest.TestCase):
         self.assertIsNone(row["request_id"])
 
     def test_mark_pin_round_trips_status_and_excludes_from_pending(self):
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
         db = make_db()
         pin_id = db.add_plex_added_at_pin(
             imported_path="A/B", original_added_at=100,
             rating_key=None, request_id=None)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         db.mark_plex_added_at_pin(pin_id, status="done", reconciled_at=now)
         # Round-trip the mutated columns via a raw SELECT.
         cur = db._execute(
@@ -315,7 +314,7 @@ class TestPlexAddedAtPinsRoundTrip(unittest.TestCase):
             db.mark_plex_added_at_pin(
                 pin_id,
                 status=cast(Any, "stranded"),
-                reconciled_at=datetime.now(timezone.utc),
+                reconciled_at=datetime.now(UTC),
             )
         cur = db._execute(
             "SELECT status, reconciled_at FROM plex_added_at_pins WHERE id = %s",
@@ -339,20 +338,20 @@ class TestPlexAddedAtPinsRoundTrip(unittest.TestCase):
         )
 
     def test_pending_getter_respects_captured_before_cutoff(self):
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
         db = make_db()
         pin_id = db.add_plex_added_at_pin(
             imported_path="C/D", original_added_at=200,
             rating_key="rk", request_id=1)
         # A cutoff in the past (before the just-now capture) excludes the pin —
         # this is the reconciler's settle-window guard.
-        past = datetime.now(timezone.utc) - timedelta(hours=1)
+        past = datetime.now(UTC) - timedelta(hours=1)
         rows = db.get_pending_plex_added_at_pins(captured_before=past, limit=100)
         self.assertEqual([r for r in rows if r["id"] == pin_id], [])
 
     def test_prune_terminal_pins_has_strict_status_and_age_boundary(self):
         db = make_db()
-        cutoff = datetime(2026, 7, 11, 0, 0, tzinfo=timezone.utc)
+        cutoff = datetime(2026, 7, 11, 0, 0, tzinfo=UTC)
         cases = (
             ("old done", "done", cutoff - timedelta(seconds=1), False),
             ("old skipped", "skipped", cutoff - timedelta(days=1), False),
@@ -449,7 +448,7 @@ class TestJellyfinDateCreatedPinsRoundTrip(unittest.TestCase):
         self.assertIsNone(row["album_item_id"])
         self.assertEqual(row["children_item_ids"], [])
         pending = db.get_pending_jellyfin_date_created_pins(
-            captured_before=datetime.now(timezone.utc) + timedelta(days=1))
+            captured_before=datetime.now(UTC) + timedelta(days=1))
         match = [r for r in pending if r["id"] == pin_id]
         self.assertEqual(len(match), 1)
         self.assertIsNone(match[0]["album_item_id"])
@@ -459,7 +458,7 @@ class TestJellyfinDateCreatedPinsRoundTrip(unittest.TestCase):
         pin_id = db.add_jellyfin_date_created_pin(
             imported_path="A/B", original_date_created="2026-01-01T00:00:00Z",
             album_item_id="alb", children_item_ids=["t"], request_id=None)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         db.mark_jellyfin_date_created_pin(
             pin_id, status="expired", reconciled_at=now)
         cur = db._execute(
@@ -495,7 +494,7 @@ class TestJellyfinDateCreatedPinsRoundTrip(unittest.TestCase):
             db.mark_jellyfin_date_created_pin(
                 pin_id,
                 status=cast(Any, "stranded"),
-                reconciled_at=datetime.now(timezone.utc),
+                reconciled_at=datetime.now(UTC),
             )
         cur = db._execute(
             "SELECT status, reconciled_at FROM jellyfin_date_created_pins "
@@ -532,14 +531,14 @@ class TestJellyfinDateCreatedPinsRoundTrip(unittest.TestCase):
             source="request", mb_release_id="mb-chain-new", status="wanted")
         db._execute(
             "UPDATE album_requests SET created_at = %s WHERE id = %s",
-            (datetime(2026, 2, 1, tzinfo=timezone.utc), old_id))
+            (datetime(2026, 2, 1, tzinfo=UTC), old_id))
         db._execute(
             "UPDATE album_requests "
             "SET created_at = %s, replaces_request_id = %s WHERE id = %s",
-            (datetime(2026, 6, 1, tzinfo=timezone.utc), old_id, new_id))
+            (datetime(2026, 6, 1, tzinfo=UTC), old_id, new_id))
         self.assertEqual(
             db.get_oldest_request_chain_created_at(new_id),
-            datetime(2026, 2, 1, tzinfo=timezone.utc))
+            datetime(2026, 2, 1, tzinfo=UTC))
         self.assertIsNone(db.get_oldest_request_chain_created_at(999999))
 
     def test_pending_getter_respects_captured_before_cutoff(self):
@@ -549,14 +548,14 @@ class TestJellyfinDateCreatedPinsRoundTrip(unittest.TestCase):
             album_item_id="alb", children_item_ids=["t"], request_id=1)
         # A cutoff in the past (before the just-now capture) excludes the pin —
         # this is the reconciler's settle-window guard.
-        past = datetime.now(timezone.utc) - timedelta(hours=1)
+        past = datetime.now(UTC) - timedelta(hours=1)
         rows = db.get_pending_jellyfin_date_created_pins(
             captured_before=past, limit=100)
         self.assertEqual([r for r in rows if r["id"] == pin_id], [])
 
     def test_prune_terminal_pins_has_strict_status_and_age_boundary(self):
         db = make_db()
-        cutoff = datetime(2026, 7, 11, 0, 0, tzinfo=timezone.utc)
+        cutoff = datetime(2026, 7, 11, 0, 0, tzinfo=UTC)
         cases = (
             ("old done", "done", cutoff - timedelta(seconds=1), False),
             ("old skipped", "skipped", cutoff - timedelta(days=1), False),
@@ -603,7 +602,7 @@ class TestPinStatusProductionFakeParity(unittest.TestCase):
     )
 
     def test_plex_mark_matrix(self):
-        now = datetime(2026, 7, 11, tzinfo=timezone.utc)
+        now = datetime(2026, 7, 11, tzinfo=UTC)
         for scenario, exists, invalid in self.CASES:
             for adapter in ("production", "fake"):
                 with self.subTest(scenario=scenario, adapter=adapter):
@@ -620,7 +619,7 @@ class TestPinStatusProductionFakeParity(unittest.TestCase):
                     try:
                         db.mark_plex_added_at_pin(
                             target_id, status=status, reconciled_at=now)
-                    except Exception as exc:
+                    except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                         error = exc
 
                     if adapter == "production":
@@ -647,7 +646,7 @@ class TestPinStatusProductionFakeParity(unittest.TestCase):
                     )
 
     def test_jellyfin_mark_matrix(self):
-        now = datetime(2026, 7, 11, tzinfo=timezone.utc)
+        now = datetime(2026, 7, 11, tzinfo=UTC)
         for scenario, exists, invalid in self.CASES:
             for adapter in ("production", "fake"):
                 with self.subTest(scenario=scenario, adapter=adapter):
@@ -667,7 +666,7 @@ class TestPinStatusProductionFakeParity(unittest.TestCase):
                     try:
                         db.mark_jellyfin_date_created_pin(
                             target_id, status=status, reconciled_at=now)
-                    except Exception as exc:
+                    except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                         error = exc
 
                     if adapter == "production":
@@ -747,7 +746,7 @@ class TestSchemaCreation(unittest.TestCase):
         first_id = row["id"]
         self.assertIsInstance(first_id, int)
 
-        with self.assertRaises(Exception):
+        with self.assertRaises(psycopg2.errors.UniqueViolation):
             db._execute("""
                 INSERT INTO import_jobs (
                     job_type, status, request_id, dedupe_key, payload
@@ -775,8 +774,8 @@ class TestSchemaCreation(unittest.TestCase):
 
         for column, bad_value in (("status", "bogus"), ("job_type", "bogus")):
             with self.subTest(column=column):
-                with self.assertRaises(Exception):
-                    db._execute(f"""
+                with self.assertRaises(psycopg2.errors.CheckViolation):
+                    db._execute("""
                         INSERT INTO import_jobs (
                             job_type, status, payload
                         )
@@ -864,7 +863,7 @@ class TestSchemaCreation(unittest.TestCase):
               AND table_name = 'import_jobs'
         """)
         column_names = {r["column_name"] for r in cur.fetchall()}
-        for column in {
+        for column in (
             "preview_status",
             "preview_result",
             "preview_message",
@@ -875,7 +874,7 @@ class TestSchemaCreation(unittest.TestCase):
             "preview_heartbeat_at",
             "preview_completed_at",
             "importable_at",
-        }:
+        ):
             self.assertIn(column, column_names)
 
         cur = db._execute("""
@@ -895,7 +894,7 @@ class TestSchemaCreation(unittest.TestCase):
         self.assertIsNotNone(row["preview_completed_at"])
         self.assertIsNotNone(row["importable_at"])
 
-        with self.assertRaises(Exception):
+        with self.assertRaises(psycopg2.errors.CheckViolation):
             db._execute("""
                 INSERT INTO import_jobs (
                     job_type, request_id, payload, preview_status
@@ -968,7 +967,7 @@ class TestAddAndGetRequest(unittest.TestCase):
             album_title="B",
             source="redownload",
         )
-        with self.assertRaises(Exception):
+        with self.assertRaises(psycopg2.errors.UniqueViolation):
             self.db.add_request(
                 mb_release_id="dup-uuid",
                 artist_name="C",
@@ -1320,8 +1319,8 @@ class TestImportJobQueueAPI(unittest.TestCase):
                     self.assertEqual(retry.candidate_evidence_id, persisted.id)
 
     def test_two_sessions_cannot_claim_same_job(self):
-        from lib.import_queue import IMPORT_JOB_FORCE
         from lib import pipeline_db
+        from lib.import_queue import IMPORT_JOB_FORCE
 
         job = self.db.enqueue_import_job(
             IMPORT_JOB_FORCE,
@@ -1568,8 +1567,8 @@ class TestImportJobQueueAPI(unittest.TestCase):
         self.assertIsNotNone(failed.completed_at)
 
     def test_two_sessions_cannot_claim_same_preview_job(self):
-        from lib.import_queue import IMPORT_JOB_FORCE
         from lib import pipeline_db
+        from lib.import_queue import IMPORT_JOB_FORCE
 
         self.db.enqueue_import_job(
             IMPORT_JOB_FORCE,
@@ -1885,7 +1884,7 @@ class TestGetWanted(unittest.TestCase):
 
     def test_get_wanted_respects_retry_backoff(self):
         id1 = self.db.add_request(mb_release_id="r1", artist_name="A", album_title="B", source="request")
-        future = datetime.now(timezone.utc) + timedelta(hours=1)
+        future = datetime.now(UTC) + timedelta(hours=1)
         self.db._execute(
             "UPDATE album_requests SET next_retry_after = %s WHERE id = %s",
             (future, id1),
@@ -2166,7 +2165,7 @@ class TestTrackManagement(unittest.TestCase):
                     CratediggerConfig(),
                     resolver=BarrierResolver(),
                 ).generate_for_request(self.req_id, regenerate=False))
-            except BaseException as exc:  # noqa: BLE001
+            except BaseException as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                 errors.append(exc)
 
         worker = threading.Thread(target=generate)
@@ -2234,7 +2233,7 @@ class TestTrackManagement(unittest.TestCase):
                     ),
                     expected_status="wanted",
                 ))
-            except BaseException as exc:  # noqa: BLE001
+            except BaseException as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                 errors.append(exc)
 
         worker = threading.Thread(target=resolve_and_apply)
@@ -2296,7 +2295,7 @@ class TestTrackManagement(unittest.TestCase):
                     expected_status="wanted",
                     target_format="lossless",
                 ))
-            except BaseException as exc:  # noqa: BLE001
+            except BaseException as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                 errors.append(exc)
 
         worker = threading.Thread(target=write_metadata)
@@ -2474,8 +2473,9 @@ class TestDownloadLog(unittest.TestCase):
 
     def test_log_download_allows_explicit_metadata_only_when_envelope_omits_it(self):
         """MeasurementFailure has no distance/scenario projection keys."""
-        from lib.quality import MeasurementFailure
         import msgspec
+
+        from lib.quality import MeasurementFailure
 
         payload = MeasurementFailure(
             reason="measurement_crashed",
@@ -2804,6 +2804,65 @@ class TestDownloadLog(unittest.TestCase):
         self.assertIsNone(history[0]["beets_scenario"])
         self.assertIsNone(history[0]["beets_distance"])
 
+    def test_staged_path_failures_round_trip_to_neutral_history_copy(self):
+        """The real writer/read projections feed the real history presenters."""
+        from lib.failure_presentation import FailureEvidence, present_failure
+        from web.classify import LogEntry, classify_log_entry
+
+        cases = (
+            (
+                "staged_path_missing",
+                ("The staged download folder could not be accessed before "
+                "import (possible filesystem error); requeued"),
+            ),
+            (
+                "staged_path_missing_tracked_files",
+                ("Tracked files in the staged download folder could not be "
+                "accessed before import (possible filesystem error); requeued"),
+            ),
+        )
+        for reason, expected in cases:
+            with self.subTest(reason=reason):
+                log_id = self.db.log_download(
+                    request_id=self.req_id,
+                    soulseek_username=None,
+                    filetype="opus",
+                    outcome="failed",
+                    beets_detail=reason,
+                    error_message=reason,
+                )
+
+                history_row = next(
+                    row for row in self.db.get_download_history(self.req_id)
+                    if row["id"] == log_id
+                )
+                self.assertEqual(
+                    (
+                        history_row["outcome"],
+                        history_row["soulseek_username"],
+                        history_row["filetype"],
+                        history_row["beets_detail"],
+                        history_row["error_message"],
+                    ),
+                    ("failed", None, "opus", reason, reason),
+                )
+                evidence = FailureEvidence.from_row(dict(history_row))
+                self.assertEqual(
+                    present_failure(evidence).verdict,
+                    expected,
+                )
+
+                recent_row = next(
+                    row for row in self.db.get_log(limit=10)
+                    if row["id"] == log_id
+                )
+                entry = LogEntry.from_row(dict(recent_row))
+                classified = classify_log_entry(entry)
+                self.assertIsNone(entry.soulseek_username)
+                self.assertEqual(entry.outcome, "failed")
+                self.assertEqual(classified.verdict, expected)
+                self.assertEqual(classified.summary, expected)
+
     def test_log_download_round_trip_preserves_transfer_detail(self):
         """Rule A (test-fidelity.md): migration 043's transfer_detail
         JSONB column must actually preserve what log_download writes —
@@ -2908,7 +2967,9 @@ class TestSearchLog(unittest.TestCase):
     def test_log_search_persists_candidates_jsonb_and_round_trips(self):
         """U5 wire-boundary: encode list[CandidateScore] → JSONB → decode."""
         import json
+
         import msgspec
+
         from lib.quality import CandidateScore
 
         candidates = [
@@ -3041,6 +3102,7 @@ class TestSearchLog(unittest.TestCase):
         what catches int-vs-str drift in the JSONB blob downstream.
         """
         import msgspec
+
         from lib.quality import CandidateScore
 
         # ``matched_tracks`` is declared int — passing a string at the wire
@@ -3346,7 +3408,7 @@ class TestPipelineDashboardMetrics(unittest.TestCase):
         self.db.close()
 
     def test_record_cycle_metrics_and_dashboard_summary(self):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         self.db.record_cycle_metrics(
             started_at=now - timedelta(hours=1, seconds=100),
             completed_at=now - timedelta(hours=1),
@@ -3495,7 +3557,7 @@ class TestPipelineDashboardMetrics(unittest.TestCase):
         self.assertEqual(metrics["cycles"]["outliers"][0]["cycle_total_s"], 900.0)
 
     def test_cycle_rows_select_recent_and_24_hour_slowest_cycles(self):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         newest_id = self.db.record_cycle_metrics(
             started_at=now - timedelta(hours=1, seconds=25),
             completed_at=now - timedelta(hours=1),
@@ -3535,7 +3597,7 @@ class TestPipelineDashboardMetrics(unittest.TestCase):
         )
 
     def test_peer_observations_track_distinct_peers(self):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         old = now - timedelta(days=2)
 
         inserted = self.db.record_peer_observations(
@@ -3565,8 +3627,8 @@ class TestPeerObservations(unittest.TestCase):
     one row per hashed username; ``get_peer_metrics`` computes totals and
     the per-day growth curve live (the table is small enough forever)."""
 
-    _TOTALS_KEYS = {"known_peers", "new_24h", "seen_24h", "tracked_since"}
-    _DAY_KEYS = {"date", "new_peers", "total_peers"}
+    _TOTALS_KEYS: ClassVar = {"known_peers", "new_24h", "seen_24h", "tracked_since"}
+    _DAY_KEYS: ClassVar = {"date", "new_peers", "total_peers"}
 
     def setUp(self):
         self.db = make_db()
@@ -3577,8 +3639,8 @@ class TestPeerObservations(unittest.TestCase):
     def test_record_round_trip_preserves_first_and_last_seen(self):
         """Rule A: every field written must read back through PG. A
         re-observation must advance last_seen_at but never first_seen_at."""
-        first = datetime.now(timezone.utc) - timedelta(days=3)
-        later = datetime.now(timezone.utc) - timedelta(hours=1)
+        first = datetime.now(UTC) - timedelta(days=3)
+        later = datetime.now(UTC) - timedelta(hours=1)
 
         self.assertEqual(
             self.db.record_peer_observations(["alice"], observed_at=first), 1)
@@ -3598,7 +3660,7 @@ class TestPeerObservations(unittest.TestCase):
         self.assertEqual(self.db.record_peer_observations([]), 0)
 
     def test_record_stale_observation_never_regresses_last_seen(self):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         earlier = now - timedelta(days=1)
         self.db.record_peer_observations(["bob"], observed_at=now)
         self.db.record_peer_observations(["bob"], observed_at=earlier)
@@ -3611,7 +3673,7 @@ class TestPeerObservations(unittest.TestCase):
         """Response shape is pinned; ``total_peers`` is the cumulative
         distinct-peer count at end of each day, carried forward across
         days with no new peers."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         self.db.record_peer_observations(
             ["old1", "old2"], observed_at=now - timedelta(days=5))
         self.db.record_peer_observations(
@@ -3642,7 +3704,7 @@ class TestPeerObservations(unittest.TestCase):
     def test_metrics_cumulative_includes_peers_older_than_window(self):
         """A peer first seen before the day window still counts toward
         every day's running total."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         self.db.record_peer_observations(
             ["ancient"], observed_at=now - timedelta(days=60))
         self.db.record_peer_observations(["fresh"], observed_at=now)
@@ -3716,7 +3778,7 @@ class TestSearchPlanReadiness(unittest.TestCase):
         rid_legacy = self._add_wanted("legacy")
         rid_det = self._add_wanted("det_failed")
         rid_trans = self._add_wanted("trans_failed")
-        rid_noplan = self._add_wanted("no_plan")
+        self._add_wanted("no_plan")
         # Searchable: active plan with current generator.
         self.db.create_successful_search_plan(
             request_id=rid_search, generator_id="g1",
@@ -3784,7 +3846,8 @@ class TestDashboardWrapMetrics(unittest.TestCase):
 
     def setUp(self):
         from lib.pipeline_db import (
-            ConsumedAttemptInput, SearchPlanItemInput,
+            ConsumedAttemptInput,
+            SearchPlanItemInput,
         )
         self.SearchPlanItemInput = SearchPlanItemInput
         self.ConsumedAttemptInput = ConsumedAttemptInput
@@ -3968,7 +4031,7 @@ class TestRetryLogic(unittest.TestCase):
         self.assertIsNotNone(req["last_attempt_at"])
         next_retry = req["next_retry_after"]
         assert next_retry is not None
-        self.assertGreater(next_retry, datetime.now(timezone.utc))
+        self.assertGreater(next_retry, datetime.now(UTC))
 
     def test_record_attempt_rejects_unknown_type_before_updating_request(self):
         with self.assertRaises(ValueError):
@@ -3997,7 +4060,7 @@ class TestRetryLogic(unittest.TestCase):
         retry2 = req2["next_retry_after"]
         assert retry2 is not None
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         delta1 = (retry1 - now).total_seconds()
         delta2 = (retry2 - now).total_seconds()
         self.assertGreater(delta2, delta1)
@@ -4014,7 +4077,7 @@ class TestRetryLogic(unittest.TestCase):
         retry_at = req["next_retry_after"]
         assert retry_at is not None
 
-        delta = (retry_at - datetime.now(timezone.utc)).total_seconds()
+        delta = (retry_at - datetime.now(UTC)).total_seconds()
         self.assertLessEqual(delta, 4 * 60 * 60 + 5)
         self.assertGreater(delta, 3 * 60 * 60)
 
@@ -4103,7 +4166,7 @@ class TestResetToWanted(unittest.TestCase):
     def test_reset_to_wanted_round_trips_priority_started_at(self):
         req_id = self._make_request("priority-window")
         priority_started_at = datetime(
-            2026, 7, 20, 4, 0, tzinfo=timezone.utc)
+            2026, 7, 20, 4, 0, tzinfo=UTC)
 
         applied = self.db.reset_to_wanted(
             req_id,
@@ -5620,6 +5683,7 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
     def test_round_trip_preview_evidence_facts_with_every_new_field(self):
         """U1: new preview-evidence fields round-trip through upsert/find."""
         import msgspec
+
         from lib.quality import AlbumQualityEvidenceFile
 
         # Seed a bad_audio_hashes row to reference; matched_bad_audio_hash_id
@@ -6650,23 +6714,23 @@ class TestUserCooldowns(unittest.TestCase):
         self.assertEqual(row["table_name"], "user_cooldowns")
 
     def test_add_and_get_cooldown(self):
-        from datetime import datetime, timedelta, timezone
-        until = datetime.now(timezone.utc) + timedelta(days=3)
+        from datetime import datetime, timedelta
+        until = datetime.now(UTC) + timedelta(days=3)
         self.db.add_cooldown("deaduser", until, "5 consecutive timeouts")
         cooled = self.db.get_cooled_down_users()
         self.assertIn("deaduser", cooled)
 
     def test_expired_cooldown_not_returned(self):
-        from datetime import datetime, timedelta, timezone
-        past = datetime.now(timezone.utc) - timedelta(hours=1)
+        from datetime import datetime, timedelta
+        past = datetime.now(UTC) - timedelta(hours=1)
         self.db.add_cooldown("expireduser", past, "old timeout")
         cooled = self.db.get_cooled_down_users()
         self.assertNotIn("expireduser", cooled)
 
     def test_upsert_extends_cooldown(self):
-        from datetime import datetime, timedelta, timezone
-        until1 = datetime.now(timezone.utc) + timedelta(days=1)
-        until2 = datetime.now(timezone.utc) + timedelta(days=5)
+        from datetime import datetime, timedelta
+        until1 = datetime.now(UTC) + timedelta(days=1)
+        until2 = datetime.now(UTC) + timedelta(days=5)
         self.db.add_cooldown("user1", until1, "first")
         self.db.add_cooldown("user1", until2, "extended")
         cur = self.db._execute(
@@ -6801,6 +6865,7 @@ class TestReleaseIdToLockKey(unittest.TestCase):
         the module and verify the same input still maps to the same key.
         """
         import importlib
+
         from lib import pipeline_db
         mbid = "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"
         k1 = pipeline_db.release_id_to_lock_key(mbid)
@@ -6869,10 +6934,9 @@ class TestAdvisoryLock(unittest.TestCase):
 
     def test_lock_released_on_exception(self):
         """Exception raised inside the with-block must still release the lock."""
-        with self.assertRaises(RuntimeError):
-            with self.db1.advisory_lock(self.NS, 12345) as acquired:
-                self.assertTrue(acquired)
-                raise RuntimeError("boom")
+        with self.assertRaises(RuntimeError), self.db1.advisory_lock(self.NS, 12345) as acquired:
+            self.assertTrue(acquired)
+            raise RuntimeError("boom")
         # Lock must be free now — a different session can acquire it.
         with self.db2.advisory_lock(self.NS, 12345) as a2:
             self.assertTrue(a2)
@@ -6883,8 +6947,10 @@ class TestAdvisoryLock(unittest.TestCase):
         must not prevent session B from acquiring the other at the same
         integer key — they are logically unrelated resources.
         """
-        from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_IMPORT,
-                                     ADVISORY_LOCK_NAMESPACE_RELEASE)
+        from lib.pipeline_db import (
+            ADVISORY_LOCK_NAMESPACE_IMPORT,
+            ADVISORY_LOCK_NAMESPACE_RELEASE,
+        )
         with self.db1.advisory_lock(
                 ADVISORY_LOCK_NAMESPACE_IMPORT, 12345) as a1:
             self.assertTrue(a1)
@@ -7833,7 +7899,7 @@ class TestActiveImportJobForRequest(unittest.TestCase):
 
     def test_returns_queued_job(self):
         job = self._enqueue(
-            request_id=self.req_id, dedupe_key="manual:%d" % self.req_id)
+            request_id=self.req_id, dedupe_key=f"manual:{self.req_id:d}")
         result = self.db.get_active_import_job_for_request(self.req_id)
         assert result is not None
         self.assertEqual(result.id, job.id)
@@ -7841,7 +7907,7 @@ class TestActiveImportJobForRequest(unittest.TestCase):
 
     def test_returns_running_job(self):
         self._enqueue(
-            request_id=self.req_id, dedupe_key="manual:%d" % self.req_id)
+            request_id=self.req_id, dedupe_key=f"manual:{self.req_id:d}")
         # Mark evidence_ready → claim → running
         self.db._execute("""
             UPDATE import_jobs
@@ -7858,7 +7924,7 @@ class TestActiveImportJobForRequest(unittest.TestCase):
 
     def test_returns_none_for_completed_job(self):
         job = self._enqueue(
-            request_id=self.req_id, dedupe_key="manual:%d" % self.req_id)
+            request_id=self.req_id, dedupe_key=f"manual:{self.req_id:d}")
         self.db._execute("""
             UPDATE import_jobs
             SET preview_status = 'evidence_ready',
@@ -7873,7 +7939,7 @@ class TestActiveImportJobForRequest(unittest.TestCase):
 
     def test_returns_none_for_failed_job(self):
         job = self._enqueue(
-            request_id=self.req_id, dedupe_key="manual:%d" % self.req_id)
+            request_id=self.req_id, dedupe_key=f"manual:{self.req_id:d}")
         self.db._execute("""
             UPDATE import_jobs
             SET preview_status = 'evidence_ready',
@@ -7946,7 +8012,7 @@ class TestActiveImportJobsForWrongMatch(unittest.TestCase):
             dedupe_key="wm:download-log",
             payload=force_import_payload(download_log_id=77, failed_path="/tmp/other"),
         )
-        by_request = self.db.enqueue_import_job(
+        self.db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=self.req_id,
             dedupe_key="wm:request",
@@ -8051,8 +8117,7 @@ class TestPersistedSearchPlanCRUD(unittest.TestCase):
         self.assertEqual(len(active.items), 2)
         self.assertEqual(active.items[0].ordinal, 0)
         self.assertEqual(active.items[0].query, "Artist Album")
-        from lib.pipeline_db import (
-            SearchPlanMetadataSnapshot, SearchPlanProvenance)
+        from lib.pipeline_db import SearchPlanMetadataSnapshot, SearchPlanProvenance
         self.assertIsInstance(
             active.plan.metadata_snapshot, SearchPlanMetadataSnapshot)
         self.assertIsInstance(active.plan.provenance, SearchPlanProvenance)
@@ -8521,7 +8586,7 @@ class TestGetWantedSearchable(unittest.TestCase):
         return request_id
 
     def test_low_volume_new_requests_all_run_with_established_floor(self):
-        now = datetime(2026, 7, 20, 4, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 7, 20, 4, 0, tzinfo=UTC)
         new_ids = {
             self._add_searchable(
                 f"new-{index}", created_at=now - timedelta(hours=1),
@@ -8545,7 +8610,7 @@ class TestGetWantedSearchable(unittest.TestCase):
         self.assertEqual(len(selected), 16)
 
     def test_seventeen_new_requests_use_four_slots_not_the_whole_page(self):
-        now = datetime(2026, 7, 20, 4, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 7, 20, 4, 0, tzinfo=UTC)
         new_ids = {
             self._add_searchable(
                 f"burst-{index}", created_at=now - timedelta(hours=1),
@@ -8571,7 +8636,7 @@ class TestGetWantedSearchable(unittest.TestCase):
         self.assertEqual(len(established_ids & selected), 12)
 
     def test_unused_new_capacity_is_borrowed_by_established_requests(self):
-        now = datetime(2026, 7, 20, 4, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 7, 20, 4, 0, tzinfo=UTC)
         new_ids = {
             self._add_searchable(
                 f"few-new-{index}", created_at=now - timedelta(hours=1),
@@ -8596,7 +8661,7 @@ class TestGetWantedSearchable(unittest.TestCase):
         self.assertEqual(len(established_ids & selected), 14)
 
     def test_unused_established_capacity_is_borrowed_by_new_requests(self):
-        now = datetime(2026, 7, 20, 4, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 7, 20, 4, 0, tzinfo=UTC)
         new_ids = {
             self._add_searchable(
                 f"many-new-{index}", created_at=now - timedelta(hours=1),
@@ -8621,7 +8686,7 @@ class TestGetWantedSearchable(unittest.TestCase):
         self.assertEqual(established_ids & selected, established_ids)
 
     def test_small_page_keeps_proportional_established_floor(self):
-        now = datetime(2026, 7, 20, 4, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 7, 20, 4, 0, tzinfo=UTC)
         new_ids = {
             self._add_searchable(
                 f"small-new-{index}", created_at=now - timedelta(hours=1),
@@ -8647,15 +8712,14 @@ class TestGetWantedSearchable(unittest.TestCase):
 
     def test_page_size_must_leave_capacity_for_both_cohorts(self):
         for page_size in (-1, 0, 1):
-            with self.subTest(page_size=page_size):
-                with self.assertRaisesRegex(ValueError, "at least 2"):
-                    self.db.get_wanted_searchable(
-                        "g1", limit=page_size,
-                        now=datetime(2026, 7, 20, 4, 0, tzinfo=timezone.utc),
-                    )
+            with self.subTest(page_size=page_size), self.assertRaisesRegex(ValueError, "at least 2"):
+                self.db.get_wanted_searchable(
+                    "g1", limit=page_size,
+                    now=datetime(2026, 7, 20, 4, 0, tzinfo=UTC),
+                )
 
     def test_exact_24_hour_boundary_is_established(self):
-        now = datetime(2026, 7, 20, 4, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 7, 20, 4, 0, tzinfo=UTC)
         new_ids = {
             self._add_searchable(
                 f"inside-{index}",
@@ -8692,7 +8756,7 @@ class TestGetWantedSearchable(unittest.TestCase):
             self.assertEqual(established_ids & selected, established_ids)
 
     def test_backoff_and_downloading_are_excluded_before_allocation(self):
-        now = datetime(2026, 7, 20, 4, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 7, 20, 4, 0, tzinfo=UTC)
         due_id = self._add_searchable(
             "new-due", created_at=now - timedelta(hours=1), attempts=1)
         backed_off_id = self._add_searchable(
@@ -8727,7 +8791,7 @@ class TestGetWantedSearchable(unittest.TestCase):
         self.assertEqual(established_ids & selected, established_ids)
 
     def test_aged_untried_request_uses_same_established_lottery(self):
-        now = datetime(2026, 7, 20, 4, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 7, 20, 4, 0, tzinfo=UTC)
         new_ids = {
             self._add_searchable(
                 f"fresh-untried-{index}",
@@ -8763,7 +8827,7 @@ class TestGetWantedSearchable(unittest.TestCase):
         self.assertIn(False, untried_selected)
 
     def test_manual_requeue_does_not_reset_priority_age(self):
-        now = datetime(2026, 7, 20, 4, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 7, 20, 4, 0, tzinfo=UTC)
         requeued_id = self._add_searchable(
             "old-manual-requeue",
             created_at=now - timedelta(days=2),
@@ -8806,7 +8870,7 @@ class TestGetWantedSearchable(unittest.TestCase):
         self.assertEqual(established_ids & selected, established_ids)
 
     def test_recent_bad_rip_priority_puts_aged_request_in_new_cohort(self):
-        now = datetime(2026, 7, 20, 4, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 7, 20, 4, 0, tzinfo=UTC)
         bad_rip_id = self._add_searchable(
             "aged-bad-rip",
             created_at=now - timedelta(days=10),
@@ -8839,7 +8903,7 @@ class TestGetWantedSearchable(unittest.TestCase):
         self.assertEqual(len(established_ids & selected), 12)
 
     def test_title_blacklist_is_applied_before_capacity(self):
-        now = datetime(2026, 7, 20, 4, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 7, 20, 4, 0, tzinfo=UTC)
         blocked_ids = {
             self._add_searchable(
                 f"Blocked release {index}",
@@ -8874,7 +8938,7 @@ class TestGetWantedSearchable(unittest.TestCase):
         self.assertEqual(len(selected), 16)
 
     def test_randomizes_within_both_cohorts(self):
-        now = datetime(2026, 7, 20, 4, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 7, 20, 4, 0, tzinfo=UTC)
         new_ids = {
             self._add_searchable(
                 f"random-new-{index}", created_at=now - timedelta(hours=1),
@@ -8907,7 +8971,7 @@ class TestGetWantedSearchable(unittest.TestCase):
         rid_match = self._add_wanted("match")
         self._make_active(rid_match, "g1")
 
-        rid_no_plan = self._add_wanted("no-plan")  # never planned
+        self._add_wanted("no-plan")  # never planned
         rid_old_gen = self._add_wanted("old-gen")
         self._make_active(rid_old_gen, "g0")  # different gen
 
@@ -8922,7 +8986,7 @@ class TestGetWantedSearchable(unittest.TestCase):
     def test_respects_retry_backoff(self):
         rid = self._add_wanted("backoff")
         self._make_active(rid, "g1")
-        future = datetime.now(timezone.utc) + timedelta(hours=1)
+        future = datetime.now(UTC) + timedelta(hours=1)
         self.db._execute(
             "UPDATE album_requests SET next_retry_after = %s WHERE id = %s",
             (future, rid),
@@ -9008,7 +9072,7 @@ class TestGetWantedSearchable(unittest.TestCase):
             ids.append(rid)
         rows = self.db.get_wanted_searchable("g1", limit=3)
         self.assertEqual(len(rows), 3)
-        self.assertTrue(set(r["id"] for r in rows).issubset(set(ids)))
+        self.assertTrue({r["id"] for r in rows}.issubset(set(ids)))
 
 
 @requires_postgres
@@ -9033,7 +9097,7 @@ class TestPersistedSearchPlanReconciliation(unittest.TestCase):
         return rid
 
     def test_lists_all_wanted_ignoring_retry_eligibility_and_pagination(self):
-        far_future = datetime.now(timezone.utc) + timedelta(hours=24)
+        far_future = datetime.now(UTC) + timedelta(hours=24)
         rid_due = self._add("recon-due")
         rid_backoff = self._add("recon-backoff")
         rid_imported = self._add("recon-imported", status="imported")
@@ -9142,8 +9206,7 @@ class TestPersistedSearchPlanInspection(unittest.TestCase):
 @requires_postgres
 class TestRecordConsumedSearchAttempt(unittest.TestCase):
     def setUp(self):
-        from lib.pipeline_db import (ConsumedAttemptInput,
-                                     SearchPlanItemInput)
+        from lib.pipeline_db import ConsumedAttemptInput, SearchPlanItemInput
         self.ConsumedAttemptInput = ConsumedAttemptInput
         self.SearchPlanItemInput = SearchPlanItemInput
         self.db = make_db()
@@ -9477,8 +9540,7 @@ class TestRecordConsumedSearchAttempt(unittest.TestCase):
 @requires_postgres
 class TestRecordNonConsumingSearchAttempt(unittest.TestCase):
     def setUp(self):
-        from lib.pipeline_db import (NonConsumingAttemptInput,
-                                     SearchPlanItemInput)
+        from lib.pipeline_db import NonConsumingAttemptInput, SearchPlanItemInput
         self.NonConsumingAttemptInput = NonConsumingAttemptInput
         self.SearchPlanItemInput = SearchPlanItemInput
         self.db = make_db()
@@ -9628,8 +9690,7 @@ class TestRequestSearchSummaryViewU11RoundTrip(unittest.TestCase):
 @requires_postgres
 class TestPersistedSearchPlanLifecycleEdgeCases(unittest.TestCase):
     def setUp(self):
-        from lib.pipeline_db import (ConsumedAttemptInput,
-                                     SearchPlanItemInput)
+        from lib.pipeline_db import ConsumedAttemptInput, SearchPlanItemInput
         self.ConsumedAttemptInput = ConsumedAttemptInput
         self.SearchPlanItemInput = SearchPlanItemInput
         self.db = make_db()
@@ -9674,8 +9735,8 @@ class TestPersistedSearchPlanLifecycleEdgeCases(unittest.TestCase):
                 ordinal=0, strategy="default", query="q")],
         )
         # Build an attempt referencing a plan_item_id that doesn't exist; the
-        # FK on search_log.plan_item_id fires inside the transaction and rolls
-        # back the cursor write too.
+        # service rejects it inside the transaction and rolls the cursor write
+        # back too.
         attempt = self.ConsumedAttemptInput(
             request_id=self.req_id,
             plan_id=plan_id,
@@ -9689,7 +9750,9 @@ class TestPersistedSearchPlanLifecycleEdgeCases(unittest.TestCase):
             outcome="no_match",
             plan_item_count=1,
         )
-        with self.assertRaises(Exception):
+        with self.assertRaisesRegex(
+            ValueError, "plan_item_id=999999 does not belong",
+        ):
             self.db.record_consumed_search_attempt(attempt)
         # No log row, cursor untouched.
         rows = self.db.get_search_history(self.req_id)
@@ -9710,7 +9773,8 @@ class TestSearchPlanStats(unittest.TestCase):
 
     def setUp(self):
         from lib.pipeline_db import (
-            ConsumedAttemptInput, NonConsumingAttemptInput,
+            ConsumedAttemptInput,
+            NonConsumingAttemptInput,
             SearchPlanItemInput,
         )
         self.SearchPlanItemInput = SearchPlanItemInput
@@ -10036,7 +10100,6 @@ class TestFieldResolutionRecording(unittest.TestCase):
 
         # Sleep enough to ensure NOW() advances (microsecond resolution
         # may be the same on very fast machines; use a small delay).
-        import time
         time.sleep(0.05)
 
         db.record_field_resolution(
@@ -10131,7 +10194,7 @@ class TestMarkImportedWithRescue(unittest.TestCase):
         # so a seed helper that flipped to downloading first would silently
         # no-op the category write.
         if category is not None:
-            ts = datetime(2026, 5, 20, tzinfo=timezone.utc)
+            ts = datetime(2026, 5, 20, tzinfo=UTC)
             db.set_unfindable_category(
                 rid, category=category, categorised_at=ts,
             )
@@ -10193,7 +10256,7 @@ class TestMarkImportedWithRescue(unittest.TestCase):
         instant is the canonical audit record.
         """
         db = make_db()
-        original_rescue_at = datetime(2026, 1, 15, tzinfo=timezone.utc)
+        original_rescue_at = datetime(2026, 1, 15, tzinfo=UTC)
         rid = self._seed_wanted(
             db,
             category="album_absent_artist_present",
@@ -10238,7 +10301,7 @@ class TestMarkImportedWithRescue(unittest.TestCase):
         self.assertEqual(before["status"], "downloading")
         self.assertEqual(before["unfindable_category"], "artist_absent")
 
-        with self.assertRaises(Exception):
+        with self.assertRaises(psycopg2.errors.UndefinedColumn):
             # ``column_that_does_not_exist`` rides through the
             # dynamic ``sets`` builder into the UPDATE statement,
             # raising ``UndefinedColumn`` inside the transaction.
@@ -10298,7 +10361,7 @@ class TestUnfindableDetectionPipelineDB(unittest.TestCase):
     def test_list_candidates_orders_oldest_first_and_filters_by_cadence(self):
         """NULL probes sort first; rows fresher than window are excluded."""
         db = make_db()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         # Three wanted rows.
         rid_null = self._seed_wanted(db, artist_name="Null", mbid="unf-null")
         rid_old = self._seed_wanted(db, artist_name="Old", mbid="unf-old")
@@ -10344,7 +10407,7 @@ class TestUnfindableDetectionPipelineDB(unittest.TestCase):
         """Probe column updates land and round-trip through SELECT."""
         db = make_db()
         rid = self._seed_wanted(db, mbid="unf-rec-1")
-        ts = datetime(2026, 5, 26, 12, 0, tzinfo=timezone.utc)
+        ts = datetime(2026, 5, 26, 12, 0, tzinfo=UTC)
 
         db.record_artist_probe(rid, match_count=42, observed_at=ts)
 
@@ -10367,7 +10430,7 @@ class TestUnfindableDetectionPipelineDB(unittest.TestCase):
             (rid,),
         )
         # Detection's late write — must be a silent no-op.
-        ts = datetime(2026, 5, 26, 12, 0, tzinfo=timezone.utc)
+        ts = datetime(2026, 5, 26, 12, 0, tzinfo=UTC)
         db.record_artist_probe(rid, match_count=99, observed_at=ts)
         after = db.get_request(rid)
         assert after is not None
@@ -10379,7 +10442,7 @@ class TestUnfindableDetectionPipelineDB(unittest.TestCase):
 
     def test_set_unfindable_category_round_trips_all_four_categories(self):
         """Every valid category round-trips; CHECK constraint passes."""
-        ts = datetime(2026, 5, 26, tzinfo=timezone.utc)
+        ts = datetime(2026, 5, 26, tzinfo=UTC)
         for category in self.UNFINDABLE_CATEGORIES:
             with self.subTest(category=category):
                 db = make_db()
@@ -10398,7 +10461,7 @@ class TestUnfindableDetectionPipelineDB(unittest.TestCase):
 
         db = make_db()
         rid = self._seed_wanted(db, mbid="unf-set-bad")
-        ts = datetime(2026, 5, 26, tzinfo=timezone.utc)
+        ts = datetime(2026, 5, 26, tzinfo=UTC)
         with self.assertRaises(CheckViolation):
             db.set_unfindable_category(
                 rid, category="garbage_value", categorised_at=ts,
@@ -10412,7 +10475,7 @@ class TestUnfindableDetectionPipelineDB(unittest.TestCase):
             "UPDATE album_requests SET status = 'imported' WHERE id = %s",
             (rid,),
         )
-        ts = datetime(2026, 5, 26, tzinfo=timezone.utc)
+        ts = datetime(2026, 5, 26, tzinfo=UTC)
         db.set_unfindable_category(
             rid, category="artist_absent", categorised_at=ts,
         )
@@ -10427,7 +10490,8 @@ class TestUnfindableDetectionPipelineDB(unittest.TestCase):
     def test_search_log_signal_aggregates_zero_find_and_wrong_pressing(self):
         """Hand-computed aggregates match the production SQL."""
         from lib.pipeline_db import (
-            ConsumedAttemptInput, SearchPlanItemInput,
+            ConsumedAttemptInput,
+            SearchPlanItemInput,
         )
 
         db = make_db()
@@ -10766,7 +10830,7 @@ class TestYoutubeAlbumMappings(unittest.TestCase):
         # yt_browse_id within the same upsert payload — the UNIQUE
         # (release_group_identifier, source, yt_browse_id) constraint
         # rejects it.
-        with self.assertRaises(Exception):
+        with self.assertRaises(psycopg2.errors.UniqueViolation):
             self.db.upsert_youtube_album_mapping("rg-1", "mb", [
                 self._row(yt_browse_id="MPREb_dup"),
                 self._row(yt_browse_id="MPREb_dup"),
@@ -10938,9 +11002,8 @@ class TestYoutubeIngestDownloadLog(unittest.TestCase):
     def test_update_youtube_terminal_rejects_non_terminal_outcomes(self):
         log_id = self.db.insert_youtube_running(**self._yt_payload())
         for bogus in ("youtube_running", "success", "rejected", ""):
-            with self.subTest(outcome=bogus):
-                with self.assertRaises(ValueError):
-                    self.db.update_youtube_terminal(log_id, bogus, {})
+            with self.subTest(outcome=bogus), self.assertRaises(ValueError):
+                self.db.update_youtube_terminal(log_id, bogus, {})
 
     def test_claim_next_youtube_pending_excludes_slskd_rows(self):
         """Source discriminator must filter slskd rows out of the worker queue."""
@@ -11090,7 +11153,7 @@ class TestYoutubeIngestDownloadLog(unittest.TestCase):
         assert active is not None
         self.assertEqual(active.id, job.id)
 
-        with self.assertRaises(Exception):
+        with self.assertRaises(psycopg2.errors.UniqueViolation):
             self.db.enqueue_import_job(
                 IMPORT_JOB_YOUTUBE,
                 request_id=self.request_id,
@@ -11307,12 +11370,11 @@ class TestAtomicAndExecuteHardening(unittest.TestCase):
         class _Boom(Exception):
             pass
 
-        with self.assertRaises(_Boom):
-            with db._atomic():
-                # Kill the connection so BOTH rollback() (except handler) and
-                # autocommit-restore (finally) raise a secondary InterfaceError.
-                db.conn.close()
-                raise _Boom("the real failure the operator must see")
+        with self.assertRaises(_Boom), db._atomic():
+            # Kill the connection so BOTH rollback() (except handler) and
+            # autocommit-restore (finally) raise a secondary InterfaceError.
+            db.conn.close()
+            raise _Boom("the real failure the operator must see")
 
     def test_atomic_commit_failure_propagates_commit_error(self):
         """Item 2: when the caller's ``commit()`` raises ``OperationalError``
@@ -11323,11 +11385,10 @@ class TestAtomicAndExecuteHardening(unittest.TestCase):
         """
         db = make_db()
         self.addCleanup(db.close)
-        with self.assertRaises(psycopg2.OperationalError):
-            with db._atomic():
-                pid = self._backend_pid(db)
-                _terminate_backend(db.dsn, pid)
-                db.conn.commit()  # backend gone -> raises OperationalError
+        with self.assertRaises(psycopg2.OperationalError), db._atomic():
+            pid = self._backend_pid(db)
+            _terminate_backend(db.dsn, pid)
+            db.conn.commit()  # backend gone -> raises OperationalError
 
     def test_atomic_happy_path_commits_and_restores_autocommit(self):
         """No behaviour change on the happy path: flip to ``autocommit=False``
@@ -11669,7 +11730,7 @@ class TestDashboardFakeParity(unittest.TestCase):
         from tests.fakes import FakePipelineDB
 
         fake = FakePipelineDB()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         newest_id = fake.record_cycle_metrics(
             completed_at=now - timedelta(hours=1),
             cycle_total_s=25.0,
@@ -11975,14 +12036,14 @@ class TestSearchLedgerRoundTrip(unittest.TestCase):
     def test_get_unswept_search_ids_empty_before_any_record(self):
         self.assertEqual(
             self.db.get_unswept_search_ids(
-                older_than=datetime.now(timezone.utc) + timedelta(seconds=1)),
+                older_than=datetime.now(UTC) + timedelta(seconds=1)),
             [])
 
     def test_record_round_trip_preserves_every_field(self):
         self.db.record_search_id("sid-rt-1", "plan_search", 4321)
 
         rows = self.db.get_unswept_search_ids(
-            older_than=datetime.now(timezone.utc) + timedelta(seconds=1))
+            older_than=datetime.now(UTC) + timedelta(seconds=1))
 
         self.assertEqual(len(rows), 1)
         row = rows[0]
@@ -11996,7 +12057,7 @@ class TestSearchLedgerRoundTrip(unittest.TestCase):
         self.db.record_search_id("sid-rt-null", "artist_probe", None)
 
         rows = self.db.get_unswept_search_ids(
-            older_than=datetime.now(timezone.utc) + timedelta(seconds=1))
+            older_than=datetime.now(UTC) + timedelta(seconds=1))
 
         self.assertEqual(rows[0]["request_id"], None)
 
@@ -12004,7 +12065,7 @@ class TestSearchLedgerRoundTrip(unittest.TestCase):
         self.db.record_search_id("sid-fresh", "plan_search", 1)
 
         rows = self.db.get_unswept_search_ids(
-            older_than=datetime.now(timezone.utc) - timedelta(hours=1))
+            older_than=datetime.now(UTC) - timedelta(hours=1))
 
         self.assertEqual(rows, [])
 
@@ -12025,7 +12086,7 @@ class TestSearchLedgerRoundTrip(unittest.TestCase):
         self.db.mark_search_ids_deleted(["sid-a"])
 
         rows = self.db.get_unswept_search_ids(
-            older_than=datetime.now(timezone.utc) + timedelta(seconds=1))
+            older_than=datetime.now(UTC) + timedelta(seconds=1))
         self.assertEqual([r["search_id"] for r in rows], ["sid-b"])
         cur = self.db._execute(
             "SELECT deleted_at FROM slskd_search_ledger WHERE search_id = %s",
@@ -12041,10 +12102,10 @@ class TestSearchLedgerRoundTrip(unittest.TestCase):
         self.db.mark_search_ids_deleted(["sid-old"])
         self.db._execute(
             "UPDATE slskd_search_ledger SET deleted_at = %s WHERE search_id = %s",
-            (datetime.now(timezone.utc) - timedelta(days=10), "sid-old"))
+            (datetime.now(UTC) - timedelta(days=10), "sid-old"))
 
         removed = self.db.prune_search_ledger(
-            deleted_before=datetime.now(timezone.utc) - timedelta(days=7))
+            deleted_before=datetime.now(UTC) - timedelta(days=7))
 
         self.assertEqual(removed, 1)
         cur = self.db._execute(
@@ -12058,7 +12119,7 @@ class TestSearchLedgerRoundTrip(unittest.TestCase):
         fake = FakePipelineDB()
         for db in (self.db, fake):
             db.record_search_id("sid-parity", "plan_search", 99)
-        cutoff = datetime.now(timezone.utc) + timedelta(seconds=1)
+        cutoff = datetime.now(UTC) + timedelta(seconds=1)
         real_rows = self.db.get_unswept_search_ids(older_than=cutoff)
         fake_rows = fake.get_unswept_search_ids(older_than=cutoff)
         strip = lambda rows: [
@@ -12273,7 +12334,7 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
             self._backdate(request_id, days=200)
 
         removed = self.db.prune_transfer_ledger(
-            older_than=datetime.now(timezone.utc) - timedelta(days=90))
+            older_than=datetime.now(UTC) - timedelta(days=90))
 
         self.assertEqual(removed, 2)
         remaining = self.db.get_owned_transfer_keys()
@@ -12306,7 +12367,7 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
                 f"p{request_id}", f"{request_id}.flac")
 
         removed = self.db.prune_transfer_ledger(
-            older_than=datetime.now(timezone.utc) - timedelta(days=90))
+            older_than=datetime.now(UTC) - timedelta(days=90))
 
         self.assertEqual(removed, 2)
         self.assertEqual(self._ledger_rows(pending_wanted), [])
@@ -12320,7 +12381,7 @@ class TestTransferLedgerRoundTrip(unittest.TestCase):
             TransferLedgerRow(
                 request_id=rid, username="p0", filename="a.flac"),
         ])
-        boundary = datetime.now(timezone.utc) - timedelta(days=90)
+        boundary = datetime.now(UTC) - timedelta(days=90)
         self.db._execute(
             "UPDATE slskd_transfer_ledger SET enqueued_at = %s "
             "WHERE request_id = %s",
@@ -12385,7 +12446,9 @@ class TestReadProjectionParity(unittest.TestCase):
             f"FakePipelineDB returned {len(fake_rows)} row(s) — seeding "
             f"drifted between the two backends",
         )
-        for i, (real_row, fake_row) in enumerate(zip(real_rows, fake_rows)):
+        for i, (real_row, fake_row) in enumerate(
+            zip(real_rows, fake_rows, strict=True)
+        ):
             real_keys = set(real_row.keys())
             fake_keys = set(fake_row.keys())
             if real_keys == fake_keys:
@@ -12487,7 +12550,7 @@ class TestReadProjectionParity(unittest.TestCase):
         from lib.triage_service import ParsedTriageFilter
         from lib.unfindable_detection_service import CATEGORY_ARTIST_ABSENT
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         for db in (self.db, self.fake):
             rid = self._seed_triage_request(
                 db, mb_release_id="triage-unfindable-1")

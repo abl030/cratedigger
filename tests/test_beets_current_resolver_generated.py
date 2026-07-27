@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Real-Beets current-library resolver contracts for exact release identity."""
 
 from __future__ import annotations
@@ -9,7 +8,8 @@ import unittest
 from dataclasses import dataclass
 from pathlib import Path
 
-from hypothesis import HealthCheck, example, given, settings, strategies as st
+from hypothesis import HealthCheck, example, given, settings
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
 from lib.beets_db import (
@@ -27,7 +27,6 @@ from lib.quality import QualityRankConfig
 from lib.release_identity import ReleaseIdentity
 from tests.beets_world import BeetsWorld, BeetsWorldRelease
 from tests.fakes import FakeBeetsDB
-
 
 REPO = Path(__file__).resolve().parent.parent
 MB_TARGET = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -66,7 +65,9 @@ def assert_current_resolution(
             )
         return
     if not isinstance(result, CurrentBeetsUnique):
-        raise AssertionError("one usable exact album did not resolve unique")
+        raise AssertionError(  # noqa: TRY004 - generated invariant failure
+            "one usable exact album did not resolve unique"
+        )
     if not os.path.isabs(result.album_path):
         raise AssertionError("unique album path is not absolute")
     if not result.items:
@@ -75,9 +76,11 @@ def assert_current_resolution(
         raise AssertionError("unique item path is not absolute")
     if {os.path.dirname(item.path) for item in result.items} != {result.album_path}:
         raise AssertionError("unique resolution spans more than one directory")
-    if expected.expected_album_path is not None:
-        if result.album_path != expected.expected_album_path:
-            raise AssertionError("resolver returned a stale or inferred album path")
+    if (
+        expected.expected_album_path is not None
+        and result.album_path != expected.expected_album_path
+    ):
+        raise AssertionError("resolver returned a stale or inferred album path")
 
 
 def _identity(source: str) -> ReleaseIdentity:
@@ -144,61 +147,59 @@ class TestCurrentBeetsResolverPins(unittest.TestCase):
 
     def test_modern_and_legacy_discogs_share_exact_unique_semantics(self) -> None:
         for legacy in (False, True):
-            with self.subTest(layout="legacy" if legacy else "modern"):
-                with BeetsWorld(REPO) as world:
-                    snapshot = world.import_release(_release("discogs", tracks=2))
-                    world.set_discogs_identity_layout(
-                        DISCOGS_TARGET, legacy=legacy,
-                    )
-                    world.set_release_paths_relative(DISCOGS_TARGET)
-                    with BeetsDB(
-                        str(world.library_db),
-                        library_root=str(world.library_root),
-                    ) as beets:
-                        result = beets.resolve_current_release(_identity("discogs"))
-                    assert_current_resolution(result, ResolverExpectation(
-                        identity=_identity("discogs"),
-                        exact_album_count=1,
-                        expected_album_path=snapshot.album_path,
-                    ))
-                    assert isinstance(result, CurrentBeetsUnique)
-                    self.assertEqual(result.selectors, (
-                        f"discogs_albumid:{DISCOGS_TARGET}",
-                        f"mb_albumid:{DISCOGS_TARGET}",
-                    ))
+            with self.subTest(layout="legacy" if legacy else "modern"), BeetsWorld(REPO) as world:
+                snapshot = world.import_release(_release("discogs", tracks=2))
+                world.set_discogs_identity_layout(
+                    DISCOGS_TARGET, legacy=legacy,
+                )
+                world.set_release_paths_relative(DISCOGS_TARGET)
+                with BeetsDB(
+                    str(world.library_db),
+                    library_root=str(world.library_root),
+                ) as beets:
+                    result = beets.resolve_current_release(_identity("discogs"))
+                assert_current_resolution(result, ResolverExpectation(
+                    identity=_identity("discogs"),
+                    exact_album_count=1,
+                    expected_album_path=snapshot.album_path,
+                ))
+                assert isinstance(result, CurrentBeetsUnique)
+                self.assertEqual(result.selectors, (
+                    f"discogs_albumid:{DISCOGS_TARGET}",
+                    f"mb_albumid:{DISCOGS_TARGET}",
+                ))
 
     def test_each_discogs_layout_preserves_zero_and_two_match_cardinality(self) -> None:
         for legacy in (False, True):
             for cardinality in (0, 2):
-                with self.subTest(legacy=legacy, cardinality=cardinality):
-                    with BeetsWorld(REPO) as world:
-                        world.import_release(_sibling("discogs"))
-                        if cardinality:
-                            world.import_release(_release(
-                                "discogs", tracks=1, suffix="one",
-                            ))
-                            if legacy:
-                                world.set_discogs_identity_layout(
-                                    DISCOGS_TARGET, legacy=True,
-                                )
-                            world.import_duplicate_release(_release(
-                                "discogs", tracks=2, suffix="two",
-                            ))
-                        with BeetsDB(
-                            str(world.library_db),
-                            library_root=str(world.library_root),
-                        ) as beets:
-                            result = beets.resolve_current_release(
-                                _identity("discogs"),
-                            )
-                            batch = beets.get_album_ids_by_mbids([
-                                DISCOGS_TARGET,
-                            ])
-                        assert_current_resolution(result, ResolverExpectation(
-                            identity=_identity("discogs"),
-                            exact_album_count=cardinality,
+                with self.subTest(legacy=legacy, cardinality=cardinality), BeetsWorld(REPO) as world:
+                    world.import_release(_sibling("discogs"))
+                    if cardinality:
+                        world.import_release(_release(
+                            "discogs", tracks=1, suffix="one",
                         ))
-                        self.assertEqual(batch, {})
+                        if legacy:
+                            world.set_discogs_identity_layout(
+                                DISCOGS_TARGET, legacy=True,
+                            )
+                        world.import_duplicate_release(_release(
+                            "discogs", tracks=2, suffix="two",
+                        ))
+                    with BeetsDB(
+                        str(world.library_db),
+                        library_root=str(world.library_root),
+                    ) as beets:
+                        result = beets.resolve_current_release(
+                            _identity("discogs"),
+                        )
+                        batch = beets.get_album_ids_by_mbids([
+                            DISCOGS_TARGET,
+                        ])
+                    assert_current_resolution(result, ResolverExpectation(
+                        identity=_identity("discogs"),
+                        exact_album_count=cardinality,
+                    ))
+                    self.assertEqual(batch, {})
 
     def test_duplicate_exact_identity_is_ambiguous_and_absent_from_batches(self) -> None:
         with BeetsWorld(REPO) as world:
@@ -222,26 +223,25 @@ class TestCurrentBeetsResolverPins(unittest.TestCase):
 
     def test_empty_and_split_topologies_are_explicitly_unusable(self) -> None:
         for topology in ("empty", "split"):
-            with self.subTest(topology=topology):
-                with BeetsWorld(REPO) as world:
-                    tracks = 1 if topology == "empty" else 2
-                    world.import_release(_release("mb", tracks=tracks))
-                    if topology == "empty":
-                        world.empty_release_topology(MB_TARGET)
-                        reason = "empty_topology"
-                    else:
-                        world.split_release_topology(MB_TARGET)
-                        reason = "split_topology"
-                    with BeetsDB(
-                        str(world.library_db),
-                        library_root=str(world.library_root),
-                    ) as beets:
-                        result = beets.resolve_current_release(_identity("mb"))
-                    assert_current_resolution(result, ResolverExpectation(
-                        identity=_identity("mb"),
-                        exact_album_count=1,
-                        topology_error=reason,
-                    ))
+            with self.subTest(topology=topology), BeetsWorld(REPO) as world:
+                tracks = 1 if topology == "empty" else 2
+                world.import_release(_release("mb", tracks=tracks))
+                if topology == "empty":
+                    world.empty_release_topology(MB_TARGET)
+                    reason = "empty_topology"
+                else:
+                    world.split_release_topology(MB_TARGET)
+                    reason = "split_topology"
+                with BeetsDB(
+                    str(world.library_db),
+                    library_root=str(world.library_root),
+                ) as beets:
+                    result = beets.resolve_current_release(_identity("mb"))
+                assert_current_resolution(result, ResolverExpectation(
+                    identity=_identity("mb"),
+                    exact_album_count=1,
+                    topology_error=reason,
+                ))
 
     def test_conflicting_discogs_columns_and_invalid_paths_are_ambiguous(self) -> None:
         cases: tuple[tuple[str, str, bytes | None], ...] = (

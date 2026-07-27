@@ -1,15 +1,15 @@
-#!/usr/bin/env python3
 """Generated PostgreSQL invariant for lossless-lineage spectral subjects."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import unittest
+from dataclasses import dataclass
 
-from hypothesis import example, given, strategies as st
 import msgspec
 import psycopg2
 import psycopg2.errors
+from hypothesis import example, given
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
 from lib.quality import (
@@ -20,7 +20,6 @@ from lib.quality import (
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_album_quality_evidence
 from tests.test_pipeline_db import TEST_DSN, requires_postgres
-
 
 CONSTRAINT = "album_quality_evidence_lossless_lineage_spectral_subject"
 LOSSLESS_CONVERSION_SOURCES = frozenset({"flac", "alac", "wav"})
@@ -230,7 +229,7 @@ class TestGeneratedLosslessLineageCheck(unittest.TestCase):
                         world.was_converted_from,
                     ),
                 )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             error = exc
         finally:
             self.conn.rollback()

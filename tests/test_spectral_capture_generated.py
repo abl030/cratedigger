@@ -43,12 +43,11 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
-
+import msgspec
 from hypothesis import given
 from hypothesis import strategies as st
-import msgspec
 
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.beets_db import AlbumInfo
 from lib.quality import (
     AlbumQualityEvidence,
@@ -65,7 +64,6 @@ from lib.spectral_check import EXTENSION_SLICE_FREQS, SLICE_FREQS, TrackResult
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_album_quality_evidence, make_request_row
 from tests.test_quality_generated import wild_ready_candidate_evidence
-
 
 Decider = Callable[
     [AlbumQualityEvidence, "AlbumQualityEvidence | None"],
@@ -451,7 +449,7 @@ def _side_effect_with_extension_dbs(
     extension-band dB values."""
     band_db: dict[int, float] = {1000: _REF_DB_VALUE}
     band_db.update((f, _NO_CLIFF_IN_WINDOW_DB) for f in SLICE_FREQS)
-    band_db.update(zip(EXTENSION_SLICE_FREQS, extension_dbs))
+    band_db.update(zip(EXTENSION_SLICE_FREQS, extension_dbs, strict=True))
 
     def _rms_for_db(db: float) -> float:
         return 10 ** (db / 20.0)
@@ -461,7 +459,7 @@ def _side_effect_with_extension_dbs(
         lo_hz = int(cmd[sinc_idx + 1].split("-")[0])
         db = band_db.get(lo_hz, _REF_DB_VALUE)
         return MagicMock(
-            stderr="RMS     amplitude:     %.8f\n" % _rms_for_db(db),
+            stderr=f"RMS     amplitude:     {_rms_for_db(db):.8f}\n",
             returncode=0,
         )
 

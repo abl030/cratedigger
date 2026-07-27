@@ -13,7 +13,8 @@ Outcome vocabulary is pinned via ``test_outcome_set_is_stable`` per
 from __future__ import annotations
 
 import unittest
-from typing import Any, Callable, Optional, TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, ClassVar
 from unittest.mock import patch
 
 import msgspec
@@ -36,7 +37,6 @@ from lib.youtube_album_service import (
 )
 from tests.fakes import FakePipelineDB, FakeYTMusic
 
-
 # ---------------------------------------------------------------------------
 # Shared fixtures
 # ---------------------------------------------------------------------------
@@ -56,8 +56,8 @@ def _ok_mb_release(
     rg: str = MB_RG,
     title: str = "Dr. Octagonecologyst",
     artist: str = "Dr. Octagon",
-    year: Optional[int] = 1996,
-    tracks: Optional[list[dict]] = None,
+    year: int | None = 1996,
+    tracks: list[dict] | None = None,
 ) -> dict:
     return {
         "id": mbid,
@@ -78,7 +78,7 @@ def _ok_mb_release(
     }
 
 
-def _ok_mb_rg_releases(*release_ids_with_year: tuple[str, Optional[int]]) -> dict:
+def _ok_mb_rg_releases(*release_ids_with_year: tuple[str, int | None]) -> dict:
     """Build a slim release-group-releases payload mirroring web/mb.py."""
     return {
         "title": "Dr. Octagonecologyst",
@@ -103,8 +103,8 @@ def _yt_search_album_result(
     browse_id: str,
     *,
     title: str = "Dr. Octagonecologyst",
-    artists: Optional[list[dict]] = None,
-    year: Optional[str] = "1996",
+    artists: list[dict] | None = None,
+    year: str | None = "1996",
     track_count: int = 2,
 ) -> dict:
     """One entry in ``YTMusic.search(filter='albums')`` results."""
@@ -155,10 +155,10 @@ def _yt_other_version(browse_id: str, *, year: str = "1996",
 def _canned_distance(
     *,
     outcome: str = "ok",
-    distance: Optional[float] = 0.12,
-    components: Optional[dict[str, float]] = None,
-    candidate_mbid: Optional[str] = None,
-    error_message: Optional[str] = None,
+    distance: float | None = 0.12,
+    components: dict[str, float] | None = None,
+    candidate_mbid: str | None = None,
+    error_message: str | None = None,
 ) -> Callable[..., BeetsDistanceResult]:
     """Build a ``distance_fn`` stub that always returns the same result.
 
@@ -212,11 +212,11 @@ def _canned_distance_by_mbid(
 class _LookupSpy:
     """Helper to wrap a dict-of-id-to-payload as a tracked callable."""
 
-    def __init__(self, table: dict[str, Optional[dict]]):
+    def __init__(self, table: dict[str, dict | None]):
         self._table = table
         self.calls: list[str] = []
 
-    def __call__(self, identifier: str) -> Optional[dict]:
+    def __call__(self, identifier: str) -> dict | None:
         self.calls.append(identifier)
         return self._table.get(identifier)
 
@@ -264,7 +264,7 @@ class TestServiceOutcomeContract(unittest.TestCase):
     which is the actual contract the CLI / route adapters depend on.
     """
 
-    EXPECTED_OUTCOMES = {
+    EXPECTED_OUTCOMES: ClassVar = {
         "ok",
         "not_found",
         "unresolved_4xx_client",
@@ -617,7 +617,7 @@ class TestResolveYoutubeAlbumHappyPath(unittest.TestCase):
 
         rg = MB_RG
 
-        def _raising_mb_leaf(identifier: str) -> Optional[dict]:
+        def _raising_mb_leaf(identifier: str) -> dict | None:
             # AE3 mirrors the live behaviour: web.mb.get_release raises
             # urllib.error.HTTPError when handed a non-release MBID.
             raise urllib.error.HTTPError(
@@ -638,7 +638,7 @@ class TestResolveYoutubeAlbumHappyPath(unittest.TestCase):
         }
         leaf_calls: list[str] = []
 
-        def _dispatching_mb_leaf(identifier: str) -> Optional[dict]:
+        def _dispatching_mb_leaf(identifier: str) -> dict | None:
             leaf_calls.append(identifier)
             if identifier == rg:
                 # The RG MBID raises like the real adapter.
@@ -703,13 +703,13 @@ class TestResolveYoutubeAlbumHappyPath(unittest.TestCase):
 
         rg = MB_RG_MISSING
 
-        def _raising_mb_leaf(identifier: str) -> Optional[dict]:
+        def _raising_mb_leaf(identifier: str) -> dict | None:
             raise urllib.error.HTTPError(
                 f"http://mb-mirror/release/{identifier}",
                 404, "Not Found", {}, None,  # type: ignore[arg-type]
             )
 
-        def _raising_group(rg_id: str) -> Optional[dict]:
+        def _raising_group(rg_id: str) -> dict | None:
             raise urllib.error.URLError("mirror unreachable")
 
         result = resolve_youtube_album(
@@ -737,7 +737,7 @@ class TestResolveYoutubeAlbumHappyPath(unittest.TestCase):
 
         rg = MB_RG
 
-        def _raising_500(_identifier: str) -> Optional[dict]:
+        def _raising_500(_identifier: str) -> dict | None:
             raise urllib.error.HTTPError(
                 "http://mb-mirror/", 503, "Service Unavailable",
                 {}, None,  # type: ignore[arg-type]
@@ -764,7 +764,7 @@ class TestResolveYoutubeAlbumHappyPath(unittest.TestCase):
 
         rg = MB_RG
 
-        def _raising_timeout(_identifier: str) -> Optional[dict]:
+        def _raising_timeout(_identifier: str) -> dict | None:
             raise _requests.Timeout("connect timeout")
 
         result = resolve_youtube_album(
@@ -784,12 +784,11 @@ class TestResolveYoutubeAlbumHappyPath(unittest.TestCase):
         """Round 2 P1-1: ``socket.timeout`` (transport-level) also maps
         to ``unresolved_timeout``.
         """
-        import socket as _socket
 
         rg = MB_RG
 
-        def _raising(_identifier: str) -> Optional[dict]:
-            raise _socket.timeout("transport timeout")
+        def _raising(_identifier: str) -> dict | None:
+            raise TimeoutError("transport timeout")
 
         result = resolve_youtube_album(
             rg,
@@ -811,7 +810,7 @@ class TestResolveYoutubeAlbumHappyPath(unittest.TestCase):
         """
         master_id = "999"
 
-        def _raising_discogs_leaf(_identifier: str) -> Optional[dict]:
+        def _raising_discogs_leaf(_identifier: str) -> dict | None:
             raise ValueError("invalid literal for int()")
 
         discogs_master = _LookupSpy({
@@ -843,7 +842,7 @@ class TestResolveYoutubeAlbumHappyPath(unittest.TestCase):
             },
         }
 
-        def _dispatching_leaf(identifier: str) -> Optional[dict]:
+        def _dispatching_leaf(identifier: str) -> dict | None:
             if identifier == master_id:
                 raise ValueError("invalid literal for int()")
             return per_id.get(identifier)
@@ -1738,7 +1737,7 @@ class TestSafeInt(unittest.TestCase):
     only surface as a downstream resolve failure, hard to localise.
     """
 
-    CASES = [
+    CASES: ClassVar = [
         # (description, raw, default, expected)
         ("None returns default", None, 99, 99),
         ("True is rejected as garbage (bool subclass guard)",
@@ -1764,7 +1763,7 @@ class TestSafeInt(unittest.TestCase):
 class TestSafeFloat(unittest.TestCase):
     """Branch-table for ``_safe_float`` (round 2 P2-3)."""
 
-    CASES = [
+    CASES: ClassVar = [
         # (description, raw, default, expected)
         ("None returns default", None, 1.5, 1.5),
         ("True is rejected as garbage", True, 1.5, 1.5),
@@ -1794,6 +1793,7 @@ class TestSafeFloat(unittest.TestCase):
         check; for now this test documents the current contract.
         """
         import math
+
         from lib.youtube_album_service import _safe_float
         self.assertTrue(math.isnan(_safe_float(float("nan"), 0.0)))
         self.assertTrue(math.isinf(_safe_float(float("inf"), 0.0)))
@@ -1901,7 +1901,7 @@ class TestScoringLoopDeadline(unittest.TestCase):
         # First monotonic call inside the scoring loop returns 11s — past
         # the 10s deadline; the scoring loop must break before scoring
         # the second sibling.
-        result, observed = self._resolve_with_slow_distance(sleeps=[11.0, 11.0])
+        result, _observed = self._resolve_with_slow_distance(sleeps=[11.0, 11.0])
         # Still ok (we have a partial matrix), with deadline_message
         # attached so the operator sees what happened.
         self.assertEqual(result.outcome, "ok")
@@ -2366,7 +2366,7 @@ class TestSeedPickHeuristic(unittest.TestCase):
 
 class TestUrlSynthesis(unittest.TestCase):
 
-    def _resolve_single_yt_album(self, *, audio_playlist_id: Optional[str]
+    def _resolve_single_yt_album(self, *, audio_playlist_id: str | None
                                  ) -> YoutubeAlbumResolverResult:
         rg = MB_RG
         mb_leaf = _LookupSpy({

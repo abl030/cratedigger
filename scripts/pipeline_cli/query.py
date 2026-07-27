@@ -9,9 +9,11 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Mapping
+from contextlib import AbstractContextManager
 from datetime import date, datetime, time
 from decimal import Decimal
-from typing import ContextManager, Mapping, Optional, Protocol
+from typing import Protocol
 
 import psycopg2
 
@@ -52,7 +54,8 @@ def _render_query_table(
     lines = [header, divider]
     for rendered in string_rows:
         lines.append(" | ".join(
-            value.ljust(widths[col]) for col, value in zip(columns, rendered)
+            value.ljust(widths[col])
+            for col, value in zip(columns, rendered, strict=True)
         ))
     row_label = "row" if len(rows) == 1 else "rows"
     lines.append(f"({len(rows)} {row_label})")
@@ -101,9 +104,7 @@ def _read_only_sql(sql: str) -> str:
             continue
 
         if state == "escape_string":
-            if char == "\\" and index + 1 < len(sql):
-                index += 2
-            elif char == "'" and index + 1 < len(sql) and sql[index + 1] == "'":
+            if char == "\\" and index + 1 < len(sql) or char == "'" and index + 1 < len(sql) and sql[index + 1] == "'":
                 index += 2
             elif char == "'":
                 state = "normal"
@@ -217,10 +218,10 @@ class _QueryDB(Protocol):
     pinned, non-retrying connection scope."""
 
     def _execute(self, sql: str) -> ReadOnlyQueryCursor: ...
-    def read_only_query_cursor(self) -> ContextManager[ReadOnlyQueryCursor]: ...
+    def read_only_query_cursor(self) -> AbstractContextManager[ReadOnlyQueryCursor]: ...
 
 
-def cmd_query(db: _QueryDB, args: argparse.Namespace) -> Optional[int]:
+def cmd_query(db: _QueryDB, args: argparse.Namespace) -> int | None:
     """Run raw SQL with an explicit read-only-by-default safety boundary."""
     try:
         sql = _get_query_sql(args)

@@ -24,7 +24,6 @@ import os
 import re
 import unittest
 
-
 TESTS_DIR = os.path.dirname(__file__)
 
 FORBIDDEN_PATTERNS = [

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Contract tests for the search-plan routes (web/routes/search_plan.py).
 
 Split from tests/test_web_server.py (#408). Moved from
@@ -6,22 +5,20 @@ tests/web/test_routes_pipeline_search_plan.py to mirror
 web/routes/search_plan.py's own split out of web/routes/pipeline.py
 (#481 item 3). Shared harness in tests/web/_harness.py.
 """
-
-from datetime import datetime, timedelta, timezone
 import json
 import os
 import sys
 import unittest
+from datetime import UTC, datetime, timedelta
+from typing import ClassVar
 from unittest.mock import patch
-from urllib.request import urlopen, Request
 from urllib.error import HTTPError
-
+from urllib.request import Request, urlopen
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
-
 from tests.helpers import make_request_row
+from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
 
 
 class TestPipelineSearchPlanContract(_FakeDbWebServerCase):
@@ -32,7 +29,7 @@ class TestPipelineSearchPlanContract(_FakeDbWebServerCase):
     contract operators / dashboard authors get to depend on.
     """
 
-    REQUIRED_FIELDS = {
+    REQUIRED_FIELDS: ClassVar = {
         "request_id",
         "request",
         "current_generator_id",
@@ -44,25 +41,25 @@ class TestPipelineSearchPlanContract(_FakeDbWebServerCase):
         "legacy_logs",
         "stats",
     }
-    STATS_REQUIRED_FIELDS = {
+    STATS_REQUIRED_FIELDS: ClassVar = {
         "request_id", "current", "superseded_and_legacy",
     }
-    STATS_BUCKET_REQUIRED_FIELDS = {
+    STATS_BUCKET_REQUIRED_FIELDS: ClassVar = {
         "slots", "query_groups", "legacy_bucket",
         "cache_attribution_level", "cache_per_search_available",
     }
-    STATS_GROUP_REQUIRED_FIELDS = {
+    STATS_GROUP_REQUIRED_FIELDS: ClassVar = {
         "identity", "attempts", "consumed_attempts",
         "non_consuming_attempts", "stale_completion_attempts",
         "outcome_counts", "elapsed_s_mean", "elapsed_s_p95",
         "result_count_mean", "browse_time_s_mean", "match_time_s_mean",
         "peers_browsed_mean", "fanout_waves_mean", "last_seen_at",
     }
-    REQUEST_REQUIRED_FIELDS = {
+    REQUEST_REQUIRED_FIELDS: ClassVar = {
         "id", "status", "artist_name", "album_title",
         "mb_release_id", "discogs_release_id", "year", "source",
     }
-    CURRENTNESS_REQUIRED_FIELDS = {
+    CURRENTNESS_REQUIRED_FIELDS: ClassVar = {
         "is_wanted",
         "has_active_plan",
         "active_plan_generator_id",
@@ -71,18 +68,18 @@ class TestPipelineSearchPlanContract(_FakeDbWebServerCase):
         "has_deterministic_failure",
         "has_retryable_failure",
     }
-    ACTIVE_PLAN_REQUIRED_FIELDS = {"plan", "items", "next_ordinal", "cycle_count"}
-    PLAN_ROW_REQUIRED_FIELDS = {
+    ACTIVE_PLAN_REQUIRED_FIELDS: ClassVar = {"plan", "items", "next_ordinal", "cycle_count"}
+    PLAN_ROW_REQUIRED_FIELDS: ClassVar = {
         "id", "request_id", "generator_id", "status", "failure_class",
         "metadata_snapshot", "provenance", "error_message",
         "superseded_at", "superseded_by_plan_id", "created_at",
     }
-    PLAN_ITEM_REQUIRED_FIELDS = {
+    PLAN_ITEM_REQUIRED_FIELDS: ClassVar = {
         "id", "plan_id", "ordinal", "strategy", "query",
         "canonical_query_key", "repeat_group", "provenance",
     }
-    LEGACY_LOGS_REQUIRED_FIELDS = {"count", "head"}
-    LEGACY_HEAD_REQUIRED_FIELDS = {
+    LEGACY_LOGS_REQUIRED_FIELDS: ClassVar = {"count", "head"}
+    LEGACY_HEAD_REQUIRED_FIELDS: ClassVar = {
         "id", "created_at", "outcome", "variant", "query",
         "result_count", "elapsed_s", "final_state",
     }
@@ -298,7 +295,7 @@ class TestPipelineSearchPlanDryRunContract(_FakeDbWebServerCase):
     plan dashboard.
     """
 
-    REQUIRED_FIELDS = {
+    REQUIRED_FIELDS: ClassVar = {
         "request_id",
         "outcome",
         "current_generator_id",
@@ -307,16 +304,16 @@ class TestPipelineSearchPlanDryRunContract(_FakeDbWebServerCase):
         "would_supersede_active",
         "error_message",
     }
-    REQUEST_REQUIRED_FIELDS = {
+    REQUEST_REQUIRED_FIELDS: ClassVar = {
         "id", "status", "artist_name", "album_title",
         "mb_release_id", "discogs_release_id", "year",
         "release_group_year", "source",
     }
-    PLAN_REQUIRED_FIELDS = {
+    PLAN_REQUIRED_FIELDS: ClassVar = {
         "generator_id", "status", "items", "provenance",
         "failure_reason", "metadata_snapshot",
     }
-    ITEM_REQUIRED_FIELDS = {
+    ITEM_REQUIRED_FIELDS: ClassVar = {
         "ordinal", "strategy", "query",
         "canonical_query_key", "repeat_group", "provenance",
     }
@@ -336,8 +333,9 @@ class TestPipelineSearchPlanDryRunContract(_FakeDbWebServerCase):
              "title": "The National Anthem"},
         ])
         # Route reads runtime config — patch to a default CratediggerConfig.
-        from lib.config import CratediggerConfig
         import configparser
+
+        from lib.config import CratediggerConfig
         cp = configparser.RawConfigParser()
         cp.read_string("[General]\n")
         self._cfg_patcher = patch(
@@ -457,7 +455,7 @@ class TestPipelineSearchPlanSaturationContract(_FakeDbWebServerCase):
     search-plan dashboard.
     """
 
-    REQUIRED_FIELDS = {
+    REQUIRED_FIELDS: ClassVar = {
         "total_searches",
         "saturated_searches",
         "saturation_rate",
@@ -477,8 +475,9 @@ class TestPipelineSearchPlanSaturationContract(_FakeDbWebServerCase):
             mb_release_id=str(uuid.uuid4()),
         ))
         # Route reads runtime config — patch to a default config.
-        from lib.config import CratediggerConfig
         import configparser
+
+        from lib.config import CratediggerConfig
         cp = configparser.RawConfigParser()
         cp.read_string("[General]\n")
         self._cfg_patcher = patch(
@@ -567,7 +566,7 @@ class TestPipelineSearchPlanSaturationContract(_FakeDbWebServerCase):
         self.assertEqual(data["total_pre_filter_skips"], 3)
 
     def test_invalid_window_days_non_int_returns_400(self):
-        status, data = self._get(
+        status, _data = self._get(
             "/api/pipeline/100/search-plan/saturation?window_days=abc")
         self.assertEqual(status, 400)
 
@@ -604,7 +603,7 @@ class TestPipelineSearchPlanRegenerateContract(_FakeDbWebServerCase):
       * 503 — transient failure (retryable)
     """
 
-    REGEN_REQUIRED_FIELDS = {
+    REGEN_REQUIRED_FIELDS: ClassVar = {
         "request_id", "outcome", "plan_id", "is_supersede",
         "failure_class", "error_message",
         "request_status", "executable",
@@ -613,6 +612,7 @@ class TestPipelineSearchPlanRegenerateContract(_FakeDbWebServerCase):
     def _patch_service(self, *, outcome, plan_id=None, is_supersede=False,
                        failure_class=None, error_message=None):
         from unittest.mock import patch as _patch
+
         from lib.search_plan_service import ServiceResult
 
         result = ServiceResult(
@@ -630,8 +630,9 @@ class TestPipelineSearchPlanRegenerateContract(_FakeDbWebServerCase):
             id=100, status="wanted",
         ))
         # The route reads the runtime config — patch it to a default.
-        from lib.config import CratediggerConfig
         import configparser
+
+        from lib.config import CratediggerConfig
         cp = configparser.RawConfigParser()
         cp.read_string("[General]\n")
         self._cfg_patcher = patch(
@@ -739,6 +740,7 @@ class TestPipelineSearchPlanRegenerateContract(_FakeDbWebServerCase):
 
     def test_regenerate_passes_prepend_artist_flag_to_service(self):
         from unittest.mock import patch as _patch
+
         from lib.search_plan_service import ServiceResult
         with _patch(
             "lib.search_plan_service.SearchPlanService.generate_for_request",
@@ -755,6 +757,7 @@ class TestPipelineSearchPlanRegenerateContract(_FakeDbWebServerCase):
 
     def test_regenerate_passes_missing_prepend_artist_as_default(self):
         from unittest.mock import patch as _patch
+
         from lib.search_plan_service import ServiceResult
         with _patch(
             "lib.search_plan_service.SearchPlanService.generate_for_request",
@@ -828,15 +831,16 @@ class TestPipelineSearchPlanAdvanceContract(_FakeDbWebServerCase):
       * 503 — RESULT_FAILED_TRANSIENT
     """
 
-    ADVANCE_REQUIRED_FIELDS = {
+    ADVANCE_REQUIRED_FIELDS: ClassVar = {
         "request_id", "outcome", "plan_id", "previous_ordinal",
         "new_ordinal", "new_strategy", "new_query", "error_message",
     }
 
     def setUp(self) -> None:
         super().setUp()
-        from lib.config import CratediggerConfig
         import configparser
+
+        from lib.config import CratediggerConfig
         cp = configparser.RawConfigParser()
         cp.read_string("[General]\n")
         self._cfg_patcher = patch(
@@ -850,6 +854,7 @@ class TestPipelineSearchPlanAdvanceContract(_FakeDbWebServerCase):
 
     def _patch_service(self, **result_kwargs):
         from unittest.mock import patch as _patch
+
         from lib.search_plan_service import AdvanceResult
         return _patch(
             "lib.search_plan_service.SearchPlanService.advance_for_request",
@@ -929,6 +934,7 @@ class TestPipelineSearchPlanAdvanceContract(_FakeDbWebServerCase):
 
     def test_advance_passes_to_strategy_to_service(self):
         from unittest.mock import patch as _patch
+
         from lib.search_plan_service import AdvanceResult
         with _patch(
             "lib.search_plan_service.SearchPlanService.advance_for_request",
@@ -962,7 +968,7 @@ class TestPipelineSearchPlanAdvanceContract(_FakeDbWebServerCase):
         with _patch(
             "lib.search_plan_service.SearchPlanService.advance_for_request",
         ) as mock_adv:
-            status, data = self._post(
+            status, _data = self._post(
                 "/api/pipeline/100/search-plan/advance",
                 {"to_ordinal": 1, "to_strategy": "track"})
         self.assertEqual(status, 400)
@@ -996,12 +1002,13 @@ class TestPipelineSearchPlanHistoryContract(_FakeDbWebServerCase):
       * 404 — RESULT_REQUEST_NOT_FOUND
     """
 
-    HISTORY_REQUIRED_FIELDS = {"request_id", "rows", "next_before_id"}
+    HISTORY_REQUIRED_FIELDS: ClassVar = {"request_id", "rows", "next_before_id"}
 
     def setUp(self) -> None:
         super().setUp()
-        from lib.config import CratediggerConfig
         import configparser
+
+        from lib.config import CratediggerConfig
         cp = configparser.RawConfigParser()
         cp.read_string("[General]\n")
         self._cfg_patcher = patch(
@@ -1015,6 +1022,7 @@ class TestPipelineSearchPlanHistoryContract(_FakeDbWebServerCase):
 
     def _patch_service(self, **result_kwargs):
         from unittest.mock import patch as _patch
+
         from lib.search_plan_service import SearchLogHistoryPageResult
         return _patch(
             "lib.search_plan_service.SearchPlanService.history_for_request",
@@ -1062,6 +1070,7 @@ class TestPipelineSearchPlanHistoryContract(_FakeDbWebServerCase):
         """No ``limit`` query param uses the default; service receives
         an int — never passed-through query string."""
         from unittest.mock import patch as _patch
+
         from lib.search_plan_service import SearchLogHistoryPageResult
         with _patch(
             "lib.search_plan_service.SearchPlanService.history_for_request",
@@ -1080,6 +1089,7 @@ class TestPipelineSearchPlanHistoryContract(_FakeDbWebServerCase):
 
     def test_history_passes_before_id_through_to_service(self):
         from unittest.mock import patch as _patch
+
         from lib.search_plan_service import SearchLogHistoryPageResult
         with _patch(
             "lib.search_plan_service.SearchPlanService.history_for_request",
@@ -1130,13 +1140,12 @@ class TestPipelineSearchPlanHistoryContract(_FakeDbWebServerCase):
     def test_history_datetime_rows_are_serialized_to_strings(self):
         """F1: rows with datetime created_at must not 500 — _serialize_row
         must be applied before JSON encoding."""
-        from datetime import datetime, timezone
         rows = [{
             "id": 12340,
             "request_id": 100,
             "query": "q1",
             "outcome": "no_match",
-            "created_at": datetime(2026, 5, 9, 12, 0, 0, tzinfo=timezone.utc),
+            "created_at": datetime(2026, 5, 9, 12, 0, 0, tzinfo=UTC),
         }]
         with self._patch_service(
                 outcome="success", request_id=100, rows=rows,

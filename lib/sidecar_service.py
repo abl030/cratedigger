@@ -18,7 +18,7 @@ import logging
 import os
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
 
 import msgspec
@@ -59,8 +59,8 @@ class SidecarBeets(Protocol):
     ``cfg``/``_cfg`` param-name split between real and fake)."""
 
     def resolve_current_release(
-        self, identity: "ReleaseIdentity", /,
-    ) -> "CurrentBeetsResolution": ...
+        self, identity: ReleaseIdentity, /,
+    ) -> CurrentBeetsResolution: ...
 
 
 @dataclass(frozen=True)
@@ -129,7 +129,7 @@ def write_sidecar_for_request(
         source_username=db.get_recent_successful_uploader(request_id),
         generated_at=(
             generated_at if generated_at is not None
-            else datetime.now(timezone.utc)
+            else datetime.now(UTC)
         ),
     )
     path = os.path.join(album_path, SIDECAR_FILENAME)

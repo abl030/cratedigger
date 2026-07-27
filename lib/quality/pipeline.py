@@ -10,42 +10,22 @@ Pure move: every definition is AST-identical to the original.
 """
 
 from typing import Any
+
 import msgspec
 
-from lib.quality.evidence_types import (
-    AlbumQualityEvidence,
-    AlbumQualityV0Metric,
-    AudioQualityMeasurement,
-    EVIDENCE_PROVENANCE_MEASURED,
-    QualityComparisonBasis,
-    SPECTRAL_TRANSCODE_GRADES,
-    TargetQualityContract,
-    V0ProbeEvidence,
-    V0_PROBE_LOSSLESS_SOURCE,
-    EVIDENCE_SUBJECT_SOURCE,
-    _NONCOMPARABLE_NEUTRAL_V0_PROBE_KIND,
-)
-from lib.quality.ranks import QualityRankConfig
-from lib.quality.filetypes import has_mixed_lossless_and_lossy
 from lib.quality.compare import comparison_format_hint
-from lib.quality.import_result_types import QualityEvidenceActionProvenance
-from lib.quality.gates import (
-    preimport_audio_gate,
-    preimport_nested_gate,
-    spectral_gate_trigger,
-)
 from lib.quality.decisions import (
+    _LOSSLESS_EXTS,
     DECISION_LOSSLESS_SOURCE_LOCKED,
     DECISION_VERIFIED_LOSSLESS_LOCKED,
     MeasuredImportDecisionInput,
     ProvisionalLosslessDecisionInput,
     ProvisionalLosslessDecisionResult,
-    _LOSSLESS_EXTS,
     build_existing_quality_measurement,
     determine_verified_lossless,
     measured_import_decision,
-    provisional_lossless_decision,
     post_import_search_action,
+    provisional_lossless_decision,
     quality_gate_decision,
     spectral_import_decision,
     transcode_detection,
@@ -55,7 +35,27 @@ from lib.quality.dispatch_actions import (
     compute_effective_override_bitrate,
     decision_denylists,
 )
-
+from lib.quality.evidence_types import (
+    _NONCOMPARABLE_NEUTRAL_V0_PROBE_KIND,
+    EVIDENCE_PROVENANCE_MEASURED,
+    EVIDENCE_SUBJECT_SOURCE,
+    SPECTRAL_TRANSCODE_GRADES,
+    V0_PROBE_LOSSLESS_SOURCE,
+    AlbumQualityEvidence,
+    AlbumQualityV0Metric,
+    AudioQualityMeasurement,
+    QualityComparisonBasis,
+    TargetQualityContract,
+    V0ProbeEvidence,
+)
+from lib.quality.filetypes import has_mixed_lossless_and_lossy
+from lib.quality.gates import (
+    preimport_audio_gate,
+    preimport_nested_gate,
+    spectral_gate_trigger,
+)
+from lib.quality.import_result_types import QualityEvidenceActionProvenance
+from lib.quality.ranks import QualityRankConfig
 
 # ---------------------------------------------------------------------------
 # Full pipeline decision — combines all three stages
@@ -100,7 +100,7 @@ def full_pipeline_decision(
     audio_corrupt: bool = False,
     has_nested_audio: bool = False,
     # Rank-model config (defaults() for legacy callers)
-    cfg: "QualityRankConfig | None" = None,
+    cfg: QualityRankConfig | None = None,
     *,
     post_conversion_is_cbr: bool | None = None,
     candidate_v0_probe_avg: int | None = None,
@@ -820,7 +820,7 @@ def _finalize_denylist(result: dict[str, object]) -> dict[str, object]:
 
 def comparison_basis_from_decision(
     result: "dict[str, Any] | None",
-) -> "QualityComparisonBasis | None":
+) -> QualityComparisonBasis | None:
     """Re-type the JSON-plain ``comparison_basis`` a decision dict carries.
 
     The decision dict stores the basis as ``msgspec.to_builtins`` output so
@@ -1055,7 +1055,7 @@ def full_pipeline_decision_from_evidence(
     current: AlbumQualityEvidence | None = None,
     *,
     facts: AlbumQualityEvidenceDecisionFacts | None = None,
-    cfg: "QualityRankConfig | None" = None,
+    cfg: QualityRankConfig | None = None,
 ) -> dict[str, Any]:
     """Run the full quality policy from neutral album-quality evidence.
 

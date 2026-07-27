@@ -33,30 +33,34 @@ from __future__ import annotations
 import logging
 import random
 import re
-import socket
 import time
 import urllib.error
-from typing import Any, Callable, Optional, Protocol, runtime_checkable
+from collections.abc import Callable
+from typing import Any, Protocol, runtime_checkable
 
 import msgspec
 import requests
-
 from ytmusicapi.exceptions import YTMusicError, YTMusicServerError, YTMusicUserError
 
 from lib.beets_distance import (
     BeetsDistanceCache,
     BeetsDistanceResult,
     SyntheticItem,
+)
+from lib.beets_distance import (
     compute_beets_distance as _default_distance_fn,
 )
 from lib.json_narrow import (
     is_dict_like as _is_dict_like,
+)
+from lib.json_narrow import (
     json_dict as _json_dict,
+)
+from lib.json_narrow import (
     json_list as _json_list,
 )
 from lib.pipeline_db import PersistedDistance, PersistedTrack, PersistedYoutubeRow
 from lib.release_identity import detect_release_source, normalize_release_id
-
 
 # Exception classes that the MB / Discogs adapters in ``web/mb.py`` and
 # ``web/discogs.py`` raise on miss / mirror outage.
@@ -121,7 +125,7 @@ _FOREVER_TTL_SECONDS = 2**31 - 1
 
 def _cached_search(
     yt_client: Any,
-    cache: Optional[BeetsDistanceCache],
+    cache: BeetsDistanceCache | None,
     query: str,
     filter_str: str,
     limit: int,
@@ -155,14 +159,14 @@ def _cached_search(
                 msgspec.json.encode(results),
                 _FOREVER_TTL_SECONDS,
             )
-        except Exception:  # noqa: BLE001 — cache writes are best-effort
+        except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
             pass
     return results
 
 
 def _cached_get_album(
     yt_client: Any,
-    cache: Optional[BeetsDistanceCache],
+    cache: BeetsDistanceCache | None,
     browse_id: str,
     *,
     refresh: bool = False,
@@ -190,7 +194,7 @@ def _cached_get_album(
                 msgspec.json.encode(album),
                 _FOREVER_TTL_SECONDS,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
             pass
     return album
 
@@ -294,23 +298,23 @@ class ResolvedDistance(msgspec.Struct, kw_only=True):
 
     mbid: str
     outcome: str
-    distance: Optional[float] = None
-    components: Optional[dict[str, float]] = None
-    matched_tracks: Optional[int] = None
-    total_local_tracks: Optional[int] = None
-    total_mb_tracks: Optional[int] = None
-    extra_local_tracks: Optional[int] = None
-    extra_mb_tracks: Optional[int] = None
-    error_message: Optional[str] = None
+    distance: float | None = None
+    components: dict[str, float] | None = None
+    matched_tracks: int | None = None
+    total_local_tracks: int | None = None
+    total_mb_tracks: int | None = None
+    extra_local_tracks: int | None = None
+    extra_mb_tracks: int | None = None
+    error_message: str | None = None
 
 
 class ResolvedYoutubeRelease(msgspec.Struct, kw_only=True):
     """One YT Music album sibling in the resolved matrix."""
 
     yt_browse_id: str
-    yt_audio_playlist_id: Optional[str] = None
+    yt_audio_playlist_id: str | None = None
     yt_url: str
-    year: Optional[int] = None
+    year: int | None = None
     track_count: int
     tracks: list[SyntheticItem]
     distances: list[ResolvedDistance]
@@ -320,13 +324,13 @@ class YoutubeAlbumResolverResult(msgspec.Struct, kw_only=True):
     """Top-level result. Crosses the wire (CLI JSON + HTTP response)."""
 
     outcome: str
-    release_group_identifier: Optional[str] = None
-    source: Optional[str] = None  # "mb" | "discogs" | None
+    release_group_identifier: str | None = None
+    source: str | None = None  # "mb" | "discogs" | None
     from_cache: bool = False
     youtube_releases: list[ResolvedYoutubeRelease] = msgspec.field(
         default_factory=list[ResolvedYoutubeRelease])
-    error_message: Optional[str] = None
-    duration_ms: Optional[int] = None
+    error_message: str | None = None
+    duration_ms: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -344,19 +348,19 @@ class YoutubeAlbumResolverResult(msgspec.Struct, kw_only=True):
 
 
 # Type aliases for clarity.
-MBLookup = Callable[[str], Optional[dict[str, object]]]
+MBLookup = Callable[[str], dict[str, object] | None]
 """``mb_get_release(id) -> slim release dict | None`` (web/mb.py shape)."""
 
-MBRGReleases = Callable[[str], Optional[dict[str, object]]]
+MBRGReleases = Callable[[str], dict[str, object] | None]
 """``mb_get_release_group_releases(rg) -> {title, type, releases[]}``."""
 
-DiscogsLookup = Callable[[str], Optional[dict[str, object]]]
+DiscogsLookup = Callable[[str], dict[str, object] | None]
 """``discogs_get_release(id) -> slim release dict | None``."""
 
-DiscogsMasterReleases = Callable[[str], Optional[dict[str, object]]]
+DiscogsMasterReleases = Callable[[str], dict[str, object] | None]
 """``discogs_get_master_releases(master_id) -> {title, type, releases[]}``."""
 
-_ReleaseOrGroupLookup = Callable[[str], Optional[dict[str, object]]]
+_ReleaseOrGroupLookup = Callable[[str], dict[str, object] | None]
 """Structurally identical to ``MBLookup``/``MBRGReleases``/
 ``DiscogsLookup``/``DiscogsMasterReleases`` above — used as the
 parameter type for the two source-agnostic helpers
@@ -380,7 +384,7 @@ class YoutubeResolverDB(Protocol):
 
     def get_youtube_album_mapping(
         self, release_group_identifier: str, source: str,
-    ) -> Optional[list[dict[str, Any]]]: ...
+    ) -> list[dict[str, Any]] | None: ...
 
     def upsert_youtube_album_mapping(
         self,
@@ -405,7 +409,7 @@ def resolve_youtube_album(
     discogs_get_master_releases: DiscogsMasterReleases,
     yt_client: Any,
     distance_fn: DistanceFn = _default_distance_fn,
-    cache: Optional[BeetsDistanceCache] = None,
+    cache: BeetsDistanceCache | None = None,
     refresh: bool = False,
     sleep_fn: Callable[[float], None] = _default_jitter_sleep_fn,
     jitter_range: tuple[float, float] = (
@@ -492,7 +496,7 @@ def resolve_youtube_album(
             widen = _resolve_discogs_group(
                 identifier, discogs_get_release,
                 discogs_get_master_releases)
-    except (requests.Timeout, TimeoutError, socket.timeout) as exc:
+    except (requests.Timeout, TimeoutError) as exc:
         return _final(
             outcome="unresolved_timeout",
             error_message=f"mirror timeout while widening "
@@ -522,7 +526,7 @@ def resolve_youtube_album(
     # ``compute_beets_distance`` skips its cross-RG guardrail — there's
     # nothing to compare against. ``rg_id`` still keys the persistence
     # cache (using the leaf's own identifier).
-    distance_rg_id: Optional[str] = None if widen.is_orphan else rg_id
+    distance_rg_id: str | None = None if widen.is_orphan else rg_id
 
     # Step 3: cache-first read.
     #
@@ -580,10 +584,10 @@ def resolve_youtube_album(
     query = _build_search_query(seed_release)
 
     # Step 5-8: search YT, expand siblings, fetch per-YT-album track lists.
-    yt_failure: Optional[tuple[str, str]] = None
-    seed_browse_id: Optional[str] = None
+    yt_failure: tuple[str, str] | None = None
+    seed_browse_id: str | None = None
     yt_album_responses: dict[str, dict[str, Any]] = {}
-    deadline_message: Optional[str] = None
+    deadline_message: str | None = None
     # Round 2 P2-4: accumulate the jitter so operators can see how
     # much of the wall-clock time is the anti-throttle pause vs real
     # network work. Logged at the resolve boundary and attached to
@@ -837,7 +841,7 @@ def resolve_youtube_album(
 # ---------------------------------------------------------------------------
 
 
-def _classify_source(identifier: str) -> Optional[str]:
+def _classify_source(identifier: str) -> str | None:
     """Map ``detect_release_source`` outputs to the table-discriminator string.
 
     The migration stores ``'mb'`` / ``'discogs'`` (CHECK constraint),
@@ -872,18 +876,18 @@ class _GroupResolution(msgspec.Struct, kw_only=True):
     cross-RG guardrail is skipped.
     """
 
-    rg_id: Optional[str] = None
+    rg_id: str | None = None
     sibling_summaries: list[object] = msgspec.field(
         default_factory=list[object]
     )
-    failure_outcome: Optional[str] = None
+    failure_outcome: str | None = None
     is_orphan: bool = False
 
 
 def _safe_leaf_lookup(
     lookup: _ReleaseOrGroupLookup,
     identifier: str,
-) -> Optional[dict[str, object]]:
+) -> dict[str, object] | None:
     """Call a leaf lookup, treating ONLY 404 (and Discogs ValueError) as a miss.
 
     Real adapters (``web.mb.get_release`` / ``web.discogs.get_release``)
@@ -916,7 +920,7 @@ def _safe_leaf_lookup(
 def _safe_group_lookup(
     lookup: _ReleaseOrGroupLookup,
     identifier: str,
-) -> Optional[dict[str, object]]:
+) -> dict[str, object] | None:
     """Call a release-group / master lookup with the same 404-only tolerance."""
     try:
         return lookup(identifier)
@@ -1077,7 +1081,7 @@ def _pick_mb_seed(siblings: list[dict[str, object]]) -> dict[str, object]:
     def _sort_key(s: dict[str, object]) -> tuple[int, str]:
         year = s.get("year")
         return (year if isinstance(year, int) else 9999, str(s.get("id") or ""))
-    return sorted(siblings, key=_sort_key)[0]
+    return min(siblings, key=_sort_key)
 
 
 def _build_search_query(seed_release: dict[str, object]) -> str:
@@ -1094,7 +1098,7 @@ def _build_search_query(seed_release: dict[str, object]) -> str:
 def _pick_yt_seed(
     search_results: list[dict[str, Any]],
     mb_seed: dict[str, object],
-) -> Optional[str]:
+) -> str | None:
     """Pick the YT search result whose ``(year, trackCount)`` is closest
     to the MB seed. Fall back to the top-ranked result on ties.
 
@@ -1107,8 +1111,8 @@ def _pick_yt_seed(
     mb_year = mb_year_raw if isinstance(mb_year_raw, int) else None
     mb_track_count = len(_json_list(mb_seed.get("tracks")))
 
-    best_idx: Optional[int] = None
-    best_score: Optional[tuple[int, int]] = None
+    best_idx: int | None = None
+    best_score: tuple[int, int] | None = None
     for idx, r in enumerate(search_results):
         if not r.get("browseId"):
             continue
@@ -1140,7 +1144,7 @@ def _pick_yt_seed(
     return str(chosen["browseId"])
 
 
-def _parse_year(raw: Any) -> Optional[int]:
+def _parse_year(raw: Any) -> int | None:
     """YT Music carries year as ``str`` ("1996"); MB carries int. Normalise."""
     if raw is None:
         return None
@@ -1284,11 +1288,11 @@ def _synthesize_items(album_resp: dict[str, Any]) -> list[SyntheticItem]:
 def _score_against_siblings(
     synth_items: list[SyntheticItem],
     sibling_mbids: list[str],
-    mb_release_group_id: Optional[str],
+    mb_release_group_id: str | None,
     distance_fn: DistanceFn,
     pdb: YoutubeResolverDB,
     mb_fetcher: _ReleaseOrGroupLookup,
-    deadline_breached: Optional[Callable[[], bool]] = None,
+    deadline_breached: Callable[[], bool] | None = None,
 ) -> list[ResolvedDistance]:
     """Run ``distance_fn`` for every sibling MBID and collect typed results.
 
@@ -1482,11 +1486,11 @@ def _rows_to_youtube_releases(
 def _final(
     *,
     outcome: str,
-    release_group_identifier: Optional[str] = None,
-    source: Optional[str] = None,
+    release_group_identifier: str | None = None,
+    source: str | None = None,
     from_cache: bool = False,
-    youtube_releases: Optional[list[ResolvedYoutubeRelease]] = None,
-    error_message: Optional[str] = None,
+    youtube_releases: list[ResolvedYoutubeRelease] | None = None,
+    error_message: str | None = None,
     started: float,
 ) -> YoutubeAlbumResolverResult:
     return YoutubeAlbumResolverResult(

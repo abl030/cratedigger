@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generated patrol for the harness-session evidence contract (issue #888).
 
 The deterministic pins in ``tests/test_beets_harness_session.py`` name the
@@ -24,21 +23,22 @@ from __future__ import annotations
 
 import unittest
 
-from hypothesis import example, given, strategies as st
+from hypothesis import example, given
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401 - loads the active profile
 from lib.beets import (
-    NO_CHOOSE_MATCH_SCENARIO,
-    VALIDATION_ERROR_SCENARIO,
     _DETAIL_MAX_CHARS,
     _STDERR_TAIL_CHARS,
+    NO_CHOOSE_MATCH_SCENARIO,
+    VALIDATION_ERROR_SCENARIO,
 )
 from lib.quality import ValidationResult
 from lib.validation_envelope import derive_validation_log_columns
 from tests.test_beets_harness_session import (
     DECIDED_SCENARIOS,
-    NON_STRING_TYPE_LINE,
     NO_CHOOSE_MATCH_VERDICT,
+    NON_STRING_TYPE_LINE,
     SESSION_END_LINE,
     SHOULD_RESUME_LINE,
     TARGET_MBID,
@@ -55,7 +55,6 @@ from tests.test_beets_harness_session import (
     run_fake_harness,
 )
 from web.classify import LogEntry, classify_log_entry
-
 
 # ---------------------------------------------------------------------------
 # Transcript worlds

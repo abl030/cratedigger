@@ -42,7 +42,7 @@ from tests.read_projection_registry import (
 
 def _find_parity_tests_for_method(
     method_name: str, tree: ast.Module,
-) -> "list[str]":
+) -> list[str]:
     """Return parity test functions in ``tree`` that exercise ``method_name``.
 
     A test qualifies as a parity test for ``method_name`` when its body
@@ -74,7 +74,7 @@ def _find_parity_tests_for_method(
             and sub.func.attr == method_name
         )
 
-    hits: "list[str]" = []
+    hits: list[str] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef):
             continue
@@ -87,7 +87,7 @@ def _find_parity_tests_for_method(
 
         # Names bound from an expression that contains a call to ``M``
         # (covers ``rows = db.M()`` and ``rows = list(db.M())``).
-        m_bound_names: "set[str]" = set()
+        m_bound_names: set[str] = set()
         for sub in ast.walk(node):
             if isinstance(sub, ast.Assign) and any(
                 _is_call_to_method(v) for v in ast.walk(sub.value)
@@ -143,7 +143,7 @@ class TestReadProjectionAudit(unittest.TestCase):
         cls._test_tree = ast.parse(test_path.read_text())
 
     def test_every_read_mirror_is_covered(self) -> None:
-        uncovered: "list[str]" = []
+        uncovered: list[str] = []
         for name in enumerate_read_mirrors():
             if name in PARITY_REGISTRY:
                 continue

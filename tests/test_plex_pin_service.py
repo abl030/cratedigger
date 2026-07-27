@@ -5,17 +5,17 @@ client (find/set) injected as kwarg-DI seams — no network, no MagicMock db.
 Every assertion targets persisted pin state, per the orchestration-test rule.
 """
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from lib.config import CratediggerConfig
-from lib.util import PlexAlbumRef
 from lib.plex_pin_service import (
     capture_plex_added_at_pin,
     reconcile_plex_added_at_pins,
 )
+from lib.util import PlexAlbumRef
 from tests.fakes import FakePipelineDB
 
-NOW = datetime(2026, 6, 28, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 6, 28, 12, 0, tzinfo=UTC)
 
 
 def _cfg(**kw):

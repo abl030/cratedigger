@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import unittest
 
-from hypothesis import example, given, strategies as st
+from hypothesis import example, given
+from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401
 from lib.import_queue import (
     IMPORT_JOB_FORCE,
     IMPORT_JOB_PREVIEW_EVIDENCE_READY,
     IMPORT_JOB_PREVIEW_STATUSES,
 )
-import tests._hypothesis_profiles  # noqa: F401
 from tests.fakes import FakePipelineDB
 
 

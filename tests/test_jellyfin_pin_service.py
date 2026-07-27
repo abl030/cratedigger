@@ -10,18 +10,18 @@ properties that patrol the same invariants live in
 tests/test_jellyfin_pins_generated.py.
 """
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from lib.config import CratediggerConfig
-from lib.util import JellyfinAlbumRef, JellyfinItemRef
 from lib.jellyfin_pin_service import (
     capture_jellyfin_date_created_pin,
     reconcile_jellyfin_date_created_pins,
 )
+from lib.util import JellyfinAlbumRef, JellyfinItemRef
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 
-NOW = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 7, 10, 12, 0, tzinfo=UTC)
 ORIGINAL = "2026-04-26T18:31:04.4425337Z"
 BUMPED = "2026-07-10T11:55:00.0000000Z"
 
@@ -66,7 +66,7 @@ class TestCapture(unittest.TestCase):
         """A Jellyfin rebuild must not redefine an old album as newly added."""
         db = FakePipelineDB()
         historical = int(datetime(
-            2010, 6, 10, 10, 10, 38, tzinfo=timezone.utc
+            2010, 6, 10, 10, 10, 38, tzinfo=UTC
         ).timestamp())
         res = capture_jellyfin_date_created_pin(
             _cfg(), db, "Eldar/2010 - Amaterasu Shiroi", 2506,
@@ -85,7 +85,7 @@ class TestCapture(unittest.TestCase):
     def test_plex_history_never_moves_a_jellyfin_baseline_forward(self):
         db = FakePipelineDB()
         later = int(datetime(
-            2026, 7, 11, tzinfo=timezone.utc
+            2026, 7, 11, tzinfo=UTC
         ).timestamp())
         res = capture_jellyfin_date_created_pin(
             _cfg(), db, "A/B", 1,
@@ -211,7 +211,7 @@ class TestCapturePathChangedUpgrade(unittest.TestCase):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=8504,
-            created_at=datetime(2026, 6, 4, 4, 45, 50, tzinfo=timezone.utc)))
+            created_at=datetime(2026, 6, 4, 4, 45, 50, tzinfo=UTC)))
         res = capture_jellyfin_date_created_pin(
             _cfg(), db, self.NEW, 8504,
             replaced_album_paths=[self.OLD],
@@ -230,10 +230,10 @@ class TestCapturePathChangedUpgrade(unittest.TestCase):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=10, status="replaced",
-            created_at=datetime(2026, 2, 1, tzinfo=timezone.utc)))
+            created_at=datetime(2026, 2, 1, tzinfo=UTC)))
         db.seed_request(make_request_row(
             id=11, replaces_request_id=10,
-            created_at=datetime(2026, 6, 1, tzinfo=timezone.utc)))
+            created_at=datetime(2026, 6, 1, tzinfo=UTC)))
         res = capture_jellyfin_date_created_pin(
             _cfg(), db, "New/Path", 11,
             replaced_album_paths=["Old/Path"],
@@ -247,8 +247,8 @@ class TestCapturePathChangedUpgrade(unittest.TestCase):
     def test_floor_prefers_an_older_plex_history(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
-            id=1, created_at=datetime(2026, 6, 4, tzinfo=timezone.utc)))
-        historical = int(datetime(2026, 4, 1, tzinfo=timezone.utc).timestamp())
+            id=1, created_at=datetime(2026, 6, 4, tzinfo=UTC)))
+        historical = int(datetime(2026, 4, 1, tzinfo=UTC).timestamp())
         res = capture_jellyfin_date_created_pin(
             _cfg(), db, "New/Path", 1,
             historical_added_at=historical,
@@ -263,9 +263,9 @@ class TestCapturePathChangedUpgrade(unittest.TestCase):
     def test_floor_ignores_a_newer_plex_history(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
-            id=1, created_at=datetime(2026, 6, 4, tzinfo=timezone.utc)))
-        historical = int(datetime(2026, 7, 1, tzinfo=timezone.utc).timestamp())
-        res = capture_jellyfin_date_created_pin(
+            id=1, created_at=datetime(2026, 6, 4, tzinfo=UTC)))
+        historical = int(datetime(2026, 7, 1, tzinfo=UTC).timestamp())
+        capture_jellyfin_date_created_pin(
             _cfg(), db, "New/Path", 1,
             historical_added_at=historical,
             replaced_album_paths=["Old/Path"],

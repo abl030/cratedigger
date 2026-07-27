@@ -17,10 +17,10 @@ wire contract notes below are verified against slskd 0.24.5 on doc2:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import logging
-from typing import Any
 import uuid
+from dataclasses import dataclass
+from typing import Any
 from urllib.parse import quote
 
 import msgspec
@@ -30,9 +30,10 @@ from requests.adapters import HTTPAdapter
 from lib.config import CratediggerConfig
 from lib.json_narrow import (
     is_dict_like as _is_dict,
+)
+from lib.json_narrow import (
     is_str_object_dict as _is_dict_typed,
 )
-
 
 logger = logging.getLogger("cratedigger")
 

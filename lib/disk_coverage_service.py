@@ -6,7 +6,7 @@ present in beets?" without treating ``album_requests.status`` as disk state.
 
 from collections import Counter
 from collections.abc import Mapping
-from typing import Any, Protocol, TYPE_CHECKING, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import msgspec
 

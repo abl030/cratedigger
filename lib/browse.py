@@ -6,12 +6,12 @@ import logging
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from cratedigger import SlskdDirectory, SlskdFile
     from lib.config import CratediggerConfig
     from lib.context import CratediggerContext
-    from cratedigger import SlskdDirectory, SlskdFile
 
 
 logger = logging.getLogger("cratedigger")
@@ -33,7 +33,9 @@ def _routine_browse_http_status(error: Exception) -> int | None:
 
 @dataclass(frozen=True)
 class BrowseManyResult:
-    directories: dict[tuple[str, str], Any] = field(default_factory=lambda: {})
+    directories: dict[tuple[str, str], Any] = field(
+        default_factory=lambda: {},  # noqa: PIE807 - preserves contextual generic type
+    )
     negative_skips: set[tuple[str, str]] = field(default_factory=lambda: set())
     browse_attempts: int = 0
 
@@ -318,7 +320,7 @@ def download_filter(
     download_cfg: CratediggerConfig,
 ) -> SlskdDirectory:
     """Return a filtered directory listing without mutating the input."""
-    logging.debug("download_filtering")
+    logger.debug("download_filtering")
     if download_cfg.download_filtering:
         from lib.quality import audio_file_matches
 

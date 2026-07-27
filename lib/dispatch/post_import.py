@@ -11,22 +11,22 @@ siblings (``lib.dispatch.outcome_actions``, ``harness.import_one``).
 
 from __future__ import annotations
 
-from typing import Sequence, TYPE_CHECKING
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 from lib import transitions
 
 # Module-level DI seam for ``transitions.finalize_request``.
 finalize_request = transitions.finalize_request
 
+from lib.dispatch.quality_gate import QualityGatePlan
+from lib.dispatch.types import QualityGateFn
 from lib.quality import extract_usernames, resolve_retained_search_override
 from lib.quality.decisions import (
     PostImportSearchAction,
     post_import_search_action_if_known,
 )
 from lib.quality.dispatch_actions import decision_denylists
-
-from lib.dispatch.quality_gate import QualityGatePlan
-from lib.dispatch.types import QualityGateFn
 from lib.terminal_outcomes import PendingImportTerminalOutcome, TerminalDenylist
 
 if TYPE_CHECKING:
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 
 
 def _apply_or_stage_transition(
-    db: "PipelineDB",
+    db: PipelineDB,
     request_id: int,
     pending: PendingImportTerminalOutcome | None,
     transition: transitions.RequestTransition,
@@ -48,7 +48,7 @@ def _apply_or_stage_transition(
 
 
 def _apply_or_stage_denylists(
-    db: "PipelineDB",
+    db: PipelineDB,
     request_id: int,
     pending: PendingImportTerminalOutcome | None,
     usernames: set[str],
@@ -71,7 +71,7 @@ def _run_or_stage_quality_gate(
     quality_gate_fn: QualityGateFn,
     pending: PendingImportTerminalOutcome | None,
     *,
-    db: "PipelineDB",
+    db: PipelineDB,
     request_id: int,
     **kwargs: object,
 ) -> PendingImportTerminalOutcome | None:
@@ -117,7 +117,7 @@ def _resolve_post_import_search_policy(
 
 
 def _apply_post_import_search_action(
-    db: "PipelineDB",
+    db: PipelineDB,
     *,
     request_id: int,
     pending: PendingImportTerminalOutcome | None,

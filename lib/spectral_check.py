@@ -13,10 +13,12 @@ import os
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
-from typing import Optional, TypedDict
+from typing import TypedDict
 
 from lib.quality import (
     AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS,
+)
+from lib.quality import (
     CODEC_FAMILY_AAC,
     CODEC_FAMILY_LOSSLESS,
     CODEC_FAMILY_MP3,
@@ -160,7 +162,7 @@ def codec_family_from_extension(filepath: str) -> CodecFamily:
 def compute_ultrasonic_deficit_db(
     ref_db: float,
     extension_slices: "list[_Slice]",
-) -> Optional[float]:
+) -> float | None:
     """Level-invariant ultrasonic deficit for one track.
 
     ``U = ref_db(1-4kHz) - mean(20.5-22kHz slices)`` — the reference band
@@ -186,7 +188,6 @@ def compute_ultrasonic_deficit_db(
         return None
     return ref_db - (sum(values) / len(values))
 
-
 # --- Data classes ---
 
 class _Slice(TypedDict):
@@ -200,18 +201,18 @@ class TrackResult:
     grade: str                                  # "genuine" | "marginal" | "suspect" | "error"
     hf_deficit_db: float = 0.0
     cliff_detected: bool = False
-    cliff_freq_hz: Optional[int] = None
-    estimated_bitrate_kbps: Optional[int] = None
-    error: Optional[str] = None
+    cliff_freq_hz: int | None = None
+    estimated_bitrate_kbps: int | None = None
+    error: str | None = None
     # issue #829 Phase 5 PR1 capture — never fed into grade/cliff_detected.
     codec_family: CodecFamily = CODEC_FAMILY_OTHER
-    ultrasonic_deficit_db: Optional[float] = None
+    ultrasonic_deficit_db: float | None = None
 
 
 @dataclass
 class AlbumResult:
     grade: str                                  # "genuine" | "suspect" | "likely_transcode"
-    estimated_bitrate_kbps: Optional[int] = None
+    estimated_bitrate_kbps: int | None = None
     suspect_pct: float = 0.0
     tracks: list[TrackResult] = field(default_factory=list[TrackResult])
     # issue #829 Phase 5 PR1 capture — never consumed by ``grade``/
@@ -222,10 +223,10 @@ class AlbumResult:
     # ``codec_family`` is the first track's family (albums are homogeneous
     # in practice); ``spectral_measurement_version`` is always stamped
     # ``SPECTRAL_MEASUREMENT_VERSION`` whenever this function runs.
-    cliff_hz: Optional[int] = None
+    cliff_hz: int | None = None
     codec_family: CodecFamily | None = None
-    ultrasonic_deficit_db: Optional[float] = None
-    spectral_measurement_version: Optional[int] = None
+    ultrasonic_deficit_db: float | None = None
+    spectral_measurement_version: int | None = None
 
 
 # --- Core functions ---
@@ -321,7 +322,7 @@ def classify_track(
     cliff_freq_hz: int | None,
     *,
     codec_family: CodecFamily = CODEC_FAMILY_OTHER,
-    ultrasonic_deficit_db: Optional[float] = None,
+    ultrasonic_deficit_db: float | None = None,
 ) -> TrackResult:
     """Classify a single track based on HF deficit and cliff detection.
 
@@ -334,9 +335,7 @@ def classify_track(
     cliff_detected = cliff_freq_hz is not None
     estimated_br = estimate_bitrate_from_cliff(cliff_freq_hz)
 
-    if cliff_detected:
-        grade = "suspect"
-    elif hf_deficit_db >= HF_DEFICIT_SUSPECT:
+    if cliff_detected or hf_deficit_db >= HF_DEFICIT_SUSPECT:
         grade = "suspect"
     elif hf_deficit_db >= HF_DEFICIT_MARGINAL:
         grade = "marginal"
@@ -377,7 +376,7 @@ def classify_album(
 
 def aggregate_album_spectral_capture(
     track_results: "list[TrackResult]",
-) -> "tuple[Optional[int], CodecFamily | None, Optional[float]]":
+) -> "tuple[int | None, CodecFamily | None, float | None]":
     """Aggregate per-track issue #829 Phase 5 PR1 capture facts to
     album-level ``(cliff_hz, codec_family, ultrasonic_deficit_db)``.
 
@@ -464,11 +463,11 @@ def _get_band_rms(
     cmd = ["sox", _safe_path(filepath), "-n"]
     if trim_seconds:
         cmd.extend(["trim", "0", str(trim_seconds)])
-    cmd.extend(["sinc", "%d-%d" % (lo_hz, hi_hz), "stat"])
+    cmd.extend(["sinc", f"{lo_hz:d}-{hi_hz:d}", "stat"])
     # errors="replace": sox echoes filename + tag bytes; non-UTF-8 metadata
     # would otherwise raise UnicodeDecodeError during capture.
     result = subprocess.run(cmd, capture_output=True, text=True,
-                            errors="replace", timeout=60)
+                            errors="replace", timeout=60, check=False)
     rms = parse_rms_from_stat(result.stderr)
     if rms is None:
         last_line = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else f"sox exit {result.returncode}"
@@ -508,7 +507,7 @@ def _ffmpeg_to_wav(src: str, dst: str, trim_seconds: int = 30) -> None:
         cmd.extend(["-t", str(trim_seconds)])
     cmd.extend(["-ar", "48000", "-ac", "2", "-f", "wav", "-bitexact", dst])
     result = subprocess.run(cmd, capture_output=True, text=True,
-                            errors="replace", timeout=30)
+                            errors="replace", timeout=30, check=False)
     if result.returncode != 0:
         last_line = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else f"ffmpeg exit {result.returncode}"
         raise _DecodeFailedError(f"ffmpeg: {last_line}")
@@ -558,7 +557,7 @@ def analyze_track(filepath: str, trim_seconds: int = 30) -> TrackResult:
             grade="error", error="sox/ffmpeg timeout",
             codec_family=codec_family,
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         return TrackResult(
             grade="error", error=str(e), codec_family=codec_family,
         )
@@ -573,10 +572,7 @@ def _analyze_decoded(sox_input: str, sox_trim: int) -> TrackResult:
     # Reference band: 1-4kHz. None RMS at the reference is a decode-side
     # failure (band would have musical content); reserve the silent-track
     # early-out for genuinely near-zero RMS only.
-    try:
-        ref_rms = _get_band_rms(sox_input, 1000, 4000, sox_trim)
-    except _DecodeFailedError:
-        raise
+    ref_rms = _get_band_rms(sox_input, 1000, 4000, sox_trim)
     if ref_rms < 0.000001:
         return TrackResult(grade="genuine", hf_deficit_db=0.0)
 

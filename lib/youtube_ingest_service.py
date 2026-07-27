@@ -33,16 +33,16 @@ deterministically.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-
 import logging
 import shutil
-from datetime import datetime, timezone
+from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Literal, Optional, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import msgspec
 
+from lib import pipeline_db as _pipeline_db_mod
 from lib.import_queue import (
     ImportJob,
     YoutubeImportPayload,
@@ -51,11 +51,15 @@ from lib.import_queue import (
 )
 from lib.json_narrow import (
     is_dict_like as _is_dict_like,
+)
+from lib.json_narrow import (
     json_dict as _json_dict,
+)
+from lib.json_narrow import (
     json_list as _json_list,
 )
 from lib.release_identity import detect_release_source, normalize_release_id
-from lib import pipeline_db as _pipeline_db_mod  # noqa: F401 — module-import so
+
 # ``except _pipeline_db_mod.YoutubeInFlightError`` resolves the class at catch
 # time. A symbol import (``from lib.pipeline_db import YoutubeInFlightError``)
 # would bind once at module load; tests/test_pipeline_db.py does
@@ -160,19 +164,19 @@ class YoutubeIngestMetadata(msgspec.Struct, kw_only=True):
     # ``expected_track_count`` is the precheck-validated count carried
     # through so the worker can enforce R10 without re-reading the
     # resolver row.
-    audio_playlist_id: Optional[str] = None
-    expected_track_count: Optional[int] = None
-    resolver_mapping_id: Optional[int] = None
-    per_track_video_ids: Optional[list[str]] = None
+    audio_playlist_id: str | None = None
+    expected_track_count: int | None = None
+    resolver_mapping_id: int | None = None
+    per_track_video_ids: list[str] | None = None
 
     # Terminal-state fields. Populated by the worker on
     # ``youtube_success`` or ``youtube_failed`` via the JSONB merge.
-    reason: Optional[str] = None
-    stderr_excerpt: Optional[str] = None
-    observed_track_count: Optional[int] = None
-    worker_claimed_at: Optional[str] = None
-    worker_id: Optional[str] = None
-    cleanup_error: Optional[str] = None
+    reason: str | None = None
+    stderr_excerpt: str | None = None
+    observed_track_count: int | None = None
+    worker_claimed_at: str | None = None
+    worker_id: str | None = None
+    cleanup_error: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -189,10 +193,10 @@ class SubmitResult(msgspec.Struct, kw_only=True):
     """
 
     outcome: SubmitOutcome
-    download_log_id: Optional[int] = None
-    import_job_id: Optional[int] = None
-    blocking_resource: Optional[str] = None
-    detail: Optional[str] = None
+    download_log_id: int | None = None
+    import_job_id: int | None = None
+    blocking_resource: str | None = None
+    detail: str | None = None
 
 
 class RunResult(msgspec.Struct, kw_only=True):
@@ -204,7 +208,7 @@ class RunResult(msgspec.Struct, kw_only=True):
     """
 
     outcome: RunOutcome
-    reason: Optional[str] = None
+    reason: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -224,9 +228,9 @@ class YtdlpRunResult(msgspec.Struct, kw_only=True):
     """
 
     exit_code: int
-    stderr_excerpt: Optional[str]
+    stderr_excerpt: str | None
     staged_files: list[Path]
-    work_dir: Optional[Path] = None
+    work_dir: Path | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -258,7 +262,7 @@ _YOUTUBE_FAILURE_TAXONOMY: tuple[tuple[str, str], ...] = (
 )
 
 
-def classify_youtube_failure(stderr_excerpt: Optional[str]) -> str:
+def classify_youtube_failure(stderr_excerpt: str | None) -> str:
     """Map a yt-dlp stderr excerpt to one of the R20 reason codes.
 
     Pure function — no IO, deterministic. Returns ``youtube_unknown``
@@ -286,7 +290,7 @@ YtdlpRunnerFn = Callable[..., YtdlpRunResult]
 :class:`YtdlpRunResult`."""
 
 
-MbTrackCountFn = Callable[[str], Optional[int]]
+MbTrackCountFn = Callable[[str], int | None]
 """``mb_track_count_fn(mbid) -> total tracks for that MB release | None``.
 
 Used by R7 (submission-side precheck) and R10 (worker-side gate). The
@@ -301,7 +305,7 @@ audio files from yt-dlp's temp output to
 :func:`_default_stage_dir`."""
 
 
-ReleaseGroupResolverFn = Callable[[Mapping[str, Any]], Optional[tuple[str, str]]]
+ReleaseGroupResolverFn = Callable[[Mapping[str, Any]], tuple[str, str] | None]
 """``release_group_resolver_fn(request_row) -> (source, rg_id) | None``.
 
 Used by ``submit`` to find the ``(release_group_identifier, source)``
@@ -333,11 +337,11 @@ class _PipelineDB(Protocol):
     in ``FakePipelineDB`` without monkey-patching.
     """
 
-    def get_request(self, request_id: int) -> "AlbumRequestRow | None": ...
+    def get_request(self, request_id: int) -> AlbumRequestRow | None: ...
 
     def get_youtube_album_mapping(
         self, release_group_identifier: str, source: str,
-    ) -> Optional[list[dict[str, Any]]]: ...
+    ) -> list[dict[str, Any]] | None: ...
 
     def find_youtube_album_mapping_for_release(
         self,
@@ -345,7 +349,7 @@ class _PipelineDB(Protocol):
         source: str,
         release_id: str,
         browse_id: str,
-    ) -> Optional[dict[str, Any]]: ...
+    ) -> dict[str, Any] | None: ...
 
     def get_tracks(self, request_id: int) -> list[dict[str, Any]]: ...
 
@@ -354,11 +358,11 @@ class _PipelineDB(Protocol):
         *,
         request_id: int,
         browse_id: str,
-        audio_playlist_id: Optional[str],
+        audio_playlist_id: str | None,
         yt_url: str,
         expected_track_count: int,
-        resolver_mapping_id: Optional[int] = None,
-        per_track_video_ids: Optional[list[str]] = None,
+        resolver_mapping_id: int | None = None,
+        per_track_video_ids: list[str] | None = None,
     ) -> int: ...
 
     def update_youtube_terminal(
@@ -370,16 +374,16 @@ class _PipelineDB(Protocol):
 
     def get_download_log_entry(
         self, log_id: int,
-    ) -> "Optional[DownloadLogWithEvidenceRow]": ...
+    ) -> DownloadLogWithEvidenceRow | None: ...
 
     def enqueue_import_job(
         self,
         job_type: str,
         *,
-        request_id: Optional[int] = None,
-        dedupe_key: Optional[str] = None,
-        payload: Optional[dict[str, Any]] = None,
-        message: Optional[str] = None,
+        request_id: int | None = None,
+        dedupe_key: str | None = None,
+        payload: dict[str, Any] | None = None,
+        message: str | None = None,
     ) -> Any: ...
 
     def enqueue_youtube_import_and_mark_success(
@@ -422,7 +426,7 @@ def _default_ytdlp_runner(**_kwargs: Any) -> YtdlpRunResult:
         "production implementation; tests inject a fake")
 
 
-def _default_mb_track_count(_mbid: str) -> Optional[int]:
+def _default_mb_track_count(_mbid: str) -> int | None:
     """Sentinel default — production wiring lives in
     :func:`default_mb_track_count_from_mirror` below.
 
@@ -443,7 +447,7 @@ def _default_mb_track_count(_mbid: str) -> Optional[int]:
         "callers, or inject a fake in tests")
 
 
-def default_mb_track_count_from_mirror(mbid: str) -> Optional[int]:
+def default_mb_track_count_from_mirror(mbid: str) -> int | None:
     """Production ``mb_track_count_fn`` — counts tracks via the MB mirror.
 
     Thin wrapper around ``web.mb.get_release`` that counts entries in the
@@ -467,7 +471,7 @@ def default_mb_track_count_from_mirror(mbid: str) -> Optional[int]:
     return len(_json_list(release.get("tracks")))
 
 
-def default_youtube_ingest_service_factory(pdb: _PipelineDB) -> "YoutubeIngestService":
+def default_youtube_ingest_service_factory(pdb: _PipelineDB) -> YoutubeIngestService:
     """Construct a production ``YoutubeIngestService`` for CLI / API.
 
     Wires the live MB-mirror ``mb_track_count_fn`` (other ports retain
@@ -501,7 +505,7 @@ def _default_stage_dir(src: Path, dest: Path) -> None:
 
 def _default_release_group_resolver(
     request_row: Mapping[str, Any],
-) -> Optional[tuple[str, str]]:
+) -> tuple[str, str] | None:
     """Default release-group resolver: trust ``mb_release_group_id`` only.
 
     Returns ``("mb", rg_id)`` when the request row carries a populated
@@ -515,7 +519,7 @@ def _default_release_group_resolver(
 
 
 def _default_clock() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -987,10 +991,10 @@ class YoutubeIngestService:
         download_log_id: int,
         *,
         reason: str,
-        stderr_excerpt: Optional[str],
-        observed_track_count: Optional[int],
-        detail: Optional[str] = None,
-        extra_metadata: Optional[dict[str, Any]] = None,
+        stderr_excerpt: str | None,
+        observed_track_count: int | None,
+        detail: str | None = None,
+        extra_metadata: dict[str, Any] | None = None,
     ) -> RunResult:
         """Write the terminal ``youtube_failed`` row and return RunResult.
 
@@ -1017,7 +1021,7 @@ class YoutubeIngestService:
                 "youtube_failed",
                 terminal_metadata,
             )
-        except Exception as exc:  # noqa: BLE001 — terminal write
+        except Exception as exc:
             log.error(
                 "youtube_ingest_service: update_youtube_terminal failed "
                 "for download_log_id=%s: %s", download_log_id, exc)
@@ -1120,7 +1124,7 @@ class YoutubeIngestService:
                 mapping_row, target_release_id)
             try:
                 stored_count = self._stored_track_count(request_id)
-            except Exception as exc:  # noqa: BLE001 — DB/read hiccup
+            except Exception as exc:
                 raise _TransientPrecheckFailure(
                     f"DB error reading stored tracklist for request "
                     f"{request_id}: {exc}"
@@ -1165,7 +1169,7 @@ class YoutubeIngestService:
             )
         try:
             current_mb_count = self.mb_track_count_fn(request_mbid)
-        except Exception as exc:  # noqa: BLE001 — MB mirror hiccup
+        except Exception as exc:
             log.warning(
                 "youtube_ingest_service: mb_track_count_fn(%s) raised %s",
                 request_mbid, exc)
@@ -1188,14 +1192,14 @@ class YoutubeIngestService:
             )
         return int(current_mb_count)
 
-    def _stored_track_count(self, request_id: int) -> Optional[int]:
+    def _stored_track_count(self, request_id: int) -> int | None:
         tracks = self.pdb.get_tracks(int(request_id))
         if not tracks:
             return None
         return len(tracks)
 
     @staticmethod
-    def _request_mbid(request_row: Mapping[str, Any]) -> Optional[str]:
+    def _request_mbid(request_row: Mapping[str, Any]) -> str | None:
         """Return the request's MB release id, or ``None`` for Discogs-only.
 
         ``mb_release_id`` may contain a numeric Discogs id for legacy
@@ -1210,7 +1214,7 @@ class YoutubeIngestService:
     @staticmethod
     def _request_discogs_release_id(
         request_row: Mapping[str, Any],
-    ) -> Optional[str]:
+    ) -> str | None:
         for key in ("discogs_release_id", "mb_release_id"):
             value = normalize_release_id(request_row.get(key))
             if detect_release_source(value) == "discogs":
@@ -1221,7 +1225,7 @@ class YoutubeIngestService:
     def _distance_entry(
         mapping_row: dict[str, Any],
         target_release_id: str,
-    ) -> Optional[dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """Look up the resolver distance entry for one release id.
 
         Walks the row's ``distances`` array, returning the first entry
@@ -1242,7 +1246,7 @@ class YoutubeIngestService:
         cls,
         mapping_row: dict[str, Any],
         target_release_id: str,
-    ) -> Optional[int]:
+    ) -> int | None:
         """Look up the resolver's cached total tracks for one release id."""
         entry = cls._distance_entry(mapping_row, target_release_id)
         if entry is None:
@@ -1255,7 +1259,7 @@ class YoutubeIngestService:
         except (TypeError, ValueError):
             return None
 
-    def _cleanup_ytdlp_run(self, run: YtdlpRunResult) -> Optional[str]:
+    def _cleanup_ytdlp_run(self, run: YtdlpRunResult) -> str | None:
         """Best-effort delete the scratch paths used by one yt-dlp run."""
         return self._cleanup_paths(self._ytdlp_cleanup_paths(run))
 
@@ -1280,7 +1284,7 @@ class YoutubeIngestService:
         return paths
 
     @staticmethod
-    def _cleanup_paths(paths: list[Path]) -> Optional[str]:
+    def _cleanup_paths(paths: list[Path]) -> str | None:
         errors: list[str] = []
         seen: set[str] = set()
         for raw_path in paths:
@@ -1342,7 +1346,7 @@ def _slug(value: Any) -> str:
     return out[:80]
 
 
-def _safe_excerpt(text: Optional[str], limit: int = 4096) -> str:
+def _safe_excerpt(text: str | None, limit: int = 4096) -> str:
     """Cap a stderr / exception string before persistence.
 
     Bounded so a runaway error message cannot bloat the JSONB column.
@@ -1356,7 +1360,7 @@ def _safe_excerpt(text: Optional[str], limit: int = 4096) -> str:
     return text[:limit] + "…[truncated]"
 
 
-def _positive_int(value: Any) -> Optional[int]:
+def _positive_int(value: Any) -> int | None:
     try:
         parsed = int(value)
     except (TypeError, ValueError):
@@ -1364,7 +1368,7 @@ def _positive_int(value: Any) -> Optional[int]:
     return parsed if parsed > 0 else None
 
 
-def _mapping_row_id(mapping_row: dict[str, Any]) -> Optional[int]:
+def _mapping_row_id(mapping_row: dict[str, Any]) -> int | None:
     raw = mapping_row.get("id")
     if isinstance(raw, int):
         return raw
@@ -1374,7 +1378,7 @@ def _mapping_row_id(mapping_row: dict[str, Any]) -> Optional[int]:
         return None
 
 
-def _per_track_video_ids(mapping_row: dict[str, Any]) -> Optional[list[str]]:
+def _per_track_video_ids(mapping_row: dict[str, Any]) -> list[str] | None:
     ids: list[str] = []
     for track_raw in _json_list(mapping_row.get("yt_tracks")):
         if not _is_dict_like(track_raw):
@@ -1388,14 +1392,14 @@ def _per_track_video_ids(mapping_row: dict[str, Any]) -> Optional[list[str]]:
     return ids or None
 
 
-def _download_log_id_from_import_job(job: ImportJob) -> Optional[int]:
+def _download_log_id_from_import_job(job: ImportJob) -> int | None:
     """Read the typed audit ancestor from a decoded YouTube queue job."""
     if isinstance(job.payload, YoutubeImportPayload):
         return job.payload.download_log_id
     return None
 
 
-def _cleanup_metadata(cleanup_error: Optional[str]) -> Optional[dict[str, Any]]:
+def _cleanup_metadata(cleanup_error: str | None) -> dict[str, Any] | None:
     if not cleanup_error:
         return None
     return {"cleanup_error": cleanup_error}

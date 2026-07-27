@@ -7,31 +7,31 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from hypothesis import example, given, strategies as st
 import msgspec
+from hypothesis import example, given
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401 - registers active profile
-
 from harness.import_one import projected_is_cbr_from_bitrates
 from lib.beets_db import (
     CurrentBeetsUnique,
     release_identity_for_lookup,
 )
 from lib.import_evidence import ensure_current_evidence_for_action
-from lib.measurement import PreimportMeasurement
 from lib.import_preview import (
     EnrichmentPlan,
     enrich_current_v0_research_for_preview,
     enrich_incomplete_current_evidence_for_request,
     load_current_evidence_for_preview,
-    prepare_current_evidence_for_failure,
     persist_exact_current_spectral_from_attempt,
     plan_current_evidence_enrichment,
+    prepare_current_evidence_for_failure,
 )
+from lib.measurement import PreimportMeasurement
 from lib.pipeline_db.download_log import _DownloadLogMixin
 from lib.quality import (
-    AlbumQualityV0Metric,
     AlbumQualityEvidenceFile,
+    AlbumQualityV0Metric,
     AudioQualityMeasurement,
     ImportResult,
     MeasuredImportDecisionInput,
@@ -901,7 +901,6 @@ class TestQualityLineagePins(unittest.TestCase):
             def failed_probe(_path: str):
                 nonlocal probe_calls
                 probe_calls += 1
-                return None
 
             result = None
             for _ in range(repeats):

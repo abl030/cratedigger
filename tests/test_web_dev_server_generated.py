@@ -1,11 +1,9 @@
-#!/usr/bin/env python3
 """Generated live-db metadata-mirror wiring contract."""
 
 from __future__ import annotations
 
 import ast
 import inspect
-import json
 import threading
 import unittest
 import urllib.error
@@ -14,23 +12,24 @@ import urllib.request
 from collections.abc import Callable
 from typing import Any
 
-from hypothesis import given, strategies as st
+from hypothesis import given
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401 - registers suite/fuzz
-from tests.test_web_cache import FakeRedis
-from web import cache
-from web.api_bases import PUBLIC_MB_ORIGIN
 import web.api_bases
 import web.discogs
 import web.mb
 import web.routes.browse
-from web.routes.browse import get_artist_compare
 from scripts.web_dev_server import (
     DevConfig,
-    DevHTTPServer,
     DevHandler,
+    DevHTTPServer,
     configure_live_db_metadata,
 )
+from tests.test_web_cache import FakeRedis
+from web import cache
+from web.api_bases import PUBLIC_MB_ORIGIN
+from web.routes.browse import get_artist_compare
 
 
 def assert_metadata_wiring(config: DevConfig) -> None:
@@ -146,7 +145,7 @@ class _RouteHandler:
 
 
 class _QuietDevHandler(DevHandler):
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+    def log_message(self, format: str, *args: Any) -> None:
         del format, args
 
 

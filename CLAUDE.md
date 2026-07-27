@@ -174,8 +174,8 @@ an unchanged tree after pushing or merging. **ALWAYS `nix-shell --run` for
 Python** (`.claude/rules/nix-shell.md`). The suite gates JS syntax + JS tests,
 the production strict gate (`pyright -p pyrightconfig.production.json` —
 full `typeCheckingMode: strict` over production code, #784),
-Ruff's source-local `F401`/`F811` import check, the aggregate vulture sweep,
-then unittest discovery — which includes `tests/test_docs_audit.py`, so the
+the pinned repository-wide Ruff gate, the production-only aggregate Vulture
+sweep, then unittest discovery — which includes `tests/test_docs_audit.py`, so the
 suite **fails if a new beets plugin, module option, or `pipeline-cli` subcommand
 ships undocumented** (or a doc link goes dead); docs are part of "done".
 `.claude/rules/code-quality.md` covers the test taxonomy, shared
@@ -254,7 +254,12 @@ For quality-decision bugs the simulator is the tool within the method: `pipeline
 
 ## Finding dead code
 
-`nix-shell --run "bash scripts/find_dead_code.sh"` (source-local Ruff `F401`/`F811`, then aggregate vulture vs `tools/vulture/whitelist.py`). After deleting, regenerate the vulture whitelist and watch for **cascading orphans** (deleting one helper exposes its callees). Full workflow: `docs/dead-code.md`.
+`nix-shell --run "bash scripts/run_ruff.sh"` checks every Python surface with
+the exact Ruff version/config; `nix-shell --run "bash scripts/find_dead_code.sh"`
+runs the production-only aggregate Vulture sweep against
+`tools/vulture/whitelist.py`. After deleting, regenerate the Vulture whitelist
+and watch for **cascading orphans** (deleting one helper exposes its callees).
+Full workflow: `docs/dead-code.md`.
 
 ## Critical rules
 

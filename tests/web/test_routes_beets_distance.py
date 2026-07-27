@@ -1,14 +1,13 @@
-#!/usr/bin/env python3
 """Contract tests for web/routes/beets_distance.py.
 
 Split from tests/web/test_routes_pipeline.py (#522), which itself split
 from tests/test_web_server.py (#408). Shared harness in
 tests/web/_harness.py.
 """
-
 import os
 import sys
 import unittest
+from typing import ClassVar
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -34,7 +33,7 @@ class TestBeetsDistanceRouteContract(_FakeDbWebServerCase):
     authority on that.
     """
 
-    REQUIRED_FIELDS = {
+    REQUIRED_FIELDS: ClassVar = {
         "outcome",
         "distance",
         "matched_tracks",

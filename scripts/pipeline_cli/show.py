@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import argparse
 import json
-from typing import Any, Mapping, Protocol, TYPE_CHECKING
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any, Protocol, Self
 
 import msgspec
 
@@ -28,7 +29,6 @@ from lib.current_library_display import (
 from lib.failure_presentation import FailureEvidence, present_failure
 from lib.import_evidence import HaveAnalysisFailure
 from lib.quality import ImportResult
-
 from scripts.pipeline_cli._format import _fmt_br, _fmt_measurement
 
 if TYPE_CHECKING:
@@ -123,12 +123,12 @@ def _render_import_result(ir_raw: object) -> list[str]:
         detail = dfail_dict.get("detail", "")
         lines.append(f"      disambig:  FAILED ({reason}): {detail}")
     elif pf.get("disambiguated") is True:
-        lines.append(f"      disambig:  ok")
+        lines.append("      disambig:  ok")
 
     return lines
 
 
-def _render_have_analysis_failure(row: "Mapping[str, object]") -> list[str]:
+def _render_have_analysis_failure(row: Mapping[str, object]) -> list[str]:
     """Render the typed installed-HAVE environment-failure payload."""
 
     if row.get("outcome") != "have_analysis_error":
@@ -159,8 +159,8 @@ def _render_have_analysis_failure(row: "Mapping[str, object]") -> list[str]:
 
 
 def _render_search_forensics_summary(
-    request_row: "Mapping[str, object]",
-    latest_search: "Mapping[str, object]",
+    request_row: Mapping[str, object],
+    latest_search: Mapping[str, object],
 ) -> list[str]:
     """Build the U7 forensic summary block printed above search history.
 
@@ -221,7 +221,7 @@ def _render_search_forensics_summary(
     return lines
 
 
-def _render_download_history_header(row: "Mapping[str, object]") -> str:
+def _render_download_history_header(row: Mapping[str, object]) -> str:
     source = row.get("source") or "slskd"
     outcome = row.get("outcome")
     created_at = row.get("created_at")
@@ -247,7 +247,7 @@ def _render_download_history_header(row: "Mapping[str, object]") -> str:
     )
 
 
-def _render_failure_presentation(row: "Mapping[str, object]") -> list[str]:
+def _render_failure_presentation(row: Mapping[str, object]) -> list[str]:
     """Render the SAME failure copy the web UI shows (issue #868).
 
     CLI and API are thin adapters over one presenter, so an operator
@@ -274,7 +274,7 @@ def _render_failure_presentation(row: "Mapping[str, object]") -> list[str]:
     return lines
 
 
-def _render_youtube_metadata(row: "Mapping[str, object]") -> list[str]:
+def _render_youtube_metadata(row: Mapping[str, object]) -> list[str]:
     if (row.get("source") or "slskd") != "youtube":
         return []
     raw_meta = row.get("youtube_metadata")
@@ -299,7 +299,7 @@ def _open_beets(path: str | None, library_root: str | None) -> BeetsDB:
 
 
 class _OpenedBeets(CurrentLibraryReader, Protocol):
-    def __enter__(self) -> "_OpenedBeets": ...
+    def __enter__(self) -> Self: ...
 
     def __exit__(self, *_args: object) -> None: ...
 
@@ -337,7 +337,7 @@ def _render_current_library(display: CurrentLibraryDisplay) -> None:
 class _ShowDB(Protocol):
     """``db`` shape ``cmd_show`` touches (issue #784, #409 pattern)."""
 
-    def get_request(self, request_id: int) -> "AlbumRequestRow | None": ...
+    def get_request(self, request_id: int) -> AlbumRequestRow | None: ...
 
     def get_tracks(self, request_id: int) -> list[dict[str, Any]]: ...
 
@@ -345,13 +345,13 @@ class _ShowDB(Protocol):
 
     def get_download_history(
         self, request_id: int,
-    ) -> "list[DownloadLogWithEvidenceRow]": ...
+    ) -> list[DownloadLogWithEvidenceRow]: ...
 
     def get_denylisted_users(self, request_id: int) -> list[dict[str, Any]]: ...
 
 
 def cmd_show(
-    db: "_ShowDB",
+    db: _ShowDB,
     args: argparse.Namespace,
     *,
     open_beets_fn: _OpenBeetsFn = _open_beets,
@@ -387,7 +387,7 @@ def cmd_show(
             library_root=getattr(args, "beets_directory", None),
         ) as beets:
             resolution = resolve_request_current_library(req, beets)
-    except Exception:
+    except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         resolution = CurrentLibraryUnavailable("beets_unavailable")
     _render_current_library(current_library_display(resolution))
     print(f"  Attempts:     search={req['search_attempts']} dl={req['download_attempts']} val={req['validation_attempts']}")
@@ -404,7 +404,7 @@ def cmd_show(
             len(msgspec.convert(ads_files, type=list[object]))
             if isinstance(ads_files, list) else 0
         )
-        print(f"\n  Active Download:")
+        print("\n  Active Download:")
         print(f"    filetype:     {ftype}")
         print(f"    enqueued_at:  {enq}")
         print(f"    files:        {fcount}")
@@ -423,7 +423,7 @@ def cmd_show(
         for v in [min_br, prev_br, verified, s_grade, s_br, cur_grade, cur_br, q_override]
     )
     if has_quality:
-        print(f"\n  Quality:")
+        print("\n  Quality:")
         print(f"    min_bitrate:        {_fmt_br(min_br)}")
         if prev_br is not None:
             print(f"    prev_min_bitrate:   {_fmt_br(prev_br)}")

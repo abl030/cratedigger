@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generated request-lifecycle tests — issue #548 follow-up.
 
 A Hypothesis ``RuleBasedStateMachine`` drives random sequences of REAL
@@ -34,16 +33,15 @@ docs/generated-testing.md.
 """
 
 import copy
-from collections.abc import Mapping
 import os
 import sys
 import unittest
+from collections.abc import Mapping
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
-
-from hypothesis import example, given, strategies as st
+from hypothesis import example, given
+from hypothesis import strategies as st
 from hypothesis.stateful import (
     RuleBasedStateMachine,
     invariant,
@@ -51,14 +49,7 @@ from hypothesis.stateful import (
     rule,
 )
 
-from lib.transitions import (
-    VALID_TRANSITIONS,
-    RequestTransition,
-    TransitionApplied,
-    TransitionConflict,
-    TransitionResult,
-    finalize_request,
-)
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.config import CratediggerConfig
 from lib.pipeline_db import (
     ConsumedAttemptInput,
@@ -70,6 +61,14 @@ from lib.pipeline_db._shared import REQUEST_METADATA_RESERVED_FIELDS
 from lib.search_plan_service import (
     RESULT_REQUEST_REPLACED,
     SearchPlanService,
+)
+from lib.transitions import (
+    VALID_TRANSITIONS,
+    RequestTransition,
+    TransitionApplied,
+    TransitionConflict,
+    TransitionResult,
+    finalize_request,
 )
 from lib.world_invariants import assert_replaced_row_frozen
 from tests.fakes import FakePipelineDB

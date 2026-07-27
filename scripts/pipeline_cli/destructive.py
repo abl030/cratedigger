@@ -11,8 +11,8 @@ import msgspec
 
 from lib.beets_db import BeetsDB, open_beets_db
 from lib.destructive_release_service import (
-    BanSourceCleanupIncomplete,
     BanSourceBeetsAmbiguous,
+    BanSourceCleanupIncomplete,
     BanSourceImporterBusy,
     BanSourceLockContended,
     BanSourceReleaseMismatch,
@@ -20,18 +20,18 @@ from lib.destructive_release_service import (
     BanSourceRequestNotFound,
     BanSourceSuccess,
     BanSourceTransitionConflict,
-    DeleteAlbumNotFound,
+    BeetsDeleteFn,
     DeleteAlbumAuthorityMismatch,
+    DeleteAlbumNotFound,
     DeleteBeetsAmbiguous,
-    DeleteIncomplete,
     DeleteImporterBusy,
+    DeleteIncomplete,
     DeleteLockContended,
+    DeleteNotifyFn,
     DeletePipelinePurgeFailure,
     DeleteReleaseMismatch,
     DeleteRequest,
     DeleteSuccess,
-    BeetsDeleteFn,
-    DeleteNotifyFn,
     ban_source,
     delete_release_from_library,
 )
@@ -61,7 +61,7 @@ def _open_beets(path: str | None, library_root: str | None) -> BeetsDB:
 
 
 def cmd_ban_source(
-    db: "SupportsDestructivePipelineDB",
+    db: SupportsDestructivePipelineDB,
     args: object,
     *,
     beets_delete_fn: BeetsDeleteFn | None = None,
@@ -166,7 +166,7 @@ def cmd_ban_source(
 
 
 def cmd_library_delete(
-    db: "SupportsDestructivePipelineDB",
+    db: SupportsDestructivePipelineDB,
     args: object,
     *,
     beets_delete_fn: BeetsDeleteFn | None = None,

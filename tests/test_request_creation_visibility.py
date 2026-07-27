@@ -12,10 +12,13 @@ sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401 -- starts the ephemeral PostgreSQL fixture
 
 from lib.config import CratediggerConfig
-from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_RELEASE, PipelineDB, release_id_to_lock_key
+from lib.pipeline_db import (
+    ADVISORY_LOCK_NAMESPACE_RELEASE,
+    PipelineDB,
+    release_id_to_lock_key,
+)
 from lib.request_creation_service import RequestCreationInput, RequestCreationService
 from lib.search import SEARCH_PLAN_GENERATOR_ID
-
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
 

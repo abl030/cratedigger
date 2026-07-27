@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Tests for scripts/migrate_db.py CLI wiring."""
 
 from __future__ import annotations
@@ -22,9 +21,8 @@ class TestDefaultDsnFailsLoud(unittest.TestCase):
     def test_main_fails_loud_when_dsn_is_not_configured(self) -> None:
         with patch.object(sys, "argv", ["migrate_db.py"]):
             stderr = io.StringIO()
-            with redirect_stderr(stderr):
-                with self.assertRaises(SystemExit) as cm:
-                    migrate_db.main()
+            with redirect_stderr(stderr), self.assertRaises(SystemExit) as cm:
+                migrate_db.main()
 
         self.assertEqual(cm.exception.code, 2)
         self.assertIn("PIPELINE_DB_DSN", stderr.getvalue())

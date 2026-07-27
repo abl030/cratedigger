@@ -123,6 +123,7 @@ class TestRemovedFieldsAreGone(unittest.TestCase):
 
     def test_config_does_not_have_cycle_max_runtime_s(self):
         import configparser
+
         from lib.config import CratediggerConfig
         cfg = CratediggerConfig.from_ini(configparser.ConfigParser())
         self.assertFalse(hasattr(cfg, "cycle_max_runtime_s"))

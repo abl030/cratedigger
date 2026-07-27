@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from lib.dispatch import (
     DispatchOutcome,
     _build_download_info,
     _record_rejection_and_maybe_requeue,
 )
-from lib.terminal_outcomes import PendingImportTerminalOutcome
 from lib.grab_list import GrabListEntry
 from lib.import_manifest import (
     move_failed_import_curated,
@@ -20,6 +19,7 @@ from lib.processing_paths import source_dirs_for_album
 from lib.quality import ValidationResult, rejection_backfill_override
 from lib.release_identity import normalize_release_id
 from lib.staged_album import StagedAlbum
+from lib.terminal_outcomes import PendingImportTerminalOutcome
 from lib.util import log_validation_result
 from lib.wrong_match_policy import rejection_scenario_is_wrong_match_candidate
 
@@ -31,7 +31,7 @@ logger = logging.getLogger("cratedigger")
 
 
 def _run_post_rejection_wrong_match_cleanup(
-    ctx: "CratediggerContext",
+    ctx: CratediggerContext,
     download_log_id: object,
     *,
     scenario: str | None,
@@ -76,7 +76,7 @@ def _resolved_request_rejection_id(
     ctx: CratediggerContext,
 ) -> tuple[Any | None, int | None]:
     """Resolve the backing request row for defensive auto-import rejects."""
-    db: "PipelineDB" = ctx.pipeline_db_source._get_db()
+    db: PipelineDB = ctx.pipeline_db_source._get_db()
     if album_data.db_request_id is not None:
         return db, album_data.db_request_id
 

@@ -25,7 +25,7 @@ def load_rank_config() -> QualityRankConfig:
     try:
         from lib.config import read_runtime_rank_config
         return read_runtime_rank_config()
-    except Exception:
+    except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         return QualityRankConfig.defaults()
 
 

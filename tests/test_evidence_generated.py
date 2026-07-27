@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generated evidence-lifecycle tests — issue #548.
 
 Property-based port of the local fuzzer that found the V0-evidence bug
@@ -27,17 +26,17 @@ import shutil
 import sys
 import tempfile
 import unittest
+import uuid
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
-
 from hypothesis import example, given
 from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.beets_db import (
     AlbumInfo,
     CurrentBeetsItem,
@@ -62,7 +61,6 @@ from lib.quality_evidence import (
 )
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_album_quality_evidence, make_request_row
-
 
 _CHANGED_SNAPSHOT_FACT_SHAPES: tuple[
     tuple[EvidenceSubject | None, EvidenceSubject | None], ...
@@ -1055,15 +1053,15 @@ def _run_fingerprint_flip_world(
 
 
 class TestGeneratedTwoAxisFingerprintCarry(unittest.TestCase):
-    @given(subject=st.sampled_from(("source", "installed")))
-    @example(subject="source")
-    @example(subject="installed")
-    def test_fingerprint_flip_carries_only_source_facts(self, subject):
-        evidence = _run_fingerprint_flip_world(subject)
-        assert_fingerprint_flip_two_axis_carry(
-            original_subject=subject,
-            evidence=evidence,
-        )
+    def test_fingerprint_flip_carries_only_source_facts(self):
+        subjects: tuple[EvidenceSubject, ...] = ("source", "installed")
+        for subject in subjects:
+            with self.subTest(subject=subject):
+                evidence = _run_fingerprint_flip_world(subject)
+                assert_fingerprint_flip_two_axis_carry(
+                    original_subject=subject,
+                    evidence=evidence,
+                )
 
 
 class TestTwoAxisCarryCheckerTripsOnViolations(unittest.TestCase):
@@ -1130,6 +1128,39 @@ _POISONED_LINK_IDENTITIES = (
 )
 
 
+@st.composite
+def poisoned_link_identity_pairs(
+    draw: st.DrawFn,
+) -> tuple[str, str]:
+    """Distinct exact identities across every stored identity shape."""
+    kinds = ("uuid", "numeric", "legacy")
+    requested_kind = draw(st.sampled_from(kinds))
+    poisoned_kind = draw(st.sampled_from(kinds))
+    requested_ordinal = draw(st.integers(min_value=1, max_value=2**63))
+    poisoned_ordinal = requested_ordinal + draw(
+        st.integers(min_value=1, max_value=2**31),
+    )
+
+    def render(kind: str, ordinal: int) -> str:
+        if kind == "uuid":
+            value = str(uuid.UUID(int=ordinal))
+            if draw(st.booleans()):
+                value = value.upper()
+        elif kind == "numeric":
+            value = ("0" * draw(st.integers(min_value=0, max_value=4))) + str(
+                ordinal,
+            )
+        else:
+            value = f"legacy-release-{ordinal}"
+        whitespace = st.sampled_from(("", " ", "\t", "\n"))
+        return f"{draw(whitespace)}{value}{draw(whitespace)}"
+
+    return (
+        render(requested_kind, requested_ordinal),
+        render(poisoned_kind, poisoned_ordinal),
+    )
+
+
 def assert_no_poisoned_link_facts(evidence: AlbumQualityEvidence) -> None:
     measurement = evidence.measurement
     if any((
@@ -1145,9 +1176,14 @@ def assert_no_poisoned_link_facts(evidence: AlbumQualityEvidence) -> None:
 
 
 class TestGeneratedPoisonedCurrentLink(unittest.TestCase):
-    @given(identities=st.sampled_from(_POISONED_LINK_IDENTITIES))
+    @given(identities=poisoned_link_identity_pairs())
     @example(identities=_POISONED_LINK_IDENTITIES[0])
     @example(identities=_POISONED_LINK_IDENTITIES[1])
+    @example(identities=_POISONED_LINK_IDENTITIES[2])
+    @example(identities=(
+        " 11111111-1111-1111-1111-111111111111 ",
+        "\t00054321\n",
+    ))
     def test_mismatched_exact_identity_carries_no_linked_facts(self, identities):
         requested, poisoned = identities
         root = tempfile.mkdtemp(prefix="cratedigger-poisoned-link-gen-")

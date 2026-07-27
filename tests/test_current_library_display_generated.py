@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generated authority laws for current-library request displays."""
 
 from __future__ import annotations
@@ -6,8 +5,9 @@ from __future__ import annotations
 import os
 import unittest
 
-from hypothesis import example, given, strategies as st
 import msgspec
+from hypothesis import example, given
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
 from lib.current_library_display import (
@@ -18,7 +18,6 @@ from lib.current_library_display import (
     resolve_request_current_library,
 )
 from tests.fakes import FakeBeetsDB
-
 
 MB_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 DISCOGS_ID = "12856590"

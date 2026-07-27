@@ -13,6 +13,8 @@ buckets / branches should be added as rows, not new methods.
 from __future__ import annotations
 
 import unittest
+from dataclasses import FrozenInstanceError
+from typing import ClassVar
 
 from lib.search_classification import (
     FAILURE_CLASS_A_ZERO_RESULTS_DOMINANT,
@@ -42,7 +44,7 @@ def _found(n: int) -> list[SearchSummary]:
 class TestClassifyFailureClass(unittest.TestCase):
     """Decision-matrix coverage of the pure classifier."""
 
-    CASES = [
+    CASES: ClassVar = [
         # 1. A dominant: 9 of 10 are no_results (90% > 80%) → A.
         (
             "A: 9 of 10 no_results (90%) → A_zero_results_dominant",
@@ -189,7 +191,7 @@ class TestSearchSummaryDataclassContract(unittest.TestCase):
 
     def test_dataclass_is_frozen(self):
         s = SearchSummary(outcome="no_match", rejection_reason="x")
-        with self.assertRaises(Exception):
+        with self.assertRaises(FrozenInstanceError):
             s.outcome = "found"  # type: ignore[misc]
 
     def test_dataclass_defaults_rejection_reason_to_none(self):

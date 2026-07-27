@@ -26,7 +26,6 @@ from tests.test_hypothesis_profile_audit import (
     audit_tests_tree,
 )
 
-
 _HYPOTHESIS_FORMS: dict[str, str] = {
     "none": "",
     "import_root": "import hypothesis\n",
@@ -258,8 +257,8 @@ class TestProfileAuditCheckerTripsOnViolations(unittest.TestCase):
         with self.assertRaises(AssertionError):
             assert_audit_verdict(
                 offenders=(
-                    "test_planted.py: imports hypothesis without a "
-                    "module-level import",
+                    ("test_planted.py: imports hypothesis without a "
+                    "module-level import"),
                 ),
                 relpath="test_planted.py",
                 hypothesis_form="from_root",
@@ -273,8 +272,8 @@ class TestProfileAuditCheckerTripsOnViolations(unittest.TestCase):
         with self.assertRaises(AssertionError):
             assert_audit_verdict(
                 offenders=(
-                    "test_planted.py: imports hypothesis without a "
-                    "module-level import",
+                    ("test_planted.py: imports hypothesis without a "
+                    "module-level import"),
                 ),
                 relpath="test_planted.py",
                 hypothesis_form="from_root",

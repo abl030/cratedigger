@@ -7,6 +7,7 @@ Functions that need config receive it as a parameter.
 from __future__ import annotations
 
 import configparser
+import difflib
 import json
 import logging
 import os
@@ -16,17 +17,19 @@ import stat
 import subprocess as sp
 import time
 import unicodedata
-import difflib
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from functools import lru_cache
-from typing import Any, Callable, Iterator, Protocol, Sequence, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Protocol
 from xml.etree.ElementTree import Element
 
 from defusedxml import ElementTree as ET
 
 from lib.json_narrow import (
     is_object_list as _is_object_list,
+)
+from lib.json_narrow import (
     is_str_object_dict as _is_str_object_dict,
 )
 from lib.quality.audio_validation import (
@@ -221,7 +224,7 @@ def repair_mp3_headers(folder_path: str) -> None:
             try:
                 result = sp.run(["mp3val", "-f", "-nb", filepath],
                                 capture_output=True, text=True,
-                                errors="replace", timeout=60)
+                                errors="replace", timeout=60, check=False)
                 if "FIXED" in result.stdout:
                     logger.info(f"MP3VAL: fixed {f}")
             except FileNotFoundError:
@@ -234,7 +237,6 @@ def repair_mp3_headers(folder_path: str) -> None:
 
 
 from lib.quality import AUDIO_EXTENSIONS as _AUDIO_EXTS
-
 
 _AUDIO_VALIDATION_TIMEOUT_SECONDS = 300
 
@@ -526,6 +528,7 @@ def validate_audio(
                 build_audio_validation_argv(filepath),
                 capture_output=True,
                 timeout=_AUDIO_VALIDATION_TIMEOUT_SECONDS,
+                check=False,
             )
         except sp.TimeoutExpired as exc:
             try:
@@ -739,8 +742,7 @@ def _track_titles_cross_check(expected_tracks: Sequence[Any], slskd_files: Seque
                 best_ratio = 1.0
                 break
             ratio = difflib.SequenceMatcher(None, exp_title, slskd_title).ratio()
-            if ratio > best_ratio:
-                best_ratio = ratio
+            best_ratio = max(best_ratio, ratio)
         if best_ratio < 0.5:
             mismatches += 1
 
@@ -765,7 +767,6 @@ def beets_validate(harness_path: str, album_path: str, mb_release_id: str,
 
 import urllib.error
 import urllib.request
-
 
 # === Plex integration ===
 
@@ -836,7 +837,7 @@ def trigger_plex_scan(cfg: CratediggerConfig, imported_path: str | None = None) 
             logger.info(f"PLEX: triggered partial scan for {scan_path} (HTTP {status})")
         else:
             logger.info(f"PLEX: triggered full library scan (HTTP {status})")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         logger.warning(f"PLEX: scan trigger failed: {e}")
 
 
@@ -890,14 +891,14 @@ def _notifier_container_path(
     return out if os.path.isabs(out) else None
 
 
-def _plex_container_path(cfg: "CratediggerConfig", imported_path: str) -> str | None:
+def _plex_container_path(cfg: CratediggerConfig, imported_path: str) -> str | None:
     """The path Plex stores in ``Media.Part.file`` for a beets album folder."""
     return _notifier_container_path(
         imported_path, beets_directory=cfg.beets_directory,
         path_map=cfg.plex_path_map)
 
 
-def _plex_fetch_xml(cfg: "CratediggerConfig", path: str, **params: str) -> Element:
+def _plex_fetch_xml(cfg: CratediggerConfig, path: str, **params: str) -> Element:
     """Thin urllib GET → parsed Plex XML. Network leaf seam."""
     from urllib.parse import urlencode
     params = dict(params)
@@ -908,7 +909,7 @@ def _plex_fetch_xml(cfg: "CratediggerConfig", path: str, **params: str) -> Eleme
         return ET.fromstring(resp.read(), forbid_dtd=True)
 
 
-def _plex_put(cfg: "CratediggerConfig", path: str, **params: str) -> int:
+def _plex_put(cfg: CratediggerConfig, path: str, **params: str) -> int:
     """Thin urllib PUT → HTTP status. Network leaf seam."""
     from urllib.parse import urlencode
     params = dict(params)
@@ -939,7 +940,7 @@ def _parse_artist_album(imported_path: str) -> tuple[str, str]:
 
 
 def plex_find_album_by_path(
-    cfg: "CratediggerConfig",
+    cfg: CratediggerConfig,
     imported_path: str,
     *,
     fetch_xml: FetchXml | None = None,
@@ -1010,7 +1011,7 @@ def plex_find_album_by_path(
 
 
 def plex_set_added_at(
-    cfg: "CratediggerConfig",
+    cfg: CratediggerConfig,
     rating_key: str,
     added_at: int,
     *,
@@ -1099,7 +1100,7 @@ def trigger_jellyfin_scan(
         with urllib.request.urlopen(req, timeout=10) as resp:
             resp.read()
         logger.info("JELLYFIN: reported changed album %s", container_path)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         logger.warning(f"JELLYFIN: media update failed: {e}")
 
 
@@ -1166,7 +1167,7 @@ JsonGetFn = Callable[..., Any]
 JsonPostFn = Callable[[str, Any], int]
 
 
-def _jellyfin_container_path(cfg: "CratediggerConfig", imported_path: str) -> str | None:
+def _jellyfin_container_path(cfg: CratediggerConfig, imported_path: str) -> str | None:
     """The path Jellyfin stores as a MusicAlbum's ``Path`` for a beets album
     folder (Jellyfin sees the library through its own mount, e.g.
     ``/mnt/fuse/Media/Music/Beets/...`` for ``/mnt/virtio/Music/Beets/...``)."""
@@ -1175,7 +1176,7 @@ def _jellyfin_container_path(cfg: "CratediggerConfig", imported_path: str) -> st
         path_map=cfg.jellyfin_path_map)
 
 
-def _jellyfin_get_json(cfg: "CratediggerConfig", path: str, **params: str) -> Any:
+def _jellyfin_get_json(cfg: CratediggerConfig, path: str, **params: str) -> Any:
     """Thin urllib GET → decoded Jellyfin JSON. Network leaf seam."""
     from urllib.parse import urlencode
     url = f"{cfg.jellyfin_url}{path}"
@@ -1189,7 +1190,7 @@ def _jellyfin_get_json(cfg: "CratediggerConfig", path: str, **params: str) -> An
         return json.loads(resp.read())
 
 
-def _jellyfin_post_json(cfg: "CratediggerConfig", path: str, payload: Any) -> int:
+def _jellyfin_post_json(cfg: CratediggerConfig, path: str, payload: Any) -> int:
     """Thin urllib POST of a JSON body → HTTP status. Network leaf seam."""
     req = urllib.request.Request(
         f"{cfg.jellyfin_url}{path}",
@@ -1204,7 +1205,7 @@ def _jellyfin_post_json(cfg: "CratediggerConfig", path: str, payload: Any) -> in
 
 
 def jellyfin_find_album_by_path(
-    cfg: "CratediggerConfig",
+    cfg: CratediggerConfig,
     imported_path: str,
     *,
     get_json: JsonGetFn | None = None,
@@ -1268,7 +1269,7 @@ def jellyfin_find_album_by_path(
 
 
 def jellyfin_get_album_children(
-    cfg: "CratediggerConfig",
+    cfg: CratediggerConfig,
     album_item_id: str,
     *,
     get_json: JsonGetFn | None = None,
@@ -1293,7 +1294,7 @@ def jellyfin_get_album_children(
 
 
 def jellyfin_set_date_created(
-    cfg: "CratediggerConfig",
+    cfg: CratediggerConfig,
     item_id: str,
     date_created: str,
     *,
@@ -1341,7 +1342,7 @@ def log_validation_result(album_data: GrabListEntry, result: ValidationResult,
                           dest_path: str | None = None) -> None:
     """Append beets validation result to tracking JSONL."""
     entry = {
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "artist": album_data.artist,
         "album": album_data.title,
         "mb_release_id": album_data.mb_release_id,
@@ -1365,7 +1366,7 @@ def log_validation_result(album_data: GrabListEntry, result: ValidationResult,
 
 def setup_logging(config: configparser.RawConfigParser) -> None:
     section: configparser.SectionProxy | dict[str, str] = (
-        config["Logging"] if "Logging" in config else {}
+        config["Logging"] if "Logging" in config else {}  # noqa: SIM401 - ConfigParser section, not Mapping.get
     )
     logging.basicConfig(
         level=section.get("level", "INFO"),

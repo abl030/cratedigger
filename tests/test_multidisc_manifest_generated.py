@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generated multi-disc grab-manifest tests — issue #550 defect #1.
 
 THE INVARIANT (the coverage law from #550's plan): an accepted multi-disc
@@ -38,11 +37,10 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
-
 from hypothesis import example, given
 from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.config import CratediggerConfig
 from lib.context import CratediggerContext
 from lib.download_ownership import DownloadOwnershipWriter
@@ -119,7 +117,7 @@ def _build_harness(world: MultiDiscWorld):
     base = "Music\\peer\\The Complete Radio Series"
     folders: dict[str, list[dict[str, Any]]] = {}
     discs = list(range(1, len(world.disc_track_counts) + 1))
-    for disc, count in zip(discs, world.disc_track_counts):
+    for disc, count in zip(discs, world.disc_track_counts, strict=True):
         dir_name = f"{base}\\{world.folder_scheme.format(d=disc)}"
         folders[dir_name] = [
             {"filename": f"{i:02d} - {_title(world, disc, i)}.mp3",
@@ -134,7 +132,7 @@ def _build_harness(world: MultiDiscWorld):
     results = {"peer": {"mp3": ordered_dirs}}
     all_tracks = cast(list, [
         {"albumId": 1, "title": _title(world, disc, i), "mediumNumber": disc}
-        for disc, count in zip(discs, world.disc_track_counts)
+        for disc, count in zip(discs, world.disc_track_counts, strict=True)
         for i in range(1, count + 1)
     ])
     release = SimpleNamespace(

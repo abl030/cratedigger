@@ -5,11 +5,11 @@ from __future__ import annotations
 import unittest
 from typing import Protocol
 
-from hypothesis import example, given, strategies as st
 import msgspec
+from hypothesis import example, given
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
-from tests.test_web_recents import _entry
 from lib.quality import (
     AudioQualityMeasurement,
     ImportResult,
@@ -18,12 +18,12 @@ from lib.quality import (
     SpectralDetail,
     V0ProbeEvidence,
 )
+from tests.test_web_recents import _entry
 from web.classify import classify_log_entry
-from web.routes.pipeline import (
+from web.download_history_view import (
     _project_current_library_have,
     _project_linked_import_evidence,
 )
-
 
 REJECT_SCENARIOS = (
     "quality_downgrade",
@@ -606,30 +606,22 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
         existing_format=st.one_of(st.none(), st.sampled_from(("MP3", "Opus"))),
         existing_min=st.one_of(st.none(), st.integers(min_value=1, max_value=2_000)),
         has_attempt_spectral=st.booleans(),
-        current_format=st.sampled_from(("MP3", "Opus", "FLAC")),
-        current_min=st.integers(min_value=1, max_value=2_000),
     )
     @example(
         existing_format=None,
         existing_min=None,
         has_attempt_spectral=False,
-        current_format="Opus",
-        current_min=93,
     )
     @example(
         existing_format=None,
         existing_min=None,
         has_attempt_spectral=True,
-        current_format="Opus",
-        current_min=99,
     )
     def test_unproven_current_library_never_backfills_attempt_have(
         self,
         existing_format: str | None,
         existing_min: int | None,
         has_attempt_spectral: bool,
-        current_format: str,
-        current_min: int,
     ) -> None:
         item: dict[str, object] = {
             "existing_format": existing_format,
@@ -639,11 +631,7 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
             ),
             "existing_spectral_bitrate": 160 if has_attempt_spectral else None,
         }
-        _project_current_library_have(item, {}, {
-            "beets_format": current_format,
-            "beets_bitrate": current_min,
-            "beets_avg_bitrate": current_min + 20,
-        })
+        _project_current_library_have(item, {})
 
         assert_current_library_have_is_projected(
             item,
@@ -712,10 +700,7 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
             "_current_evidence_v0_probe_avg_bitrate": current_v0,
             "_current_evidence_v0_probe_median_bitrate": current_v0,
         }
-        _project_current_library_have(item, row, {
-            "beets_format": "conflicting-beets-format",
-            "beets_bitrate": current_min + 100,
-        })
+        _project_current_library_have(item, row)
 
         assert_current_library_have_is_projected(
             item,
@@ -853,7 +838,7 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
             "_current_evidence_v0_probe_avg_bitrate": current_v0,
             "_current_evidence_v0_probe_median_bitrate": current_v0,
         }
-        _project_current_library_have(item, row, {})
+        _project_current_library_have(item, row)
 
         assert_complete_have_snapshot_is_selected(
             item,
@@ -913,7 +898,7 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
             "_current_evidence_min_bitrate": current_min,
             "_current_evidence_avg_bitrate": current_min + 10,
             "_current_evidence_median_bitrate": current_min + 5,
-        }, {})
+        })
         if is_pre_attempt:
             self.assertEqual(item["existing_format"], current_format)
             self.assertEqual(item["existing_min_bitrate"], current_min)
@@ -953,10 +938,6 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
             "_current_evidence_min_bitrate": current_min,
             "_current_evidence_avg_bitrate": current_avg,
             "_current_evidence_median_bitrate": current_avg,
-        }, {
-            "beets_format": current_format,
-            "beets_bitrate": current_min,
-            "beets_avg_bitrate": current_avg,
         })
         assert_mutating_attempt_has_no_projected_have(item)
 

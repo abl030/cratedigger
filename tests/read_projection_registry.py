@@ -31,13 +31,14 @@ timestamps are backend-assigned/time-anchored), so seeders must never
 put timestamps or random values in row KEYS. Every seeder must produce
 >= 1 row on BOTH backends — a vacuous parity check is worthless.
 """
+# ruff: noqa: UP037 - quoted Any annotations are part of the typing ratchet
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from lib.pipeline_db import PersistedDistance, PersistedTrack, PersistedYoutubeRow
-
 
 # A seeder takes a db (real ``PipelineDB`` or ``FakePipelineDB``), seeds
 # identical state, calls ONE read method, and returns the projected rows
@@ -51,12 +52,12 @@ Seeder = Callable[[Any], "list[dict[str, Any]]"]
 # route, ``find_youtube_album_mapping_for_release`` = a hand-listed SELECT)
 # — restricting the universe to ``get_``/``list_`` let those escape the
 # audit (the #546 W1 reviewers' F1 finding).
-_READ_METHOD_PREFIXES: "tuple[str, ...]" = (
+_READ_METHOD_PREFIXES: tuple[str, ...] = (
     "get_", "list_", "search_", "find_", "fetch_",
 )
 
 
-def enumerate_read_mirrors() -> "list[str]":
+def enumerate_read_mirrors() -> list[str]:
     """Introspect ``FakePipelineDB`` for its public read-projection methods.
 
     The authoritative universe is every public method whose name starts
@@ -410,7 +411,7 @@ def _seed_get_pending_plex_added_at_pins(db: Any) -> "list[dict[str, Any]]":
         request_id=None,
     )
     # captured_before must be AFTER the pin's captured_at (stamped NOW()).
-    captured_before = datetime.now(timezone.utc) + timedelta(days=1)
+    captured_before = datetime.now(UTC) + timedelta(days=1)
     return list(db.get_pending_plex_added_at_pins(
         captured_before=captured_before, limit=100))
 
@@ -424,7 +425,7 @@ def _seed_get_pending_jellyfin_date_created_pins(db: Any) -> "list[dict[str, Any
         request_id=None,
     )
     # captured_before must be AFTER the pin's captured_at (stamped NOW()).
-    captured_before = datetime.now(timezone.utc) + timedelta(days=1)
+    captured_before = datetime.now(UTC) + timedelta(days=1)
     return list(db.get_pending_jellyfin_date_created_pins(
         captured_before=captured_before, limit=100))
 
@@ -445,7 +446,7 @@ def _seed_list_unfindable_probe_candidates(db: Any) -> "list[dict[str, Any]]":
 # (typed Struct returns, scalars, computed metric dicts) are in ALLOWLIST.
 # --------------------------------------------------------------------------
 
-PARITY_REGISTRY: "dict[str, Seeder]" = {
+PARITY_REGISTRY: dict[str, Seeder] = {
     # Request-family (album_requests SELECT * projections).
     "get_request": _seed_get_request,
     "get_request_by_mb_release_id": _seed_get_request_by_mb_release_id,
@@ -505,7 +506,7 @@ PARITY_REGISTRY: "dict[str, Seeder]" = {
 #     the parity gate guards against does not apply.
 # --------------------------------------------------------------------------
 
-ALLOWLIST: "dict[str, str]" = {
+ALLOWLIST: dict[str, str] = {
     # --- Typed Struct / dataclass returns ---
     "get_active_search_plan":
         "typed ActiveSearchPlan | None return (wraps a PersistedSearchPlan "

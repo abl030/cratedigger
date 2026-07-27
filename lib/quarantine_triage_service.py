@@ -10,7 +10,7 @@ reference.
 from __future__ import annotations
 
 import os
-from typing import Protocol, TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import msgspec
 
@@ -51,7 +51,7 @@ class QuarantineTriageResult(msgspec.Struct, frozen=True):
 
 
 class _WrongMatchesDB(Protocol):
-    def get_wrong_matches(self) -> "list[WrongMatchCandidateRow]": ...
+    def get_wrong_matches(self) -> list[WrongMatchCandidateRow]: ...
 
 
 def _configured_download_dir(download_dir: str | None) -> str:

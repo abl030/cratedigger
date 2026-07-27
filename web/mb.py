@@ -13,7 +13,6 @@ web UI's POST invalidation paths. See issue #101.
 """
 
 import json
-
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -49,8 +48,10 @@ USER_AGENT = "cratedigger-web/1.0"
 # (the MB artist→release-group endpoint takes ~23s for VA). Single
 # declaration site at ``lib/va_identity.py`` — re-exported here so the
 # existing ``from web.mb import VA_ARTIST_MBID`` imports keep working.
-from lib.va_identity import (  # noqa: E402
+from lib.va_identity import (
     MB_VA_ARTIST_MBID as VA_ARTIST_MBID,
+)
+from lib.va_identity import (
     split_va_query,
 )
 

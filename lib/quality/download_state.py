@@ -13,13 +13,11 @@ download evidence.
 
 import enum
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 import msgspec
 
 from lib.quality.evidence_types import CodecFamily, V0ProbeEvidence
-
 
 # --- Download state reducer (pure decision for async poller) ---
 
@@ -126,8 +124,11 @@ class CooldownConfig:
     lookback_window: int = 5
 
 
+DEFAULT_COOLDOWN_CONFIG = CooldownConfig()
+
+
 def should_cooldown(outcomes: list[str],
-                    config: CooldownConfig = CooldownConfig()) -> bool:
+                    config: CooldownConfig = DEFAULT_COOLDOWN_CONFIG) -> bool:
     """Decide whether a user should be put on cooldown.
 
     Args:
@@ -216,22 +217,22 @@ class SpectralMeasurement:
     from a fresh ``SpectralAnalysisDetail`` measurement into
     ``AudioQualityMeasurement``. No decision reads them in this PR.
     """
-    grade: Optional[str] = None
-    bitrate_kbps: Optional[int] = None
-    cliff_hz: Optional[int] = None
+    grade: str | None = None
+    bitrate_kbps: int | None = None
+    cliff_hz: int | None = None
     codec_family: CodecFamily | None = None
-    ultrasonic_deficit_db: Optional[float] = None
-    spectral_measurement_version: Optional[int] = None
+    ultrasonic_deficit_db: float | None = None
+    spectral_measurement_version: int | None = None
 
     @staticmethod
     def from_parts(
-        grade: Optional[str],
-        bitrate_kbps: Optional[int],
+        grade: str | None,
+        bitrate_kbps: int | None,
         *,
-        cliff_hz: Optional[int] = None,
+        cliff_hz: int | None = None,
         codec_family: CodecFamily | None = None,
-        ultrasonic_deficit_db: Optional[float] = None,
-        spectral_measurement_version: Optional[int] = None,
+        ultrasonic_deficit_db: float | None = None,
+        spectral_measurement_version: int | None = None,
     ) -> "SpectralMeasurement | None":
         """Build a measurement when any spectral data exists, else None."""
         if grade is None and bitrate_kbps is None:
@@ -454,7 +455,7 @@ def _copy_download_state(
 def _datetime_from_iso(value: str) -> datetime:
     parsed = datetime.fromisoformat(value)
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
     return parsed
 
 
@@ -516,7 +517,11 @@ def reduce_poll_cycle(
             file.last_state is not None
             and file.last_state.startswith("Completed,")
         )
-        for file, observation in zip(persisted_state.files, snapshot.files)
+        for file, observation in zip(
+            persisted_state.files,
+            snapshot.files,
+            strict=True,
+        )
     ]
     elapsed_seconds = (
         now - _datetime_from_iso(persisted_state.enqueued_at)
@@ -538,6 +543,7 @@ def reduce_poll_cycle(
         persisted_state.files,
         snapshot.files,
         missing,
+        strict=True,
     ):
         if vanished:
             current_state = "Completed, Errored"
@@ -552,9 +558,7 @@ def reduce_poll_cycle(
             current_bytes = observation.bytes_transferred
             current_exception = observation.exception or file.last_exception
 
-        if current_bytes > file.bytes_transferred:
-            observed_progress = True
-        elif (
+        if current_bytes > file.bytes_transferred or (
             current_state != (file.last_state or "")
             and (current_state or "") not in _NON_PROGRESS_STATES
         ):
@@ -649,31 +653,31 @@ class DownloadInfo:
     download_log has a typed slot here.
     """
     # Soulseek source
-    username: Optional[str] = None
-    filetype: Optional[str] = None
-    bitrate: Optional[int] = None           # bps (e.g. 320000)
-    sample_rate: Optional[int] = None
-    bit_depth: Optional[int] = None
-    is_vbr: Optional[bool] = None
+    username: str | None = None
+    filetype: str | None = None
+    bitrate: int | None = None           # bps (e.g. 320000)
+    sample_rate: int | None = None
+    bit_depth: int | None = None
+    is_vbr: bool | None = None
     # Conversion tracking
     was_converted: bool = False
-    original_filetype: Optional[str] = None
+    original_filetype: str | None = None
     # Quality verification
-    slskd_filetype: Optional[str] = None    # captured source filetype
-    actual_filetype: Optional[str] = None   # after conversion
-    actual_min_bitrate: Optional[int] = None
+    slskd_filetype: str | None = None    # captured source filetype
+    actual_filetype: str | None = None   # after conversion
+    actual_min_bitrate: int | None = None
     # Spectral analysis
     download_spectral: SpectralMeasurement | None = None
     current_spectral: SpectralMeasurement | None = None
-    existing_min_bitrate: Optional[int] = None
+    existing_min_bitrate: int | None = None
     # Verified lossless override (from import_one.py)
-    verified_lossless_override: Optional[bool] = None
+    verified_lossless_override: bool | None = None
     # Full import_one.py result (JSON string)
-    import_result: Optional[str] = None
+    import_result: str | None = None
     # Full validation result (JSON string)
-    validation_result: Optional[str] = None
+    validation_result: str | None = None
     # Final format on disk after verified-lossless target conversion
-    final_format: Optional[str] = None
+    final_format: str | None = None
     # V0 probe evidence
-    v0_probe: Optional["V0ProbeEvidence"] = None
-    existing_v0_probe: Optional["V0ProbeEvidence"] = None
+    v0_probe: V0ProbeEvidence | None = None
+    existing_v0_probe: V0ProbeEvidence | None = None

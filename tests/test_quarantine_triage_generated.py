@@ -6,7 +6,8 @@ import os
 import tempfile
 import unittest
 
-from hypothesis import given, strategies as st
+from hypothesis import given
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
 from lib.quarantine_triage_service import (
@@ -15,7 +16,6 @@ from lib.quarantine_triage_service import (
     list_unreferenced_quarantine_folders,
 )
 from tests.fakes import FakePipelineDB
-
 
 REFERENCE_KINDS = (
     "none",

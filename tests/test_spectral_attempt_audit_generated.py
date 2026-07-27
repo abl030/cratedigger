@@ -1,23 +1,22 @@
 """Generated invariant for independent two-sided spectral attempt audit."""
 
 import configparser
-from contextlib import contextmanager
 import logging
 import os
-from pathlib import Path
 import subprocess as sp
 import tempfile
 import unittest
-from types import SimpleNamespace
+from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Literal
 from unittest.mock import patch
 
 import msgspec
-
-from hypothesis import example, given, strategies as st
-from tests.beets_world import BeetsWorld
+from hypothesis import example, given
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads active profile)
+from tests.beets_world import BeetsWorld
 
 
 @contextmanager
@@ -78,12 +77,12 @@ def _run_have_boundary_through_both_adapters(
     """Drive normal measurement and reused front-gate through one boundary."""
     from lib.beets_db import AlbumInfo
     from lib.config import CratediggerConfig
+    from lib.import_preview import preserve_existing_source_spectral
     from lib.import_queue import (
         IMPORT_JOB_FORCE,
         force_import_dedupe_key,
         force_import_payload,
     )
-    from lib.import_preview import preserve_existing_source_spectral
     from lib.measurement import (
         ExistingSpectralAuditLookup,
         LocalFileInspection,
@@ -344,6 +343,7 @@ def _run_candidate_snapshot_reuse_world(
     track_count: int,
 ) -> tuple[int, list[str], str | None, str | None]:
     from lib.config import CratediggerConfig
+    from lib.import_preview import ImportPreviewResult
     from lib.import_queue import (
         IMPORT_JOB_AUTOMATION,
         IMPORT_JOB_FORCE,
@@ -351,7 +351,6 @@ def _run_candidate_snapshot_reuse_world(
         force_import_dedupe_key,
         force_import_payload,
     )
-    from lib.import_preview import ImportPreviewResult
     from lib.measurement import ExistingSpectralAuditLookup
     from lib.quality import (
         AudioQualityMeasurement,
@@ -1250,7 +1249,9 @@ class TestAttemptAuditGenerated(unittest.TestCase):
     ):
         from lib.dispatch.types import ImportAttemptResult
         from lib.quality import (
-            AudioQualityMeasurement, ImportResult, SpectralAnalysisDetail,
+            AudioQualityMeasurement,
+            ImportResult,
+            SpectralAnalysisDetail,
             SpectralDetail,
         )
 
@@ -1281,7 +1282,9 @@ class TestAttemptAuditGenerated(unittest.TestCase):
 
     def test_policy_snapshot_checker_rejects_planted_adapter_mutant(self):
         from lib.quality import (
-            AudioQualityMeasurement, ImportResult, SpectralAnalysisDetail,
+            AudioQualityMeasurement,
+            ImportResult,
+            SpectralAnalysisDetail,
             SpectralDetail,
         )
 

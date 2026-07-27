@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-
 import logging
+from collections.abc import Mapping
 from typing import Any
 
 from lib.grab_list import DownloadFile, GrabListEntry

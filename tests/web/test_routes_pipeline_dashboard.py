@@ -1,33 +1,31 @@
-#!/usr/bin/env python3
 """Contract tests for web/routes/pipeline_dashboard.py.
 
 Split from tests/web/test_routes_pipeline.py (#522), which itself split
 from tests/test_web_server.py (#408). Shared harness in
 tests/web/_harness.py.
 """
-
-from datetime import datetime, timezone
 import os
 import sys
 import unittest
+from datetime import UTC, datetime
+from typing import ClassVar
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
-
 from tests.fakes import FakeBeetsDB
 from tests.helpers import make_request_row
+from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
 
 
 class TestPipelineDashboardRouteContracts(_FakeDbWebServerCase):
     """Contract tests for ``GET /api/pipeline/dashboard``."""
 
-    DASHBOARD_REQUIRED_FIELDS = {
+    DASHBOARD_REQUIRED_FIELDS: ClassVar = {
         "generated_at", "redis", "searches", "cycles", "coverage",
         "peers", "plan_readiness", "disk_coverage",
     }
-    DASHBOARD_SEARCH_WINDOW_FIELDS = {
+    DASHBOARD_SEARCH_WINDOW_FIELDS: ClassVar = {
         "label", "hours", "searches", "distinct_requests",
         "searches_per_hour", "searches_per_24h", "avg_elapsed_s",
         "median_elapsed_s", "p95_elapsed_s", "max_elapsed_s", "outcomes",
@@ -39,19 +37,19 @@ class TestPipelineDashboardRouteContracts(_FakeDbWebServerCase):
         "cursor_wraps", "stale_completions", "non_consuming",
         "cache_attribution_level",
     }
-    DASHBOARD_PLAN_READINESS_FIELDS = {
+    DASHBOARD_PLAN_READINESS_FIELDS: ClassVar = {
         "generator_id", "wanted_total", "wanted_searchable",
         "wanted_legacy", "wanted_failed_deterministic",
         "wanted_failed_transient", "wanted_no_plan",
     }
-    DASHBOARD_CYCLE_WINDOW_FIELDS = {
+    DASHBOARD_CYCLE_WINDOW_FIELDS: ClassVar = {
         "label", "hours", "cycles", "avg_cycle_s", "median_cycle_s",
         "p95_cycle_s", "max_cycle_s", "median_search_s", "watchdog_kills",
         "find_download_queued", "find_download_completed", "cache_errors",
         "cache_write_errors", "cache_fuse_tripped", "peers_browsed",
         "peers_browsed_lazy", "fanout_waves",
     }
-    DASHBOARD_COVERAGE_FIELDS = {
+    DASHBOARD_COVERAGE_FIELDS: ClassVar = {
         "wanted_total", "wanted_searched_24h", "wanted_searched_6h",
         "wanted_unsearched_24h", "wanted_unsearched_6h",
         "wanted_never_searched", "active_wanted_searches_24h",
@@ -61,44 +59,44 @@ class TestPipelineDashboardRouteContracts(_FakeDbWebServerCase):
         "match_rate_series_28d", "wanted_trend", "top_10_share_24h",
         "top_loop_suspects", "stale_wanted",
     }
-    DASHBOARD_WANTED_TREND_FIELDS = {
+    DASHBOARD_WANTED_TREND_FIELDS: ClassVar = {
         "current_wanted", "latest_sample_at", "series_24h", "windows",
     }
-    DASHBOARD_WANTED_TREND_POINT_FIELDS = {
+    DASHBOARD_WANTED_TREND_POINT_FIELDS: ClassVar = {
         "sampled_at", "wanted_total",
     }
-    DASHBOARD_WANTED_TREND_WINDOW_FIELDS = {
+    DASHBOARD_WANTED_TREND_WINDOW_FIELDS: ClassVar = {
         "label", "hours", "sample_count", "start_sample_at",
         "end_sample_at", "start_wanted", "end_wanted", "delta",
         "delta_per_hour", "drain_per_hour", "eta_hours", "trend",
     }
-    DASHBOARD_MATCH_RATE_POINT_FIELDS = {
+    DASHBOARD_MATCH_RATE_POINT_FIELDS: ClassVar = {
         "bucket_start", "matches", "matches_per_hour",
     }
-    DASHBOARD_DAILY_MATCH_RATE_POINT_FIELDS = {
+    DASHBOARD_DAILY_MATCH_RATE_POINT_FIELDS: ClassVar = {
         "bucket_start", "matches", "matches_per_day",
     }
-    DASHBOARD_PEERS_FIELDS = {
+    DASHBOARD_PEERS_FIELDS: ClassVar = {
         "totals", "days", "heavy_queries", "heavy_query_hours",
     }
-    DASHBOARD_PEERS_TOTAL_FIELDS = {
+    DASHBOARD_PEERS_TOTAL_FIELDS: ClassVar = {
         "known_peers", "new_24h", "seen_24h", "tracked_since",
     }
-    DASHBOARD_PEERS_DAY_FIELDS = {
+    DASHBOARD_PEERS_DAY_FIELDS: ClassVar = {
         "date", "new_peers", "total_peers",
     }
-    DASHBOARD_PEER_BROWSE_HEAVY_QUERY_FIELDS = {
+    DASHBOARD_PEER_BROWSE_HEAVY_QUERY_FIELDS: ClassVar = {
         "search_log_id", "request_id", "mb_release_id", "artist_name",
         "album_title", "status", "created_at", "query", "variant",
         "outcome", "result_count", "elapsed_s", "browse_time_s",
         "match_time_s", "peers_browsed", "peers_browsed_lazy",
         "peer_dirs", "fanout_waves",
     }
-    DISK_COVERAGE_COUNT_FIELDS = {
+    DISK_COVERAGE_COUNT_FIELDS: ClassVar = {
         "active_total", "on_disk_total", "off_disk_total", "by_status",
         "on_disk_by_status", "off_disk_by_status", "inverse_total",
     }
-    DISK_COVERAGE_ROW_FIELDS = {
+    DISK_COVERAGE_ROW_FIELDS: ClassVar = {
         "id", "status", "artist_name", "album_title", "mb_release_id",
         "discogs_release_id",
     }
@@ -180,7 +178,7 @@ class TestPipelineDashboardRouteContracts(_FakeDbWebServerCase):
         logs (match-rate series, heavy queries, loop suspects), and peer
         observations (totals + days)."""
         from datetime import timedelta
-        base = datetime.now(timezone.utc)
+        base = datetime.now(UTC)
         self.db.record_cycle_metrics(
             cycle_total_s=300.0, browse_time_s=20.0, match_time_s=10.0,
             search_time_s=240.0, peers_browsed=8, fanout_waves=2,

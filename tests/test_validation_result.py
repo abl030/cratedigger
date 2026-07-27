@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Tests for ValidationResult + CandidateSummary Structs.
 
 RED/GREEN TDD — tests written before implementation.
@@ -13,9 +12,13 @@ import msgspec
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from lib.quality import (ValidationResult, CandidateSummary,
-                         HarnessItem, HarnessTrackInfo, TrackMapping)
-
+from lib.quality import (
+    CandidateSummary,
+    HarnessItem,
+    HarnessTrackInfo,
+    TrackMapping,
+    ValidationResult,
+)
 
 # ============================================================================
 # HarnessItem, HarnessTrackInfo, TrackMapping

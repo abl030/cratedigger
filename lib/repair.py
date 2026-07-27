@@ -104,7 +104,7 @@ def find_orphaned_downloads(
             # transferless rows in this phase are not ordinary orphans.
             continue
         if not has_active:
-            usernames = sorted(set(f.get("username", "?") for f in files))
+            usernames = sorted({f.get("username", "?") for f in files})
             issues.append(OrphanInfo(
                 request_id=row["id"],
                 issue_type="orphaned_download",

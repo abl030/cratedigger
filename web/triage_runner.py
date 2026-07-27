@@ -21,8 +21,9 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import datetime, timezone
-from typing import Any, Callable
+from collections.abc import Callable
+from datetime import UTC, datetime
+from typing import Any
 
 logger = logging.getLogger("cratedigger")
 
@@ -104,7 +105,7 @@ class TriageRunner:
                 self._summary = summary.to_dict()
                 self._finished_at = _utcnow_iso()
             logger.info("wrong_match_triage_sweep.completed")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.exception("wrong_match_triage_sweep.failed")
             with self._lock:
                 self._state = STATE_FAILED
@@ -114,11 +115,11 @@ class TriageRunner:
             if db is not None:
                 try:
                     db.close()
-                except Exception:  # noqa: BLE001
+                except Exception:
                     logger.exception(
                         "wrong_match_triage_sweep.db_close_failed",
                     )
 
 
 def _utcnow_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()

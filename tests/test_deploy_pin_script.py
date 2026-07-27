@@ -10,7 +10,6 @@ from pathlib import Path
 from tests.fakes.deploy_pin import FakeDeployPinCommands
 from tests.structural_audits.deploy_pin import find_shell_contract_violations
 
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "pin_nixosconfig.sh"
 SKILL = REPO_ROOT / ".claude" / "skills" / "deploy" / "SKILL.md"

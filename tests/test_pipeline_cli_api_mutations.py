@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-from email.message import Message
 import io
 import json
 import os
@@ -11,8 +10,10 @@ import tempfile
 import threading
 import unittest
 import urllib.error
-from contextlib import redirect_stdout, redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
+from email.message import Message
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import ClassVar, Self
 from unittest.mock import patch
 
 from scripts.pipeline_cli import api_mutations
@@ -29,7 +30,7 @@ class _Response:
     def read(self) -> bytes:
         return self._body
 
-    def __enter__(self) -> "_Response":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *_values: object) -> None:
@@ -38,8 +39,8 @@ class _Response:
 
 class _RedirectingApiHandler(BaseHTTPRequestHandler):
     redirect_status = 301
-    initial_methods: list[str] = []
-    target_methods: list[str] = []
+    initial_methods: ClassVar[list[str]] = []
+    target_methods: ClassVar[list[str]] = []
 
     def _json(self, status: int, payload: bytes, *, location: str | None = None) -> None:
         self.send_response(status)
@@ -193,10 +194,9 @@ class TestApiMutationCli(unittest.TestCase):
                 ) as urlopen, patch("sys.argv", [
                     "pipeline-cli", "--dsn", "not-a-postgresql-dsn",
                     "--api-base", "http://api", *command,
-                ]):
-                    with self.assertRaises(SystemExit) as exited:
-                        from scripts.pipeline_cli.cli import main
-                        main()
+                ]), self.assertRaises(SystemExit) as exited:
+                    from scripts.pipeline_cli.cli import main
+                    main()
                 self.assertEqual(exited.exception.code, 0)
                 urlopen.assert_called_once()
 

@@ -9,9 +9,9 @@ import sys
 import tempfile
 import unittest
 from contextlib import closing, redirect_stderr, redirect_stdout
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import msgspec
 
@@ -628,7 +628,7 @@ class TestCmdImportJobRecovery(unittest.TestCase):
         row = next(row for row in db._import_jobs if row["id"] == job.id)
         row.update({
             "status": "recovery_required",
-            "beets_launch_authorized_at": datetime.now(timezone.utc),
+            "beets_launch_authorized_at": datetime.now(UTC),
             "beets_launch_release_id": "release-42",
             "beets_launch_source_path": "/tmp/cli-recovery",
             "beets_launch_request_status": "wanted",
@@ -1245,9 +1245,8 @@ class TestMainExitCodes(unittest.TestCase):
         ), patch(
             "scripts.pipeline_cli.cli.PipelineDB",
             return_value=db,
-        ), redirect_stdout(stdout), redirect_stderr(stderr):
-            with self.assertRaises(SystemExit) as raised:
-                pipeline_cli.main()
+        ), redirect_stdout(stdout), redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            pipeline_cli.main()
 
         self.assertEqual(raised.exception.code, 5)
         self.assertEqual(stderr.getvalue(), "")
@@ -1270,9 +1269,8 @@ class TestMainExitCodes(unittest.TestCase):
         with patch.object(sys, "argv", argv), patch(
             "scripts.pipeline_cli.cli.PipelineDB",
             side_effect=RuntimeError("database unavailable"),
-        ), redirect_stdout(stdout), redirect_stderr(stderr):
-            with self.assertRaises(SystemExit) as raised:
-                pipeline_cli.main()
+        ), redirect_stdout(stdout), redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            pipeline_cli.main()
 
         self.assertEqual(raised.exception.code, 5)
         self.assertEqual(stderr.getvalue(), "")
@@ -1294,9 +1292,8 @@ class TestMainExitCodes(unittest.TestCase):
         with patch.object(sys, "argv", argv), patch(
             "scripts.pipeline_cli.cli.PipelineDB",
             side_effect=RuntimeError("database unavailable"),
-        ), redirect_stdout(stdout), redirect_stderr(stderr):
-            with self.assertRaises(SystemExit) as raised:
-                pipeline_cli.main()
+        ), redirect_stdout(stdout), redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            pipeline_cli.main()
 
         self.assertEqual(raised.exception.code, 5)
         self.assertEqual(stdout.getvalue(), "")
@@ -1317,9 +1314,8 @@ class TestMainExitCodes(unittest.TestCase):
         with patch.object(sys, "argv", argv), patch(
             "scripts.pipeline_cli.cli.PipelineDB",
             return_value=db,
-        ):
-            with self.assertRaises(SystemExit) as raised:
-                pipeline_cli.main()
+        ), self.assertRaises(SystemExit) as raised:
+            pipeline_cli.main()
 
         self.assertEqual(raised.exception.code, 2)
         self.assertEqual(db.close_calls, 1)
@@ -1352,9 +1348,8 @@ class TestMainExitCodes(unittest.TestCase):
         ), patch(
             "lib.wrong_match_delete_service.delete_wrong_match",
             return_value=result,
-        ) as delete, redirect_stdout(io.StringIO()):
-            with self.assertRaises(SystemExit) as raised:
-                pipeline_cli.main()
+        ) as delete, redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as raised:
+            pipeline_cli.main()
 
         self.assertEqual(raised.exception.code, 0)
         delete.assert_called_once_with(db, 42, require_visible=True)
@@ -1393,9 +1388,8 @@ class TestMainExitCodes(unittest.TestCase):
         ), patch(
             "lib.wrong_match_delete_service.delete_wrong_match_group",
             return_value=summary,
-        ) as delete, redirect_stdout(io.StringIO()):
-            with self.assertRaises(SystemExit) as raised:
-                pipeline_cli.main()
+        ) as delete, redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as raised:
+            pipeline_cli.main()
 
         self.assertEqual(raised.exception.code, 0)
         delete.assert_called_once_with(db, 42)
@@ -1604,6 +1598,7 @@ class TestCmdQuery(unittest.TestCase):
     def test_read_only_scope_never_retries_caller_sql_on_replacement_connection(self):
         """A post-BEGIN socket death must not replay SQL on writable B."""
         import psycopg2
+
         from lib.pipeline_db import PipelineDB
 
         class DeadConnection:
@@ -1834,7 +1829,7 @@ class TestCmdSetIntent(unittest.TestCase):
         ))
         args = MagicMock(id=1, intent="lossless")
         pipeline_cli.cmd_set_intent(cast(Any, db), args)
-        self.assertEqual(db.update_request_fields_calls, [(1, dict(target_format="lossless"))])
+        self.assertEqual(db.update_request_fields_calls, [(1, {"target_format": "lossless"})])
 
     @patch("builtins.print")
     def test_set_default_clears_target(self, _mock_print):
@@ -1844,7 +1839,7 @@ class TestCmdSetIntent(unittest.TestCase):
         ))
         args = MagicMock(id=1, intent="default")
         pipeline_cli.cmd_set_intent(cast(Any, db), args)
-        self.assertEqual(db.update_request_fields_calls, [(1, dict(target_format=None))])
+        self.assertEqual(db.update_request_fields_calls, [(1, {"target_format": None})])
 
     @patch("builtins.print")
     @patch("scripts.pipeline_cli.album_requests.finalize_request")
@@ -1869,7 +1864,7 @@ class TestCmdSetIntent(unittest.TestCase):
             transition.fields,
             {"search_filetype_override": "lossless", "min_bitrate": 245},
         )
-        self.assertEqual(db.update_request_fields_calls, [(2, dict(target_format="lossless"))])
+        self.assertEqual(db.update_request_fields_calls, [(2, {"target_format": "lossless"})])
 
     @patch("builtins.print")
     def test_set_intent_reports_replace_race_instead_of_success(
@@ -1934,7 +1929,7 @@ class TestCmdSetIntent(unittest.TestCase):
         args = MagicMock(id=4, intent="default")
         pipeline_cli.cmd_set_intent(cast(Any, db), args)
         self.assertEqual(db.update_request_fields_calls, [(
-            4, dict(target_format=None, search_filetype_override=None))])
+            4, {"target_format": None, "search_filetype_override": None})])
 
     @patch("builtins.print")
     def test_set_intent_refuses_downloading(self, _mock_print):
@@ -2045,7 +2040,7 @@ class TestCmdRepairSpectral(unittest.TestCase):
 
 
 def _invoke_cmd_quality(
-    db: "FakePipelineDB", request_id: int, *, runtime_target: str | None,
+    db: FakePipelineDB, request_id: int, *, runtime_target: str | None,
 ) -> str:
     """Shared ``cmd_quality`` invocation seam.
 
@@ -2391,7 +2386,7 @@ class TestCmdQuality(unittest.TestCase):
 
     def test_backfill_replaces_full_upgrade_ladder_from_linked_evidence(self):
         """Only an already-lossless override makes positive backfill a no-op."""
-        from lib.quality import AudioQualityMeasurement, QUALITY_UPGRADE_TIERS
+        from lib.quality import QUALITY_UPGRADE_TIERS, AudioQualityMeasurement
 
         request_row = make_request_row(
             id=8503,
@@ -2739,7 +2734,9 @@ class _ForensicsDB(FakePipelineDB):
     def set_stub_download_history(self, rows: list[dict[str, object]]) -> None:
         self._stub_download_history = list(rows)
 
-    def get_download_history(self, request_id: int) -> "list[DownloadLogWithEvidenceRow]":
+    def get_download_history(
+        self, request_id: int,
+    ) -> "list[DownloadLogWithEvidenceRow]":
         if self._stub_download_history is None:
             return super().get_download_history(request_id)
         return cast("list[DownloadLogWithEvidenceRow]", [
@@ -3253,9 +3250,9 @@ class TestCmdSearchPlanShowStats(unittest.TestCase):
     """
 
     def _seed_with_plan(self):
-        from tests.fakes import FakePipelineDB
         from lib.pipeline_db import SearchPlanItemInput
         from lib.search import SEARCH_PLAN_GENERATOR_ID
+        from tests.fakes import FakePipelineDB
         db = FakePipelineDB()
         rid = db.add_request(
             artist_name="A", album_title="B",
@@ -3344,9 +3341,9 @@ class TestCmdSearchPlanRegenerate(unittest.TestCase):
     """
 
     def _seed_with_plan(self, *, status: str = "wanted"):
-        from tests.fakes import FakePipelineDB
         from lib.pipeline_db import SearchPlanItemInput
         from lib.search import SEARCH_PLAN_GENERATOR_ID
+        from tests.fakes import FakePipelineDB
         db = FakePipelineDB()
         rid = db.add_request(
             artist_name="A", album_title="B",
@@ -3372,16 +3369,16 @@ class TestCmdSearchPlanRegenerate(unittest.TestCase):
         args = SimpleNamespace(
             id=rid, json=json_out, prepend_artist=prepend)
         stdout = io.StringIO()
-        with redirect_stdout(stdout):
-            with patch("lib.config.read_runtime_config") as mock_cfg:
-                from lib.config import CratediggerConfig
-                # Build a minimal real config from defaults so the service
-                # can read escalation_threshold etc.
-                import configparser
-                cp = configparser.RawConfigParser()
-                cp.read_string("[General]\n")
-                mock_cfg.return_value = CratediggerConfig.from_ini(cp)
-                rc = pipeline_cli.cmd_search_plan_regenerate(db, cast(Any, args))
+        with redirect_stdout(stdout), patch("lib.config.read_runtime_config") as mock_cfg:
+            # Build a minimal real config from defaults so the service
+            # can read escalation_threshold etc.
+            import configparser
+
+            from lib.config import CratediggerConfig
+            cp = configparser.RawConfigParser()
+            cp.read_string("[General]\n")
+            mock_cfg.return_value = CratediggerConfig.from_ini(cp)
+            rc = pipeline_cli.cmd_search_plan_regenerate(db, cast(Any, args))
         return rc, stdout.getvalue()
 
     def test_regenerate_succeeds_creates_new_active_plan_and_resets_cursor(self):
@@ -3441,9 +3438,9 @@ class TestCmdSearchPlanRegenerate(unittest.TestCase):
         self.assertEqual(db.search_plans, plans_before)
 
     def test_regenerate_deterministic_failure_returns_3_preserves_old_plan(self):
-        from tests.fakes import FakePipelineDB
         from lib.pipeline_db import SearchPlanItemInput
         from lib.search import SEARCH_PLAN_GENERATOR_ID
+        from tests.fakes import FakePipelineDB
         db = FakePipelineDB()
         # Empty artist/title would normally fail generation; seed a request
         # with no usable identity and an existing successful plan to prove
@@ -3506,14 +3503,14 @@ class TestCmdSearchPlanDryRun(unittest.TestCase):
         args = SimpleNamespace(
             id=rid, json=json_out, prepend_artist=prepend)
         stdout = io.StringIO()
-        with redirect_stdout(stdout):
-            with patch("lib.config.read_runtime_config") as mock_cfg:
-                from lib.config import CratediggerConfig
-                import configparser
-                cp = configparser.RawConfigParser()
-                cp.read_string("[General]\n")
-                mock_cfg.return_value = CratediggerConfig.from_ini(cp)
-                rc = pipeline_cli.cmd_search_plan_dry_run(db, cast(Any, args))
+        with redirect_stdout(stdout), patch("lib.config.read_runtime_config") as mock_cfg:
+            import configparser
+
+            from lib.config import CratediggerConfig
+            cp = configparser.RawConfigParser()
+            cp.read_string("[General]\n")
+            mock_cfg.return_value = CratediggerConfig.from_ini(cp)
+            rc = pipeline_cli.cmd_search_plan_dry_run(db, cast(Any, args))
         return rc, stdout.getvalue()
 
     def test_dry_run_happy_path_prints_plan_items_without_persisting(self):
@@ -3634,14 +3631,14 @@ class TestCmdSearchPlanSaturation(unittest.TestCase):
         args = SimpleNamespace(
             id=rid, json=json_out, window_days=window_days)
         stdout = io.StringIO()
-        with redirect_stdout(stdout):
-            with patch("lib.config.read_runtime_config") as mock_cfg:
-                from lib.config import CratediggerConfig
-                import configparser
-                cp = configparser.RawConfigParser()
-                cp.read_string("[General]\n")
-                mock_cfg.return_value = CratediggerConfig.from_ini(cp)
-                rc = pipeline_cli.cmd_search_plan_saturation(db, cast(Any, args))
+        with redirect_stdout(stdout), patch("lib.config.read_runtime_config") as mock_cfg:
+            import configparser
+
+            from lib.config import CratediggerConfig
+            cp = configparser.RawConfigParser()
+            cp.read_string("[General]\n")
+            mock_cfg.return_value = CratediggerConfig.from_ini(cp)
+            rc = pipeline_cli.cmd_search_plan_saturation(db, cast(Any, args))
         return rc, stdout.getvalue()
 
     def test_happy_path_prints_human_summary(self):
@@ -3737,14 +3734,16 @@ class TestStaleCompletionRacingRegeneration(unittest.TestCase):
     """
 
     def test_stale_completion_logs_does_not_advance_new_cursor(self):
-        from tests.fakes import FakePipelineDB
+        import configparser
+
+        from lib.config import CratediggerConfig
         from lib.pipeline_db import (
-            ConsumedAttemptInput, SearchPlanItemInput,
+            ConsumedAttemptInput,
+            SearchPlanItemInput,
         )
         from lib.search import SEARCH_PLAN_GENERATOR_ID
         from lib.search_plan_service import SearchPlanService
-        from lib.config import CratediggerConfig
-        import configparser
+        from tests.fakes import FakePipelineDB
         cp = configparser.RawConfigParser()
         cp.read_string("[General]\n")
         cfg = CratediggerConfig.from_ini(cp)
@@ -3817,9 +3816,9 @@ class TestCmdSearchPlanAdvance(unittest.TestCase):
     stay in sync; see ``CLAUDE.md`` § "CLI ⇄ API surface symmetry"."""
 
     def _seed_plan(self):
-        from tests.fakes import FakePipelineDB
         from lib.pipeline_db import SearchPlanItemInput
         from lib.search import SEARCH_PLAN_GENERATOR_ID
+        from tests.fakes import FakePipelineDB
         db = FakePipelineDB()
         rid = db.add_request(
             artist_name="David Bowie", album_title="David Bowie",
@@ -3847,14 +3846,14 @@ class TestCmdSearchPlanAdvance(unittest.TestCase):
             json=json_out,
         )
         stdout = io.StringIO()
-        with redirect_stdout(stdout):
-            with patch("lib.config.read_runtime_config") as mock_cfg:
-                from lib.config import CratediggerConfig
-                import configparser
-                cp = configparser.RawConfigParser()
-                cp.read_string("[General]\n")
-                mock_cfg.return_value = CratediggerConfig.from_ini(cp)
-                rc = pipeline_cli.cmd_search_plan_advance(db, cast(Any, args))
+        with redirect_stdout(stdout), patch("lib.config.read_runtime_config") as mock_cfg:
+            import configparser
+
+            from lib.config import CratediggerConfig
+            cp = configparser.RawConfigParser()
+            cp.read_string("[General]\n")
+            mock_cfg.return_value = CratediggerConfig.from_ini(cp)
+            rc = pipeline_cli.cmd_search_plan_advance(db, cast(Any, args))
         return rc, stdout.getvalue()
 
     def test_advance_to_ordinal_succeeds_and_moves_cursor(self):
@@ -3942,16 +3941,16 @@ class TestCmdReplace(unittest.TestCase):
             id=req_id, target_mb_release_id=target_mbid, json=json_out,
         )
         stdout = io.StringIO()
-        with redirect_stdout(stdout):
-            with patch("lib.config.read_runtime_config") as mock_cfg, \
+        with redirect_stdout(stdout), patch("lib.config.read_runtime_config") as mock_cfg, \
                  patch("lib.mbid_replace_service.MbidReplaceService") as MS:
-                from lib.config import CratediggerConfig
-                import configparser
-                cp = configparser.RawConfigParser()
-                cp.read_string("[General]\n")
-                mock_cfg.return_value = CratediggerConfig.from_ini(cp)
-                MS.return_value.replace_request_mbid.return_value = result
-                rc = pipeline_cli.cmd_replace(MagicMock(), cast(Any, args))
+            import configparser
+
+            from lib.config import CratediggerConfig
+            cp = configparser.RawConfigParser()
+            cp.read_string("[General]\n")
+            mock_cfg.return_value = CratediggerConfig.from_ini(cp)
+            MS.return_value.replace_request_mbid.return_value = result
+            rc = pipeline_cli.cmd_replace(MagicMock(), cast(Any, args))
         return rc, stdout.getvalue()
 
     def test_exit_0_on_replaced(self):
@@ -3998,7 +3997,7 @@ class TestCmdReplace(unittest.TestCase):
         """#501 item 2: the CLI's --json payload surfaces the new typed
         ``reason`` field (a REPLACE_REASON_* code) so operators/tooling
         can assert on the stable code instead of parsing error_message."""
-        rc, out = self._run(
+        _rc, out = self._run(
             mock_outcome="target_invalid",
             mock_kwargs={
                 "reason": "cross_pathway_target",
@@ -4012,7 +4011,7 @@ class TestCmdReplace(unittest.TestCase):
     def test_text_output_includes_reason_line(self):
         """#501 item 2: the human-readable output also surfaces the
         reason code when set (target_invalid outcomes only)."""
-        rc, out = self._run(
+        _rc, out = self._run(
             mock_outcome="target_invalid",
             mock_kwargs={"reason": "cross_pathway_target"},
         )
@@ -4068,12 +4067,11 @@ class TestCmdBeetsDistance(unittest.TestCase):
             download_log_id=100, mbid=self.UUID, json=json_out,
         )
         stdout = io.StringIO()
-        with redirect_stdout(stdout):
-            with patch(
-                "lib.beets_distance.compute_beets_distance",
-                return_value=result,
-            ):
-                rc = pipeline_cli.cmd_beets_distance(MagicMock(), cast(Any, args))
+        with redirect_stdout(stdout), patch(
+            "lib.beets_distance.compute_beets_distance",
+            return_value=result,
+        ):
+            rc = pipeline_cli.cmd_beets_distance(MagicMock(), cast(Any, args))
         return rc, stdout.getvalue()
 
     def test_exit_0_on_ok(self):
@@ -4167,18 +4165,17 @@ class TestCmdBeetsDistance(unittest.TestCase):
         }
         args = SimpleNamespace(download_log_id=100, mbid="2048516", json=False)
         stdout = io.StringIO()
-        with redirect_stdout(stdout):
-            with patch(
-                "lib.beets_distance.compute_beets_distance",
-                side_effect=_fake_compute,
-            ), patch(
-                "web.discogs.get_release",
-                return_value=discogs_release,
-            ) as discogs_get:
-                rc = pipeline_cli.cmd_beets_distance(MagicMock(), cast(Any, args))
-                self.assertIn("mb_get_release", captured)
-                resolved = captured["mb_get_release"]("2048516")
-                discogs_get.assert_called_once_with(2048516, fresh=False)
+        with redirect_stdout(stdout), patch(
+            "lib.beets_distance.compute_beets_distance",
+            side_effect=_fake_compute,
+        ), patch(
+            "web.discogs.get_release",
+            return_value=discogs_release,
+        ) as discogs_get:
+            rc = pipeline_cli.cmd_beets_distance(MagicMock(), cast(Any, args))
+            self.assertIn("mb_get_release", captured)
+            resolved = captured["mb_get_release"]("2048516")
+            discogs_get.assert_called_once_with(2048516, fresh=False)
         self.assertEqual(rc, 0)
         self.assertEqual(resolved, discogs_release)
 
@@ -4221,7 +4218,8 @@ class TestCmdYoutubeAlbum(unittest.TestCase):
     def _make_ok_matrix(self):
         from lib.beets_distance import SyntheticItem
         from lib.youtube_album_service import (
-            ResolvedDistance, ResolvedYoutubeRelease,
+            ResolvedDistance,
+            ResolvedYoutubeRelease,
         )
         synth = [
             SyntheticItem(
@@ -4276,24 +4274,22 @@ class TestCmdYoutubeAlbum(unittest.TestCase):
 
             def close(self) -> None:
                 type(self).close_calls += 1
-                return None
 
         _FakeSession.close_calls = 0
         self._last_session_cls = _FakeSession
 
-        with redirect_stdout(stdout):
-            with patch(
-                "scripts.pipeline_cli.youtube._build_youtube_client",
-                return_value=(object(), _FakeSession()),
-            ), patch(
-                "scripts.pipeline_cli.youtube._RedisYoutubeCache",
-                return_value=object(),
-            ), patch(
-                "scripts.pipeline_cli.youtube.resolve_youtube_album",
-                return_value=result,
-            ) as mock_resolve:
-                rc = pipeline_cli.cmd_youtube_album(
-                    FakePipelineDB(), cast(Any, args))
+        with redirect_stdout(stdout), patch(
+            "scripts.pipeline_cli.youtube._build_youtube_client",
+            return_value=(object(), _FakeSession()),
+        ), patch(
+            "scripts.pipeline_cli.youtube._RedisYoutubeCache",
+            return_value=object(),
+        ), patch(
+            "scripts.pipeline_cli.youtube.resolve_youtube_album",
+            return_value=result,
+        ) as mock_resolve:
+            rc = pipeline_cli.cmd_youtube_album(
+                FakePipelineDB(), cast(Any, args))
         return rc, stdout.getvalue(), mock_resolve
 
     def test_exit_code_mapping_uses_service_module_dict(self):
@@ -4425,7 +4421,6 @@ class TestCmdYoutubeAlbum(unittest.TestCase):
 
             def close(self) -> None:
                 type(self).close_calls += 1
-                return None
 
         _FakeSession.close_calls = 0
 
@@ -4445,10 +4440,9 @@ class TestCmdYoutubeAlbum(unittest.TestCase):
         ), patch(
             "scripts.pipeline_cli.youtube.resolve_youtube_album",
             side_effect=_raising_resolver,
-        ):
-            with self.assertRaises(RuntimeError):
-                pipeline_cli.cmd_youtube_album(
-                    FakePipelineDB(), cast(Any, args))
+        ), self.assertRaises(RuntimeError):
+            pipeline_cli.cmd_youtube_album(
+                FakePipelineDB(), cast(Any, args))
 
         self.assertEqual(
             _FakeSession.close_calls, 1,
@@ -4482,14 +4476,14 @@ class TestCmdSearchPlanHistory(unittest.TestCase):
             json=json_out,
         )
         stdout = io.StringIO()
-        with redirect_stdout(stdout):
-            with patch("lib.config.read_runtime_config") as mock_cfg:
-                from lib.config import CratediggerConfig
-                import configparser
-                cp = configparser.RawConfigParser()
-                cp.read_string("[General]\n")
-                mock_cfg.return_value = CratediggerConfig.from_ini(cp)
-                rc = pipeline_cli.cmd_search_plan_history(db, cast(Any, args))
+        with redirect_stdout(stdout), patch("lib.config.read_runtime_config") as mock_cfg:
+            import configparser
+
+            from lib.config import CratediggerConfig
+            cp = configparser.RawConfigParser()
+            cp.read_string("[General]\n")
+            mock_cfg.return_value = CratediggerConfig.from_ini(cp)
+            rc = pipeline_cli.cmd_search_plan_history(db, cast(Any, args))
         return rc, stdout.getvalue()
 
     def test_history_success_default_limit_human_output(self):
@@ -4526,12 +4520,12 @@ class TestCmdSearchPlanHistory(unittest.TestCase):
 
     def test_history_returns_3_on_zero_limit(self):
         db, rid = self._seed(n=2)
-        rc, out = self._run(db, rid, limit=0)
+        rc, _out = self._run(db, rid, limit=0)
         self.assertEqual(rc, 3)
 
     def test_history_returns_3_on_negative_before_id(self):
         db, rid = self._seed(n=2)
-        rc, out = self._run(db, rid, limit=10, before_id=0)
+        rc, _out = self._run(db, rid, limit=10, before_id=0)
         self.assertEqual(rc, 3)
 
     def test_history_paginates_via_before_id(self):
@@ -4595,9 +4589,10 @@ class TestPipelineCliTriage(unittest.TestCase):
         ))
 
     def _seed_unfindable(self, db, rid: int, category: str = "artist_absent") -> None:
-        from datetime import datetime, timezone
+        from datetime import datetime
+
         from tests.helpers import make_request_row
-        now = datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 5, 26, 12, 0, 0, tzinfo=UTC)
         db.seed_request(make_request_row(
             id=rid, artist_name=f"Vanished {rid}",
             album_title=f"Unfindable Album {rid}",
@@ -4746,7 +4741,7 @@ class TestPipelineCliTriage(unittest.TestCase):
 
     def test_show_unknown_id_returns_2_with_stderr_message(self):
         db = FakePipelineDB()
-        rc, out, err = self._run_show(db, 9999)
+        rc, _out, err = self._run_show(db, 9999)
         self.assertEqual(rc, 2)
         # Human path writes to stderr; the operator running `triage show`
         # should see the error there, not on stdout.
@@ -4755,7 +4750,7 @@ class TestPipelineCliTriage(unittest.TestCase):
 
     def test_show_unknown_id_json_returns_2_with_structured_payload(self):
         db = FakePipelineDB()
-        rc, out, err = self._run_show(db, 9999, json_out=True)
+        rc, out, _err = self._run_show(db, 9999, json_out=True)
         self.assertEqual(rc, 2)
         payload = json.loads(out)
         self.assertEqual(payload["error"], "Not found")
@@ -4764,7 +4759,7 @@ class TestPipelineCliTriage(unittest.TestCase):
     def test_show_healthy_request_renders_no_unfindable_signal(self):
         db = FakePipelineDB()
         self._seed_healthy(db, 1)
-        rc, out, err = self._run_show(db, 1)
+        rc, out, _err = self._run_show(db, 1)
         self.assertEqual(rc, 0)
         self.assertIn("Healthy", out)
         self.assertIn("Imported Album", out)
@@ -4814,7 +4809,7 @@ class TestPipelineCliTriage(unittest.TestCase):
 
     def test_list_data_quality_returns_data_quality_rows(self):
         db = self._seed_cohort()
-        rc, out, err = self._run_list(db, filter_spec="data_quality")
+        rc, out, _err = self._run_list(db, filter_spec="data_quality")
         self.assertEqual(rc, 0)
         self.assertIn("DataOnly 4", out)
         # Healthy + unfindable rows without resolutions must not appear.
@@ -4826,7 +4821,7 @@ class TestPipelineCliTriage(unittest.TestCase):
         filters on the resolver-status column (what
         ``lib/field_resolver_service.py`` actually writes)."""
         db = self._seed_cohort()
-        rc, out, err = self._run_list(
+        rc, out, _err = self._run_list(
             db, filter_spec="data_quality:status=unresolved_4xx_client",
         )
         self.assertEqual(rc, 0)
@@ -4836,7 +4831,7 @@ class TestPipelineCliTriage(unittest.TestCase):
         """``data_quality:reason=<code>`` complementary filter on the
         ``reason_code`` column (HTTP code-specific)."""
         db = self._seed_cohort()
-        rc, out, err = self._run_list(
+        rc, out, _err = self._run_list(
             db, filter_spec="data_quality:reason=http_400",
         )
         self.assertEqual(rc, 0)
@@ -4844,7 +4839,7 @@ class TestPipelineCliTriage(unittest.TestCase):
 
     def test_list_invalid_filter_returns_3_and_emits_valid_forms(self):
         db = self._seed_cohort()
-        rc, out, err = self._run_list(db, filter_spec="garbage_value")
+        rc, _out, err = self._run_list(db, filter_spec="garbage_value")
         self.assertEqual(rc, 3)
         # Operator sees the valid forms on stderr.
         self.assertIn("Invalid filter spec", err)
@@ -4922,7 +4917,7 @@ class TestPipelineCliTriage(unittest.TestCase):
     def test_list_empty_result_is_exit_0(self):
         db = FakePipelineDB()
         # No rows seeded — empty cohort under any filter.
-        rc, out, err = self._run_list(db, filter_spec="unfindable")
+        rc, out, _err = self._run_list(db, filter_spec="unfindable")
         self.assertEqual(rc, 0)
         self.assertIn("No results", out)
 
@@ -4930,7 +4925,7 @@ class TestPipelineCliTriage(unittest.TestCase):
         db = self._seed_cohort()
         # 2 unfindable rows seeded (ids 2 and 3); limit=2 means full page
         # and the footer should print the next --after cursor.
-        rc, out, err = self._run_list(
+        rc, out, _err = self._run_list(
             db, filter_spec="unfindable", limit=2,
         )
         self.assertEqual(rc, 0)
@@ -4943,7 +4938,7 @@ class TestPipelineCliTriage(unittest.TestCase):
         db = self._seed_cohort()
         # Only 2 unfindable rows; limit=10 returns a partial page with no
         # follow-on cursor.
-        rc, out, err = self._run_list(
+        rc, out, _err = self._run_list(
             db, filter_spec="unfindable", limit=10,
         )
         self.assertEqual(rc, 0)
@@ -4999,7 +4994,7 @@ class TestPipelineCliLongTail(unittest.TestCase):
     def test_json_emits_typed_envelope(self):
         db = self._seed()
         band_fn = self._band_fn({"rel-2": "transparent"})
-        rc, out, err = self._run(db, json_out=True, band_fn=band_fn)
+        rc, out, _err = self._run(db, json_out=True, band_fn=band_fn)
         self.assertEqual(rc, 0)
         payload = json.loads(out)
         self.assertEqual(set(payload), {"results", "band", "count"})
@@ -5035,14 +5030,14 @@ class TestPipelineCliLongTail(unittest.TestCase):
 
     def test_empty_cohort_exit_zero(self):
         db = FakePipelineDB()
-        rc, out, err = self._run(db, band_fn=self._band_fn({}))
+        rc, out, _err = self._run(db, band_fn=self._band_fn({}))
         self.assertEqual(rc, 0)
         self.assertIn("No wanted rows", out)
 
     def test_single_id_exit_zero_with_band(self):
         db = self._seed()
         band_fn = self._band_fn({"rel-2": "transparent"})
-        rc, out, err = self._run(
+        rc, out, _err = self._run(
             db, request_id=2, json_out=True, band_fn=band_fn)
         self.assertEqual(rc, 0)
         payload = json.loads(out)
@@ -5052,7 +5047,7 @@ class TestPipelineCliLongTail(unittest.TestCase):
 
     def test_single_id_not_wanted_exit_two(self):
         db = self._seed()
-        rc, out, err = self._run(
+        rc, _out, err = self._run(
             db, request_id=3, band_fn=self._band_fn({}))  # id 3 is imported
         self.assertEqual(rc, 2)
         self.assertIn("not found or not wanted", err)
@@ -5073,9 +5068,8 @@ class TestPipelineCliRoutes(unittest.TestCase):
         db = FakePipelineDB()
         with patch.object(sys, "argv", argv), patch(
             "scripts.pipeline_cli.cli.PipelineDB", return_value=db,
-        ), redirect_stdout(io.StringIO()) as out:
-            with self.assertRaises(SystemExit) as raised:
-                pipeline_cli.main()
+        ), redirect_stdout(io.StringIO()) as out, self.assertRaises(SystemExit) as raised:
+            pipeline_cli.main()
         code = raised.exception.code
         return (code if isinstance(code, int) else 0), out.getvalue()
 
@@ -5158,6 +5152,8 @@ class TestCmdYoutubeRescue(unittest.TestCase):
              json_out=False, request_id=42, browse_id="MPREb_test"):
         from lib.youtube_ingest_service import (
             OUTCOME_EXIT_CODE as INGEST_EXIT_CODE,
+        )
+        from lib.youtube_ingest_service import (
             SubmitResult,
         )
 
@@ -5208,7 +5204,7 @@ class TestCmdYoutubeRescue(unittest.TestCase):
         # The table itself must match the literal coverage above —
         # forces future contributors who add a new outcome to update
         # both the service map and this subTest table together.
-        self.assertEqual(set(o for o, _ in cases), set(TABLE),
+        self.assertEqual({o for o, _ in cases}, set(TABLE),
                          "subTest cases drifted from OUTCOME_EXIT_CODE")
         for outcome, expected_rc in cases:
             with self.subTest(outcome=outcome):

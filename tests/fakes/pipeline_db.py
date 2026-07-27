@@ -9,19 +9,21 @@ from __future__ import annotations
 
 import copy
 import json
-import time
+from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
-from collections.abc import Generator, Mapping
-from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator, Optional, Sequence, cast
-import msgspec
+from datetime import UTC, date, datetime, timedelta
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    cast,
+)
 
+import msgspec
 
 if TYPE_CHECKING:
     from cratedigger import TrackRecord
     from lib.dispatch.types import PostCommitQuarantineAudit
-    from lib.quality import CandidateScore
     from lib.pipeline_db import (
         AlbumRequestRow,
         DownloadLogWithEvidenceRow,
@@ -32,86 +34,97 @@ if TYPE_CHECKING:
         SearchLogHistoryPage,
         WrongMatchCandidateRow,
     )
+    from lib.quality import CandidateScore
 
+from lib import transitions
 from lib.import_queue import (
-    ForceImportPayload,
-    ImportJob,
     IMPORT_JOB_ACTIVE_STATUSES,
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
-    IMPORT_JOB_RECOVERY_REQUIRED,
-    IMPORT_JOB_YOUTUBE,
     IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES,
     IMPORT_JOB_PREVIEW_EVIDENCE_READY,
     IMPORT_JOB_PREVIEW_WAITING,
+    IMPORT_JOB_RECOVERY_REQUIRED,
+    IMPORT_JOB_YOUTUBE,
+    ForceImportPayload,
+    ImportJob,
     YoutubeImportPayload,
     validate_job_type,
-    validate_preview_failure_status,
     validate_payload,
+    validate_preview_failure_status,
     validate_status,
 )
-from lib.pipeline_db import (ActiveSearchPlan, BACKOFF_BASE_MINUTES,
-                             DOWNLOAD_LOG_OUTCOMES,
-                             JELLYFIN_PIN_STATUSES,
-                             JELLYFIN_TERMINAL_PIN_STATUSES,
-                             JellyfinTerminalPinStatus,
-                             PLEX_PIN_STATUSES,
-                             PLEX_TERMINAL_PIN_STATUSES,
-                             PlexTerminalPinStatus,
-                             BACKOFF_MAX_MINUTES, BadAudioHashInput,
-                             BadAudioHashRow, ConsumedAttemptInput,
-                             ConsumedAttemptResult, CURSOR_UPDATE_ADVANCED,
-                             CURSOR_UPDATE_STALE, CURSOR_UPDATE_UNCHANGED,
-                             CURSOR_UPDATE_WRAPPED, DownloadLogCounts,
-                             DryRunPlanClassification,
-                             NonConsumingAttemptInput,
-                             PLAN_STATUS_ACTIVE, PLAN_STATUS_FAILED_DETERMINISTIC,
-                             PLAN_STATUS_FAILED_TRANSIENT,
-                             PLAN_STATUS_SUPERSEDED,
-                             PersistedYoutubeRow,
-                             RequestSpectralStateUpdate,
-                             ReplacedRequestMutationError,
-                             SEARCH_LOG_STAGE_ACCEPTED,
-                             SEARCH_LOG_STAGE_PRE_ATTEMPT,
-                             SEARCH_LOG_STAGE_STALE_COMPLETION,
-                             SearchPlanInspection, SearchPlanItemInput,
-                             SearchPlanItemProvenance, SearchPlanItemRow,
-                             SearchPlanMetadataSnapshot,
-                             SearchPlanProvenance, SearchPlanRow,
-                             TransferLedgerRow,
-                             WantedReconciliationCandidate)
+from lib.pipeline_db import (
+    BACKOFF_BASE_MINUTES,
+    BACKOFF_MAX_MINUTES,
+    CURSOR_UPDATE_ADVANCED,
+    CURSOR_UPDATE_STALE,
+    CURSOR_UPDATE_UNCHANGED,
+    CURSOR_UPDATE_WRAPPED,
+    DOWNLOAD_LOG_OUTCOMES,
+    JELLYFIN_PIN_STATUSES,
+    JELLYFIN_TERMINAL_PIN_STATUSES,
+    PLAN_STATUS_ACTIVE,
+    PLAN_STATUS_FAILED_DETERMINISTIC,
+    PLAN_STATUS_FAILED_TRANSIENT,
+    PLAN_STATUS_SUPERSEDED,
+    PLEX_PIN_STATUSES,
+    PLEX_TERMINAL_PIN_STATUSES,
+    SEARCH_LOG_STAGE_ACCEPTED,
+    SEARCH_LOG_STAGE_PRE_ATTEMPT,
+    SEARCH_LOG_STAGE_STALE_COMPLETION,
+    ActiveSearchPlan,
+    BadAudioHashInput,
+    BadAudioHashRow,
+    ConsumedAttemptInput,
+    ConsumedAttemptResult,
+    DownloadLogCounts,
+    DryRunPlanClassification,
+    JellyfinTerminalPinStatus,
+    NonConsumingAttemptInput,
+    PersistedYoutubeRow,
+    PlexTerminalPinStatus,
+    ReplacedRequestMutationError,
+    RequestSpectralStateUpdate,
+    SearchPlanInspection,
+    SearchPlanItemInput,
+    SearchPlanItemProvenance,
+    SearchPlanItemRow,
+    SearchPlanMetadataSnapshot,
+    SearchPlanProvenance,
+    SearchPlanRow,
+    TransferLedgerRow,
+    WantedReconciliationCandidate,
+)
+from lib.pipeline_db._core import ReadOnlyQueryCursor
 from lib.pipeline_db._shared import (
     validate_request_metadata_fields,
 )
-from lib.pipeline_db._core import ReadOnlyQueryCursor
 from lib.quality import (
-    AlbumQualityEvidence,
-    AlbumQualityV0Metric,
-    CodecFamily,
-    CooldownConfig,
     EVIDENCE_PROVENANCE_MEASURED,
     EVIDENCE_SUBJECT_INSTALLED,
     EVIDENCE_SUBJECT_SOURCE,
     LOSSLESS_CODECS,
     V0_PROBE_LOSSLESS_SOURCE,
     V0_PROBE_NATIVE_LOSSY_RESEARCH,
+    AlbumQualityEvidence,
+    AlbumQualityV0Metric,
+    CodecFamily,
+    CooldownConfig,
 )
-from lib import transitions
-from lib.terminal_outcomes import (
-    ImportTerminalOutcome,
-    PreviewTerminalOutcome,
-    TerminalOutcomeResult,
-    operator_search_stop_is_current,
-)
-from lib.beets_db import ReleaseLocation
 from lib.release_identity import (
     ReleaseIdentity,
-    detect_release_source,
     normalize_release_id,
 )
 from lib.search_scheduler import (
     NEW_REQUEST_PRIORITY_HOURS,
     search_cohort_slots,
+)
+from lib.terminal_outcomes import (
+    ImportTerminalOutcome,
+    PreviewTerminalOutcome,
+    TerminalOutcomeResult,
+    operator_search_stop_is_current,
 )
 
 
@@ -120,13 +133,13 @@ class _FakeTerminalTransitionsDB:
 
     def __init__(
         self,
-        db: "FakePipelineDB",
+        db: FakePipelineDB,
         boundary: Callable[[str], None],
     ) -> None:
         self._db = db
         self._boundary = boundary
 
-    def get_request(self, request_id: int) -> "AlbumRequestRow | None":
+    def get_request(self, request_id: int) -> AlbumRequestRow | None:
         return self._db.get_request(request_id)
 
     def set_downloading(
@@ -292,19 +305,19 @@ class _FakeTerminalTransitionsDB:
             if extra:
                 self._boundary("request.metadata")
         return applied
+from lib.search_classification import (
+    SearchSummary as _SearchSummary,
+)
+from lib.search_classification import (
+    classify_failure_class as _classify_failure_class,
+)
 from lib.validation_envelope import (
     VALIDATION_PROJECTION_UNSET,
     ValidationProjectionUnset,
     WrongMatchTriageAudit,
     derive_validation_log_columns,
 )
-from lib.search_classification import (
-    SearchSummary as _SearchSummary,
-    classify_failure_class as _classify_failure_class,
-)
-
-
-from tests.fakes._shared import _EPOCH, _PERTH_TZ, _as_datetime, _utcnow
+from tests.fakes._shared import _PERTH_TZ, _as_datetime, _utcnow
 from tests.fakes.cursors import FakeCursor
 from tests.fakes.rows import (
     DenylistEntry,
@@ -315,6 +328,7 @@ from tests.fakes.rows import (
     SearchLogRow,
     UserCooldownRow,
 )
+
 
 @dataclass
 class _FakeSearchPlanRow:
@@ -348,7 +362,7 @@ class _FakeSearchPlanItemRow:
 class _FakeReadOnlyQueryCursor:
     """Typed cursor adapter for FakePipelineDB's raw-query context."""
 
-    def __init__(self, db: "FakePipelineDB") -> None:
+    def __init__(self, db: FakePipelineDB) -> None:
         self._db = db
         self._query_cursor: ReadOnlyQueryCursor | None = None
 
@@ -597,8 +611,7 @@ class FakePipelineDB:
         self._assert_mb_release_id_unique(
             row.get("mb_release_id"), exclude_id=rid)
         self._requests[rid] = dict(copy.deepcopy(row))
-        if rid > self._next_request_id:
-            self._next_request_id = rid
+        self._next_request_id = max(self._next_request_id, rid)
 
     def request(self, request_id: int) -> dict[str, Any]:
         """Get a request row (for test assertions). Raises KeyError if missing."""
@@ -786,7 +799,7 @@ class FakePipelineDB:
         return entry
 
     @contextmanager
-    def read_only_query_cursor(self) -> Generator[ReadOnlyQueryCursor, None, None]:
+    def read_only_query_cursor(self) -> Generator[ReadOnlyQueryCursor]:
         """Fake the pinned read-only query scope used by ``pipeline-cli``.
 
         The production guarantee (no reconnect/retry after BEGIN) belongs to
@@ -1069,7 +1082,7 @@ class FakePipelineDB:
         jobs.sort(
             key=lambda job: (
                 job.created_at is None,
-                job.created_at or datetime.min.replace(tzinfo=timezone.utc),
+                job.created_at or datetime.min.replace(tzinfo=UTC),
                 job.id,
             ),
         )
@@ -1636,7 +1649,7 @@ class FakePipelineDB:
 
     # --- PipelineDB interface methods ---
 
-    def get_request(self, request_id: int) -> "AlbumRequestRow | None":
+    def get_request(self, request_id: int) -> AlbumRequestRow | None:
         return cast(
             "AlbumRequestRow | None",
             copy.deepcopy(self._requests.get(request_id)),
@@ -1958,19 +1971,19 @@ class FakePipelineDB:
             cooled_down_users=frozenset(cooled),
         )
 
-    def get_request_by_mb_release_id(self, mb_release_id: str) -> "AlbumRequestRow | None":
+    def get_request_by_mb_release_id(self, mb_release_id: str) -> AlbumRequestRow | None:
         for row in self._requests.values():
             if row.get("mb_release_id") == mb_release_id:
                 return cast("AlbumRequestRow", copy.deepcopy(row))
         return None
 
-    def get_request_by_discogs_release_id(self, discogs_release_id: str) -> "AlbumRequestRow | None":
+    def get_request_by_discogs_release_id(self, discogs_release_id: str) -> AlbumRequestRow | None:
         for row in self._requests.values():
             if row.get("discogs_release_id") == discogs_release_id:
                 return cast("AlbumRequestRow", copy.deepcopy(row))
         return None
 
-    def get_request_by_release_id(self, release_id: object | None) -> "AlbumRequestRow | None":
+    def get_request_by_release_id(self, release_id: object | None) -> AlbumRequestRow | None:
         normalized = normalize_release_id(release_id)
         if not normalized:
             return None
@@ -2801,7 +2814,7 @@ class FakePipelineDB:
         return ImportJob.from_row(copy.deepcopy(rows[0]))
 
     def check_and_apply_cooldown(self, username: str,
-                                  config: Any = None) -> bool:  # noqa: ARG002
+                                  config: Any = None) -> bool:
         self.cooldowns_applied.append(username)
         if callable(self._cooldown_result):
             return self._cooldown_result(username)
@@ -2914,10 +2927,7 @@ class FakePipelineDB:
             if kind == "unfindable":
                 if row.get("unfindable_category") is None:
                     return False
-                if (unfindable_category is not None
-                        and row.get("unfindable_category") != unfindable_category):
-                    return False
-                return True
+                return not (unfindable_category is not None and row.get("unfindable_category") != unfindable_category)
             if kind == "data_quality":
                 rid = int(row["id"])
                 matched = False
@@ -3563,7 +3573,7 @@ class FakePipelineDB:
     def record_post_commit_quarantine(
         self,
         log_id: int,
-        audit: "PostCommitQuarantineAudit",
+        audit: PostCommitQuarantineAudit,
     ) -> bool:
         for row in self.download_logs:
             if row.id != log_id:
@@ -3597,7 +3607,7 @@ class FakePipelineDB:
         row["current_evidence_id"] = None
         row["updated_at"] = _utcnow()
 
-    def get_downloading(self) -> "list[AlbumRequestRow]":
+    def get_downloading(self) -> list[AlbumRequestRow]:
         return cast(
             "list[AlbumRequestRow]",
             [copy.deepcopy(r) for r in self._requests.values()
@@ -3685,7 +3695,7 @@ class FakePipelineDB:
         def _sort_key(r: dict[str, Any]) -> tuple[int, datetime, int]:
             ts = r["last_artist_probe_at"]
             if ts is None:
-                return (0, datetime.min.replace(tzinfo=timezone.utc),
+                return (0, datetime.min.replace(tzinfo=UTC),
                         int(r["id"]))
             return (1, _as_datetime(ts), int(r["id"]))
         eligible.sort(key=_sort_key)
@@ -3819,7 +3829,7 @@ class FakePipelineDB:
         self,
         release_group_identifier: str,
         source: str,
-    ) -> Optional[list[dict[str, Any]]]:
+    ) -> list[dict[str, Any]] | None:
         """Return all rows for the pair, ordered by ``yt_browse_id`` ASC.
 
         Returns ``None`` when the pair has never been resolved, and an
@@ -3847,7 +3857,7 @@ class FakePipelineDB:
         source: str,
         release_id: str,
         browse_id: str,
-    ) -> Optional[dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         for (rg_id, row_source), rows in self._youtube_album_mappings.items():
             if row_source != source:
                 continue
@@ -4099,7 +4109,7 @@ class FakePipelineDB:
 
     def get_request_by_replaces_request_id(
         self, replaced_id: int
-    ) -> "AlbumRequestRow | None":
+    ) -> AlbumRequestRow | None:
         """Reverse-lookup the descendant row of ``replaced_id``."""
         for row in self._requests.values():
             if row.get("replaces_request_id") == replaced_id:
@@ -4134,7 +4144,7 @@ class FakePipelineDB:
         *,
         exclude_replaced: bool = True,
         exclude_request_id: int | None = None,
-    ) -> "list[AlbumRequestRow]":
+    ) -> list[AlbumRequestRow]:
         """List rows in the same MB release group (newest id first)."""
         out: list[dict[str, Any]] = []
         for row in self._requests.values():
@@ -4157,7 +4167,7 @@ class FakePipelineDB:
             and row.get("mb_release_group_id") is not None
         }
 
-    def list_non_replaced_requests(self) -> "list[AlbumRequestRow]":
+    def list_non_replaced_requests(self) -> list[AlbumRequestRow]:
         """Return active request rows ordered like PipelineDB."""
         rows = [
             r for r in self._requests.values()
@@ -4203,7 +4213,7 @@ class FakePipelineDB:
             if item.plan_id not in plan_ids_to_drop
         }
 
-    def get_wanted(self, limit: int | None = None) -> "list[AlbumRequestRow]":
+    def get_wanted(self, limit: int | None = None) -> list[AlbumRequestRow]:
         """Return wanted requests past their retry gate.
 
         Production randomizes the diagnostic result.  The fake keeps insertion
@@ -4292,7 +4302,7 @@ class FakePipelineDB:
 
     def get_log(self, limit: int = 50,
                 outcome_filter: str | None = None,
-                ) -> "list[DownloadLogWithRequestRow]":
+                ) -> list[DownloadLogWithRequestRow]:
         imported = {"success", "force_import"}
         rejected = {"rejected", "failed", "timeout", "measurement_failed"}
         rows: list[dict[str, object]] = []
@@ -4390,7 +4400,7 @@ class FakePipelineDB:
     def get_linked_import_logs(
         self,
         source_log_ids: list[int],
-    ) -> "list[DownloadLogWithOriginRow]":
+    ) -> list[DownloadLogWithOriginRow]:
         wanted = {int(log_id) for log_id in source_log_ids}
         return cast("list[DownloadLogWithOriginRow]", [
             self._download_log_to_dict(entry)
@@ -4405,7 +4415,7 @@ class FakePipelineDB:
         *,
         limit: int | None = None,
         newest_first: bool = False,
-    ) -> "list[AlbumRequestRow]":
+    ) -> list[AlbumRequestRow]:
         if newest_first:
             rows = sorted(
                 (r for r in self._requests.values()
@@ -4423,7 +4433,7 @@ class FakePipelineDB:
 
     def search_requests(
         self, query: str, *, limit: int = 200, status: str | None = None,
-    ) -> "list[AlbumRequestRow]":
+    ) -> list[AlbumRequestRow]:
         """Mirror ``PipelineDB.search_requests``: case-insensitive
         substring over artist/album, optionally narrowed to one status."""
         q = (query or "").strip().lower()
@@ -4523,7 +4533,7 @@ class FakePipelineDB:
         self,
         artist_name: str,
         mb_artist_id: str = "",
-    ) -> "list[AlbumRequestRow]":
+    ) -> list[AlbumRequestRow]:
         needle = artist_name.lower()
 
         def _legacy_name_match(row: dict[str, Any]) -> bool:
@@ -4612,7 +4622,7 @@ class FakePipelineDB:
         if not rows:
             return True
         rows.sort(key=lambda t: (t["disc_number"], t["track_number"]))
-        for row, artist in zip(rows, track_artists):
+        for row, artist in zip(rows, track_artists, strict=False):
             row["track_artist"] = artist
         return True
 
@@ -4621,13 +4631,13 @@ class FakePipelineDB:
         return {
             rid: len(self._tracks[rid])
             for rid in request_ids
-            if rid in self._tracks and self._tracks[rid]
+            if self._tracks.get(rid)
         }
 
     # --- Download history queries ---
 
     def get_download_log_entry(self,
-                               log_id: int) -> "DownloadLogWithEvidenceRow | None":
+                               log_id: int) -> DownloadLogWithEvidenceRow | None:
         for entry in self.download_logs:
             if entry.id == log_id:
                 return cast(
@@ -4637,7 +4647,7 @@ class FakePipelineDB:
         return None
 
     def get_download_history(self,
-                             request_id: int) -> "list[DownloadLogWithEvidenceRow]":
+                             request_id: int) -> list[DownloadLogWithEvidenceRow]:
         return cast("list[DownloadLogWithEvidenceRow]", [
             self._download_log_evidence_dict(e)
             for e in reversed(self.download_logs)
@@ -4646,7 +4656,7 @@ class FakePipelineDB:
 
     def get_download_history_batch(
         self, request_ids: list[int],
-    ) -> "dict[int, list[DownloadLogWithEvidenceRow]]":
+    ) -> dict[int, list[DownloadLogWithEvidenceRow]]:
         wanted = set(request_ids)
         result: dict[int, list[dict[str, Any]]] = {}
         for entry in reversed(self.download_logs):
@@ -4658,7 +4668,7 @@ class FakePipelineDB:
 
     def get_latest_download_summaries(
         self, request_ids: list[int],
-    ) -> "dict[int, LatestDownloadSummary]":
+    ) -> dict[int, LatestDownloadSummary]:
         """Mirror ``PipelineDB.get_latest_download_summaries``: newest
         row + history count per request (#426)."""
         return cast("dict[int, LatestDownloadSummary]", {
@@ -4735,9 +4745,9 @@ class FakePipelineDB:
                 continue
             created_at = row["created_at"]
             if created_at.tzinfo is None:
-                created_at = created_at.replace(tzinfo=timezone.utc)
+                created_at = created_at.replace(tzinfo=UTC)
             else:
-                created_at = created_at.astimezone(timezone.utc)
+                created_at = created_at.astimezone(UTC)
             if created_at >= now - timedelta(days=7):
                 samples.append((created_at, int(row["wanted_total"])))
 
@@ -4823,7 +4833,7 @@ class FakePipelineDB:
 
         observed = observed_at or _utcnow()
         if observed.tzinfo is None:
-            observed = observed.replace(tzinfo=timezone.utc)
+            observed = observed.replace(tzinfo=UTC)
         unique = sorted({str(u) for u in usernames if u})
         new_count = 0
         for username in unique:
@@ -4853,7 +4863,7 @@ class FakePipelineDB:
         for row in rows:
             ts = row["first_seen_at"]
             if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
+                ts = ts.replace(tzinfo=UTC)
             day = ts.astimezone(_PERTH_TZ).date()
             new_by_day[day] = new_by_day.get(day, 0) + 1
 
@@ -4894,8 +4904,8 @@ class FakePipelineDB:
     @staticmethod
     def _as_utc(value: datetime) -> datetime:
         if value.tzinfo is None:
-            return value.replace(tzinfo=timezone.utc)
-        return value.astimezone(timezone.utc)
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
 
     def _dashboard_search_window(
         self, label: str, hours: int, now: datetime,
@@ -5489,7 +5499,7 @@ class FakePipelineDB:
 
     # --- Wrong-match review queue ---
 
-    def get_wrong_matches(self) -> "list[WrongMatchCandidateRow]":
+    def get_wrong_matches(self) -> list[WrongMatchCandidateRow]:
         """Rejected downloads whose ``validation_result.failed_path`` is set.
 
         Mirrors the real ``DISTINCT ON (request_id, failed_path)`` —
@@ -5528,16 +5538,14 @@ class FakePipelineDB:
                 if ev_measurement is not None else None
             ) or entry.extra.get("spectral_bitrate")
             v0_probe_kind = (
-                (
-                    V0_PROBE_LOSSLESS_SOURCE
-                    if (
-                        ev_v0 is not None
-                        and ev_v0.subject == EVIDENCE_SUBJECT_SOURCE
-                    )
-                    else V0_PROBE_NATIVE_LOSSY_RESEARCH
-                    if ev_v0 is not None
-                    else None
+                V0_PROBE_LOSSLESS_SOURCE
+                if (
+                    ev_v0 is not None
+                    and ev_v0.subject == EVIDENCE_SUBJECT_SOURCE
                 )
+                else V0_PROBE_NATIVE_LOSSY_RESEARCH
+                if ev_v0 is not None
+                else None
             ) or entry.extra.get("v0_probe_kind")
             v0_probe_avg_bitrate = (
                 ev_v0.avg_bitrate_kbps if ev_v0 is not None else None
@@ -5786,7 +5794,7 @@ class FakePipelineDB:
         *,
         limit: int,
         before_id: int | None = None,
-    ) -> "SearchLogHistoryPage":
+    ) -> SearchLogHistoryPage:
         """Mirror of ``PipelineDB.get_search_history_page``.
 
         Returns at most ``limit`` rows ``id DESC``; sets
@@ -5816,7 +5824,7 @@ class FakePipelineDB:
 
     def get_saturation_summary(
         self, request_id: int, *, window_days: int = 14,
-    ) -> "SaturationSummary":
+    ) -> SaturationSummary:
         """U7 mirror of ``PipelineDB.get_saturation_summary``.
 
         Replicates the SQL aggregate against ``self.search_logs``:
@@ -6445,7 +6453,7 @@ class FakePipelineDB:
             )
             for rid in request_ids
         }
-        for rid in out.keys():
+        for rid in out:
             det_matches = [
                 p for p in self.search_plans.values()
                 if p.request_id == rid
@@ -6601,7 +6609,7 @@ class FakePipelineDB:
         lock-step with PostgreSQL behavior — the only thing that
         differs is where the rows come from.
         """
-        from lib.pipeline_db import _build_stats_bucket, SearchPlanStats
+        from lib.pipeline_db import SearchPlanStats, _build_stats_bucket
         active = self.get_active_search_plan(request_id)
         active_plan_id = active.plan.id if active is not None else None
 
@@ -6872,8 +6880,8 @@ class FakePipelineDB:
                            f"Expected at least {index + 1} download_log entries, "
                            f"got {len(self.download_logs)}")
         entry = self.download_logs[index]
-        for field, value in expected.items():
-            actual = getattr(entry, field, entry.extra.get(field))
+        for field_name, value in expected.items():
+            actual = getattr(entry, field_name, entry.extra.get(field_name))
             test.assertEqual(actual, value,
                              f"download_log[{index}].{field}: "
                              f"expected {value!r}, got {actual!r}")

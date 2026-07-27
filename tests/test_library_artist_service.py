@@ -1,11 +1,10 @@
-#!/usr/bin/env python3
 """Direct tests for the `/api/library/artist` merge / dedup seam."""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import cast
 import unittest
+from datetime import UTC, datetime
+from typing import cast
 
 from lib.pipeline_db import AlbumRequestRow
 from tests.fakes import FakePipelineDB
@@ -14,7 +13,6 @@ from web.library_artist_service import (
     build_library_artist_rows,
     list_library_artist_rows,
 )
-
 
 ARTIST_ID = "664c3e0e-42d8-48c1-b209-1efca19c0325"
 RELEASE_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -119,7 +117,7 @@ class TestLibraryArtistService(unittest.TestCase):
             source="request",
             status="wanted",
             min_bitrate=320,
-            created_at=datetime(2026, 4, 1, 3, 47, 54, tzinfo=timezone.utc),
+            created_at=datetime(2026, 4, 1, 3, 47, 54, tzinfo=UTC),
             search_filetype_override="flac",
         ))
         fake_db.set_tracks(42, [
@@ -255,7 +253,7 @@ class TestLibraryArtistService(unittest.TestCase):
                 album_title="Discogs Import",
                 source="request",
                 status="wanted",
-                created_at=datetime(2026, 4, 1, 3, 47, 54, tzinfo=timezone.utc),
+                created_at=datetime(2026, 4, 1, 3, 47, 54, tzinfo=UTC),
             )],
             track_counts={55: 0},
             rank_fn=_rank,
@@ -363,7 +361,7 @@ class TestLibraryArtistService(unittest.TestCase):
                 album_title="Older Request",
                 year=1997,
                 status="wanted",
-                created_at=datetime(2026, 4, 1, 3, 47, 54, tzinfo=timezone.utc),
+                created_at=datetime(2026, 4, 1, 3, 47, 54, tzinfo=UTC),
             )],
             track_counts={50: 0},
             rank_fn=_rank,

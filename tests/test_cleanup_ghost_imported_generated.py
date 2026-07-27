@@ -2,19 +2,18 @@
 
 from __future__ import annotations
 
-from uuid import UUID
-from typing import cast
 import unittest
+from typing import cast
+from uuid import UUID
 
-from hypothesis import given, strategies as st
+from hypothesis import given
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401 - registers active profile
-
 from lib.beets_db import BeetsDB
 from lib.release_identity import ReleaseIdentity
 from scripts.cleanup_ghost_imported import classify_imported_rows
 from tests.fakes import FakeBeetsDB
-
 
 _MBIDS = st.binary(min_size=16, max_size=16).map(
     lambda raw: str(UUID(bytes=raw))

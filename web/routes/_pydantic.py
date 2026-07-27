@@ -11,15 +11,15 @@ handled; routes never catch it inline.
 
 from __future__ import annotations
 
-from typing import Any, Sequence, Type, TypeVar
+from collections.abc import Sequence
+from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
-
 
 M = TypeVar("M", bound=BaseModel)
 
 
-def parse_body(handler: Any, body: Any, model: Type[M]) -> M | None:
+def parse_body[M: BaseModel](handler: Any, body: Any, model: type[M]) -> M | None:
     """Validate ``body`` against ``model``; on failure, send HTTP 400 and return None.
 
     Returns the parsed model instance on success, or ``None`` after

@@ -13,14 +13,14 @@ import fnmatch
 import logging
 import os
 import subprocess as sp
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any, Callable, Iterable, Literal, TypeAlias
+from typing import Any, Literal
 
 import msgspec
 
 from lib.beets_config_contract import BeetsConfigError, validate_beets_config
 from lib.release_identity import ReleaseIdentity
-
 
 log = logging.getLogger("cratedigger")
 
@@ -74,7 +74,7 @@ class BeetsDeleteFailed(
     preserved_paths: tuple[str, ...] = ()
 
 
-BeetsDeleteOutcome: TypeAlias = BeetsDeleteCompleted | BeetsDeleteFailed
+type BeetsDeleteOutcome = BeetsDeleteCompleted | BeetsDeleteFailed
 SubprocessRunFn = Callable[..., sp.CompletedProcess[bytes]]
 
 
@@ -140,7 +140,7 @@ def _album_field(album: Any, key: str) -> object:
     breaking the cascade without a suppression comment (same technique as
     ``lib.beets_distance._item_field``).
     """
-    return getattr(album, "get")(key)
+    return album.get(key)
 
 
 def _library_items(lib: Any, query: str) -> Iterable[object]:
@@ -149,7 +149,7 @@ def _library_items(lib: Any, query: str) -> Iterable[object]:
     Its ``query``/``sort`` parameters are unannotated upstream, cascading
     Unknown. Same ``getattr`` containment as :func:`_album_field`.
     """
-    return getattr(lib, "items")(query)
+    return lib.items(query)
 
 
 def _decode_path(raw: object) -> str:

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generated (property-based) dispatch/outcome tests — issue #548.
 
 Hypothesis-driven properties over the importer dispatch/outcome layer:
@@ -37,28 +36,27 @@ Full usage guide: docs/generated-testing.md.
 """
 
 import configparser
-import os
 import json
+import os
 import shutil
 import sys
 import tempfile
 import unittest
 from contextlib import nullcontext
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from unittest.mock import MagicMock, mock_open, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
-
 from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.config import CratediggerConfig
 from lib.dispatch import DispatchOutcome
-from lib.dispatch.types import ImportAttemptResult, _PREIMPORT_FACT_REJECT_DECISIONS
+from lib.dispatch.types import _PREIMPORT_FACT_REJECT_DECISIONS, ImportAttemptResult
 from lib.quality import (
     QUALITY_DECISION_IMPORT_STAGE_DECISIONS,
     QUALITY_DECISION_REJECT_STAGE_DECISIONS,
@@ -66,8 +64,8 @@ from lib.quality import (
     dispatch_action,
 )
 from lib.quality_evidence import snapshot_audio_files
-from tests.fakes import DownloadLogRow, FakePipelineDB
 from tests.beets_world import BeetsWorld
+from tests.fakes import DownloadLogRow, FakePipelineDB
 from tests.helpers import (
     make_album_quality_evidence,
     make_download_file,
@@ -789,7 +787,9 @@ def assert_validation_projection_matches_payload(db: FakePipelineDB) -> None:
     raw = last.validation_result
     raw_object = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
     if not isinstance(raw_object, dict):
-        raise AssertionError("rejection writer did not persist an object envelope")
+        raise AssertionError(  # noqa: TRY004 - generated invariant failure
+            "rejection writer did not persist an object envelope"
+        )
     envelope = decode_validation_envelope(raw_object)
     if "distance" in raw_object and last.beets_distance != envelope.distance:
         raise AssertionError(
@@ -1440,7 +1440,7 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         db = FakePipelineDB()
         db.add_cooldown(
             "ghost",
-            datetime.now(timezone.utc) + timedelta(days=1),
+            datetime.now(UTC) + timedelta(days=1),
             "planted mutant",
         )
         with self.assertRaises(AssertionError):
@@ -1455,7 +1455,7 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         db.cooldowns_applied.append("peer")
         db.add_cooldown(
             "peer",
-            datetime.now(timezone.utc) + timedelta(days=1),
+            datetime.now(UTC) + timedelta(days=1),
             "planted mutant",
         )
         with self.assertRaises(AssertionError):

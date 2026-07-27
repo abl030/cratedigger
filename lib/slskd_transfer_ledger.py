@@ -13,7 +13,7 @@ pruned, while accepted evidence retains active-request protection.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -29,7 +29,7 @@ logger = logging.getLogger("cratedigger")
 TRANSFER_LEDGER_PRUNE_RETENTION_DAYS: int = 90
 
 
-def prune_transfer_ledger_cycle(ctx: "CratediggerContext") -> int:
+def prune_transfer_ledger_cycle(ctx: CratediggerContext) -> int:
     """Phase 0d: hard-delete transfer-ledger rows past retention.
 
     Pending intent is bounded regardless of request status. Accepted evidence
@@ -42,7 +42,7 @@ def prune_transfer_ledger_cycle(ctx: "CratediggerContext") -> int:
     """
     db = ctx.pipeline_db_source._get_db()
     cutoff = (
-        datetime.now(timezone.utc)
+        datetime.now(UTC)
         - timedelta(days=TRANSFER_LEDGER_PRUNE_RETENTION_DAYS)
     )
     try:

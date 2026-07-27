@@ -19,10 +19,10 @@ sys.path.insert(
     0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")),
 )
 
-import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
-from hypothesis import given, strategies as st
+from hypothesis import given
+from hypothesis import strategies as st
 
-from lib.config import CratediggerConfig
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.beets_db import BeetsDB, CurrentBeetsMissing
 from lib.beets_delete import (
     BeetsDeleteCompleted,
@@ -30,12 +30,11 @@ from lib.beets_delete import (
     BeetsDeleteRequest,
     run_beets_delete,
 )
+from lib.config import CratediggerConfig
 from lib.mbid_replace_service import (
-    MbidReplaceService,
+    REPLACE_REASON_CROSS_PATHWAY_TARGET,
     REPLACE_REASON_CURRENT_BEETS_AMBIGUOUS,
     REPLACE_REASON_SOURCE_IDENTITY_INVALID,
-    ReplaceResult,
-    REPLACE_REASON_CROSS_PATHWAY_TARGET,
     REPLACE_REASON_SOURCE_NO_RELEASE_GROUP,
     REPLACE_REASON_TARGET_NO_RELEASE_GROUP,
     REPLACE_REASON_UNEXPECTED_LOOKUP_ERROR,
@@ -49,15 +48,15 @@ from lib.mbid_replace_service import (
     RESULT_TARGET_SAME_AS_CURRENT,
     RESULT_TRANSIENT,
     RESULT_WRONG_STATE,
+    MbidReplaceService,
 )
-from web.discogs import DiscogsMirrorNotConfigured
 from lib.pipeline_db import MbidCollisionError, SupersedeRaceError
 from lib.release_identity import ReleaseIdentity
 from lib.wrong_match_delete_service import WrongMatchDeleteSummary
-from tests.fakes import FakeBeetsDB, FakePipelineDB, FakeSlskdAPI
 from tests.beets_world import BeetsWorld, BeetsWorldRelease
+from tests.fakes import FakeBeetsDB, FakePipelineDB, FakeSlskdAPI
 from tests.helpers import make_request_row
-
+from web.discogs import DiscogsMirrorNotConfigured
 
 # NOTE: must be a valid MB release id per ``detect_release_source``
 # (lib/release_identity.py regex) — the service rejects malformed MBIDs
@@ -1255,7 +1254,7 @@ class TestReplaceHappyPath(_ServiceCase):
         self._patch_externals()
         beets = self._installed_beets()
         exact_delete = MagicMock(side_effect=self._completed_delete)
-        db, _, svc = self._replace(
+        _db, _, svc = self._replace(
             old_status="imported",
             beets_db_factory=lambda: beets,
             beets_delete_fn=exact_delete,
@@ -1303,7 +1302,7 @@ class TestReplaceHappyPath(_ServiceCase):
         self._patch_externals()
         beets = self._installed_beets()
         exact_delete = MagicMock(side_effect=self._completed_delete)
-        db, _, svc = self._replace(
+        _db, _, svc = self._replace(
             old_status="wanted",
             beets_db_factory=lambda: beets,
             beets_delete_fn=exact_delete,
@@ -1327,7 +1326,7 @@ class TestReplaceHappyPath(_ServiceCase):
         self._patch_externals()
         beets = self._installed_beets()
         exact_delete = MagicMock(side_effect=self._completed_delete)
-        db, _, svc = self._replace(
+        _db, _, svc = self._replace(
             old_status=old_status,
             beets_db_factory=lambda: beets,
             beets_delete_fn=exact_delete,
@@ -1341,7 +1340,7 @@ class TestReplaceHappyPath(_ServiceCase):
 
     def test_happy_path_downloading_skips_staging_logs_warning(self):
         self._patch_externals()
-        db, _, svc = self._replace(old_status="downloading")
+        _db, _, svc = self._replace(old_status="downloading")
         slskd = svc.slskd
         result = svc.replace_request_mbid(
             42, target_mb_release_id=NEW_MBID,
@@ -1521,9 +1520,9 @@ class TestReplaceWarnings(_ServiceCase):
     def test_staging_rmtree_permission_error_warns(self):
         """``shutil.rmtree`` failure on the staging dir (e.g. permission
         denied) becomes a warning; outcome stays RESULT_REPLACED."""
-        import tempfile
         import os as _os
         import shutil as _shutil
+        import tempfile
         tmpdir = tempfile.mkdtemp(prefix="cratedigger-test-staging-")
         # Register cleanup before the patch context so it runs after
         # the patch is rolled back; otherwise the patched rmtree would
@@ -1752,97 +1751,96 @@ class TestReplaceCurrentAuthorityRealBeets(_ServiceCase):
             ),
         )
         for name, source_id, target_id, group_id, legacy in worlds:
-            with self.subTest(identity=name):
-                with BeetsWorld(
-                    REPO,
-                    subprocess_mirror_url="http://127.0.0.1:9",
-                ) as world:
-                    world.import_release(BeetsWorldRelease(
-                        release_id=source_id,
-                        artist="Archive Artist",
-                        album="Replace Source",
-                        year=2001,
-                        track_count=2,
-                    ))
-                    if name.startswith("discogs"):
-                        world.set_discogs_identity_layout(
-                            source_id,
-                            legacy=legacy,
-                        )
-                    moved = world.relocate_release_out_of_band(
+            with self.subTest(identity=name), BeetsWorld(
+                REPO,
+                subprocess_mirror_url="http://127.0.0.1:9",
+            ) as world:
+                world.import_release(BeetsWorldRelease(
+                    release_id=source_id,
+                    artist="Archive Artist",
+                    album="Replace Source",
+                    year=2001,
+                    track_count=2,
+                ))
+                if name.startswith("discogs"):
+                    world.set_discogs_identity_layout(
                         source_id,
-                        world.library_root / name / "fresh current path",
-                        store_relative_paths=True,
+                        legacy=legacy,
                     )
-                    db = FakePipelineDB()
-                    if name == "mb":
-                        self._seed_old(
-                            db,
-                            status="imported",
-                        )
-                    else:
-                        self._seed_discogs(
-                            db,
-                            status="imported",
-                        )
-                    target = (
-                        _fake_target_payload(
-                            mbid=target_id,
-                            rg_id=group_id,
-                        )
-                        if name == "mb"
-                        else _fake_discogs_payload(
-                            release_id=target_id,
-                            master=group_id,
-                        )
+                moved = world.relocate_release_out_of_band(
+                    source_id,
+                    world.library_root / name / "fresh current path",
+                    store_relative_paths=True,
+                )
+                db = FakePipelineDB()
+                if name == "mb":
+                    self._seed_old(
+                        db,
+                        status="imported",
                     )
-                    scans: list[str | None] = []
-                    with (
-                        world.subprocess_environment(),
-                        BeetsDB(
-                            str(world.library_db),
-                            library_root=str(world.library_root),
-                        ) as beets,
-                        patch(
-                            "lib.mbid_replace_service.trigger_plex_scan",
-                            side_effect=lambda _cfg, imported_path=None: (
-                                scans.append(imported_path)
-                            ),
-                        ),
-                        patch(
-                            "lib.mbid_replace_service.trigger_jellyfin_scan",
-                            side_effect=lambda _cfg, imported_path=None: (
-                                scans.append(imported_path)
-                            ),
-                        ),
-                    ):
-                        service = self._make_service(
-                            db,
-                            beets_db_factory=lambda: beets,
-                            beets_delete_fn=run_beets_delete,
-                            mb_lookup=lambda _rid, *, fresh=False: target,
-                            discogs_lookup=lambda _rid, *, fresh=False: target,
-                        )
-                        result = service.replace_request_mbid(
-                            42,
-                            target_mb_release_id=target_id,
-                        )
-
-                    self.assertEqual(result.outcome, RESULT_REPLACED)
-                    self.assertEqual(scans, [moved.album_path, moved.album_path])
-                    self.assertTrue(
-                        all(not Path(path).exists() for path in moved.item_paths)
+                else:
+                    self._seed_discogs(
+                        db,
+                        status="imported",
                     )
-                    with BeetsDB(
+                target = (
+                    _fake_target_payload(
+                        mbid=target_id,
+                        rg_id=group_id,
+                    )
+                    if name == "mb"
+                    else _fake_discogs_payload(
+                        release_id=target_id,
+                        master=group_id,
+                    )
+                )
+                scans: list[str | None] = []
+                with (
+                    world.subprocess_environment(),
+                    BeetsDB(
                         str(world.library_db),
                         library_root=str(world.library_root),
-                    ) as beets:
-                        identity = ReleaseIdentity.from_id(source_id)
-                        assert identity is not None
-                        self.assertIsInstance(
-                            beets.resolve_current_release(identity),
-                            CurrentBeetsMissing,
-                        )
+                    ) as beets,
+                    patch(
+                        "lib.mbid_replace_service.trigger_plex_scan",
+                        side_effect=lambda _cfg, imported_path=None, scans=scans: (
+                            scans.append(imported_path)
+                        ),
+                    ),
+                    patch(
+                        "lib.mbid_replace_service.trigger_jellyfin_scan",
+                        side_effect=lambda _cfg, imported_path=None, scans=scans: (
+                            scans.append(imported_path)
+                        ),
+                    ),
+                ):
+                    service = self._make_service(
+                        db,
+                        beets_db_factory=lambda: beets,
+                        beets_delete_fn=run_beets_delete,
+                        mb_lookup=lambda _rid, *, fresh=False, target=target: target,
+                        discogs_lookup=lambda _rid, *, fresh=False, target=target: target,
+                    )
+                    result = service.replace_request_mbid(
+                        42,
+                        target_mb_release_id=target_id,
+                    )
+
+                self.assertEqual(result.outcome, RESULT_REPLACED)
+                self.assertEqual(scans, [moved.album_path, moved.album_path])
+                self.assertTrue(
+                    all(not Path(path).exists() for path in moved.item_paths)
+                )
+                with BeetsDB(
+                    str(world.library_db),
+                    library_root=str(world.library_root),
+                ) as beets:
+                    identity = ReleaseIdentity.from_id(source_id)
+                    assert identity is not None
+                    self.assertIsInstance(
+                        beets.resolve_current_release(identity),
+                        CurrentBeetsMissing,
+                    )
 
     def test_real_missing_authority_proceeds_without_beets_mutation(self):
         with BeetsWorld(REPO) as world:

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generated attempt-scoped materialize tests — issue #548 method, #550
 phase 2 follow-up.
 
@@ -52,11 +51,10 @@ from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
-
 from hypothesis import assume, example, given
 from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.download_materialization import (
     Materialized,
     _materialize_processing_dir,
@@ -99,8 +97,8 @@ def assert_fingerprint_equal(a: str, b: str, *, context: str) -> None:
 def assert_fingerprints_distinct(
     fp_a: str,
     fp_b: str,
-    pairs_a: "list[tuple[str, str]]",
-    pairs_b: "list[tuple[str, str]]",
+    pairs_a: list[tuple[str, str]],
+    pairs_b: list[tuple[str, str]],
 ) -> None:
     """Two DIFFERENT (username, filename) sets must not share a
     fingerprint. An 8-hex sha256 prefix collision between two generated
@@ -250,7 +248,7 @@ _DISJOINT_B_PAIRS = set(_ATTEMPT_PAIR_POOL[3:5])
 
 
 def _build_attempt_entry(
-    pairs: "set[tuple[str, str]]", *, src_root: str,
+    pairs: set[tuple[str, str]], *, src_root: str,
 ) -> GrabListEntry:
     """A GrabListEntry whose files are real on-disk DownloadFiles stamped
     with local_path — the event-stamped shape _materialize_processing_dir
@@ -268,7 +266,7 @@ def _build_attempt_entry(
         os.makedirs(src_dir, exist_ok=True)
         src_path = os.path.join(src_dir, basename)
         with open(src_path, "wb") as fp:
-            fp.write(f"{username}:{filename}".encode("utf-8"))
+            fp.write(f"{username}:{filename}".encode())
         file.local_path = src_path
         files.append(file)
     return make_grab_list_entry(
@@ -277,8 +275,8 @@ def _build_attempt_entry(
 
 
 def assert_folder_contents_match_manifest(
-    actual_basenames: "frozenset[str]",
-    expected_basenames: "frozenset[str]",
+    actual_basenames: frozenset[str],
+    expected_basenames: frozenset[str],
     *,
     label: str,
 ) -> None:
@@ -315,11 +313,11 @@ class TestMaterializeAttemptIsolation(unittest.TestCase):
 
     def _materialize(
         self,
-        pairs: "set[tuple[str, str]]",
+        pairs: set[tuple[str, str]],
         src_root: str,
         ctx: Any,
         download_root: str,
-    ) -> "tuple[StagedAlbum, frozenset[str]]":
+    ) -> tuple[StagedAlbum, frozenset[str]]:
         album = _build_attempt_entry(pairs, src_root=src_root)
         expected_basenames = frozenset(staged_filename(f) for f in album.files)
         staged = StagedAlbum.from_entry(

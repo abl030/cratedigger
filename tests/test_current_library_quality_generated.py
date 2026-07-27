@@ -7,7 +7,8 @@ import sqlite3
 import tempfile
 import unittest
 
-from hypothesis import given, strategies as st
+from hypothesis import given
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401 - registers suite/fuzz
 from lib.banding import (

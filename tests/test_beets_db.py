@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Unit tests for lib/beets_db.py — beets library database queries.
 
 Uses a temporary SQLite database to test queries without needing the real
@@ -16,7 +15,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from lib.beets_db import AlbumInfo, BeetsDB, open_beets_db
+from lib.beets_db import BeetsDB, open_beets_db
 from lib.config import CratediggerConfig
 from lib.quality import AudioQualityMeasurement, QualityRankConfig
 
@@ -146,10 +145,9 @@ class TestBeetsDBConnection(unittest.TestCase):
             beets_library_db=self.db_path,
             beets_directory="/runtime/library",
         )
-        with patch("lib.config.read_runtime_config", return_value=cfg):
-            with BeetsDB() as db:
-                self.assertEqual(db.library_db_path, self.db_path)
-                self.assertEqual(db.library_root, "/runtime/library")
+        with patch("lib.config.read_runtime_config", return_value=cfg), BeetsDB() as db:
+            self.assertEqual(db.library_db_path, self.db_path)
+            self.assertEqual(db.library_root, "/runtime/library")
 
     def test_factory_rejects_each_half_of_an_explicit_override(self) -> None:
         with self.assertRaisesRegex(ValueError, "supplied together"):
@@ -489,6 +487,7 @@ class TestLocate(unittest.TestCase):
         value without tripping the test suite.
         """
         from typing import get_args, get_type_hints
+
         from lib.beets_db import ReleaseLocation
         hints = get_type_hints(ReleaseLocation)
         kind_args = get_args(hints["kind"])
@@ -1079,8 +1078,8 @@ class TestGetItemPaths(unittest.TestCase):
         _insert_album(self.db_path, 1, "rolling-stones-release", [
             (
                 128000,
-                "The Rolling Stones/1964 - England's Newest Hit Makers/"
-                "01 Not Fade Away.opus",
+                ("The Rolling Stones/1964 - England's Newest Hit Makers/"
+                "01 Not Fade Away.opus"),
             ),
         ])
         library_root = "/mnt/virtio/Music/Beets"

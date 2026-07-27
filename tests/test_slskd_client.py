@@ -36,7 +36,6 @@ from lib.slskd_client import (
     parse_transfer_snapshot,
 )
 
-
 EVENT_FILE_COMPLETE_DATA = {
     "version": 0,
     "localFilename": "/mnt/virtio/music/slskd/Dungeon Vision/1-03 Flashlight.flac",

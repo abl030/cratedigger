@@ -104,9 +104,7 @@ class TestStopwordsInlineLiteralGuard(unittest.TestCase):
     def _literal_strings(self, node: ast.AST) -> list[str] | None:
         """Return the literal string elements of a Set/FrozenSet/List, else None."""
         elements: list[ast.expr] | None = None
-        if isinstance(node, ast.Set):
-            elements = list(node.elts)
-        elif isinstance(node, (ast.List, ast.Tuple)):
+        if isinstance(node, (ast.Set, ast.List, ast.Tuple)):
             elements = list(node.elts)
         elif (
             isinstance(node, ast.Call)

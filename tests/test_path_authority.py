@@ -16,11 +16,11 @@ from unittest.mock import MagicMock
 from lib.download_materialization import (
     REASON_PROCESSING_AUTHORITY_UNSAFE,
     REASON_PROCESSING_READ_FAILED_PREFIX,
+    Materialized,
     MaterializeFailed,
     MaterializeGuarded,
-    Materialized,
-    _materialize_token,
     _materialize_processing_dir,
+    _materialize_token,
     materialize_authority_reason,
 )
 from lib.fs_authority import (
@@ -79,7 +79,9 @@ def assert_publication_invariant(
     if any(name.startswith(".materialize-tmp-") for name in artifact_names):
         raise AssertionError("unpublished materialize temp was retained")
     if not isinstance(result, allowed_result_types):
-        raise AssertionError(f"unexpected materialize result {result!r}")
+        raise AssertionError(  # noqa: TRY004 - test invariant failure
+            f"unexpected materialize result {result!r}"
+        )
 
 
 def assert_preview_copy_invariant(
@@ -134,10 +136,8 @@ class TestAuthorityFailureClassification(unittest.TestCase):
     """
 
     def test_missing_file_is_classified_missing(self) -> None:
-        with tempfile.TemporaryDirectory() as root:
-            with open_directory_path(root) as root_fd:
-                with self.assertRaises(FilesystemAuthorityError) as caught:
-                    open_regular_relative(root_fd, "absent.mp3")
+        with tempfile.TemporaryDirectory() as root, open_directory_path(root) as root_fd, self.assertRaises(FilesystemAuthorityError) as caught:
+            open_regular_relative(root_fd, "absent.mp3")
         self.assertEqual(caught.exception.code, "missing")
         self.assertIsNone(caught.exception.errno_symbol)
 
@@ -149,27 +149,23 @@ class TestAuthorityFailureClassification(unittest.TestCase):
             with open(outside, "wb") as handle:
                 handle.write(b"outside")
             os.symlink(outside, os.path.join(root, "track.mp3"))
-            with open_directory_path(root) as root_fd:
-                with self.assertRaises(FilesystemAuthorityError) as caught:
-                    open_regular_relative(root_fd, "track.mp3")
+            with open_directory_path(root) as root_fd, self.assertRaises(FilesystemAuthorityError) as caught:
+                open_regular_relative(root_fd, "track.mp3")
         self.assertEqual(caught.exception.code, "unsafe_symlink")
         self.assertIn(caught.exception.code, _CONTAINMENT_CODES)
         self.assertIsNone(caught.exception.errno_symbol)
 
     def test_parent_escape_is_classified_path_escape(self) -> None:
-        with tempfile.TemporaryDirectory() as root:
-            with open_directory_path(root) as root_fd:
-                with self.assertRaises(FilesystemAuthorityError) as caught:
-                    open_regular_relative(root_fd, "../outside")
+        with tempfile.TemporaryDirectory() as root, open_directory_path(root) as root_fd, self.assertRaises(FilesystemAuthorityError) as caught:
+            open_regular_relative(root_fd, "../outside")
         self.assertEqual(caught.exception.code, "path_escape")
         self.assertIn(caught.exception.code, _CONTAINMENT_CODES)
 
     def test_non_regular_file_is_classified_as_containment(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             os.mkfifo(os.path.join(root, "pipe"))
-            with open_directory_path(root) as root_fd:
-                with self.assertRaises(FilesystemAuthorityError) as caught:
-                    open_regular_relative(root_fd, "pipe")
+            with open_directory_path(root) as root_fd, self.assertRaises(FilesystemAuthorityError) as caught:
+                open_regular_relative(root_fd, "pipe")
         self.assertEqual(caught.exception.code, "not_regular_file")
         self.assertIn(caught.exception.code, _CONTAINMENT_CODES)
 
@@ -181,9 +177,8 @@ class TestAuthorityFailureClassification(unittest.TestCase):
             sock = socket.socket(socket.AF_UNIX)
             try:
                 sock.bind(os.path.join(root, "sock"))
-                with open_directory_path(root) as root_fd:
-                    with self.assertRaises(FilesystemAuthorityError) as caught:
-                        open_regular_relative(root_fd, "sock")
+                with open_directory_path(root) as root_fd, self.assertRaises(FilesystemAuthorityError) as caught:
+                    open_regular_relative(root_fd, "sock")
             finally:
                 sock.close()
         self.assertEqual(caught.exception.code, "not_regular_file")
@@ -196,9 +191,8 @@ class TestAuthorityFailureClassification(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             with open(os.path.join(root, "notadir"), "wb") as handle:
                 handle.write(b"regular")
-            with open_directory_path(root) as root_fd:
-                with self.assertRaises(FilesystemAuthorityError) as caught:
-                    open_regular_relative(root_fd, "notadir/child.mp3")
+            with open_directory_path(root) as root_fd, self.assertRaises(FilesystemAuthorityError) as caught:
+                open_regular_relative(root_fd, "notadir/child.mp3")
         self.assertEqual(caught.exception.code, "not_a_directory")
         self.assertIn(caught.exception.code, _CONTAINMENT_CODES)
 
@@ -209,9 +203,8 @@ class TestAuthorityFailureClassification(unittest.TestCase):
                 handle.write(b"audio")
             os.chmod(path, 0o000)
             try:
-                with open_directory_path(root) as root_fd:
-                    with self.assertRaises(FilesystemAuthorityError) as caught:
-                        open_regular_relative(root_fd, "track.mp3")
+                with open_directory_path(root) as root_fd, self.assertRaises(FilesystemAuthorityError) as caught:
+                    open_regular_relative(root_fd, "track.mp3")
             finally:
                 os.chmod(path, 0o600)
         self.assertEqual(caught.exception.code, "open_failed")
@@ -229,18 +222,16 @@ class TestAuthorityFailureClassification(unittest.TestCase):
         """
         with tempfile.TemporaryDirectory() as parent:
             absent_root = os.path.join(parent, "never-created")
-            with self.assertRaises(SharedDownloadRootError) as root_caught:
-                with open_shared_download_root(absent_root):
-                    pass
+            with self.assertRaises(SharedDownloadRootError) as root_caught, open_shared_download_root(absent_root):
+                pass
             self.assertEqual(root_caught.exception.code, "missing")
 
             healthy_root = os.path.join(parent, "downloads")
             os.mkdir(healthy_root)
-            with open_shared_download_root(healthy_root) as held_root:
-                with self.assertRaises(FilesystemAuthorityError) as file_caught:
-                    open_regular_under_held_root(
-                        held_root, os.path.join(healthy_root, "absent.mp3"),
-                    )
+            with open_shared_download_root(healthy_root) as held_root, self.assertRaises(FilesystemAuthorityError) as file_caught:
+                open_regular_under_held_root(
+                    held_root, os.path.join(healthy_root, "absent.mp3"),
+                )
             # Same code, deliberately NOT the same type: a healthy share
             # missing one file is the file's problem, not the share's.
             self.assertEqual(file_caught.exception.code, "missing")
@@ -252,9 +243,8 @@ class TestAuthorityFailureClassification(unittest.TestCase):
             os.mkdir(root)
             os.chmod(root, 0o000)
             try:
-                with self.assertRaises(SharedDownloadRootError) as caught:
-                    with open_shared_download_root(root):
-                        pass
+                with self.assertRaises(SharedDownloadRootError) as caught, open_shared_download_root(root):
+                    pass
             finally:
                 os.chmod(root, 0o700)
         self.assertEqual(caught.exception.code, "open_failed")
@@ -286,9 +276,8 @@ class TestAuthorityFailureClassification(unittest.TestCase):
         with tempfile.TemporaryDirectory() as parent:
             source = os.path.join(parent, "source")
             os.mkdir(source)
-            with self.assertRaises(FilesystemAuthorityError) as caught:
-                with open_private_processing_root(source, source):
-                    pass
+            with self.assertRaises(FilesystemAuthorityError) as caught, open_private_processing_root(source, source):
+                pass
         self.assertEqual(caught.exception.code, "unspecified")
 
 
@@ -299,19 +288,16 @@ class TestPrivateProcessingAuthority(unittest.TestCase):
             processing = os.path.join(parent, "processing")
             os.mkdir(source)
             os.mkdir(processing, 0o700)
-            with self.assertRaisesRegex(FilesystemAuthorityError, "overlaps"):
-                with open_private_processing_root(source, source):
-                    pass
+            with self.assertRaisesRegex(FilesystemAuthorityError, "overlaps"), open_private_processing_root(source, source):
+                pass
             os.chmod(processing, 0o750)
-            with self.assertRaisesRegex(FilesystemAuthorityError, "mode 0700"):
-                with open_private_processing_root(processing, source):
-                    pass
+            with self.assertRaisesRegex(FilesystemAuthorityError, "mode 0700"), open_private_processing_root(processing, source):
+                pass
             os.chmod(processing, 0o700)
             link = os.path.join(parent, "processing-link")
             os.symlink(processing, link)
-            with self.assertRaises(FilesystemAuthorityError):
-                with open_private_processing_root(link, source):
-                    pass
+            with self.assertRaises(FilesystemAuthorityError), open_private_processing_root(link, source):
+                pass
 
     def test_rejects_group_writable_ancestor(self) -> None:
         with tempfile.TemporaryDirectory() as parent:
@@ -324,9 +310,8 @@ class TestPrivateProcessingAuthority(unittest.TestCase):
             os.mkdir(processing, 0o700)
             with self.assertRaisesRegex(
                 FilesystemAuthorityError, "ancestor",
-            ) as caught:
-                with open_private_processing_root(processing, source):
-                    pass
+            ) as caught, open_private_processing_root(processing, source):
+                pass
             # Issue #868 review A8: an ownership/permission downgrade of the
             # tree the whole boundary rests on is a containment finding, not
             # the "renameat2 is unsupported" miscellany ``unspecified``
@@ -353,10 +338,8 @@ class TestPrivateProcessingAuthority(unittest.TestCase):
             def failing_fstat(fd: int) -> object:
                 raise OSError(errno.ESTALE, os.strerror(errno.ESTALE))
 
-            with unittest.mock.patch("os.fstat", side_effect=failing_fstat):
-                with self.assertRaises(FilesystemAuthorityError) as caught:
-                    with open_private_processing_root(processing, source):
-                        pass
+            with unittest.mock.patch("os.fstat", side_effect=failing_fstat), self.assertRaises(FilesystemAuthorityError) as caught, open_private_processing_root(processing, source):
+                pass
             self.assertIs(os.fstat, real_fstat)
         self.assertEqual(caught.exception.code, "read_failed")
         self.assertEqual(caught.exception.errno_symbol, "ESTALE")
@@ -372,17 +355,14 @@ class TestPrivateProcessingAuthority(unittest.TestCase):
             os.mkdir(source)
             processing = os.path.join(parent, "processing")
             os.mkdir(processing, 0o750)
-            with self.assertRaises(FilesystemAuthorityError) as mode_caught:
-                with open_private_processing_root(processing, source):
-                    pass
+            with self.assertRaises(FilesystemAuthorityError) as mode_caught, open_private_processing_root(processing, source):
+                pass
             self.assertEqual(mode_caught.exception.code, "untrusted_ownership")
 
             os.chmod(processing, 0o700)
             os.mkdir(os.path.join(processing, "albums"), 0o750)
-            with open_private_processing_root(processing, source) as root_fd:
-                with self.assertRaises(FilesystemAuthorityError) as child:
-                    with open_private_child_directory(root_fd, "albums"):
-                        pass
+            with open_private_processing_root(processing, source) as root_fd, self.assertRaises(FilesystemAuthorityError) as child, open_private_child_directory(root_fd, "albums"):
+                pass
             self.assertEqual(child.exception.code, "untrusted_ownership")
             self.assertEqual(
                 materialize_authority_reason(child.exception),
@@ -423,9 +403,8 @@ class TestPrivateProcessingAuthority(unittest.TestCase):
                 self.assertEqual(os.fstat(opened.fd).st_ino, os.stat(album).st_ino)
             lookalike = os.path.join(incoming, "failed_imports-old", "Album")
             os.makedirs(lookalike)
-            with self.assertRaises(FilesystemAuthorityError):
-                with open_configured_quarantine_directory(lookalike, cfg):
-                    pass
+            with self.assertRaises(FilesystemAuthorityError), open_configured_quarantine_directory(lookalike, cfg):
+                pass
 
 
 class TestPrivatePreviewCopyBounds(unittest.TestCase):

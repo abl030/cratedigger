@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import json
-
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-
 
 import msgspec
 
@@ -142,6 +140,213 @@ def classify_download_log_row(
         entry=entry,
         classified=classify_log_entry(entry),
     )
+
+
+def _classify_pipeline_log_item(
+    row: Mapping[str, object],
+) -> dict[str, object]:
+    classified_row = classify_download_log_row(row)
+    return {
+        **classified_row.entry.to_json_dict(),
+        **msgspec.to_builtins(classified_row.classified),
+    }
+
+
+def _project_current_library_have(
+    item: dict[str, object],
+    row: Mapping[str, object],
+) -> None:
+    """Select one complete, provably pre-attempt HAVE snapshot.
+
+    HAVE is historical: what was on disk before this attempt. Successful and
+    explicit import rows may have updated the request's current evidence, so
+    they never receive an overlay. A deleted-triage or failed row may carry a
+    partial embedded snapshot (for example Qigong's V0 probe with no codec or
+    bitrate); when canonical evidence predates the attempt, replace that
+    partial snapshot wholesale instead of mixing fields. Live Beets data has
+    no historical timestamp and is never evidence for HAVE.
+    """
+    attempt_measurement_fields = (
+        "existing_format",
+        "existing_min_bitrate",
+        "existing_avg_bitrate",
+        "existing_median_bitrate",
+        "existing_spectral_grade",
+        "existing_spectral_bitrate",
+        "existing_spectral_error",
+        "existing_v0_probe_kind",
+        "existing_v0_probe_min_bitrate",
+        "existing_v0_probe_avg_bitrate",
+        "existing_v0_probe_median_bitrate",
+        "comparison_basis",
+    )
+    if item.get("outcome") in ("success", "force_import", "manual_import"):
+        return
+
+    attempt_has_any = (
+        item.get("existing_spectral_attempted") is True
+        or any(
+            item.get(field) is not None
+            for field in attempt_measurement_fields
+        )
+    )
+    attempt_has_complete_core = (
+        item.get("existing_format") is not None
+        and item.get("existing_min_bitrate") is not None
+        and item.get("existing_avg_bitrate") is not None
+    )
+    partial_snapshot_can_be_replaced = (
+        item.get("comparison_basis") is None
+        and (
+            item.get("outcome") in (
+                "failed", "timeout", "measurement_failed",
+            )
+            or item.get("wrong_match_triage_action") in (
+                "deleted_reject",
+                "deleted_verified_lossless_parent",
+            )
+        )
+    )
+    if attempt_has_any and (
+        attempt_has_complete_core or not partial_snapshot_can_be_replaced
+    ):
+        return
+
+    current_projection = {
+        "existing_format": row.get("_current_evidence_format"),
+        "existing_min_bitrate": row.get("_current_evidence_min_bitrate"),
+        "existing_avg_bitrate": row.get("_current_evidence_avg_bitrate"),
+        "existing_median_bitrate": row.get(
+            "_current_evidence_median_bitrate"
+        ),
+        "existing_spectral_grade": row.get(
+            "_current_evidence_spectral_grade"
+        ),
+        "existing_spectral_bitrate": row.get(
+            "_current_evidence_spectral_bitrate"
+        ),
+        "existing_v0_probe_kind": row.get(
+            "_current_evidence_v0_probe_kind"
+        ),
+        "existing_v0_probe_min_bitrate": row.get(
+            "_current_evidence_v0_probe_min_bitrate"
+        ),
+        "existing_v0_probe_avg_bitrate": row.get(
+            "_current_evidence_v0_probe_avg_bitrate"
+        ),
+        "existing_v0_probe_median_bitrate": row.get(
+            "_current_evidence_v0_probe_median_bitrate"
+        ),
+    }
+    current_has_complete_core = (
+        current_projection["existing_format"] is not None
+        and current_projection["existing_min_bitrate"] is not None
+        and current_projection["existing_avg_bitrate"] is not None
+    )
+    if (
+        row.get("_current_evidence_id") is not None
+        and row.get("_current_evidence_is_pre_attempt") is True
+        and (not attempt_has_any or current_has_complete_core)
+    ):
+        if attempt_has_any:
+            item["existing_spectral_attempted"] = False
+            item["existing_spectral_error"] = None
+        item.update(current_projection)
+
+
+_LINKED_IMPORT_EVIDENCE_FIELDS = (
+    "existing_format",
+    "existing_min_bitrate",
+    "existing_avg_bitrate",
+    "existing_median_bitrate",
+    "existing_spectral_grade",
+    "existing_spectral_bitrate",
+    "existing_spectral_attempted",
+    "existing_spectral_error",
+    "existing_v0_probe_kind",
+    "existing_v0_probe_min_bitrate",
+    "existing_v0_probe_avg_bitrate",
+    "existing_v0_probe_median_bitrate",
+    "materialized_format",
+    "materialized_min_bitrate",
+    "materialized_avg_bitrate",
+    "materialized_median_bitrate",
+    "target_contract_format",
+)
+
+
+def _project_linked_import_evidence(
+    items: list[dict[str, object]],
+    linked_successors: Sequence[Mapping[str, object]] = (),
+) -> None:
+    """Attach a successor import's measurements to its source audit row.
+
+    Active force-import rows and historical manual-import rows explicitly
+    point back through ``source_download_log_id``. That is the authoritative
+    bridge from a kept wrong-match card to the conversion which later
+    materialized those bytes; do not infer the relationship from matching
+    albums or measurements. The newest qualifying download-log id has
+    precedence regardless of query order or whether the successor is also on
+    the current page.
+    """
+    by_id = {
+        item.get("id"): item
+        for item in items
+        if isinstance(item.get("id"), int)
+    }
+    successors_by_id: dict[int, dict[str, object]] = {}
+    for successor in (*items, *linked_successors):
+        if successor.get("outcome") not in (
+            "success", "force_import", "manual_import"
+        ):
+            continue
+        source_id = successor.get("source_download_log_id")
+        origin = by_id.get(source_id)
+        if origin is None or successor.get("materialized_format") is None:
+            continue
+        successor_id = successor.get("id")
+        if not isinstance(successor_id, int) or isinstance(successor_id, bool):
+            raise TypeError(
+                "linked import successor has no integer download-log id"
+            )
+        payload = {
+            "source_download_log_id": source_id,
+            **{
+                field: successor.get(field)
+                for field in _LINKED_IMPORT_EVIDENCE_FIELDS
+            },
+        }
+        previous = successors_by_id.get(successor_id)
+        if previous is not None and previous != payload:
+            raise ValueError(
+                "linked import successor id "
+                f"{successor_id} has conflicting projection data"
+            )
+        successors_by_id[successor_id] = payload
+
+    for successor_id in sorted(successors_by_id, reverse=True):
+        successor = successors_by_id[successor_id]
+        origin = by_id[successor["source_download_log_id"]]
+        for field in _LINKED_IMPORT_EVIDENCE_FIELDS:
+            if origin.get(field) is None:
+                origin[field] = successor.get(field)
+
+
+def build_recents_download_log_rows(
+    rows: Sequence[Mapping[str, object]],
+    *,
+    linked_successor_rows: Sequence[Mapping[str, object]] = (),
+) -> list[dict[str, object]]:
+    """Render a Recents page through every persisted-evidence projection."""
+    items = [_classify_pipeline_log_item(row) for row in rows]
+    for item, row in zip(items, rows, strict=True):
+        _project_current_library_have(item, row)
+    linked_items = [
+        _classify_pipeline_log_item(row)
+        for row in linked_successor_rows
+    ]
+    _project_linked_import_evidence(items, linked_items)
+    return items
 
 
 def build_download_history_row(

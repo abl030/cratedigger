@@ -8,8 +8,9 @@ lossless. ``finalize_request`` is the module-local DI seam.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Callable, Protocol, Sequence, TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import msgspec
 
@@ -18,6 +19,7 @@ from lib import transitions
 # Module-level DI seam for ``transitions.finalize_request``.
 finalize_request = transitions.finalize_request
 
+from lib.dispatch.types import QualityGateState
 from lib.quality import (
     compute_effective_override_bitrate,
     extract_usernames,
@@ -25,8 +27,6 @@ from lib.quality import (
     resolve_retained_search_override,
 )
 from lib.quality.decisions import post_import_search_action
-
-from lib.dispatch.types import QualityGateState
 from lib.terminal_outcomes import TerminalDenylist
 
 
@@ -67,8 +67,11 @@ def _evidence_unavailable_plan() -> QualityGatePlan:
 
 if TYPE_CHECKING:
     from lib.pipeline_db import PipelineDB
-    from lib.quality import (AudioQualityMeasurement, QualityRankConfig,
-                             TargetQualityContract)
+    from lib.quality import (
+        AudioQualityMeasurement,
+        QualityRankConfig,
+        TargetQualityContract,
+    )
     from lib.quality.decisions import QualityGateDecision
 
 
@@ -77,12 +80,12 @@ class _QualityGateDecisionFn(Protocol):
 
     def __call__(
         self,
-        current: "AudioQualityMeasurement",
-        cfg: "QualityRankConfig | None" = None,
+        current: AudioQualityMeasurement,
+        cfg: QualityRankConfig | None = None,
         *,
-        target_contract: "TargetQualityContract | None" = None,
+        target_contract: TargetQualityContract | None = None,
         verified_lossless_proof: bool = False,
-    ) -> "QualityGateDecision": ...
+    ) -> QualityGateDecision: ...
 
 logger = logging.getLogger("cratedigger")
 
@@ -90,7 +93,7 @@ logger = logging.getLogger("cratedigger")
 def load_quality_gate_state(
     *,
     request_id: int,
-    db: "PipelineDB",
+    db: PipelineDB,
     mb_id: str | None = None,
     expected_current_evidence_id: int | None = None,
 ) -> QualityGateState | None:
@@ -102,7 +105,7 @@ def load_quality_gate_state(
     if not resolved_mb_id:
         try:
             req = db.get_request(request_id)
-        except Exception:
+        except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             logger.debug("QUALITY GATE: DB lookup failed for request row")
             req = None
         resolved_mb_id = (
@@ -168,8 +171,8 @@ def _check_quality_gate_core(
     label: str,
     request_id: int,
     files: Sequence[object],
-    db: "PipelineDB",
-    quality_ranks: "QualityRankConfig | None" = None,
+    db: PipelineDB,
+    quality_ranks: QualityRankConfig | None = None,
     expected_current_evidence_id: int | None = None,
     apply: bool = True,
     state_loader: Callable[..., QualityGateState | None] = load_quality_gate_state,

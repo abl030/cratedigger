@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from lib.pin_retention import PIN_RETENTION_DAYS, prune_terminal_pin_rows_cycle
 from lib.pipeline_db import (
@@ -18,7 +18,7 @@ from tests.helpers import make_ctx_with_fake_db
 class TestPruneTerminalPinRowsCycle(unittest.TestCase):
     def test_one_phase_zero_step_prunes_both_backends(self):
         db = FakePipelineDB()
-        now = datetime(2026, 7, 11, 12, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 7, 11, 12, 0, tzinfo=UTC)
         old = now - timedelta(days=PIN_RETENTION_DAYS, seconds=1)
 
         plex_id = db.add_plex_added_at_pin(

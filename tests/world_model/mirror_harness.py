@@ -17,15 +17,14 @@ from hypothesis.database import DirectoryBasedExampleDatabase
 from hypothesis.stateful import RuleBasedStateMachine, invariant, precondition, rule
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-import conftest  # noqa: E402, F401
+import conftest  # noqa: F401
 
-import tests._hypothesis_profiles  # noqa: E402, F401  (loads the active profile)
-from tests.beets_world import BeetsWorldRelease  # noqa: E402
-from tests.world_model.census_seeds import (  # noqa: E402
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
+from tests.beets_world import BeetsWorldRelease
+from tests.world_model.census_seeds import (
     STATEFUL_WORLD_CENSUS_SEEDS,
 )
-from tests.world_model.support import LifecycleWorld, repository_root  # noqa: E402
-
+from tests.world_model.support import LifecycleWorld, repository_root
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
 MIRROR_URL = os.environ.get("CRATEDIGGER_WORLD_MIRROR_URL", "")

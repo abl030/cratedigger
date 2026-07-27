@@ -168,9 +168,7 @@ def analyse_artist_releases(
             recording_ids=pressing_rec_ids,
         ))
         release_date = r.get("date", "")
-        if data.first_date and release_date and release_date < data.first_date:
-            data.first_date = release_date
-        elif not data.first_date:
+        if data.first_date and release_date and release_date < data.first_date or not data.first_date:
             data.first_date = release_date
 
         # Union recordings; deduplicate track list by normalized title within RG

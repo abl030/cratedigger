@@ -1,9 +1,9 @@
 """Tests for ``lib/staged_album.py``."""
-
 import os
 import shutil
 import tempfile
 import unittest
+from typing import ClassVar
 from unittest.mock import patch
 
 from tests.fakes import FakePipelineDB
@@ -42,7 +42,7 @@ class TestStageToAiPath(unittest.TestCase):
 
 class TestStagedFilename(unittest.TestCase):
 
-    CASES = [
+    CASES: ClassVar = [
         ("backslashes only", "user1\\Album\\01 - Track.flac", "01 - Track.flac"),
         ("forward slashes only", "user1/Album/01 - Track.flac", "01 - Track.flac"),
         ("mixed separators", "user1\\Album/Disc 1\\01 - Track.flac", "01 - Track.flac"),
@@ -207,12 +207,11 @@ class TestStagedAlbum(unittest.TestCase):
             with patch(
                 "lib.staged_album.shutil.move",
                 side_effect=move_with_rollback_failure,
+            ), self.assertRaisesRegex(
+                RuntimeError,
+                "Failed to roll back staged move cleanly",
             ):
-                with self.assertRaisesRegex(
-                    RuntimeError,
-                    "Failed to roll back staged move cleanly",
-                ):
-                    staged_album.move_to(dest, ExplodingDB())
+                staged_album.move_to(dest, ExplodingDB())
 
             self.assertTrue(os.path.exists(dest_file))
             self.assertFalse(os.path.exists(source_file))

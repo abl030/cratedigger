@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """One-shot beets import for a single album with a known MBID.
 
 Designed for the pipeline DB auto-import path (source='request').
@@ -25,15 +24,16 @@ import argparse
 import json
 import os
 import select
+import shutil
 import signal
 import statistics
 import subprocess
 import sys
-import shutil
 import tempfile
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass, field as dataclass_field
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from typing import NoReturn, TypeGuard
 
 import msgspec
@@ -49,60 +49,78 @@ def _bootstrap_import_paths() -> None:
 
 _bootstrap_import_paths()
 
+from lib import transitions
 from lib.beets_db import AlbumInfo, BeetsDB, validate_beets_storage_pair
 from lib.measurement import ffprobe_audio_codec_name
 from lib.permissions import fix_library_modes, reset_umask
 from lib.release_identity import ReleaseIdentity
 from lib.util import beets_subprocess_env, validate_audio
-from lib import transitions
 
 # Module-level DI seam for ``transitions.finalize_request`` — see
 # ``lib.dispatch.outcome_actions.finalize_request`` for the rationale.
 finalize_request = transitions.finalize_request
-from lib.quality import (AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS,
-                         AudioQualityMeasurement, CodecFamily,
-                         DuplicateRemoveCandidate,
-                         AudioToolDiagnostic,
-                         AudioToolDiagnosticCategory,
-                         AudioValidationReport,
-                         ConversionInfo,
-                         DuplicateRemoveGuardInfo, ImportResult,
-                         EVIDENCE_PROVENANCE_MEASURED,
-                         EVIDENCE_SUBJECT_SOURCE,
-                         PostflightInfo, QualityComparisonBasis,
-                         QualityRankConfig,
-                         QualityEvidenceActionPayload,
-                         QualityEvidenceActionProvenance,
-                         SpectralAnalysisDetail,
-                         SpectralDetail,
-                         MeasuredImportDecisionInput,
-                         ProvisionalLosslessDecisionInput,
-                         ProvisionalLosslessDecisionResult,
-                         TargetQualityContract,
-                         V0_PROBE_LOSSLESS_SOURCE,
-                         V0_PROBE_NATIVE_LOSSY_RESEARCH,
-                         V0ProbeEvidence,
-                         SPECTRAL_TRANSCODE_GRADES,
-                         build_existing_quality_measurement,
-                         comparison_basis_from_decision,
-                         comparison_format_hint, native_codec_format_label,
-                         determine_verified_lossless,
-                         mint_verified_lossless_proof,
-                         evidence_decision_name,
-                         measured_import_decision,
-                         provisional_lossless_decision, transcode_detection,
-                         v0_probe_overrides_spectral)
-from lib.quality import bounded_audio_tool_diagnostic
+from lib.quality import AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS
+from lib.quality import (
+    EVIDENCE_PROVENANCE_MEASURED,
+    EVIDENCE_SUBJECT_SOURCE,
+    SPECTRAL_TRANSCODE_GRADES,
+    V0_PROBE_LOSSLESS_SOURCE,
+    V0_PROBE_NATIVE_LOSSY_RESEARCH,
+    AudioQualityMeasurement,
+    AudioToolDiagnostic,
+    AudioToolDiagnosticCategory,
+    AudioValidationReport,
+    CodecFamily,
+    ConversionInfo,
+    DuplicateRemoveCandidate,
+    DuplicateRemoveGuardInfo,
+    ImportResult,
+    MeasuredImportDecisionInput,
+    PostflightInfo,
+    ProvisionalLosslessDecisionInput,
+    ProvisionalLosslessDecisionResult,
+    QualityComparisonBasis,
+    QualityEvidenceActionPayload,
+    QualityEvidenceActionProvenance,
+    QualityRankConfig,
+    SpectralAnalysisDetail,
+    SpectralDetail,
+    TargetQualityContract,
+    V0ProbeEvidence,
+    bounded_audio_tool_diagnostic,
+    build_existing_quality_measurement,
+    comparison_basis_from_decision,
+    comparison_format_hint,
+    determine_verified_lossless,
+    evidence_decision_name,
+    measured_import_decision,
+    mint_verified_lossless_proof,
+    native_codec_format_label,
+    provisional_lossless_decision,
+    transcode_detection,
+    v0_probe_overrides_spectral,
+)
 from lib.v0_probe import (
     V0_CODEC,
     V0_CODEC_ARGS,
     V0_METADATA_ARGS,
+)
+from lib.v0_probe import (
     conversion_timeout_seconds as _conversion_timeout_seconds,
+)
+from lib.v0_probe import (
     folder_bitrates as _get_folder_bitrates,
+)
+from lib.v0_probe import (
     probe_duration_seconds as _probe_duration_seconds,
+)
+from lib.v0_probe import (
     probe_files_as_v0 as _temp_v0_probe,
+)
+from lib.v0_probe import (
     v0_probe_from_bitrates as _shared_v0_probe_from_bitrates,
 )
+
 HARNESS = os.path.join(os.path.dirname(__file__), "..", "harness", "run_beets_harness.sh")
 HARNESS_TIMEOUT = 300
 IMPORT_TIMEOUT = 1800
@@ -302,11 +320,13 @@ class RunImportOutcome:
     # apply-time distance was journal-only, which hid the tagless-match
     # inflation for a day and made diagnosis journal archaeology).
     applied_distance: float | None = None
-    # Typed reason for a failed run, set where the run itself knows WHY
-    # (over-threshold reject, harness timeout, MBID skip). Preferred over
-    # the last-beets-line/rc fallback when building ImportResult.error —
-    # those paths return with empty ``beets_lines``, which degenerated the
-    # operator-facing message to "Harness returned rc=N" (issue #865).
+    # Typed reason for a failed run, set where the run has a specific
+    # observed fact (over-threshold reject, harness timeout, MBID skip,
+    # terminal process status, or no applied release). Preferred over the
+    # last-beets-line/rc fallback when building ImportResult.error — those
+    # paths can return with empty ``beets_lines``, which otherwise
+    # degenerates the operator-facing message to "Harness returned rc=N"
+    # (issue #865).
     failure_reason: str | None = None
 
 
@@ -584,7 +604,7 @@ V0_SPEC = ConversionSpec(
 
 
 def _harness_failure_error(
-    import_outcome: "RunImportOutcome", rc: int,
+    import_outcome: RunImportOutcome, rc: int,
 ) -> str:
     """The ONE failed-run message decision both stage sites share (#865).
 
@@ -857,12 +877,12 @@ def _probe_source_channels(path: str) -> int | None:
         # a partially-unknown overloaded return (many mutagen format
         # classes) — third-party, not ours to annotate.
         import mutagen
-        _MutagenFile = getattr(mutagen, "File")
+        _MutagenFile = getattr(mutagen, "File")  # noqa: B009 - dynamic untyped factory
     except ImportError:
         return None
     try:
         mf = _MutagenFile(path)
-    except Exception:
+    except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         return None
     if mf is None:
         return None
@@ -1045,7 +1065,7 @@ def convert_lossless(album_path: str, spec: ConversionSpec,
             # don't raise UnicodeDecodeError during capture and crash the
             # whole import — request 580 (78 Saab — Crossed Lines) hit this.
             result = subprocess.run(cmd, capture_output=True, text=True,
-                                    errors="replace", timeout=conv_timeout)
+                                    errors="replace", timeout=conv_timeout, check=False)
         except subprocess.TimeoutExpired as exc:
             diagnostic = bounded_audio_tool_diagnostic(
                 relative_path=fname,
@@ -1111,7 +1131,7 @@ def convert_lossless(album_path: str, spec: ConversionSpec,
             validation_result = validate_audio(album_path, "normal")
             source_validation = validation_result.report
             source_validation_failed_paths = list(validation_result.failed_paths)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             diagnostics.append(bounded_audio_tool_diagnostic(
                 relative_path=".",
                 category="read_error",
@@ -1204,7 +1224,7 @@ def run_import(
     proc = subprocess.Popen(
         cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, text=True, errors="replace",
-        preexec_fn=os.setsid,
+        start_new_session=True,
         env=beets_subprocess_env(
             beets_config_dir=beets_config_dir,
             beets_python=beets_python,
@@ -1356,11 +1376,12 @@ def run_import(
 
     stderr_out = proc.stderr.read() if proc.stderr else ""
     beets_lines: list[str] = []
-    if stderr_out.strip():
-        for line in stderr_out.strip().split("\n"):
-            if "Disabled fetchart" not in line:
-                print(f"  [BEETS] {line}", file=sys.stderr)
-                beets_lines.append(line.strip())
+    for raw_line in stderr_out.splitlines():
+        line = raw_line.strip()
+        if not line or "Disabled fetchart" in line:
+            continue
+        print(f"  [BEETS] {line}", file=sys.stderr)
+        beets_lines.append(line)
 
     if proc_rc not in (None, 0):
         return RunImportOutcome(
@@ -1369,6 +1390,14 @@ def run_import(
             beets_owned_replacement=beets_owned_replacement,
             replaced_albums=replaced_albums,
             applied_distance=applied_distance,
+            failure_reason=(
+                (
+                    f"beets harness terminated by signal {-proc_rc}"
+                    if proc_rc < 0
+                    else f"beets harness exited with status {proc_rc}"
+                )
+                if not beets_lines else None
+            ),
         )
 
     return RunImportOutcome(
@@ -1377,6 +1406,11 @@ def run_import(
         beets_owned_replacement=beets_owned_replacement,
         replaced_albums=replaced_albums,
         applied_distance=applied_distance,
+        failure_reason=(
+            "beets harness ended without applying requested release "
+            f"{mb_release_id}"
+            if not applied else None
+        ),
     )
 
 
@@ -1416,7 +1450,7 @@ def update_pipeline_db(
             print(f"  [WARN] Pipeline DB transition rejected: {e}", file=sys.stderr)
         finally:
             db.close()
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         print(f"  [WARN] Pipeline DB update failed: {e}", file=sys.stderr)
 
 
@@ -1436,7 +1470,7 @@ def _log_timing(stage: str, start: float) -> None:
 
 def _emit_and_exit(r: ImportResult) -> NoReturn:
     """Emit ImportResult JSON on stdout and exit."""
-    global _preview_temp_root  # noqa: PLW0603
+    global _preview_temp_root
     if _import_total_start is not None:
         _log_timing("total", _import_total_start)
     if _preview_temp_root is not None:
@@ -1486,7 +1520,7 @@ def _load_quality_evidence_action_file(
 
 def _preview_spectral_audit_from_action_file(
     action_file: str | None,
-) -> "SpectralDetail | None":
+) -> SpectralDetail | None:
     """Reuse the candidate grade already measured by preview."""
     if not action_file:
         return None
@@ -1670,7 +1704,7 @@ def _run_quality_evidence_authorized_import(
     assert action_file is not None
     r = ImportResult()
     r.already_in_beets = already_in_beets
-    global _current_result  # noqa: PLW0603
+    global _current_result
     _current_result = r
 
     try:
@@ -1730,7 +1764,7 @@ def _run_quality_evidence_authorized_import(
             payload=payload,
             r=r,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         r.exit_code = 5
         r.decision = "quality_evidence_action_failed"
         r.error = str(exc)
@@ -1920,7 +1954,7 @@ def import_beets_subprocess_kwargs(
 
 
 def main():
-    global _import_total_start  # noqa: PLW0603
+    global _import_total_start
     _import_total_start = time.monotonic()
 
     # Belt-and-suspenders for the group-writable import boundary (umask 0o002) —
@@ -1937,7 +1971,7 @@ def main():
     # Parse --quality-rank-config and replace the module-level _rank_cfg default.
     # Used by BeetsDB.get_album_info() mixed-format reduction + (commit 5)
     # quality_rank()/compare_quality()/quality_gate_decision().
-    global _rank_cfg  # noqa: PLW0603
+    global _rank_cfg
     if args.quality_rank_config:
         try:
             _rank_cfg = QualityRankConfig.from_json(args.quality_rank_config)
@@ -1955,7 +1989,7 @@ def main():
         _log("[FORCE] Distance check disabled (max_distance=999)")
 
     # Accumulate structured result (module-level so crash handler can preserve data)
-    global _current_result  # noqa: PLW0603
+    global _current_result
     r = ImportResult()
     r.preview = args.dry_run
     r.existing_v0_probe = _existing_v0_probe_from_args(args)
@@ -1982,7 +2016,7 @@ def main():
         r.exit_code = pf.exit_code
         r.error = pf.error
         if pf.decision == "preflight_existing":
-            _log(f"[PRE-FLIGHT] No new files, keeping existing import")
+            _log("[PRE-FLIGHT] No new files, keeping existing import")
             if request_id and not args.dry_run:
                 info = beets.get_album_info(mbid, _rank_cfg)
                 if info:
@@ -2007,7 +2041,7 @@ def main():
 
     work_path = args.path
     if args.dry_run:
-        global _preview_temp_root  # noqa: PLW0603
+        global _preview_temp_root
         _preview_temp_root = tempfile.mkdtemp(prefix="cratedigger-import-preview-")
         basename = os.path.basename(os.path.abspath(args.path)) or "album"
         work_path = os.path.join(_preview_temp_root, basename)
@@ -2160,7 +2194,7 @@ def main():
         has_non_flac = any(
             not f.lower().endswith(".flac") for f in lossless_files)
         if has_non_flac:
-            _log(f"[NORMALIZE] Converting non-FLAC lossless → FLAC")
+            _log("[NORMALIZE] Converting non-FLAC lossless → FLAC")
             stage_start = time.monotonic()
             try:
                 converted, failed, original_ext, source_channels = convert_lossless(
@@ -2213,10 +2247,13 @@ def main():
     existing_info = beets.get_album_info(mbid, _rank_cfg)
     _log_timing("quality_measurement", stage_start)
     existing_min_br = existing_info.min_bitrate_kbps if existing_info else None
-    if args.override_min_bitrate is not None and existing_min_br is not None:
-        if args.override_min_bitrate != existing_min_br:
-            _log(f"  [OVERRIDE] pipeline says {args.override_min_bitrate}kbps, "
-                 f"beets says {existing_min_br}kbps")
+    if (
+        args.override_min_bitrate is not None
+        and existing_min_br is not None
+        and args.override_min_bitrate != existing_min_br
+    ):
+        _log(f"  [OVERRIDE] pipeline says {args.override_min_bitrate}kbps, "
+             f"beets says {existing_min_br}kbps")
     effective_existing = args.override_min_bitrate if args.override_min_bitrate is not None else existing_min_br
     if effective_existing is not None:
         _log(f"  prev_min_bitrate={effective_existing}")
@@ -2398,8 +2435,8 @@ def main():
         _log(f"{log_prefix} {provisional.reason}")
         if args.preserve_source and not keep_lossless and converted > 0:
             _remove_files_by_ext(work_path, "." + V0_SPEC.extension)
-            _log(f"  [PRESERVE-SOURCE] Removed temporary V0 artifacts; "
-                 f"lossless originals left intact for retry")
+            _log("  [PRESERVE-SOURCE] Removed temporary V0 artifacts; "
+                 "lossless originals left intact for retry")
         _emit_and_exit(r)
 
     if qd is not None and qd.is_terminal:
@@ -2417,8 +2454,8 @@ def main():
         # verified_lossless_target pass is wrongly skipped.
         if args.preserve_source and not keep_lossless and converted > 0:
             _remove_files_by_ext(work_path, "." + V0_SPEC.extension)
-            _log(f"  [PRESERVE-SOURCE] Removed temporary V0 artifacts; "
-                 f"lossless originals left intact for retry")
+            _log("  [PRESERVE-SOURCE] Removed temporary V0 artifacts; "
+                 "lossless originals left intact for retry")
         _emit_and_exit(r)
 
     # Non-terminal quality decisions — log and proceed to import
@@ -2433,7 +2470,7 @@ def main():
         _log(f"  [QUALITY] new {new_min_br}kbps > existing "
              f"{effective_existing}kbps — upgrading (transcode)")
     elif decision == "transcode_first":
-        _log(f"  [QUALITY] no existing album in beets — importing transcode")
+        _log("  [QUALITY] no existing album in beets — importing transcode")
 
     if (not keep_lossless
             and (will_be_verified_lossless
@@ -2532,8 +2569,8 @@ def main():
         stage_start = time.monotonic()
         _remove_lossless_files(work_path)
         _log_timing("source_cleanup", stage_start)
-        _log(f"  [CLEANUP] Removed lossless originals "
-             f"(target skipped or preserve-source approved)")
+        _log("  [CLEANUP] Removed lossless originals "
+             "(target skipped or preserve-source approved)")
 
     # --- Import ---
     _log(f"[IMPORT] {work_path} → beets (mbid={mbid})")
@@ -2660,7 +2697,7 @@ if __name__ == "__main__":
         main()
     except SystemExit:
         raise  # _emit_and_exit uses sys.exit
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         # Preserve intermediate data if main() had started building a result
         if _current_result is not None:
             r = _current_result

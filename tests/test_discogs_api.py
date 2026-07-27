@@ -1,12 +1,11 @@
 """Unit tests for web/discogs.py — Discogs mirror API wrapper."""
-
 import json
 import os
 import sys
 import unittest
 import urllib.parse
-from typing import TypeGuard
-from unittest.mock import patch, MagicMock
+from typing import ClassVar, TypeGuard
+from unittest.mock import MagicMock, patch
 
 import msgspec
 
@@ -40,25 +39,25 @@ def tearDownModule() -> None:
 
 
 from web.discogs import (
+    LabelEntity,
     _parse_duration,
     _parse_position,
     _parse_year,
     _primary_artist_name,
-    get_artist_releases,
-    get_release,
-    get_master_releases,
-    search_releases,
-    search_artists,
     get_artist_name,
-    search_labels,
+    get_artist_releases,
     get_label,
     get_label_releases,
-    LabelEntity,
+    get_master_releases,
+    get_release,
+    search_artists,
+    search_labels,
+    search_releases,
 )
 
 
 class TestParseDuration(unittest.TestCase):
-    CASES = [
+    CASES: ClassVar = [
         ("normal", "4:44", 284.0),
         ("short", "0:30", 30.0),
         ("long", "1:02:15", 3735.0),
@@ -74,7 +73,7 @@ class TestParseDuration(unittest.TestCase):
 
 
 class TestParsePosition(unittest.TestCase):
-    CASES = [
+    CASES: ClassVar = [
         ("simple number", "3", (1, 3)),
         ("cd disc-track", "2-5", (2, 5)),
         ("vinyl side", "A1", (1, 1)),
@@ -89,7 +88,7 @@ class TestParsePosition(unittest.TestCase):
 
 
 class TestParseYear(unittest.TestCase):
-    CASES = [
+    CASES: ClassVar = [
         ("full date", "1997-06-16", 1997),
         ("year only", "2020", 2020),
         ("empty", "", None),
@@ -123,7 +122,7 @@ def _mock_urlopen(response_data):
 
 
 class TestGetRelease(unittest.TestCase):
-    RELEASE_DATA = {
+    RELEASE_DATA: ClassVar = {
         "id": 83182,
         "title": "OK Computer",
         "country": "Europe",
@@ -161,7 +160,7 @@ class TestGetRelease(unittest.TestCase):
 
 
 class TestGetMasterReleases(unittest.TestCase):
-    MASTER_DATA = {
+    MASTER_DATA: ClassVar = {
         "id": 21491,
         "title": "OK Computer",
         "year": 1997,
@@ -271,7 +270,7 @@ class TestGetMasterReleases(unittest.TestCase):
 
 
 class TestSearchReleases(unittest.TestCase):
-    SEARCH_DATA = {
+    SEARCH_DATA: ClassVar = {
         "results": [
             {
                 "id": 83182,
@@ -350,7 +349,7 @@ class TestSearchReleasesVaRewrite(unittest.TestCase):
     returns only VA-credited releases.
     """
 
-    SEARCH_DATA = {
+    SEARCH_DATA: ClassVar = {
         "results": [
             {
                 "id": 32457180,
@@ -420,7 +419,7 @@ class TestSearchReleasesVaRewrite(unittest.TestCase):
 class TestSearchArtists(unittest.TestCase):
     """search_artists() now hits /api/artists?name= (real artist-name index)."""
 
-    ARTIST_SEARCH_DATA = {
+    ARTIST_SEARCH_DATA: ClassVar = {
         "results": [
             {
                 "id": 3840,
@@ -520,7 +519,7 @@ def _mock_urlopen_by_url(responses: dict):
 class TestGetArtistReleases(unittest.TestCase):
     """get_artist_releases() merges /masters + /appearances from the mirror."""
 
-    MASTERS_DATA = {
+    MASTERS_DATA: ClassVar = {
         "results": [
             {
                 "id": 21481,
@@ -564,7 +563,7 @@ class TestGetArtistReleases(unittest.TestCase):
         "per_page": 100,
     }
 
-    EMPTY_APPEARANCES = {"results": [], "total": 0, "page": 1, "per_page": 1}
+    EMPTY_APPEARANCES: ClassVar = {"results": [], "total": 0, "page": 1, "per_page": 1}
 
     def _assert_incomplete_envelope_rejected(
         self, *, endpoint: str, payload: dict,
@@ -808,9 +807,8 @@ class TestGetArtistReleases(unittest.TestCase):
         with _mock_urlopen_by_url({
             "/masters": invalid,
             "/appearances": self.EMPTY_APPEARANCES,
-        }):
-            with self.assertRaises(msgspec.ValidationError):
-                get_artist_releases(3840)
+        }), self.assertRaises(msgspec.ValidationError):
+            get_artist_releases(3840)
 
     def test_wrong_primary_types_element_is_rejected_at_boundary(self):
         invalid = {
@@ -828,9 +826,8 @@ class TestGetArtistReleases(unittest.TestCase):
         with _mock_urlopen_by_url({
             "/masters": invalid,
             "/appearances": self.EMPTY_APPEARANCES,
-        }):
-            with self.assertRaises(msgspec.ValidationError):
-                get_artist_releases(3840)
+        }), self.assertRaises(msgspec.ValidationError):
+            get_artist_releases(3840)
 
     def test_missing_provenance_is_rejected_at_boundary(self):
         invalid_row = {
@@ -885,9 +882,8 @@ class TestGetArtistReleases(unittest.TestCase):
         with _mock_urlopen_by_url({
             "/masters": self.MASTERS_DATA,
             "/appearances": invalid_appearances,
-        }):
-            with self.assertRaises(msgspec.ValidationError):
-                get_artist_releases(3840)
+        }), self.assertRaises(msgspec.ValidationError):
+            get_artist_releases(3840)
 
     def test_null_primary_artist_id_normalizes_to_empty_string(self):
         null_artist = {
@@ -927,7 +923,7 @@ class TestGetArtistName(unittest.TestCase):
 class TestSearchLabels(unittest.TestCase):
     """search_labels() hits /api/labels?name= and returns LabelEntity list."""
 
-    LABEL_SEARCH_DATA = {
+    LABEL_SEARCH_DATA: ClassVar = {
         "results": [
             {
                 "id": 2294,
@@ -1003,9 +999,8 @@ class TestSearchLabels(unittest.TestCase):
             "page": 1,
             "per_page": 25,
         }
-        with _mock_urlopen(bad):
-            with self.assertRaises(msgspec.ValidationError):
-                search_labels("Parlophone")
+        with _mock_urlopen(bad), self.assertRaises(msgspec.ValidationError):
+            search_labels("Parlophone")
 
     def test_long_query_uses_bounded_distinct_cache_key(self):
         q1 = "x" * 250
@@ -1026,7 +1021,7 @@ class TestSearchLabels(unittest.TestCase):
 class TestGetLabel(unittest.TestCase):
     """get_label() hits /api/labels/{id} and returns a LabelEntity."""
 
-    TOP_LEVEL_DATA = {
+    TOP_LEVEL_DATA: ClassVar = {
         "id": 2294,
         "name": "Parlophone",
         "profile": "British record label.",
@@ -1040,7 +1035,7 @@ class TestGetLabel(unittest.TestCase):
         ],
     }
 
-    SUB_LABEL_DATA = {
+    SUB_LABEL_DATA: ClassVar = {
         "id": 25693,
         "name": "Parlophone Records Ltd.",
         "profile": "",
@@ -1092,7 +1087,7 @@ class TestGetLabel(unittest.TestCase):
 class TestGetLabelReleases(unittest.TestCase):
     """get_label_releases() hits /api/labels/{id}/releases."""
 
-    RELEASES_DATA = {
+    RELEASES_DATA: ClassVar = {
         "results": [
             {
                 "id": 83182,
@@ -1238,8 +1233,8 @@ class TestGetLabelReleases(unittest.TestCase):
         """Plan 002 U3: when the upstream returns 503 (timeout) and the
         caller asked for sub-labels, the adapter retries once with
         include_sublabels=False and flags the response."""
-        from urllib.error import HTTPError
         from io import BytesIO
+        from urllib.error import HTTPError
 
         # First call (sub=true) raises 503; second call (sub=false) succeeds.
         success_resp = MagicMock()
@@ -1316,8 +1311,8 @@ class TestGetLabelReleases(unittest.TestCase):
     def test_503_then_503_reraises(self):
         """Plan 002 U3: if the fallback also 503s, the original HTTPError
         re-raises. No infinite retry."""
-        from urllib.error import HTTPError
         from io import BytesIO
+        from urllib.error import HTTPError
 
         def _always_503(req, *_args, **_kwargs):
             raise HTTPError(
@@ -1325,15 +1320,14 @@ class TestGetLabelReleases(unittest.TestCase):
                 hdrs=None,  # type: ignore[arg-type]
                 fp=BytesIO(b'{"error":"timeout"}'))
 
-        with patch("web.discogs.urllib.request.urlopen", side_effect=_always_503):
-            with self.assertRaises(HTTPError):
-                get_label_releases(99887765, include_sublabels=True)
+        with patch("web.discogs.urllib.request.urlopen", side_effect=_always_503), self.assertRaises(HTTPError):
+            get_label_releases(99887765, include_sublabels=True)
 
     def test_503_when_sub_labels_already_false_reraises(self):
         """Plan 002 U3: 503 with include_sublabels=False has nothing to fall
         back to — re-raise."""
-        from urllib.error import HTTPError
         from io import BytesIO
+        from urllib.error import HTTPError
 
         def _503(req, *_args, **_kwargs):
             raise HTTPError(
@@ -1341,15 +1335,14 @@ class TestGetLabelReleases(unittest.TestCase):
                 hdrs=None,  # type: ignore[arg-type]
                 fp=BytesIO(b'{"error":"timeout"}'))
 
-        with patch("web.discogs.urllib.request.urlopen", side_effect=_503):
-            with self.assertRaises(HTTPError):
-                get_label_releases(99887764, include_sublabels=False)
+        with patch("web.discogs.urllib.request.urlopen", side_effect=_503), self.assertRaises(HTTPError):
+            get_label_releases(99887764, include_sublabels=False)
 
     def test_404_propagates_unchanged(self):
         """Plan 002 U3: 404 surfaces as 404 (existing route maps it). The
         503 retry must not swallow other HTTP errors."""
-        from urllib.error import HTTPError
         from io import BytesIO
+        from urllib.error import HTTPError
 
         def _404(req, *_args, **_kwargs):
             raise HTTPError(
@@ -1357,9 +1350,8 @@ class TestGetLabelReleases(unittest.TestCase):
                 hdrs=None,  # type: ignore[arg-type]
                 fp=BytesIO(b'{"error":"not found"}'))
 
-        with patch("web.discogs.urllib.request.urlopen", side_effect=_404):
-            with self.assertRaises(HTTPError):
-                get_label_releases(99887763, include_sublabels=True)
+        with patch("web.discogs.urllib.request.urlopen", side_effect=_404), self.assertRaises(HTTPError):
+            get_label_releases(99887763, include_sublabels=True)
 
 
 if __name__ == "__main__":

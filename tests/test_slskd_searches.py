@@ -24,7 +24,7 @@ from __future__ import annotations
 import configparser
 import unittest
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import cratedigger
@@ -59,7 +59,7 @@ def _ledger(db: FakePipelineDB, search_id: str, *, purpose: str = "plan_search",
     """Record a ledger row and backdate its created_at by ``age_s``."""
     db.record_search_id(search_id, purpose, request_id)
     db._search_ledger[search_id].created_at = (
-        datetime.now(timezone.utc) - timedelta(seconds=age_s))
+        datetime.now(UTC) - timedelta(seconds=age_s))
 
 
 _PAST_GRACE = SEARCH_LEDGER_SWEEP_GRACE_S + 60.0
@@ -173,7 +173,7 @@ class TestConvergeSlskdSearchesI1Pin(unittest.TestCase):
         db.record_search_id("old-swept", "plan_search", 1)
         db.mark_search_ids_deleted(["old-swept"])
         db._search_ledger["old-swept"].deleted_at = (
-            datetime.now(timezone.utc)
+            datetime.now(UTC)
             - timedelta(days=SEARCH_LEDGER_PRUNE_RETENTION_DAYS + 1))
 
         summary = converge_slskd_searches(_ctx(db, slskd))
@@ -188,7 +188,7 @@ class TestConvergeSlskdSearchesI1Pin(unittest.TestCase):
         db.record_search_id("swept-old", "plan_search", 1)
         db.mark_search_ids_deleted(["swept-old"])
         db._search_ledger["swept-old"].deleted_at = (
-            datetime.now(timezone.utc)
+            datetime.now(UTC)
             - timedelta(days=SEARCH_LEDGER_PRUNE_RETENTION_DAYS + 1))
 
         converge_slskd_searches(_ctx(db, slskd))

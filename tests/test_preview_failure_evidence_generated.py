@@ -23,12 +23,11 @@ from dataclasses import dataclass, replace
 from typing import Any, Literal, cast
 from unittest.mock import patch
 
-import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
-
+import msgspec
 from hypothesis import example, given
 from hypothesis import strategies as st
-import msgspec
 
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.beets_db import AlbumInfo
 from lib.config import CratediggerConfig
 from lib.import_preview import (
@@ -57,7 +56,6 @@ from lib.quality_evidence import EvidenceBuildResult, snapshot_audio_files
 from scripts import import_preview_worker
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_album_quality_evidence, make_request_row
-
 
 FailureMode = Literal[
     "returned",
@@ -207,7 +205,9 @@ def assert_preview_failure_have_contract(
         raise AssertionError("request-owned preview failure lost its terminal audit")
     raw_validation = audit.get("validation_result")
     if not isinstance(raw_validation, str):
-        raise AssertionError("terminal audit lost the typed failure payload")
+        raise AssertionError(  # noqa: TRY004 - generated invariant failure
+            "terminal audit lost the typed failure payload"
+        )
     detail = json.loads(raw_validation).get("detail")
     if not isinstance(detail, str) or not detail:
         raise AssertionError("terminal audit lost the diagnostic detail")

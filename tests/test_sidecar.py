@@ -10,7 +10,7 @@ ValidationError on type drift).
 from __future__ import annotations
 
 import unittest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import msgspec
 
@@ -107,7 +107,7 @@ class TestBuildSidecar(unittest.TestCase):
     """``build_sidecar`` maps evidence → the on-disk payload faithfully."""
 
     def setUp(self):
-        self.gen_at = datetime(2026, 6, 18, 12, 0, 0, tzinfo=timezone.utc)
+        self.gen_at = datetime(2026, 6, 18, 12, 0, 0, tzinfo=UTC)
         self.evidence = _verified_lossless_evidence()
         self.sidecar = build_sidecar(
             self.evidence,
@@ -180,7 +180,7 @@ class TestSidecarWireBoundary(unittest.TestCase):
         sidecar = build_sidecar(
             _verified_lossless_evidence(),
             source_username="peer",
-            generated_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
+            generated_at=datetime(2026, 6, 18, tzinfo=UTC),
         )
         encoded = msgspec.json.encode(sidecar)
         decoded = msgspec.json.decode(encoded, type=AlbumSidecar)
@@ -190,7 +190,7 @@ class TestSidecarWireBoundary(unittest.TestCase):
         sidecar = build_sidecar(
             _verified_lossless_evidence(),
             source_username="peer",
-            generated_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
+            generated_at=datetime(2026, 6, 18, tzinfo=UTC),
         )
         payload = msgspec.to_builtins(sidecar)
 

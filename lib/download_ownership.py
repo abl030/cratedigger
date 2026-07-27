@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Callable, Protocol, TYPE_CHECKING, runtime_checkable
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from lib import transitions
 
@@ -37,7 +38,7 @@ class DownloadOwnershipDB(transitions.TransitionsDB, Protocol):
         self, request_id: int, state_json: str,
     ) -> bool: ...
 
-    def record_transfer_enqueue(self, rows: "list[TransferLedgerRow]") -> None: ...
+    def record_transfer_enqueue(self, rows: list[TransferLedgerRow]) -> None: ...
 
     def confirm_transfer_enqueue(
         self, username: str, filename: str,
@@ -85,7 +86,7 @@ class DownloadOwnershipWriter:
         request_id: int,
         state_json: str,
         *,
-        plan_execution: "PlanExecutionContext | None" = None,
+        plan_execution: PlanExecutionContext | None = None,
     ) -> bool:
         """Guarded wanted -> downloading claim with planned download state.
 
@@ -168,7 +169,7 @@ class DownloadOwnershipWriter:
         finally:
             self._close_db(db)
 
-    def record_transfer_enqueue(self, rows: "list[TransferLedgerRow]") -> None:
+    def record_transfer_enqueue(self, rows: list[TransferLedgerRow]) -> None:
         """Write-ahead ownership ledger insert (issue #571, T1) using a
         fresh DB handle -- same worker-safety rationale as every other
         method here: find_download workers cannot reach the owner

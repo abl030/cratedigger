@@ -1,13 +1,12 @@
 """Tests for download state reducer — pure decision function."""
 
 import unittest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from lib.quality import (
     ActiveDownloadFileState,
     ActiveDownloadState,
     DownloadDecision,
-    DownloadVerdict,
     PollCycleConfig,
     PollCycleDecision,
     PollCycleSnapshot,
@@ -22,21 +21,21 @@ class TestDecideDownloadAction(unittest.TestCase):
 
     def _decide(self, **overrides):
         """Build default args and apply overrides."""
-        defaults = dict(
-            album_done=False,
-            error_filenames=None,
-            total_files=3,
-            all_remote_queued=False,
-            elapsed_seconds=60.0,
-            idle_seconds=10.0,
-            remote_queue_timeout=3600,
-            stalled_timeout=1800,
-            file_retries={},
-            max_file_retries=5,
-            processing_started=False,
-        )
+        defaults = {
+            "album_done": False,
+            "error_filenames": None,
+            "total_files": 3,
+            "all_remote_queued": False,
+            "elapsed_seconds": 60.0,
+            "idle_seconds": 10.0,
+            "remote_queue_timeout": 3600,
+            "stalled_timeout": 1800,
+            "file_retries": {},
+            "max_file_retries": 5,
+            "processing_started": False,
+        }
         defaults.update(overrides)
-        return decide_download_action(**defaults)  # type: ignore[arg-type]
+        return decide_download_action(**defaults)
 
     def test_processing_started(self):
         v = self._decide(processing_started=True)
@@ -117,14 +116,14 @@ class TestDownloadDecisionEnum(unittest.TestCase):
 class TestReducePollCycle(unittest.TestCase):
     """The poll-cycle reducer owns every persisted-state transition."""
 
-    NOW = datetime(2026, 7, 11, 3, 0, tzinfo=timezone.utc)
+    NOW = datetime(2026, 7, 11, 3, 0, tzinfo=UTC)
 
     def _state(self, **overrides):
-        values = dict(
-            filetype="flac",
-            enqueued_at="2026-07-11T02:58:00+00:00",
-            last_progress_at="2026-07-11T02:59:00+00:00",
-            files=[
+        values = {
+            "filetype": "flac",
+            "enqueued_at": "2026-07-11T02:58:00+00:00",
+            "last_progress_at": "2026-07-11T02:59:00+00:00",
+            "files": [
                 ActiveDownloadFileState(
                     username="alice",
                     filename="Album\\01.flac",
@@ -132,22 +131,22 @@ class TestReducePollCycle(unittest.TestCase):
                     size=100,
                 ),
             ],
-        )
+        }
         values.update(overrides)
-        return ActiveDownloadState(**values)  # type: ignore[arg-type]
+        return ActiveDownloadState(**values)
 
     def _snapshot(self, *files, **overrides):
-        values = dict(files=list(files))
+        values = {"files": list(files)}
         values.update(overrides)
         return PollCycleSnapshot(**values)  # type: ignore[arg-type]
 
     def _reduce(self, state, snapshot, **cfg_overrides):
-        cfg_values = dict(
-            remote_queue_timeout=300,
-            stalled_timeout=180,
-            max_file_retries=5,
-            vanished_grace_seconds=60,
-        )
+        cfg_values = {
+            "remote_queue_timeout": 300,
+            "stalled_timeout": 180,
+            "max_file_retries": 5,
+            "vanished_grace_seconds": 60,
+        }
         cfg_values.update(cfg_overrides)
         return reduce_poll_cycle(
             state,

@@ -11,12 +11,16 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from typing import Optional, Protocol, TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import msgspec
 
+from lib.force_import_service import (
+    FORCE_IMPORT_EXIT_CODE,
+    RESULT_QUEUED,
+    enqueue_force_import,
+)
 from lib.import_preview import ImportPreviewValues
-from lib.force_import_service import FORCE_IMPORT_EXIT_CODE, RESULT_QUEUED, enqueue_force_import
 from lib.import_queue import ImportJob
 from scripts.pipeline_cli.quality import _load_runtime_rank_config
 
@@ -34,18 +38,18 @@ class _ForceImportDB(Protocol):
 
     def get_download_log_entry(
         self, log_id: int,
-    ) -> "Optional[DownloadLogWithEvidenceRow]": ...
+    ) -> DownloadLogWithEvidenceRow | None: ...
 
-    def get_request(self, request_id: int) -> "Optional[AlbumRequestRow]": ...
+    def get_request(self, request_id: int) -> AlbumRequestRow | None: ...
 
     def enqueue_import_job(
         self,
         job_type: str,
         *,
-        request_id: Optional[int] = None,
-        dedupe_key: Optional[str] = None,
-        payload: Optional[dict[str, object]] = None,
-        message: Optional[str] = None,
+        request_id: int | None = None,
+        dedupe_key: str | None = None,
+        payload: dict[str, object] | None = None,
+        message: str | None = None,
     ) -> ImportJob: ...
 
 
@@ -53,12 +57,12 @@ class _ImportJobsDB(Protocol):
     """``db`` shape ``cmd_import_jobs`` touches (issue #784, #409 pattern)."""
 
     def list_import_jobs(
-        self, *, status: Optional[str] = None, limit: int = 50,
+        self, *, status: str | None = None, limit: int = 50,
     ) -> list[ImportJob]: ...
 
 
 def cmd_force_import(
-    db: "_ForceImportDB", args: argparse.Namespace,
+    db: _ForceImportDB, args: argparse.Namespace,
 ) -> int:
     """Force-import a rejected download by download_log ID."""
     log_id = args.download_log_id
@@ -76,7 +80,7 @@ def cmd_force_import(
     return 0
 
 
-def cmd_import_jobs(db: "_ImportJobsDB", args: argparse.Namespace) -> None:
+def cmd_import_jobs(db: _ImportJobsDB, args: argparse.Namespace) -> None:
     """List recent import queue jobs."""
     jobs = db.list_import_jobs(status=args.status, limit=args.limit)
     if not jobs:
@@ -100,7 +104,7 @@ def cmd_import_jobs(db: "_ImportJobsDB", args: argparse.Namespace) -> None:
 
 
 def cmd_import_job_recovery(
-    db: "ImportRecoveryDB", args: argparse.Namespace,
+    db: ImportRecoveryDB, args: argparse.Namespace,
 ) -> int:
     """Resolve one ambiguous Beets operation by explicit operator choice."""
     from lib.import_job_recovery_service import resolve_import_job_recovery
@@ -170,7 +174,7 @@ def _preview_values_from_args(args: argparse.Namespace) -> ImportPreviewValues:
 
 
 def _print_preview_result(
-    result: "ImportPreviewResult", *, json_output: bool,
+    result: ImportPreviewResult, *, json_output: bool,
 ) -> None:
     if json_output:
         print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
@@ -191,7 +195,7 @@ def _print_preview_result(
 
 
 def cmd_import_preview(
-    db: "ImportPreviewDB", args: argparse.Namespace,
+    db: ImportPreviewDB, args: argparse.Namespace,
 ) -> int:
     """Preview a real folder/download-log row or a typed values scenario."""
     from lib.import_preview import (

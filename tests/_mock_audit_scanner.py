@@ -29,12 +29,10 @@ The scanner returns a dict ``{relpath: {finding_key: count}}``.
 
 from __future__ import annotations
 
+import ast
 import os
 import re
-import ast
 from collections import Counter, defaultdict
-from typing import Dict
-
 
 TESTS_DIR = os.path.abspath(os.path.dirname(__file__))
 
@@ -482,11 +480,7 @@ def _is_leaf_seam(target: str) -> bool:
 
 def _is_repo_target(target: str) -> bool:
     return (
-        target.startswith("lib.")
-        or target.startswith("web.")
-        or target.startswith("scripts.")
-        or target.startswith("harness.")
-        or target.startswith("cratedigger.")
+        target.startswith(("lib.", "web.", "scripts.", "harness.", "cratedigger."))
     )
 
 
@@ -527,13 +521,13 @@ def scan_multiline_patch_targets() -> dict[str, int]:
     return dict(counts)
 
 
-def scan_file(path: str) -> Dict[str, int]:
+def scan_file(path: str) -> dict[str, int]:
     """Return ``{finding_key: count}`` for one test file.
 
     Finding keys are stable (no line numbers) so the baseline survives
     line shifts from refactors.
     """
-    counts: Dict[str, int] = defaultdict(int)
+    counts: dict[str, int] = defaultdict(int)
     with open(path, encoding="utf-8") as f:
         for line in f:
             if _STATEFUL_ASSIGN_RE.match(line):
@@ -592,9 +586,9 @@ def iter_scan_paths():
             yield rel, path
 
 
-def scan_tree() -> Dict[str, Dict[str, int]]:
+def scan_tree() -> dict[str, dict[str, int]]:
     """Return ``{relpath: {finding_key: count}}`` for every test file."""
-    result: Dict[str, Dict[str, int]] = {}
+    result: dict[str, dict[str, int]] = {}
     for rel, path in iter_scan_paths():
         counts = scan_file(path)
         if counts:
@@ -627,7 +621,7 @@ _HARNESS_CTOR_RE = re.compile(r"\b_pipeline_db_test_harness\b")
 # harness deletion). The ratchet stays armed at zero: any reintroduced
 # ``mock_db`` reference in tests/web, or ``_pipeline_db_test_harness``
 # reference anywhere, fails the audit immediately.
-WEB_HARNESS_MOCK_BASELINE: Dict[str, int] = {}
+WEB_HARNESS_MOCK_BASELINE: dict[str, int] = {}
 
 
 def count_harness_overrides(text: str, *, web_file: bool) -> int:
@@ -643,9 +637,9 @@ def count_harness_overrides(text: str, *, web_file: bool) -> int:
     return n
 
 
-def scan_web_harness_overrides() -> Dict[str, int]:
+def scan_web_harness_overrides() -> dict[str, int]:
     """Count MagicMock-harness usage occurrences per test file."""
-    counts: Dict[str, int] = {}
+    counts: dict[str, int] = {}
     web_prefix = "web" + os.sep
     for rel, path in iter_scan_paths():
         with open(path, encoding="utf-8") as f:
@@ -699,7 +693,7 @@ _WEB_BEETS_MOCK_RE = re.compile(
 # EMPTY — the #445 item 1 migration is complete (ratchet + four
 # migration batches). The ratchet stays armed at zero: any reintroduced
 # beets-mock variable name in tests/web fails the audit immediately.
-WEB_BEETS_MOCK_BASELINE: Dict[str, int] = {}
+WEB_BEETS_MOCK_BASELINE: dict[str, int] = {}
 
 
 def count_beets_mock_overrides(text: str) -> int:
@@ -707,9 +701,9 @@ def count_beets_mock_overrides(text: str) -> int:
     return len(_WEB_BEETS_MOCK_RE.findall(text))
 
 
-def scan_web_beets_overrides() -> Dict[str, int]:
+def scan_web_beets_overrides() -> dict[str, int]:
     """Count beets-MagicMock occurrences per ``tests/web`` test file."""
-    counts: Dict[str, int] = {}
+    counts: dict[str, int] = {}
     web_prefix = "web" + os.sep
     for rel, path in iter_scan_paths():
         if not rel.startswith(web_prefix):

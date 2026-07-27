@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import msgspec
@@ -16,7 +16,6 @@ from lib.quality import (
     EVIDENCE_PROVENANCE_MEASURED,
     EVIDENCE_SUBJECT_INSTALLED,
     EVIDENCE_SUBJECT_SOURCE,
-    EvidenceSubject,
     V0_PROBE_LOSSLESS_SOURCE,
     V0_PROBE_NATIVE_LOSSY_RESEARCH,
     V0_PROBE_ON_DISK_RESEARCH,
@@ -24,6 +23,7 @@ from lib.quality import (
     AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
+    EvidenceSubject,
     ImportResult,
     V0ProbeEvidence,
     VerifiedLosslessProof,
@@ -32,8 +32,8 @@ from lib.quality import (
 
 if TYPE_CHECKING:
     from lib.beets_db import CurrentBeetsUnique
-    from lib.pipeline_db.rows import AlbumRequestRow
     from lib.measurement import PreimportMeasurement
+    from lib.pipeline_db.rows import AlbumRequestRow
 
 
 @runtime_checkable
@@ -45,7 +45,7 @@ class QualityEvidenceDB(Protocol):
     reason. Parity tests live in ``tests/test_quality_evidence.py``.
     """
 
-    def get_request(self, request_id: int) -> "AlbumRequestRow | None": ...
+    def get_request(self, request_id: int) -> AlbumRequestRow | None: ...
 
     def upsert_album_quality_evidence(
         self, evidence: AlbumQualityEvidence,
@@ -372,7 +372,7 @@ def audit_v0_probe_from_metric(
 
 def _apply_measurement_facts_to_files(
     files: list[AlbumQualityEvidenceFile],
-    measurement: "PreimportMeasurement",
+    measurement: PreimportMeasurement,
 ) -> list[AlbumQualityEvidenceFile]:
     """Stamp ``decode_ok=False`` on snapshot files listed in measurement.corrupt_files.
 
@@ -439,7 +439,7 @@ def evidence_from_import_result(
     import_result: ImportResult | None,
     measured_at: datetime | None = None,
     files: list[AlbumQualityEvidenceFile] | None = None,
-    measurement: "PreimportMeasurement | None" = None,
+    measurement: PreimportMeasurement | None = None,
 ) -> EvidenceBuildResult:
     """Build candidate evidence from an ``ImportResult`` and source folder.
 
@@ -515,7 +515,7 @@ def evidence_from_import_result(
         snapshot_fingerprint=snapshot_fingerprint(files),
         source_path=source_path,
         measurement=audio_measurement,
-        measured_at=measured_at or datetime.now(timezone.utc),
+        measured_at=measured_at or datetime.now(UTC),
         files=files,
         codec=files[0].codec,
         container=files[0].container,
@@ -550,7 +550,7 @@ def evidence_from_measurement(
     *,
     mb_release_id: str,
     source_path: str,
-    measurement: "PreimportMeasurement",
+    measurement: PreimportMeasurement,
     measured_at: datetime | None = None,
     files: list[AlbumQualityEvidenceFile] | None = None,
 ) -> EvidenceBuildResult:
@@ -641,7 +641,7 @@ def evidence_from_measurement(
         snapshot_fingerprint=snapshot_fingerprint(files),
         source_path=source_path,
         measurement=audio_measurement,
-        measured_at=measured_at or datetime.now(timezone.utc),
+        measured_at=measured_at or datetime.now(UTC),
         files=files,
         codec=codec,
         container=container,
@@ -703,7 +703,7 @@ def evidence_from_album_info(
         snapshot_fingerprint=snapshot_fingerprint(files),
         source_path=str(album_path) or "",
         measurement=measurement,
-        measured_at=measured_at or datetime.now(timezone.utc),
+        measured_at=measured_at or datetime.now(UTC),
         files=files,
         codec=files[0].codec,
         container=files[0].container,
@@ -731,7 +731,7 @@ def persist_candidate_evidence_from_import_result(
     download_log_id: int | None = None,
     import_job_id: int | None = None,
     files: list[AlbumQualityEvidenceFile] | None = None,
-    measurement: "PreimportMeasurement | None" = None,
+    measurement: PreimportMeasurement | None = None,
 ) -> EvidenceBuildResult:
     """Persist content-addressed candidate evidence and write addressing FKs.
 
@@ -775,7 +775,7 @@ def persist_candidate_evidence_from_measurement(
     *,
     mb_release_id: str,
     source_path: str,
-    measurement: "PreimportMeasurement",
+    measurement: PreimportMeasurement,
     download_log_id: int | None = None,
     import_job_id: int | None = None,
     files: list[AlbumQualityEvidenceFile] | None = None,
@@ -960,7 +960,7 @@ def propagate_candidate_evidence_to_current(
         snapshot_fingerprint=snapshot_fingerprint(files),
         source_path=str(album_path) or "",
         measurement=measurement,
-        measured_at=measured_at or datetime.now(timezone.utc),
+        measured_at=measured_at or datetime.now(UTC),
         files=files,
         codec=library_codec_from_files,
         container=library_container_from_files,
@@ -1031,17 +1031,18 @@ def backfill_current_evidence_from_album_info(
         # A poisoned/stale FK contributes no facts whatsoever, even when its
         # byte fingerprint happens to equal the requested album's snapshot.
         existing = None
-    if verified_lossless_proof is None and preserve_existing_verified_lossless_proof:
-        if (
-            existing is not None
-            and existing.verified_lossless_proof is not None
-            and existing.verified_lossless_proof.source
-            and existing.verified_lossless_proof.classifier
-        ):
-            verified_lossless_proof = msgspec.structs.replace(
-                existing.verified_lossless_proof,
-                provenance=EVIDENCE_PROVENANCE_CARRIED,
-            )
+    if (
+        verified_lossless_proof is None
+        and preserve_existing_verified_lossless_proof
+        and existing is not None
+        and existing.verified_lossless_proof is not None
+        and existing.verified_lossless_proof.source
+        and existing.verified_lossless_proof.classifier
+    ):
+        verified_lossless_proof = msgspec.structs.replace(
+            existing.verified_lossless_proof,
+            provenance=EVIDENCE_PROVENANCE_CARRIED,
+        )
     result = evidence_from_album_info(
         mb_release_id=mb_release_id,
         album_info=album_info,
@@ -1254,7 +1255,7 @@ def load_or_backfill_current_evidence(
     preloaded: bool = False,
     beets_library_db_path: str | None = None,
     beets_library_root: str = "",
-    current_release: "CurrentBeetsUnique | None" = None,
+    current_release: CurrentBeetsUnique | None = None,
 ) -> EvidenceBuildResult:
     """Resolve Beets freshly, then load or rebuild the exact current snapshot."""
 

@@ -15,7 +15,7 @@ import os
 import sqlite3
 import statistics
 from dataclasses import dataclass
-from typing import Literal, Optional, TYPE_CHECKING, TypeAlias
+from typing import TYPE_CHECKING, Literal, Self
 
 import msgspec
 
@@ -102,7 +102,7 @@ class CurrentBeetsMissing:
     identity: ReleaseIdentity
 
 
-CurrentBeetsAmbiguityReason: TypeAlias = Literal[
+type CurrentBeetsAmbiguityReason = Literal[
     "multiple_matches",
     "conflicting_identity",
     "empty_topology",
@@ -121,10 +121,10 @@ class CurrentBeetsAmbiguous:
     reason: CurrentBeetsAmbiguityReason
 
 
-CurrentBeetsResolution: TypeAlias = (
+type CurrentBeetsResolution = (
     CurrentBeetsUnique | CurrentBeetsMissing | CurrentBeetsAmbiguous
 )
-_RawCurrentItem: TypeAlias = tuple[
+type _RawCurrentItem = tuple[
     int,
     object,
     object,
@@ -276,7 +276,7 @@ def _reduce_album_format(
     # Beets aliases stay canonical even when a user deliberately omits their
     # family from mixed_format_precedence; unknown labels retain their source
     # spelling and therefore still fail evidence validation when multiword.
-    return normalized[sorted(normalized)[0]] if normalized else ""
+    return normalized[min(normalized)] if normalized else ""
 
 
 @dataclass
@@ -307,8 +307,8 @@ class AlbumInfo:
     min_bitrate_kbps: int
     is_cbr: bool
     album_path: str
-    avg_bitrate_kbps: Optional[int] = None
-    median_bitrate_kbps: Optional[int] = None
+    avg_bitrate_kbps: int | None = None
+    median_bitrate_kbps: int | None = None
     format: str = ""
 
 
@@ -393,7 +393,7 @@ class BeetsDB:
         """Exact filesystem root used to resolve paths from this handle."""
         return self._library_root
 
-    def __enter__(self) -> "BeetsDB":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *_args: object) -> None:
@@ -774,7 +774,7 @@ class BeetsDB:
         self,
         mb_release_id: str,
         cfg: "QualityRankConfig",
-    ) -> Optional[AlbumInfo]:
+    ) -> AlbumInfo | None:
         """Get full album info for quality gate / postflight verification.
 
         Returns None if the release isn't in beets or has no tracks.
@@ -789,7 +789,7 @@ class BeetsDB:
             return None
         return album_info_from_current(current, cfg)
 
-    def get_min_bitrate(self, mb_release_id: str) -> Optional[int]:
+    def get_min_bitrate(self, mb_release_id: str) -> int | None:
         """Get min track bitrate (kbps) for a release. Returns None if not found."""
         current = self._resolve_unique(mb_release_id)
         if current is None:
@@ -901,7 +901,7 @@ class BeetsDB:
             }
         return result
 
-    def get_album_detail(self, album_id: int) -> Optional[dict[str, object]]:
+    def get_album_detail(self, album_id: int) -> dict[str, object] | None:
         """Get full album metadata + track list. Returns None if not found."""
         album = self._conn.execute(
             "SELECT id, album, albumartist, year, mb_albumid, albumtype, "
@@ -995,7 +995,7 @@ class BeetsDB:
             ).fetchall()
         return [self._album_row_to_dict(r) for r in rows]
 
-    def get_tracks_by_mb_release_id(self, mbid: str) -> Optional[list[dict[str, object]]]:
+    def get_tracks_by_mb_release_id(self, mbid: str) -> list[dict[str, object]] | None:
         """Get all tracks for an album by release ID.
 
         Routes through ``locate`` (issue #121) so Discogs numerics in
@@ -1029,7 +1029,7 @@ class BeetsDB:
         """
         return self._batch_lookup_album_ids(mbids)
 
-    def get_avg_bitrate_kbps(self, mb_release_id: str) -> Optional[int]:
+    def get_avg_bitrate_kbps(self, mb_release_id: str) -> int | None:
         """Get average track bitrate (kbps) for a release. None if not found.
 
         Routes through ``locate`` (issue #121) so Discogs numerics
@@ -1046,7 +1046,7 @@ class BeetsDB:
             return None
         return int(sum(bitrates) / len(bitrates) / 1000)
 
-    def list_world_albums(self) -> list["BeetsWorldAlbum"]:
+    def list_world_albums(self) -> "list[BeetsWorldAlbum]":
         """Return every Beets album with exact identities and resolved paths.
 
         Unlike :meth:`list_release_identities`, albums with no usable release
@@ -1073,13 +1073,12 @@ class BeetsDB:
                 # partially unknown ``list[Unknown]`` even though the
                 # element type is known (same quirk documented on
                 # ``lib.youtube_album_service._json_dict``), which taints
-                # even a re-reference of the narrowed local. Re-reading
-                # the still-``object``-typed ``entry["paths"]`` (the
-                # identical list — a dict subscript, not a copy) and
-                # calling ``append`` via ``getattr`` types the callable as
-                # ``Any``, breaking the cascade without a suppression
-                # comment; the ``assert`` above still enforces the shape.
-                getattr(entry["paths"], "append")(self._resolve_path(raw_path))
+                # even a re-reference of the narrowed local. Re-reading the
+                # still-object-typed value keeps the upstream dynamic seam
+                # from leaking Unknown into strict Pyright.
+                getattr(entry["paths"], "append")(  # noqa: B009 - dynamic typed boundary
+                    self._resolve_path(raw_path)
+                )
 
         albums: list[BeetsWorldAlbum] = []
         for album_id, entry in grouped.items():

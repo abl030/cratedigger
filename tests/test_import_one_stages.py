@@ -1,10 +1,8 @@
-#!/usr/bin/env python3
 """Tests for import_one.py pure stage decision functions.
 
 These test the decision points extracted from main() — each stage function
 takes data inputs and returns a StageResult without I/O.
 """
-
 import io
 import json
 import os
@@ -12,9 +10,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timezone
-from types import SimpleNamespace
-from typing import Any, cast
+import warnings
+from collections.abc import Sequence
+from datetime import UTC, datetime
+from typing import Any, ClassVar, cast
 from unittest.mock import patch
 
 import msgspec
@@ -24,7 +23,33 @@ HARNESS_DIR = os.path.join(ROOT_DIR, "harness")
 
 sys.path.insert(0, ROOT_DIR)
 
-from tests.fakes import FakeBeetsDB, FakePipelineDB  # noqa: E402
+from tests.fakes import FakeBeetsDB, FakePipelineDB
+from tests.test_beets_harness_session import write_fake_harness
+
+
+def run_import_with_fake_harness(
+    *,
+    process_status: int,
+    stderr_lines: Sequence[str] = (),
+):
+    """Drive real ``run_import`` pipes against an executable fake harness."""
+    from harness import import_one
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        harness_path = write_fake_harness(
+            tmpdir,
+            stdout_lines=[],
+            stderr_text="".join(f"{line}\n" for line in stderr_lines),
+            process_returncode=process_status,
+        )
+
+        with (
+            warnings.catch_warnings(),
+            patch("sys.stderr", io.StringIO()),
+            patch.object(import_one, "HARNESS", harness_path),
+        ):
+            warnings.simplefilter("ignore", ResourceWarning)
+            return import_one.run_import(tmpdir, "release-under-test")
 
 
 def _spectral_collection_precedes_conversion(source: str) -> bool:
@@ -42,16 +67,12 @@ class TestHarnessFailureError(unittest.TestCase):
     helper is the ONE message decision both stage sites share.
     """
 
-    CASES = [
+    CASES: ClassVar = [
         ("typed reason wins",
          "beets apply distance 0.5637 exceeded 0.5", ["beets: noise"], 2,
          "beets apply distance 0.5637 exceeded 0.5"),
         ("last nonempty beets line when no reason",
          None, ["first", "  ", "actual error"], 2, "actual error"),
-        ("rc fallback when nothing else",
-         None, [], 2, "Harness returned rc=2"),
-        ("rc fallback carries the real rc",
-         None, [], 4, "Harness returned rc=4"),
     ]
 
     def test_message_preference_table(self):
@@ -62,6 +83,112 @@ class TestHarnessFailureError(unittest.TestCase):
                     rc, lines, failure_reason=reason)
                 self.assertEqual(
                     _harness_failure_error(outcome, rc), expected)
+
+
+class TestRunImportFailureReasons(unittest.TestCase):
+    """Terminal producer paths explain observed failures without an rc token."""
+
+    def test_nonzero_harness_without_stderr_names_the_observed_status(self):
+        from harness.import_one import _harness_failure_error
+
+        outcome = run_import_with_fake_harness(process_status=23)
+
+        self.assertEqual(outcome.exit_code, 2)
+        self.assertEqual(
+            outcome.failure_reason,
+            "beets harness exited with status 23",
+        )
+        self.assertEqual(
+            _harness_failure_error(outcome, outcome.exit_code),
+            "beets harness exited with status 23",
+        )
+
+    def test_zero_harness_without_apply_names_the_observed_gap(self):
+        from harness.import_one import _harness_failure_error
+
+        outcome = run_import_with_fake_harness(process_status=0)
+
+        self.assertEqual(outcome.exit_code, 2)
+        self.assertEqual(
+            outcome.failure_reason,
+            "beets harness ended without applying requested release "
+            "release-under-test",
+        )
+        self.assertEqual(
+            _harness_failure_error(outcome, outcome.exit_code),
+            outcome.failure_reason,
+        )
+
+    def test_nonzero_harness_stderr_remains_the_diagnostic(self):
+        from harness.import_one import _harness_failure_error
+
+        outcome = run_import_with_fake_harness(
+            process_status=17,
+            stderr_lines=["setup note", "database is locked"],
+        )
+
+        self.assertEqual(outcome.exit_code, 2)
+        self.assertIsNone(outcome.failure_reason)
+        self.assertEqual(outcome.beets_lines, [
+            "setup note",
+            "database is locked",
+        ])
+        self.assertEqual(
+            _harness_failure_error(outcome, outcome.exit_code),
+            "database is locked",
+        )
+
+    def test_filtered_and_blank_stderr_does_not_hide_the_status_reason(self):
+        from harness.import_one import _harness_failure_error
+
+        outcome = run_import_with_fake_harness(
+            process_status=17,
+            stderr_lines=[
+                "Disabled fetchart: no sources configured",
+                "   ",
+                "Disabled fetchart: plugin disabled",
+            ],
+        )
+
+        self.assertEqual(outcome.exit_code, 2)
+        self.assertEqual(outcome.beets_lines, [])
+        self.assertEqual(
+            outcome.failure_reason,
+            "beets harness exited with status 17",
+        )
+        self.assertEqual(
+            _harness_failure_error(outcome, outcome.exit_code),
+            "beets harness exited with status 17",
+        )
+
+    def test_signal_termination_names_the_observed_signal(self):
+        from harness.import_one import _harness_failure_error
+
+        outcome = run_import_with_fake_harness(process_status=-15)
+
+        self.assertEqual(outcome.exit_code, 2)
+        self.assertEqual(
+            outcome.failure_reason,
+            "beets harness terminated by signal 15",
+        )
+        self.assertEqual(
+            _harness_failure_error(outcome, outcome.exit_code),
+            "beets harness terminated by signal 15",
+        )
+
+    def test_no_apply_reason_wins_over_incidental_stderr(self):
+        from harness.import_one import _harness_failure_error
+
+        outcome = run_import_with_fake_harness(
+            process_status=0,
+            stderr_lines=["ordinary beets chatter"],
+        )
+
+        self.assertEqual(
+            _harness_failure_error(outcome, outcome.exit_code),
+            "beets harness ended without applying requested release "
+            "release-under-test",
+        )
 
 
 class TestImportBootstrap(unittest.TestCase):
@@ -81,14 +208,15 @@ class TestImportBootstrap(unittest.TestCase):
         """
         proc = subprocess.run(
             [sys.executable, "-c",
-             "import sys, os\n"
+             ("import sys, os\n"
              f"sys.path.insert(0, {HARNESS_DIR!r})\n"
              "import import_one\n"
              "assert 'lib.quality' in sys.modules\n"
              "assert 'lib.beets_db' in sys.modules\n"
              f"assert {ROOT_DIR!r} in sys.path\n"
-             "print('OK')\n"],
+             "print('OK')\n")],
             capture_output=True, text=True, timeout=60,
+            check=False,
         )
         self.assertEqual(
             proc.returncode, 0,
@@ -99,6 +227,7 @@ class TestImportBootstrap(unittest.TestCase):
     def test_candidate_spectral_collection_precedes_any_conversion(self):
         """The harness must inspect source audio before it creates derivatives."""
         import inspect
+
         from harness import import_one
 
         source = inspect.getsource(import_one.main)
@@ -214,6 +343,7 @@ class TestPreviewImportResultSurface(unittest.TestCase):
             capture_output=True,
             text=True,
             timeout=15,
+            check=False,
         )
 
         self.assertEqual(result.returncode, 2)
@@ -229,6 +359,7 @@ class TestPreviewImportResultSurface(unittest.TestCase):
             capture_output=True,
             text=True,
             timeout=15,
+            check=False,
         )
 
         self.assertEqual(result.returncode, 0)
@@ -236,6 +367,7 @@ class TestPreviewImportResultSurface(unittest.TestCase):
 
     def test_no_preview_import_result_reuse_path_in_main(self):
         import inspect
+
         from harness import import_one
 
         main_source = inspect.getsource(import_one.main)
@@ -356,7 +488,7 @@ class TestConversionTimeoutSeconds(unittest.TestCase):
     while normal-length tracks keep the 300s floor (pure)."""
 
     # (description, duration_seconds, expected_timeout)
-    CASES = [
+    CASES: ClassVar = [
         ("none probe -> floor", None, 300),
         ("zero duration -> floor", 0, 300),
         ("negative duration -> floor", -5.0, 300),
@@ -806,15 +938,16 @@ class TestConvertLosslessKeepSource(unittest.TestCase):
     def test_keep_source_preserves_flac(self):
         """With keep_source=True, FLAC files should remain after V0 conversion."""
         import tempfile
-        from harness.import_one import convert_lossless, V0_SPEC
+
+        from harness.import_one import V0_SPEC, convert_lossless
         with tempfile.TemporaryDirectory() as tmpdir:
             flac_path = os.path.join(tmpdir, "track01.flac")
             subprocess.run(
                 ["ffmpeg", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
                  "-y", flac_path],
-                capture_output=True, timeout=30)
+                capture_output=True, timeout=30, check=False)
             self.assertTrue(os.path.exists(flac_path))
-            converted, failed, ext, channels = convert_lossless(
+            converted, failed, _ext, channels = convert_lossless(
                 tmpdir, V0_SPEC, keep_source=True)
             self.assertEqual(converted, 1)
             self.assertEqual(failed, 0)
@@ -826,14 +959,15 @@ class TestConvertLosslessKeepSource(unittest.TestCase):
     def test_default_removes_flac(self):
         """Default behavior (keep_source=False) removes FLAC after conversion."""
         import tempfile
-        from harness.import_one import convert_lossless, V0_SPEC
+
+        from harness.import_one import V0_SPEC, convert_lossless
         with tempfile.TemporaryDirectory() as tmpdir:
             flac_path = os.path.join(tmpdir, "track01.flac")
             subprocess.run(
                 ["ffmpeg", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
                  "-y", flac_path],
-                capture_output=True, timeout=30)
-            converted, failed, ext, _channels = convert_lossless(tmpdir, V0_SPEC)
+                capture_output=True, timeout=30, check=False)
+            converted, _failed, _ext, _channels = convert_lossless(tmpdir, V0_SPEC)
             self.assertEqual(converted, 1)
             self.assertFalse(os.path.exists(flac_path))
 
@@ -870,13 +1004,13 @@ class TestConvertLosslessMultichannelDownmix(unittest.TestCase):
             "-f", "lavfi", "-i", f"sine=frequency=600:duration={duration_s}",
             "-f", "lavfi", "-i", f"sine=frequency=700:duration={duration_s}",
             "-filter_complex",
-            "[0:a][1:a][2:a][3:a][4:a][5:a]"
-            "amerge=inputs=6,channelmap=channel_layout=5.1(side)[a]",
+            ("[0:a][1:a][2:a][3:a][4:a][5:a]"
+            "amerge=inputs=6,channelmap=channel_layout=5.1(side)[a]"),
             "-map", "[a]",
             "-c:a", "flac",
             dst,
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, check=False)
         if result.returncode != 0:
             raise AssertionError(
                 f"ffmpeg cannot synthesize 5.1(side) FLAC fixture "
@@ -892,7 +1026,8 @@ class TestConvertLosslessMultichannelDownmix(unittest.TestCase):
         recorded.
         """
         from harness.import_one import (
-            convert_lossless, parse_verified_lossless_target,
+            convert_lossless,
+            parse_verified_lossless_target,
         )
         with tempfile.TemporaryDirectory() as tmpdir:
             src = os.path.join(tmpdir, "track01.flac")
@@ -913,7 +1048,7 @@ class TestConvertLosslessMultichannelDownmix(unittest.TestCase):
         fire so the operator can see 5.1 sources in download_log even when
         the conversion would have silently succeeded.
         """
-        from harness.import_one import convert_lossless, V0_SPEC
+        from harness.import_one import V0_SPEC, convert_lossless
         with tempfile.TemporaryDirectory() as tmpdir:
             src = os.path.join(tmpdir, "track01.flac")
             self._make_5_1_flac(src)
@@ -927,7 +1062,8 @@ class TestConvertLosslessMultichannelDownmix(unittest.TestCase):
     def test_stereo_source_records_two_channels(self):
         """The breadcrumb is populated for every source, not just multichannel."""
         from harness.import_one import (
-            convert_lossless, parse_verified_lossless_target,
+            convert_lossless,
+            parse_verified_lossless_target,
         )
         with tempfile.TemporaryDirectory() as tmpdir:
             src = os.path.join(tmpdir, "track01.flac")
@@ -940,7 +1076,7 @@ class TestConvertLosslessMultichannelDownmix(unittest.TestCase):
                 src,
             ]
             result = subprocess.run(cmd, capture_output=True, text=True,
-                                    timeout=30)
+                                    timeout=30, check=False)
             if result.returncode != 0:
                 raise AssertionError(
                     f"ffmpeg stereo fixture failed: {result.stderr[-300:]}")
@@ -977,7 +1113,8 @@ class TestConvertLosslessNonUtf8Stderr(unittest.TestCase):
         live crash on request 580.
         """
         import tempfile
-        from harness.import_one import convert_lossless, V0_SPEC
+
+        from harness.import_one import V0_SPEC, convert_lossless
         with tempfile.TemporaryDirectory() as tmpdir:
             bin_dir = os.path.join(tmpdir, "bin")
             os.makedirs(bin_dir)
@@ -1029,7 +1166,7 @@ class TestPreserveSourceFlag(unittest.TestCase):
         import_script = os.path.join(HARNESS_DIR, "import_one.py")
         result = subprocess.run(
             [sys.executable, import_script, "--help"],
-            capture_output=True, text=True, timeout=15)
+            capture_output=True, text=True, timeout=15, check=False)
         self.assertEqual(result.returncode, 0)
         self.assertIn("--preserve-source", result.stdout)
 
@@ -1087,7 +1224,7 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
                 spectral_subject="source",
                 spectral_provenance="measured",
             ),
-            measured_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            measured_at=datetime(2026, 1, 1, tzinfo=UTC),
             files=files,
             codec=files[0].codec if files else "mp3",
             container=files[0].container if files else "mp3",
@@ -1129,7 +1266,7 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
         import_script = os.path.join(HARNESS_DIR, "import_one.py")
         result = subprocess.run(
             [sys.executable, import_script, "--help"],
-            capture_output=True, text=True, timeout=15)
+            capture_output=True, text=True, timeout=15, check=False)
         self.assertEqual(result.returncode, 0)
         self.assertIn("--quality-evidence-action-file", result.stdout)
         self.assertNotIn("--preview-import-result-file", result.stdout)

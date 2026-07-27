@@ -1,14 +1,14 @@
 """Tests for lib/spectral_check.py — spectral quality verification."""
 
-import math
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
-from unittest.mock import patch, MagicMock
+from typing import ClassVar
+from unittest.mock import MagicMock, patch
 
-import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
@@ -192,14 +192,14 @@ class TestClassifyAlbum(unittest.TestCase):
     """Test album-level classification from track results."""
 
     def test_all_genuine(self):
-        from lib.spectral_check import classify_album, TrackResult
+        from lib.spectral_check import TrackResult, classify_album
         tracks = [TrackResult("genuine", 35.0, False, None, None)] * 10
         grade, pct = classify_album(tracks)
         self.assertEqual(grade, "genuine")
         self.assertEqual(pct, 0.0)
 
     def test_majority_suspect(self):
-        from lib.spectral_check import classify_album, TrackResult
+        from lib.spectral_check import TrackResult, classify_album
         tracks = ([TrackResult("suspect", 70.0, True, 16000, 128)] * 7 +
                   [TrackResult("genuine", 35.0, False, None, None)] * 3)
         grade, pct = classify_album(tracks)
@@ -207,7 +207,7 @@ class TestClassifyAlbum(unittest.TestCase):
         self.assertEqual(pct, 70.0)
 
     def test_below_threshold(self):
-        from lib.spectral_check import classify_album, TrackResult
+        from lib.spectral_check import TrackResult, classify_album
         tracks = ([TrackResult("suspect", 70.0, True, 16000, 128)] * 4 +
                   [TrackResult("genuine", 35.0, False, None, None)] * 6)
         grade, pct = classify_album(tracks)
@@ -216,7 +216,7 @@ class TestClassifyAlbum(unittest.TestCase):
 
     def test_empty_tracks(self):
         from lib.spectral_check import classify_album
-        grade, pct = classify_album([])
+        grade, _pct = classify_album([])
         self.assertEqual(grade, "genuine")
 
 
@@ -224,7 +224,7 @@ class TestAnalyzeTrackMocked(unittest.TestCase):
     """Test analyze_track with mocked subprocess (no sox needed)."""
 
     def _make_sox_output(self, rms):
-        return "", "RMS     amplitude:     %.6f\n" % rms
+        return "", f"RMS     amplitude:     {rms:.6f}\n"
 
     @patch("lib.spectral_check.subprocess.run")
     def test_calls_sox_with_correct_args(self, mock_run):
@@ -253,7 +253,7 @@ class TestAnalyzeTrackMocked(unittest.TestCase):
                 rms = 0.1  # reference
             else:
                 rms = 0.005  # ~-26dB below ref = healthy HF
-            return MagicMock(stderr="RMS     amplitude:     %.6f\n" % rms, returncode=0)
+            return MagicMock(stderr=f"RMS     amplitude:     {rms:.6f}\n", returncode=0)
         mock_run.side_effect = side_effect
         result = analyze_track("/fake/genuine.mp3")
         self.assertEqual(result.grade, "genuine")
@@ -269,6 +269,7 @@ class TestAnalyzeTrackMocked(unittest.TestCase):
     @patch("lib.spectral_check.subprocess.run")
     def test_sox_timeout(self, mock_run):
         import subprocess
+
         from lib.spectral_check import analyze_track
         mock_run.side_effect = subprocess.TimeoutExpired(cmd="sox", timeout=60)
         result = analyze_track("/fake/path.mp3")
@@ -534,7 +535,7 @@ class TestCodecFamilyFromExtension(unittest.TestCase):
     outside the six-family vocabulary (see ``track.mid``/``track`` below).
     """
 
-    CASES = [
+    CASES: ClassVar[list[tuple[str, str]]] = [
         ("track.mp3", "mp3"),
         ("track.MP3", "mp3"),
         ("track.aac", "aac"),
@@ -793,7 +794,8 @@ class TestAggregateAlbumSpectralCapture(unittest.TestCase):
 
     def test_cliff_hz_is_min_of_detected_cliffs(self):
         from lib.spectral_check import (
-            TrackResult, aggregate_album_spectral_capture,
+            TrackResult,
+            aggregate_album_spectral_capture,
         )
         tracks = [
             TrackResult("suspect", cliff_freq_hz=18000, codec_family="mp3"),
@@ -807,7 +809,8 @@ class TestAggregateAlbumSpectralCapture(unittest.TestCase):
 
     def test_cliff_hz_none_when_no_track_has_a_cliff(self):
         from lib.spectral_check import (
-            TrackResult, aggregate_album_spectral_capture,
+            TrackResult,
+            aggregate_album_spectral_capture,
         )
         tracks = [TrackResult("genuine", codec_family="lossless") for _ in range(3)]
         cliff_hz, _codec_family, _deficit = (
@@ -817,7 +820,8 @@ class TestAggregateAlbumSpectralCapture(unittest.TestCase):
 
     def test_ultrasonic_deficit_db_is_mean_of_available_values(self):
         from lib.spectral_check import (
-            TrackResult, aggregate_album_spectral_capture,
+            TrackResult,
+            aggregate_album_spectral_capture,
         )
         tracks = [
             TrackResult("genuine", ultrasonic_deficit_db=40.0),
@@ -832,7 +836,8 @@ class TestAggregateAlbumSpectralCapture(unittest.TestCase):
 
     def test_ultrasonic_deficit_db_none_when_no_track_has_one(self):
         from lib.spectral_check import (
-            TrackResult, aggregate_album_spectral_capture,
+            TrackResult,
+            aggregate_album_spectral_capture,
         )
         tracks = [TrackResult("genuine") for _ in range(2)]
         _cliff_hz, _codec_family, deficit = (
@@ -842,7 +847,8 @@ class TestAggregateAlbumSpectralCapture(unittest.TestCase):
 
     def test_codec_family_is_first_track(self):
         from lib.spectral_check import (
-            TrackResult, aggregate_album_spectral_capture,
+            TrackResult,
+            aggregate_album_spectral_capture,
         )
         tracks = [
             TrackResult("genuine", codec_family="opus"),
@@ -861,25 +867,30 @@ class TestExtensionSlicesNeverFeedCliffDetection(unittest.TestCase):
 
     # 16 in-window slices (12000..19500) with no cliff, plus 4 extension
     # slices (20000..21500) that DO contain a steep dropoff.
-    _NO_CLIFF_IN_WINDOW = [-20.0] * 16
-    _CLIFF_IN_EXTENSION_ONLY = [-20.0, -35.0, -60.0, -90.0]
+    _NO_CLIFF_IN_WINDOW: ClassVar[list[float]] = [-20.0] * 16
+    _CLIFF_IN_EXTENSION_ONLY: ClassVar[list[float]] = [-20.0, -35.0, -60.0, -90.0]
 
     def test_fixture_would_show_a_cliff_if_extension_slices_leaked_in(self):
         """Sanity check: feeding detect_cliff the WIDER 20-slice vector
         DOES find a cliff — proves the exclusion below is a real
         constraint, not a no-op."""
         from lib.spectral_check import (
-            EXTENSION_SLICE_FREQS, SLICE_FREQS, _Slice, detect_cliff,
+            EXTENSION_SLICE_FREQS,
+            SLICE_FREQS,
+            _Slice,
+            detect_cliff,
         )
         in_window: list[_Slice] = [
             {"freq": f, "db": d}
-            for f, d in zip(SLICE_FREQS, self._NO_CLIFF_IN_WINDOW)
+            for f, d in zip(SLICE_FREQS, self._NO_CLIFF_IN_WINDOW, strict=True)
         ]
         self.assertIsNone(detect_cliff(in_window))
 
         extended: list[_Slice] = in_window + [
             {"freq": f, "db": d}
-            for f, d in zip(EXTENSION_SLICE_FREQS, self._CLIFF_IN_EXTENSION_ONLY)
+            for f, d in zip(
+                EXTENSION_SLICE_FREQS, self._CLIFF_IN_EXTENSION_ONLY, strict=True,
+            )
         ]
         self.assertIsNotNone(
             detect_cliff(extended),
@@ -893,13 +904,17 @@ class TestExtensionSlicesNeverFeedCliffDetection(unittest.TestCase):
         with no cliff, even though the SAME dB values — if detect_cliff
         saw them — would report one at the window boundary."""
         from lib.spectral_check import (
-            EXTENSION_SLICE_FREQS, SLICE_FREQS, analyze_track,
+            EXTENSION_SLICE_FREQS,
+            SLICE_FREQS,
+            analyze_track,
         )
 
         ref_db_value = -20.0
         band_db = {1000: ref_db_value}
-        band_db.update(zip(SLICE_FREQS, self._NO_CLIFF_IN_WINDOW))
-        band_db.update(zip(EXTENSION_SLICE_FREQS, self._CLIFF_IN_EXTENSION_ONLY))
+        band_db.update(zip(SLICE_FREQS, self._NO_CLIFF_IN_WINDOW, strict=True))
+        band_db.update(
+            zip(EXTENSION_SLICE_FREQS, self._CLIFF_IN_EXTENSION_ONLY, strict=True)
+        )
 
         def _rms_for_db(db):
             return 10 ** (db / 20.0)
@@ -909,7 +924,7 @@ class TestExtensionSlicesNeverFeedCliffDetection(unittest.TestCase):
             lo_hz = int(cmd[sinc_idx + 1].split("-")[0])
             db = band_db.get(lo_hz, ref_db_value)
             return MagicMock(
-                stderr="RMS     amplitude:     %.8f\n" % _rms_for_db(db),
+                stderr=f"RMS     amplitude:     {_rms_for_db(db):.8f}\n",
                 returncode=0,
             )
 

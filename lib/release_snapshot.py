@@ -24,18 +24,17 @@ not have to import from `lib.search` for a frozen value type.
 from __future__ import annotations
 
 from collections.abc import Mapping
-
 from typing import Any, Protocol
 
 from lib.search import ReleaseSnapshot
 
 __all__ = [
     "ReleaseSnapshot",
-    "TrackResolver",
     "ResolverFailure",
     "ResolverMetadataIncomplete",
-    "snapshot_from_request_row",
+    "TrackResolver",
     "snapshot_from_add_payload",
+    "snapshot_from_request_row",
     "year_from_value",
 ]
 

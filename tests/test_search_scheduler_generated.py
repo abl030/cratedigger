@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import unittest
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
-from hypothesis import given, strategies as st
+from hypothesis import given
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
 from lib.pipeline_db import SearchPlanItemInput
@@ -21,8 +22,7 @@ from lib.search_scheduler import search_cohort_slots
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 
-
-NOW = datetime(2026, 7, 20, 4, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 7, 20, 4, 0, tzinfo=UTC)
 NEW_RESERVED_DIVISOR = 4
 EligibilityState = Literal[
     "eligible",
@@ -208,9 +208,8 @@ class TestSchedulerInvariantCheckerKnownBad(unittest.TestCase):
         self,
     ) -> None:
         for page_size in (-1, 0, 1):
-            with self.subTest(page_size=page_size):
-                with self.assertRaisesRegex(ValueError, "at least 2"):
-                    search_cohort_slots(page_size)
+            with self.subTest(page_size=page_size), self.assertRaisesRegex(ValueError, "at least 2"):
+                search_cohort_slots(page_size)
 
     def test_checker_rejects_new_cohort_monopoly(self) -> None:
         worlds = tuple(

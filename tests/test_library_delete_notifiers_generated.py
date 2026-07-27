@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generated targeting and observation laws for library-delete notifiers."""
 
 from __future__ import annotations
@@ -9,7 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from hypothesis import example, given, strategies as st
+from hypothesis import example, given
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
 from lib.config import CratediggerConfig
@@ -234,7 +234,7 @@ class TestGeneratedDeleteNotifierLaws(unittest.TestCase):
                     jellyfin_find_fn=find,
                     jellyfin_refresh_fn=refresh,
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                 assert_jellyfin_delete_observation_law(
                     initial_exact=mode not in {
                         "initial_absent", "initial_lookup_error",
@@ -307,36 +307,36 @@ class TestDeleteNotifierCheckerKnownBad(unittest.TestCase):
         self,
     ) -> None:
         mutants = {
-            "wrong_exact_target": dict(
-                initial_exact=True, observed_absent=True,
-                lookup_failed=False, refresh_failed=False,
-                outcome_status="submitted", refresh_target="library-root",
-                raised=False,
-            ),
-            "stale_2xx_submitted": dict(
-                initial_exact=True, observed_absent=False,
-                lookup_failed=False, refresh_failed=False,
-                outcome_status="submitted", refresh_target="exact-album",
-                raised=False,
-            ),
-            "lookup_failure_hidden": dict(
-                initial_exact=False, observed_absent=False,
-                lookup_failed=True, refresh_failed=False,
-                outcome_status="submitted", refresh_target="library-root",
-                raised=False,
-            ),
-            "refresh_failure_hidden": dict(
-                initial_exact=True, observed_absent=False,
-                lookup_failed=False, refresh_failed=True,
-                outcome_status="submitted", refresh_target="exact-album",
-                raised=False,
-            ),
-            "exception_escaped": dict(
-                initial_exact=True, observed_absent=False,
-                lookup_failed=False, refresh_failed=True,
-                outcome_status="raised", refresh_target="exact-album",
-                raised=True,
-            ),
+            "wrong_exact_target": {
+                "initial_exact": True, "observed_absent": True,
+                "lookup_failed": False, "refresh_failed": False,
+                "outcome_status": "submitted", "refresh_target": "library-root",
+                "raised": False,
+            },
+            "stale_2xx_submitted": {
+                "initial_exact": True, "observed_absent": False,
+                "lookup_failed": False, "refresh_failed": False,
+                "outcome_status": "submitted", "refresh_target": "exact-album",
+                "raised": False,
+            },
+            "lookup_failure_hidden": {
+                "initial_exact": False, "observed_absent": False,
+                "lookup_failed": True, "refresh_failed": False,
+                "outcome_status": "submitted", "refresh_target": "library-root",
+                "raised": False,
+            },
+            "refresh_failure_hidden": {
+                "initial_exact": True, "observed_absent": False,
+                "lookup_failed": False, "refresh_failed": True,
+                "outcome_status": "submitted", "refresh_target": "exact-album",
+                "raised": False,
+            },
+            "exception_escaped": {
+                "initial_exact": True, "observed_absent": False,
+                "lookup_failed": False, "refresh_failed": True,
+                "outcome_status": "raised", "refresh_target": "exact-album",
+                "raised": True,
+            },
         }
         for name, world in mutants.items():
             with self.subTest(mutant=name), self.assertRaises(AssertionError):

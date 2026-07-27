@@ -7,9 +7,9 @@ underscore shared module for cross-route helpers that don't belong to any
 single command family.
 """
 
+from collections.abc import Mapping
 from datetime import date, datetime, time
 from decimal import Decimal
-from typing import Mapping, Optional
 
 
 def _json_default(value: object) -> str | float:
@@ -29,7 +29,7 @@ def _fmt_br(kbps: object) -> str:
 
 
 def _fmt_measurement(
-    m: Optional[Mapping[str, object]], label: str = "",
+    m: Mapping[str, object] | None, label: str = "",
 ) -> str:
     """Format an AudioQualityMeasurement dict for display."""
     if not m:

@@ -1,16 +1,16 @@
-"""Contracts for the production-only Ruff unused-import gate."""
+"""Contracts for the repository-wide Ruff and production Vulture gates."""
 
 from __future__ import annotations
 
 import ast
-from collections import Counter
 import json
 import os
-from pathlib import Path
 import subprocess
 import tempfile
+import tomllib
 import unittest
-
+from collections import Counter
+from pathlib import Path
 
 EXPECTED_PRODUCTION_ROOTS = (
     "lib",
@@ -44,14 +44,18 @@ def _write_source_world(root: Path, sources: dict[str, str]) -> Path:
 
 
 def ruff_findings(sources: dict[str, str]) -> tuple[dict[str, object], ...]:
-    """Run the production source-local command over a synthetic world."""
+    """Run the canonical Ruff command over a synthetic world."""
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         source_list = _write_source_world(root, sources)
         env = dict(os.environ)
         env["CRATEDIGGER_RUFF_OUTPUT_FORMAT"] = "json"
         result = subprocess.run(
-            ["bash", "scripts/find_unused_imports.sh", str(source_list)],
+            [
+                "bash",
+                "scripts/run_ruff.sh",
+                *source_list.read_text(encoding="utf-8").splitlines(),
+            ],
             cwd=REPO_ROOT,
             env=env,
             text=True,
@@ -61,6 +65,35 @@ def ruff_findings(sources: dict[str, str]) -> tuple[dict[str, object], ...]:
     if result.returncode not in {0, 1}:
         raise AssertionError(result.stderr or result.stdout)
     return tuple(json.loads(result.stdout))
+
+
+def run_ruff_gate(
+    sources: dict[str, str],
+    *,
+    runner_source: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run the canonical Ruff wrapper, optionally with a planted mutant."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        source_list = _write_source_world(root, sources)
+        runner = REPO_ROOT / "scripts/run_ruff.sh"
+        if runner_source is not None:
+            runner = root / "run_ruff.sh"
+            runner.write_text(runner_source, encoding="utf-8")
+        env = dict(os.environ)
+        env["CRATEDIGGER_REPO_ROOT"] = str(REPO_ROOT)
+        return subprocess.run(
+            [
+                "bash",
+                str(runner),
+                *source_list.read_text(encoding="utf-8").splitlines(),
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
 
 
 def run_full_dead_code_gate(
@@ -167,8 +200,8 @@ def assert_import_liveness(
     assert bool(matching) is not import_is_live
 
 
-def assert_dead_code_gate_rejects(result: subprocess.CompletedProcess[str]) -> None:
-    """Assert the production wrapper enforces a source-local failure."""
+def assert_ruff_gate_rejects(result: subprocess.CompletedProcess[str]) -> None:
+    """Assert the canonical Ruff wrapper enforces a finding."""
     assert result.returncode != 0, result.stdout + result.stderr
 
 
@@ -257,35 +290,60 @@ class TestUnusedImportAudit(unittest.TestCase):
             import_is_live=False,
         )
 
-    def test_actual_production_wrapper_rejects_cross_module_name_masking(self) -> None:
+    def test_actual_ruff_wrapper_rejects_cross_module_name_masking(self) -> None:
         sources = {
             "lib/importing.py": "from dependency import shared_name\n",
             "lib/peer.py": "shared_name = object()\nprint(shared_name)\n",
         }
 
-        result = run_full_dead_code_gate(sources)
+        result = run_ruff_gate(sources)
 
-        assert_dead_code_gate_rejects(result)
+        assert_ruff_gate_rejects(result)
 
-    def test_checker_kills_a_non_enforcing_production_wrapper_mutant(self) -> None:
+    def test_checker_kills_a_non_enforcing_ruff_wrapper_mutant(self) -> None:
         sources = {
             "lib/importing.py": "from dependency import shared_name\n",
             "lib/peer.py": "shared_name = object()\nprint(shared_name)\n",
         }
-        runner_source = Path("scripts/find_dead_code.sh").read_text(encoding="utf-8")
-        enforcing_call = 'bash scripts/find_unused_imports.sh "$SOURCE_LIST"'
+        runner_source = Path("scripts/run_ruff.sh").read_text(encoding="utf-8")
+        enforcing_call = (
+            'exec ruff check \\\n'
+            '  --output-format "${CRATEDIGGER_RUFF_OUTPUT_FORMAT:-full}" \\\n'
+            '  "$@"'
+        )
         self.assertIn(enforcing_call, runner_source)
         mutant = runner_source.replace(
             enforcing_call,
-            enforcing_call + " || true",
+            enforcing_call.removeprefix("exec ") + " || true",
             1,
         )
 
-        result = run_full_dead_code_gate(sources, runner_source=mutant)
+        result = run_ruff_gate(sources, runner_source=mutant)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         with self.assertRaises(AssertionError):
-            assert_dead_code_gate_rejects(result)
+            assert_ruff_gate_rejects(result)
+
+    def test_repo_wide_gate_checks_production_and_every_test_shape(self) -> None:
+        paths = (
+            "lib/production.py",
+            "tests/test_ordinary.py",
+            "tests/test_generated_generated.py",
+            "tests/fakes/support.py",
+        )
+
+        findings = ruff_findings({
+            path: "import planted_unused_dependency\n"
+            for path in paths
+        })
+
+        for path in paths:
+            with self.subTest(path=path):
+                assert_import_liveness(
+                    findings,
+                    relative_path=path,
+                    import_is_live=False,
+                )
 
     def test_scope_control_flow_annotations_and_exports_use_real_ruff(self) -> None:
         cases = {
@@ -369,7 +427,7 @@ class TestUnusedImportAudit(unittest.TestCase):
                     for finding in findings
                 ))
 
-    def test_one_authored_root_list_feeds_both_gates_and_excludes_tests(self) -> None:
+    def test_vulture_keeps_its_production_only_roots(self) -> None:
         roots = tuple(
             line.strip()
             for line in Path("tools/production_python_sources.txt")
@@ -382,8 +440,78 @@ class TestUnusedImportAudit(unittest.TestCase):
         self.assertEqual(roots, EXPECTED_PRODUCTION_ROOTS)
         self.assertNotIn("tests", roots)
         self.assertIn("tools/production_python_sources.txt", script)
-        self.assertIn('bash scripts/find_unused_imports.sh "$SOURCE_LIST"', script)
+        self.assertNotIn("ruff", script.lower())
         self.assertIn('vulture "${VULTURE_ARGS[@]}" "${SOURCES[@]}"', script)
+
+    def test_full_suite_calls_the_canonical_repo_wide_ruff_gate(self) -> None:
+        suite = Path("scripts/run_tests.sh").read_text(encoding="utf-8")
+        runner = Path("scripts/run_ruff.sh").read_text(encoding="utf-8")
+
+        self.assertIn('bash "$(dirname "$0")/run_ruff.sh"', suite)
+        self.assertIn('set -- .', runner)
+        self.assertIn("ruff check", runner)
+
+    def test_ruff_toolchain_and_config_are_pinned_to_0_16(self) -> None:
+        result = subprocess.run(
+            ["ruff", "--version"],
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        config = tomllib.loads(
+            Path("ruff.toml").read_text(encoding="utf-8")
+        )
+        nix_pin = Path("nix/ruff.nix").read_text(encoding="utf-8")
+        shell = Path("nix/shell.nix").read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "ruff 0.16.0")
+        self.assertEqual(config["required-version"], "==0.16.0")
+        self.assertEqual(config["target-version"], "py313")
+        self.assertEqual(config["lint"]["extend-select"], ["B905"])
+        self.assertNotIn("ignore", config["lint"])
+        self.assertEqual(
+            config["lint"]["per-file-ignores"],
+            {"tools/vulture/whitelist.py": ["B018", "F821"]},
+        )
+        self.assertIn('version = "0.16.0";', nix_pin)
+        for system, target in (
+            ("x86_64-linux", "x86_64-unknown-linux-gnu"),
+            ("aarch64-linux", "aarch64-unknown-linux-gnu"),
+            ("x86_64-darwin", "x86_64-apple-darwin"),
+            ("aarch64-darwin", "aarch64-apple-darwin"),
+        ):
+            with self.subTest(system=system):
+                self.assertIn(f'"{system}" = {{', nix_pin)
+                self.assertIn(f'target = "{target}";', nix_pin)
+        self.assertIn("ruff = import ./ruff.nix", shell)
+        self.assertNotIn("pkgs.ruff", shell)
+
+    def test_b905_requires_every_zip_intent_to_be_explicit(self) -> None:
+        findings = ruff_findings({
+            "tests/test_zip_intent.py": (
+                "left = [1]\n"
+                "right = [2]\n"
+                "paired = list(zip(left, right))\n"
+                "print(paired)\n"
+            ),
+        })
+        self.assertEqual(
+            [finding["code"] for finding in findings],
+            ["B905"],
+        )
+
+        explicit_findings = ruff_findings({
+            "tests/test_zip_intent.py": (
+                "left = [1]\n"
+                "right = [2]\n"
+                "strict = list(zip(left, right, strict=True))\n"
+                "truncating = list(zip(left, right, strict=False))\n"
+                "print(strict, truncating)\n"
+            ),
+        })
+        self.assertEqual(explicit_findings, ())
 
     def test_exact_vulture_whitelist_is_fresh_and_gate_passes(self) -> None:
         world = {"lib/orphan.py": "def orphan():\n    return 1\n"}

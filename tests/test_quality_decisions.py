@@ -1,62 +1,59 @@
-#!/usr/bin/env python3
 """Unit tests for the lib/quality/ pure decision functions.
 
 These test every branch of the four decision functions directly,
 independent of real audio fixtures or the full_pipeline_decision integrator.
 """
-
 import json
 import os
 import sys
 import unittest
-from datetime import datetime, timezone
-from typing import Any
+from datetime import UTC, datetime
+from typing import Any, ClassVar
 
 import msgspec
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from lib.quality import (
-    spectral_import_decision,
-    import_quality_decision,
-    transcode_detection,
-    quality_gate_decision,
-    is_verified_lossless,
-    AudioQualityMeasurement,
+    DECISION_LOSSLESS_SOURCE_LOCKED,
+    DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
+    DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
+    DECISION_SUSPECT_LOSSLESS_PROBE_MISSING,
     AlbumQualityEvidence,
     AlbumQualityEvidenceDecisionFacts,
     AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
+    AudioQualityMeasurement,
+    CodecRankBands,
     DownloadInfo,
-    rejected_download_tier,
-    narrow_override_on_downgrade,
-    resolve_rejection_search_override,
+    MeasuredImportDecisionInput,
+    ProvisionalLosslessDecisionInput,
     # Codec-aware rank model (issue #60)
     QualityRank,
-    RankBitrateMetric,
-    CodecRankBands,
     QualityRankConfig,
-    quality_rank,
-    measurement_rank,
-    gate_rank,
-    compare_quality,
-    build_existing_quality_measurement,
-    measured_import_decision,
-    MeasuredImportDecisionInput,
-    provisional_lossless_decision,
-    ProvisionalLosslessDecisionInput,
+    RankBitrateMetric,
     V0ProbeEvidence,
-    DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
-    DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
-    DECISION_SUSPECT_LOSSLESS_PROBE_MISSING,
-    DECISION_LOSSLESS_SOURCE_LOCKED,
     VerifiedLosslessProof,
+    build_existing_quality_measurement,
+    compare_quality,
     evidence_decision_name,
     full_pipeline_decision_from_evidence,
+    gate_rank,
+    import_quality_decision,
+    is_verified_lossless,
+    measured_import_decision,
+    measurement_rank,
+    narrow_override_on_downgrade,
+    provisional_lossless_decision,
+    quality_gate_decision,
+    quality_rank,
+    rejected_download_tier,
+    resolve_rejection_search_override,
+    spectral_import_decision,
+    transcode_detection,
 )
 from lib.quality.decisions import post_import_search_action
 from tests.helpers import make_audio_corrupt_validation_report
-
 
 # ============================================================================
 # spectral_import_decision
@@ -142,7 +139,7 @@ class TestSpectralImportDecision(unittest.TestCase):
     one side has spectral evidence.
     """
 
-    CASES = [
+    CASES: ClassVar = [
         # desc, grade, bitrate, existing_spectral, expected
         ("genuine imports", "genuine", None, None, "import"),
         ("genuine ignores bitrates", "genuine", 128, 256, "import"),
@@ -218,75 +215,75 @@ class TestImportQualityDecision(unittest.TestCase):
     existing album.
     """
 
-    CASES = [
+    CASES: ClassVar = [
         # desc, new_kwargs, existing_kwargs, is_transcode, expected
 
         # --- Same-codec mono-codec regression cases ---
         ("V0 beats V2 (same codec family, different rank)",
-         dict(format="mp3 v0", avg_bitrate_kbps=245),
-         dict(format="mp3 v2", avg_bitrate_kbps=190),
+         {"format": "mp3 v0", "avg_bitrate_kbps": 245},
+         {"format": "mp3 v2", "avg_bitrate_kbps": 190},
          False, "import"),
         ("V2 loses to V0",
-         dict(format="mp3 v2", avg_bitrate_kbps=190),
-         dict(format="mp3 v0", avg_bitrate_kbps=245),
+         {"format": "mp3 v2", "avg_bitrate_kbps": 190},
+         {"format": "mp3 v0", "avg_bitrate_kbps": 245},
          False, "downgrade"),
         ("equal V0 labels → equivalent → downgrade without verified_lossless",
-         dict(format="mp3 v0", avg_bitrate_kbps=245),
-         dict(format="mp3 v0", avg_bitrate_kbps=245),
+         {"format": "mp3 v0", "avg_bitrate_kbps": 245},
+         {"format": "mp3 v0", "avg_bitrate_kbps": 245},
          False, "downgrade"),
         ("equal CBR 320 → equivalent → downgrade",
-         dict(format="mp3 320", avg_bitrate_kbps=320, is_cbr=True),
-         dict(format="mp3 320", avg_bitrate_kbps=320, is_cbr=True),
+         {"format": "mp3 320", "avg_bitrate_kbps": 320, "is_cbr": True},
+         {"format": "mp3 320", "avg_bitrate_kbps": 320, "is_cbr": True},
          False, "downgrade"),
         ("CBR 192 loses to CBR 320",
-         dict(format="mp3 192", avg_bitrate_kbps=192, is_cbr=True),
-         dict(format="mp3 320", avg_bitrate_kbps=320, is_cbr=True),
+         {"format": "mp3 192", "avg_bitrate_kbps": 192, "is_cbr": True},
+         {"format": "mp3 320", "avg_bitrate_kbps": 320, "is_cbr": True},
          False, "downgrade"),
 
         # --- Cross-codec equivalence (core #60 fix) ---
         ("Opus 128 equivalent to MP3 V0 → no verified → downgrade",
-         dict(format="opus 128", avg_bitrate_kbps=130),
-         dict(format="mp3 v0", avg_bitrate_kbps=245),
+         {"format": "opus 128", "avg_bitrate_kbps": 130},
+         {"format": "mp3 v0", "avg_bitrate_kbps": 245},
          False, "downgrade"),
         ("Opus 128 equivalent to MP3 V0 + verified_lossless → import",
-         dict(format="opus 128", avg_bitrate_kbps=130, verified_lossless_proof=True),
-         dict(format="mp3 v0", avg_bitrate_kbps=245),
+         {"format": "opus 128", "avg_bitrate_kbps": 130, "verified_lossless_proof": True},
+         {"format": "mp3 v0", "avg_bitrate_kbps": 245},
          False, "import"),
         ("FLAC→Opus 128 equivalent to MP3 CBR 320 + verified_lossless → import",
-         dict(format="opus 128", avg_bitrate_kbps=130, verified_lossless_proof=True),
-         dict(format="mp3 320", avg_bitrate_kbps=320, is_cbr=True),
+         {"format": "opus 128", "avg_bitrate_kbps": 130, "verified_lossless_proof": True},
+         {"format": "mp3 320", "avg_bitrate_kbps": 320, "is_cbr": True},
          False, "import"),
 
         # --- verified_lossless guardrail (core #60 fix) ---
         ("Opus 64 verified CANNOT replace MP3 V0 245",
-         dict(format="opus 64", avg_bitrate_kbps=64, verified_lossless_proof=True),
-         dict(format="mp3 v0", avg_bitrate_kbps=245),
+         {"format": "opus 64", "avg_bitrate_kbps": 64, "verified_lossless_proof": True},
+         {"format": "mp3 v0", "avg_bitrate_kbps": 245},
          False, "downgrade"),
         ("Opus 48 verified CANNOT replace MP3 CBR 320",
-         dict(format="opus 48", avg_bitrate_kbps=48, verified_lossless_proof=True),
-         dict(format="mp3 320", avg_bitrate_kbps=320, is_cbr=True),
+         {"format": "opus 48", "avg_bitrate_kbps": 48, "verified_lossless_proof": True},
+         {"format": "mp3 320", "avg_bitrate_kbps": 320, "is_cbr": True},
          False, "downgrade"),
 
         # --- Lo-fi genuine V0 (label semantics preserved) ---
         ("lo-fi V0 (207) equivalent to dense V0 (245) + verified → import",
-         dict(format="mp3 v0", avg_bitrate_kbps=207, verified_lossless_proof=True),
-         dict(format="mp3 v0", avg_bitrate_kbps=245),
+         {"format": "mp3 v0", "avg_bitrate_kbps": 207, "verified_lossless_proof": True},
+         {"format": "mp3 v0", "avg_bitrate_kbps": 245},
          False, "import"),
 
         # --- No existing album ---
         ("no existing → import",
-         dict(format="mp3 v0", avg_bitrate_kbps=240), None, False, "import"),
+         {"format": "mp3 v0", "avg_bitrate_kbps": 240}, None, False, "import"),
         ("no existing transcode → transcode_first",
-         dict(format="mp3 v0", avg_bitrate_kbps=150), None, True, "transcode_first"),
+         {"format": "mp3 v0", "avg_bitrate_kbps": 150}, None, True, "transcode_first"),
 
         # --- Transcode semantics ---
         ("transcode upgrade (better rank)",
-         dict(format="mp3 v0", avg_bitrate_kbps=192),
-         dict(format="mp3 192", avg_bitrate_kbps=128, is_cbr=True),
+         {"format": "mp3 v0", "avg_bitrate_kbps": 192},
+         {"format": "mp3 192", "avg_bitrate_kbps": 128, "is_cbr": True},
          True, "transcode_upgrade"),
         ("transcode downgrade (worse rank)",
-         dict(format="mp3 128", avg_bitrate_kbps=128, is_cbr=True),
-         dict(format="mp3 v0", avg_bitrate_kbps=192),
+         {"format": "mp3 128", "avg_bitrate_kbps": 128, "is_cbr": True},
+         {"format": "mp3 v0", "avg_bitrate_kbps": 192},
          True, "transcode_downgrade"),
 
         # --- Legacy format-less fallback via bare-codec path ---
@@ -294,10 +291,10 @@ class TestImportQualityDecision(unittest.TestCase):
         # and compare_quality() uses the bare-codec bitrate tiebreaker with
         # tolerance. Tests here document that fallback explicitly.
         ("legacy no-format tie → equivalent → downgrade",
-         dict(min_bitrate_kbps=320), dict(min_bitrate_kbps=320),
+         {"min_bitrate_kbps": 320}, {"min_bitrate_kbps": 320},
          False, "downgrade"),
         ("legacy no-format worse → downgrade",
-         dict(min_bitrate_kbps=192), dict(min_bitrate_kbps=320),
+         {"min_bitrate_kbps": 192}, {"min_bitrate_kbps": 320},
          False, "downgrade"),
     ]
 
@@ -593,7 +590,7 @@ class TestProvisionalLosslessDecision(unittest.TestCase):
 class TestTranscodeDetection(unittest.TestCase):
     """Test post-conversion transcode detection."""
 
-    CASES = [
+    CASES: ClassVar = [
         # desc, converted_count, spectral_grade, expected
         ("no conversion", 0, None, False),
         ("affirmative genuine proof", 12, "genuine", False),
@@ -635,63 +632,63 @@ class TestQualityGateDecision(unittest.TestCase):
     needed for genuine lo-fi.
     """
 
-    CASES = [
+    CASES: ClassVar = [
         # (description, measurement_kwargs, expected_decision)
 
         # --- unverified retained copies stay wanted on full tiers ---
         ("MP3 V0 label lo-fi stays searchable without proof",
-         dict(format="mp3 v0", avg_bitrate_kbps=207), "requeue_upgrade"),
+         {"format": "mp3 v0", "avg_bitrate_kbps": 207}, "requeue_upgrade"),
         ("MP3 V0 label dense",
-         dict(format="mp3 v0", avg_bitrate_kbps=245), "requeue_upgrade"),
+         {"format": "mp3 v0", "avg_bitrate_kbps": 245}, "requeue_upgrade"),
         # --- verified-lossless proof is absolute, regardless of target rank ---
         ("Opus 128 verified lossless",
-         dict(format="opus 128", avg_bitrate_kbps=130, verified_lossless_proof=True), "accept"),
+         {"format": "opus 128", "avg_bitrate_kbps": 130, "verified_lossless_proof": True}, "accept"),
         ("Opus 128 not verified stays searchable",
-         dict(format="opus 128", avg_bitrate_kbps=130), "requeue_upgrade"),
+         {"format": "opus 128", "avg_bitrate_kbps": 130}, "requeue_upgrade"),
         ("bare MP3 VBR above rank",
-         dict(format="MP3", avg_bitrate_kbps=240, is_cbr=False), "requeue_upgrade"),
+         {"format": "MP3", "avg_bitrate_kbps": 240, "is_cbr": False}, "requeue_upgrade"),
 
         # --- unverified copies remain nonterminal at every rank ---
         ("bare MP3 VBR below rank",
-         dict(format="MP3", avg_bitrate_kbps=150, is_cbr=False), "requeue_upgrade"),
+         {"format": "MP3", "avg_bitrate_kbps": 150, "is_cbr": False}, "requeue_upgrade"),
         ("Opus 64 verified (target too low)",
-         dict(format="opus 64", avg_bitrate_kbps=64, verified_lossless_proof=True), "accept"),
+         {"format": "opus 64", "avg_bitrate_kbps": 64, "verified_lossless_proof": True}, "accept"),
         ("Opus 48 verified (target far too low)",
-         dict(format="opus 48", avg_bitrate_kbps=48, verified_lossless_proof=True), "accept"),
+         {"format": "opus 48", "avg_bitrate_kbps": 48, "verified_lossless_proof": True}, "accept"),
         ("spectral clamp pulls CBR 320 down",
-         dict(format="mp3 320", avg_bitrate_kbps=320, is_cbr=True,
-              spectral_bitrate_kbps=128), "requeue_upgrade"),
+         {"format": "mp3 320", "avg_bitrate_kbps": 320, "is_cbr": True,
+              "spectral_bitrate_kbps": 128}, "requeue_upgrade"),
         ("no format no bitrate → UNKNOWN",
-         dict(), "requeue_upgrade"),
+         {}, "requeue_upgrade"),
 
         # --- lossless narrowing requires transparent + genuine evidence ---
         ("CBR 320 unmeasured stays on full tiers",
-         dict(format="mp3 320", avg_bitrate_kbps=320, is_cbr=True), "requeue_upgrade"),
+         {"format": "mp3 320", "avg_bitrate_kbps": 320, "is_cbr": True}, "requeue_upgrade"),
         ("bare MP3 CBR 320 unmeasured stays on full tiers",
-         dict(format="MP3", avg_bitrate_kbps=320, is_cbr=True), "requeue_upgrade"),
+         {"format": "MP3", "avg_bitrate_kbps": 320, "is_cbr": True}, "requeue_upgrade"),
         ("bare MP3 CBR 256 unmeasured stays on full tiers",
-         dict(format="MP3", avg_bitrate_kbps=256, is_cbr=True), "requeue_upgrade"),
+         {"format": "MP3", "avg_bitrate_kbps": 256, "is_cbr": True}, "requeue_upgrade"),
         ("CBR 320 genuine narrows to lossless",
-         dict(format="mp3 320", avg_bitrate_kbps=320, is_cbr=True,
-              spectral_grade="genuine", spectral_subject="installed",
-              spectral_provenance="measured"), "requeue_lossless"),
+         {"format": "mp3 320", "avg_bitrate_kbps": 320, "is_cbr": True,
+              "spectral_grade": "genuine", "spectral_subject": "installed",
+              "spectral_provenance": "measured"}, "requeue_lossless"),
         ("CBR 320 genuine source-subject grade also narrows (D17)",
-         dict(format="mp3 320", avg_bitrate_kbps=320, is_cbr=True,
-              spectral_grade="genuine", spectral_subject="source",
-              spectral_provenance="carried"), "requeue_lossless"),
+         {"format": "mp3 320", "avg_bitrate_kbps": 320, "is_cbr": True,
+              "spectral_grade": "genuine", "spectral_subject": "source",
+              "spectral_provenance": "carried"}, "requeue_lossless"),
         ("CBR 320 suspect stays on full tiers",
-         dict(format="mp3 320", avg_bitrate_kbps=320, is_cbr=True,
-              spectral_grade="suspect", spectral_bitrate_kbps=192), "requeue_upgrade"),
+         {"format": "mp3 320", "avg_bitrate_kbps": 320, "is_cbr": True,
+              "spectral_grade": "suspect", "spectral_bitrate_kbps": 192}, "requeue_upgrade"),
 
         # A lossless container is not itself verified-lossless proof.
         ("unverified FLAC stays searchable",
-         dict(format="FLAC", avg_bitrate_kbps=900), "requeue_upgrade"),
+         {"format": "FLAC", "avg_bitrate_kbps": 900}, "requeue_upgrade"),
         ("unverified lossless label stays searchable",
-         dict(format="flac"), "requeue_upgrade"),
+         {"format": "flac"}, "requeue_upgrade"),
 
         # --- legacy verified_lossless cases (still honoured via label if present) ---
         ("legacy no format with verified-lossless proof accepts",
-         dict(min_bitrate_kbps=180, verified_lossless_proof=True), "accept"),
+         {"min_bitrate_kbps": 180, "verified_lossless_proof": True}, "accept"),
     ]
 
     def test_quality_gate_decisions(self):
@@ -840,7 +837,7 @@ class TestPostImportSearchAction(unittest.TestCase):
 class TestIsVerifiedLossless(unittest.TestCase):
     """Test verified_lossless derivation."""
 
-    CASES = [
+    CASES: ClassVar = [
         ("gold standard", True, "flac", "genuine", True),
         ("uppercase flac", True, "FLAC", "genuine", True),
         ("not converted", False, None, "genuine", False),
@@ -874,7 +871,7 @@ class TestMintVerifiedLosslessProof(unittest.TestCase):
 
     # (desc, will_be, was_converted_from, detected_format, grade,
     #  expected_source or None-for-no-proof)
-    CASES = [
+    CASES: ClassVar = [
         ("not verified mints nothing", False, "flac", "FLAC", "genuine", None),
         ("converted flac", True, "flac", "FLAC", "genuine", "flac"),
         ("normalized alac keeps true origin", True, "alac", "FLAC", "genuine", "alac"),
@@ -931,8 +928,9 @@ class TestMintVerifiedLosslessProof(unittest.TestCase):
 # simulator. If a stage is added/removed or the result shape changes, these
 # fail — forcing the simulator to be updated in sync.
 
-from lib.quality import full_pipeline_decision
 import inspect
+
+from lib.quality import full_pipeline_decision
 
 # The exact keys the simulator reads from the result dict
 EXPECTED_RESULT_KEYS = {
@@ -1059,7 +1057,7 @@ class TestFullPipelineDecisionFromEvidence(unittest.TestCase):
                     "measured" if spectral_grade is not None else None
                 ),
             ),
-            measured_at=datetime(2026, 5, 14, tzinfo=timezone.utc),
+            measured_at=datetime(2026, 5, 14, tzinfo=UTC),
             files=[
                 AlbumQualityEvidenceFile(
                     relative_path=f"{owner_type}-{owner_id}.{container}",
@@ -1317,7 +1315,7 @@ class TestPreimportAudioGate(unittest.TestCase):
     """
 
     # (desc, audio_check_mode, audio_corrupt, expected)
-    CASES = [
+    CASES: ClassVar = [
         ("off short-circuits regardless of corrupt flag", "off", False, "skipped_off"),
         ("off skipped even when corrupt signalled",       "off", True,  "skipped_off"),
         ("normal + clean passes",                         "normal", False, "pass"),
@@ -1342,7 +1340,7 @@ class TestPreimportNestedGate(unittest.TestCase):
     """
 
     # (desc, has_nested_audio, expected)
-    CASES = [
+    CASES: ClassVar = [
         ("flat passes", False, "pass"),
         ("nested rejects", True, "reject_nested"),
     ]
@@ -1526,15 +1524,15 @@ class TestFullPipelineContract(unittest.TestCase):
         """Stage 1 spectral decisions must be from the known set."""
         # Run several representative cases
         cases = [
-            dict(is_flac=False, min_bitrate=320, is_cbr=True,
-                 spectral_grade="suspect", spectral_bitrate=160,
-                 existing_spectral_bitrate=160),
-            dict(is_flac=False, min_bitrate=320, is_cbr=True,
-                 spectral_grade="genuine"),
-            dict(is_flac=False, min_bitrate=256, is_cbr=False),
-            dict(is_flac=False, min_bitrate=320, is_cbr=True,
-                 spectral_grade="suspect", spectral_bitrate=200,
-                 existing_spectral_bitrate=128),
+            {"is_flac": False, "min_bitrate": 320, "is_cbr": True,
+                 "spectral_grade": "suspect", "spectral_bitrate": 160,
+                 "existing_spectral_bitrate": 160},
+            {"is_flac": False, "min_bitrate": 320, "is_cbr": True,
+                 "spectral_grade": "genuine"},
+            {"is_flac": False, "min_bitrate": 256, "is_cbr": False},
+            {"is_flac": False, "min_bitrate": 320, "is_cbr": True,
+                 "spectral_grade": "suspect", "spectral_bitrate": 200,
+                 "existing_spectral_bitrate": 128},
         ]
         for kwargs in cases:
             r = full_pipeline_decision(**kwargs)
@@ -1544,18 +1542,18 @@ class TestFullPipelineContract(unittest.TestCase):
     def test_stage2_values_in_contract(self):
         """Stage 2 import decisions must be from the known set."""
         cases = [
-            dict(is_flac=True, min_bitrate=0, is_cbr=False,
-                 spectral_grade="genuine", converted_count=10,
-                 post_conversion_min_bitrate=245),
-            dict(is_flac=True, min_bitrate=0, is_cbr=False,
-                 spectral_grade="genuine", converted_count=10,
-                 post_conversion_min_bitrate=190),
-            dict(is_flac=True, min_bitrate=0, is_cbr=False,
-                 spectral_grade="genuine", converted_count=10,
-                 post_conversion_min_bitrate=245, existing_min_bitrate=300),
-            dict(is_flac=False, min_bitrate=256, is_cbr=False),
-            dict(is_flac=False, min_bitrate=128, is_cbr=False,
-                 existing_min_bitrate=256),
+            {"is_flac": True, "min_bitrate": 0, "is_cbr": False,
+                 "spectral_grade": "genuine", "converted_count": 10,
+                 "post_conversion_min_bitrate": 245},
+            {"is_flac": True, "min_bitrate": 0, "is_cbr": False,
+                 "spectral_grade": "genuine", "converted_count": 10,
+                 "post_conversion_min_bitrate": 190},
+            {"is_flac": True, "min_bitrate": 0, "is_cbr": False,
+                 "spectral_grade": "genuine", "converted_count": 10,
+                 "post_conversion_min_bitrate": 245, "existing_min_bitrate": 300},
+            {"is_flac": False, "min_bitrate": 256, "is_cbr": False},
+            {"is_flac": False, "min_bitrate": 128, "is_cbr": False,
+                 "existing_min_bitrate": 256},
         ]
         for kwargs in cases:
             r = full_pipeline_decision(**kwargs)
@@ -1565,12 +1563,12 @@ class TestFullPipelineContract(unittest.TestCase):
     def test_stage3_values_in_contract(self):
         """Stage 3 quality gate decisions must be from the known set."""
         cases = [
-            dict(is_flac=True, min_bitrate=0, is_cbr=False,
-                 spectral_grade="genuine", converted_count=10,
-                 post_conversion_min_bitrate=245),
-            dict(is_flac=False, min_bitrate=320, is_cbr=True),
-            dict(is_flac=False, min_bitrate=256, is_cbr=False),
-            dict(is_flac=False, min_bitrate=180, is_cbr=False),
+            {"is_flac": True, "min_bitrate": 0, "is_cbr": False,
+                 "spectral_grade": "genuine", "converted_count": 10,
+                 "post_conversion_min_bitrate": 245},
+            {"is_flac": False, "min_bitrate": 320, "is_cbr": True},
+            {"is_flac": False, "min_bitrate": 256, "is_cbr": False},
+            {"is_flac": False, "min_bitrate": 180, "is_cbr": False},
         ]
         for kwargs in cases:
             r = full_pipeline_decision(**kwargs)
@@ -1721,8 +1719,12 @@ class TestFullPipelineContract(unittest.TestCase):
         sees. The fix (use ``==`` not ``is``) must hold.
         """
         from enum import StrEnum
-        from lib.quality import (AudioQualityMeasurement, QualityRankConfig,
-                                 measurement_rank)
+
+        from lib.quality import (
+            AudioQualityMeasurement,
+            QualityRankConfig,
+            measurement_rank,
+        )
 
         # Fake RankBitrateMetric-equivalent StrEnum: same string values,
         # different class object. Under `is`, compares False; under `==`,
@@ -2146,7 +2148,7 @@ class TestComputeEffectiveOverrideBitrate(unittest.TestCase):
     """
 
     # (description, container, spectral, grade, expected)
-    CASES = [
+    CASES: ClassVar = [
         ("spectral ignored when grade None",             320, 128, None,               320),
         ("spectral ignored when grade genuine",          320, 128, "genuine",          320),
         ("spectral ignored when grade marginal",         320, 128, "marginal",         320),
@@ -2202,38 +2204,38 @@ class TestDispatchAction(unittest.TestCase):
     """Test dispatch_action: map decision string to action flags via subTest table."""
 
     # (decision, {flag: expected_value, ...})
-    CASES = [
-        ("import", dict(mark_done=True, record_rejection=False, denylist=False,
-                        cleanup=True, trigger_notifiers=True,
-                        run_quality_gate=True)),
-        ("preflight_existing", dict(mark_done=True, trigger_notifiers=True,
-                                    run_quality_gate=True)),
-        ("downgrade", dict(mark_done=False, record_rejection=True, denylist=True,
-                           cleanup=True)),
-        ("transcode_upgrade", dict(mark_done=True, denylist=False,
-                                   trigger_notifiers=True)),
-        ("transcode_downgrade", dict(mark_done=False, record_rejection=True,
-                                     denylist=True)),
-        ("transcode_first", dict(mark_done=True, denylist=False,
-                                 trigger_notifiers=True)),
+    CASES: ClassVar = [
+        ("import", {"mark_done": True, "record_rejection": False, "denylist": False,
+                        "cleanup": True, "trigger_notifiers": True,
+                        "run_quality_gate": True}),
+        ("preflight_existing", {"mark_done": True, "trigger_notifiers": True,
+                                    "run_quality_gate": True}),
+        ("downgrade", {"mark_done": False, "record_rejection": True, "denylist": True,
+                           "cleanup": True}),
+        ("transcode_upgrade", {"mark_done": True, "denylist": False,
+                                   "trigger_notifiers": True}),
+        ("transcode_downgrade", {"mark_done": False, "record_rejection": True,
+                                     "denylist": True}),
+        ("transcode_first", {"mark_done": True, "denylist": False,
+                                 "trigger_notifiers": True}),
         ("provisional_lossless_upgrade",
-         dict(mark_done=True, denylist=False,
-              trigger_notifiers=True, run_quality_gate=False)),
+         {"mark_done": True, "denylist": False,
+              "trigger_notifiers": True, "run_quality_gate": False}),
         ("suspect_lossless_downgrade",
-         dict(mark_done=False, record_rejection=True, denylist=True,
-              cleanup=True)),
+         {"mark_done": False, "record_rejection": True, "denylist": True,
+              "cleanup": True}),
         ("suspect_lossless_probe_missing",
-         dict(mark_done=False, record_rejection=True, denylist=True,
-              cleanup=True)),
+         {"mark_done": False, "record_rejection": True, "denylist": True,
+              "cleanup": True}),
         ("lossless_source_locked",
-         dict(mark_done=False, record_rejection=True, denylist=True,
-              cleanup=True)),
+         {"mark_done": False, "record_rejection": True, "denylist": True,
+              "cleanup": True}),
         ("spectral_reject",
-         dict(mark_done=False, record_rejection=True, denylist=True,
-              cleanup=True)),
-        ("conversion_failed", dict(record_rejection=True, denylist=False)),
-        ("import_failed", dict(record_rejection=True)),
-        ("target_conversion_failed", dict(record_rejection=True, denylist=False)),
+         {"mark_done": False, "record_rejection": True, "denylist": True,
+              "cleanup": True}),
+        ("conversion_failed", {"record_rejection": True, "denylist": False}),
+        ("import_failed", {"record_rejection": True}),
+        ("target_conversion_failed", {"record_rejection": True, "denylist": False}),
     ]
 
     def test_dispatch_action_flags(self):
@@ -2268,7 +2270,7 @@ class TestDecisionDenylists(unittest.TestCase):
     """
 
     # (decision, expected denylist)
-    CASES = [
+    CASES: ClassVar = [
         # --- stage2/early-exit decisions: resolved via dispatch_action
         # fallback (not in _POST_IMPORT_SEARCH_ACTIONS) ---
         ("import", False),
@@ -2491,7 +2493,7 @@ class TestResolveRejectionSearchOverride(unittest.TestCase):
         )
 
     def test_trusted_transparent_have_wins_over_full_ladder(self):
-        from lib.quality import SpectralAnalysisDetail, QUALITY_UPGRADE_TIERS
+        from lib.quality import QUALITY_UPGRADE_TIERS, SpectralAnalysisDetail
 
         resolution = resolve_rejection_search_override(
             decision="downgrade",
@@ -2552,7 +2554,7 @@ class TestNarrowOverrideOnLosslessSourceLock(unittest.TestCase):
     """
 
     # (description, current_override, expected)
-    CASES = [
+    CASES: ClassVar = [
         ("none → lossless", None, "lossless"),
         ("mp3 v0 → lossless", "mp3 v0", "lossless"),
         ("mp3 320 → lossless", "mp3 320", "lossless"),
@@ -2883,7 +2885,7 @@ class TestCodecRankBands(unittest.TestCase):
     """rank_for() exhaustively, plus the monotonic invariant."""
 
     # (description, transparent, excellent, good, acceptable, bitrate, expected)
-    CASES = [
+    CASES: ClassVar = [
         ("exactly transparent threshold",   112, 88, 64, 48, 112, QualityRank.TRANSPARENT),
         ("above transparent",               112, 88, 64, 48, 200, QualityRank.TRANSPARENT),
         ("exactly excellent threshold",     112, 88, 64, 48,  88, QualityRank.EXCELLENT),
@@ -2922,7 +2924,7 @@ class TestQualityRank(unittest.TestCase):
     """
 
     # (description, format_hint, bitrate_kbps, is_cbr, expected_rank)
-    CASES = [
+    CASES: ClassVar = [
         # --- Step 1: both None → UNKNOWN ---
         ("None format + None bitrate",             None,            None, False, QualityRank.UNKNOWN),
 
@@ -3095,7 +3097,7 @@ class TestMeasurementRank(unittest.TestCase):
     # The median is robust against per-track outliers like a 60kbps interlude
     # or a 320kbps hidden track on an otherwise V0 album. The subtest table
     # below pins the dispatch behavior for every interesting combination.
-    MEDIAN_CASES = [
+    MEDIAN_CASES: ClassVar = [
         # (description, min, avg, median, format, expected_rank)
         ("median wins over outlier-low min — Opus 130 album",
          60, 128, 130, "Opus", QualityRank.TRANSPARENT),
@@ -3144,94 +3146,94 @@ class TestCompareQuality(unittest.TestCase):
         return AudioQualityMeasurement(**kwargs)
 
     # (description, new_kwargs, existing_kwargs, expected)
-    CASES = [
+    CASES: ClassVar = [
         # --- Different rank → trivial ---
         ("V0 beats V4",
-         dict(format="mp3 v0", avg_bitrate_kbps=240),
-         dict(format="mp3 v4", avg_bitrate_kbps=150),
+         {"format": "mp3 v0", "avg_bitrate_kbps": 240},
+         {"format": "mp3 v4", "avg_bitrate_kbps": 150},
          "better"),
         ("V4 loses to V0",
-         dict(format="mp3 v4", avg_bitrate_kbps=150),
-         dict(format="mp3 v0", avg_bitrate_kbps=240),
+         {"format": "mp3 v4", "avg_bitrate_kbps": 150},
+         {"format": "mp3 v0", "avg_bitrate_kbps": 240},
          "worse"),
         ("Opus 128 beats Opus 64",
-         dict(format="opus 128", avg_bitrate_kbps=130),
-         dict(format="opus 64",  avg_bitrate_kbps=60),
+         {"format": "opus 128", "avg_bitrate_kbps": 130},
+         {"format": "opus 64",  "avg_bitrate_kbps": 60},
          "better"),
 
         # --- Same rank, different codec family → equivalent ---
         ("Opus 128 == MP3 V0",
-         dict(format="opus 128", avg_bitrate_kbps=130),
-         dict(format="mp3 v0",   avg_bitrate_kbps=240),
+         {"format": "opus 128", "avg_bitrate_kbps": 130},
+         {"format": "mp3 v0",   "avg_bitrate_kbps": 240},
          "equivalent"),
         ("MP3 V0 == Opus 128 (reverse)",
-         dict(format="mp3 v0",   avg_bitrate_kbps=240),
-         dict(format="opus 128", avg_bitrate_kbps=130),
+         {"format": "mp3 v0",   "avg_bitrate_kbps": 240},
+         {"format": "opus 128", "avg_bitrate_kbps": 130},
          "equivalent"),
         ("MP3 V0 == MP3 CBR 320",
-         dict(format="mp3 v0",   avg_bitrate_kbps=240, is_cbr=False),
-         dict(format="mp3 320",  avg_bitrate_kbps=320, is_cbr=True),
+         {"format": "mp3 v0",   "avg_bitrate_kbps": 240, "is_cbr": False},
+         {"format": "mp3 320",  "avg_bitrate_kbps": 320, "is_cbr": True},
          "equivalent"),
         ("Opus 128 == AAC 192",
-         dict(format="opus 128", avg_bitrate_kbps=130),
-         dict(format="aac 192",  avg_bitrate_kbps=192),
+         {"format": "opus 128", "avg_bitrate_kbps": 130},
+         {"format": "aac 192",  "avg_bitrate_kbps": 192},
          "equivalent"),
 
         # --- Same rank, same VBR label → equivalent regardless of bitrate ---
         ("lo-fi V0 == dense V0 (label rule)",
-         dict(format="mp3 v0",   avg_bitrate_kbps=207),
-         dict(format="mp3 v0",   avg_bitrate_kbps=245),
+         {"format": "mp3 v0",   "avg_bitrate_kbps": 207},
+         {"format": "mp3 v0",   "avg_bitrate_kbps": 245},
          "equivalent"),
         ("lo-fi V0 ≠ 'worse' even though 207 < 245",
-         dict(format="mp3 v0",   avg_bitrate_kbps=207),
-         dict(format="mp3 v0",   avg_bitrate_kbps=260),
+         {"format": "mp3 v0",   "avg_bitrate_kbps": 207},
+         {"format": "mp3 v0",   "avg_bitrate_kbps": 260},
          "equivalent"),
 
         # --- Same rank, same bare codec family, measurable bitrate ---
         # Default mp3_vbr bands: transparent=245, excellent=210
         ("bare MP3 260 > MP3 250 (same rank TRANSPARENT)",
-         dict(format="MP3", avg_bitrate_kbps=260),
-         dict(format="MP3", avg_bitrate_kbps=250),
+         {"format": "MP3", "avg_bitrate_kbps": 260},
+         {"format": "MP3", "avg_bitrate_kbps": 250},
          "better"),
         ("bare MP3 250 < MP3 260 (same rank)",
-         dict(format="MP3", avg_bitrate_kbps=250),
-         dict(format="MP3", avg_bitrate_kbps=260),
+         {"format": "MP3", "avg_bitrate_kbps": 250},
+         {"format": "MP3", "avg_bitrate_kbps": 260},
          "worse"),
         ("bare MP3 within tolerance → equivalent",
-         dict(format="MP3", avg_bitrate_kbps=257),
-         dict(format="MP3", avg_bitrate_kbps=260),
+         {"format": "MP3", "avg_bitrate_kbps": 257},
+         {"format": "MP3", "avg_bitrate_kbps": 260},
          "equivalent"),
         ("bare Opus 130 == Opus 128 within tolerance",
-         dict(format="Opus", avg_bitrate_kbps=130),
-         dict(format="Opus", avg_bitrate_kbps=128),
+         {"format": "Opus", "avg_bitrate_kbps": 130},
+         {"format": "Opus", "avg_bitrate_kbps": 128},
          "equivalent"),
 
         # --- Unknown measurements fall through ---
         ("both unknown format",
-         dict(format=None, avg_bitrate_kbps=None),
-         dict(format=None, avg_bitrate_kbps=None),
+         {"format": None, "avg_bitrate_kbps": None},
+         {"format": None, "avg_bitrate_kbps": None},
          "equivalent"),
         ("bare MP3 both None bitrate → equivalent guard",
-         dict(format="MP3"),
-         dict(format="MP3"),
+         {"format": "MP3"},
+         {"format": "MP3"},
          "equivalent"),
         ("bare Opus both None bitrate → equivalent guard",
-         dict(format="Opus"),
-         dict(format="Opus"),
+         {"format": "Opus"},
+         {"format": "Opus"},
          "equivalent"),
 
         # --- Lossless beats anything else ---
         ("FLAC beats MP3 V0",
-         dict(format="FLAC", avg_bitrate_kbps=900),
-         dict(format="mp3 v0", avg_bitrate_kbps=245),
+         {"format": "FLAC", "avg_bitrate_kbps": 900},
+         {"format": "mp3 v0", "avg_bitrate_kbps": 245},
          "better"),
         ("MP3 V0 loses to FLAC",
-         dict(format="mp3 v0", avg_bitrate_kbps=245),
-         dict(format="FLAC", avg_bitrate_kbps=900),
+         {"format": "mp3 v0", "avg_bitrate_kbps": 245},
+         {"format": "FLAC", "avg_bitrate_kbps": 900},
          "worse"),
         ("FLAC == FLAC",
-         dict(format="FLAC", avg_bitrate_kbps=900),
-         dict(format="FLAC", avg_bitrate_kbps=1100),
+         {"format": "FLAC", "avg_bitrate_kbps": 900},
+         {"format": "FLAC", "avg_bitrate_kbps": 1100},
          "equivalent"),
     ]
 
@@ -3301,36 +3303,36 @@ class TestCompareQualitySharedSpectralBucket(unittest.TestCase):
         return AudioQualityMeasurement(**kwargs)
 
     # (description, new_kwargs, existing_kwargs, expected)
-    CASES = [
+    CASES: ClassVar = [
         # --- Both sides agree on 96 kbps floor → same bucket, avg wins ---
         # The Eno case: inflated container avg on new, existing uniform
         # at the floor, both spectral=96. Clamp drags both ranks to the
         # same bucket; raw avg is still the tiebreaker.
         ("Eno shape: both spectral=96, new avg=290, existing avg=128",
-         dict(format="MP3", avg_bitrate_kbps=290, min_bitrate_kbps=128,
-              spectral_bitrate_kbps=96),
-         dict(format="MP3", avg_bitrate_kbps=128, min_bitrate_kbps=128,
-              spectral_bitrate_kbps=96),
+         {"format": "MP3", "avg_bitrate_kbps": 290, "min_bitrate_kbps": 128,
+              "spectral_bitrate_kbps": 96},
+         {"format": "MP3", "avg_bitrate_kbps": 128, "min_bitrate_kbps": 128,
+              "spectral_bitrate_kbps": 96},
          "better"),
         ("both spectral=96, equal containers → still equivalent",
-         dict(format="MP3", avg_bitrate_kbps=128, spectral_bitrate_kbps=96),
-         dict(format="MP3", avg_bitrate_kbps=128, spectral_bitrate_kbps=96),
+         {"format": "MP3", "avg_bitrate_kbps": 128, "spectral_bitrate_kbps": 96},
+         {"format": "MP3", "avg_bitrate_kbps": 128, "spectral_bitrate_kbps": 96},
          "equivalent"),
 
         # --- Same spectral bucket still allows raw-metric progress ---
         ("new clamped rank == existing clamped rank → raw avg tiebreaker wins",
-         dict(format="MP3", avg_bitrate_kbps=290, spectral_bitrate_kbps=96),
-         dict(format="MP3", avg_bitrate_kbps=128, spectral_bitrate_kbps=96),
+         {"format": "MP3", "avg_bitrate_kbps": 290, "spectral_bitrate_kbps": 96},
+         {"format": "MP3", "avg_bitrate_kbps": 128, "spectral_bitrate_kbps": 96},
          "better"),
 
         # --- Different floors → clamped comparison decides ---
         ("new spectral=160 > existing spectral=96 → better after clamp",
-         dict(format="MP3", avg_bitrate_kbps=290, spectral_bitrate_kbps=160),
-         dict(format="MP3", avg_bitrate_kbps=128, spectral_bitrate_kbps=96),
+         {"format": "MP3", "avg_bitrate_kbps": 290, "spectral_bitrate_kbps": 160},
+         {"format": "MP3", "avg_bitrate_kbps": 128, "spectral_bitrate_kbps": 96},
          "better"),
         ("new spectral rank below existing spectral rank → worse after clamp",
-         dict(format="MP3", avg_bitrate_kbps=290, spectral_bitrate_kbps=64),
-         dict(format="MP3", avg_bitrate_kbps=170, spectral_bitrate_kbps=170),
+         {"format": "MP3", "avg_bitrate_kbps": 290, "spectral_bitrate_kbps": 64},
+         {"format": "MP3", "avg_bitrate_kbps": 170, "spectral_bitrate_kbps": 170},
          "worse"),
 
         # --- Only one side has spectral: clamp does NOT fire ---
@@ -3340,24 +3342,24 @@ class TestCompareQualitySharedSpectralBucket(unittest.TestCase):
         # (simulator) pins this at the full-pipeline level; this confirms
         # the rule holds inside compare_quality itself.
         ("existing-only spectral → no clamp, container comparison",
-         dict(format="mp3 v0", avg_bitrate_kbps=240, is_cbr=False),
-         dict(format="mp3 320", avg_bitrate_kbps=320, is_cbr=True,
-              spectral_bitrate_kbps=96),
+         {"format": "mp3 v0", "avg_bitrate_kbps": 240, "is_cbr": False},
+         {"format": "mp3 320", "avg_bitrate_kbps": 320, "is_cbr": True,
+              "spectral_bitrate_kbps": 96},
          "equivalent"),  # V0 and 320 are same-rank different-family → equivalent
         ("new-only spectral → no clamp either way",
-         dict(format="MP3", avg_bitrate_kbps=290, is_cbr=False,
-              spectral_bitrate_kbps=96),
-         dict(format="MP3", avg_bitrate_kbps=128, is_cbr=False),
+         {"format": "MP3", "avg_bitrate_kbps": 290, "is_cbr": False,
+              "spectral_bitrate_kbps": 96},
+         {"format": "MP3", "avg_bitrate_kbps": 128, "is_cbr": False},
          "better"),  # Container comparison: 290 > 128
 
         # --- Label equivalence still short-circuits same-rank ties ---
         # Explicit labels are quality contracts; within the same rank tier,
         # they stay equivalent regardless of raw-bitrate deltas.
         ("both explicit labels + both spectral=96 → equivalent",
-         dict(format="mp3 v0", avg_bitrate_kbps=240,
-              spectral_bitrate_kbps=96),
-         dict(format="mp3 v0", avg_bitrate_kbps=245,
-              spectral_bitrate_kbps=96),
+         {"format": "mp3 v0", "avg_bitrate_kbps": 240,
+              "spectral_bitrate_kbps": 96},
+         {"format": "mp3 v0", "avg_bitrate_kbps": 245,
+              "spectral_bitrate_kbps": 96},
          "equivalent"),
     ]
 
@@ -3967,7 +3969,7 @@ class TestQualityRankConfigDefaults(unittest.TestCase):
 class TestDetectReleaseSource(unittest.TestCase):
     """Test source detection from release ID format."""
 
-    CASES = [
+    CASES: ClassVar = [
         # desc, id_string, expected
         ("MB UUID", "89ad4ac3-39f7-470e-963a-56509c546377", "musicbrainz"),
         ("MB UUID uppercase", "89AD4AC3-39F7-470E-963A-56509C546377", "musicbrainz"),

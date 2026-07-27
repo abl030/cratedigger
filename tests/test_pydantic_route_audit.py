@@ -17,7 +17,6 @@ import ast
 import os
 import unittest
 
-
 TESTS_DIR = os.path.abspath(os.path.dirname(__file__))
 ROUTES_DIR = os.path.abspath(os.path.join(TESTS_DIR, "..", "web", "routes"))
 
@@ -67,9 +66,12 @@ def _handler_reads_raw_body(fn: ast.FunctionDef) -> bool:
                 and target.value.id == "body"
             ):
                 return True
-        if isinstance(node, ast.Subscript):
-            if isinstance(node.value, ast.Name) and node.value.id == "body":
-                return True
+        if (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "body"
+        ):
+            return True
     return False
 
 

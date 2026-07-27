@@ -12,7 +12,8 @@ import os
 import shutil
 import tempfile
 import unittest
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import MagicMock
 
 import msgspec
@@ -20,8 +21,8 @@ import msgspec
 from lib.beets_db import AlbumInfo
 from lib.measurement import PreimportMeasurement
 from lib.quality import (
-    AlbumQualityV0Metric,
     AlbumQualityEvidenceFile,
+    AlbumQualityV0Metric,
     AudioQualityMeasurement,
     ImportResult,
     V0ProbeEvidence,
@@ -1047,20 +1048,27 @@ class TestCaptureFieldsAreOneAtomicFactWithSpectralGrade(unittest.TestCase):
     cannot legitimately carry any of them. One-directional: a grade
     WITHOUT the four fields must stay valid (every legacy row)."""
 
-    CAPTURE_FIELD_OVERRIDES = [
-        ("cliff_hz", {"cliff_hz": 16500}),
-        ("codec_family", {"codec_family": "mp3"}),
-        ("ultrasonic_deficit_db", {"ultrasonic_deficit_db": 44.0}),
-        ("spectral_measurement_version", {"spectral_measurement_version": 2}),
+    CAPTURE_FIELD_FACTORIES: ClassVar[
+        list[tuple[str, Callable[[], AudioQualityMeasurement]]]
+    ] = [
+        ("cliff_hz", lambda: AudioQualityMeasurement(
+            min_bitrate_kbps=192, format="MP3", cliff_hz=16500,
+        )),
+        ("codec_family", lambda: AudioQualityMeasurement(
+            min_bitrate_kbps=192, format="MP3", codec_family="mp3",
+        )),
+        ("ultrasonic_deficit_db", lambda: AudioQualityMeasurement(
+            min_bitrate_kbps=192, format="MP3", ultrasonic_deficit_db=44.0,
+        )),
+        ("spectral_measurement_version", lambda: AudioQualityMeasurement(
+            min_bitrate_kbps=192, format="MP3", spectral_measurement_version=2,
+        )),
     ]
 
     def test_any_capture_field_without_a_grade_is_rejected(self):
-        for field_name, override in self.CAPTURE_FIELD_OVERRIDES:
+        for field_name, make_measurement in self.CAPTURE_FIELD_FACTORIES:
             with self.subTest(field=field_name):
-                measurement = AudioQualityMeasurement(
-                    min_bitrate_kbps=192, format="MP3", **override,
-                )
-                errors = measurement.new_row_validation_errors()
+                errors = make_measurement().new_row_validation_errors()
                 self.assertTrue(
                     any("require a spectral grade" in e for e in errors),
                     f"{field_name} without spectral_grade must be rejected, "

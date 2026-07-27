@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generated fail-closed TLS contract for notifier HTTP leaves (issue #663).
 
 The deterministic pin lives in ``tests/test_util.py``. This property drives
@@ -15,12 +14,12 @@ import urllib.error
 from dataclasses import dataclass
 from unittest.mock import patch
 
-import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from hypothesis import given
 from hypothesis import strategies as st
 
-from lib.config import CratediggerConfig
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib import util
+from lib.config import CratediggerConfig
 
 
 @dataclass(frozen=True)
@@ -120,9 +119,8 @@ class TestGeneratedNotifierTlsFailClosed(unittest.TestCase):
         raw_error = ssl.SSLCertVerificationError(1, "certificate verify failed")
         error = (raw_error if failure_shape == "raw"
                  else urllib.error.URLError(raw_error))
-        with patch("lib.util.urllib.request.urlopen", side_effect=error) as urlopen:
-            with self.assertRaises(type(error)) as raised:
-                _invoke_leaf(leaf, _cfg(token), path_segment, query, payload_value)
+        with patch("lib.util.urllib.request.urlopen", side_effect=error) as urlopen, self.assertRaises(type(error)) as raised:
+            _invoke_leaf(leaf, _cfg(token), path_segment, query, payload_value)
 
         self.assertIs(raised.exception, error)
         attempts = [

@@ -3,21 +3,20 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Literal, Protocol, TypeAlias
+from typing import Literal, Protocol
 
 import msgspec
 
 from lib.beets_db import (
-    CurrentBeetsAmbiguous,
     CurrentBeetsAmbiguityReason,
+    CurrentBeetsAmbiguous,
     CurrentBeetsMissing,
     CurrentBeetsResolution,
     CurrentBeetsUnique,
 )
 from lib.release_identity import ReleaseIdentity, normalize_release_id
 
-
-CurrentLibraryUnavailableReason: TypeAlias = Literal[
+type CurrentLibraryUnavailableReason = Literal[
     "beets_unavailable",
     "missing_request_identity",
     "invalid_request_identity",
@@ -40,7 +39,7 @@ class CurrentLibraryUnavailable(msgspec.Struct, frozen=True):
     reason: CurrentLibraryUnavailableReason
 
 
-CurrentLibraryResolution: TypeAlias = (
+type CurrentLibraryResolution = (
     CurrentBeetsUnique
     | CurrentBeetsMissing
     | CurrentBeetsAmbiguous
@@ -92,7 +91,7 @@ class CurrentLibraryUnavailableDisplay(
     manual_review: bool = True
 
 
-CurrentLibraryDisplay: TypeAlias = (
+type CurrentLibraryDisplay = (
     CurrentLibraryUniqueDisplay
     | CurrentLibraryMissingDisplay
     | CurrentLibraryAmbiguousDisplay

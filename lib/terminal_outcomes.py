@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, fields, replace
-from typing import Literal, TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from lib.import_queue import ImportJob
 from lib.transitions import RequestTransition, TransitionApplied
@@ -170,7 +170,7 @@ class PendingImportTerminalOutcome:
     def append_transitions(
         self,
         *transitions: RequestTransition,
-    ) -> "PendingImportTerminalOutcome":
+    ) -> PendingImportTerminalOutcome:
         return replace(
             self,
             post_audit_transitions=self.post_audit_transitions + transitions,
@@ -179,12 +179,12 @@ class PendingImportTerminalOutcome:
     def append_denylists(
         self,
         *entries: TerminalDenylist,
-    ) -> "PendingImportTerminalOutcome":
+    ) -> PendingImportTerminalOutcome:
         return replace(self, denylists=self.denylists + entries)
 
     def mark_successful_terminal_acceptance(
         self,
-    ) -> "PendingImportTerminalOutcome":
+    ) -> PendingImportTerminalOutcome:
         """Authorize the successful-import stop-supersession exception."""
         return replace(self, successful_terminal_acceptance=True)
 

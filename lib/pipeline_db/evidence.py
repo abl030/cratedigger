@@ -4,6 +4,7 @@ from typing import Any
 
 import msgspec
 
+from lib.pipeline_db._core import _PipelineDBBase
 from lib.quality import (
     AlbumQualityEvidence,
     AlbumQualityEvidenceFile,
@@ -13,8 +14,6 @@ from lib.quality import (
     CodecFamily,
     VerifiedLosslessProof,
 )
-
-from lib.pipeline_db._core import _PipelineDBBase
 
 
 class _EvidenceMixin(_PipelineDBBase):

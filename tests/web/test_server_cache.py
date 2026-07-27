@@ -1,22 +1,19 @@
-#!/usr/bin/env python3
 """Routing-cache behaviour: overlay freshness + analysis skeleton caching.
 
 Split from tests/test_web_server.py (#408). Shared harness in
 tests/web/_harness.py.
 """
-
 import os
 import sys
 import unittest
+from typing import ClassVar
 from unittest.mock import patch
-
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from tests.web._harness import _FakeDbWebServerCase, _WebServerCase
-
 from lib.artist_catalogue import ArtistCatalogueRow
 from tests.helpers import make_request_row
+from tests.web._harness import _FakeDbWebServerCase, _WebServerCase
 
 
 def _catalogue_row(
@@ -96,8 +93,8 @@ class _CachedServerCase(_FakeDbWebServerCase):
     @classmethod
     def setUpClass(cls) -> None:
         super().setUpClass()
-        import web.cache as cache
         from tests.test_web_cache import FakeRedis
+        from web import cache
         cls._cache = cache
         cls._saved_redis = cache._redis
         cache._redis = FakeRedis()
@@ -212,7 +209,7 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
     RELEASE_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
     RG_ID = "11111111-1111-1111-1111-111111111111"
 
-    _RAW_RELEASES = [
+    _RAW_RELEASES: ClassVar = [
         {
             "id": RELEASE_ID,
             "title": "Album",

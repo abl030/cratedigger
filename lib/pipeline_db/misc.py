@@ -1,24 +1,22 @@
 """Tracks, denylist/cooldowns, bad-audio hashes, field-resolution, triage."""
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
-import psycopg2
 
+import psycopg2
 
 if TYPE_CHECKING:
     from lib.triage_service import ParsedTriageFilter
 
-from lib.quality import (
-    CooldownConfig,
-    should_cooldown,
-)
-
+from lib.pipeline_db._core import _PipelineDBBase
 from lib.pipeline_db._shared import (
     BadAudioHashInput,
     BadAudioHashRow,
     ReplacedRequestMutationError,
 )
-
-from lib.pipeline_db._core import _PipelineDBBase
+from lib.quality import (
+    CooldownConfig,
+    should_cooldown,
+)
 
 
 class _MiscMixin(_PipelineDBBase):
@@ -47,7 +45,7 @@ class _MiscMixin(_PipelineDBBase):
         ``last_event_timestamp`` is the raw ISO-8601 string slskd emits
         (7-digit fractional seconds) — stored verbatim, compared in Python.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         self._execute("""
             INSERT INTO slskd_event_cursor (id, last_event_id, last_event_timestamp, updated_at)
             VALUES (1, %s, %s, %s)
@@ -166,7 +164,7 @@ class _MiscMixin(_PipelineDBBase):
                 (request_id,),
             )
             row_ids = [r["id"] for r in cur.fetchall()]
-            for row_id, artist in zip(row_ids, track_artists):
+            for row_id, artist in zip(row_ids, track_artists, strict=False):
                 self._execute(
                     "UPDATE album_tracks SET track_artist = %s WHERE id = %s",
                     (artist, row_id),
@@ -236,7 +234,7 @@ class _MiscMixin(_PipelineDBBase):
 
     def get_cooled_down_users(self) -> list[str]:
         """Return usernames with active (non-expired) cooldowns."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         cur = self._execute("""
             SELECT username FROM user_cooldowns
             WHERE cooldown_until > %s
@@ -274,7 +272,7 @@ class _MiscMixin(_PipelineDBBase):
         outcomes = [r["outcome"] for r in cur.fetchall()]
         if not should_cooldown(outcomes, cfg):
             return None
-        cooldown_until = datetime.now(timezone.utc) + timedelta(days=cfg.cooldown_days)
+        cooldown_until = datetime.now(UTC) + timedelta(days=cfg.cooldown_days)
         return cooldown_until, f"{cfg.failure_threshold} consecutive failures"
 
     def check_and_apply_cooldown(
@@ -526,8 +524,9 @@ class _MiscMixin(_PipelineDBBase):
             # field name, status, or reason_code. Status values come from
             # ``lib.field_resolver_service.ResolverStatus`` to avoid the
             # ``LIKE 'unresolved_%%'`` underscore-wildcard ambiguity.
-            from lib.field_resolver_service import ResolverStatus
             from typing import get_args as _get_args
+
+            from lib.field_resolver_service import ResolverStatus
             unresolved_statuses = [
                 s for s in _get_args(ResolverStatus)
                 if s.startswith("unresolved_")

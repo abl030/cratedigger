@@ -29,10 +29,15 @@ echo "=== Pyright production typing rules ==="
 pyright -p pyrightconfig.production.json --threads 4
 echo ""
 
-# Production-liveness sweep — source-local Ruff F401/F811 runs first, then
-# aggregate vulture. Vulture's baseline lives at tools/vulture/whitelist.py;
-# intentional import exports, if any, require exact redundant-alias baselines
-# (CLAUDE.md § "Finding dead code").
+# Repository-wide Python lint. Ruff's pinned 0.16 defaults plus the
+# repository-selected extensions apply equally to production and tests.
+echo "=== Ruff ==="
+bash "$(dirname "$0")/run_ruff.sh"
+echo ""
+
+# Production-liveness sweep. Vulture's baseline lives at
+# tools/vulture/whitelist.py; tests remain excluded so a test reference cannot
+# keep dead production code live (CLAUDE.md § "Finding dead code").
 echo "=== Dead-code sweep ==="
 bash "$(dirname "$0")/find_dead_code.sh"
 echo ""

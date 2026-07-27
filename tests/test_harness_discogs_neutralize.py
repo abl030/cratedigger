@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Deterministic pin for harness/beets_harness.py's Discogs id neutralizer
 (issue #570 defect 2).
 
@@ -48,11 +47,14 @@ for name, mock in _beets_mocks.items():
     sys.modules.setdefault(name, mock)
 
 # ImportSession needs to be a class so subclassing works.
-setattr(sys.modules["beets.importer.session"], "ImportSession",
-        type("ImportSession", (object,), {}))
+setattr(  # noqa: B010 - populate a synthetic runtime module
+    sys.modules["beets.importer.session"],
+    "ImportSession",
+    type("ImportSession", (object,), {}),
+)
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from harness import beets_harness  # noqa: E402
+from harness import beets_harness
 
 
 def discogs_provider_ids_neutralized(info) -> bool:

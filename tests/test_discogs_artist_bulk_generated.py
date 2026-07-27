@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generated contract for Discogs' bulk artist-catalogue consumer.
 
 The mirror returns primary-credit and track-appearance rows separately. The
@@ -13,20 +12,19 @@ import os
 import re
 import sys
 import unittest
-from copy import deepcopy
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from typing import Any
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import msgspec
-import tests._hypothesis_profiles  # noqa: F401
 from hypothesis import given
 from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401
 from web.discogs import DiscogsArtistCatalogueIncomplete, get_artist_releases
-
 
 _PRIMARY_TYPES = ("Album", "EP", "Single")
 _PROVENANCE = ("ordinary", "promo", "unofficial")

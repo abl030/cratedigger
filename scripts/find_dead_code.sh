@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
-# Static liveness gates: source-local Ruff imports plus aggregate vulture.
+# Static production-liveness gate: aggregate vulture.
 #
-# Default: Ruff rejects source-local F401/F811 findings, then vulture reads
-#          tools/vulture/whitelist.py and reports only aggregate findings
-#          introduced since that baseline.
+# Default: vulture reads tools/vulture/whitelist.py and reports only aggregate
+#          findings introduced since that baseline.
 #
 # --baseline: ignore only vulture's whitelist and report every aggregate
-#             candidate. Ruff remains an exact zero-new-debt gate.
+#             candidate.
 #
 # Usage:
 #   nix-shell --run "bash scripts/find_dead_code.sh"             # diff vs whitelist
@@ -44,8 +43,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# One authored production-root list feeds both local F401 and aggregate vulture.
-# Tests stay excluded: a test reference must not keep production code live.
+# Vulture alone consumes the production-root list. Tests stay excluded: a test
+# reference must not keep production code live.
 SOURCE_LIST=${CRATEDIGGER_PRODUCTION_PYTHON_SOURCES_FILE:-tools/production_python_sources.txt}
 if [[ "$SOURCE_LIST" != /* ]]; then
   SOURCE_LIST="$REPO_ROOT/$SOURCE_LIST"
@@ -80,10 +79,6 @@ VULTURE_ARGS=(--min-confidence "$CONFIDENCE")
 if [[ "$USE_WHITELIST" == 1 ]]; then
   VULTURE_ARGS+=("$VULTURE_WHITELIST_FILE")
 fi
-
-echo "=== ruff source-local unused imports: ${SOURCES[*]} ==="
-echo
-bash scripts/find_unused_imports.sh "$SOURCE_LIST"
 
 if [[ "$USE_WHITELIST" == 1 ]]; then
   check_vulture_whitelist_freshness

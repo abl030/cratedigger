@@ -12,23 +12,21 @@ lib/slskd_events.py.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
-from datetime import datetime, timezone
+from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
-from typing import (Any, Callable, Protocol, TYPE_CHECKING, assert_never,
-                    runtime_checkable)
+from datetime import UTC, datetime
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Protocol,
+    assert_never,
+    runtime_checkable,
+)
 
 import msgspec
 
-from lib import download_processing
-from lib.download_processing import (
-    Completed,
-    CompletionDeferred,
-    CompletionDispatched,
-    CompletionFailed,
-    CompletionResult,
-    ProcessAlbumFn,
-)
+from lib import download_processing, transitions
+from lib.dispatch import _build_download_info
 from lib.download_materialization import (
     Materialized,
     MaterializeFailed,
@@ -37,36 +35,45 @@ from lib.download_materialization import (
     _evaluate_staged_path_readiness,
     _materialize_processing_dir,
 )
-from lib.download_recovery import (
-    classify_processing_path,
-    reconcile_processing_current_path,
+from lib.download_processing import (
+    Completed,
+    CompletionDeferred,
+    CompletionDispatched,
+    CompletionFailed,
+    CompletionResult,
+    ProcessAlbumFn,
 )
 from lib.download_reconstruction import (
     reconstruct_grab_list_entry as _reconstruct_grab_list_entry,
 )
-from lib.grab_list import GrabListEntry, DownloadFile
+from lib.download_recovery import (
+    classify_processing_path,
+    reconcile_processing_current_path,
+)
+from lib.grab_list import DownloadFile, GrabListEntry
+from lib.import_queue import (
+    IMPORT_JOB_AUTOMATION,
+    ImportJob,
+    automation_import_dedupe_key,
+    automation_import_payload,
+)
 from lib.processing_paths import (
     attempt_fingerprint,
     canonical_folder_for_row,
     directory_has_entries,
     processing_albums_dir,
 )
-from lib.quality import (ActiveDownloadState, ActiveDownloadFileState,
-                         CooldownConfig,
-                         FileFailureDetail,
-                         PollCycleConfig,
-                         PollCycleDecision,
-                         PollCycleSnapshot,
-                         PollFileSnapshot,
-                         reduce_poll_cycle,
-                         extract_usernames)
-from lib import transitions
-from lib.dispatch import _build_download_info
-from lib.import_queue import (
-    IMPORT_JOB_AUTOMATION,
-    ImportJob,
-    automation_import_dedupe_key,
-    automation_import_payload,
+from lib.quality import (
+    ActiveDownloadFileState,
+    ActiveDownloadState,
+    CooldownConfig,
+    FileFailureDetail,
+    PollCycleConfig,
+    PollCycleDecision,
+    PollCycleSnapshot,
+    PollFileSnapshot,
+    extract_usernames,
+    reduce_poll_cycle,
 )
 from lib.slskd_client import DownloadUser
 from lib.slskd_transfers import (
@@ -206,7 +213,7 @@ def build_active_download_state(
     (which NULL ``active_download_state`` inline) wipe it. See
     ``docs/advisory-locks.md``.
     """
-    enqueued_at_value = enqueued_at or datetime.now(timezone.utc).isoformat()
+    enqueued_at_value = enqueued_at or datetime.now(UTC).isoformat()
     files = [
         ActiveDownloadFileState(
             username=f.username,
@@ -648,7 +655,7 @@ def _run_completed_processing(
                 entry,
                 processing_albums_dir(ctx.cfg.processing_dir),
             )
-        state.processing_started_at = datetime.now(timezone.utc).isoformat()
+        state.processing_started_at = datetime.now(UTC).isoformat()
         if not _persist_updated_download_state(db, request_id, entry, state):
             return CompletionDeferred(
                 detail="request_state_changed_before_local_processing",
@@ -789,10 +796,11 @@ def materialize_failure_action(
 ) -> str:
     """Decide what the poller does with a non-``Materialized`` outcome.
 
-    - ``"leave"`` — ``MaterializeGuarded`` marks paths needing manual
-      recovery; NEVER auto-reset those, regardless of age. (Also the
-      no-op answer if ``materialized`` is actually ``Materialized`` —
-      callers only invoke this after already excluding that case.)
+    - ``"leave"`` — ``MaterializeGuarded`` means this caller must not apply
+      a generic reset: either manual recovery owns the path or a successful
+      abandonment already reset and audited it. (Also the no-op answer if
+      ``materialized`` is actually ``Materialized`` — callers only invoke
+      this after already excluding that case.)
     - ``"retry"`` — ``MaterializeFailed`` within the grace window retries
       next cycle (covers the benign completion-vs-event-write race,
       which resolves on the next ingest).
@@ -808,7 +816,7 @@ def materialize_failure_action(
     except ValueError:
         return "retry"
     if started.tzinfo is None:
-        started = started.replace(tzinfo=timezone.utc)
+        started = started.replace(tzinfo=UTC)
     if (now - started).total_seconds() > grace_seconds:
         return "reset"
     return "retry"
@@ -846,7 +854,7 @@ def _enqueue_completed_processing(
         action = materialize_failure_action(
             materialized,
             state.processing_started_at,
-            datetime.now(timezone.utc),
+            datetime.now(UTC),
         )
         # ``materialize_failure_action`` answers "reset" only for
         # ``MaterializeFailed`` (``MaterializeGuarded`` is always
@@ -996,15 +1004,6 @@ def _processing_path_ready_for_importer(
         return False
 
     assert isinstance(result, MaterializeFailed)
-    # This gate writes no ``download_log`` row (deliberately — it fails
-    # closed BEFORE any import attempt exists to audit), so the journal is
-    # the only place the cause can land. Name it (issue #868).
-    logger.warning(
-        "PRE-ENQUEUE GATE RESET: request_id=%s reason=%s current_path=%s",
-        request_id,
-        result.reason,
-        state.current_path,
-    )
     transitions.require_transition_applied(transitions.finalize_request(
         db,
         request_id,
@@ -1013,6 +1012,20 @@ def _processing_path_ready_for_importer(
             attempt_type="download",
         ),
     ))
+    db.log_download(
+        request_id=request_id,
+        soulseek_username=None,
+        filetype=state.filetype,
+        outcome="failed",
+        beets_detail=result.reason,
+        error_message=result.reason,
+    )
+    logger.warning(
+        "PRE-ENQUEUE GATE RESET: request_id=%s reason=%s current_path=%s",
+        request_id,
+        result.reason,
+        state.current_path,
+    )
     return False
 
 
@@ -1176,7 +1189,7 @@ def _poll_one_active_download(
         ),
         completion_current_path=completion_current_path,
     )
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     result = reduce_poll_cycle(
         state,
         snapshot,
@@ -1261,7 +1274,7 @@ def _poll_one_active_download(
     assert state is not None
     transfer_ids = {
         (file.username, file.filename): observation.transfer_id
-        for file, observation in zip(state.files, snapshot.files)
+        for file, observation in zip(state.files, snapshot.files, strict=False)
         if observation.transfer_id is not None
     }
     entry = _reconstruct_grab_list_entry(
@@ -1353,7 +1366,7 @@ def _poll_one_active_download(
     # Still in progress — log and continue to next album
     enqueued_at = datetime.fromisoformat(state.enqueued_at)
     if enqueued_at.tzinfo is None:
-        enqueued_at = enqueued_at.replace(tzinfo=timezone.utc)
+        enqueued_at = enqueued_at.replace(tzinfo=UTC)
     elapsed_seconds = (now - enqueued_at).total_seconds()
     files_done = sum(
         1 for file in state.files
@@ -1367,10 +1380,10 @@ def _poll_one_active_download(
 # === Top-level orchestration ===
 
 def grab_most_wanted(
-    albums: "list[AlbumRecord]",
+    albums: list[AlbumRecord],
     search_and_queue: Callable[
         ...,
-        "tuple[dict[int, GrabListEntry], list[AlbumRecord], list[AlbumRecord]]",
+        tuple[dict[int, GrabListEntry], list[AlbumRecord], list[AlbumRecord]],
     ],
     ctx: CratediggerContext,
 ) -> int:

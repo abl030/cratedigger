@@ -1,28 +1,19 @@
-#!/usr/bin/env python3
 """Contract tests for pipeline mutation routes (add/update/delete/ban-source/...).
 
 Split from tests/test_web_server.py (#408). Shared harness in
 tests/web/_harness.py.
 """
-
 import json
 import os
 import sys
 import tempfile
 import unittest
 from contextlib import contextmanager
+from typing import ClassVar
 from unittest.mock import patch
-
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from tests.web._harness import (
-    _assert_required_fields,
-    _FakeDbWebServerCase,
-)
-
-from tests.fakes import FakeBeetsDB, FakePipelineDB
-from tests.helpers import make_request_row
 from lib import transitions
 from lib.beets_delete import (
     BeetsDeleteCompleted,
@@ -39,6 +30,12 @@ from lib.force_import_service import (
     RESULT_UNAUTHORIZED_PATH,
 )
 from lib.transitions import TransitionConflict, TransitionConflictKind
+from tests.fakes import FakeBeetsDB, FakePipelineDB
+from tests.helpers import make_request_row
+from tests.web._harness import (
+    _assert_required_fields,
+    _FakeDbWebServerCase,
+)
 
 
 def _completed_beets_delete(request: BeetsDeleteRequest) -> BeetsDeleteCompleted:
@@ -126,24 +123,24 @@ class _RacingRequestFieldsDB(FakePipelineDB):
 class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
     """Contract tests for frontend-consumed pipeline mutation routes."""
 
-    ADD_REQUIRED_FIELDS = {"status", "id", "artist", "album", "tracks"}
-    EXISTS_REQUIRED_FIELDS = {"status", "id", "current_status"}
-    UPDATE_REQUIRED_FIELDS = {"status", "id", "new_status"}
-    UPGRADE_REQUIRED_FIELDS = {
+    ADD_REQUIRED_FIELDS: ClassVar = {"status", "id", "artist", "album", "tracks"}
+    EXISTS_REQUIRED_FIELDS: ClassVar = {"status", "id", "current_status"}
+    UPDATE_REQUIRED_FIELDS: ClassVar = {"status", "id", "new_status"}
+    UPGRADE_REQUIRED_FIELDS: ClassVar = {
         "status", "id", "min_bitrate", "search_filetype_override",
     }
-    SET_QUALITY_REQUIRED_FIELDS = {"status", "id", "new_status", "min_bitrate"}
-    SET_INTENT_REQUIRED_FIELDS = {
+    SET_QUALITY_REQUIRED_FIELDS: ClassVar = {"status", "id", "new_status", "min_bitrate"}
+    SET_INTENT_REQUIRED_FIELDS: ClassVar = {
         "status", "id", "intent", "target_format", "requeued",
     }
-    BAN_SOURCE_REQUIRED_FIELDS = {
+    BAN_SOURCE_REQUIRED_FIELDS: ClassVar = {
         "status", "username", "beets_removed", "hashes_recorded",
         "request_status",
     }
-    FORCE_IMPORT_REQUIRED_FIELDS = {
+    FORCE_IMPORT_REQUIRED_FIELDS: ClassVar = {
         "status", "request_id", "artist", "album", "message",
     }
-    DELETE_REQUIRED_FIELDS = {"status", "id"}
+    DELETE_REQUIRED_FIELDS: ClassVar = {"status", "id"}
 
     def setUp(self) -> None:
         super().setUp()

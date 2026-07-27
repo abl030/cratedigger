@@ -12,11 +12,10 @@ from __future__ import annotations
 import subprocess
 import unittest
 
-import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
-
 from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from tests.test_test_tmpfs import (
     LOW_HEADROOM_MINIMUM_BYTES,
     assert_tmpfs_setup_failure_contract,
@@ -24,7 +23,6 @@ from tests.test_test_tmpfs import (
     run_tmpfs_setup_and_print_tmpdir,
     tmpfs_runtime_root,
 )
-
 
 _INHERITED_TMPDIR_NAMES = st.from_regex(
     r"[A-Za-z0-9_-]{1,24}",

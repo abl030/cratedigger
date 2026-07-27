@@ -3,22 +3,20 @@
 Mix of pure file-discovery tests (no DB) and integration tests against
 the ephemeral PostgreSQL fixture from ``conftest.py``.
 """
-
 import os
 import pathlib
 import shutil
 import sys
 import tempfile
 import unittest
+from typing import ClassVar
 
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401 — sets TEST_DB_DSN env var
+import psycopg2
+from psycopg2.extensions import make_dsn
 
-
-import psycopg2  # noqa: E402
-from psycopg2.extensions import make_dsn  # noqa: E402
-
-from lib.migrator import (  # noqa: E402
+from lib.migrator import (
     DEFAULT_MIGRATIONS_DIR,
     Migration,
     SchemaBehindError,
@@ -83,11 +81,10 @@ class TestDiscoverMigrations(unittest.TestCase):
 
     def test_rejects_malformed_filename(self):
         for filename in ["no_number.sql", "001-bad-dashes.sql"]:
-            with self.subTest(filename=filename):
-                with tempfile.TemporaryDirectory() as d:
-                    self._write(d, filename)
-                    with self.assertRaises(ValueError):
-                        discover_migrations(d)
+            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as d:
+                self._write(d, filename)
+                with self.assertRaises(ValueError):
+                    discover_migrations(d)
 
     def test_rejects_short_prefix(self):
         """Migration filenames must use the documented three-digit prefix."""
@@ -138,7 +135,7 @@ class TestApplyMigrations(unittest.TestCase):
     """
 
     # Test-only tables we may create. Tracked so tearDown can drop them all.
-    _TEST_TABLES = [
+    _TEST_TABLES: ClassVar = [
         "migrator_test_t1",
         "migrator_test_t2",
         "migrator_test_t3",
@@ -610,14 +607,13 @@ class TestPersistedSearchPlansSchema(unittest.TestCase):
                 "SELECT id FROM search_plans WHERE request_id = %s", (rid,)
             )[0][0]
             for bad_query in ("", "   ", "\t\n"):
-                with self.subTest(q=repr(bad_query)):
-                    with self.assertRaises(psycopg2.errors.CheckViolation):
-                        self._exec(
-                            "INSERT INTO search_plan_items "
-                            "(plan_id, ordinal, strategy, query) "
-                            "VALUES (%s, %s, %s, %s)",
-                            (plan_id, 0, "default", bad_query),
-                        )
+                with self.subTest(q=repr(bad_query)), self.assertRaises(psycopg2.errors.CheckViolation):
+                    self._exec(
+                        "INSERT INTO search_plan_items "
+                        "(plan_id, ordinal, strategy, query) "
+                        "VALUES (%s, %s, %s, %s)",
+                        (plan_id, 0, "default", bad_query),
+                    )
         finally:
             self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
 
@@ -818,10 +814,9 @@ class TestAlbumQualityEvidenceSchema(unittest.TestCase):
                 (245, "installed", "carried"),
             ),
         ):
-            with self.subTest(fact_columns=fact_columns):
-                with self.assertRaises(psycopg2.errors.CheckViolation):
-                    self._exec(
-                        f"""
+            with self.subTest(fact_columns=fact_columns), self.assertRaises(psycopg2.errors.CheckViolation):
+                self._exec(
+                    f"""
                         INSERT INTO album_quality_evidence (
                             mb_release_id, snapshot_fingerprint, source_path,
                             measured_at, format, lineage_version,
@@ -833,8 +828,8 @@ class TestAlbumQualityEvidenceSchema(unittest.TestCase):
                             {LEGACY_UNRECORDED_AUDIO_VALIDATION_SQL}
                         )
                         """,
-                        (fact_columns, *fact_values),
-                    )
+                    (fact_columns, *fact_values),
+                )
 
     def test_v3_unknown_legacy_values_remain_deploy_safe(self):
         mbid = "aqe-two-axis-legacy"
@@ -3341,6 +3336,7 @@ class TestDownloadLogOutcomeTaxonomySync(unittest.TestCase):
 
     def test_literal_matches_latest_migration_check(self):
         import re
+
         from lib.migrator import DEFAULT_MIGRATIONS_DIR
         from lib.pipeline_db import DOWNLOAD_LOG_OUTCOMES
 
@@ -3365,6 +3361,7 @@ class TestPinStatusTaxonomySync(unittest.TestCase):
 
     def test_literals_match_latest_named_migration_checks(self):
         import re
+
         from lib.pipeline_db import JELLYFIN_PIN_STATUSES, PLEX_PIN_STATUSES
 
         expected = {
@@ -3692,9 +3689,8 @@ class TestQualityEvidenceLineageVersionMigration(unittest.TestCase):
         conn = psycopg2.connect(TEST_DSN)
         conn.autocommit = True
         try:
-            with conn.cursor() as cur:
-                with self.assertRaises(psycopg2.errors.CheckViolation):
-                    cur.execute(f"""
+            with conn.cursor() as cur, self.assertRaises(psycopg2.errors.CheckViolation):
+                cur.execute(f"""
                         INSERT INTO album_quality_evidence (
                             mb_release_id, snapshot_fingerprint,
                             source_path, measured_at, lineage_version,
@@ -4952,7 +4948,7 @@ class TestSimplifySlskdTransferOwnershipCurrentSchema(unittest.TestCase):
 class TestMissingMigrationVersions(unittest.TestCase):
     """Pure set-difference decision — deterministic pin half of the PAIR."""
 
-    CASES: list[tuple[str, set[int], set[int], list[int]]] = [
+    CASES: ClassVar[list[tuple[str, set[int], set[int], list[int]]]] = [
         ("current -- fully applied", {1, 2, 3}, {1, 2, 3}, []),
         ("one behind", {1, 2}, {1, 2, 3}, [3]),
         ("several behind, nothing applied", set(), {1, 2, 3}, [1, 2, 3]),

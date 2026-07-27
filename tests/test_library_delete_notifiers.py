@@ -1,13 +1,12 @@
-#!/usr/bin/env python3
 """Deletion-specific Plex/Jellyfin notification contracts."""
 
 from __future__ import annotations
 
 import io
-from email.message import Message
 import tempfile
 import unittest
 import urllib.error
+from email.message import Message
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 

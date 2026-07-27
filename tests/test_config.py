@@ -737,9 +737,8 @@ class TestMainCLIParsing(unittest.TestCase):
             raise self._StopMain()
 
         with patch.object(sys, "argv", argv), \
-             patch("lib.config.CratediggerConfig.from_ini", side_effect=fake_from_ini):
-            with self.assertRaises(self._StopMain):
-                cratedigger.main()
+             patch("lib.config.CratediggerConfig.from_ini", side_effect=fake_from_ini), self.assertRaises(self._StopMain):
+            cratedigger.main()
 
     def test_missing_config_exits_with_error(self):
         """main() exits 1 when config.ini doesn't exist at --config-dir."""
@@ -748,9 +747,8 @@ class TestMainCLIParsing(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             with patch.object(sys, "argv", [
                 "cratedigger", "--config-dir", d, "--var-dir", d, "--no-lock-file"
-            ]):
-                with self.assertRaises(SystemExit) as cm:
-                    cratedigger.main()
+            ]), self.assertRaises(SystemExit) as cm:
+                cratedigger.main()
             self.assertEqual(cm.exception.code, 1)
 
     def test_config_dir_resolves_config_path(self):

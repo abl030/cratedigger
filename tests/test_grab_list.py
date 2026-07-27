@@ -10,25 +10,25 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from lib.grab_list import GrabListEntry, DownloadFile
+from lib.grab_list import DownloadFile, GrabListEntry
 from lib.quality import SpectralMeasurement
 from lib.slskd_client import TransferSnapshot
 
 
 def _make_entry(**overrides):
     """Helper: construct a minimal GrabListEntry with sensible defaults."""
-    defaults = dict(
-        album_id=-42,
-        files=[DownloadFile(filename="01 - Track.mp3", id="abc", username="user1",
+    defaults = {
+        "album_id": -42,
+        "files": [DownloadFile(filename="01 - Track.mp3", id="abc", username="user1",
                            file_dir="\\Music\\Album", size=5000000)],
-        filetype="mp3",
-        title="Test Album",
-        artist="Test Artist",
-        year="2024",
-        mb_release_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-    )
+        "filetype": "mp3",
+        "title": "Test Album",
+        "artist": "Test Artist",
+        "year": "2024",
+        "mb_release_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    }
     defaults.update(overrides)
-    return GrabListEntry(**defaults)  # type: ignore[arg-type]
+    return GrabListEntry(**defaults)
 
 
 class TestConstruction(unittest.TestCase):
@@ -152,15 +152,15 @@ class TestLifecycle(unittest.TestCase):
 
 def _make_file(**overrides):
     """Helper: construct a minimal DownloadFile with sensible defaults."""
-    defaults = dict(
-        filename="\\Music\\Artist\\Album\\01 - Track.mp3",
-        id="abc-123",
-        file_dir="\\Music\\Artist\\Album",
-        username="testuser",
-        size=5000000,
-    )
+    defaults = {
+        "filename": "\\Music\\Artist\\Album\\01 - Track.mp3",
+        "id": "abc-123",
+        "file_dir": "\\Music\\Artist\\Album",
+        "username": "testuser",
+        "size": 5000000,
+    }
     defaults.update(overrides)
-    return DownloadFile(**defaults)  # type: ignore[arg-type]
+    return DownloadFile(**defaults)
 
 
 class TestDownloadFileConstruction(unittest.TestCase):

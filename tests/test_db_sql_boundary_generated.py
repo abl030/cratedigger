@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generated fail-closed tests for the attempt SQL boundary.
 
 The deterministic pin lives in ``tests/test_pipeline_db.py``. This property
@@ -10,10 +9,10 @@ from __future__ import annotations
 
 import unittest
 
-import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from hypothesis import given
 from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.pipeline_db.requests import _RequestsMixin
 
 

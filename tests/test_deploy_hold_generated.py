@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import unittest
 
-from hypothesis import example, given, strategies as st
+from hypothesis import example, given
+from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401
 from scripts.cratedigger_deploy_hold import (
     MAIN_SERVICE,
     MAIN_TIMER,
@@ -21,7 +23,6 @@ from scripts.cratedigger_deploy_hold import (
     prepare_controlled,
     recover_held,
 )
-import tests._hypothesis_profiles  # noqa: F401
 from tests.fakes.deploy_hold import FakeDeployHoldBackend
 
 
@@ -97,24 +98,21 @@ def job_worlds(
 
 
 class TestGeneratedHoldLifecycle(unittest.TestCase):
-    @given(interrupt_publication=st.booleans())
-    @example(interrupt_publication=True)
-    def test_atomic_receipt_publication_retry_precedes_hold_mutation(
-        self,
-        interrupt_publication: bool,
-    ) -> None:
-        backend = FakeDeployHoldBackend(
-            interrupt_receipt_publication=interrupt_publication,
-        )
-        if interrupt_publication:
-            with self.assertRaises(InterruptedError):
-                acquire_hold(backend)
-            self.assertFalse(backend.receipt)
-            self.assertFalse(backend.manual_hold)
-            self.assertEqual(backend.control_links, {})
+    def test_atomic_receipt_publication_retry_precedes_hold_mutation(self) -> None:
+        for interrupt_publication in (False, True):
+            with self.subTest(interrupt_publication=interrupt_publication):
+                backend = FakeDeployHoldBackend(
+                    interrupt_receipt_publication=interrupt_publication,
+                )
+                if interrupt_publication:
+                    with self.assertRaises(InterruptedError):
+                        acquire_hold(backend)
+                    self.assertFalse(backend.receipt)
+                    self.assertFalse(backend.manual_hold)
+                    self.assertEqual(backend.control_links, {})
 
-        acquire_hold(backend)
-        assert_held_invariants(backend)
+                acquire_hold(backend)
+                assert_held_invariants(backend)
 
     @given(release_phase=st.integers(min_value=0, max_value=3))
     @example(release_phase=3)

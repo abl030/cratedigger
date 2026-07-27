@@ -1,20 +1,26 @@
-#!/usr/bin/env python3
 """Deterministic authority and importer-race pins for destructive actions."""
 
 from __future__ import annotations
 
 import json
-import unittest
-import threading
 import os
 import sys
 import tempfile
+import threading
+import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
 from beets import library
 
+from lib.beets_db import BeetsDB, CurrentBeetsMissing
+from lib.beets_delete import (
+    BeetsDeleteCompleted,
+    BeetsDeleteFailed,
+    BeetsDeleteRequest,
+    run_beets_delete,
+)
 from lib.destructive_release_service import (
     BanSourceBeetsAmbiguous,
     BanSourceCleanupIncomplete,
@@ -24,9 +30,9 @@ from lib.destructive_release_service import (
     BanSourceRequest,
     BanSourceSuccess,
     BanSourceTransitionConflict,
-    DeleteImporterBusy,
     DeleteAlbumAuthorityMismatch,
     DeleteBeetsAmbiguous,
+    DeleteImporterBusy,
     DeleteIncomplete,
     DeleteLockContended,
     DeleteReleaseMismatch,
@@ -35,27 +41,19 @@ from lib.destructive_release_service import (
     ban_source,
     delete_release_from_library,
 )
-from lib.beets_db import BeetsDB, CurrentBeetsMissing
-from lib.beets_delete import (
-    BeetsDeleteCompleted,
-    BeetsDeleteFailed,
-    BeetsDeleteRequest,
-    run_beets_delete,
-)
+from lib.import_queue import IMPORT_JOB_AUTOMATION
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_IMPORT,
     ADVISORY_LOCK_NAMESPACE_RELEASE,
     PipelineDB,
     release_id_to_lock_key,
 )
-from lib.import_queue import IMPORT_JOB_AUTOMATION
-from lib.transitions import TransitionConflict, TransitionConflictKind
 from lib.release_identity import ReleaseIdentity
-from tests.fakes import FakeBeetsDB, FakePipelineDB
+from lib.transitions import TransitionConflict, TransitionConflictKind
 from tests.beets_world import BeetsWorld, BeetsWorldRelease
+from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_request_row
 from tests.test_pipeline_db import TEST_DSN, make_db, requires_postgres
-
 
 RELEASE_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 RELEASE_B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
@@ -658,72 +656,71 @@ class TestDestructiveCurrentAuthorityRealBeets(unittest.TestCase):
             ("discogs-legacy", DISCOGS_A, True),
         )
         for name, release_id, legacy in worlds:
-            with self.subTest(identity=name):
-                with BeetsWorld(
-                    REPO,
-                    subprocess_mirror_url="http://127.0.0.1:9",
-                ) as world:
-                    world.import_release(BeetsWorldRelease(
-                        release_id=release_id,
-                        artist="Archive Artist",
-                        album="Exact Pressing",
-                        year=2001,
-                        track_count=2,
-                    ))
-                    if name.startswith("discogs"):
-                        world.set_discogs_identity_layout(
-                            release_id,
-                            legacy=legacy,
-                        )
-                    moved = world.relocate_release_out_of_band(
+            with self.subTest(identity=name), BeetsWorld(
+                REPO,
+                subprocess_mirror_url="http://127.0.0.1:9",
+            ) as world:
+                world.import_release(BeetsWorldRelease(
+                    release_id=release_id,
+                    artist="Archive Artist",
+                    album="Exact Pressing",
+                    year=2001,
+                    track_count=2,
+                ))
+                if name.startswith("discogs"):
+                    world.set_discogs_identity_layout(
                         release_id,
-                        world.library_root / name / "fresh moved album",
-                        store_relative_paths=True,
+                        legacy=legacy,
                     )
-                    pipeline = FakePipelineDB()
-                    pipeline.seed_request(make_request_row(
-                        id=41,
-                        status="imported",
-                        mb_release_id=release_id,
-                        discogs_release_id=(
-                            release_id if name.startswith("discogs") else None
+                moved = world.relocate_release_out_of_band(
+                    release_id,
+                    world.library_root / name / "fresh moved album",
+                    store_relative_paths=True,
+                )
+                pipeline = FakePipelineDB()
+                pipeline.seed_request(make_request_row(
+                    id=41,
+                    status="imported",
+                    mb_release_id=release_id,
+                    discogs_release_id=(
+                        release_id if name.startswith("discogs") else None
+                    ),
+                ))
+                hashed: list[str] = []
+                with (
+                    world.subprocess_environment(),
+                    patch(
+                        "lib.destructive_release_service.hash_audio_content",
+                        side_effect=lambda path, _format, hashed=hashed: (
+                            hashed.append(str(path)) or f"hash:{Path(path).name}"
                         ),
-                    ))
-                    hashed: list[str] = []
-                    with (
-                        world.subprocess_environment(),
-                        patch(
-                            "lib.destructive_release_service.hash_audio_content",
-                            side_effect=lambda path, _format: (
-                                hashed.append(str(path)) or f"hash:{Path(path).name}"
-                            ),
-                        ),
-                        BeetsDB(
-                            str(world.library_db),
-                            library_root=str(world.library_root),
-                        ) as beets,
-                    ):
-                        result = ban_source(
-                            pipeline_db=pipeline,
-                            beets_db=beets,
-                            request=BanSourceRequest(41),
-                        )
-
-                    self.assertIsInstance(result, BanSourceSuccess)
-                    self.assertEqual(hashed, list(moved.item_paths))
-                    self.assertTrue(
-                        all(not Path(path).exists() for path in moved.item_paths)
-                    )
-                    with BeetsDB(
+                    ),
+                    BeetsDB(
                         str(world.library_db),
                         library_root=str(world.library_root),
-                    ) as beets:
-                        identity = ReleaseIdentity.from_id(release_id)
-                        assert identity is not None
-                        self.assertIsInstance(
-                            beets.resolve_current_release(identity),
-                            CurrentBeetsMissing,
-                        )
+                    ) as beets,
+                ):
+                    result = ban_source(
+                        pipeline_db=pipeline,
+                        beets_db=beets,
+                        request=BanSourceRequest(41),
+                    )
+
+                self.assertIsInstance(result, BanSourceSuccess)
+                self.assertEqual(hashed, list(moved.item_paths))
+                self.assertTrue(
+                    all(not Path(path).exists() for path in moved.item_paths)
+                )
+                with BeetsDB(
+                    str(world.library_db),
+                    library_root=str(world.library_root),
+                ) as beets:
+                    identity = ReleaseIdentity.from_id(release_id)
+                    assert identity is not None
+                    self.assertIsInstance(
+                        beets.resolve_current_release(identity),
+                        CurrentBeetsMissing,
+                    )
 
     def test_library_delete_real_duplicate_authority_preserves_all_files(
         self,
@@ -985,12 +982,11 @@ class TestDestructiveAuthorityRealPostgres(unittest.TestCase):
             try:
                 with observer.advisory_lock(
                     ADVISORY_LOCK_NAMESPACE_IMPORT, request_id,
-                ) as import_free:
-                    with observer.advisory_lock(
-                        ADVISORY_LOCK_NAMESPACE_RELEASE,
-                        release_id_to_lock_key(RELEASE_A),
-                    ) as release_free:
-                        notifier_saw_released_locks = import_free and release_free
+                ) as import_free, observer.advisory_lock(
+                    ADVISORY_LOCK_NAMESPACE_RELEASE,
+                    release_id_to_lock_key(RELEASE_A),
+                ) as release_free:
+                    notifier_saw_released_locks = import_free and release_free
             finally:
                 observer.close()
             return ()

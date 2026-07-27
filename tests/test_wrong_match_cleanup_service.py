@@ -7,12 +7,21 @@ import shutil
 import tempfile
 import types
 import unittest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import msgspec
 
+from lib.import_evidence import (
+    ActionEvidenceProvenance,
+    CurrentEvidenceActionResult,
+)
+from lib.import_preview import (
+    PREVIEW_VERDICT_EVIDENCE_READY,
+    PREVIEW_VERDICT_MEASUREMENT_FAILED,
+    ImportPreviewResult,
+)
 from lib.quality import (
     AlbumQualityEvidence,
     AlbumQualityEvidenceFile,
@@ -22,18 +31,8 @@ from lib.quality import (
     VerifiedLosslessProof,
     legacy_unrecorded_audio_validation_report,
 )
-from lib.import_preview import (
-    PREVIEW_VERDICT_EVIDENCE_READY,
-    PREVIEW_VERDICT_MEASUREMENT_FAILED,
-    ImportPreviewResult,
-)
 from lib.quality_evidence import snapshot_audio_files, snapshot_fingerprint
-from lib.import_evidence import (
-    ActionEvidenceProvenance,
-    CurrentEvidenceActionResult,
-)
 from lib.validation_envelope import decode_validation_envelope
-from lib.wrong_matches import WrongMatchCleanupResult
 from lib.wrong_match_cleanup_service import (
     OUTCOME_DELETE_FAILED,
     OUTCOME_DELETED,
@@ -49,6 +48,7 @@ from lib.wrong_match_cleanup_service import (
     cleanup_all_wrong_matches,
     cleanup_wrong_match,
 )
+from lib.wrong_matches import WrongMatchCleanupResult
 from tests.fakes import FakePipelineDB
 from tests.helpers import (
     make_audio_corrupt_validation_report,
@@ -117,7 +117,7 @@ def _evidence(
             spectral_subject="source",
             spectral_provenance="measured",
         ),
-        measured_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        measured_at=datetime(2026, 5, 1, tzinfo=UTC),
         files=files,
         codec="mp3",
         container="mp3",
@@ -449,7 +449,7 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
 
     def test_stuck_skip_outcomes_persist_recents_triage_audit(self) -> None:
         """Issue #271: stuck skips leave an audit row the UI can render."""
-        source, log_id = self._make_stale_row("audit-stale-source")
+        _source, log_id = self._make_stale_row("audit-stale-source")
         preview_fn = _refresh_stub(
             verdict=PREVIEW_VERDICT_MEASUREMENT_FAILED,
             reason="snapshot_stale",

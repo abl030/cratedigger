@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Drain the shared import queue through one beets-mutating lane."""
 
 from __future__ import annotations
@@ -36,22 +35,22 @@ from lib.download_processing import (
     CompletionResult,
     ProcessAlbumFn,
 )
+from lib.import_manifest import audio_relative_paths
 from lib.import_queue import (
-    ForceImportPayload,
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
     IMPORT_JOB_YOUTUBE,
+    ForceImportPayload,
     ImportJob,
     YoutubeImportPayload,
 )
-from lib.terminal_outcomes import ImportJobTerminal
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_IMPORTER,
     DEFAULT_DSN,
     PipelineDB,
 )
-from lib.import_manifest import audio_relative_paths
 from lib.quality import ActiveDownloadFileState, ActiveDownloadState
+from lib.terminal_outcomes import ImportJobTerminal
 from lib.youtube_ingest_service import (
     YOUTUBE_IMPORT_ALLOWED_REQUEST_STATUSES,
 )
@@ -120,7 +119,7 @@ def _run_post_commit_cleanup(
                     download_log_id,
                     audit,
                 )
-            except Exception as exc:  # noqa: BLE001 - commit already stands
+            except Exception as exc:
                 logger.exception(
                     "Failed to persist post-commit audio quarantine audit"
                 )
@@ -151,7 +150,7 @@ def _run_post_commit_cleanup(
                 "path_missing": quarantine.path_missing,
                 "error": quarantine.error,
             }
-        except Exception as exc:  # noqa: BLE001 - terminal commit must stand
+        except Exception as exc:
             logger.exception("Post-commit duplicate-guard quarantine failed")
             details["duplicate_guard_quarantine"] = {
                 "source_path": plan.duplicate_guard_source_path,
@@ -167,7 +166,7 @@ def _run_post_commit_cleanup(
                 "path": plan.staged_path,
                 "success": True,
             }
-        except Exception as exc:  # noqa: BLE001 - terminal commit must stand
+        except Exception as exc:
             logger.exception("Post-commit staged-path cleanup failed")
             details["staged_path"] = {
                 "path": plan.staged_path,
@@ -182,7 +181,7 @@ def _force_job_wrong_match_payload(job: ImportJob) -> tuple[int, str | None] | N
     if job.job_type != IMPORT_JOB_FORCE:
         return None
     if not isinstance(job.payload, ForceImportPayload):
-        raise AssertionError("force_import payload type mismatch")
+        raise TypeError("force_import payload type mismatch")
     return job.payload.download_log_id, job.payload.failed_path
 
 
@@ -543,15 +542,15 @@ def execute_youtube_import_job(
     the staged audio manifest, so the rejection paths inside
     ``_handle_rejected_result`` find no peers to denylist.
     """
-    from lib.download_reconstruction import reconstruct_grab_list_entry
     from lib.download_processing import process_completed_album
+    from lib.download_reconstruction import reconstruct_grab_list_entry
 
     request_id = job.request_id
     if request_id is None:
         return DispatchOutcome(False, "YouTube import job has no request_id")
 
     if not isinstance(job.payload, YoutubeImportPayload):
-        raise AssertionError("youtube_import payload type mismatch")
+        raise TypeError("youtube_import payload type mismatch")
     payload = job.payload
 
     row = db.get_request(request_id)

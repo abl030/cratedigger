@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import argparse
 import json
-from typing import Callable, Optional, TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from scripts.pipeline_cli._format import _json_default
 
@@ -16,7 +17,7 @@ if TYPE_CHECKING:
 
 
 def cmd_beets_distance(
-    db: "BeetsDistancePipelineDB", args: argparse.Namespace,
+    db: BeetsDistancePipelineDB, args: argparse.Namespace,
 ) -> int:
     """Real beets-distance between a download_log's failed_path and an MBID.
 
@@ -46,7 +47,7 @@ def cmd_beets_distance(
     from web import discogs as discogs_api
     from web import mb as mb_api
 
-    get_release_fn: Callable[[str], Optional[dict[str, object]]]
+    get_release_fn: Callable[[str], dict[str, object] | None]
     if detect_release_source(args.mbid) == "discogs":
         get_release_fn = lambda m: discogs_api.get_release(int(m), fresh=False)
     else:

@@ -9,8 +9,11 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from lib.util import _normalize_title, _extract_title_from_filename, _track_titles_cross_check
-
+from lib.util import (
+    _extract_title_from_filename,
+    _normalize_title,
+    _track_titles_cross_check,
+)
 
 # === Helper to build test data ===
 

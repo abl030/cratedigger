@@ -86,6 +86,10 @@ production never returns; Rule C stops a fixture from feeding an *input*
 production never emits. Both failures look identical from inside the test:
 green, fluent, and describing a world that does not exist.
 
+Rule C also applies when a docstring or PR claims a generated-test guard or
+carve-out is load-bearing: prove it with a producible generated world or named
+live evidence, not a hand-written impossible world.
+
 **Forbidden anti-pattern:**
 
 ```python

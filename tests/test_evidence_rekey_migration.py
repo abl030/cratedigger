@@ -28,27 +28,25 @@ import sys
 import tempfile
 import unittest
 import uuid
-from typing import Sequence
+from collections.abc import Sequence
 from unittest.mock import patch
 
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401 — sets TEST_DB_DSN env var
+import psycopg2
+from psycopg2.extensions import make_dsn, parse_dsn
 
-
-import psycopg2  # noqa: E402
-from psycopg2.extensions import make_dsn, parse_dsn  # noqa: E402
-
-from lib.migrator import (  # noqa: E402
+from lib.migrator import (
     DEFAULT_MIGRATIONS_DIR,
     apply_migrations,
     discover_migrations,
 )
-from lib.quality import AlbumQualityEvidenceFile  # noqa: E402
-from lib.quality_evidence import snapshot_fingerprint  # noqa: E402
+from lib.quality import AlbumQualityEvidenceFile
+from lib.quality_evidence import snapshot_fingerprint
 
 TEST_DSN: str = os.environ.get("TEST_DB_DSN") or ""
 
-EMPTY_FILESET_FINGERPRINT = hashlib.sha256("[]".encode("utf-8")).hexdigest()
+EMPTY_FILESET_FINGERPRINT = hashlib.sha256(b"[]").hexdigest()
 
 
 def requires_postgres(cls):

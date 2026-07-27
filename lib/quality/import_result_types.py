@@ -5,7 +5,8 @@ Pure move: every definition is AST-identical to the original.
 """
 
 import json
-from typing import Any, Optional
+from typing import Any, Self
+
 import msgspec
 
 from lib.quality.audio_validation import (
@@ -13,18 +14,17 @@ from lib.quality.audio_validation import (
     AudioValidationReport,
 )
 from lib.quality.evidence_types import (
-    AudioQualityMeasurement,
-    CodecFamily,
     EVIDENCE_PROVENANCE_CARRIED,
     EVIDENCE_PROVENANCE_MEASURED,
     EVIDENCE_SUBJECT_INSTALLED,
     EVIDENCE_SUBJECT_SOURCE,
+    AudioQualityMeasurement,
+    CodecFamily,
     QualityComparisonBasis,
     TargetQualityContract,
     V0ProbeEvidence,
     VerifiedLosslessProof,
 )
-
 
 IMPORT_RESULT_SENTINEL = "__IMPORT_RESULT__"
 
@@ -42,16 +42,16 @@ class ConversionInfo(msgspec.Struct):
     converted: int = 0
     failed: int = 0
     was_converted: bool = False
-    original_filetype: Optional[str] = None
-    target_filetype: Optional[str] = None
-    post_conversion_min_bitrate: Optional[int] = None  # min bitrate after lossless→V0
+    original_filetype: str | None = None
+    target_filetype: str | None = None
+    post_conversion_min_bitrate: int | None = None  # min bitrate after lossless→V0
     is_transcode: bool = False  # True if FLAC was actually a transcode
-    final_format: Optional[str] = None  # e.g. "opus 128", "mp3 v2", "aac 128"
+    final_format: str | None = None  # e.g. "opus 128", "mp3 v2", "aac 128"
     # Source channel count read off the first source file before conversion.
     # ``> 2`` means the ffmpeg invocation downmixed multichannel → stereo;
     # 5.1(side) FLAC otherwise breaks libopus outright (Mott / r3852). None
     # for legacy rows or when the probe fails.
-    source_channels: Optional[int] = None
+    source_channels: int | None = None
     diagnostics: list[AudioToolDiagnostic] = msgspec.field(
         default_factory=list[AudioToolDiagnostic]
     )
@@ -68,29 +68,29 @@ class SpectralTrackDetail(msgspec.Struct, frozen=True):
     grade: str
     hf_deficit_db: float = 0.0
     cliff_detected: bool = False
-    cliff_freq_hz: Optional[int] = None
-    estimated_bitrate_kbps: Optional[int] = None
-    error: Optional[str] = None
+    cliff_freq_hz: int | None = None
+    estimated_bitrate_kbps: int | None = None
+    error: str | None = None
 
 
 class SpectralAnalysisDetail(msgspec.Struct, frozen=True):
     """Complete audit result for one side of an import attempt."""
 
     attempted: bool = False
-    grade: Optional[str] = None
-    bitrate_kbps: Optional[int] = None
-    suspect_pct: Optional[float] = None
+    grade: str | None = None
+    bitrate_kbps: int | None = None
+    suspect_pct: float | None = None
     per_track: list[SpectralTrackDetail] = msgspec.field(
         default_factory=list[SpectralTrackDetail]
     )
-    error: Optional[str] = None
+    error: str | None = None
     # issue #829 Phase 5 PR1 capture — album-level facts from
     # ``lib.spectral_check.AlbumResult``. Pure passengers: never read by any
     # decision in this PR.
-    cliff_hz: Optional[int] = None
+    cliff_hz: int | None = None
     codec_family: CodecFamily | None = None
-    ultrasonic_deficit_db: Optional[float] = None
-    spectral_measurement_version: Optional[int] = None
+    ultrasonic_deficit_db: float | None = None
+    spectral_measurement_version: int | None = None
 
 
 class SpectralDetail(msgspec.Struct):
@@ -101,14 +101,14 @@ class SpectralDetail(msgspec.Struct):
     This carries the per-track detail data that doesn't fit on a measurement.
     Wire-boundary type per ``.claude/rules/code-quality.md``.
     """
-    cliff_freq_hz: Optional[int] = None
+    cliff_freq_hz: int | None = None
     suspect_pct: float = 0.0
     per_track: list[SpectralTrackDetail] = []
     existing_suspect_pct: float = 0.0
     # Attempt-local display audit. These are deliberately disjoint from
     # source/current measurements, which remain the decision inputs.
-    candidate: Optional[SpectralAnalysisDetail] = None
-    existing: Optional[SpectralAnalysisDetail] = None
+    candidate: SpectralAnalysisDetail | None = None
+    existing: SpectralAnalysisDetail | None = None
 
 
 # Issue #133 unified the historical ``DisambiguationFailure`` and destructive
@@ -160,7 +160,7 @@ class MovedSibling(msgspec.Struct, frozen=True):
 class DuplicateRemoveCandidate(msgspec.Struct, frozen=True):
     """One beets album that ``get_duplicate_action`` said Beets would remove."""
 
-    beets_album_id: Optional[int] = None
+    beets_album_id: int | None = None
     mb_albumid: str = ""
     discogs_albumid: str = ""
     album_path: str = ""
@@ -182,8 +182,8 @@ class DuplicateRemoveGuardInfo(msgspec.Struct):
     duplicate_count: int = 0
     candidates: list[DuplicateRemoveCandidate] = []
     message: str = ""
-    quarantine_path: Optional[str] = None
-    quarantine_error: Optional[str] = None
+    quarantine_path: str | None = None
+    quarantine_error: str | None = None
 
 
 class PostflightInfo(msgspec.Struct):
@@ -192,16 +192,16 @@ class PostflightInfo(msgspec.Struct):
     Wire-boundary type per ``.claude/rules/code-quality.md`` — nested
     in ``ImportResult.postflight``, flows through ``download_log``.
     """
-    beets_id: Optional[int] = None
-    track_count: Optional[int] = None
-    imported_path: Optional[str] = None
+    beets_id: int | None = None
+    track_count: int | None = None
+    imported_path: str | None = None
     bad_extensions: list[str] = []  # files with non-audio extensions
     # Legacy issue #127 / #132 fields. New imports do not run post-import
     # ``beet move``; these remain for old import-result rows and web recents.
     disambiguated: bool = False
-    disambiguation_failure: Optional[DisambiguationFailure] = None
+    disambiguation_failure: DisambiguationFailure | None = None
     moved_siblings: list[MovedSibling] = []
-    duplicate_remove_guard: Optional[DuplicateRemoveGuardInfo] = None
+    duplicate_remove_guard: DuplicateRemoveGuardInfo | None = None
     # Beets albums the dup-guard ALLOWED beets to remove during this import —
     # the replaced pre-upgrade copies. Their ``album_path``s are where the
     # album lived before a path-changing upgrade, which is what the Jellyfin
@@ -276,16 +276,16 @@ class ImportResult(msgspec.Struct):
     """
     version: int = 4
     exit_code: int = 0
-    decision: Optional[str] = None      # from import_quality_decision() or error label
+    decision: str | None = None      # from import_quality_decision() or error label
     already_in_beets: bool = False
-    source_measurement: Optional[AudioQualityMeasurement] = None
-    verified_lossless_proof: Optional[VerifiedLosslessProof] = None
-    current_measurement: Optional[AudioQualityMeasurement] = None
-    target_quality_contract: Optional[TargetQualityContract] = None
-    materialized_measurement: Optional[AudioQualityMeasurement] = None
+    source_measurement: AudioQualityMeasurement | None = None
+    verified_lossless_proof: VerifiedLosslessProof | None = None
+    current_measurement: AudioQualityMeasurement | None = None
+    target_quality_contract: TargetQualityContract | None = None
+    materialized_measurement: AudioQualityMeasurement | None = None
     # Set only by the quarantined v1/v2/v3 reader. New v4 producers never
     # infer lineage from historical equality or label heuristics.
-    legacy_projection_version: Optional[int] = None
+    legacy_projection_version: int | None = None
     conversion: ConversionInfo = msgspec.field(default_factory=ConversionInfo)
     spectral: SpectralDetail = msgspec.field(default_factory=SpectralDetail)
     postflight: PostflightInfo = msgspec.field(default_factory=PostflightInfo)
@@ -295,14 +295,14 @@ class ImportResult(msgspec.Struct):
     # validate-time ``beets_distance`` column. Queryable via
     # ``import_result->>'apply_beets_distance'`` (issue #863 — journal-only
     # apply distance hid the tagless-match inflation).
-    apply_beets_distance: Optional[float] = None
-    error: Optional[str] = None
+    apply_beets_distance: float | None = None
+    error: str | None = None
     # Target-conversion audit trail — V0 bitrate that proved genuineness
-    v0_verification_bitrate: Optional[int] = None
-    final_format: Optional[str] = None  # configured target, None means keep V0/MP3
+    v0_verification_bitrate: int | None = None
+    final_format: str | None = None  # configured target, None means keep V0/MP3
     preview: bool = False              # True for no-mutation import preview
-    v0_probe: Optional[V0ProbeEvidence] = None
-    existing_v0_probe: Optional[V0ProbeEvidence] = None
+    v0_probe: V0ProbeEvidence | None = None
+    existing_v0_probe: V0ProbeEvidence | None = None
     quality_evidence_provenance: QualityEvidenceActionProvenance = msgspec.field(
         default_factory=QualityEvidenceActionProvenance
     )
@@ -310,7 +310,7 @@ class ImportResult(msgspec.Struct):
     # re-derived "MP3 V2 to MP3 V2" from min bitrate while the decider ranked
     # on avg). None on rows predating the field and when no existing album
     # was compared — the UI falls back to the legacy min-based labels.
-    comparison_basis: Optional[QualityComparisonBasis] = None
+    comparison_basis: QualityComparisonBasis | None = None
 
     def to_json(self) -> str:
         """Serialize to JSON string via msgspec.json.encode."""
@@ -354,7 +354,7 @@ class ImportResult(msgspec.Struct):
         return IMPORT_RESULT_SENTINEL + self.to_json()
 
     @classmethod
-    def _migrate_v1(cls, d: dict[str, object]) -> "ImportResult":
+    def _migrate_v1(cls, d: dict[str, object]) -> Self:
         """Project version 1 (QualityInfo + SpectralInfo) into the v4 model.
 
         v1 rows in production (~226 on doc2 as of 2026-04) carry
@@ -384,7 +384,7 @@ class ImportResult(msgspec.Struct):
             "was_converted_from": (conv_d.get("original_filetype")
                                    if conv_d.get("was_converted") else None),
         }
-        existing_measurement: Optional[dict[str, Any]] = None
+        existing_measurement: dict[str, Any] | None = None
         if quality.get("prev_min_bitrate") is not None:
             existing_measurement = {
                 "min_bitrate_kbps": quality.get("prev_min_bitrate"),
@@ -419,7 +419,7 @@ class ImportResult(msgspec.Struct):
         d: dict[str, Any],
         *,
         source_version: int = 2,
-    ) -> "ImportResult":
+    ) -> Self:
         """Quarantine the ambiguous v1/v2 measurement shape.
 
         Historical ``new_measurement`` sometimes combined V0-probe numbers
@@ -461,7 +461,7 @@ class ImportResult(msgspec.Struct):
         return msgspec.convert(projected, type=cls)
 
     @classmethod
-    def _project_legacy_v3(cls, d: dict[str, Any]) -> "ImportResult":
+    def _project_legacy_v3(cls, d: dict[str, Any]) -> Self:
         """Project persisted v3 facts into the explicit v4 two-axis model.
 
         The base v3 writer put verified-lossless on the source measurement and
@@ -580,7 +580,7 @@ class ImportResult(msgspec.Struct):
         return projected
 
     @classmethod
-    def from_dict(cls, d: dict[str, object]) -> "ImportResult":
+    def from_dict(cls, d: dict[str, object]) -> Self:
         """Construct from a dict (e.g. parsed JSON).
 
         Handles historical v1/v2/v3 rows through quarantined projections and
@@ -642,12 +642,12 @@ class ImportResult(msgspec.Struct):
         return result
 
     @classmethod
-    def from_json(cls, s: str) -> "ImportResult":
+    def from_json(cls, s: str) -> Self:
         """Deserialize from JSON string."""
         return cls.from_dict(json.loads(s))
 
 
-def parse_import_result(stdout_text: str) -> Optional[ImportResult]:
+def parse_import_result(stdout_text: str) -> ImportResult | None:
     """Extract ImportResult from import_one.py stdout.
 
     Scans from the last line backward for the sentinel prefix.
