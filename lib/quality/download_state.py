@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 
 import msgspec
 
-from lib.quality.evidence_types import V0ProbeEvidence
+from lib.quality.evidence_types import CodecFamily, V0ProbeEvidence
 
 # --- Download state reducer (pure decision for async poller) ---
 
@@ -209,19 +209,42 @@ def decide_download_action(
 
 @dataclass(frozen=True)
 class SpectralMeasurement:
-    """One spectral analysis result pair."""
+    """One spectral analysis result pair.
+
+    ``cliff_hz``/``codec_family``/``ultrasonic_deficit_db``/
+    ``spectral_measurement_version`` are issue #829 Phase 5 PR1 capture
+    fields — pure passengers carried alongside ``grade``/``bitrate_kbps``
+    from a fresh ``SpectralAnalysisDetail`` measurement into
+    ``AudioQualityMeasurement``. No decision reads them in this PR.
+    """
     grade: str | None = None
     bitrate_kbps: int | None = None
+    cliff_hz: int | None = None
+    codec_family: CodecFamily | None = None
+    ultrasonic_deficit_db: float | None = None
+    spectral_measurement_version: int | None = None
 
     @staticmethod
     def from_parts(
         grade: str | None,
         bitrate_kbps: int | None,
+        *,
+        cliff_hz: int | None = None,
+        codec_family: CodecFamily | None = None,
+        ultrasonic_deficit_db: float | None = None,
+        spectral_measurement_version: int | None = None,
     ) -> "SpectralMeasurement | None":
         """Build a measurement when any spectral data exists, else None."""
         if grade is None and bitrate_kbps is None:
             return None
-        return SpectralMeasurement(grade=grade, bitrate_kbps=bitrate_kbps)
+        return SpectralMeasurement(
+            grade=grade,
+            bitrate_kbps=bitrate_kbps,
+            cliff_hz=cliff_hz,
+            codec_family=codec_family,
+            ultrasonic_deficit_db=ultrasonic_deficit_db,
+            spectral_measurement_version=spectral_measurement_version,
+        )
 
 
 # ---------------------------------------------------------------------------

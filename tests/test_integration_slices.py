@@ -34,6 +34,7 @@ from lib.quality import (
     ValidationResult,
     legacy_unrecorded_audio_validation_report,
 )
+from lib.spectral_check import AlbumResult
 from lib.staged_album import StagedAlbum
 from tests.fakes import (
     FakeBeetsDB,
@@ -1204,7 +1205,7 @@ class TestSpectralPropagationSlice(unittest.TestCase):
         def analyze(path: str, trim_seconds: int = 30):
             del trim_seconds
             existing = path == "/Beets/Test"
-            return SimpleNamespace(
+            return AlbumResult(
                 grade="genuine" if existing else "suspect",
                 estimated_bitrate_kbps=320 if existing else 128,
                 suspect_pct=0.0 if existing else 90.0,
@@ -1281,7 +1282,7 @@ class TestSpectralPropagationSlice(unittest.TestCase):
 
         with patch(
             "lib.measurement.spectral_analyze",
-            return_value=SimpleNamespace(
+            return_value=AlbumResult(
                 grade="suspect",
                 estimated_bitrate_kbps=128,
                 suspect_pct=90.0,
@@ -1337,7 +1338,7 @@ class TestSpectralPropagationSlice(unittest.TestCase):
 
         with patch(
             "lib.measurement.spectral_analyze",
-            return_value=SimpleNamespace(
+            return_value=AlbumResult(
                 grade="suspect",
                 estimated_bitrate_kbps=280,
                 suspect_pct=90.0,
@@ -1436,7 +1437,7 @@ class TestSpectralPropagationOnAccept(unittest.TestCase):
         def analyze(path: str, trim_seconds: int = 30):
             del trim_seconds
             existing = path == "/Beets/Test"
-            return SimpleNamespace(
+            return AlbumResult(
                 grade="likely_transcode" if existing else "suspect",
                 estimated_bitrate_kbps=96 if existing else 256,
                 suspect_pct=100.0 if existing else 70.0,
@@ -1493,7 +1494,7 @@ class TestSpectralPropagationOnAccept(unittest.TestCase):
 
         with patch(
             "lib.measurement.spectral_analyze",
-            return_value=SimpleNamespace(
+            return_value=AlbumResult(
                 grade="suspect",
                 estimated_bitrate_kbps=192,
                 suspect_pct=60.0,
@@ -7838,7 +7839,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
             def analyze(path: str, trim_seconds: int = 30):
                 del trim_seconds
                 analyzer_calls.append(path)
-                return SimpleNamespace(
+                return AlbumResult(
                     grade="genuine",
                     estimated_bitrate_kbps=None,
                     suspect_pct=0.0,

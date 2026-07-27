@@ -109,6 +109,7 @@ from lib.quality import (
     V0_PROBE_NATIVE_LOSSY_RESEARCH,
     AlbumQualityEvidence,
     AlbumQualityV0Metric,
+    CodecFamily,
     CooldownConfig,
 )
 from lib.release_identity import (
@@ -3197,10 +3198,19 @@ class FakePipelineDB:
         # R19 is the exception: new lossless lineage clears a stored
         # installed-subject tuple because those derivative bytes are not an
         # authoritative spectral subject.
+        #
+        # This condition mirrors the real SQL's CASE guard exactly (issue
+        # #829 Phase 5 PR1 review round 2, should-fix 7) — it does NOT
+        # additionally require ``existing.measurement.spectral_grade is not
+        # None``. The SQL's ELSE (preserve-stored) branch fires whenever
+        # ``lineage_version >= 4 AND EXCLUDED.spectral_grade IS NULL AND NOT
+        # exception``, regardless of what the STORED grade already was; an
+        # earlier draft of this fake added that extra precondition, which a
+        # previous version of this comment claimed (wrongly) was already an
+        # exact mirror.
         if (
             existing is not None
             and existing.lineage_version >= 4
-            and existing.measurement.spectral_grade is not None
             and evidence.measurement.spectral_grade is None
             and not (
                 incoming_lossless_lineage
@@ -3208,6 +3218,9 @@ class FakePipelineDB:
                     == EVIDENCE_SUBJECT_INSTALLED
             )
         ):
+            # cliff_hz/codec_family/ultrasonic_deficit_db/
+            # spectral_measurement_version are measured in the same pass as
+            # spectral_grade, so they preserve under the exact same guard.
             evidence = msgspec.structs.replace(
                 evidence,
                 measurement=msgspec.structs.replace(
@@ -3219,6 +3232,14 @@ class FakePipelineDB:
                     spectral_subject=existing.measurement.spectral_subject,
                     spectral_provenance=(
                         existing.measurement.spectral_provenance
+                    ),
+                    cliff_hz=existing.measurement.cliff_hz,
+                    codec_family=existing.measurement.codec_family,
+                    ultrasonic_deficit_db=(
+                        existing.measurement.ultrasonic_deficit_db
+                    ),
+                    spectral_measurement_version=(
+                        existing.measurement.spectral_measurement_version
                     ),
                 ),
             )
@@ -3350,6 +3371,10 @@ class FakePipelineDB:
         expected_snapshot_fingerprint: str,
         grade: str,
         bitrate_kbps: int | None,
+        cliff_hz: int | None = None,
+        codec_family: CodecFamily | None = None,
+        ultrasonic_deficit_db: float | None = None,
+        spectral_measurement_version: int | None = None,
     ) -> bool:
         request = self._requests.get(int(request_id))
         evidence = self._evidence_by_id.get(int(expected_evidence_id))
@@ -3364,12 +3389,18 @@ class FakePipelineDB:
         # spectral with the fresh measured installed-subject audit. The old
         # fill-only-if-NULL guard is gone; mirrors the production SQL. The R19
         # lossless-lineage CHECK still fires in _store_album_quality_evidence.
+        # The four capture facts (issue #829 phase 5) travel with the grade
+        # as one atomic fact, mirroring the production SQL column list.
         measurement = msgspec.structs.replace(
             evidence.measurement,
             spectral_grade=grade,
             spectral_bitrate_kbps=bitrate_kbps,
             spectral_subject=EVIDENCE_SUBJECT_INSTALLED,
             spectral_provenance=EVIDENCE_PROVENANCE_MEASURED,
+            cliff_hz=cliff_hz,
+            codec_family=codec_family,
+            ultrasonic_deficit_db=ultrasonic_deficit_db,
+            spectral_measurement_version=spectral_measurement_version,
         )
         completed = msgspec.structs.replace(
             evidence,

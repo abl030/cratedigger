@@ -31,6 +31,19 @@ EVIDENCE_SUBJECT_SOURCE: EvidenceSubject = "source"
 EVIDENCE_PROVENANCE_MEASURED: EvidenceProvenance = "measured"
 EVIDENCE_PROVENANCE_CARRIED: EvidenceProvenance = "carried"
 
+# issue #829 Phase 5 PR1 — the six measured codec families
+# ``AudioQualityMeasurement.codec_family`` is restricted to (mirrored by
+# migration 065's CHECK constraint). A Literal here, not a bare ``str``,
+# so msgspec catches a drifted value at the wire boundary (harness stdout,
+# JSONB) instead of psycopg2 raising a CheckViolation 500 on write.
+CodecFamily = Literal["mp3", "aac", "opus", "vorbis", "lossless", "other"]
+CODEC_FAMILY_MP3: CodecFamily = "mp3"
+CODEC_FAMILY_AAC: CodecFamily = "aac"
+CODEC_FAMILY_OPUS: CodecFamily = "opus"
+CODEC_FAMILY_VORBIS: CodecFamily = "vorbis"
+CODEC_FAMILY_LOSSLESS: CodecFamily = "lossless"
+CODEC_FAMILY_OTHER: CodecFamily = "other"
+
 
 # ---------------------------------------------------------------------------
 # Audio quality measurement — ground truth from ffprobe + spectral
@@ -85,6 +98,23 @@ class AudioQualityMeasurement(msgspec.Struct, frozen=True):
     spectral_subject: EvidenceSubject | None = None
     spectral_provenance: EvidenceProvenance | None = None
     was_converted_from: str | None = None
+    # issue #829 Phase 5 PR1 — measured facts captured alongside the
+    # spectral tuple above (same subject/provenance, same measurement
+    # pass). Pure passengers: no decision reads them in this PR.
+    #   cliff_hz:                 raw in-window cliff frequency (Hz) —
+    #                              exactly what detect_cliff() returns,
+    #                              vs. spectral_bitrate_kbps's bucketed
+    #                              interpretation of the same fact.
+    #   codec_family:              mp3/aac/opus/vorbis/lossless/other.
+    #   ultrasonic_deficit_db:     level-invariant ultrasonic deficit
+    #                              (PR3's proof-leg statistic).
+    #   spectral_measurement_version: 2 for rows measured by the PR1+
+    #                              spectral_check code; None for legacy
+    #                              rows (forward-only, no backfill).
+    cliff_hz: int | None = None
+    codec_family: CodecFamily | None = None
+    ultrasonic_deficit_db: float | None = None
+    spectral_measurement_version: int | None = None
 
     def new_row_validation_errors(
         self,
@@ -127,6 +157,24 @@ class AudioQualityMeasurement(msgspec.Struct, frozen=True):
             if self.spectral_subject is not None or self.spectral_provenance is not None:
                 errors.append(
                     "spectral markers require a spectral grade"
+                )
+            # issue #829 Phase 5 PR1: cliff_hz/codec_family/
+            # ultrasonic_deficit_db/spectral_measurement_version are
+            # measured in the SAME pass as spectral_grade — a row with no
+            # grade cannot legitimately carry any of them. Note this is
+            # deliberately one-directional: a spectral_grade WITHOUT these
+            # four fields stays valid (every pre-PR1 legacy row, forward-
+            # only per scope.md).
+            if (
+                self.cliff_hz is not None
+                or self.codec_family is not None
+                or self.ultrasonic_deficit_db is not None
+                or self.spectral_measurement_version is not None
+            ):
+                errors.append(
+                    "spectral capture facts (cliff_hz/codec_family/"
+                    "ultrasonic_deficit_db/spectral_measurement_version) "
+                    "require a spectral grade"
                 )
         elif self.spectral_subject is None or self.spectral_provenance is None:
             errors.append(

@@ -19,6 +19,7 @@ from lib.quality.evidence_types import (
     EVIDENCE_SUBJECT_INSTALLED,
     EVIDENCE_SUBJECT_SOURCE,
     AudioQualityMeasurement,
+    CodecFamily,
     QualityComparisonBasis,
     TargetQualityContract,
     V0ProbeEvidence,
@@ -83,6 +84,13 @@ class SpectralAnalysisDetail(msgspec.Struct, frozen=True):
         default_factory=list[SpectralTrackDetail]
     )
     error: str | None = None
+    # issue #829 Phase 5 PR1 capture — album-level facts from
+    # ``lib.spectral_check.AlbumResult``. Pure passengers: never read by any
+    # decision in this PR.
+    cliff_hz: int | None = None
+    codec_family: CodecFamily | None = None
+    ultrasonic_deficit_db: float | None = None
+    spectral_measurement_version: int | None = None
 
 
 class SpectralDetail(msgspec.Struct):

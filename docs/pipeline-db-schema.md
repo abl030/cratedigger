@@ -62,6 +62,22 @@ Key fields:
   `spectral_provenance`, `was_converted_from` — the wrapped
   `AudioQualityMeasurement` facts. The measurement has no verified-lossless
   boolean; an observation about bytes cannot assert acquisition completion.
+- `cliff_hz`, `codec_family`, `ultrasonic_deficit_db`,
+  `spectral_measurement_version` — issue #829 Phase 5 PR1 measured facts
+  captured in the SAME pass as `spectral_grade` above (one atomic fact,
+  eight columns wide — a stale writer without a grade preserves all eight
+  together, and none of the four may be non-NULL without a grade).
+  `cliff_hz` is the raw in-window cliff frequency (Hz) `detect_cliff()`
+  returns — `spectral_bitrate_kbps` is only its bucketed interpretation.
+  `codec_family` is `mp3` / `aac` / `opus` / `vorbis` / `lossless` / `other`
+  (CHECK-constrained), resolved from the real probed codec for the two
+  containers extension cannot disambiguate (`.ogg`, `.m4a`).
+  `ultrasonic_deficit_db` is the level-invariant ultrasonic deficit
+  (`ref_db(1-4kHz) - mean(20.5-22kHz slices)`, averaged across tracks) —
+  PR3's proof-leg statistic; not read by any decision yet.
+  `spectral_measurement_version` is `2` for rows measured by the PR1+
+  `lib/spectral_check.py` code; NULL for legacy rows (forward-only, no
+  backfill — `.claude/rules/scope.md`).
 - `audio_validation JSONB NOT NULL` — the bounded typed report from the
   audio-only strict FFmpeg policy. New reports are `passed`,
   `audio_corrupt`, or `skipped`; the migration uses `legacy_failure` for
