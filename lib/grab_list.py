@@ -9,7 +9,6 @@ Attribute-only access. No dict compatibility — use .field, not ["field"].
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 from lib.quality import SpectralMeasurement
 from lib.slskd_client import TransferSnapshot
@@ -29,15 +28,15 @@ class GrabListEntry:
     mb_release_id: str
 
     # Optional: DB mode
-    db_request_id: Optional[int] = None
-    db_source: Optional[str] = None           # "request" or "redownload"
-    db_search_filetype_override: Optional[str] = None
-    db_target_format: Optional[str] = None
+    db_request_id: int | None = None
+    db_source: str | None = None           # "request" or "redownload"
+    db_search_filetype_override: str | None = None
+    db_target_format: str | None = None
 
     # Transient: process_completed_album
-    import_folder: Optional[str] = None
+    import_folder: str | None = None
     download_spectral: SpectralMeasurement | None = None
-    current_min_bitrate: Optional[int] = None
+    current_min_bitrate: int | None = None
     current_spectral: SpectralMeasurement | None = None
 
 
@@ -54,26 +53,26 @@ class DownloadFile:
     size: int               # File size in bytes
 
     # Audio metadata (optional, from slskd search results)
-    bitRate: Optional[int] = None
-    sampleRate: Optional[int] = None
-    bitDepth: Optional[int] = None
-    isVariableBitRate: Optional[bool] = None
+    bitRate: int | None = None
+    sampleRate: int | None = None
+    bitDepth: int | None = None
+    isVariableBitRate: bool | None = None
 
     # Multi-disc (optional, set in try_multi_enqueue)
-    disk_no: Optional[int] = None
-    disk_count: Optional[int] = None
+    disk_no: int | None = None
+    disk_count: int | None = None
 
     # Transient: poll_active_downloads
-    status: Optional[TransferSnapshot] = None   # typed slskd transfer snapshot (#468)
-    retry: Optional[int] = None     # retry counter, initialized on error
-    bytes_transferred: Optional[int] = None
-    last_state: Optional[str] = None
+    status: TransferSnapshot | None = None   # typed slskd transfer snapshot (#468)
+    retry: int | None = None     # retry counter, initialized on error
+    bytes_transferred: int | None = None
+    last_state: str | None = None
     # slskd's real per-transfer failure reason (issue #564), mirrored
     # from TransferSnapshot.exception and persisted alongside last_state.
-    last_exception: Optional[str] = None
+    last_exception: str | None = None
     # slskd's authoritative post-rename local path, stamped from the
     # DownloadFileComplete event stream (issue #146 phase 1).
-    local_path: Optional[str] = None
+    local_path: str | None = None
 
     # Transient: process_completed_album
-    import_path: Optional[str] = None
+    import_path: str | None = None

@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import msgspec
 
@@ -116,7 +116,7 @@ class TestWriteSidecarHappyPath(_SidecarServiceCase):
             self.beets,
             REQUEST_ID,
             mb_release_id=MBID,
-            generated_at=datetime(2026, 6, 18, tzinfo=timezone.utc),
+            generated_at=datetime(2026, 6, 18, tzinfo=UTC),
         )
         self.assertEqual(result.outcome, "written")
         self.assertEqual(

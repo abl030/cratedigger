@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Current-Beets authority laws for evidence consumers (issue #762)."""
 
 from __future__ import annotations
@@ -9,14 +8,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import patch
 
-from hypothesis import HealthCheck, example, given, settings, strategies as st
+from hypothesis import HealthCheck, example, given, settings
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
 from lib.beets_db import BeetsDB
 from lib.import_evidence import (
-    ActionEvidenceProvenance,
     CURRENT_STATUS_FAILED,
     CURRENT_STATUS_LOADED,
+    ActionEvidenceProvenance,
     CurrentEvidenceActionResult,
     load_current_evidence_for_action,
 )
@@ -27,7 +27,6 @@ from lib.sidecar_service import write_sidecar_for_request
 from tests.beets_world import BeetsWorld, BeetsWorldRelease
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_album_quality_evidence, make_request_row
-
 
 REPO = Path(__file__).resolve().parent.parent
 MB_RELEASE_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -281,26 +280,24 @@ class TestCurrentEvidenceAuthorityPins(unittest.TestCase):
                 assert current is not None
                 self.assertTrue(current.provenance.fail_closed)
                 self.assertIn("ValueError", current.provenance.fallback_reason or "")
-            with self.subTest(consumer="refresh", db_path=db_path, root=library_root):
-                with self.assertRaisesRegex(ValueError, "supplied together"):
-                    _refresh_current_evidence_after_import(
-                        db,
-                        request_id=42,
-                        mb_release_id=MB_RELEASE_ID,
-                        quality_ranks=None,
-                        beets_library_db_path=db_path,
-                        beets_library_root=library_root,
-                    )
-            with self.subTest(consumer="sidecar", db_path=db_path, root=library_root):
-                with self.assertRaisesRegex(ValueError, "supplied together"):
-                    _write_album_sidecar_after_import(
-                        db,
-                        request_id=42,
-                        mb_release_id=MB_RELEASE_ID,
-                        cfg=None,
-                        beets_library_db_path=db_path,
-                        beets_library_root=library_root,
-                    )
+            with self.subTest(consumer="refresh", db_path=db_path, root=library_root), self.assertRaisesRegex(ValueError, "supplied together"):
+                _refresh_current_evidence_after_import(
+                    db,
+                    request_id=42,
+                    mb_release_id=MB_RELEASE_ID,
+                    quality_ranks=None,
+                    beets_library_db_path=db_path,
+                    beets_library_root=library_root,
+                )
+            with self.subTest(consumer="sidecar", db_path=db_path, root=library_root), self.assertRaisesRegex(ValueError, "supplied together"):
+                _write_album_sidecar_after_import(
+                    db,
+                    request_id=42,
+                    mb_release_id=MB_RELEASE_ID,
+                    cfg=None,
+                    beets_library_db_path=db_path,
+                    beets_library_root=library_root,
+                )
 
     def test_real_duplicate_exact_identity_is_failed_not_missing(self) -> None:
         with BeetsWorld(REPO) as world:

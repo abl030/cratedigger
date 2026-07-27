@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import argparse
 import ast
-from pathlib import Path
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from harness import import_one
-
 
 IMPORT_ONE_PATH = Path("harness/import_one.py")
 
@@ -17,10 +16,10 @@ IMPORT_ONE_PATH = Path("harness/import_one.py")
 def parser_destinations(parser: argparse.ArgumentParser) -> frozenset[str]:
     """Return data destinations while rejecting unsupported parser shapes."""
     destinations: set[str] = set()
-    for action in parser._actions:  # noqa: SLF001 - argparse has no public action API
-        if isinstance(action, argparse._HelpAction):  # noqa: SLF001
+    for action in parser._actions:
+        if isinstance(action, argparse._HelpAction):
             continue
-        assert not isinstance(action, argparse._SubParsersAction), (  # noqa: SLF001
+        assert not isinstance(action, argparse._SubParsersAction), (
             "import_one argparse audit does not support subparsers"
         )
         assert action.default != argparse.SUPPRESS, (

@@ -48,7 +48,7 @@ def quarantine_corrupt_audio_source(
             scenario="audio_corrupt",
             quarantine_root=quarantine_root,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         error = _bounded_error(exc)
         logger.warning(
             "AUDIO QUARANTINE FAILED: source=%s error=%s",

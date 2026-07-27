@@ -10,7 +10,6 @@ from hypothesis import strategies as st
 import tests._hypothesis_profiles  # noqa: F401 - registers active profile
 from scripts.audit_issue_references import find_closing_issue_references
 
-
 _CLOSERS = (
     "close",
     "closes",

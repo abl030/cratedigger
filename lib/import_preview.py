@@ -22,7 +22,7 @@ import stat
 from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Protocol, TYPE_CHECKING, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import msgspec
 
@@ -36,55 +36,6 @@ from lib.evidence_action_file import (
     remove_quality_evidence_action_file,
     write_quality_evidence_action_file,
 )
-from lib.measurement import (
-    ExistingSpectralResolver,
-    PreimportMeasurement,
-    SpectralDetailAnalyzer,
-    analyze_spectral_audit_path,
-    inspect_local_files,
-    measure_preimport_state,
-    spectral_detail_from_persisted_source,
-)
-from lib.quality_evidence import (
-    EvidenceBuildResult,
-    QualityEvidenceDB,
-    audio_snapshot_matches,
-    current_evidence_rebuild_reasons,
-    load_or_backfill_current_evidence,
-    audit_v0_probe_from_metric,
-    evidence_from_measurement,
-    neutral_v0_metric_from_probe,
-    persist_candidate_evidence_from_import_result,
-    persist_candidate_evidence_from_measurement,
-    snapshot_audio_files,
-    snapshot_fingerprint,
-)
-from lib.quality import (
-    LOSSLESS_CODECS,
-    EVIDENCE_SUBJECT_SOURCE,
-    AlbumQualityEvidence,
-    AlbumQualityEvidenceFile,
-    AlbumQualityV0Metric,
-    AudioQualityMeasurement,
-    AudioValidationMeasurementError,
-    AudioValidationReport,
-    ImportResult,
-    MeasurementFailure,
-    MeasurementFailureReason,
-    QUALITY_DECISION_IMPORT_STAGE_DECISIONS,
-    QualityRankConfig,
-    QualityEvidenceActionPayload,
-    QualityEvidenceActionProvenance,
-    SpectralAnalysisDetail,
-    SpectralDetail,
-    TargetQualityContract,
-    V0ProbeEvidence,
-    classify_full_pipeline_decision,
-    classify_quality_import_stages,
-    compute_effective_override_bitrate,
-    full_pipeline_decision,
-    quality_gate_decision,
-)
 from lib.fs_authority import (
     FilesystemAuthorityError,
     copy_opened_file,
@@ -96,14 +47,63 @@ from lib.fs_authority import (
     open_regular_relative,
     remove_relative_tree,
 )
+from lib.measurement import (
+    ExistingSpectralResolver,
+    PreimportMeasurement,
+    SpectralDetailAnalyzer,
+    analyze_spectral_audit_path,
+    inspect_local_files,
+    measure_preimport_state,
+    spectral_detail_from_persisted_source,
+)
 from lib.processing_paths import (
     path_is_within_root,
     processing_albums_dir,
     processing_preview_dir,
 )
+from lib.quality import (
+    EVIDENCE_SUBJECT_SOURCE,
+    LOSSLESS_CODECS,
+    QUALITY_DECISION_IMPORT_STAGE_DECISIONS,
+    AlbumQualityEvidence,
+    AlbumQualityEvidenceFile,
+    AlbumQualityV0Metric,
+    AudioQualityMeasurement,
+    AudioValidationMeasurementError,
+    AudioValidationReport,
+    ImportResult,
+    MeasurementFailure,
+    MeasurementFailureReason,
+    QualityEvidenceActionPayload,
+    QualityEvidenceActionProvenance,
+    QualityRankConfig,
+    SpectralAnalysisDetail,
+    SpectralDetail,
+    TargetQualityContract,
+    V0ProbeEvidence,
+    classify_full_pipeline_decision,
+    classify_quality_import_stages,
+    compute_effective_override_bitrate,
+    full_pipeline_decision,
+    quality_gate_decision,
+)
+from lib.quality_evidence import (
+    EvidenceBuildResult,
+    QualityEvidenceDB,
+    audio_snapshot_matches,
+    audit_v0_probe_from_metric,
+    current_evidence_rebuild_reasons,
+    evidence_from_measurement,
+    load_or_backfill_current_evidence,
+    neutral_v0_metric_from_probe,
+    persist_candidate_evidence_from_import_result,
+    persist_candidate_evidence_from_measurement,
+    snapshot_audio_files,
+    snapshot_fingerprint,
+)
 from lib.util import repair_mp3_headers
-from lib.validation_envelope import decode_validation_envelope
 from lib.v0_probe import probe_installed_album_as_v0
+from lib.validation_envelope import decode_validation_envelope
 
 logger = logging.getLogger("cratedigger")
 
@@ -143,7 +143,7 @@ def _preview_available_bytes(preview_fd: int) -> int:
 @contextmanager
 def _preview_copy_lock(
     cfg: CratediggerConfig,
-) -> Generator[int, None, None]:
+) -> Generator[int]:
     """Serialize bounded source snapshots before they consume private disk.
 
     The lock intentionally covers only the untrusted-tree copy and its
@@ -152,12 +152,14 @@ def _preview_copy_lock(
     """
     with open_private_processing_root(
         cfg.processing_dir, cfg.slskd_download_dir,
-    ) as processing_fd:
+    ) as processing_fd, exclusive_relative_lock(
+        processing_fd, ".preview-snapshot.lock",
+    ), open_private_child_directory(
+        processing_fd, "preview",
+    ) as preview_fd:
         # Keep locks out of the aged preview directory: its contents are
         # ephemeral snapshots and tmpfiles may prune them independently.
-        with exclusive_relative_lock(processing_fd, ".preview-snapshot.lock"):
-            with open_private_child_directory(processing_fd, "preview") as preview_fd:
-                yield preview_fd
+        yield preview_fd
 
 
 def _assert_preview_space(
@@ -383,17 +385,14 @@ def retain_preview_snapshot_for_force_action(
     action_name = f"force-action-{import_job_id}"
     with open_private_processing_root(
         cfg.processing_dir, cfg.slskd_download_dir,
-    ) as processing_fd:
-        with open_private_child_directory(processing_fd, "preview") as preview_fd:
-            with open_private_child_directory(processing_fd, "albums") as albums_fd:
-                with exclusive_relative_lock(
-                    albums_fd, f".force-action-{import_job_id}.lock",
-                ):
-                    remove_relative_tree(albums_fd, action_name)
-                    os.rename(
-                        name, action_name,
-                        src_dir_fd=preview_fd, dst_dir_fd=albums_fd,
-                    )
+    ) as processing_fd, open_private_child_directory(processing_fd, "preview") as preview_fd, open_private_child_directory(processing_fd, "albums") as albums_fd, exclusive_relative_lock(
+        albums_fd, f".force-action-{import_job_id}.lock",
+    ):
+        remove_relative_tree(albums_fd, action_name)
+        os.rename(
+            name, action_name,
+            src_dir_fd=preview_fd, dst_dir_fd=albums_fd,
+        )
     return os.path.join(processing_albums_dir(cfg.processing_dir), action_name)
 
 
@@ -406,9 +405,8 @@ def remove_force_action_copy(path: str, cfg: CratediggerConfig) -> None:
         raise FilesystemAuthorityError("force action copy is outside private root")
     with open_private_processing_root(
         cfg.processing_dir, cfg.slskd_download_dir,
-    ) as processing_fd:
-        with open_private_child_directory(processing_fd, "albums") as albums_fd:
-            remove_relative_tree(albums_fd, name)
+    ) as processing_fd, open_private_child_directory(processing_fd, "albums") as albums_fd:
+        remove_relative_tree(albums_fd, name)
 
 
 def cleanup_force_action_copy_for_job(
@@ -533,7 +531,7 @@ class ImportPreviewDB(QualityEvidenceDB, Protocol):
 
     def get_download_log_entry(
         self, log_id: int,
-    ) -> "DownloadLogWithEvidenceRow | None": ...
+    ) -> DownloadLogWithEvidenceRow | None: ...
 
     def persist_current_spectral_measurement(
         self,
@@ -642,7 +640,7 @@ def persist_exact_current_spectral_from_attempt(
     try:
         current_id = db.get_request_current_evidence_id(request_id)
         refreshed = db.load_album_quality_evidence_by_id(current_evidence.id)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         return EvidenceBuildResult(None, "failed", f"{type(exc).__name__}: {exc}")
     if (
         current_id != current_evidence.id
@@ -682,7 +680,7 @@ def persist_exact_current_spectral_from_attempt(
         )
         loaded = db.load_album_quality_evidence_by_id(current_evidence.id)
         linked_id = db.get_request_current_evidence_id(request_id)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         return EvidenceBuildResult(None, "failed", f"{type(exc).__name__}: {exc}")
     if (
         linked_id != current_evidence.id
@@ -786,7 +784,7 @@ def enrich_current_v0_research_for_preview(
                 "request current evidence no longer matches expected id",
             )
         evidence = db.load_album_quality_evidence_by_id(expected_evidence_id)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         return EvidenceBuildResult(
             None,
             "failed",
@@ -821,7 +819,7 @@ def enrich_current_v0_research_for_preview(
             expected_evidence_id=expected_evidence_id,
             expected_snapshot_fingerprint=expected_snapshot_fingerprint,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         return EvidenceBuildResult(
             None,
             "failed",
@@ -836,7 +834,7 @@ def enrich_current_v0_research_for_preview(
             claimed_evidence = db.load_album_quality_evidence_by_id(
                 expected_evidence_id
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             return EvidenceBuildResult(
                 None,
                 "failed",
@@ -874,7 +872,7 @@ def enrich_current_v0_research_for_preview(
     metric = None
     try:
         metric = neutral_v0_metric_from_probe(probe_fn(current_album_path))
-    except Exception:  # noqa: BLE001 - neutral research must remain fail-soft
+    except Exception:
         logger.warning(
             "Current on-disk V0 research probe failed for %s",
             current_album_path,
@@ -896,7 +894,7 @@ def enrich_current_v0_research_for_preview(
             and refreshed.snapshot_fingerprint == expected_snapshot_fingerprint
             and audio_snapshot_matches(current_album_path, refreshed.files)
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         try:
             db.release_current_v0_research_attempt(
                 expected_evidence_id=expected_evidence_id,
@@ -919,7 +917,7 @@ def enrich_current_v0_research_for_preview(
                 expected_evidence_id=expected_evidence_id,
                 expected_snapshot_fingerprint=expected_snapshot_fingerprint,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             return EvidenceBuildResult(
                 None,
                 "failed",
@@ -939,7 +937,7 @@ def enrich_current_v0_research_for_preview(
                 expected_snapshot_fingerprint=expected_snapshot_fingerprint,
                 metric=metric,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             return EvidenceBuildResult(
                 None,
                 "failed",
@@ -951,7 +949,7 @@ def enrich_current_v0_research_for_preview(
                     expected_evidence_id=expected_evidence_id,
                     expected_snapshot_fingerprint=expected_snapshot_fingerprint,
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                 return EvidenceBuildResult(
                     None,
                     "failed",
@@ -965,7 +963,7 @@ def enrich_current_v0_research_for_preview(
 
     try:
         persisted = db.load_album_quality_evidence_by_id(expected_evidence_id)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         return EvidenceBuildResult(
             None,
             "failed",
@@ -1989,7 +1987,7 @@ def measure_and_persist_candidate_evidence(
                 source_path=path,
                 audio_validation=exc.report,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             return _measurement_failed_result(
                 mode="path",
                 reason="measurement_crashed",
@@ -2048,7 +2046,7 @@ def measure_and_persist_candidate_evidence(
                     import_job_id=import_job_id,
                     files=source_snapshot,
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                 return _measurement_failed_result(
                     mode="path",
                     reason="evidence_persist_failed",
@@ -2148,7 +2146,7 @@ def measure_and_persist_candidate_evidence(
                 source_path=path,
                 audio_validation=exc.report,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             return _measurement_failed_result(
                 mode="path",
                 reason="measurement_crashed",
@@ -2239,7 +2237,7 @@ def measure_and_persist_candidate_evidence(
                     import_job_id=import_job_id,
                     files=source_snapshot,
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                 return _measurement_failed_result(
                     mode="path",
                     reason="evidence_persist_failed",
@@ -2330,7 +2328,7 @@ def measure_and_persist_candidate_evidence(
                 files=source_snapshot,
                 measurement=measurement,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             return _measurement_failed_result(
                 mode="path",
                 reason="evidence_persist_failed",
@@ -2359,7 +2357,7 @@ def measure_and_persist_candidate_evidence(
             reason=run.import_result.decision,
             detail=run.import_result.error,
             stage_chain=[
-                f"measure_preimport:ok",
+                "measure_preimport:ok",
                 f"stage2_import:{run.import_result.decision}",
             ],
             request_id=request_id,
@@ -2531,7 +2529,7 @@ def preview_import_from_path(
         # repair before inspection, measurement, and the dry-run harness.
         try:
             repair_mp3_headers(preview_path)
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
             pass
 
         source_snapshot = None
@@ -2625,7 +2623,7 @@ def preview_import_from_path(
                 source_path=path,
                 audio_validation=exc.report,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             return _measurement_failed_result(
                 mode="path",
                 reason="measurement_crashed",
@@ -2785,7 +2783,7 @@ def preview_import_from_path(
                 )
                 evidence_status = evidence.status
                 evidence_reason = evidence.reason
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                 evidence_status = "failed"
                 evidence_reason = f"{type(exc).__name__}: {exc}"
             if evidence_status != "ready":

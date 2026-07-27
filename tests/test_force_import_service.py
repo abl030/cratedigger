@@ -16,10 +16,10 @@ from lib.force_import_service import (
     RESULT_REQUEST_MBID_MISSING,
     RESULT_REQUEST_MISSING,
     RESULT_UNAUTHORIZED_PATH,
+    ForceImportEnqueueResult,
     enqueue_force_import,
 )
-from lib.import_queue import ForceImportPayload
-from lib.import_queue import force_import_dedupe_key
+from lib.import_queue import ForceImportPayload, force_import_dedupe_key
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 
@@ -83,7 +83,7 @@ class TestForceImportService(unittest.TestCase):
     def _assert_queued(
         self,
         db: FakePipelineDB,
-        result: object,
+        result: ForceImportEnqueueResult,
         *,
         download_log_id: int,
         request_id: int,
@@ -91,12 +91,12 @@ class TestForceImportService(unittest.TestCase):
         source_username: str | None,
         source_dirs: list[str],
     ) -> None:
-        self.assertEqual(getattr(result, "outcome"), RESULT_QUEUED)
-        self.assertEqual(getattr(result, "download_log_id"), download_log_id)
-        self.assertEqual(getattr(result, "request_id"), request_id)
-        self.assertEqual(getattr(result, "failed_path"), failed_path)
+        self.assertEqual(result.outcome, RESULT_QUEUED)
+        self.assertEqual(result.download_log_id, download_log_id)
+        self.assertEqual(result.request_id, request_id)
+        self.assertEqual(result.failed_path, failed_path)
         self.assertEqual(len(db.list_import_jobs()), 1)
-        job = getattr(result, "job")
+        job = result.job
         self.assertIsNotNone(job)
         assert job is not None
         self.assertEqual(job.request_id, request_id)

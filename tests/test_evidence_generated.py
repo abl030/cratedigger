@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generated evidence-lifecycle tests — issue #548.
 
 Property-based port of the local fuzzer that found the V0-evidence bug
@@ -34,11 +33,10 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
-
 from hypothesis import example, given
 from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.beets_db import (
     AlbumInfo,
     CurrentBeetsItem,
@@ -63,7 +61,6 @@ from lib.quality_evidence import (
 )
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_album_quality_evidence, make_request_row
-
 
 _CHANGED_SNAPSHOT_FACT_SHAPES: tuple[
     tuple[EvidenceSubject | None, EvidenceSubject | None], ...

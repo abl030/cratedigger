@@ -8,16 +8,15 @@ tests/web/test_server_threading.py::TestProductionWiringOverlays.
 import datetime
 import unittest
 
-from web import overlay
-
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_request_row
+from web import overlay
 
 
 class TestSerializeRow(unittest.TestCase):
     def test_datetimes_become_iso_strings(self):
         ts = datetime.datetime(2026, 6, 12, 1, 2, 3,
-                               tzinfo=datetime.timezone.utc)
+                               tzinfo=datetime.UTC)
         out = overlay.serialize_row({"id": 1, "created_at": ts, "x": None})
         self.assertEqual(out["created_at"], ts.isoformat())
         self.assertEqual(out["id"], 1)

@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
+from lib.beets_db import BeetsDB
 from lib.dispatch.subprocess_runner import run_import_one
 from lib.util import beets_subprocess_env
-from lib.beets_db import BeetsDB
 from tests.beets_world import (
     BeetsWorld,
     BeetsWorldRelease,

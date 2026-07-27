@@ -1,56 +1,54 @@
-#!/usr/bin/env python3
 """Generated no-mutation laws for destructive release authority."""
 
 from __future__ import annotations
 
 import copy
-from collections.abc import Mapping
 import logging
 import os
 import subprocess as sp
 import tempfile
 import unittest
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from hypothesis import example, given, strategies as st
 import msgspec
+from hypothesis import example, given
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
+from lib.beets_delete import (
+    BeetsDeleteCompleted,
+    BeetsDeleteFailed,
+    BeetsDeleteFailureReason,
+    BeetsDeleteRequest,
+    _configuration_matches,
+    _delete_manifest,
+    _OwnedPath,
+    run_beets_delete,
+)
+from lib.config import CratediggerConfig
 from lib.destructive_release_service import (
     BanSourceBeetsAmbiguous,
     BanSourceCleanupIncomplete,
-    BanSourceSuccess,
     BanSourceRequest,
-    DeleteIncomplete,
+    BanSourceSuccess,
     DeleteBeetsAmbiguous,
+    DeleteIncomplete,
     DeleteRequest,
     DeleteSuccess,
     ban_source,
     delete_release_from_library,
 )
-from lib.beets_delete import (
-    BeetsDeleteCompleted,
-    BeetsDeleteFailureReason,
-    BeetsDeleteRequest,
-    run_beets_delete,
-)
-from lib.beets_delete import (
-    BeetsDeleteFailed,
-    _OwnedPath,
-    _configuration_matches,
-    _delete_manifest,
-)
 from lib.import_queue import IMPORT_JOB_AUTOMATION
-from lib.config import CratediggerConfig
 from lib.mbid_replace_service import (
-    MbidReplaceService,
     REPLACE_REASON_CURRENT_BEETS_AMBIGUOUS,
     REPLACE_REASON_SOURCE_IDENTITY_INVALID,
     RESULT_REPLACED,
     RESULT_WRONG_STATE,
+    MbidReplaceService,
 )
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_IMPORT,
@@ -1662,30 +1660,30 @@ class TestDestructiveAuthorityCheckerKnownBad(unittest.TestCase):
 
     def test_delete_checker_kills_each_contract_mutant(self) -> None:
         mutants = {
-            "omitted_art": dict(
-                outcome="success", owned_paths_present=True,
-                unknown_bytes_preserved=True, beets_album_present=False,
-                pipeline_present=False),
-            "omitted_sidecar": dict(
-                outcome="success", owned_paths_present=True,
-                unknown_bytes_preserved=True, beets_album_present=False,
-                pipeline_present=False),
-            "noop_success": dict(
-                outcome="success", owned_paths_present=True,
-                unknown_bytes_preserved=True, beets_album_present=False,
-                pipeline_present=False),
-            "unknown_overdelete": dict(
-                outcome="success", owned_paths_present=False,
-                unknown_bytes_preserved=False, beets_album_present=False,
-                pipeline_present=False),
-            "early_beets_delete": dict(
-                outcome="cleanup_failure", owned_paths_present=True,
-                unknown_bytes_preserved=True, beets_album_present=False,
-                pipeline_present=True),
-            "early_pg_delete": dict(
-                outcome="cleanup_failure", owned_paths_present=True,
-                unknown_bytes_preserved=True, beets_album_present=True,
-                pipeline_present=False),
+            "omitted_art": {
+                "outcome": "success", "owned_paths_present": True,
+                "unknown_bytes_preserved": True, "beets_album_present": False,
+                "pipeline_present": False},
+            "omitted_sidecar": {
+                "outcome": "success", "owned_paths_present": True,
+                "unknown_bytes_preserved": True, "beets_album_present": False,
+                "pipeline_present": False},
+            "noop_success": {
+                "outcome": "success", "owned_paths_present": True,
+                "unknown_bytes_preserved": True, "beets_album_present": False,
+                "pipeline_present": False},
+            "unknown_overdelete": {
+                "outcome": "success", "owned_paths_present": False,
+                "unknown_bytes_preserved": False, "beets_album_present": False,
+                "pipeline_present": False},
+            "early_beets_delete": {
+                "outcome": "cleanup_failure", "owned_paths_present": True,
+                "unknown_bytes_preserved": True, "beets_album_present": False,
+                "pipeline_present": True},
+            "early_pg_delete": {
+                "outcome": "cleanup_failure", "owned_paths_present": True,
+                "unknown_bytes_preserved": True, "beets_album_present": True,
+                "pipeline_present": False},
         }
         for name, world in mutants.items():
             with self.subTest(mutant=name), self.assertRaises(AssertionError):
@@ -1699,22 +1697,22 @@ class TestDestructiveAuthorityCheckerKnownBad(unittest.TestCase):
 
     def test_ack_checker_kills_each_fail_closed_mutant(self) -> None:
         mutants = {
-            "metadata_absence_promoted": dict(
-                completed=True, pipeline_present=True,
-                notification_count=0, context_retained=True,
-            ),
-            "pipeline_purged": dict(
-                completed=False, pipeline_present=False,
-                notification_count=0, context_retained=True,
-            ),
-            "media_notified": dict(
-                completed=False, pipeline_present=True,
-                notification_count=1, context_retained=True,
-            ),
-            "operator_context_lost": dict(
-                completed=False, pipeline_present=True,
-                notification_count=0, context_retained=False,
-            ),
+            "metadata_absence_promoted": {
+                "completed": True, "pipeline_present": True,
+                "notification_count": 0, "context_retained": True,
+            },
+            "pipeline_purged": {
+                "completed": False, "pipeline_present": False,
+                "notification_count": 0, "context_retained": True,
+            },
+            "media_notified": {
+                "completed": False, "pipeline_present": True,
+                "notification_count": 1, "context_retained": True,
+            },
+            "operator_context_lost": {
+                "completed": False, "pipeline_present": True,
+                "notification_count": 0, "context_retained": False,
+            },
         }
         for name, world in mutants.items():
             with self.subTest(mutant=name), self.assertRaises(AssertionError):
@@ -1733,22 +1731,22 @@ class TestDestructiveAuthorityCheckerKnownBad(unittest.TestCase):
 
     def test_enumeration_checker_kills_each_fail_closed_mutant(self) -> None:
         mutants = {
-            "reported_success": dict(
-                completed=True, beets_present=True,
-                pipeline_present=True, notification_count=0,
-            ),
-            "beets_removed": dict(
-                completed=False, beets_present=False,
-                pipeline_present=True, notification_count=0,
-            ),
-            "pipeline_purged": dict(
-                completed=False, beets_present=True,
-                pipeline_present=False, notification_count=0,
-            ),
-            "media_notified": dict(
-                completed=False, beets_present=True,
-                pipeline_present=True, notification_count=1,
-            ),
+            "reported_success": {
+                "completed": True, "beets_present": True,
+                "pipeline_present": True, "notification_count": 0,
+            },
+            "beets_removed": {
+                "completed": False, "beets_present": False,
+                "pipeline_present": True, "notification_count": 0,
+            },
+            "pipeline_purged": {
+                "completed": False, "beets_present": True,
+                "pipeline_present": False, "notification_count": 0,
+            },
+            "media_notified": {
+                "completed": False, "beets_present": True,
+                "pipeline_present": True, "notification_count": 1,
+            },
         }
         for name, world in mutants.items():
             with self.subTest(mutant=name), self.assertRaises(AssertionError):
@@ -1761,22 +1759,22 @@ class TestDestructiveAuthorityCheckerKnownBad(unittest.TestCase):
 
     def test_presence_probe_checker_kills_each_fail_closed_mutant(self) -> None:
         mutants = {
-            "reported_success": dict(
-                completed=True, beets_present=True,
-                pipeline_present=True, notification_count=0,
-            ),
-            "beets_removed": dict(
-                completed=False, beets_present=False,
-                pipeline_present=True, notification_count=0,
-            ),
-            "pipeline_purged": dict(
-                completed=False, beets_present=True,
-                pipeline_present=False, notification_count=0,
-            ),
-            "media_notified": dict(
-                completed=False, beets_present=True,
-                pipeline_present=True, notification_count=1,
-            ),
+            "reported_success": {
+                "completed": True, "beets_present": True,
+                "pipeline_present": True, "notification_count": 0,
+            },
+            "beets_removed": {
+                "completed": False, "beets_present": False,
+                "pipeline_present": True, "notification_count": 0,
+            },
+            "pipeline_purged": {
+                "completed": False, "beets_present": True,
+                "pipeline_present": False, "notification_count": 0,
+            },
+            "media_notified": {
+                "completed": False, "beets_present": True,
+                "pipeline_present": True, "notification_count": 1,
+            },
         }
         for name, world in mutants.items():
             with self.subTest(mutant=name), self.assertRaises(AssertionError):

@@ -65,6 +65,7 @@ def _run_entrypoint_and_dump_modules(bootstrap_code: str) -> set[str]:
         capture_output=True,
         text=True,
         timeout=60,
+        check=False,
     )
     if proc.returncode != 0:
         raise AssertionError(

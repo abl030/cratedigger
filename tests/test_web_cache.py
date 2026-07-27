@@ -25,7 +25,6 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from unittest.mock import patch
 
-
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
@@ -112,7 +111,7 @@ class RaisingRedis(FakeRedis):
 class _CacheTestBase(unittest.TestCase):
 
     def setUp(self) -> None:
-        import web.cache as cache
+        from web import cache
         self.cache = cache
         self.fake = FakeRedis()
         self._saved = cache._redis

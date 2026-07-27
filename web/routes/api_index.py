@@ -12,7 +12,6 @@ import textwrap
 
 from web.routes._registry import RouteHandler, RouteRegistration, route
 
-
 # --- U18 step 2: /api/_index — self-documenting API surface ----------------
 #
 # Walks ``web.server.Handler``'s merged dispatch tables and emits one row per
@@ -53,9 +52,7 @@ def _extract_request_model(fn: object) -> str | None:
         if not isinstance(node, ast.Call):
             continue
         target = node.func
-        if isinstance(target, ast.Name) and target.id == "parse_body":
-            pass
-        elif isinstance(target, ast.Attribute) and target.attr == "parse_body":
+        if isinstance(target, ast.Name) and target.id == "parse_body" or isinstance(target, ast.Attribute) and target.attr == "parse_body":
             pass
         else:
             continue

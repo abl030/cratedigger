@@ -184,13 +184,9 @@ def flac_streaminfo_md5(path: Path) -> bytes | None:
         flac = FLAC(str(path))
     except Exception as e:
         raise AudioHashError(f"failed to read FLAC {path}: {e}") from e
-    # mutagen's FLAC.info has no upstream type annotation at all, so a
-    # direct reference propagates Unknown through pyright strict mode.
-    # getattr retrieves the identical bound attribute (behaviorally
-    # identical) but types as Any under typeshed's two-argument getattr
-    # overload, breaking the Unknown cascade without a suppression
-    # comment — same technique as lib.beets_distance._item_from_path_fn.
-    info = getattr(flac, "info")
+    # Keep the dynamic STREAMINFO field behind an object-typed boundary:
+    # mutagen does not annotate ``md5_signature``.
+    info = getattr(flac, "info")  # noqa: B009 - mutagen leaves this field untyped
     raw: object = getattr(info, "md5_signature", None)
     if raw is None:
         return None

@@ -4,11 +4,8 @@ import unittest
 from typing import TYPE_CHECKING, Required, TypedDict
 
 from lib.artist_releases import (
-    TrackInfo,
-    PressingInfo,
-    ReleaseGroupInfo,
-    filter_non_live,
     analyse_artist_releases,
+    filter_non_live,
 )
 
 if TYPE_CHECKING:
@@ -46,7 +43,7 @@ def _release(
     ``media[].track-count`` isn't a real field on this endpoint's medium
     shape (that's a different, summary-only MB endpoint).
     """
-    track_dicts: list["_MBTrackFullJSON"] = [
+    track_dicts: list[_MBTrackFullJSON] = [
         {
             "position": i + 1,
             "number": i + 1,
@@ -131,8 +128,8 @@ class TestAnalyseArtistReleases(unittest.TestCase):
             ], rg_id="rg-single", rg_title="Track A", primary_type="Single"),
         ]
         result = analyse_artist_releases(releases)
-        album_rg = [rg for rg in result if rg.release_group_id == "rg-album"][0]
-        single_rg = [rg for rg in result if rg.release_group_id == "rg-single"][0]
+        album_rg = next(rg for rg in result if rg.release_group_id == "rg-album")
+        single_rg = next(rg for rg in result if rg.release_group_id == "rg-single")
 
         self.assertEqual(album_rg.unique_track_count, 2)
         self.assertIsNone(album_rg.covered_by)
@@ -151,11 +148,11 @@ class TestAnalyseArtistReleases(unittest.TestCase):
             ], rg_id="rg-single", rg_title="The Single", primary_type="Single"),
         ]
         result = analyse_artist_releases(releases)
-        single_rg = [rg for rg in result if rg.release_group_id == "rg-single"][0]
+        single_rg = next(rg for rg in result if rg.release_group_id == "rg-single")
 
         self.assertEqual(single_rg.unique_track_count, 1)
         self.assertIsNone(single_rg.covered_by)
-        bside = [t for t in single_rg.tracks if t.title == "B-side"][0]
+        bside = next(t for t in single_rg.tracks if t.title == "B-side")
         self.assertTrue(bside.unique)
 
     def test_ep_covers_singles(self) -> None:
@@ -174,9 +171,9 @@ class TestAnalyseArtistReleases(unittest.TestCase):
             ], rg_id="rg-s2", rg_title="Song B", primary_type="Single"),
         ]
         result = analyse_artist_releases(releases)
-        ep = [rg for rg in result if rg.release_group_id == "rg-ep"][0]
-        s1 = [rg for rg in result if rg.release_group_id == "rg-s1"][0]
-        s2 = [rg for rg in result if rg.release_group_id == "rg-s2"][0]
+        ep = next(rg for rg in result if rg.release_group_id == "rg-ep")
+        s1 = next(rg for rg in result if rg.release_group_id == "rg-s1")
+        s2 = next(rg for rg in result if rg.release_group_id == "rg-s2")
 
         self.assertEqual(ep.unique_track_count, 3)
         self.assertIsNone(ep.covered_by)
@@ -199,7 +196,7 @@ class TestAnalyseArtistReleases(unittest.TestCase):
         ]
         result = analyse_artist_releases(releases)
         # The EP's union includes rec-1 and rec-2, covering the single
-        single = [rg for rg in result if rg.release_group_id == "rg-single"][0]
+        single = next(rg for rg in result if rg.release_group_id == "rg-single")
         self.assertEqual(single.covered_by, "EP")
 
     def test_same_tier_larger_covers_smaller(self) -> None:
@@ -216,7 +213,7 @@ class TestAnalyseArtistReleases(unittest.TestCase):
             ], rg_id="rg-small", rg_title="Small EP", primary_type="EP", date="2020"),
         ]
         result = analyse_artist_releases(releases)
-        small = [rg for rg in result if rg.release_group_id == "rg-small"][0]
+        small = next(rg for rg in result if rg.release_group_id == "rg-small")
         self.assertEqual(small.covered_by, "Big EP")
 
     def test_partial_overlap_both_have_unique(self) -> None:
@@ -232,8 +229,8 @@ class TestAnalyseArtistReleases(unittest.TestCase):
             ], rg_id="rg-2", rg_title="EP Two", primary_type="EP"),
         ]
         result = analyse_artist_releases(releases)
-        ep1 = [rg for rg in result if rg.release_group_id == "rg-1"][0]
-        ep2 = [rg for rg in result if rg.release_group_id == "rg-2"][0]
+        ep1 = next(rg for rg in result if rg.release_group_id == "rg-1")
+        ep2 = next(rg for rg in result if rg.release_group_id == "rg-2")
 
         self.assertIsNone(ep1.covered_by)
         self.assertIsNone(ep2.covered_by)
@@ -253,7 +250,7 @@ class TestAnalyseArtistReleases(unittest.TestCase):
             ], rg_id="rg-single", rg_title="Hit", primary_type="Single"),
         ]
         result = analyse_artist_releases(releases)
-        single = [rg for rg in result if rg.release_group_id == "rg-single"][0]
+        single = next(rg for rg in result if rg.release_group_id == "rg-single")
         hit = single.tracks[0]
         self.assertFalse(hit.unique)
         self.assertIn("The Album", hit.also_on)
@@ -269,7 +266,7 @@ class TestAnalyseArtistReleases(unittest.TestCase):
             ], rg_id="rg-single", rg_title="Hit Single", primary_type="Single"),
         ]
         result = analyse_artist_releases(releases)
-        album = [rg for rg in result if rg.release_group_id == "rg-album"][0]
+        album = next(rg for rg in result if rg.release_group_id == "rg-album")
         # Album track is unique (it's the highest tier) — not "also on" the single
         self.assertTrue(album.tracks[0].unique)
         self.assertEqual(album.tracks[0].also_on, [])
@@ -336,10 +333,10 @@ class TestAnalyseArtistReleases(unittest.TestCase):
             ], rg_id="rg-s3", rg_title="If We Make It", primary_type="Single"),
         ]
         result = analyse_artist_releases(releases)
-        ep = [rg for rg in result if rg.release_group_id == "rg-ep"][0]
-        s1 = [rg for rg in result if rg.release_group_id == "rg-s1"][0]
-        s2 = [rg for rg in result if rg.release_group_id == "rg-s2"][0]
-        s3 = [rg for rg in result if rg.release_group_id == "rg-s3"][0]
+        ep = next(rg for rg in result if rg.release_group_id == "rg-ep")
+        s1 = next(rg for rg in result if rg.release_group_id == "rg-s1")
+        s2 = next(rg for rg in result if rg.release_group_id == "rg-s2")
+        s3 = next(rg for rg in result if rg.release_group_id == "rg-s3")
 
         self.assertIsNone(ep.covered_by)
         self.assertEqual(ep.unique_track_count, 4)
@@ -361,10 +358,10 @@ class TestAnalyseArtistReleases(unittest.TestCase):
                status="Bootleg"),
         ]
         result = analyse_artist_releases(releases)
-        boot = [rg for rg in result if rg.release_group_id == "rg-boot"][0]
-        single = [rg for rg in result if rg.release_group_id == "rg-single"][0]
+        boot = next(rg for rg in result if rg.release_group_id == "rg-boot")
+        single = next(rg for rg in result if rg.release_group_id == "rg-single")
         # Song A on bootleg is covered by the official single (single > bootleg)
-        song_a = [t for t in boot.tracks if t.title == "Song A"][0]
+        song_a = next(t for t in boot.tracks if t.title == "Song A")
         self.assertFalse(song_a.unique)
         # Song B is only on bootleg — still unique
         self.assertEqual(boot.unique_track_count, 1)
@@ -419,7 +416,7 @@ class TestAnalyseArtistReleases(unittest.TestCase):
             ], rg_id="rg-single", rg_title="ICU", primary_type="Single"),
         ]
         result = analyse_artist_releases(releases)
-        single = [rg for rg in result if rg.release_group_id == "rg-single"][0]
+        single = next(rg for rg in result if rg.release_group_id == "rg-single")
         self.assertEqual(single.covered_by, "Album")
 
     def test_pressing_info_collected(self) -> None:
@@ -436,8 +433,8 @@ class TestAnalyseArtistReleases(unittest.TestCase):
         result = analyse_artist_releases(releases)
         rg = result[0]
         self.assertEqual(len(rg.pressings), 2)
-        cd = [p for p in rg.pressings if p.release_id == "r1"][0]
-        vinyl = [p for p in rg.pressings if p.release_id == "r2"][0]
+        cd = next(p for p in rg.pressings if p.release_id == "r1")
+        vinyl = next(p for p in rg.pressings if p.release_id == "r2")
         self.assertEqual(cd.track_count, 1)
         self.assertEqual(cd.format, "CD")
         self.assertEqual(cd.recording_ids, ["rec-1"])

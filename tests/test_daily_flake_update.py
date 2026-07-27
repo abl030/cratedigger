@@ -8,7 +8,6 @@ from pathlib import Path
 
 from tests.fakes.daily_flake_update import FakeDailyFlakeUpdateCommands
 
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "daily_flake_update.sh"
 

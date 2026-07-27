@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import configparser
 import unittest
-from typing import cast
+from typing import ClassVar, cast
 from unittest.mock import MagicMock, patch
 
 from cratedigger import SlskdFile, TrackRecord
@@ -167,7 +167,7 @@ class TestMatchTimeAccumulator(unittest.TestCase):
     return sites and would silently drop time on any exception path."""
 
     USERNAME = "user1"
-    TRACKS = [_track("Alpha"), _track("Bravo"), _track("Charlie")]
+    TRACKS: ClassVar = [_track("Alpha"), _track("Bravo"), _track("Charlie")]
 
     def _seed_cache(self, ctx: CratediggerContext, dir_name: str,
                     files: list[SlskdFile]) -> None:
@@ -251,7 +251,7 @@ class TestBrowseTimeAccumulator(unittest.TestCase):
     including the exception path. Same try/finally contract as match_time_s."""
 
     USERNAME = "user1"
-    TRACKS = [_track("Alpha"), _track("Bravo"), _track("Charlie")]
+    TRACKS: ClassVar = [_track("Alpha"), _track("Bravo"), _track("Charlie")]
 
     def test_browse_time_credited_when_browse_raises(self):
         ctx = _make_real_ctx()
@@ -259,9 +259,8 @@ class TestBrowseTimeAccumulator(unittest.TestCase):
         with patch(
             "lib.matching._browse_directories",
             side_effect=RuntimeError("network broke"),
-        ):
-            with self.assertRaises(RuntimeError):
-                check_for_match(self.TRACKS, "flac", ["dirA"], self.USERNAME, ctx)
+        ), self.assertRaises(RuntimeError):
+            check_for_match(self.TRACKS, "flac", ["dirA"], self.USERNAME, ctx)
         self.assertGreater(
             ctx.browse_time_s, 0.0,
             "exception inside _browse_directories must still credit browse_time_s",

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Run async no-mutation previews for queued import jobs."""
 
 from __future__ import annotations
@@ -11,7 +10,7 @@ import sys
 import threading
 from collections.abc import Callable, Mapping
 from datetime import timedelta
-from typing import Any, Protocol, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from cratedigger import TrackRecord
@@ -24,38 +23,36 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from lib.config import CratediggerConfig, read_runtime_config
-from lib.processing_paths import canonical_folder_for_row, processing_albums_dir
 from lib.dispatch import _record_preview_measurement_failed
+from lib.import_evidence import (
+    CANDIDATE_STATUS_REUSED,
+    ensure_candidate_evidence_for_action,
+)
 from lib.import_preview import (
     PREVIEW_VERDICT_EVIDENCE_READY,
     PREVIEW_VERDICT_MEASUREMENT_FAILED,
     ImportPreviewResult,
     cleanup_force_action_copy_for_job,
     enrich_incomplete_current_evidence_for_request,
+    force_action_copy_path,
     load_current_evidence_for_preview,
     load_persisted_existing_spectral,
     measure_and_persist_candidate_evidence,
-    remove_preview_snapshot,
-    retain_preview_snapshot_for_force_action,
-    snapshot_configured_quarantine_directory,
     persist_exact_current_spectral_from_attempt,
     prepare_current_evidence_for_failure,
     preserve_existing_source_spectral,
-    force_action_copy_path,
-)
-from lib.import_evidence import (
-    CANDIDATE_STATUS_REUSED,
-    ensure_candidate_evidence_for_action,
+    remove_preview_snapshot,
+    retain_preview_snapshot_for_force_action,
+    snapshot_configured_quarantine_directory,
 )
 from lib.import_queue import (
-    ForceImportPayload,
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
     IMPORT_JOB_YOUTUBE,
+    ForceImportPayload,
     ImportJob,
     YoutubeImportPayload,
 )
-from lib.pipeline_db import DEFAULT_DSN, PipelineDB
 from lib.measurement import (
     ExistingSpectralAuditLookup,
     ExistingSpectralResolver,
@@ -65,11 +62,13 @@ from lib.measurement import (
     existing_spectral_resolver_for_config,
     spectral_detail_from_persisted_source,
 )
+from lib.pipeline_db import DEFAULT_DSN, PipelineDB
+from lib.processing_paths import canonical_folder_for_row, processing_albums_dir
 from lib.quality import (
     ActiveDownloadState,
     AlbumQualityEvidence,
-    MeasurementFailure,
     ImportResult,
+    MeasurementFailure,
     SpectralAnalysisDetail,
 )
 from lib.quality_evidence import (
@@ -221,7 +220,7 @@ class _PreviewDBSource:
     def _get_db(self) -> object:
         return self._db
 
-    def get_tracks(self, album_record: object) -> "list[TrackRecord]":
+    def get_tracks(self, album_record: object) -> list[TrackRecord]:
         raise AssertionError("preview materialization must not read tracks")
 
     def get_wanted_searchable(
@@ -247,12 +246,12 @@ def _materialize_automation_preview_path(
 ) -> str:
     """Ensure automation preview has the same stable folder importer uses."""
     from lib.config import read_runtime_config
-    from lib.download_reconstruction import reconstruct_grab_list_entry
+    from lib.context import CratediggerContext
     from lib.download_materialization import (
         Materialized,
         _materialize_processing_dir,
     )
-    from lib.context import CratediggerContext
+    from lib.download_reconstruction import reconstruct_grab_list_entry
     from lib.staged_album import StagedAlbum
 
     cfg = read_runtime_config()
@@ -271,7 +270,7 @@ def _materialize_automation_preview_path(
     )
     materialized = _materialize_processing_dir(entry, staged_album, ctx)
     if not isinstance(materialized, Materialized):
-        raise ValueError(
+        raise RuntimeError(  # noqa: TRY004 - state-machine outcome, not caller type
             f"Album request {request_id} could not be materialized for preview"
         )
     return staged_album.current_path
@@ -1206,7 +1205,7 @@ def run_threaded_workers(
     def recovery_loop() -> None:
         try:
             preview_recovery_loop(dsn=dsn, stop=stop, db_factory=PipelineDB)
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             record_error(exc)
 
     threads = [

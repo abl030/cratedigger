@@ -4,47 +4,58 @@ import os
 from collections.abc import Callable, Mapping, Sequence
 from email.message import Message
 from io import BufferedIOBase
-from typing import Any, Protocol, TypedDict
+from typing import Any, Protocol, Self, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from web.routes._pydantic import parse_body
-
-from lib.quality import _is_explicit_label
 from lib.config import read_runtime_config
 from lib.force_import_service import RESULT_QUEUED, enqueue_force_import
+from lib.fs_authority import OpenedRegularFile
+from lib.import_preview import (
+    ImportPreviewValues,
+    preview_import_from_download_log,
+    preview_import_from_values,
+)
 from lib.import_queue import ForceImportPayload, ImportJob, YoutubeImportPayload
+from lib.quality import _is_explicit_label
 from lib.util import resolve_failed_path
+from lib.validation_envelope import (
+    ValidationResultEnvelope,
+    decode_validation_envelope,
+)
 from lib.wrong_match_cleanup_service import (
     cleanup_all_wrong_matches,
 )
-from lib.wrong_matches import wrong_match_row_is_visible
 from lib.wrong_match_delete_service import (
     OUTCOME_DELETE_FAILED as DELETE_OUTCOME_FAILED,
+)
+from lib.wrong_match_delete_service import (
     OUTCOME_SKIPPED_ACTIVE_JOB as DELETE_OUTCOME_ACTIVE_JOB,
+)
+from lib.wrong_match_delete_service import (
     OUTCOME_SKIPPED_INVALID_ROW as DELETE_OUTCOME_INVALID_ROW,
+)
+from lib.wrong_match_delete_service import (
     OUTCOME_SKIPPED_LOCKED as DELETE_OUTCOME_LOCKED,
+)
+from lib.wrong_match_delete_service import (
     OUTCOME_SKIPPED_NOT_VISIBLE as DELETE_OUTCOME_NOT_VISIBLE,
+)
+from lib.wrong_match_delete_service import (
     OUTCOME_SKIPPED_UNSAFE_PATH as DELETE_OUTCOME_UNSAFE_PATH,
+)
+from lib.wrong_match_delete_service import (
     WrongMatchDeleteDB,
     WrongMatchDeleteResult,
     WrongMatchDeleteSummary,
     delete_wrong_match,
     delete_wrong_match_group,
 )
-from lib.import_preview import (
-    ImportPreviewValues,
-    preview_import_from_download_log,
-    preview_import_from_values,
-)
-from lib.fs_authority import OpenedRegularFile
-from lib.validation_envelope import (
-    ValidationResultEnvelope,
-    decode_validation_envelope,
-)
-from web.routes.pipeline import _serialize_import_job
+from lib.wrong_matches import wrong_match_row_is_visible
+from web.routes._pydantic import parse_body
 from web.routes._registry import RouteHandler, RouteRegistration, route
 from web.routes._server_access import _server
+from web.routes.pipeline import _serialize_import_job
 from web.triage_runner import TriageRunner
 from web.wrong_match_file_service import (
     build_wrong_match_explorer,
@@ -867,7 +878,7 @@ class ImportPreviewRequest(BaseModel):
     download_log_id: int | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
-    def _one_mode(self) -> "ImportPreviewRequest":
+    def _one_mode(self) -> Self:
         if (self.values is None) == (self.download_log_id is None):
             raise ValueError("provide exactly one of values or download_log_id")
         return self
@@ -903,7 +914,7 @@ class WrongMatchTriageRequest(BaseModel):
     confirm_all_wrong_matches: bool
 
     @model_validator(mode="after")
-    def _must_be_true(self) -> "WrongMatchTriageRequest":
+    def _must_be_true(self) -> Self:
         if self.confirm_all_wrong_matches is not True:
             raise ValueError("confirm_all_wrong_matches must be true")
         return self

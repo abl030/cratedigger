@@ -22,9 +22,10 @@ list directly instead of separately-maintained dicts/sets.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from types import ModuleType
-from typing import Callable, Literal, Protocol
+from typing import Literal, Protocol
 
 
 class RouteHandler(Protocol):

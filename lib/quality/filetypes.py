@@ -5,8 +5,9 @@ also owns the pure policy that maps trusted current quality evidence to search
 tier overrides.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, Optional, Sequence
+from typing import Any, Literal
 
 from lib.quality.evidence_types import (
     AlbumQualityEvidenceFile,
@@ -14,7 +15,6 @@ from lib.quality.evidence_types import (
 )
 from lib.quality.import_result_types import SpectralAnalysisDetail
 from lib.quality.ranks import QualityRank, QualityRankConfig, measurement_rank
-
 
 QUALITY_UPGRADE_TIERS = "lossless,mp3 v0,mp3 320,aac,opus,ogg"
 QUALITY_LOSSLESS = "lossless"
@@ -112,7 +112,7 @@ def rejection_backfill_override(
         "attempt_have_audit", "linked_current_evidence"
     ],
     have_spectral_audit: SpectralAnalysisDetail | None = None,
-    cfg: "QualityRankConfig | None" = None,
+    cfg: QualityRankConfig | None = None,
 ) -> str | None:
     """Constrain a transparent, spectrally genuine HAVE copy to lossless.
 
@@ -220,7 +220,7 @@ _MIXED_REJECT_LOSSY_CONTAINERS: frozenset[str] = frozenset(
 
 
 def has_mixed_lossless_and_lossy(
-    files: "Sequence[AlbumQualityEvidenceFile]",
+    files: Sequence[AlbumQualityEvidenceFile],
 ) -> bool:
     """True when the snapshot contains both lossless and lossy containers.
 
@@ -241,9 +241,9 @@ def has_mixed_lossless_and_lossy(
     )
 
 def _m4a_codec_heuristic(
-    bitrate: Optional[int],
-    bit_depth: Optional[int],
-    sample_rate: Optional[int],
+    bitrate: int | None,
+    bit_depth: int | None,
+    sample_rate: int | None,
 ) -> str:
     """Guess whether a .m4a file is ALAC or AAC from slskd metadata.
 
@@ -271,11 +271,11 @@ class AudioFileSpec:
     """
     codec: str
     extension: str
-    quality: Optional[str] = None
-    bitrate: Optional[int] = None
-    sample_rate: Optional[int] = None
-    bit_depth: Optional[int] = None
-    is_variable_bitrate: Optional[bool] = None
+    quality: str | None = None
+    bitrate: int | None = None
+    sample_rate: int | None = None
+    bit_depth: int | None = None
+    is_variable_bitrate: bool | None = None
 
     @property
     def lossless(self) -> bool:

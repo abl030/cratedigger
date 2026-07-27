@@ -5,7 +5,8 @@ Pure move: every definition is AST-identical to the original.
 """
 
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Literal, Self
+
 import msgspec
 
 from lib.quality.audio_validation import (
@@ -13,7 +14,6 @@ from lib.quality.audio_validation import (
     legacy_unrecorded_audio_validation_report,
     validate_audio_validation_report,
 )
-
 
 V0_PROBE_LOSSLESS_SOURCE = "lossless_source_v0"
 V0_PROBE_NATIVE_LOSSY_RESEARCH = "native_lossy_research_v0"
@@ -75,16 +75,16 @@ class AudioQualityMeasurement(msgspec.Struct, frozen=True):
                                conversion (flac/m4a/wav). New source
                                measurements leave this None.
     """
-    min_bitrate_kbps: Optional[int] = None
-    avg_bitrate_kbps: Optional[int] = None
-    median_bitrate_kbps: Optional[int] = None
-    format: Optional[str] = None
+    min_bitrate_kbps: int | None = None
+    avg_bitrate_kbps: int | None = None
+    median_bitrate_kbps: int | None = None
+    format: str | None = None
     is_cbr: bool = False
-    spectral_grade: Optional[str] = None
-    spectral_bitrate_kbps: Optional[int] = None
+    spectral_grade: str | None = None
+    spectral_bitrate_kbps: int | None = None
     spectral_subject: EvidenceSubject | None = None
     spectral_provenance: EvidenceProvenance | None = None
-    was_converted_from: Optional[str] = None
+    was_converted_from: str | None = None
 
     def new_row_validation_errors(
         self,
@@ -155,7 +155,7 @@ class TargetQualityContract(msgspec.Struct, frozen=True):
     def from_explicit_label(
         cls,
         format_hint: str,
-    ) -> "TargetQualityContract":
+    ) -> Self:
         """Build policy from a self-describing target label.
 
         Bare ``MP3`` is deliberately rejected because it does not declare CBR
@@ -184,7 +184,7 @@ class TargetQualityContract(msgspec.Struct, frozen=True):
         format_hint: str,
         *,
         projected_is_cbr: bool,
-    ) -> "TargetQualityContract":
+    ) -> Self:
         """Build policy with a required independently measured target mode.
 
         Bare ``MP3`` consumes the projection.  Explicit labels remain
@@ -484,9 +484,8 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
                     f"duplicate snapshot relative_path: {file.relative_path}"
                 )
             relative_paths.add(file.relative_path)
-        if self.lineage_version == 4:
-            if self.v0_metric is not None:
-                errors.extend(self.v0_metric.validation_errors())
+        if self.lineage_version == 4 and self.v0_metric is not None:
+            errors.extend(self.v0_metric.validation_errors())
         if self.lineage_version == 4 and self.verified_lossless_proof is not None:
             errors.extend(self.verified_lossless_proof.validation_errors())
         return errors
@@ -524,9 +523,9 @@ class V0ProbeEvidence(msgspec.Struct, frozen=True):
     """
 
     kind: str = ""
-    min_bitrate_kbps: Optional[int] = None
-    avg_bitrate_kbps: Optional[int] = None
-    median_bitrate_kbps: Optional[int] = None
+    min_bitrate_kbps: int | None = None
+    avg_bitrate_kbps: int | None = None
+    median_bitrate_kbps: int | None = None
 
 
 def is_comparable_lossless_source_probe(
@@ -577,12 +576,12 @@ class QualityComparisonBasis(msgspec.Struct, frozen=True):
     existing_rank: str
     new_metric: str = "min"        # "min" | "avg" | "median" | "contract"
     existing_metric: str = "min"
-    new_value_kbps: Optional[int] = None
-    existing_value_kbps: Optional[int] = None
-    new_format: Optional[str] = None
-    existing_format: Optional[str] = None
+    new_value_kbps: int | None = None
+    existing_value_kbps: int | None = None
+    new_format: str | None = None
+    existing_format: str | None = None
     spectral_clamped: bool = False
-    tolerance_kbps: Optional[int] = None
+    tolerance_kbps: int | None = None
     verified_lossless_bypass: bool = False
 
 

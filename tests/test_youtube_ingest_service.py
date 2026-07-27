@@ -10,13 +10,14 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
-from typing import Any, Optional, cast
+from typing import Any, cast
 from unittest.mock import patch
 
 import msgspec
 
-from lib.import_queue import IMPORT_JOB_YOUTUBE, YoutubeImportPayload
 from lib import pipeline_db as _pipeline_db_mod  # module-import so the raise
+from lib.import_queue import IMPORT_JOB_YOUTUBE, YoutubeImportPayload
+
 # site below resolves YoutubeInFlightError at call time. tests/test_pipeline_db.py
 # does importlib.reload(pipeline_db); a stale symbol import here would raise the
 # pre-reload class while the service catches the post-reload one — see the
@@ -24,7 +25,6 @@ from lib import pipeline_db as _pipeline_db_mod  # module-import so the raise
 from lib.youtube_ingest_service import (
     OUTCOME_EXIT_CODE,
     OUTCOME_HTTP_STATUS,
-    RunResult,
     SubmitResult,
     YoutubeIngestMetadata,
     YoutubeIngestService,
@@ -33,7 +33,6 @@ from lib.youtube_ingest_service import (
 )
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
-
 
 # ---------------------------------------------------------------------------
 # Fixtures + helpers.
@@ -57,10 +56,10 @@ def _seed_resolver_row(
     source: str = "mb",
     browse_id: str = BROWSE,
     yt_url: str = YT_URL,
-    yt_audio_playlist_id: Optional[str] = PLAYLIST,
+    yt_audio_playlist_id: str | None = PLAYLIST,
     distances_for_mbid: str = MB_REL,
-    total_mb_tracks: Optional[int] = EXPECTED_TRACKS,
-    extra_rows: Optional[list[dict[str, Any]]] = None,
+    total_mb_tracks: int | None = EXPECTED_TRACKS,
+    extra_rows: list[dict[str, Any]] | None = None,
 ) -> None:
     """Pre-seed ``youtube_album_mappings`` with one matching row."""
     rows: list[dict[str, Any]] = [{
@@ -114,7 +113,7 @@ def _seed_discogs_request(
     request_id: int = 77,
     status: str = "wanted",
     discogs_release_id: str = DISCOGS_REL,
-    mb_release_id: Optional[str] = None,
+    mb_release_id: str | None = None,
 ) -> None:
     pdb.seed_request(make_request_row(
         id=request_id,
@@ -133,10 +132,10 @@ def _tracks(count: int) -> list[dict[str, Any]]:
     ]
 
 
-def _track_count_returning(value: Optional[int]):
+def _track_count_returning(value: int | None):
     """Factory: deterministic ``mb_track_count_fn`` returning a fixed value."""
 
-    def _fn(_mbid: str) -> Optional[int]:
+    def _fn(_mbid: str) -> int | None:
         return value
 
     return _fn
@@ -145,7 +144,7 @@ def _track_count_returning(value: Optional[int]):
 def _make_service(
     pdb: FakePipelineDB,
     *,
-    mb_count: Optional[int] = EXPECTED_TRACKS,
+    mb_count: int | None = EXPECTED_TRACKS,
     mb_track_count_fn: Any = None,
     ytdlp_runner_fn: Any = None,
     stage_dir_fn: Any = None,
@@ -273,7 +272,7 @@ class TestSubmitHappyPath(unittest.TestCase):
             total_mb_tracks=EXPECTED_TRACKS,
         )
 
-        def _exploding_mb(_mbid: str) -> Optional[int]:
+        def _exploding_mb(_mbid: str) -> int | None:
             raise AssertionError("Discogs submit must not call MB mirror")
 
         svc = _make_service(pdb, mb_track_count_fn=_exploding_mb)
@@ -620,7 +619,7 @@ class TestSubmitTransient(unittest.TestCase):
         _seed_wanted_request(pdb, request_id=42)
         _seed_resolver_row(pdb)
 
-        def _exploding_mb(_mbid: str) -> Optional[int]:
+        def _exploding_mb(_mbid: str) -> int | None:
             raise RuntimeError("mb mirror connection refused")
 
         svc = YoutubeIngestService(pdb, mb_track_count_fn=_exploding_mb)
@@ -657,7 +656,7 @@ class TestSubmitTransient(unittest.TestCase):
 class _RecordingStager:
     """Recorder ``stage_dir_fn``. Default behaviour: no-op (no disk IO)."""
 
-    def __init__(self, raise_exc: Optional[BaseException] = None) -> None:
+    def __init__(self, raise_exc: BaseException | None = None) -> None:
         self.calls: list[tuple[Path, Path]] = []
         self.raise_exc = raise_exc
 
@@ -768,7 +767,7 @@ class TestRunJobHappyPath(unittest.TestCase):
             for path in staged_files:
                 path.write_bytes(b"opus")
 
-            def _exploding_mb(_mbid: str) -> Optional[int]:
+            def _exploding_mb(_mbid: str) -> int | None:
                 raise AssertionError("Discogs run_job must not call MB mirror")
 
             _seed_resolver_row(
@@ -817,7 +816,7 @@ class _StubRunner:
         self,
         result: YtdlpRunResult,
         *,
-        raise_exc: Optional[BaseException] = None,
+        raise_exc: BaseException | None = None,
     ) -> None:
         self.result = result
         self.raise_exc = raise_exc
@@ -1287,9 +1286,8 @@ class TestRunJobRunnerUnhandled(unittest.TestCase):
             pdb,
             "update_youtube_terminal",
             side_effect=RuntimeError("audit write failed"),
-        ):
-            with self.assertRaises(RuntimeError):
-                svc.run_job(log_id)
+        ), self.assertRaises(RuntimeError):
+            svc.run_job(log_id)
 
 
 # ---------------------------------------------------------------------------

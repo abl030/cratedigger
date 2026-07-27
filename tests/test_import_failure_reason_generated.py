@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generated patrol for truthful terminal ``run_import`` failure reasons."""
 
 from __future__ import annotations
@@ -6,12 +5,12 @@ from __future__ import annotations
 import string
 import unittest
 
-from hypothesis import given, settings, strategies as st
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401 - loads the active profile
 from harness.import_one import RunImportOutcome, _harness_failure_error
 from tests.test_import_one_stages import run_import_with_fake_harness
-
 
 _DIAGNOSTIC_TEXT = st.text(
     alphabet=string.ascii_letters + string.digits + " .,:;_-",

@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import os
 import unittest
+from dataclasses import dataclass
 from unittest.mock import patch
 
-from hypothesis import given, strategies as st
+from hypothesis import given
+from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401
 from lib.config import CratediggerConfig
 from lib.dispatch import dispatch_import_core
 from lib.dispatch.types import EvidenceImportGate, ImportOneRun
@@ -21,9 +23,8 @@ from lib.import_queue import (
 )
 from lib.quality import DownloadInfo
 from scripts.importer import process_claimed_job
-import tests._hypothesis_profiles  # noqa: F401
-from tests.fakes import FakePipelineDB
 from tests.beets_world import BeetsWorld
+from tests.fakes import FakePipelineDB
 from tests.helpers import (
     make_album_quality_evidence,
     make_import_result,

@@ -1,16 +1,24 @@
-# Finding dead code
+# Python lint and dead-code liveness
 
-Two complementary static checks protect production liveness:
+Two complementary static checks protect the Python tree:
 
-- Ruff `F401`/`F811` runs source-locally, so a name used in another module
-  cannot hide an unused import. The exact redundant-alias audit pins both
-  `cratedigger.py` and `scripts/pipeline_cli/__init__.py` to empty baselines,
-  preventing private facades from returning.
-- Vulture keeps the aggregate repository view for dead functions, classes,
-  attributes, and cross-module APIs.
+- Ruff is pinned exactly in `nix/ruff.nix` and configured by `ruff.toml`. The
+  canonical `scripts/run_ruff.sh` gate checks production, tools, ordinary
+  tests, generated tests, and fakes with Ruff 0.16's default rules plus the
+  explicit `B905` correctness ratchet. Its source-local `F401`/`F811`
+  analysis means a name used in another module cannot hide an unused import.
+  The exact redundant-alias audit pins both `cratedigger.py` and
+  `scripts/pipeline_cli/__init__.py` to empty baselines, preventing private
+  facades from returning.
+- Vulture keeps the aggregate production view for dead functions, classes,
+  attributes, and cross-module APIs. Tests remain excluded so a test-only
+  reference cannot preserve a dead production surface.
 
-Both consume `tools/production_python_sources.txt`; tests are deliberately
-absent from that one authored root list.
+Run the whole-tree lint directly with:
+
+```bash
+nix-shell --run "bash scripts/run_ruff.sh"
+```
 
 **Static (fast, noisy):** vulture flags unreferenced functions / classes / variables.
 
@@ -37,14 +45,18 @@ mechanically at the same fixed confidence:
 nix-shell --run 'mapfile -t sources < <(sed "/^[[:space:]]*#/d; /^[[:space:]]*$/d" tools/production_python_sources.txt); vulture --make-whitelist --min-confidence 60 "${sources[@]}" > tools/vulture/whitelist.py'
 ```
 
-Both scans are intentionally **production-only**. Tests are evidence that a
-surface behaves as expected, not evidence that production still calls it; if
-tests were included, a test-only reference could silently preserve a dead API
-forever. A production field consumed only through serialization, framework
-reflection, or an external client therefore needs a narrow entry in
+Only Vulture is intentionally **production-only** and consumes
+`tools/production_python_sources.txt`. Tests are evidence that a surface
+behaves as expected, not evidence that production still calls it; if tests
+were included, a test-only reference could silently preserve a dead API
+forever. Ruff deliberately has the opposite scope: tests are first-class code
+and must meet the same lint floor. A production field consumed only through
+serialization, framework reflection, or an external client therefore needs a
+narrow entry in
 `tools/vulture/whitelist.py` with its reason on the same line. Intentional
-unused imports use an explicit redundant alias at that import, never a
-whole-file ignore; this keeps every module ratcheted against new F401 debt.
+unused imports use an explicit export (`__all__` or a redundant alias) at that
+import, never a whole-file ignore; this keeps every module ratcheted against
+new F401 debt.
 The suite pins this boundary in `tests/test_issue_573_boundaries.py` and
 `tests/test_unused_import_audit.py`; do not add `tests/` to the source roots.
 

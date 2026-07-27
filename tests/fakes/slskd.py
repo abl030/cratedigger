@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import copy
 import time
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from lib.slskd_client import DownloadUser
@@ -28,7 +29,7 @@ class CancelDownloadCall:
 class FakeSlskdTransfers:
     """Stateful fake for the slskd transfers API."""
 
-    def __init__(self, api: "FakeSlskdAPI") -> None:
+    def __init__(self, api: FakeSlskdAPI) -> None:
         self._api = api
         self.enqueue_calls: list[EnqueueCall] = []
         self.get_all_downloads_calls: list[bool] = []
@@ -48,7 +49,7 @@ class FakeSlskdTransfers:
         return self.enqueue_result
 
     def get_all_downloads(self, includeRemoved: bool = False) -> list[DownloadUser]:
-        from lib.slskd_client import DownloadUser, parse_downloads_envelope
+        from lib.slskd_client import parse_downloads_envelope
         self.get_all_downloads_calls.append(includeRemoved)
         self._api.call_log.append("transfers.get_all_downloads")
         if self.get_all_downloads_error is not None:
@@ -389,7 +390,7 @@ class FakeSlskdEvents:
     ``total_count_override`` for retention/pruning scenarios).
     """
 
-    def __init__(self, api: "FakeSlskdAPI | None" = None) -> None:
+    def __init__(self, api: FakeSlskdAPI | None = None) -> None:
         from lib.slskd_client import SlskdEventsPage, SlskdRawEvent
         self._api = api
         self._page_cls = SlskdEventsPage

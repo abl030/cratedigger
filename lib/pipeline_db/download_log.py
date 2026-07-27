@@ -1,11 +1,13 @@
 """download_log audit rows and wrong-match bookkeeping."""
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from typing import Any, Literal, TypedDict, get_args
+from datetime import UTC, datetime, timedelta
+from typing import Any, ClassVar, Literal, TypedDict, get_args
+
 import msgspec
 import psycopg2
 import psycopg2.extras
 
+from lib.dispatch.types import PostCommitQuarantineAudit
 from lib.pipeline_db._shared import (
     BACKOFF_BASE_MINUTES,
     BACKOFF_MAX_MINUTES,
@@ -20,7 +22,6 @@ from lib.pipeline_db.rows import (
     download_log_with_request_row,
     wrong_match_candidate_row,
 )
-from lib.dispatch.types import PostCommitQuarantineAudit
 
 # Canonical ``download_log.outcome`` taxonomy — the Python mirror of the
 # ``download_log_outcome_check`` CHECK constraint (latest definition:
@@ -41,8 +42,8 @@ from lib.pipeline_db._core import _PipelineDBBase
 from lib.validation_envelope import (
     FAILED_PATH_KEY,
     VALIDATION_PROJECTION_UNSET,
-    ValidationProjectionUnset,
     WRONG_MATCH_TRIAGE_KEY,
+    ValidationProjectionUnset,
     WrongMatchTriageAudit,
     derive_validation_log_columns,
 )
@@ -488,7 +489,7 @@ class _DownloadLogMixin(_PipelineDBBase):
                 validation_result,
             )
         with self._atomic():
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             with self.conn.cursor(
                 cursor_factory=psycopg2.extras.RealDictCursor,
             ) as cur:
@@ -592,7 +593,7 @@ class _DownloadLogMixin(_PipelineDBBase):
     # migration 007). When we overlay evidence lineage into the kind slot, we
     # have to translate, or the renderer (history.js::formatV0Probe) won't
     # recognize the value and will fall through to the raw-kind branch.
-    _EVIDENCE_LINEAGE_TO_PROBE_KIND = {
+    _EVIDENCE_LINEAGE_TO_PROBE_KIND: ClassVar = {
         "source":    "lossless_source_v0",
         "installed": "native_lossy_research_v0",
         "lossless_source": "lossless_source_v0",
@@ -932,7 +933,7 @@ class _DownloadLogMixin(_PipelineDBBase):
             WHERE request_id = %s
               AND outcome = 'rejected'
               AND validation_result->>'{FAILED_PATH_KEY}' IN ({placeholders})
-        """, tuple([request_id, *paths]))
+        """, (request_id, *paths))
         self.conn.commit()
         return cur.rowcount
 

@@ -3,9 +3,9 @@
 import unittest
 
 from lib.download_recovery import (
+    classify_processing_path,
     find_blocked_processing_path_issues,
     find_blocked_recovery_issues,
-    classify_processing_path,
     reconcile_processing_current_path,
     resolve_missing_current_path,
 )

@@ -13,7 +13,6 @@ from hypothesis import strategies as st
 import tests._hypothesis_profiles  # noqa: F401 - registers active profile
 from tests.fakes.deploy_pin import FakeDeployPinCommands
 
-
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "pin_nixosconfig.sh"
 RECEIPT_REF = "refs/cratedigger-deploy/cratedigger-src"
 PENDING_REF = "refs/cratedigger-deploy/cratedigger-src-pending"

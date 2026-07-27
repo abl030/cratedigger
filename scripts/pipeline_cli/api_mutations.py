@@ -9,13 +9,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import socket
 import sys
 import urllib.error
 import urllib.request
 
 import msgspec
-
 
 DEFAULT_API_BASE = "http://127.0.0.1:8085"
 _TIMEOUT_SECONDS = 15.0
@@ -80,7 +78,7 @@ def _post(api_base: str, mutation: _ApiMutation) -> _ApiResult | None:
     except ValueError as exc:
         _failure("api_protocol_error", str(exc))
         return None
-    except (urllib.error.URLError, TimeoutError, socket.timeout, OSError) as exc:
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
         _failure("api_unavailable", str(exc))
         return None
 

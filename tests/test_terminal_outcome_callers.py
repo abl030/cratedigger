@@ -124,7 +124,7 @@ class TestTerminalOutcomeCallers(unittest.TestCase):
     def test_preview_worker_uses_one_terminal_persistence_call(self) -> None:
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="unsearchable"))
-        job = db.enqueue_import_job(
+        db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=42,
             payload={"download_log_id": 1, "failed_path": "/tmp/atomic"},

@@ -1,5 +1,6 @@
 """YouTube rescue-ingest queue and album-mapping cache."""
-from typing import Any, Optional
+from typing import Any
+
 import msgspec
 import psycopg2
 import psycopg2.extras
@@ -11,15 +12,12 @@ from lib.import_queue import (
     validate_job_type,
     validate_payload,
 )
-
+from lib.pipeline_db._core import _PipelineDBBase
 from lib.pipeline_db._shared import (
     PersistedYoutubeRow,
     YoutubeInFlightError,
     pg_execute_values,
 )
-
-from lib.pipeline_db._core import _PipelineDBBase
-
 
 # The two JSONB columns on ``youtube_album_mappings`` — every other
 # ``PersistedYoutubeRow`` field is a scalar column, passed through via
@@ -128,7 +126,7 @@ class _YoutubeMixin(_PipelineDBBase):
                 row = lookup.fetchone()
                 if row is not None:
                     existing_id = int(row["id"])
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
                 pass
             raise YoutubeInFlightError(request_id, existing_id) from exc
         row = cur.fetchone()
@@ -387,7 +385,7 @@ class _YoutubeMixin(_PipelineDBBase):
         self,
         release_group_identifier: str,
         source: str,
-    ) -> Optional[list[dict[str, Any]]]:
+    ) -> list[dict[str, Any]] | None:
         """Return all cached rows for the ``(release_group_identifier, source)`` pair.
 
         Reads from two tables: the main ``youtube_album_mappings``
@@ -449,7 +447,7 @@ class _YoutubeMixin(_PipelineDBBase):
         source: str,
         release_id: str,
         browse_id: str,
-    ) -> Optional[dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """Return cached YT mapping row whose distance targets one release.
 
         Discogs ingest uses this as the no-new-column bridge from a request's

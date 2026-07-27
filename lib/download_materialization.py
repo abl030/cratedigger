@@ -13,35 +13,35 @@ import hashlib
 import logging
 import os
 import re
-import shutil
 import secrets
+import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Final, TYPE_CHECKING, assert_never
+from typing import TYPE_CHECKING, Any, Final, assert_never
 
-from lib.download_recovery import ProcessingPathLocation, classify_processing_path
-from lib.grab_list import DownloadFile, GrabListEntry
 from lib.dispatch import _build_download_info
+from lib.download_recovery import ProcessingPathLocation, classify_processing_path
 from lib.fs_authority import (
     CopyDestinationWriteError,
     CopySourceReadError,
     FilesystemAuthorityError,
-    errno_symbol,
     OpenedRegularFile,
     SharedDownloadRootError,
     copy_opened_file,
+    errno_symbol,
     exclusive_relative_lock,
     open_private_child_directory,
     open_private_processing_root,
-    open_relative_directory,
     open_regular_relative,
     open_regular_under_held_root,
+    open_relative_directory,
     open_shared_download_root,
-    rename_relative_noreplace,
     remove_relative_tree,
+    rename_relative_noreplace,
     same_open_directory,
     unlink_if_same,
 )
+from lib.grab_list import DownloadFile, GrabListEntry
 from lib.import_manifest import audio_relative_paths, manifest_trace_summary
 from lib.processing_paths import (
     attempt_fingerprint,
@@ -993,156 +993,156 @@ def _materialize_processing_dir(
     try:
         with open_private_processing_root(
             processing_dir, ctx.cfg.slskd_download_dir,
-        ) as processing_fd:
-            with open_private_child_directory(processing_fd, albums_name) as albums_fd:
-                # A bounded shard lock avoids unbounded persistent lock files
-                # and works even when the canonical basename consumes all
-                # NAME_MAX bytes.  Hash collisions only serialize work.
-                with exclusive_relative_lock(
-                    albums_fd, f".materialize-lock-shard-{materialize_token[:2]}",
-                ):
-                    transaction_prefix = f".materialize-tmp-{materialize_token}-"
-                    for entry_name in os.listdir(albums_fd):
-                        if entry_name.startswith(transaction_prefix):
-                            remove_relative_tree(albums_fd, entry_name)
+        ) as processing_fd, open_private_child_directory(
+            processing_fd, albums_name,
+        ) as albums_fd, exclusive_relative_lock(
+            albums_fd, f".materialize-lock-shard-{materialize_token[:2]}",
+        ):
+            # A bounded shard lock avoids unbounded persistent lock files
+            # and works even when the canonical basename consumes all
+            # NAME_MAX bytes.  Hash collisions only serialize work.
+            transaction_prefix = f".materialize-tmp-{materialize_token}-"
+            for entry_name in os.listdir(albums_fd):
+                if entry_name.startswith(transaction_prefix):
+                    remove_relative_tree(albums_fd, entry_name)
 
-                    # An existing destination is valid only when it is a
-                    # complete exact regular-file manifest. Never add files
-                    # to it, including an empty directory.
-                    if _canonical_manifest_complete(
-                        albums_fd, canonical_name, destination_names,
-                    ):
-                        if not same_open_directory(processing_dir, processing_fd):
-                            return MaterializeGuarded(detail="processing_root_relocated")
-                        staged_album.current_path = canonical_path
-                        album_data.import_folder = canonical_path
-                        if persist_current_path:
-                            staged_album.persist_current_path(db)
-                        return Materialized()
-                    try:
-                        os.stat(canonical_name, dir_fd=albums_fd, follow_symlinks=False)
-                    except FileNotFoundError:
-                        pass
-                    else:
-                        return MaterializeGuarded(detail="incomplete_or_unsafe_canonical")
+            # An existing destination is valid only when it is a
+            # complete exact regular-file manifest. Never add files
+            # to it, including an empty directory.
+            if _canonical_manifest_complete(
+                albums_fd, canonical_name, destination_names,
+            ):
+                if not same_open_directory(processing_dir, processing_fd):
+                    return MaterializeGuarded(detail="processing_root_relocated")
+                staged_album.current_path = canonical_path
+                album_data.import_folder = canonical_path
+                if persist_current_path:
+                    staged_album.persist_current_path(db)
+                return Materialized()
+            try:
+                os.stat(canonical_name, dir_fd=albums_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                return MaterializeGuarded(detail="incomplete_or_unsafe_canonical")
 
-                    # Preflight *all* event-stamped sources before creating a
-                    # destination. Missing stamps, path escapes, symlinks and
-                    # special files all leave every byte untouched.
-                    #
-                    # Each refusal reports its own cause. An unstamped file
-                    # means slskd never told us where it landed; a stamped
-                    # file that will not open is a different problem
-                    # entirely, and WHICH open failure it was decides
-                    # whether the operator is looking at a hostile peer
-                    # path or a sick mount.
-                    #
-                    # The share is opened ONCE and held across the whole
-                    # manifest. Re-opening it per file gave a flaky mount N
-                    # chances per album to refuse, and every one of those
-                    # would have been blamed on a single file's event stamp
-                    # rather than on the share; a root refusal now leaves
-                    # here as SharedDownloadRootError and is attributed by
-                    # the handler below. Holding one proven descriptor also
-                    # means the whole manifest is opened beneath the SAME
-                    # inode, so a root swapped mid-loop cannot redirect its
-                    # second half.
-                    with open_shared_download_root(
-                        ctx.cfg.slskd_download_dir,
-                    ) as slskd_root:
-                        for file in album_data.files:
-                            if file.local_path is None:
-                                return _record_materialize_failure(
-                                    request_id,
-                                    REASON_EVENT_PATH_NEVER_STAMPED,
-                                    f"no completion event stamped {file.filename!r}",
-                                    level=logging.ERROR,
-                                )
-                            try:
-                                opened_sources.append(open_regular_under_held_root(
-                                    slskd_root, file.local_path,
-                                ))
-                            except FilesystemAuthorityError as exc:
-                                return _record_materialize_failure(
-                                    request_id,
-                                    source_preflight_reason(exc),
-                                    f"local_path={file.local_path!r}: {exc}",
-                                    level=logging.ERROR,
-                                )
-
-                    temp_name = f"{transaction_prefix}{secrets.token_hex(16)}"
-                    os.mkdir(temp_name, 0o700, dir_fd=albums_fd)
-                    temp_fd = os.open(
-                        temp_name,
-                        os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
-                        dir_fd=albums_fd,
-                    )
-                    published = False
-                    try:
-                        for opened, name in zip(opened_sources, destination_names, strict=True):
-                            destination_fd = os.open(
-                                name,
-                                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
-                                0o600,
-                                dir_fd=temp_fd,
-                            )
-                            try:
-                                if before_file_copy is not None:
-                                    before_file_copy()
-                                copy_opened_file(opened.fd, destination_fd)
-                            finally:
-                                os.close(destination_fd)
-                        _fsync_private_directory(
-                            temp_fd, "transaction directory")
-                        if before_publish is not None:
-                            before_publish(albums_fd, canonical_name)
-                        published = rename_relative_noreplace(
-                            albums_fd, temp_name, canonical_name,
+            # Preflight *all* event-stamped sources before creating a
+            # destination. Missing stamps, path escapes, symlinks and
+            # special files all leave every byte untouched.
+            #
+            # Each refusal reports its own cause. An unstamped file
+            # means slskd never told us where it landed; a stamped
+            # file that will not open is a different problem
+            # entirely, and WHICH open failure it was decides
+            # whether the operator is looking at a hostile peer
+            # path or a sick mount.
+            #
+            # The share is opened ONCE and held across the whole
+            # manifest. Re-opening it per file gave a flaky mount N
+            # chances per album to refuse, and every one of those
+            # would have been blamed on a single file's event stamp
+            # rather than on the share; a root refusal now leaves
+            # here as SharedDownloadRootError and is attributed by
+            # the handler below. Holding one proven descriptor also
+            # means the whole manifest is opened beneath the SAME
+            # inode, so a root swapped mid-loop cannot redirect its
+            # second half.
+            with open_shared_download_root(
+                ctx.cfg.slskd_download_dir,
+            ) as slskd_root:
+                for file in album_data.files:
+                    if file.local_path is None:
+                        return _record_materialize_failure(
+                            request_id,
+                            REASON_EVENT_PATH_NEVER_STAMPED,
+                            f"no completion event stamped {file.filename!r}",
+                            level=logging.ERROR,
                         )
-                        if published:
-                            _fsync_private_directory(albums_fd, "albums directory")
+                    try:
+                        opened_sources.append(open_regular_under_held_root(
+                            slskd_root, file.local_path,
+                        ))
+                    except FilesystemAuthorityError as exc:
+                        return _record_materialize_failure(
+                            request_id,
+                            source_preflight_reason(exc),
+                            f"local_path={file.local_path!r}: {exc}",
+                            level=logging.ERROR,
+                        )
+
+            temp_name = f"{transaction_prefix}{secrets.token_hex(16)}"
+            os.mkdir(temp_name, 0o700, dir_fd=albums_fd)
+            temp_fd = os.open(
+                temp_name,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=albums_fd,
+            )
+            published = False
+            try:
+                for opened, name in zip(opened_sources, destination_names, strict=True):
+                    destination_fd = os.open(
+                        name,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+                        0o600,
+                        dir_fd=temp_fd,
+                    )
+                    try:
+                        if before_file_copy is not None:
+                            before_file_copy()
+                        copy_opened_file(opened.fd, destination_fd)
                     finally:
-                        os.close(temp_fd)
-                        if not published:
-                            remove_relative_tree(albums_fd, temp_name)
+                        os.close(destination_fd)
+                _fsync_private_directory(
+                    temp_fd, "transaction directory")
+                if before_publish is not None:
+                    before_publish(albums_fd, canonical_name)
+                published = rename_relative_noreplace(
+                    albums_fd, temp_name, canonical_name,
+                )
+                if published:
+                    _fsync_private_directory(albums_fd, "albums directory")
+            finally:
+                os.close(temp_fd)
+                if not published:
+                    remove_relative_tree(albums_fd, temp_name)
 
-                    if not published:
-                        # A writer that bypassed this process's shard lock
-                        # won between our preflight and publish. Never
-                        # overwrite it; converge only an exact manifest.
-                        if not _canonical_manifest_complete(
-                            albums_fd, canonical_name, destination_names,
-                        ):
-                            return MaterializeGuarded(
-                                detail="incomplete_or_unsafe_canonical",
-                            )
-                        if not same_open_directory(processing_dir, processing_fd):
-                            return MaterializeGuarded(detail="processing_root_relocated")
-                        staged_album.current_path = canonical_path
-                        album_data.import_folder = canonical_path
-                        if persist_current_path:
-                            staged_album.persist_current_path(db)
-                        return Materialized()
+            if not published:
+                # A writer that bypassed this process's shard lock
+                # won between our preflight and publish. Never
+                # overwrite it; converge only an exact manifest.
+                if not _canonical_manifest_complete(
+                    albums_fd, canonical_name, destination_names,
+                ):
+                    return MaterializeGuarded(
+                        detail="incomplete_or_unsafe_canonical",
+                    )
+                if not same_open_directory(processing_dir, processing_fd):
+                    return MaterializeGuarded(detail="processing_root_relocated")
+                staged_album.current_path = canonical_path
+                album_data.import_folder = canonical_path
+                if persist_current_path:
+                    staged_album.persist_current_path(db)
+                return Materialized()
 
-                    # Verify the lexical root still names this held private
-                    # inode before publishing/persisting its pathname or
-                    # deleting source bytes.
-                    if not same_open_directory(processing_dir, processing_fd):
-                        return MaterializeGuarded(detail="processing_root_relocated")
+            # Verify the lexical root still names this held private
+            # inode before publishing/persisting its pathname or
+            # deleting source bytes.
+            if not same_open_directory(processing_dir, processing_fd):
+                return MaterializeGuarded(detail="processing_root_relocated")
 
-                    # Reopen the winner for convergence proof. A success
-                    # cannot coexist with a stale transaction under this lock.
-                    with open_relative_directory(albums_fd, canonical_name) as winner_fd:
-                        if set(os.listdir(winner_fd)) != set(destination_names):
-                            return MaterializeGuarded(detail="published_manifest_mismatch")
-                        for name in destination_names:
-                            winner = open_regular_relative(winner_fd, name)
-                            winner.close()
+            # Reopen the winner for convergence proof. A success
+            # cannot coexist with a stale transaction under this lock.
+            with open_relative_directory(albums_fd, canonical_name) as winner_fd:
+                if set(os.listdir(winner_fd)) != set(destination_names):
+                    return MaterializeGuarded(detail="published_manifest_mismatch")
+                for name in destination_names:
+                    winner = open_regular_relative(winner_fd, name)
+                    winner.close()
 
-                    # The durable private album is now visible. An
-                    # adversarial slskd replacement is never unlinked.
-                    for opened in opened_sources:
-                        unlink_if_same(opened)
+            # The durable private album is now visible. An
+            # adversarial slskd replacement is never unlinked.
+            for opened in opened_sources:
+                unlink_if_same(opened)
     except CopySourceReadError as exc:
         # The share is read in FULL here, so this is where the convicted
         # nested-virtiofs ESTALE/EIO actually fires. Before #868's review

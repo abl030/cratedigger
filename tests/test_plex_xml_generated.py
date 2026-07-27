@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generated hostile-XML coverage for the Plex response parser.
 
 The deterministic DTD/entity pin lives in ``tests/test_util.py``.  This
@@ -11,14 +10,13 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock, patch
 
-import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from defusedxml.common import DefusedXmlException
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib import util
 from lib.config import CratediggerConfig
-
 
 _ENTITY_NAMES = st.text(
     alphabet="abcdefghijklmnopqrstuvwxyz",

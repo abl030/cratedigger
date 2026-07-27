@@ -9,12 +9,11 @@ import unittest
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Self
 from unittest.mock import patch
 
 from tests.test_web_cache import FakeRedis
 from web import cache, discogs
-
 
 PUBLIC_CACHED_DISCOGS_ADAPTERS = (
     "search_releases",
@@ -36,7 +35,7 @@ class _JsonResponse:
     def read(self) -> bytes:
         return self._body
 
-    def __enter__(self) -> _JsonResponse:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *args: object) -> None:
@@ -61,11 +60,9 @@ class LeafDiscogsMirror:
         parsed = urllib.parse.urlparse(url)
         path = parsed.path
 
-        if path == "/api/search":
+        if path == "/api/search" or path == "/api/artists":
             payload = {"results": []}
-        elif path == "/api/artists":
-            payload = {"results": []}
-        elif path.endswith("/masters/all") or path.endswith("/appearances"):
+        elif path.endswith(("/masters/all", "/appearances")):
             payload = {"results": [], "total": 0, "page": 1, "per_page": 100}
         elif path.startswith("/api/masters/"):
             payload = {"releases": []}
@@ -193,7 +190,7 @@ class TestPublicCachedDiscogsAdaptersFailClosed(unittest.TestCase):
 
                 discogs.DISCOGS_API_BASE = None
 
-                def call_warm_adapter() -> object:
+                def call_warm_adapter(surface: str = surface) -> object:
                     return call_public_cached_adapter(
                         surface, query="Deloris", entity_id=681,
                     )

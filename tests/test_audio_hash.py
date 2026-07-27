@@ -112,7 +112,7 @@ class TestHashAudioContentTagInvariance(unittest.TestCase):
             audio = MP3(str(target), ID3=ID3)
             try:
                 audio.add_tags()
-            except Exception:  # pragma: no cover — already has tags
+            except Exception:  # noqa: BLE001, S110  # pragma: no cover - already has tags
                 pass
             assert audio.tags is not None
             audio.tags.add(TIT2(encoding=3, text="Totally Different Title"))

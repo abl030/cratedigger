@@ -1,14 +1,12 @@
-#!/usr/bin/env python3
 """Route classification audit + /api/_index discoverability contracts.
 
 Split from tests/test_web_server.py (#408). Shared harness in
 tests/web/_harness.py.
 """
-
 import os
 import sys
 import unittest
-
+from typing import ClassVar
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -86,6 +84,7 @@ class TestRouteRegistryShape(unittest.TestCase):
 
     def test_all_routes_are_well_formed_registrations(self):
         import re
+
         import web.server as srv
         from web.routes._registry import RouteRegistration
 
@@ -107,7 +106,7 @@ class TestRouteRegistryShape(unittest.TestCase):
 class TestApiIndexRouteContract(_WebServerCase):
     """U18 step 2: contract test for the self-documenting ``/api/_index``."""
 
-    INDEX_ENTRY_REQUIRED_FIELDS = {
+    INDEX_ENTRY_REQUIRED_FIELDS: ClassVar = {
         "method", "path", "description", "request_model",
     }
 

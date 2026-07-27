@@ -29,8 +29,8 @@ import ast
 import os
 import sys
 import unittest
-from datetime import datetime, timedelta, timezone
-from typing import Any
+from datetime import UTC, datetime, timedelta
+from typing import Any, ClassVar
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -41,12 +41,11 @@ from lib.unfindable_detection_service import (
     CATEGORY_ONE_TRACK_STRUCTURAL,
     CATEGORY_WRONG_PRESSING_AVAILABLE,
     PROBE_INTERVAL_DAYS,
-    REQUIRED_LOW_PROBES,
     REQUIRED_ZERO_FIND_CYCLES,
     RESULT_CATEGORISED,
     RESULT_DOWNGRADED,
-    RESULT_NOT_DUE,
     RESULT_NO_CHANGE,
+    RESULT_NOT_DUE,
     RESULT_PROBE_FAILED,
     RESULT_REQUEST_NOT_FOUND,
     WRONG_PRESSING_MIN_HITS,
@@ -60,7 +59,6 @@ from lib.unfindable_detection_service import (
     run_artist_probe,
 )
 from tests.fakes import FakePipelineDB, FakeSlskdAPI
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -101,7 +99,7 @@ class TestClassifyUnfindableFromState(unittest.TestCase):
     Pure-function tests.
     """
 
-    CASES: list[tuple[str, UnfindableInputs, str | None]] = [
+    CASES: ClassVar[list[tuple[str, UnfindableInputs, str | None]]] = [
         # 1. one_track_structural — total_tracks == 1 dominates.
         (
             "one_track_structural fires regardless of probes",
@@ -519,7 +517,7 @@ class TestUnfindableDetectionService(unittest.TestCase):
     ) -> UnfindableDetectionService:
         now_fn = (
             (lambda: now) if now is not None
-            else (lambda: datetime.now(timezone.utc))
+            else (lambda: datetime.now(UTC))
         )
         return UnfindableDetectionService(
             self.db, self.slskd,
@@ -538,9 +536,9 @@ class TestUnfindableDetectionService(unittest.TestCase):
         rid = _seed_wanted_request(
             self.db,
             last_artist_probe_match_count=0,
-            last_artist_probe_at=datetime.now(timezone.utc) - timedelta(days=14),
+            last_artist_probe_at=datetime.now(UTC) - timedelta(days=14),
         )
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         probe = _StubProbe(match_count=0, artist_observed=False)
         svc = self._service(probe, now=now)
 
@@ -619,7 +617,7 @@ class TestUnfindableDetectionService(unittest.TestCase):
 
     def test_downgrade_clears_prior_category(self) -> None:
         """Prior artist_absent + probe match surge → clear column."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         rid = _seed_wanted_request(
             self.db,
             unfindable_category=CATEGORY_ARTIST_ABSENT,
@@ -653,7 +651,7 @@ class TestUnfindableDetectionService(unittest.TestCase):
 
     def test_not_due_skips_slskd_call(self) -> None:
         """Probe within PROBE_INTERVAL_DAYS → skipped, no slskd hit."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         # 1 day old → well within the 7d window.
         recent = now - timedelta(days=1)
         rid = _seed_wanted_request(
@@ -668,7 +666,7 @@ class TestUnfindableDetectionService(unittest.TestCase):
         self.assertEqual(probe.calls, [])
 
     def test_force_probe_overrides_cadence(self) -> None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         recent = now - timedelta(days=1)
         rid = _seed_wanted_request(
             self.db, total_tracks=1,
@@ -722,7 +720,7 @@ class TestUnfindableDetectionService(unittest.TestCase):
 
     def test_cadence_independent_of_plan_cursor(self) -> None:
         """next_plan_ordinal stays unchanged across a categorisation."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         rid = _seed_wanted_request(
             self.db,
             last_artist_probe_at=now - timedelta(days=8),
@@ -742,7 +740,7 @@ class TestUnfindableDetectionService(unittest.TestCase):
         self.assertEqual(row["plan_cycle_count"], 2)
 
     def test_categorise_due_batch_processes_oldest_first(self) -> None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         # Three rows; one freshly-probed (NOT due), two due.
         rid_fresh = _seed_wanted_request(
             self.db, artist_name="Fresh",
@@ -784,7 +782,7 @@ class TestUnfindableDetectionService(unittest.TestCase):
 
         With the guard, both writes are silent no-ops — rescue wins.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         rid = _seed_wanted_request(
             self.db,
             last_artist_probe_at=now - timedelta(days=14),
@@ -1007,7 +1005,7 @@ class TestR20CursorIsolation(unittest.TestCase):
         rid_abs = _seed_wanted_request(
             db, artist_name="GoneArtist",
             last_artist_probe_at=(
-                datetime.now(timezone.utc)
+                datetime.now(UTC)
                 - timedelta(days=PROBE_INTERVAL_DAYS + 1)),
             last_artist_probe_match_count=0,
         )
@@ -1036,7 +1034,7 @@ class TestR20CursorIsolation(unittest.TestCase):
             db, artist_name="Recovered",
             unfindable_category=CATEGORY_ARTIST_ABSENT,
             last_artist_probe_at=(
-                datetime.now(timezone.utc)
+                datetime.now(UTC)
                 - timedelta(days=PROBE_INTERVAL_DAYS + 1)),
             last_artist_probe_match_count=0,
         )

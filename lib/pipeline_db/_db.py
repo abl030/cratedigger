@@ -1,18 +1,18 @@
 """The composed PipelineDB class."""
 from lib.pipeline_db._core import _CoreMixin
-from lib.pipeline_db.import_jobs import _ImportJobsMixin
-from lib.pipeline_db.requests import _RequestsMixin
-from lib.pipeline_db.evidence import _EvidenceMixin
-from lib.pipeline_db.download_log import _DownloadLogMixin
-from lib.pipeline_db.youtube import _YoutubeMixin
-from lib.pipeline_db.search_plan import _SearchPlanMixin
 from lib.pipeline_db.dashboard import _DashboardMixin
-from lib.pipeline_db.plex_pins import _PlexPinsMixin
+from lib.pipeline_db.download_log import _DownloadLogMixin
+from lib.pipeline_db.evidence import _EvidenceMixin
+from lib.pipeline_db.import_jobs import _ImportJobsMixin
 from lib.pipeline_db.jellyfin_pins import _JellyfinPinsMixin
 from lib.pipeline_db.misc import _MiscMixin
+from lib.pipeline_db.plex_pins import _PlexPinsMixin
+from lib.pipeline_db.requests import _RequestsMixin
 from lib.pipeline_db.search_ledger import _SearchLedgerMixin
-from lib.pipeline_db.transfer_ledger import _TransferLedgerMixin
+from lib.pipeline_db.search_plan import _SearchPlanMixin
 from lib.pipeline_db.terminal_outcomes import _TerminalOutcomesMixin
+from lib.pipeline_db.transfer_ledger import _TransferLedgerMixin
+from lib.pipeline_db.youtube import _YoutubeMixin
 
 
 class PipelineDB(
@@ -43,4 +43,3 @@ class PipelineDB(
     # All behaviour is provided by the cluster mixins above; this
     # class only fixes the MRO. See lib/pipeline_db/_core.py and
     # the sibling cluster modules.
-    pass

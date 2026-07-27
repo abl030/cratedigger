@@ -6,9 +6,8 @@ import re
 import unittest
 from pathlib import Path
 
-import lib.beets_album_op as beets_album_op
+from lib import beets_album_op
 from lib.beets_album_op import BeetsOpFailure
-
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -30,7 +29,7 @@ class TestTypedReturnContract(unittest.TestCase):
 
     def test_op_failure_is_frozen(self) -> None:
         failure = BeetsOpFailure(reason="timeout", detail="x")
-        with self.assertRaises(Exception):
+        with self.assertRaises(AttributeError):
             failure.detail = "y"  # type: ignore[misc]
 
 

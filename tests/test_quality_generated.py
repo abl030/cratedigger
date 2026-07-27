@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generated (property-based) quality-decision tests — issue #548.
 
 Hypothesis-driven properties over the quality decision twins:
@@ -31,29 +30,30 @@ import os
 import sys
 import unittest
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Never
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
-
 import msgspec
 from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
+from lib.dispatch.quality_gate import QualityGatePlan, _check_quality_gate_core
+from lib.dispatch.types import QualityGateState
 from lib.quality import (
+    COMPARISON_BASIS_BRANCHES,
+    EVIDENCE_PROVENANCE_MEASURED,
+    EVIDENCE_SUBJECT_INSTALLED,
+    EVIDENCE_SUBJECT_SOURCE,
+    QUALITY_UPGRADE_TIERS,
     AlbumQualityEvidence,
     AlbumQualityEvidenceDecisionFacts,
     AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
-    COMPARISON_BASIS_BRANCHES,
-    QUALITY_UPGRADE_TIERS,
-    EVIDENCE_PROVENANCE_MEASURED,
-    EVIDENCE_SUBJECT_SOURCE,
-    EVIDENCE_SUBJECT_INSTALLED,
     QualityComparisonBasis,
     QualityRankConfig,
     TargetQualityContract,
@@ -70,8 +70,6 @@ from lib.quality import (
     quality_gate_decision,
     spectral_import_decision,
 )
-from lib.dispatch.quality_gate import QualityGatePlan, _check_quality_gate_core
-from lib.dispatch.types import QualityGateState
 from lib.quality.filetypes import has_mixed_lossless_and_lossy
 from tests.helpers import (
     build_parity_candidate_evidence,
@@ -123,12 +121,16 @@ _VALID_FINAL_STATUSES = ("imported", "wanted")
 def assert_decision_is_definitive(result: SimResult) -> None:
     """Totality: every auto-mode decision is a well-formed, definitive one."""
     if not isinstance(result.imported, bool):
-        raise AssertionError(f"imported is not bool: {result.imported!r}")
+        raise AssertionError(  # noqa: TRY004 - generated invariant failure
+            f"imported is not bool: {result.imported!r}"
+        )
     if not isinstance(result.keep_searching, bool):
-        raise AssertionError(
+        raise AssertionError(  # noqa: TRY004 - generated invariant failure
             f"keep_searching is not bool: {result.keep_searching!r}")
     if not isinstance(result.denylisted, bool):
-        raise AssertionError(f"denylisted is not bool: {result.denylisted!r}")
+        raise AssertionError(  # noqa: TRY004 - generated invariant failure
+            f"denylisted is not bool: {result.denylisted!r}"
+        )
     if result.final_status not in _VALID_FINAL_STATUSES:
         raise AssertionError(
             f"auto-mode decision must end imported/wanted, got "
@@ -889,7 +891,7 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
                         },
                     ),  # type: ignore[arg-type]
                     apply=False,
-                    state_loader=lambda **_kwargs: state,
+                    state_loader=lambda state=state, **_kwargs: state,
                 )
                 self.assertIsNotNone(plan)
                 assert plan is not None
@@ -1246,12 +1248,17 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
     def test_measured_decisions_with_existing_carry_basis(
             self, album, download):
         result = simulate(album, download)
-        if result.stage2_import in ("import", "downgrade",
-                                    "transcode_upgrade",
-                                    "transcode_downgrade"):
-            if result.comparison_basis is None:
-                raise AssertionError(
-                    f"measured decision {result.stage2_import!r} against an "
+        if (
+            result.stage2_import in (
+                "import",
+                "downgrade",
+                "transcode_upgrade",
+                "transcode_downgrade",
+            )
+            and result.comparison_basis is None
+        ):
+            raise AssertionError(
+                f"measured decision {result.stage2_import!r} against an "
                     f"existing album lost its comparison basis: {result!r}")
         assert_basis_consistent(result)
 
@@ -1681,7 +1688,7 @@ def wild_ready_candidate_evidence(draw) -> AlbumQualityEvidence:
         snapshot_fingerprint="sha256:generated-fingerprint",
         source_path="/Incoming/auto-import/generated",
         measurement=measurement,
-        measured_at=datetime(2026, 7, 8, tzinfo=timezone.utc),
+        measured_at=datetime(2026, 7, 8, tzinfo=UTC),
         files=files,
         codec=codec,
         container=container,

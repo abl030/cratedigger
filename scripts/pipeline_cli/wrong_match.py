@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 
 def cmd_wrong_match_triage(
-    db: "WrongMatchCleanupDB", args: argparse.Namespace,
+    db: WrongMatchCleanupDB, args: argparse.Namespace,
 ) -> int:
     """Run evidence-only cleanup for the full Wrong Matches queue."""
     from lib.wrong_match_cleanup_service import (
@@ -61,7 +61,7 @@ def cmd_wrong_match_triage(
             f"{': ' + result.reason if result.reason else ''}"
         )
     if summary.results:
-        print("")
+        print()
     for outcome in OUTCOME_KEYS:
         print(f"  {outcome}: {getattr(summary, outcome)}")
     print(f"  total: {summary.processed}")
@@ -69,7 +69,7 @@ def cmd_wrong_match_triage(
 
 
 def _print_wrong_match_delete_result(
-    result: "WrongMatchDeleteResult", *, json_output: bool,
+    result: WrongMatchDeleteResult, *, json_output: bool,
 ) -> None:
     if json_output:
         print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
@@ -85,7 +85,7 @@ def _print_wrong_match_delete_result(
 
 
 def cmd_wrong_match_delete(
-    db: "WrongMatchDeleteDB", args: argparse.Namespace,
+    db: WrongMatchDeleteDB, args: argparse.Namespace,
 ) -> int:
     """Delete one visible Wrong Matches source folder."""
     from lib.wrong_match_delete_service import (
@@ -128,7 +128,7 @@ def cmd_wrong_match_delete(
 
 
 def cmd_wrong_match_delete_group(
-    db: "WrongMatchDeleteDB", args: argparse.Namespace,
+    db: WrongMatchDeleteDB, args: argparse.Namespace,
 ) -> int:
     """Delete every visible Wrong Matches source folder for one request."""
     from lib.wrong_match_delete_service import delete_wrong_match_group
@@ -150,7 +150,7 @@ def cmd_wrong_match_delete_group(
         if result.reason:
             print(f"    reason: {result.reason}")
     if summary.results:
-        print("")
+        print()
     print(f"  deleted: {summary.deleted}")
     print(f"  deleted_paths: {summary.deleted_paths}")
     print(f"  cleared: {summary.cleared}")
@@ -161,7 +161,7 @@ def cmd_wrong_match_delete_group(
 
 
 def _wrong_match_delete_group_exit_code(
-    summary: "WrongMatchDeleteSummary",
+    summary: WrongMatchDeleteSummary,
 ) -> int:
     from lib.wrong_match_delete_service import (
         OUTCOME_DELETE_FAILED,

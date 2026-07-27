@@ -59,7 +59,7 @@ def main() -> int:
     logger.info("Applying pending migrations from %s", args.migrations_dir)
     try:
         applied = apply_migrations(args.dsn, args.migrations_dir)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         logger.error("Migration failed: %s", exc)
         return 1
 

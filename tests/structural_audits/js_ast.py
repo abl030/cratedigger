@@ -8,9 +8,8 @@ import re
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 
-from tree_sitter import Language, Node, Parser, Tree
 import tree_sitter_javascript
-
+from tree_sitter import Language, Node, Parser, Tree
 
 TESTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -454,12 +453,14 @@ def _fixture_registration_nodes(
         )
 
     for node in _walk(root):
-        if _identifier_is(node, source_bytes, renderer_name):
-            if _node_key(node) not in renderer_nodes:
-                raise ValueError(
-                    f"raw renderer reference outside {fixture_name} registration: "
-                    f"{renderer_name}"
-                )
+        if (
+            _identifier_is(node, source_bytes, renderer_name)
+            and _node_key(node) not in renderer_nodes
+        ):
+            raise ValueError(
+                f"raw renderer reference outside {fixture_name} registration: "
+                f"{renderer_name}"
+            )
     return allowed
 
 

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Typed and bounded observability for validation and album conversion.
 
 Real FFmpeg fixtures prove that a failed conversion is transactional, retains
@@ -21,11 +20,10 @@ import msgspec
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
-
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from harness.import_one import V0_SPEC, convert_lossless
 from lib.import_preview import (
     _STDERR_DIAGNOSTIC_MAX_CHARS,

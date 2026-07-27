@@ -4,12 +4,11 @@ Extracted verbatim from the monolithic ``lib/quality.py`` (issue #477).
 Pure move: every definition is AST-identical to the original.
 """
 
-from typing import Optional
 
 from lib.quality.evidence_types import (
+    SPECTRAL_TRANSCODE_GRADES,
     AudioQualityMeasurement,
     QualityComparisonBasis,
-    SPECTRAL_TRANSCODE_GRADES,
     TargetQualityContract,
     V0ProbeEvidence,
 )
@@ -27,7 +26,7 @@ from lib.quality.ranks import (
 )
 
 
-def _is_explicit_label(format_hint: Optional[str]) -> bool:
+def _is_explicit_label(format_hint: str | None) -> bool:
     """True if format_hint carries an explicit quality contract (VBR or bitrate).
 
     "mp3 v0" / "opus 128" / "mp3 320" are contracts. "MP3" / "Opus" / "FLAC"
@@ -38,9 +37,7 @@ def _is_explicit_label(format_hint: Optional[str]) -> bool:
         return False
     if _parse_vbr_level(format_hint) is not None:
         return True
-    if _parse_bitrate_label(format_hint) is not None:
-        return True
-    return False
+    return _parse_bitrate_label(format_hint) is not None
 
 
 def comparison_format_hint(
@@ -93,8 +90,8 @@ _NATIVE_EXT_LABELS: dict[str, str] = {
 
 
 def native_codec_format_label(
-    codec: Optional[str], ext: Optional[str] = None
-) -> Optional[str]:
+    codec: str | None, ext: str | None = None
+) -> str | None:
     """Map a probed codec name (or file-extension fallback) to the native-lossy
     ``AudioQualityMeasurement.format`` label the rank model keys on.
 
@@ -107,7 +104,7 @@ def native_codec_format_label(
     used to be hardcoded to "MP3", so a genuine Opus 124 was scored on the
     MP3-VBR band table and rejected as a downgrade against an MP3 128.
     """
-    def _norm(value: Optional[str]) -> Optional[str]:
+    def _norm(value: str | None) -> str | None:
         return (value or "").strip().lower().lstrip(".") or None
 
     codec_norm = _norm(codec)
@@ -129,7 +126,7 @@ def _shared_spectral_bitrates(
     cfg: QualityRankConfig,
     *,
     new_v0_probe: V0ProbeEvidence | None = None,
-) -> "tuple[Optional[int], Optional[int], bool, bool] | None":
+) -> tuple[int | None, int | None, bool, bool] | None:
     """Return rank-bucket bitrates when BOTH sides carry spectral estimates.
 
     The clamp takes ``min(selected_metric, spectral_bitrate)`` per side — the
@@ -285,8 +282,8 @@ def compare_quality(
     def _truthful_display_value(
         measurement: AudioQualityMeasurement,
         metric: str,
-        value: Optional[int],
-    ) -> tuple[str, Optional[int]]:
+        value: int | None,
+    ) -> tuple[str, int | None]:
         """Name the evidence that actually classified one side.
 
         Explicit labels are encoder/storage contracts. Their rank ignores the
@@ -311,10 +308,10 @@ def compare_quality(
         branch: str,
         new_rank: QualityRank,
         existing_rank: QualityRank,
-        new_value: Optional[int] = None,
-        existing_value: Optional[int] = None,
+        new_value: int | None = None,
+        existing_value: int | None = None,
         spectral_clamped: bool = False,
-        tolerance_kbps: Optional[int] = None,
+        tolerance_kbps: int | None = None,
     ) -> QualityComparisonBasis:
         display_new_metric, display_new_value = _truthful_display_value(
             new, new_metric, new_value,

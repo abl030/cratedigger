@@ -62,7 +62,6 @@ import os
 import unittest
 from dataclasses import dataclass
 
-
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 
 #: The one sanctioned spelling. Everything else fails closed.

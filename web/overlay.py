@@ -51,7 +51,7 @@ def serialize_row(row: Mapping[str, object]) -> dict[str, object]:
 
 
 def check_beets_library(
-    beets: "OverlayBeetsDB | None",
+    beets: OverlayBeetsDB | None,
     mbids: list[str] | list[object],
 ) -> set[str]:
     """Check which MBIDs are already in the beets library."""
@@ -59,7 +59,7 @@ def check_beets_library(
 
 
 def check_beets_library_detail(
-    beets: "OverlayBeetsDB | None",
+    beets: OverlayBeetsDB | None,
     mbids: list[str] | list[object],
 ) -> dict[str, dict[str, object]]:
     """Check beets library with track counts and audio quality."""
@@ -67,7 +67,7 @@ def check_beets_library_detail(
 
 
 def get_library_artist(
-    beets: "OverlayBeetsDB | None",
+    beets: OverlayBeetsDB | None,
     artist_name: str,
     mb_artist_id: str = "",
 ) -> list[dict[str, object]]:
@@ -78,7 +78,7 @@ def get_library_artist(
 
 
 def check_pipeline(
-    pdb: "OverlayPipelineDB | None",
+    pdb: OverlayPipelineDB | None,
     mbids: list[str] | list[object],
 ) -> dict[str, dict[str, object]]:
     """Check which MBIDs are already in the pipeline DB. Returns dict of mbid → info."""
@@ -104,7 +104,7 @@ def _rank_cfg():
         try:
             from lib.config import read_runtime_rank_config
             _rank_cfg_cache = read_runtime_rank_config()
-        except Exception:
+        except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             from lib.quality import QualityRankConfig
             _rank_cfg_cache = QualityRankConfig.defaults()
     return _rank_cfg_cache

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Literal
+from typing import Literal
 
 from lib.json_narrow import (
     is_object_list as _is_object_list,
+)
+from lib.json_narrow import (
     is_str_object_dict as _is_str_object_dict,
 )
 from lib.processing_paths import (
@@ -16,7 +19,6 @@ from lib.processing_paths import (
     path_is_within_root,
     stage_to_ai_path,
 )
-
 
 ProcessingPathKind = Literal[
     "canonical",
@@ -574,18 +576,17 @@ def find_blocked_processing_path_issues(
                     ),
                 ))
                 continue
-            if auto_import_in_progress is not None:
-                if in_progress is None:
-                    issues.append(BlockedRecoveryIssue(
-                        request_id=request_id,
-                        detail=(
-                            "persisted request-scoped auto-import staged "
-                            "path is still populated, but the repair scan "
-                            "could not determine whether auto-import is "
-                            f"still running: {location.path}"
-                        ),
-                    ))
-                    continue
+            if auto_import_in_progress is not None and in_progress is None:
+                issues.append(BlockedRecoveryIssue(
+                    request_id=request_id,
+                    detail=(
+                        "persisted request-scoped auto-import staged "
+                        "path is still populated, but the repair scan "
+                        "could not determine whether auto-import is "
+                        f"still running: {location.path}"
+                    ),
+                ))
+                continue
             issues.append(BlockedRecoveryIssue(
                 request_id=request_id,
                 detail=(

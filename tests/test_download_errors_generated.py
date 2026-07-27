@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generated + pinned tests for issue #564 — sane download-failure evidence.
 
 Three invariants, each shipped as a deterministic pin (already living in
@@ -71,17 +70,16 @@ import os
 import sys
 import unittest
 from dataclasses import asdict
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
-import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 
 import msgspec
 from hypothesis import example, given
 from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.download import (
     _enrich_timeout_reason,
     _vanished_timeout_reason,
@@ -174,15 +172,15 @@ def assert_capture_progress_preserves_terminal_observation(
 
 @st.composite
 def _capture_progress_worlds(draw: Any) -> dict:
-    return dict(
-        prev_state=draw(st.one_of(st.none(), st.sampled_from(_ALL_STATES))),
-        prev_exception=draw(st.one_of(st.none(), st.sampled_from(_EXCEPTIONS))),
-        prev_bytes=draw(st.integers(min_value=0, max_value=10_000_000)),
-        has_snapshot=draw(st.booleans()),
-        snap_state=draw(st.sampled_from(_ALL_STATES)),
-        snap_exception=draw(st.one_of(st.none(), st.sampled_from(_EXCEPTIONS))),
-        snap_bytes=draw(st.integers(min_value=0, max_value=10_000_000)),
-    )
+    return {
+        "prev_state": draw(st.one_of(st.none(), st.sampled_from(_ALL_STATES))),
+        "prev_exception": draw(st.one_of(st.none(), st.sampled_from(_EXCEPTIONS))),
+        "prev_bytes": draw(st.integers(min_value=0, max_value=10_000_000)),
+        "has_snapshot": draw(st.booleans()),
+        "snap_state": draw(st.sampled_from(_ALL_STATES)),
+        "snap_exception": draw(st.one_of(st.none(), st.sampled_from(_EXCEPTIONS))),
+        "snap_bytes": draw(st.integers(min_value=0, max_value=10_000_000)),
+    }
 
 
 def _run_capture_progress(world: dict) -> dict:
@@ -200,7 +198,7 @@ def _run_capture_progress(world: dict) -> dict:
         enqueued_at="2026-01-01T00:00:00+00:00",
         files=[f],
     )
-    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    now = datetime(2026, 1, 1, tzinfo=UTC)
     snapshot = PollFileSnapshot(
         transfer_id="tx-1" if world["has_snapshot"] else None,
         state=world["snap_state"] if world["has_snapshot"] else None,
@@ -219,20 +217,20 @@ def _run_capture_progress(world: dict) -> dict:
     )
     assert result.state is not None
     after = result.state.files[0]
-    return dict(
-        after_last_state=after.last_state,
-        after_last_exception=after.last_exception,
-        after_bytes=after.bytes_transferred,
-    )
+    return {
+        "after_last_state": after.last_state,
+        "after_last_exception": after.last_exception,
+        "after_bytes": after.bytes_transferred,
+    }
 
 
 class TestGeneratedCaptureProgressNeverLosesTerminalObservation(unittest.TestCase):
     @given(world=_capture_progress_worlds())
-    @example(world=dict(
-        prev_state="InProgress", prev_exception=None, prev_bytes=0,
-        has_snapshot=True, snap_state="Completed, Rejected",
-        snap_exception="Transfer rejected: Banned", snap_bytes=0,
-    ))
+    @example(world={
+        "prev_state": "InProgress", "prev_exception": None, "prev_bytes": 0,
+        "has_snapshot": True, "snap_state": "Completed, Rejected",
+        "snap_exception": "Transfer rejected: Banned", "snap_bytes": 0,
+    })
     def test_capture_progress_never_loses_terminal_observation(self, world):
         result = _run_capture_progress(world)
         assert_capture_progress_preserves_terminal_observation(**world, **result)
@@ -240,14 +238,14 @@ class TestGeneratedCaptureProgressNeverLosesTerminalObservation(unittest.TestCas
 
 class TestCaptureProgressCheckerTripsOnViolations(unittest.TestCase):
     def _base(self, **overrides: Any) -> dict:
-        defaults = dict(
-            prev_state=None, prev_exception=None, prev_bytes=0,
-            has_snapshot=True, snap_state="Completed, Rejected",
-            snap_exception="Transfer rejected: Banned", snap_bytes=0,
-            after_last_state="Completed, Rejected",
-            after_last_exception="Transfer rejected: Banned",
-            after_bytes=0,
-        )
+        defaults = {
+            "prev_state": None, "prev_exception": None, "prev_bytes": 0,
+            "has_snapshot": True, "snap_state": "Completed, Rejected",
+            "snap_exception": "Transfer rejected: Banned", "snap_bytes": 0,
+            "after_last_state": "Completed, Rejected",
+            "after_last_exception": "Transfer rejected: Banned",
+            "after_bytes": 0,
+        }
         defaults.update(overrides)
         return defaults
 
@@ -321,7 +319,7 @@ def _reducer_purity_worlds(draw: Any) -> dict[str, Any]:
 
 
 def _run_reducer_purity(world: dict[str, Any]) -> None:
-    now = datetime(2026, 1, 1, 0, 10, tzinfo=timezone.utc)
+    now = datetime(2026, 1, 1, 0, 10, tzinfo=UTC)
     file = ActiveDownloadFileState(
         username="user",
         filename="Album\\01.flac",
@@ -505,16 +503,16 @@ def assert_harvest_preserves_terminal_observation(
 
 @st.composite
 def _harvest_worlds(draw: Any) -> dict:
-    return dict(
-        processing_started=draw(st.booleans()),
-        prev_state=draw(st.one_of(st.none(), st.sampled_from(_ALL_STATES))),
-        prev_exception=draw(st.one_of(st.none(), st.sampled_from(_EXCEPTIONS))),
-        prev_bytes=draw(st.integers(min_value=0, max_value=10_000_000)),
-        has_snapshot_match=draw(st.booleans()),
-        snap_state=draw(st.sampled_from(_ALL_STATES)),
-        snap_exception=draw(st.one_of(st.none(), st.sampled_from(_EXCEPTIONS))),
-        snap_bytes=draw(st.integers(min_value=0, max_value=10_000_000)),
-    )
+    return {
+        "processing_started": draw(st.booleans()),
+        "prev_state": draw(st.one_of(st.none(), st.sampled_from(_ALL_STATES))),
+        "prev_exception": draw(st.one_of(st.none(), st.sampled_from(_EXCEPTIONS))),
+        "prev_bytes": draw(st.integers(min_value=0, max_value=10_000_000)),
+        "has_snapshot_match": draw(st.booleans()),
+        "snap_state": draw(st.sampled_from(_ALL_STATES)),
+        "snap_exception": draw(st.one_of(st.none(), st.sampled_from(_EXCEPTIONS))),
+        "snap_bytes": draw(st.integers(min_value=0, max_value=10_000_000)),
+    }
 
 
 _HARVEST_USERNAME = "peer1"
@@ -562,27 +560,27 @@ def _run_harvest(world: dict) -> dict:
     harvest_terminal_transfer_evidence(ctx)
 
     after = db.request(1)["active_download_state"]["files"][0]
-    return dict(
-        after_state=after.get("last_state"),
-        after_exception=after.get("last_exception"),
-        after_bytes=after.get("bytes_transferred", 0),
-    )
+    return {
+        "after_state": after.get("last_state"),
+        "after_exception": after.get("last_exception"),
+        "after_bytes": after.get("bytes_transferred", 0),
+    }
 
 
 class TestGeneratedHarvestNeverLosesTerminalObservation(unittest.TestCase):
     @given(world=_harvest_worlds())
-    @example(world=dict(
-        processing_started=False, prev_state=None, prev_exception=None,
-        prev_bytes=0, has_snapshot_match=True,
-        snap_state="Completed, Rejected",
-        snap_exception="Transfer rejected: Banned", snap_bytes=0,
-    ))
-    @example(world=dict(
-        processing_started=False, prev_state="Completed, Succeeded",
-        prev_exception=None, prev_bytes=1000, has_snapshot_match=True,
-        snap_state="Completed, Errored", snap_exception="ignored",
-        snap_bytes=1000,
-    ))
+    @example(world={
+        "processing_started": False, "prev_state": None, "prev_exception": None,
+        "prev_bytes": 0, "has_snapshot_match": True,
+        "snap_state": "Completed, Rejected",
+        "snap_exception": "Transfer rejected: Banned", "snap_bytes": 0,
+    })
+    @example(world={
+        "processing_started": False, "prev_state": "Completed, Succeeded",
+        "prev_exception": None, "prev_bytes": 1000, "has_snapshot_match": True,
+        "snap_state": "Completed, Errored", "snap_exception": "ignored",
+        "snap_bytes": 1000,
+    })
     def test_harvest_never_loses_terminal_observation(self, world):
         result = _run_harvest(world)
         assert_harvest_preserves_terminal_observation(**world, **result)
@@ -590,14 +588,14 @@ class TestGeneratedHarvestNeverLosesTerminalObservation(unittest.TestCase):
 
 class TestHarvestCheckerTripsOnViolations(unittest.TestCase):
     def _base(self, **overrides: Any) -> dict:
-        defaults = dict(
-            processing_started=False, prev_state=None, prev_exception=None,
-            prev_bytes=0, has_snapshot_match=True,
-            snap_state="Completed, Rejected",
-            snap_exception="Transfer rejected: Banned", snap_bytes=0,
-            after_state="Completed, Rejected",
-            after_exception="Transfer rejected: Banned", after_bytes=0,
-        )
+        defaults = {
+            "processing_started": False, "prev_state": None, "prev_exception": None,
+            "prev_bytes": 0, "has_snapshot_match": True,
+            "snap_state": "Completed, Rejected",
+            "snap_exception": "Transfer rejected: Banned", "snap_bytes": 0,
+            "after_state": "Completed, Rejected",
+            "after_exception": "Transfer rejected: Banned", "after_bytes": 0,
+        }
         defaults.update(overrides)
         return defaults
 
@@ -867,7 +865,7 @@ class TestStampedReasonCheckerTripsOnViolations(unittest.TestCase):
 _820_USERNAME = "peer-820"
 _820_DIRECTORY = "peer-820\\Album"
 _820_FILENAME = "peer-820\\Album\\01.flac"
-_820_BOUNDARY = datetime(2026, 7, 22, 2, 1, 25, tzinfo=timezone.utc)
+_820_BOUNDARY = datetime(2026, 7, 22, 2, 1, 25, tzinfo=UTC)
 
 
 def _820_is_survivor(spec: tuple[str, int]) -> bool:
@@ -1131,21 +1129,21 @@ def assert_stale_shadow_never_produces_false_complete(
 
 @st.composite
 def _820_stale_shadow_worlds(draw: st.DrawFn) -> dict:
-    return dict(
-        current_state=draw(st.sampled_from(_ALL_STATES)),
-        post_offset=draw(st.integers(min_value=0, max_value=7200)),
-        exception=draw(st.one_of(st.none(), st.sampled_from(_EXCEPTIONS))),
-    )
+    return {
+        "current_state": draw(st.sampled_from(_ALL_STATES)),
+        "post_offset": draw(st.integers(min_value=0, max_value=7200)),
+        "exception": draw(st.one_of(st.none(), st.sampled_from(_EXCEPTIONS))),
+    }
 
 
 class TestGeneratedStaleShadowNeverProducesFalseComplete(unittest.TestCase):
     @given(world=_820_stale_shadow_worlds())
-    @example(world=dict(
-        current_state="Completed, Errored", post_offset=1,
-        exception=(
+    @example(world={
+        "current_state": "Completed, Errored", "post_offset": 1,
+        "exception": (
             "Download of 09 - Downhill From Here.mp3 reported as "
             "failed by HumDrum"),
-    ))
+    })
     def test_stale_shadow_never_produces_false_complete(self, world):
         decision = _820_run_stale_shadow_world(world)
         assert_stale_shadow_never_produces_false_complete(
@@ -1192,7 +1190,7 @@ def _822_is_timestampless_terminal(spec: tuple[str, int | None]) -> bool:
 def _822_build_downloads(specs: tuple[tuple[str, int | None], ...]):
     files = []
     for i, (state, offset) in enumerate(specs):
-        kwargs: dict[str, str] = dict(filename=_820_FILENAME, id=f"c{i}", state=state)
+        kwargs: dict[str, str] = {"filename": _820_FILENAME, "id": f"c{i}", "state": state}
         if offset is not None:
             kwargs["ended_at"] = (
                 _820_BOUNDARY + timedelta(seconds=offset)).isoformat()

@@ -4,11 +4,10 @@ import unittest
 
 from lib.quality import (
     QUALITY_UPGRADE_TIERS,
-    QUALITY_FLAC_ONLY,
+    DownloadInfo,
+    narrow_override_on_downgrade,
     search_tiers,
     should_clear_lossless_search_override,
-    narrow_override_on_downgrade,
-    DownloadInfo,
 )
 
 

@@ -13,7 +13,6 @@ from hypothesis import strategies as st
 import tests._hypothesis_profiles  # noqa: F401 - registers active profile
 from tests.fakes.deploy_cycle import FakeDeployCycleCommands
 
-
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "verify_cratedigger_cycle.sh"
 
 

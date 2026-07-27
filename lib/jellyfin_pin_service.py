@@ -55,9 +55,10 @@ contract explicit in its own module.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Callable, Protocol
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any, Protocol
 
 from lib.pipeline_db.pin_status import JellyfinTerminalPinStatus
 from lib.util import (
@@ -145,7 +146,7 @@ class ReconcileResult:
         )
 
 
-def _jellyfin_pin_enabled(cfg: "CratediggerConfig") -> bool:
+def _jellyfin_pin_enabled(cfg: CratediggerConfig) -> bool:
     return bool(cfg.jellyfin_url and cfg.resolved_jellyfin_token())
 
 
@@ -158,8 +159,8 @@ def _date_newer(a: str, b: str) -> bool:
     compare parsed datetimes; fall back to the string compare only if a
     side doesn't parse (arbitrary text stored verbatim)."""
     try:
-        return (datetime.fromisoformat(a.replace("Z", "+00:00"))
-                > datetime.fromisoformat(b.replace("Z", "+00:00")))
+        return (datetime.fromisoformat(a)
+                > datetime.fromisoformat(b))
     except (ValueError, TypeError):
         # ValueError: unparseable text (e.g. ""). TypeError: one side parsed
         # naive (no offset) — comparing would raise and strand the pin.
@@ -167,7 +168,7 @@ def _date_newer(a: str, b: str) -> bool:
 
 
 def _floor_original_date(
-    db: "PipelineDB | _PinDBProto",
+    db: PipelineDB | _PinDBProto,
     request_id: int | None,
     historical_added_at: int | None,
 ) -> str | None:
@@ -178,22 +179,22 @@ def _floor_original_date(
     candidates: list[datetime] = []
     if historical_added_at is not None:
         candidates.append(
-            datetime.fromtimestamp(historical_added_at, tz=timezone.utc))
+            datetime.fromtimestamp(historical_added_at, tz=UTC))
     if request_id is not None:
         oldest = db.get_oldest_request_chain_created_at(request_id)
         if oldest is not None:
             if oldest.tzinfo is None:
-                oldest = oldest.replace(tzinfo=timezone.utc)
+                oldest = oldest.replace(tzinfo=UTC)
             candidates.append(oldest)
     if not candidates:
         return None
-    return (min(candidates).astimezone(timezone.utc)
+    return (min(candidates).astimezone(UTC)
             .isoformat(timespec="seconds").replace("+00:00", "Z"))
 
 
 def capture_jellyfin_date_created_pin(
-    cfg: "CratediggerConfig",
-    db: "PipelineDB | _PinDBProto",
+    cfg: CratediggerConfig,
+    db: PipelineDB | _PinDBProto,
     imported_path: str | None,
     request_id: int | None,
     *,
@@ -275,10 +276,10 @@ def capture_jellyfin_date_created_pin(
         )
         if historical_added_at is not None:
             historical = datetime.fromtimestamp(
-                historical_added_at, tz=timezone.utc
+                historical_added_at, tz=UTC
             )
             captured = datetime.fromisoformat(
-                original_date_created.replace("Z", "+00:00")
+                original_date_created
             )
             if historical < captured:
                 original_date_created = (
@@ -305,8 +306,8 @@ def capture_jellyfin_date_created_pin(
 
 
 def reconcile_jellyfin_date_created_pins(
-    cfg: "CratediggerConfig",
-    db: "PipelineDB | _PinDBProto",
+    cfg: CratediggerConfig,
+    db: PipelineDB | _PinDBProto,
     *,
     now: datetime,
     grace_seconds: int = DEFAULT_GRACE_SECONDS,

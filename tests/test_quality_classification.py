@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Quality classification tests — synthetic-input regression suite.
 
 Each ``TestLiveBugReproductions`` test reproduces a real production bug
@@ -15,11 +14,14 @@ import unittest
 # Add project root to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from datetime import UTC
+
 from lib.quality import full_pipeline_decision
 from tests.helpers import (
     build_parity_candidate_evidence,
     build_parity_current_evidence,
 )
+
 
 class TestLiveBugReproductions(unittest.TestCase):
     """Reproduce bugs found in live pipeline runs.
@@ -661,7 +663,6 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
     def test_mountain_goats_flux_provisional_lossless_via_evidence(self):
         """Request 4514 shape, but routed through the production decider."""
         from lib.quality import (
-            AlbumQualityEvidenceDecisionFacts,
             full_pipeline_decision_from_evidence,
         )
 
@@ -730,7 +731,6 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
         actual entry point, not just the flat-kwargs simulator twin.
         """
         from lib.quality import (
-            AlbumQualityEvidenceDecisionFacts,
             dispatch_action,
             full_pipeline_decision_from_evidence,
         )
@@ -995,9 +995,8 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
         RED until U5 makes the production path produce that state.
         """
         from lib.quality import (
-            AlbumQualityEvidenceDecisionFacts,
-            AlbumQualityV0Metric,
             EVIDENCE_SUBJECT_SOURCE,
+            AlbumQualityV0Metric,
             classify_full_pipeline_decision,
             full_pipeline_decision_from_evidence,
         )
@@ -1094,7 +1093,6 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
         (likely_transcode). Parity twin of
         test_darcie_haven_native_opus_beats_mp3_transcode."""
         from lib.quality import (
-            AlbumQualityEvidenceDecisionFacts,
             full_pipeline_decision_from_evidence,
         )
 
@@ -1132,7 +1130,6 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
         in _new_format_hint_from_evidence would flip this back to a wrong
         rejection and be caught here."""
         from lib.quality import (
-            AlbumQualityEvidenceDecisionFacts,
             full_pipeline_decision_from_evidence,
         )
 
@@ -1240,7 +1237,6 @@ class TestPreimportFactRejects(unittest.TestCase):
 
     def test_audio_corrupt_routes_through_full_pipeline(self):
         from lib.quality import (
-            AlbumQualityEvidenceDecisionFacts,
             classify_full_pipeline_decision,
             evidence_decision_name,
             full_pipeline_decision_from_evidence,
@@ -1268,7 +1264,6 @@ class TestPreimportFactRejects(unittest.TestCase):
 
     def test_bad_audio_hash_routes_through_full_pipeline(self):
         from lib.quality import (
-            AlbumQualityEvidenceDecisionFacts,
             classify_full_pipeline_decision,
             evidence_decision_name,
             full_pipeline_decision_from_evidence,
@@ -1297,7 +1292,6 @@ class TestPreimportFactRejects(unittest.TestCase):
 
     def test_nested_layout_routes_through_full_pipeline(self):
         from lib.quality import (
-            AlbumQualityEvidenceDecisionFacts,
             classify_full_pipeline_decision,
             evidence_decision_name,
             full_pipeline_decision_from_evidence,
@@ -1327,7 +1321,6 @@ class TestPreimportFactRejects(unittest.TestCase):
 
     def test_empty_fileset_routes_through_full_pipeline(self):
         from lib.quality import (
-            AlbumQualityEvidenceDecisionFacts,
             classify_full_pipeline_decision,
             evidence_decision_name,
             full_pipeline_decision_from_evidence,
@@ -1372,16 +1365,16 @@ class TestPreimportFactRejects(unittest.TestCase):
         files and reject before any conversion or import runs. Self-heals
         back to ``wanted`` like the other preimport-fact rejects.
         """
+        from datetime import datetime
+
         from lib.quality import (
             AlbumQualityEvidence,
-            AlbumQualityEvidenceDecisionFacts,
             AlbumQualityEvidenceFile,
             AudioQualityMeasurement,
             classify_full_pipeline_decision,
             evidence_decision_name,
             full_pipeline_decision_from_evidence,
         )
-        from datetime import datetime, timezone
 
         # 15 FLAC + 2 MP3, mirroring the live download 17772 source folder.
         files = [
@@ -1417,7 +1410,7 @@ class TestPreimportFactRejects(unittest.TestCase):
                 spectral_subject="source",
                 spectral_provenance="measured",
             ),
-            measured_at=datetime(2026, 5, 21, tzinfo=timezone.utc),
+            measured_at=datetime(2026, 5, 21, tzinfo=UTC),
             files=files,
             codec="flac",
             container="flac",
@@ -1450,14 +1443,14 @@ class TestPreimportFactRejects(unittest.TestCase):
         """FLAC + WAV in the same folder is all-lossless — must NOT trip
         the mixed_source reject. The check is specifically "lossless +
         lossy in the same folder", not "multiple containers"."""
+        from datetime import datetime
+
         from lib.quality import (
             AlbumQualityEvidence,
-            AlbumQualityEvidenceDecisionFacts,
             AlbumQualityEvidenceFile,
             AudioQualityMeasurement,
             full_pipeline_decision_from_evidence,
         )
-        from datetime import datetime, timezone
 
         files = [
             AlbumQualityEvidenceFile(
@@ -1482,7 +1475,7 @@ class TestPreimportFactRejects(unittest.TestCase):
                 format="FLAC",
                 is_cbr=False,
             ),
-            measured_at=datetime(2026, 5, 21, tzinfo=timezone.utc),
+            measured_at=datetime(2026, 5, 21, tzinfo=UTC),
             files=files,
             codec="flac",
             container="flac",
@@ -1501,7 +1494,6 @@ class TestPreimportFactRejects(unittest.TestCase):
         """When multiple facts are present, ``audio_corrupt`` wins
         (matches the deleted ``preimport_decide`` evaluation order)."""
         from lib.quality import (
-            AlbumQualityEvidenceDecisionFacts,
             evidence_decision_name,
             full_pipeline_decision_from_evidence,
         )

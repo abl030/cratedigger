@@ -14,7 +14,7 @@ from __future__ import annotations
 import configparser
 import unittest
 from dataclasses import replace
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 from unittest.mock import MagicMock
 
 from cratedigger import SlskdFile, TrackRecord
@@ -30,7 +30,6 @@ from lib.peer_cache import PeerCache
 from lib.quality import CandidateScore
 from tests.fakes import FakePipelineDBSource, FakeSlskdAPI
 from tests.test_peer_cache import FakeRedis
-
 
 # ---------------------------------------------------------------------------
 # Test fixtures
@@ -1001,7 +1000,7 @@ class TestClassifyRejectionReason(unittest.TestCase):
 
     # (description, candidates, pre_filter_skip_count, matched,
     #  cross_check_failure, expected_reason)
-    CASES = [
+    CASES: ClassVar = [
         ("matched_returns_none",
          [_cand(matched=3, total=3, avg=0.99, file_count=3)],
          0, True, False, None),
@@ -1069,7 +1068,7 @@ class TestClassifyRejectionFromLogInputs(unittest.TestCase):
     """
 
     # (description, candidates, pre_filter_skip_count, outcome, expected)
-    CASES = [
+    CASES: ClassVar = [
         ("outcome_found_returns_none",
          [_cand(matched=3, total=3, avg=0.95, file_count=3)],
          0, "found", None),

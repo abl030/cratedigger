@@ -1,9 +1,8 @@
 """Unit tests for lib.artist_compare — fuzzy MB+Discogs discography merge."""
-
 import os
 import sys
 import unittest
-from typing import cast
+from typing import ClassVar, cast
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -78,7 +77,7 @@ def _dg(
 
 
 class TestNormalizeTitle(unittest.TestCase):
-    CASES = [
+    CASES: ClassVar = [
         ("lowercase", "OK Computer", "okcomputer"),
         ("special chars", "Text_Bomb", "textbomb"),
         ("punctuation", "Ok. Computer!", "okcomputer"),
@@ -95,7 +94,7 @@ class TestNormalizeTitle(unittest.TestCase):
 
 
 class TestExtractYear(unittest.TestCase):
-    CASES = [
+    CASES: ClassVar = [
         ("full date", "1997-06-16", 1997),
         ("year only", "1997", 1997),
         ("partial date", "1997-06-00", 1997),  # discogs unknown-day convention
@@ -265,8 +264,8 @@ class TestMergeDiscographies(unittest.TestCase):
             [
                 ("Fraulein", "3938744"),
                 (
-                    "The Point In The War When We Knew We Were Lost / "
-                    "Mapped Out In Our Thoughts",
+                    ("The Point In The War When We Knew We Were Lost / "
+                    "Mapped Out In Our Thoughts"),
                     "461708",
                 ),
                 ("The Pointless Gift", "3088588"),

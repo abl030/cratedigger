@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import logging
 import os
 import shutil
-from typing import Protocol, TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from lib.grab_list import DownloadFile, GrabListEntry
@@ -26,7 +26,7 @@ class SupportsCurrentPathUpdate(Protocol):
         ...
 
 
-def staged_filename(file: "DownloadFile") -> str:
+def staged_filename(file: DownloadFile) -> str:
     """Return the local filename used once a track is under album staging."""
     filename = file.filename.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
     if file.disk_no is not None and file.disk_count is not None and file.disk_count > 1:
@@ -44,19 +44,19 @@ class StagedAlbum:
     @classmethod
     def from_entry(
         cls,
-        entry: "GrabListEntry",
+        entry: GrabListEntry,
         *,
         default_path: str,
-    ) -> "StagedAlbum":
+    ) -> StagedAlbum:
         return cls(
             current_path=entry.import_folder or default_path,
             request_id=entry.db_request_id,
         )
 
-    def import_path_for(self, file: "DownloadFile") -> str:
+    def import_path_for(self, file: DownloadFile) -> str:
         return os.path.join(self.current_path, staged_filename(file))
 
-    def bind_import_paths(self, files: list["DownloadFile"]) -> None:
+    def bind_import_paths(self, files: list[DownloadFile]) -> None:
         for file in files:
             file.import_path = self.import_path_for(file)
 

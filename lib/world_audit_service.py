@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any, Protocol, TYPE_CHECKING, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import msgspec
 
@@ -32,7 +32,6 @@ from lib.world_invariants import (
     check_status_membership,
     derive_denylist_authorities,
 )
-
 
 AUDITED_INVARIANTS = (
     "folder_exclusivity",
@@ -77,7 +76,7 @@ class WorldAuditPipelineDB(Protocol):
     def get_download_history_batch(
         self,
         request_ids: list[int],
-    ) -> "dict[int, list[DownloadLogWithEvidenceRow]]": ...
+    ) -> dict[int, list[DownloadLogWithEvidenceRow]]: ...
 
     def list_denylist_rows(self) -> list[dict[str, Any]]: ...
 

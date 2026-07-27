@@ -5,24 +5,24 @@ Pure move: every definition is AST-identical to the original.
 """
 
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Literal
+
 import msgspec
 
 from lib.quality.audio_validation import AudioValidationReport
+from lib.quality.compare import compare_quality
 from lib.quality.evidence_types import (
-    AudioQualityMeasurement,
     EVIDENCE_PROVENANCE_MEASURED,
     EVIDENCE_SUBJECT_INSTALLED,
-    QualityComparisonBasis,
     SPECTRAL_TRANSCODE_GRADES,
+    AudioQualityMeasurement,
+    QualityComparisonBasis,
     TargetQualityContract,
     V0ProbeEvidence,
     VerifiedLosslessProof,
     is_comparable_lossless_source_probe,
 )
 from lib.quality.ranks import QualityRank, QualityRankConfig, gate_rank
-from lib.quality.compare import compare_quality
-
 
 DECISION_PROVISIONAL_LOSSLESS_UPGRADE = "provisional_lossless_upgrade"
 DECISION_SUSPECT_LOSSLESS_DOWNGRADE = "suspect_lossless_downgrade"
@@ -160,14 +160,14 @@ class ImportQualityDecision(msgspec.Struct, frozen=True):
     ``basis`` is None exactly when no comparison ran (no existing album).
     """
     decision: str
-    basis: Optional[QualityComparisonBasis] = None
+    basis: QualityComparisonBasis | None = None
 
 
 def import_quality_decision(
     new: AudioQualityMeasurement,
-    existing: "AudioQualityMeasurement | None",
+    existing: AudioQualityMeasurement | None,
     is_transcode: bool = False,
-    cfg: "QualityRankConfig | None" = None,
+    cfg: QualityRankConfig | None = None,
     *,
     target_contract: TargetQualityContract | None = None,
     v0_probe: V0ProbeEvidence | None = None,
@@ -253,7 +253,7 @@ class MeasuredImportDecisionInput(msgspec.Struct, frozen=True):
     contains no filesystem, database, or subprocess concerns.
     """
     source_measurement: AudioQualityMeasurement
-    current_measurement: Optional[AudioQualityMeasurement] = None
+    current_measurement: AudioQualityMeasurement | None = None
     is_transcode: bool = False
     target_contract: TargetQualityContract | None = None
     v0_probe: V0ProbeEvidence | None = None
@@ -269,37 +269,37 @@ class MeasuredImportDecisionResult(msgspec.Struct, frozen=True):
     uncertain: bool = False
     cleanup_eligible: bool = False
     stage_chain: list[str] = []
-    reason: Optional[str] = None
+    reason: str | None = None
     # The comparison compare_quality() performed, None when no existing
     # album was compared. Persisted onto ImportResult so the UI renders
     # the decision's own explanation instead of re-deriving one.
-    comparison_basis: Optional[QualityComparisonBasis] = None
+    comparison_basis: QualityComparisonBasis | None = None
 
 
 class ProvisionalLosslessDecisionInput(msgspec.Struct, frozen=True):
     """Pure input for suspect lossless-source provisional grind-up."""
 
-    candidate_probe: Optional[V0ProbeEvidence] = None
-    existing_probe: Optional[V0ProbeEvidence] = None
-    spectral_grade: Optional[str] = None
+    candidate_probe: V0ProbeEvidence | None = None
+    existing_probe: V0ProbeEvidence | None = None
+    spectral_grade: str | None = None
     supported_lossless_source: bool = False
 
 
 class ProvisionalLosslessDecisionResult(msgspec.Struct, frozen=True):
     """Decision result for the suspect lossless-source lane."""
 
-    decision: Optional[str] = None
+    decision: str | None = None
     would_import: bool = False
     confident_reject: bool = False
     cleanup_eligible: bool = False
-    reason: Optional[str] = None
+    reason: str | None = None
     stage_chain: list[str] = []
 
 
 def provisional_lossless_decision(
     candidate: ProvisionalLosslessDecisionInput,
     *,
-    cfg: "QualityRankConfig | None" = None,
+    cfg: QualityRankConfig | None = None,
 ) -> ProvisionalLosslessDecisionResult:
     """Compare suspect lossless-source V0 probes inside the provisional lane.
 
@@ -474,7 +474,7 @@ def build_existing_quality_measurement(
 def measured_import_decision(
     measured: MeasuredImportDecisionInput,
     *,
-    cfg: "QualityRankConfig | None" = None,
+    cfg: QualityRankConfig | None = None,
 ) -> MeasuredImportDecisionResult:
     """Reduce measured import facts to a decision and preview classification."""
     quality = import_quality_decision(
@@ -543,12 +543,10 @@ def transcode_detection(
     """
     if converted_count == 0:
         return False
-    if spectral_grade in ("genuine", "marginal"):
-        return False
     # Suspect/likely-transcode are affirmative disagreement and may later be
     # rescued by the V0 override. Missing/error/unknown evidence is an abort,
     # represented conservatively here so it can never mint verification.
-    return True
+    return spectral_grade not in ("genuine", "marginal")
 
 
 # ---------------------------------------------------------------------------
@@ -570,7 +568,7 @@ V0_OVERRIDE_AVG_KBPS: int = 230
 V0_OVERRIDE_MIN_KBPS: int = 200
 
 
-def v0_probe_overrides_spectral(probe: "V0ProbeEvidence | None") -> bool:
+def v0_probe_overrides_spectral(probe: V0ProbeEvidence | None) -> bool:
     """Decide whether a V0 probe is strong enough to override a suspect
     spectral grade and certify the source as genuine lossless.
 
@@ -589,11 +587,11 @@ def v0_probe_overrides_spectral(probe: "V0ProbeEvidence | None") -> bool:
 
 
 def determine_verified_lossless(
-    target_format: Optional[str],
-    spectral_grade: Optional[str],
+    target_format: str | None,
+    spectral_grade: str | None,
     converted_count: int,
     is_transcode: bool,
-    v0_probe: "V0ProbeEvidence | None" = None,
+    v0_probe: V0ProbeEvidence | None = None,
     *,
     has_lossy_passthrough: bool = False,
 ) -> bool:
@@ -635,19 +633,16 @@ def determine_verified_lossless(
         return spectral_disagrees and v0_probe_overrides_spectral(v0_probe)
     if converted_count > 0 and spectral_affirms and not is_transcode:
         return True
-    if (converted_count > 0 and spectral_disagrees
-            and v0_probe_overrides_spectral(v0_probe)):
-        return True
-    return False
+    return bool(converted_count > 0 and spectral_disagrees and v0_probe_overrides_spectral(v0_probe))
 
 
 def mint_verified_lossless_proof(
     will_be_verified_lossless: bool,
     *,
-    was_converted_from: Optional[str],
-    detected_source_format: Optional[str],
-    spectral_grade: Optional[str],
-) -> Optional[VerifiedLosslessProof]:
+    was_converted_from: str | None,
+    detected_source_format: str | None,
+    spectral_grade: str | None,
+) -> VerifiedLosslessProof | None:
     """Mint the measured verified-lossless proof for a harness attempt (pure).
 
     Single policy owner for proof construction: the harness supplies only
@@ -675,8 +670,8 @@ def mint_verified_lossless_proof(
     )
 
 
-def is_verified_lossless(was_converted: bool, original_filetype: Optional[str],
-                         spectral_grade: Optional[str]) -> bool:
+def is_verified_lossless(was_converted: bool, original_filetype: str | None,
+                         spectral_grade: str | None) -> bool:
     """Legacy derivation for album_source.py fallback path.
 
     Used when import_one.py didn't set verified_lossless_override
@@ -745,7 +740,7 @@ def post_import_search_action_if_known(
 
 def quality_gate_decision(
     current: AudioQualityMeasurement,
-    cfg: "QualityRankConfig | None" = None,
+    cfg: QualityRankConfig | None = None,
     *,
     target_contract: TargetQualityContract | None = None,
     verified_lossless_proof: bool = False,

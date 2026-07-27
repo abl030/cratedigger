@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import io
 import unittest
+from typing import Self
 from unittest.mock import patch
 
-import tests._hypothesis_profiles  # noqa: F401
-from hypothesis import given, strategies as st
+from hypothesis import given
+from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401
 from scripts.pipeline_cli import api_mutations
 
 
@@ -25,7 +27,7 @@ class _Response:
     def read(self) -> bytes:
         return b'{"status":"route"}'
 
-    def __enter__(self) -> "_Response":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *_values: object) -> None:

@@ -7,7 +7,8 @@ import tempfile
 import unittest
 
 import msgspec
-from hypothesis import assume, given, strategies as st
+from hypothesis import assume, given
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads active profile)
 from lib.beets_db import (
@@ -22,19 +23,18 @@ from lib.release_identity import ReleaseIdentity
 from lib.world_invariants import (
     DenylistAuthoritySnapshot,
     EvidenceDiskSnapshot,
-    LifecycleTransitionSnapshot,
     LibraryAlbumSnapshot,
+    LifecycleTransitionSnapshot,
     RequestMembershipSnapshot,
-    check_folder_exclusivity,
     check_denylist_authority,
     check_evidence_disk_coherence,
+    check_folder_exclusivity,
     check_library_filesystem,
     check_no_lossy_tier_widening,
     check_proof_lock_terminality,
     check_status_membership,
     derive_denylist_authorities,
 )
-
 
 _SEGMENT = st.text(
     alphabet=st.characters(

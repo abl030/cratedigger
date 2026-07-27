@@ -7,24 +7,11 @@ Patch targets moved to concrete submodules; see docstrings there.
 
 from __future__ import annotations
 
-from lib.dispatch.types import (
-    DISPATCH_CODE_BAD_REQUEST,
-    DISPATCH_CODE_IMPORT_MANIFEST_REJECTED,
-    DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
-    DISPATCH_CODE_REQUEUED_FOR_PREVIEW,
-    DISPATCH_CODE_REQUEUE_FAILED,
-    DispatchCoreFn,
-    DispatchOutcome,
-    QualityGateFn,
+from lib.dispatch.core import (
+    dispatch_import_core,
 )
-from lib.dispatch.subprocess_runner import (
-    build_import_one_command,
-    run_import_one,
-)
-from lib.dispatch.helpers import (
-    _build_download_info,
-    _cleanup_staged_dir,
-    _populate_dl_info_from_import_result,
+from lib.dispatch.entry_points import (
+    dispatch_import_from_db,
 )
 from lib.dispatch.evidence_gate import (
     _download_info_from_candidate_evidence,
@@ -32,6 +19,11 @@ from lib.dispatch.evidence_gate import (
     _refresh_current_evidence_after_import,
     _requeue_import_job_to_preview,
     _write_album_sidecar_after_import,
+)
+from lib.dispatch.helpers import (
+    _build_download_info,
+    _cleanup_staged_dir,
+    _populate_dl_info_from_import_result,
 )
 from lib.dispatch.outcome_actions import (
     _do_mark_done,
@@ -43,11 +35,19 @@ from lib.dispatch.quality_gate import (
     _check_quality_gate_core,
     load_quality_gate_state,
 )
-from lib.dispatch.core import (
-    dispatch_import_core,
+from lib.dispatch.subprocess_runner import (
+    build_import_one_command,
+    run_import_one,
 )
-from lib.dispatch.entry_points import (
-    dispatch_import_from_db,
+from lib.dispatch.types import (
+    DISPATCH_CODE_BAD_REQUEST,
+    DISPATCH_CODE_IMPORT_MANIFEST_REJECTED,
+    DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
+    DISPATCH_CODE_REQUEUE_FAILED,
+    DISPATCH_CODE_REQUEUED_FOR_PREVIEW,
+    DispatchCoreFn,
+    DispatchOutcome,
+    QualityGateFn,
 )
 
 # Pyright-visible proof that the production callable continues to satisfy the

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Long-running drainer for YouTube-rescue ingest jobs.
 
 Mirrors ``scripts/importer.py`` structurally: acquires a process-wide
@@ -39,20 +38,21 @@ import sys
 import tempfile
 import time
 import traceback
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from lib.pipeline_db import (  # noqa: E402
+from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_YOUTUBE_INGEST,
     DEFAULT_DSN,
     PipelineDB,
 )
-from lib.processing_paths import stage_to_ai_root  # noqa: E402
-from lib.youtube_ingest_service import (  # noqa: E402
+from lib.processing_paths import stage_to_ai_root
+from lib.youtube_ingest_service import (
     YoutubeIngestService,
     YtdlpRunResult,
     _slug,

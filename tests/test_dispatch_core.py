@@ -16,10 +16,9 @@ import msgspec
 
 from lib.beets_db import AlbumInfo
 from lib.config import CratediggerConfig
-from lib.import_queue import IMPORT_JOB_AUTOMATION, IMPORT_JOB_FORCE
 from lib.dispatch.types import DispatchOutcome, EvidenceImportGate, ImportOneRun
+from lib.import_queue import IMPORT_JOB_AUTOMATION, IMPORT_JOB_FORCE
 from lib.pipeline_db import DownloadLogOutcome
-from lib.terminal_outcomes import ImportJobTerminal
 from lib.quality import (
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
@@ -28,6 +27,8 @@ from lib.quality import (
     QualityEvidenceActionPayload,
     VerifiedLosslessProof,
 )
+from lib.quality_evidence import snapshot_audio_files
+from lib.terminal_outcomes import ImportJobTerminal
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import (
     make_album_quality_evidence,
@@ -36,7 +37,6 @@ from tests.helpers import (
     noop_quality_gate,
     patch_dispatch_externals,
 )
-from lib.quality_evidence import snapshot_audio_files
 
 
 # Migration 021 helpers — seed evidence and wire the FK chain that

@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from lib.mbid_replace_service import MbidReplaceDB
 
 
-def cmd_replace(db: "MbidReplaceDB", args: argparse.Namespace) -> int:
+def cmd_replace(db: MbidReplaceDB, args: argparse.Namespace) -> int:
     """Supersede a request with a new row at a different release id (an
     MB release UUID or a Discogs numeric release id — must share the
     source's pathway and release group/master).
@@ -40,7 +40,6 @@ def cmd_replace(db: "MbidReplaceDB", args: argparse.Namespace) -> int:
     """
     from lib.config import read_runtime_config
     from lib.mbid_replace_service import (
-        MbidReplaceService,
         RESULT_MIRROR_UNCONFIGURED,
         RESULT_NOT_FOUND,
         RESULT_REPLACED,
@@ -50,6 +49,7 @@ def cmd_replace(db: "MbidReplaceDB", args: argparse.Namespace) -> int:
         RESULT_TARGET_SAME_AS_CURRENT,
         RESULT_TRANSIENT,
         RESULT_WRONG_STATE,
+        MbidReplaceService,
     )
 
     cfg = read_runtime_config()

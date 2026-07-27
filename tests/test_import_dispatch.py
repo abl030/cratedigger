@@ -6,7 +6,6 @@ TestTargetFormat*) exercise the surviving auto-import seam in
 ``lib.download_validation._handle_valid_result`` and the core subprocess wiring.
 Pure function tests (TestPopulateDlInfo*, TestCleanupStagedDir) test in/out.
 """
-
 import configparser
 import errno
 import json
@@ -16,25 +15,38 @@ import subprocess as sp
 import tempfile
 import unittest
 from contextlib import AbstractContextManager
-from typing import Never
+from datetime import UTC
+from typing import ClassVar, Never
 from unittest.mock import MagicMock, patch
 
 import msgspec
 
 from lib.config import CratediggerConfig
+from lib.quality import (
+    QUALITY_FLAC_ONLY,
+    QUALITY_UPGRADE_TIERS,
+    V0_PROBE_LOSSLESS_SOURCE,
+    AlbumQualityV0Metric,
+    AudioQualityMeasurement,
+    ConversionInfo,
+    DownloadInfo,
+    DuplicateRemoveCandidate,
+    DuplicateRemoveGuardInfo,
+    EvidenceProvenance,
+    EvidenceSubject,
+    ImportResult,
+    QualityRankConfig,
+    SpectralMeasurement,
+    TargetQualityContract,
+    V0ProbeEvidence,
+    ValidationResult,
+    VerifiedLosslessProof,
+)
 from lib.quality_evidence import snapshot_audio_files, snapshot_fingerprint
-from lib.quality import (DownloadInfo, ImportResult, ConversionInfo,
-                         DuplicateRemoveCandidate, DuplicateRemoveGuardInfo,
-                         AlbumQualityV0Metric, AudioQualityMeasurement,
-                         EvidenceProvenance, EvidenceSubject,
-                         PostflightInfo, SpectralMeasurement,
-                         QualityRankConfig, TargetQualityContract,
-                         QUALITY_UPGRADE_TIERS, QUALITY_FLAC_ONLY,
-                         V0_PROBE_LOSSLESS_SOURCE, V0ProbeEvidence,
-                         ValidationResult, VerifiedLosslessProof)
 from tests.fakes import FakePipelineDB
 from tests.helpers import (
     RecordingQualityGate,
+    hermetic_beets_config_defaults,
     make_album_quality_evidence,
     make_ctx_with_fake_db,
     make_download_file,
@@ -42,9 +54,7 @@ from tests.helpers import (
     make_request_row,
     noop_quality_gate,
     patch_dispatch_externals,
-    hermetic_beets_config_defaults,
 )
-
 
 _HERMETIC_BEETS_DEFAULTS: AbstractContextManager[tuple[str, str]] | None = None
 _HERMETIC_BEETS_PAIR: tuple[str, str] | None = None
@@ -87,9 +97,8 @@ class TestHermeticBeetsConfigDefaults(unittest.TestCase):
             "/mnt/virtio/Music/beets-library.db",
             "/var/lib/cratedigger-beets-db/beets-library.db",
         ):
-            with self.subTest(library_db=library_db):
-                with self.assertRaisesRegex(AssertionError, "both library DB and root"):
-                    CratediggerConfig(beets_library_db=library_db)
+            with self.subTest(library_db=library_db), self.assertRaisesRegex(AssertionError, "both library DB and root"):
+                CratediggerConfig(beets_library_db=library_db)
         with self.assertRaisesRegex(AssertionError, "both library DB and root"):
             CratediggerConfig(beets_directory="/music/library")
 
@@ -107,9 +116,8 @@ class TestHermeticBeetsConfigDefaults(unittest.TestCase):
         ):
             partial = configparser.ConfigParser()
             partial["Beets"] = {"library": library}
-            with self.subTest(library=library):
-                with self.assertRaisesRegex(AssertionError, "both library and directory"):
-                    CratediggerConfig.from_ini(partial)
+            with self.subTest(library=library), self.assertRaisesRegex(AssertionError, "both library and directory"):
+                CratediggerConfig.from_ini(partial)
 
         root_only = configparser.ConfigParser()
         root_only["Beets"] = {"directory": "/music/library"}
@@ -311,7 +319,7 @@ def _dispatch_valid_result_cmd(
 
         def no_current_evidence(*_args: object, **_kwargs: object) -> None:
             """Typed current-evidence boundary for this subprocess argv seam."""
-            return None
+            return
 
         with patch("lib.download_validation.log_validation_result"), \
              patch_dispatch_externals() as ext, \
@@ -975,7 +983,9 @@ class TestRejectImportFromEvidenceDecision(unittest.TestCase):
         from lib.dispatch import _reject_import_from_evidence_decision
         from lib.dispatch.types import ImportAttemptResult
         from lib.quality import (
-            AudioQualityMeasurement, ImportResult, SpectralAnalysisDetail,
+            AudioQualityMeasurement,
+            ImportResult,
+            SpectralAnalysisDetail,
             SpectralDetail,
         )
 
@@ -1216,7 +1226,7 @@ class TestRejectImportFromEvidenceDecisionCallerLifecycle(unittest.TestCase):
     candidate-integrity fact.
     """
 
-    FOUR_FACT_DECISIONS = ["audio_corrupt", "bad_audio_hash", "nested_layout", "empty_fileset"]
+    FOUR_FACT_DECISIONS: ClassVar = ["audio_corrupt", "bad_audio_hash", "nested_layout", "empty_fileset"]
 
     def _reject(
         self,
@@ -2431,8 +2441,9 @@ class TestImportDispatchRescueCapture(unittest.TestCase):
     def _dispatch_with_unfindable(self, *, prior_category, rescued_at=None,
                                   prior_rescue_category=None):
         """Drive a successful import on a previously-unfindable request."""
+        from datetime import datetime
+
         from lib.dispatch import dispatch_import_core
-        from datetime import datetime, timezone
 
         ir = make_import_result(decision="import")
         db = FakePipelineDB()
@@ -2445,7 +2456,7 @@ class TestImportDispatchRescueCapture(unittest.TestCase):
         if prior_category is not None:
             db._requests[42]["unfindable_category"] = prior_category
             db._requests[42]["unfindable_categorised_at"] = datetime(
-                2026, 5, 20, tzinfo=timezone.utc)
+                2026, 5, 20, tzinfo=UTC)
         if rescued_at is not None:
             db._requests[42]["rescued_at"] = rescued_at
         if prior_rescue_category is not None:
@@ -2524,9 +2535,9 @@ class TestImportDispatchRescueCapture(unittest.TestCase):
         self,
     ):
         """One-shot capture — first rescue wins forever."""
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        original_rescue_at = datetime(2026, 1, 15, tzinfo=timezone.utc)
+        original_rescue_at = datetime(2026, 1, 15, tzinfo=UTC)
         db = self._dispatch_with_unfindable(
             prior_category="album_absent_artist_present",
             rescued_at=original_rescue_at,
@@ -2565,7 +2576,7 @@ class TestOverrideMinBitrate(unittest.TestCase):
         return None
 
     # (description, min_bitrate, current_spectral_bitrate, current_spectral_grade, expected)
-    CASES = [
+    CASES: ClassVar = [
         ("suspect spectral lower wins",             320, 128, "suspect",          128),
         ("likely_transcode spectral lower wins",    320, 128, "likely_transcode", 128),
         ("genuine spectral ignored even if lower",  320, 128, "genuine",          320),
@@ -2653,8 +2664,7 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
     def test_custom_cfg_serializes_to_argv(self):
         """Custom policy and codec bands survive the argv round-trip."""
         from lib.config import CratediggerConfig
-        from lib.quality import (CodecRankBands, QualityRankConfig,
-                                 RankBitrateMetric)
+        from lib.quality import CodecRankBands, QualityRankConfig, RankBitrateMetric
         vorbis = CodecRankBands(
             transparent=201, excellent=161, good=113, acceptable=97)
         wma = CodecRankBands(
@@ -3358,8 +3368,8 @@ class TestQualityGatePreservesTargetFormat(unittest.TestCase):
 
     def _run_quality_gate_accept(self, target_format="flac"):
         """Drive a real accept via FLAC verified-lossless input — no decision stub."""
-        from lib.dispatch import _check_quality_gate_core
         from lib.beets_db import AlbumInfo
+        from lib.dispatch import _check_quality_gate_core
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(

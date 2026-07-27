@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Boundary tests for the one-shot Plex duplicate maintenance scripts."""
 
 from __future__ import annotations
@@ -8,6 +7,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from defusedxml.common import DefusedXmlException
+
 from scripts import plex_dupes_audit, plex_dupes_merge
 
 

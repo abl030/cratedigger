@@ -2,11 +2,12 @@
 
 import atexit
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import time
+from pathlib import Path
+from typing import Self
 from urllib.parse import quote
 
 
@@ -134,7 +135,7 @@ class EphemeralPostgres:
     def stop(self) -> None:
         self._cleanup()
 
-    def __enter__(self) -> "EphemeralPostgres":
+    def __enter__(self) -> Self:
         self.start()
         return self
 

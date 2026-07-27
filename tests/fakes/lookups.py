@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import email.message
 import urllib.error
-from typing import Any, Callable, Optional
+from typing import Any
 
 
 def http_error(
@@ -60,14 +60,14 @@ class FakeMBLookup:
 
     def set_release(
         self, identifier: str, payload: dict[str, Any],
-    ) -> "FakeMBLookup":
+    ) -> FakeMBLookup:
         """Seed a hit for ``identifier``. Returns self for chaining."""
         self._releases[identifier] = copy.deepcopy(payload)
         return self
 
     def __call__(
         self, identifier: str, *, fresh: bool = False,
-    ) -> Optional[dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         self.calls.append(identifier)
         if identifier in self._releases:
             return copy.deepcopy(self._releases[identifier])
@@ -98,14 +98,14 @@ class FakeDiscogsLookup:
 
     def set_release(
         self, identifier: str, payload: dict[str, Any],
-    ) -> "FakeDiscogsLookup":
+    ) -> FakeDiscogsLookup:
         """Seed a hit for ``identifier``. Returns self for chaining."""
         self._releases[identifier] = copy.deepcopy(payload)
         return self
 
     def __call__(
         self, identifier: str, *, fresh: bool = False,
-    ) -> Optional[dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         self.calls.append(identifier)
         if identifier in self._releases:
             return copy.deepcopy(self._releases[identifier])

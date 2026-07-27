@@ -9,13 +9,12 @@ import uuid
 
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401 -- sets TEST_DB_DSN
-
 import psycopg2
-from hypothesis import example, given, strategies as st
+from hypothesis import example, given
+from hypothesis import strategies as st
 
-from lib.pipeline_db import PipelineDB
 import tests._hypothesis_profiles  # noqa: F401
-
+from lib.pipeline_db import PipelineDB
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
 _TEXT = st.text(

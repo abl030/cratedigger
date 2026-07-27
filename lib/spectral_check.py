@@ -13,7 +13,7 @@ import os
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
-from typing import Optional, TypedDict
+from typing import TypedDict
 
 # --- Thresholds ---
 HF_DEFICIT_SUSPECT = 60.0   # dB — above this = suspect (no cliff needed)
@@ -41,7 +41,6 @@ LAME_LOWPASS = [
 
 from lib.quality import AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS
 
-
 # --- Data classes ---
 
 class _Slice(TypedDict):
@@ -55,15 +54,15 @@ class TrackResult:
     grade: str                                  # "genuine" | "marginal" | "suspect" | "error"
     hf_deficit_db: float = 0.0
     cliff_detected: bool = False
-    cliff_freq_hz: Optional[int] = None
-    estimated_bitrate_kbps: Optional[int] = None
-    error: Optional[str] = None
+    cliff_freq_hz: int | None = None
+    estimated_bitrate_kbps: int | None = None
+    error: str | None = None
 
 
 @dataclass
 class AlbumResult:
     grade: str                                  # "genuine" | "suspect" | "likely_transcode"
-    estimated_bitrate_kbps: Optional[int] = None
+    estimated_bitrate_kbps: int | None = None
     suspect_pct: float = 0.0
     tracks: list[TrackResult] = field(default_factory=list[TrackResult])
 
@@ -164,9 +163,7 @@ def classify_track(hf_deficit_db: float, cliff_freq_hz: int | None) -> TrackResu
     cliff_detected = cliff_freq_hz is not None
     estimated_br = estimate_bitrate_from_cliff(cliff_freq_hz)
 
-    if cliff_detected:
-        grade = "suspect"
-    elif hf_deficit_db >= HF_DEFICIT_SUSPECT:
+    if cliff_detected or hf_deficit_db >= HF_DEFICIT_SUSPECT:
         grade = "suspect"
     elif hf_deficit_db >= HF_DEFICIT_MARGINAL:
         grade = "marginal"
@@ -252,11 +249,11 @@ def _get_band_rms(
     cmd = ["sox", _safe_path(filepath), "-n"]
     if trim_seconds:
         cmd.extend(["trim", "0", str(trim_seconds)])
-    cmd.extend(["sinc", "%d-%d" % (lo_hz, hi_hz), "stat"])
+    cmd.extend(["sinc", f"{lo_hz:d}-{hi_hz:d}", "stat"])
     # errors="replace": sox echoes filename + tag bytes; non-UTF-8 metadata
     # would otherwise raise UnicodeDecodeError during capture.
     result = subprocess.run(cmd, capture_output=True, text=True,
-                            errors="replace", timeout=60)
+                            errors="replace", timeout=60, check=False)
     rms = parse_rms_from_stat(result.stderr)
     if rms is None:
         last_line = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else f"sox exit {result.returncode}"
@@ -283,7 +280,7 @@ def _ffmpeg_to_wav(src: str, dst: str, trim_seconds: int = 30) -> None:
         cmd.extend(["-t", str(trim_seconds)])
     cmd.extend(["-ar", "48000", "-ac", "2", "-f", "wav", "-bitexact", dst])
     result = subprocess.run(cmd, capture_output=True, text=True,
-                            errors="replace", timeout=30)
+                            errors="replace", timeout=30, check=False)
     if result.returncode != 0:
         last_line = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else f"ffmpeg exit {result.returncode}"
         raise _DecodeFailedError(f"ffmpeg: {last_line}")
@@ -313,7 +310,7 @@ def analyze_track(filepath: str, trim_seconds: int = 30) -> TrackResult:
         return TrackResult(grade="error", error=f"binary not found: {e}")
     except subprocess.TimeoutExpired:
         return TrackResult(grade="error", error="sox/ffmpeg timeout")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         return TrackResult(grade="error", error=str(e))
 
 
@@ -325,10 +322,7 @@ def _analyze_decoded(sox_input: str, sox_trim: int) -> TrackResult:
     # Reference band: 1-4kHz. None RMS at the reference is a decode-side
     # failure (band would have musical content); reserve the silent-track
     # early-out for genuinely near-zero RMS only.
-    try:
-        ref_rms = _get_band_rms(sox_input, 1000, 4000, sox_trim)
-    except _DecodeFailedError:
-        raise
+    ref_rms = _get_band_rms(sox_input, 1000, 4000, sox_trim)
     if ref_rms < 0.000001:
         return TrackResult(grade="genuine", hf_deficit_db=0.0)
 

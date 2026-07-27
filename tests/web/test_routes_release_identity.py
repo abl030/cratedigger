@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Contract tests for the Replace / resolve-rg routes
 (web/routes/release_identity_routes.py), plus the closely-related
 requests-by-rg / active-rgs auxiliary endpoints that stayed in
@@ -9,18 +8,16 @@ test_routes_pipeline_replace.py when web/routes/pipeline.py's
 resolve-rg/replace handlers moved to web/routes/release_identity_routes.py
 (#522). Shared harness in tests/web/_harness.py.
 """
-
 import os
 import sys
 import unittest
+from typing import ClassVar
 from unittest.mock import patch
-
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
 from tests.helpers import make_request_row
-
+from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
 
 
 class TestReplacedFilterContract(_FakeDbWebServerCase):
@@ -111,19 +108,20 @@ class TestPipelineReplaceContract(_FakeDbWebServerCase):
       * 503 — RESULT_TRANSIENT, RESULT_MIRROR_UNCONFIGURED
     """
 
-    REPLACE_REQUIRED_FIELDS = {
+    REPLACE_REQUIRED_FIELDS: ClassVar = {
         "outcome", "request_id", "new_request_id", "current_status",
         "descendant_request_id", "error_message", "reason", "warnings",
     }
-    REQUESTS_BY_RG_FIELDS = {
+    REQUESTS_BY_RG_FIELDS: ClassVar = {
         "id", "mb_release_id", "mb_release_group_id", "status",
         "artist_name", "album_title",
     }
 
     def setUp(self) -> None:
         super().setUp()
-        from lib.config import CratediggerConfig
         import configparser
+
+        from lib.config import CratediggerConfig
         cp = configparser.RawConfigParser()
         cp.read_string("[General]\n")
         self._cfg_patcher = patch(
@@ -137,6 +135,7 @@ class TestPipelineReplaceContract(_FakeDbWebServerCase):
 
     def _patch_service(self, **result_kwargs):
         from unittest.mock import patch as _patch
+
         from lib.mbid_replace_service import ReplaceResult
         return _patch(
             "lib.mbid_replace_service.MbidReplaceService"
@@ -225,7 +224,7 @@ class TestPipelineReplaceContract(_FakeDbWebServerCase):
             outcome="target_release_group_mismatch", request_id=100,
             error_message="rg mismatch",
         ):
-            status, data = self._post(
+            status, _data = self._post(
                 "/api/pipeline/100/replace",
                 {"target_mb_release_id": "other-rg"},
             )
@@ -236,7 +235,7 @@ class TestPipelineReplaceContract(_FakeDbWebServerCase):
             outcome="target_same_as_current", request_id=100,
             error_message="target == source",
         ):
-            status, data = self._post(
+            status, _data = self._post(
                 "/api/pipeline/100/replace",
                 {"target_mb_release_id": "same-uuid"},
             )
@@ -408,7 +407,7 @@ class TestPipelineResolveRgContract(_FakeDbWebServerCase):
       * 503 — transient MB-mirror failure
     """
 
-    RESOLVE_RG_REQUIRED_FIELDS = {
+    RESOLVE_RG_REQUIRED_FIELDS: ClassVar = {
         "request_id", "mb_release_group_id", "status",
     }
 

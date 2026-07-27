@@ -13,11 +13,10 @@ passed as kwargs (the DI seam pattern).
 from __future__ import annotations
 
 import copy
-import socket
 import threading
 import unittest
 import urllib.error
-from typing import Any
+from typing import Any, ClassVar
 from urllib.error import URLError
 
 from lib.field_resolver_service import (
@@ -217,7 +216,7 @@ class TestResolveReleaseGroupYear(unittest.TestCase):
         req = _request(id=46, mb_release_group_id="abc-uuid")
 
         def _raise(_: str) -> int | None:
-            raise socket.timeout("read timed out")
+            raise TimeoutError("read timed out")
 
         result = resolve_release_group_year(
             req, db, mb_get_release_group_year=_raise,
@@ -230,7 +229,7 @@ class TestResolveReleaseGroupYear(unittest.TestCase):
         req = _request(id=47, mb_release_group_id="abc-uuid")
 
         def _raise(_: str) -> int | None:
-            raise URLError(socket.timeout("read timed out"))
+            raise URLError(TimeoutError("read timed out"))
 
         result = resolve_release_group_year(
             req, db, mb_get_release_group_year=_raise,
@@ -848,7 +847,7 @@ class TestDetectVaCompilation(unittest.TestCase):
 
 
 class TestLooksNumeric(unittest.TestCase):
-    CASES = [
+    CASES: ClassVar = [
         ("12345", True),
         ("  555  ", True),
         ("abc-uuid", False),
@@ -1611,7 +1610,7 @@ class TestApplyResolveAllResult(unittest.TestCase):
         Web + CLI wrappers own their own logging style — the helper
         raises so the wrapper can decide how to surface it."""
         class FailingDB:
-            update_request_fields_calls: list[tuple[int, dict[str, object]]] = []
+            update_request_fields_calls: ClassVar[list[tuple[int, dict[str, object]]]] = []
 
             def update_request_fields(self, request_id: int, **fields: object) -> bool:
                 raise RuntimeError("db boom")

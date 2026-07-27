@@ -21,7 +21,7 @@ import copy
 import os
 import sys
 import unittest
-from datetime import timedelta
+from datetime import UTC, timedelta
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
@@ -502,13 +502,12 @@ class TestSearchPlanServiceFailureStickiness(unittest.TestCase):
              if p.request_id == 51 and p.status == PLAN_STATUS_FAILED_TRANSIENT),
             key=lambda p: p.created_at,
         )
-        from datetime import timezone
         backdated = (
             latest.created_at - _TRANSIENT_FAILURE_RETRY_INTERVAL
             - _TRANSIENT_FAILURE_RETRY_INTERVAL
         )
         if backdated.tzinfo is None:
-            backdated = backdated.replace(tzinfo=timezone.utc)
+            backdated = backdated.replace(tzinfo=UTC)
         latest.created_at = backdated
 
         # After the window: a new attempt is permitted.
@@ -638,7 +637,6 @@ class TestSearchPlanServiceResolver(unittest.TestCase):
 
         # Backdate the recorded transient failure past the retry window
         # so the next call is permitted to actually run the resolver.
-        from datetime import timezone
         from lib.search_plan_service import _TRANSIENT_FAILURE_RETRY_INTERVAL
         latest = max(
             (p for p in self.db.search_plans.values()
@@ -650,7 +648,7 @@ class TestSearchPlanServiceResolver(unittest.TestCase):
             - _TRANSIENT_FAILURE_RETRY_INTERVAL
         )
         if backdated.tzinfo is None:
-            backdated = backdated.replace(tzinfo=timezone.utc)
+            backdated = backdated.replace(tzinfo=UTC)
         latest.created_at = backdated
 
         # Later retry succeeds.
@@ -1149,8 +1147,9 @@ class TestSearchPlanServiceDryRun(unittest.TestCase):
         self.assertEqual(
             result.metadata_snapshot.get("catalog_number"), "STRMRT-001")
         # Typed-Struct round-trip preserves them
-        from lib.pipeline_db import SearchPlanMetadataSnapshot
         import msgspec
+
+        from lib.pipeline_db import SearchPlanMetadataSnapshot
         struct = msgspec.convert(
             result.metadata_snapshot, type=SearchPlanMetadataSnapshot)
         self.assertEqual(struct.is_va_compilation, True)
@@ -1324,7 +1323,8 @@ class TestSearchPlanServiceSaturation(unittest.TestCase):
 
     def test_payload_helper_round_trips_summary_fields(self):
         from lib.search_plan_service import (
-            RESULT_SATURATION_SUCCESS, saturation_payload,
+            RESULT_SATURATION_SUCCESS,
+            saturation_payload,
         )
         rid = self._seed(rid=8)
         self.db.log_search(request_id=rid, query="q1", outcome="found",

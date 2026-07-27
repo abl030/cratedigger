@@ -8,6 +8,7 @@ import sys
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from types import SimpleNamespace
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -18,7 +19,11 @@ from lib.pipeline_db import TransferLedgerRow
 from lib.repair import OrphanInfo, SlskdOrphanTransfer
 from scripts import repair
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_download_directory, make_download_user, make_transfer_snapshot
+from tests.helpers import (
+    make_download_directory,
+    make_download_user,
+    make_transfer_snapshot,
+)
 
 
 class TestCmdFix(unittest.TestCase):
@@ -282,7 +287,7 @@ class TestCollectIssuesSlskdOrphanReport(unittest.TestCase):
     convergence would also treat it as a ledger-owned stray.
     """
 
-    RAW_SNAPSHOT = [
+    RAW_SNAPSHOT: ClassVar = [
         make_download_user(username="peer1", directories=[
             make_download_directory(directory="Music\\Orphan", files=[
                 make_transfer_snapshot(
@@ -458,9 +463,8 @@ class TestDefaultDsnFailsLoud(unittest.TestCase):
     def test_main_fails_loud_when_dsn_is_not_configured(self) -> None:
         with patch.object(sys, "argv", ["repair.py", "scan"]):
             stderr = io.StringIO()
-            with redirect_stderr(stderr):
-                with self.assertRaises(SystemExit) as cm:
-                    repair.main()
+            with redirect_stderr(stderr), self.assertRaises(SystemExit) as cm:
+                repair.main()
 
         self.assertEqual(cm.exception.code, 2)
         self.assertIn("PIPELINE_DB_DSN", stderr.getvalue())

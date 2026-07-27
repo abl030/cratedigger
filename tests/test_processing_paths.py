@@ -111,12 +111,12 @@ class TestCanonicalProcessingPathFingerprint(unittest.TestCase):
         )
 
     def test_different_fingerprints_produce_different_paths(self):
-        base_kwargs = dict(
-            artist="Test Artist",
-            title="Test Album",
-            year="2020",
-            slskd_download_dir="/tmp/downloads",
-        )
+        base_kwargs = {
+            "artist": "Test Artist",
+            "title": "Test Album",
+            "year": "2020",
+            "slskd_download_dir": "/tmp/downloads",
+        }
 
         path_a = canonical_processing_path(attempt_fingerprint="aaaaaaaa", **base_kwargs)
         path_b = canonical_processing_path(attempt_fingerprint="bbbbbbbb", **base_kwargs)

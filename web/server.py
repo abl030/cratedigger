@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Cratedigger Web UI — album request manager at music.ablz.au.
 
 Browse MusicBrainz, add releases to the pipeline DB, view status.
@@ -6,9 +5,9 @@ Browse MusicBrainz, add releases to the pipeline DB, view status.
 Usage:
     python3 web/server.py --port 8085 --dsn postgresql://cratedigger@10.20.0.11/cratedigger
 """
-
 import os
 import sys
+from typing import ClassVar
 
 # Script-mode Python puts this file's directory (web/) at sys.path[0]
 # (production boots `python .../web/server.py` from the systemd wrapper),
@@ -33,9 +32,9 @@ import json
 import logging
 import re
 import threading
-from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from typing import Callable
-from urllib.parse import urlparse, parse_qs
+from collections.abc import Callable
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
 import msgspec
 
@@ -53,20 +52,20 @@ MAX_POST_BODY_BYTES = 1024 * 1024
 if __name__ == "__main__" or "web.server" not in sys.modules:
     sys.modules["web.server"] = sys.modules[__name__]
 
-from web import cache as cache
-from web import discogs as _discogs
-from web import mb as mb_api
-from web import overlay as _overlay
 from lib.beets_db import BeetsDB, open_beets_db
 from lib.json_narrow import is_str_object_dict as _is_str_object_dict
 from lib.pipeline_db import AlbumRequestRow, PipelineDB
+from web import cache
+from web import discogs as _discogs
+from web import mb as mb_api
+from web import overlay as _overlay
 from web.routes import api_index as _api_index_routes
 from web.routes import beets_distance as _beets_distance_routes
 from web.routes import browse as _browse_routes
 from web.routes import disk_coverage as _disk_coverage_routes
+from web.routes import imports as _imports_routes
 from web.routes import labels as _labels_routes
 from web.routes import library as _library_routes
-from web.routes import imports as _imports_routes
 from web.routes import long_tail as _long_tail_routes
 from web.routes import pipeline as _pipeline_routes
 from web.routes import pipeline_dashboard as _pipeline_dashboard_routes
@@ -74,8 +73,8 @@ from web.routes import pipeline_mutations as _pipeline_mutations_routes
 from web.routes import release_identity_routes as _release_identity_routes
 from web.routes import search_plan as _search_plan_routes
 from web.routes import triage as _triage_routes
-from web.routes import youtube as _youtube_routes
 from web.routes import world_audit as _world_audit_routes
+from web.routes import youtube as _youtube_routes
 from web.routes._registry import (
     RouteRegistration,
     build_get_patterns,
@@ -152,7 +151,7 @@ def _try_reconnect_db():
     if handle is not None:
         try:
             handle.conn.close()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
             pass
         _thread_state.db = None
         log.info("Dropped this thread's pipeline DB handle; next request reconnects")
@@ -234,14 +233,14 @@ def _close_thread_handles() -> None:
     if handle is not None:
         try:
             handle.close()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
             pass
         _thread_state.db = None
     beets_handle = getattr(_thread_state, "beets", None)
     if beets_handle is not None:
         try:
             beets_handle.close()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
             pass
         _thread_state.beets = None
 
@@ -330,7 +329,7 @@ class Handler(BaseHTTPRequestHandler):
     _FUNC_POST_PATTERNS: list[tuple[re.Pattern[str], Callable[..., None]]] = (
         build_post_patterns(ALL_ROUTES))
 
-    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+    def log_message(self, format: str, *args: object) -> None:
         log.info(format % args)
 
     def _json(self, data: object, status: int = 200) -> None:
@@ -354,7 +353,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # Browser icon assets (#161). Allowlist keyed by URL path — no
     # filesystem-derived names, so no traversal surface.
-    _STATIC_ASSETS = {
+    _STATIC_ASSETS: ClassVar = {
         "/favicon.ico": ("favicon.ico", "image/x-icon"),
         "/favicon-16x16.png": ("favicon-16x16.png", "image/png"),
         "/favicon-32x32.png": ("favicon-32x32.png", "image/png"),
@@ -486,7 +485,7 @@ class Handler(BaseHTTPRequestHandler):
             # Discogs browse is off (tier-2 plan R13). 503 with the
             # actionable message, no DB reconnect churn.
             self._error(str(e), 503)
-        except Exception as e:
+        except Exception:
             log.exception("GET %s failed", path)
             _try_reconnect_db()
             # The handler may have already sent headers or a partial body;
@@ -550,7 +549,7 @@ class Handler(BaseHTTPRequestHandler):
             # Deliberate config posture (no Discogs mirror) — clean 503,
             # no DB reconnect churn (R13).
             self._error(str(e), 503)
-        except Exception as e:
+        except Exception:
             log.exception("POST %s failed", path)
             _try_reconnect_db()
             # See do_GET: never reuse the socket after an error response.

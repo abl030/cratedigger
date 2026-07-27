@@ -11,13 +11,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import tempfile
 import unittest
 
 from lib.quality import AlbumQualityEvidenceFile
 from lib.quality_evidence import (
-    snapshot_audio_files,
     snapshot_fingerprint,
 )
 

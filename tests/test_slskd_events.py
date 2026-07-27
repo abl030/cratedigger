@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import unittest
 
-from lib.quality import ActiveDownloadState, ActiveDownloadFileState
+from lib.quality import ActiveDownloadFileState, ActiveDownloadState
 from lib.slskd_events import (
     EVENT_PAGE_LIMIT,
     MAX_EVENT_PAGES,
@@ -18,7 +18,11 @@ from lib.slskd_events import (
 from tests.fakes import FakePipelineDB, FakeSlskdAPI
 from tests.helpers import (
     make_active_download_file_state as _file_state,
+)
+from tests.helpers import (
     make_active_download_state_json as _state_json,
+)
+from tests.helpers import (
     make_file_complete_event_data as _file_complete_data,
 )
 

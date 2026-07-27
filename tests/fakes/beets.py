@@ -7,7 +7,7 @@ import os
 import statistics
 from collections.abc import Sequence
 from dataclasses import replace
-from typing import Any
+from typing import Any, Self
 
 from lib.beets_db import (
     AlbumInfo,
@@ -759,7 +759,7 @@ class FakeBeetsDB:
     def close(self) -> None:
         self.close_calls += 1
 
-    def __enter__(self) -> "FakeBeetsDB":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *_args: object) -> None:

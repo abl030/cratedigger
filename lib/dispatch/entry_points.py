@@ -13,28 +13,32 @@ import os
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from lib.processing_paths import normalize_source_dirs
-from lib.import_evidence import ensure_candidate_evidence_for_action
-
-from lib.dispatch.types import (DISPATCH_CODE_BAD_REQUEST, DispatchOutcome,
-                                ImportAttemptResult)
-from lib.dispatch.manifest_guard import _guard_force_import_audio_manifest
-from lib.dispatch.evidence_gate import (_download_info_from_candidate_evidence,
-                                        _requeue_import_job_to_preview)
 from lib.dispatch.core import dispatch_import_core
+from lib.dispatch.evidence_gate import (
+    _download_info_from_candidate_evidence,
+    _requeue_import_job_to_preview,
+)
+from lib.dispatch.manifest_guard import _guard_force_import_audio_manifest
 from lib.dispatch.quality_gate import _check_quality_gate_core
+from lib.dispatch.types import (
+    DISPATCH_CODE_BAD_REQUEST,
+    DispatchOutcome,
+    ImportAttemptResult,
+)
+from lib.import_evidence import ensure_candidate_evidence_for_action
+from lib.processing_paths import normalize_source_dirs
 from lib.terminal_outcomes import ImportJobTerminal
 
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
-    from lib.pipeline_db import PipelineDB
     from lib.dispatch.types import ImportOneRunner, QualityGateFn
+    from lib.pipeline_db import PipelineDB
 
 logger = logging.getLogger("cratedigger")
 
 
 def dispatch_import_from_db(
-    db: "PipelineDB",
+    db: PipelineDB,
     request_id: int,
     failed_path: str,
     *,
@@ -43,12 +47,12 @@ def dispatch_import_from_db(
     source_dirs: list[str] | None = None,
     import_job_id: int | None = None,
     download_log_id: int | None = None,
-    quality_gate_fn: "QualityGateFn | None" = None,
-    cfg: "CratediggerConfig | None" = None,
-    run_import_fn: "ImportOneRunner | None" = None,
+    quality_gate_fn: QualityGateFn | None = None,
+    cfg: CratediggerConfig | None = None,
+    run_import_fn: ImportOneRunner | None = None,
     beets_library_db_path: str | None = None,
     beets_library_root: str | None = None,
-) -> "DispatchOutcome":
+) -> DispatchOutcome:
     """Run a force-import through the full dispatch pipeline.
 
     Requires pre-recorded candidate evidence: the caller supplies either
@@ -127,7 +131,7 @@ def dispatch_import_from_db(
 
 
 def _dispatch_import_from_db_locked(
-    db: "PipelineDB",
+    db: PipelineDB,
     request_id: int,
     failed_path: str,
     *,
@@ -136,12 +140,12 @@ def _dispatch_import_from_db_locked(
     source_dirs: list[str] | None,
     import_job_id: int | None,
     download_log_id: int | None,
-    quality_gate_fn: "QualityGateFn | None" = None,
-    cfg: "CratediggerConfig | None" = None,
-    run_import_fn: "ImportOneRunner | None" = None,
+    quality_gate_fn: QualityGateFn | None = None,
+    cfg: CratediggerConfig | None = None,
+    run_import_fn: ImportOneRunner | None = None,
     beets_library_db_path: str | None = None,
     beets_library_root: str | None = None,
-) -> "DispatchOutcome":
+) -> DispatchOutcome:
     """Body of dispatch_import_from_db, called once the advisory lock is held.
 
     Precondition: at least one of ``import_job_id`` or ``download_log_id``
@@ -280,7 +284,7 @@ def _dispatch_import_from_db_locked(
     )
 
 
-def _job_is_running(db: "PipelineDB", import_job_id: int | None) -> bool:
+def _job_is_running(db: PipelineDB, import_job_id: int | None) -> bool:
     if import_job_id is None:
         return False
     job = db.get_import_job(import_job_id)
@@ -288,7 +292,7 @@ def _job_is_running(db: "PipelineDB", import_job_id: int | None) -> bool:
 
 
 def _persist_terminal_dispatch_outcome(
-    db: "PipelineDB",
+    db: PipelineDB,
     outcome: DispatchOutcome,
     *,
     defer: bool,

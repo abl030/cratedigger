@@ -30,7 +30,6 @@ import unittest
 
 import lib.pipeline_db as pdb_mod
 
-
 # Methods on PipelineDB that mutate state. Anything matching one of these
 # prefixes (and not allowlisted below) must have a round-trip guard.
 WRITE_METHOD_PREFIXES = (
@@ -198,7 +197,7 @@ def _find_round_trip_tests_for_method(method_name: str,
     elif method_name.startswith("set_"):
         suffix = method_name[len("set_"):]
         read_candidates.update({f"get_{suffix}", f"list_{suffix}"})
-    elif method_name.startswith("record_") or method_name.startswith("mark_"):
+    elif method_name.startswith(("record_", "mark_")):
         suffix = method_name.split("_", 1)[1]
         read_candidates.update({f"get_{suffix}", f"list_{suffix}"})
 
@@ -219,9 +218,11 @@ def _find_round_trip_tests_for_method(method_name: str,
         # SELECT-as-roundtrip — accept any SELECT statement against the
         # method's bare suffix table when the test name hints round-trip.
         body_text = ast.dump(node)
-        if any(hint in node.name for hint in _ROUND_TRIP_TEST_HINTS):
-            if "SELECT" in body_text or "_query" in body_text:
-                read_back = True
+        if (
+            any(hint in node.name for hint in _ROUND_TRIP_TEST_HINTS)
+            and ("SELECT" in body_text or "_query" in body_text)
+        ):
+            read_back = True
         if wrote and read_back:
             hits.append(node.name)
     return hits

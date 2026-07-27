@@ -30,7 +30,7 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -65,7 +65,7 @@ class SearchSweepSummary:
         return bool(self.deleted or self.already_gone)
 
 
-def converge_slskd_searches(ctx: "CratediggerContext") -> SearchSweepSummary:
+def converge_slskd_searches(ctx: CratediggerContext) -> SearchSweepSummary:
     """Phase 0 convergence (issue #576): reap ledgered slskd searches.
 
     Per cycle:
@@ -105,7 +105,7 @@ def converge_slskd_searches(ctx: "CratediggerContext") -> SearchSweepSummary:
     is invoked in Phase 0) for defense-in-depth regardless.
     """
     db = ctx.pipeline_db_source._get_db()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     cutoff = now - timedelta(seconds=SEARCH_LEDGER_SWEEP_GRACE_S)
     unswept_rows = db.get_unswept_search_ids(older_than=now)
 

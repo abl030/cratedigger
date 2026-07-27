@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """JSON entry point for the pinned-Beets exact library delete operation."""
 
 from __future__ import annotations
@@ -9,10 +8,9 @@ from pathlib import Path
 
 import msgspec
 
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from lib.beets_delete import (  # noqa: E402
+from lib.beets_delete import (
     BeetsDeleteOutcome,
     BeetsDeleteRequest,
     execute_pinned_beets_delete,
@@ -29,7 +27,7 @@ def main() -> None:
     try:
         request = msgspec.json.decode(sys.stdin.buffer.read(), type=BeetsDeleteRequest)
         outcome: BeetsDeleteOutcome = execute_pinned_beets_delete(request)
-    except Exception as exc:  # noqa: BLE001 -- stderr + nonzero protocol failure
+    except Exception as exc:
         print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
         os.close(protocol_fd)
         raise SystemExit(1) from exc

@@ -19,8 +19,8 @@ from lib.release_identity import ReleaseIdentity
 from lib.world_invariants import (
     DenylistAuthoritySnapshot,
     EvidenceDiskSnapshot,
-    LifecycleTransitionSnapshot,
     LibraryAlbumSnapshot,
+    LifecycleTransitionSnapshot,
     RequestMembershipSnapshot,
     assert_replaced_row_frozen,
     check_denylist_authority,

@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import subprocess
 import unittest
-
+from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "world_model_burst.sh"
@@ -27,6 +26,7 @@ class TestWorldModelBurstScript(unittest.TestCase):
             capture_output=True,
             text=True,
             timeout=30,
+            check=False,
         )
 
     def test_print_config_reports_randomized_ephemeral_world(self) -> None:

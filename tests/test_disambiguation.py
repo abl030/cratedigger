@@ -7,11 +7,8 @@ Covers:
 """
 
 import json
-import os
-import sys
 import unittest
-from unittest.mock import patch, MagicMock
-
+from unittest.mock import MagicMock, patch
 
 
 def _make_harness_proc(messages: list[dict]) -> MagicMock:

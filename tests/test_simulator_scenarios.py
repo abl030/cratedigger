@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Simulator scenario test suite for pipeline quality decisions.
 
 Tests the COMPOSITION of decision functions — full_pipeline_decision() +
@@ -17,9 +16,9 @@ from dataclasses import dataclass, replace
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from lib.quality import (
+    QUALITY_UPGRADE_TIERS,
     AudioQualityMeasurement,
     DownloadInfo,
-    QUALITY_UPGRADE_TIERS,
     SpectralAnalysisDetail,
     compute_effective_override_bitrate,
     full_pipeline_decision,
@@ -27,7 +26,6 @@ from lib.quality import (
     resolve_rejection_search_override,
     search_tiers,
 )
-
 
 # ============================================================================
 # Fixtures
@@ -59,7 +57,7 @@ class AlbumState:
     existing_v0_probe_avg: int | None = None
 
 
-def _derive_album_format(album: "AlbumState") -> str | None:
+def _derive_album_format(album: AlbumState) -> str | None:
     """Derive a codec-aware format hint for an AlbumState.
 
     Legacy simulator fixtures don't carry a format field — derive one from
@@ -460,7 +458,7 @@ _REJECT_DENYLIST_CAUSES = (
 )
 
 
-def assert_denylist_has_valid_cause(r: "SimResult") -> None:
+def assert_denylist_has_valid_cause(r: SimResult) -> None:
     """A denylisted outcome must trace to a real reject/retained-nonterminal
     decision — never a bare default with no decision behind it.
 
@@ -487,7 +485,7 @@ def assert_denylist_has_valid_cause(r: "SimResult") -> None:
 class TestAssertDenylistHasValidCauseTripsOnViolations(unittest.TestCase):
     """Known-bad self-test (issue #813): proves the checker actually trips."""
 
-    def _result(self, **overrides: object) -> "SimResult":
+    def _result(self, **overrides: object) -> SimResult:
         base = SimResult(
             imported=False,
             keep_searching=True,
@@ -1157,7 +1155,10 @@ class TestNamedRegressions(unittest.TestCase):
         compare as equivalent, so the verified_lossless preference imports.
         """
         from lib.quality import (
-            AudioQualityMeasurement, compare_quality, QualityRankConfig)
+            AudioQualityMeasurement,
+            QualityRankConfig,
+            compare_quality,
+        )
         cfg = QualityRankConfig.defaults()
         opus_128 = AudioQualityMeasurement(
             format="opus 128", avg_bitrate_kbps=130)
@@ -1186,8 +1187,10 @@ class TestNamedRegressions(unittest.TestCase):
         import is rejected.
         """
         from lib.quality import (
-            AudioQualityMeasurement, import_quality_decision,
-            QualityRankConfig)
+            AudioQualityMeasurement,
+            QualityRankConfig,
+            import_quality_decision,
+        )
         cfg = QualityRankConfig.defaults()
         opus_64 = AudioQualityMeasurement(
             format="opus 64", avg_bitrate_kbps=64)
@@ -1206,8 +1209,10 @@ class TestNamedRegressions(unittest.TestCase):
     def test_flac_to_opus_128_replaces_cbr_320(self):
         """Verified Opus 128 replaces unverified CBR 320 (codec parity)."""
         from lib.quality import (
-            AudioQualityMeasurement, import_quality_decision,
-            QualityRankConfig)
+            AudioQualityMeasurement,
+            QualityRankConfig,
+            import_quality_decision,
+        )
         cfg = QualityRankConfig.defaults()
         opus_128 = AudioQualityMeasurement(
             format="opus 128", avg_bitrate_kbps=130)
@@ -1232,7 +1237,10 @@ class TestNamedRegressions(unittest.TestCase):
         cfg.mp3_vbr_levels[0] regardless of bitrate.
         """
         from lib.quality import (
-            AudioQualityMeasurement, quality_gate_decision, QualityRankConfig)
+            AudioQualityMeasurement,
+            QualityRankConfig,
+            quality_gate_decision,
+        )
         cfg = QualityRankConfig.defaults()
         current = AudioQualityMeasurement(
             format="mp3 v0", min_bitrate_kbps=207, avg_bitrate_kbps=207)
@@ -1782,6 +1790,7 @@ class TestReconciliationFlowScenarios(unittest.TestCase):
 
     def _service(self, db, generator_id="g-test"):
         import configparser
+
         from lib.config import CratediggerConfig
         from lib.search_plan_service import SearchPlanService
         cfg = CratediggerConfig.from_ini(configparser.ConfigParser())
@@ -1794,8 +1803,8 @@ class TestReconciliationFlowScenarios(unittest.TestCase):
         reconciliation gives it a current active plan -- after the pass
         it appears in ``get_wanted_searchable``.
         """
-        from tests.fakes import FakePipelineDB
         from lib.startup_reconciliation import reconcile_search_plans
+        from tests.fakes import FakePipelineDB
 
         db = FakePipelineDB()
         rid = db.add_request(
@@ -1825,8 +1834,8 @@ class TestReconciliationFlowScenarios(unittest.TestCase):
         never enters the searchable picker, even after repeated
         reconciliation passes.
         """
-        from tests.fakes import FakePipelineDB
         from lib.startup_reconciliation import reconcile_search_plans
+        from tests.fakes import FakePipelineDB
 
         db = FakePipelineDB()
         # Empty artist + title -> generator returns failure_reason.

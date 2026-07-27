@@ -9,8 +9,8 @@ name and opening it later would re-introduce a symlink/swap race.
 
 from __future__ import annotations
 
-import errno
 import ctypes
+import errno
 import fcntl
 import os
 import stat
@@ -104,7 +104,7 @@ class SharedDownloadRootError(FilesystemAuthorityError):
     """
 
     @classmethod
-    def wrapping(cls, exc: FilesystemAuthorityError) -> "SharedDownloadRootError":
+    def wrapping(cls, exc: FilesystemAuthorityError) -> SharedDownloadRootError:
         return cls(
             f"shared download root refused: {exc}",
             code=exc.code,
@@ -204,7 +204,7 @@ def _raise_path_error(path: str, exc: OSError) -> FilesystemAuthorityError:
 
 
 @contextmanager
-def open_directory_path(path: str) -> Generator[int, None, None]:
+def open_directory_path(path: str) -> Generator[int]:
     """Open an absolute directory while refusing every symlink component."""
     if not os.path.isabs(path):
         raise FilesystemAuthorityError(
@@ -309,7 +309,7 @@ def same_open_directory(path: str, held_fd: int) -> bool:
 
 
 @contextmanager
-def exclusive_relative_lock(root_fd: int, name: str) -> Generator[None, None, None]:
+def exclusive_relative_lock(root_fd: int, name: str) -> Generator[None]:
     """Hold a no-follow regular lock file beneath an authoritative root."""
     lock_name = _parts(name)
     if len(lock_name) != 1:
@@ -406,7 +406,7 @@ def remove_relative_tree(parent_fd: int, name: str) -> None:
 @contextmanager
 def open_private_processing_root(
     processing_dir: str, slskd_download_dir: str,
-) -> Generator[int, None, None]:
+) -> Generator[int]:
     """Open the configured private root after its complete trust checks.
 
     This opens BOTH roots — the private tree and, for the physical-overlap
@@ -447,7 +447,7 @@ def open_private_processing_root(
 @contextmanager
 def open_relative_directory(
     root_fd: int, relative_path: str,
-) -> Generator[int, None, None]:
+) -> Generator[int]:
     """Walk a directory under an already-authoritative root descriptor."""
     fd = os.dup(root_fd)
     try:
@@ -466,7 +466,7 @@ def open_relative_directory(
 @contextmanager
 def open_private_child_directory(
     root_fd: int, name: str,
-) -> Generator[int, None, None]:
+) -> Generator[int]:
     """Open one required 0700 child of the private processing root.
 
     Nix creates ``albums`` and ``preview``.  Rechecking their owner and
@@ -527,7 +527,7 @@ class HeldDirectory:
 @contextmanager
 def open_configured_quarantine_directory(
     raw_path: str, cfg: object,
-) -> Generator[HeldDirectory, None, None]:
+) -> Generator[HeldDirectory]:
     """Resolve a DB/path payload through the configured quarantine roots.
 
     The required marker is a *path component*, never a string prefix.  In
@@ -538,10 +538,18 @@ def open_configured_quarantine_directory(
     from lib.processing_paths import processing_albums_dir
 
     roots = (
-        (getattr(cfg, "slskd_download_dir"), frozenset({"failed_imports", "wrong_matches"})),
-        (getattr(cfg, "beets_staging_dir"), frozenset({"failed_imports"})),
         (
-            processing_albums_dir(getattr(cfg, "processing_dir")),
+            getattr(cfg, "slskd_download_dir"),  # noqa: B009 - structural config boundary
+            frozenset({"failed_imports", "wrong_matches"}),
+        ),
+        (
+            getattr(cfg, "beets_staging_dir"),  # noqa: B009 - structural config boundary
+            frozenset({"failed_imports"}),
+        ),
+        (
+            processing_albums_dir(
+                getattr(cfg, "processing_dir"),  # noqa: B009 - structural config boundary
+            ),
             frozenset({"failed_imports", "wrong_matches"}),
         ),
     )
@@ -563,12 +571,11 @@ def open_configured_quarantine_directory(
         if not markers.intersection(parts):
             continue
         try:
-            with open_directory_path(root) as root_fd:
-                with open_relative_directory(root_fd, relative) as candidate_fd:
-                    held = HeldDirectory(
-                        fd=os.dup(candidate_fd),
-                        display_path=os.path.abspath(os.path.join(root, relative)),
-                    )
+            with open_directory_path(root) as root_fd, open_relative_directory(root_fd, relative) as candidate_fd:
+                held = HeldDirectory(
+                    fd=os.dup(candidate_fd),
+                    display_path=os.path.abspath(os.path.join(root, relative)),
+                )
         except FilesystemAuthorityError:
             continue
         try:
@@ -639,7 +646,7 @@ def open_regular_under_held_root(
 
 
 @contextmanager
-def open_shared_download_root(path: str) -> Generator[HeldDirectory, None, None]:
+def open_shared_download_root(path: str) -> Generator[HeldDirectory]:
     """Hold the UNTRUSTED shared download root open for a whole batch.
 
     A refusal of the root ITSELF is raised as

@@ -4,20 +4,22 @@ import os
 import string
 import sys
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 from urllib.parse import quote
 
-from hypothesis import given, strategies as st
+from hypothesis import given
+from hypothesis import strategies as st
+
 # Bootstrap ephemeral PostgreSQL if available
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from album_source import AlbumRecord, DatabaseSource, MB_API_BASE
-from lib.grab_list import GrabListEntry, DownloadFile
-from lib.quality import DownloadInfo, ValidationResult
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
+from album_source import MB_API_BASE, AlbumRecord, DatabaseSource
+from lib.grab_list import GrabListEntry
+from lib.quality import DownloadInfo, ValidationResult
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 
@@ -26,12 +28,12 @@ TEST_DSN = os.environ.get("TEST_DB_DSN")
 
 def _make_record(**overrides):
     """Build a minimal GrabListEntry for album_source method tests."""
-    defaults = dict(
-        album_id=0, files=[], filetype="mp3", title="T", artist="A",
-        year="2024", mb_release_id="",
-    )
+    defaults = {
+        "album_id": 0, "files": [], "filetype": "mp3", "title": "T", "artist": "A",
+        "year": "2024", "mb_release_id": "",
+    }
     defaults.update(overrides)
-    return GrabListEntry(**defaults)  # type: ignore[arg-type]
+    return GrabListEntry(**defaults)
 
 
 SAMPLE_DB_ROW = {
@@ -431,7 +433,7 @@ class TestDatabaseSource(unittest.TestCase):
 
     def test_mark_done_sets_on_disk_spectral(self):
         """Successful import updates current_spectral_grade/bitrate."""
-        from lib.quality import DownloadInfo, SpectralMeasurement
+        from lib.quality import SpectralMeasurement
         source, db = self._make_source()
         req_id = db.add_request(
             mb_release_id="spectral-uuid",
@@ -455,7 +457,7 @@ class TestDatabaseSource(unittest.TestCase):
     def test_mark_done_override_false_prevents_verified_lossless(self):
         """import_one says will_be_verified_lossless=False — mark_done must not
         set verified_lossless=True even if is_verified_lossless() would."""
-        from lib.quality import DownloadInfo, SpectralMeasurement
+        from lib.quality import SpectralMeasurement
         source, db = self._make_source()
         req_id = db.add_request(
             mb_release_id="vl-override-uuid", artist_name="The National",
@@ -475,7 +477,7 @@ class TestDatabaseSource(unittest.TestCase):
 
     def test_mark_done_override_true_sets_verified_lossless(self):
         """import_one says will_be_verified_lossless=True — sets it."""
-        from lib.quality import DownloadInfo, SpectralMeasurement
+        from lib.quality import SpectralMeasurement
         source, db = self._make_source()
         req_id = db.add_request(
             mb_release_id="vl-true-uuid", artist_name="A",
@@ -496,7 +498,7 @@ class TestDatabaseSource(unittest.TestCase):
     def test_mark_done_verified_lossless_uses_bitrate_for_spectral(self):
         """When verified_lossless, current_spectral_bitrate should be the
         actual V0 min bitrate, not the spectral cliff estimate."""
-        from lib.quality import DownloadInfo, SpectralMeasurement
+        from lib.quality import SpectralMeasurement
         source, db = self._make_source()
         req_id = db.add_request(
             mb_release_id="vl-bitrate-uuid", artist_name="The National",
@@ -520,7 +522,7 @@ class TestDatabaseSource(unittest.TestCase):
 
     def test_mark_done_no_override_falls_back(self):
         """No override (legacy path) — derives from is_verified_lossless()."""
-        from lib.quality import DownloadInfo, SpectralMeasurement
+        from lib.quality import SpectralMeasurement
         source, db = self._make_source()
         req_id = db.add_request(
             mb_release_id="vl-fallback-uuid", artist_name="A",
@@ -543,7 +545,7 @@ class TestDatabaseSource(unittest.TestCase):
         stale current_spectral_bitrate and last_download_spectral_bitrate
         must be cleared.
         Regression test for issue #18."""
-        from lib.quality import DownloadInfo, SpectralMeasurement
+        from lib.quality import SpectralMeasurement
         source, db = self._make_source()
         req_id = db.add_request(
             mb_release_id="stale-spectral-uuid", artist_name="Brand New",

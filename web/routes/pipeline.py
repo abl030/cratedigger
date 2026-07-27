@@ -22,30 +22,30 @@ from typing import TYPE_CHECKING, Literal
 import msgspec
 from pydantic import BaseModel, Field
 
-from lib.import_queue import ImportJob
 from lib.beets_db import CurrentBeetsUnique
 from lib.current_library_display import (
     CurrentLibraryUnavailable,
     current_library_display,
     resolve_request_current_library,
 )
+from lib.import_queue import ImportJob
 
 if TYPE_CHECKING:
     from lib.pipeline_db import LatestDownloadSummary
 
-from web.routes._registry import RouteHandler, RouteRegistration, pattern_route, route
 from web.routes._pydantic import parse_body
+from web.routes._registry import RouteHandler, RouteRegistration, pattern_route, route
 from web.routes._server_access import _server
 
 logger = logging.getLogger(__name__)
 
+from lib.quality import CandidateScore, top_candidates
+from web.classify import classify_import_job_display
 from web.download_history_view import (
     build_download_history_row,
     build_download_history_rows,
     build_recents_download_log_rows,
 )
-from web.classify import classify_import_job_display
-from lib.quality import CandidateScore, top_candidates
 
 DEFAULT_PIPELINE_LOG_LIMIT = 50
 MAX_PIPELINE_LOG_LIMIT = 500

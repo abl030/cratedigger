@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generated property for the Discogs id neutralizer (issue #570 defect 2).
 
 INVARIANT: An applied Discogs match leaves `mb_albumid` and
@@ -35,10 +34,10 @@ from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
-
 from hypothesis import example, given
 from hypothesis import strategies as st
+
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 
 _beets_mocks = {
     "beets": MagicMock(),
@@ -56,14 +55,16 @@ _beets_mocks = {
 for name, mock in _beets_mocks.items():
     sys.modules.setdefault(name, mock)
 
-setattr(sys.modules["beets.importer.session"], "ImportSession",
-        type("ImportSession", (object,), {}))
-
-from harness import beets_harness  # noqa: E402
-from tests.test_harness_discogs_neutralize import (  # noqa: E402
-    discogs_provider_ids_neutralized,
+setattr(  # noqa: B010 - populate a synthetic runtime module
+    sys.modules["beets.importer.session"],
+    "ImportSession",
+    type("ImportSession", (object,), {}),
 )
 
+from harness import beets_harness
+from tests.test_harness_discogs_neutralize import (
+    discogs_provider_ids_neutralized,
+)
 
 # ============================================================================
 # World space

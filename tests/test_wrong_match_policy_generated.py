@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import unittest
 
-from hypothesis import example, given, strategies as st
+from hypothesis import example, given
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
 from lib.wrong_match_policy import (
@@ -13,7 +14,6 @@ from lib.wrong_match_policy import (
 )
 from lib.wrong_matches import wrong_match_row_is_visible
 from tests.fakes import FakePipelineDB
-
 
 EXPECTED_NON_MATCH_SCENARIOS = frozenset({
     "audio_corrupt",

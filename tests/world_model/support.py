@@ -6,12 +6,11 @@ import os
 import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 from unittest.mock import patch
 
 import msgspec
 
-from lib.pipeline_db.rows import AlbumRequestRow
 from lib.beets_db import BeetsDB, CurrentBeetsUnique
 from lib.beets_delete import (
     BeetsDeleteCompleted,
@@ -20,8 +19,8 @@ from lib.beets_delete import (
 )
 from lib.config import CratediggerConfig
 from lib.destructive_release_service import (
-    BanSourceRequest,
     BanSourceReleaseMismatch,
+    BanSourceRequest,
     BanSourceSuccess,
     ban_source,
 )
@@ -38,8 +37,8 @@ from lib.import_evidence import (
 from lib.import_preview import (
     ImportPreviewResult,
     enrich_incomplete_current_evidence_for_request,
-    persist_exact_current_spectral_from_attempt,
     force_action_copy_path,
+    persist_exact_current_spectral_from_attempt,
 )
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
@@ -49,30 +48,31 @@ from lib.import_queue import (
     force_import_dedupe_key,
     force_import_payload,
 )
+from lib.mbid_replace_service import (
+    REPLACE_REASON_SOURCE_IDENTITY_INVALID,
+    RESULT_REPLACED,
+    RESULT_WRONG_STATE,
+    MbidReplaceService,
+)
+from lib.measurement import ExistingSpectralAuditLookup
+from lib.pipeline_db.rows import AlbumRequestRow
 from lib.quality import (
     EVIDENCE_PROVENANCE_MEASURED,
     EVIDENCE_SUBJECT_SOURCE,
+    V0_PROBE_ON_DISK_RESEARCH,
     AlbumQualityEvidence,
     AudioQualityMeasurement,
     DownloadInfo,
     QualityRankConfig,
     SpectralAnalysisDetail,
     V0ProbeEvidence,
-    V0_PROBE_ON_DISK_RESEARCH,
     VerifiedLosslessProof,
     resolve_user_requeue_override,
 )
-from lib.measurement import ExistingSpectralAuditLookup
 from lib.quality_evidence import (
     EvidenceBuildResult,
     snapshot_audio_files,
     snapshot_fingerprint,
-)
-from lib.mbid_replace_service import (
-    MbidReplaceService,
-    REPLACE_REASON_SOURCE_IDENTITY_INVALID,
-    RESULT_REPLACED,
-    RESULT_WRONG_STATE,
 )
 from lib.release_identity import ReleaseIdentity
 from lib.search_plan_service import SearchPlanService
@@ -81,11 +81,12 @@ from lib.transitions import (
     finalize_request,
     require_transition_applied,
 )
+from lib.validation_envelope import decode_validation_envelope
 from lib.world_invariants import (
     DenylistAuthoritySnapshot,
     EvidenceDiskSnapshot,
-    LifecycleTransitionSnapshot,
     LibraryAlbumSnapshot,
+    LifecycleTransitionSnapshot,
     RequestMembershipSnapshot,
     WorldViolation,
     assert_replaced_row_frozen,
@@ -98,9 +99,12 @@ from lib.world_invariants import (
     check_status_membership,
     derive_denylist_authorities,
 )
-from lib.validation_envelope import decode_validation_envelope
 from lib.wrong_match_delete_service import (
     delete_wrong_match as delete_wrong_match_source,
+)
+from scripts.import_preview_worker import (
+    _prepare_force_action_path,
+    process_claimed_preview_job,
 )
 from tests.beets_world import BeetsWorld, BeetsWorldRelease
 from tests.helpers import (
@@ -114,8 +118,8 @@ from tests.world_model.census_seeds import (
     STATEFUL_WORLD_CENSUS_SEEDS,
     EvidenceDriftFactSeed,
     EvidenceDriftMutationSeed,
-    MissingCurrentEvidenceIdentitySeed,
     MissingCurrentEvidenceFormatSeed,
+    MissingCurrentEvidenceIdentitySeed,
     MissingCurrentEvidenceLegacyBitrateSeed,
     MissingCurrentEvidenceLegacySpectralSeed,
     MissingCurrentEvidenceOriginSeed,
@@ -124,10 +128,6 @@ from tests.world_model.census_seeds import (
     MissingCurrentEvidenceTargetFormatSeed,
     WorldCensusSeed,
     assert_missing_current_evidence_seed_anonymized,
-)
-from scripts.import_preview_worker import (
-    _prepare_force_action_path,
-    process_claimed_preview_job,
 )
 
 
@@ -210,7 +210,7 @@ class LifecycleWorld:
             finally:
                 self.db.close()
 
-    def __enter__(self) -> LifecycleWorld:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *_args: object) -> None:
@@ -1579,7 +1579,9 @@ class LifecycleWorld:
                 raise AssertionError("failed-closed dual-identity ban mutated Beets")
             return
         if not isinstance(result, BanSourceSuccess):
-            raise AssertionError(f"production ban-source failed: {result!r}")
+            raise AssertionError(  # noqa: TRY004 - model invariant failure
+                f"production ban-source failed: {result!r}"
+            )
         after = self._require_request(request_id)
         after_album = self._album_for_release(release.release_id)
         self._transitions.append(LifecycleTransitionSnapshot(
@@ -1913,7 +1915,7 @@ class LifecycleWorld:
             )
             raise AssertionError(f"cross-engine world violations:\n{rendered}")
 
-    def _require_request(self, request_id: int) -> "AlbumRequestRow":
+    def _require_request(self, request_id: int) -> AlbumRequestRow:
         row = self.db.get_request(request_id)
         if row is None:
             raise AssertionError(f"request {request_id} disappeared")

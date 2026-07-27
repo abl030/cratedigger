@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-
 NEW_REQUEST_PRIORITY_HOURS = 24
 NEW_REQUEST_RESERVED_DIVISOR = 4
 

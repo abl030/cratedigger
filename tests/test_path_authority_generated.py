@@ -12,11 +12,18 @@ import tempfile
 import unittest
 from collections.abc import Callable
 
-import tests._hypothesis_profiles  # noqa: F401
 from hypothesis import example, given
 from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401
 from lib.config import CratediggerConfig
+from lib.download_materialization import (
+    Materialized,
+    MaterializeFailed,
+    MaterializeGuarded,
+    _materialize_processing_dir,
+    _materialize_token,
+)
 from lib.fs_authority import (
     FilesystemAuthorityError,
     copy_opened_file,
@@ -24,20 +31,17 @@ from lib.fs_authority import (
     open_private_processing_root,
     open_regular_relative,
 )
+from lib.grab_list import DownloadFile
 from lib.import_preview import (
     PreviewSnapshotLimits,
     _snapshot_authorized_directory,
     remove_preview_snapshot,
 )
-from lib.download_materialization import (
-    MaterializeFailed,
-    MaterializeGuarded,
-    Materialized,
-    _materialize_processing_dir,
-    _materialize_token,
+from lib.import_queue import (
+    IMPORT_JOB_FORCE,
+    force_import_dedupe_key,
+    force_import_payload,
 )
-from lib.grab_list import DownloadFile
-from lib.import_queue import IMPORT_JOB_FORCE, force_import_dedupe_key, force_import_payload
 from lib.processing_paths import canonical_folder_for_row, processing_albums_dir
 from lib.quality_evidence import EvidenceBuildResult
 from lib.staged_album import StagedAlbum
@@ -48,7 +52,6 @@ from web.wrong_match_file_service import (
     WrongMatchExplorerLimits,
     build_wrong_match_explorer,
 )
-
 
 _SAFE_COMPONENTS = st.text(
     alphabet="abcdefghijklmnopqrstuvwxyz0123456789_-",
@@ -90,21 +93,25 @@ class TestGeneratedDescriptorAuthority(unittest.TestCase):
 
     def test_private_root_acceptance_tracks_ancestor_writability(self) -> None:
         for unsafe_ancestor in (False, True):
-            with self.subTest(unsafe_ancestor=unsafe_ancestor):
-                with tempfile.TemporaryDirectory() as parent:
-                    source = os.path.join(parent, "source")
-                    container = os.path.join(parent, "container")
-                    processing = os.path.join(container, "processing")
-                    os.mkdir(source)
-                    os.mkdir(container, 0o777 if unsafe_ancestor else 0o755)
-                    os.chmod(container, 0o777 if unsafe_ancestor else 0o755)
-                    os.mkdir(processing, 0o700)
-                    if unsafe_ancestor:
-                        with self.assertRaises(FilesystemAuthorityError):
-                            with open_private_processing_root(processing, source):
-                                pass
-                    else:
-                        with open_private_processing_root(processing, source):
+            with (
+                self.subTest(unsafe_ancestor=unsafe_ancestor),
+                tempfile.TemporaryDirectory() as parent,
+            ):
+                source = os.path.join(parent, "source")
+                container = os.path.join(parent, "container")
+                processing = os.path.join(container, "processing")
+                os.mkdir(source)
+                os.mkdir(container, 0o777 if unsafe_ancestor else 0o755)
+                os.chmod(container, 0o777 if unsafe_ancestor else 0o755)
+                os.mkdir(processing, 0o700)
+                if unsafe_ancestor:
+                    with (
+                        self.assertRaises(FilesystemAuthorityError),
+                        open_private_processing_root(processing, source),
+                    ):
+                        pass
+                else:
+                    with open_private_processing_root(processing, source):
                             pass
 
     @given(entry_count=st.integers(min_value=0, max_value=6))
@@ -154,7 +161,7 @@ class TestGeneratedDescriptorAuthority(unittest.TestCase):
 def assert_generated_publication_invariant(
     *,
     result: object,
-    expected_result_type: type[Materialized] | type[MaterializeGuarded],
+    expected_result_type: type[Materialized | MaterializeGuarded],
     expected_detail: str | None,
     source_exists: bool,
     expected_source_exists: bool,
@@ -285,7 +292,9 @@ def assert_explorer_entry_invariant(
         raise AssertionError("over-budget explorer result was presented as complete")
     scanned_file_count = payload["scanned_file_count"]
     if not isinstance(scanned_file_count, int):
-        raise AssertionError("explorer did not return an integer scanned_file_count")
+        raise AssertionError(  # noqa: TRY004 - generated invariant failure
+            "explorer did not return an integer scanned_file_count"
+        )
     if scanned_file_count > entry_cap:
         raise AssertionError("explorer scanned more regular files than its entry budget")
     files = payload["files"]
@@ -393,7 +402,7 @@ class TestGeneratedMaterializePublication(unittest.TestCase):
             )
             albums = processing_albums_dir(processing)
             if destination_state == "absent":
-                expected_result_type: type[Materialized] | type[MaterializeGuarded] = Materialized
+                expected_result_type: type[Materialized | MaterializeGuarded] = Materialized
                 expected_detail = None
                 expected_source_exists = False
                 expected_names = {"track.mp3"}
@@ -563,7 +572,7 @@ class TestGeneratedWrongMatchExplorerBounds(unittest.TestCase):
     @example(kinds=["audio", "other", "directory"])
     @example(kinds=["directory", "directory", "directory", "directory"])
     def test_real_explorer_has_deterministic_total_entry_limit(self, kinds: list[str]) -> None:
-        parent, source, processing, cfg = _private_world()
+        parent, source, processing, _cfg = _private_world()
         del processing
         with parent:
             failed = os.path.join(source, "failed_imports", "Album")
@@ -632,7 +641,7 @@ class TestGeneratedForceFrontGateAuthority(unittest.TestCase):
     ) -> None:
         from scripts import import_preview_worker
 
-        parent, source, processing, cfg = _private_world()
+        parent, _source, processing, cfg = _private_world()
         with parent:
             incoming = cfg.beets_staging_dir
             db_path = os.path.join(
@@ -792,14 +801,23 @@ class TestGeneratedRootRelocation(unittest.TestCase):
 
                     def relocate_before_publish(
                         _albums_fd: int, _destination: str,
+                        processing_path: str = processing,
+                        relocated_path: str = relocated,
+                        replacement_extra_value: bool = replacement_extra,
                     ) -> None:
-                        os.rename(processing, relocated)
-                        os.mkdir(processing, 0o700)
-                        os.mkdir(os.path.join(processing, "albums"), 0o700)
-                        os.mkdir(os.path.join(processing, "preview"), 0o700)
-                        if replacement_extra:
+                        os.rename(processing_path, relocated_path)
+                        os.mkdir(processing_path, 0o700)
+                        os.mkdir(
+                            os.path.join(processing_path, "albums"), 0o700,
+                        )
+                        os.mkdir(
+                            os.path.join(processing_path, "preview"), 0o700,
+                        )
+                        if replacement_extra_value:
                             with open(
-                                os.path.join(processing, "replacement-marker"),
+                                os.path.join(
+                                    processing_path, "replacement-marker",
+                                ),
                                 "wb",
                             ) as handle:
                                 handle.write(b"replacement")

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import os
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -200,9 +200,9 @@ renderDownloadHistoryFixture({outcome: 'success', request_id: 1});
         )
         for bypass in (
             "renderDownloadHistoryItem({invented_client_only: 1});",
-            "import * as historyModule from './fixture.js'; "
+            ("import * as historyModule from './fixture.js'; "
             'const name = "renderDownloadHistoryItem"; '
-            "historyModule[name]({invented_client_only: 1});",
+            "historyModule[name]({invented_client_only: 1});"),
             'helpers["renderDownloadHistoryFixture"]({invented_client_only: 1});',
             "__test__.renderDownloadHistoryFixture({invented_client_only: 1});",
         ):

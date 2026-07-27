@@ -10,7 +10,11 @@ from lib.repair import (
     find_slskd_orphans,
     suggest_repair,
 )
-from tests.helpers import make_download_directory, make_download_user, make_transfer_snapshot
+from tests.helpers import (
+    make_download_directory,
+    make_download_user,
+    make_transfer_snapshot,
+)
 
 
 class TestFindInconsistencies(unittest.TestCase):

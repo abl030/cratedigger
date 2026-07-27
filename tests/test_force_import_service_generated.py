@@ -7,14 +7,14 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 
-from hypothesis import example, given, strategies as st
+from hypothesis import example, given
+from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.force_import_service import RESULT_QUEUED, enqueue_force_import
 from lib.processing_paths import processing_albums_dir
-import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
-
 
 # Stated here rather than imported from lib.fs_authority: an oracle derived
 # from the production table cannot detect that table widening. The three

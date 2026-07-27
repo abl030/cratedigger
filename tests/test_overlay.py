@@ -100,9 +100,8 @@ class TestOverlayReleaseRowsInPlace(unittest.TestCase):
     def test_missing_row_id_raises_key_error(self):
         with patch("web.server.check_beets_library", return_value=set()), \
                 patch("web.server.check_pipeline", return_value={}), \
-                patch("web.server._beets_db", return_value=None):
-            with self.assertRaises(KeyError):
-                overlay_release_rows_in_place([{"title": "No ID"}], [])
+                patch("web.server._beets_db", return_value=None), self.assertRaises(KeyError):
+            overlay_release_rows_in_place([{"title": "No ID"}], [])
 
 
 class TestBandReleaseIds(unittest.TestCase):

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import unittest
 
-from hypothesis import example, given, strategies as st
+from hypothesis import example, given
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
 from web.discogs import _status_from_formats

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Reject GitHub issue references that can close an issue on merge.
 
 This audit is intentionally narrow: feed it a pull-request body or branch
@@ -9,12 +8,11 @@ grammar, leaving ordinary prose about closing work untouched.
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
-from pathlib import Path
 import re
 import sys
-from typing import Sequence
-
+from collections.abc import Sequence
+from dataclasses import dataclass
+from pathlib import Path
 
 _CLOSING_KEYWORDS = (
     "close",

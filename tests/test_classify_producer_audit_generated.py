@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generated properties for ``web/classify.py``'s decision copy (issue #882).
 
 The pins in ``tests/test_classify_producer_audit.py`` prove the exact
@@ -78,12 +77,12 @@ import sys
 import unittest
 
 import msgspec
-from hypothesis import assume, example, given, strategies as st
+from hypothesis import assume, example, given
+from hypothesis import strategies as st
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
-
 from lib.quality import dispatch_action
 from lib.quality.dispatch_actions import decision_denylists
 from tests.helpers import make_import_result
@@ -171,8 +170,8 @@ def decision_claim_families(decision: str) -> frozenset[str]:
 FORBIDDEN_FAMILY_CLAIMS: dict[str, tuple[tuple[str, str], ...]] = {
     FAMILY_ACQUISITION_COMPLETE: (
         ("searching continues",
-         "verified_lossless_locked sets preserve_imported: the request stays "
-         "imported and no search is open"),
+         ("verified_lossless_locked sets preserve_imported: the request stays "
+         "imported and no search is open")),
         ("searching for better", "the participle form of the same claim"),
         ("still searching", "the progressive form of the same claim"),
         ("returned to the queue",
@@ -192,15 +191,15 @@ FORBIDDEN_FAMILY_CLAIMS: dict[str, tuple[tuple[str, str], ...]] = {
     ),
     FAMILY_DENYLISTS_THE_SOURCE: (
         ("no denylist",
-         "downgrade denylists the source, so the reassuring parenthetical "
-         "verified_lossless_locked earns would be false here"),
+         ("downgrade denylists the source, so the reassuring parenthetical "
+         "verified_lossless_locked earns would be false here")),
         ("without denylisting", "the participle form of the same claim"),
         ("source kept", "the plain-English form of the same claim"),
     ),
     FAMILY_ACCEPTED_THE_CANDIDATE: (
         ("not better than",
-         "transcode_upgrade sets mark_done: the candidate was imported, not "
-         "out-ranked"),
+         ("transcode_upgrade sets mark_done: the candidate was imported, not "
+         "out-ranked")),
         ("declined", "the passive form of the same retracted claim"),
         ("rejected", "the blunt form of the same retracted claim"),
     ),

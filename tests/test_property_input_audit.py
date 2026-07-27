@@ -126,17 +126,16 @@ an unmappable decorator must never pass silently.
 from __future__ import annotations
 
 import ast
-from dataclasses import dataclass
 import functools
 import inspect
-from pathlib import Path
 import unittest
+from dataclasses import dataclass
+from pathlib import Path
 
 from hypothesis import strategies as st
 from hypothesis.stateful import invariant
 
 import tests._hypothesis_profiles  # noqa: F401 - loads the active profile
-
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TESTS_DIR = REPO_ROOT / "tests"
@@ -582,52 +581,52 @@ class TestPropertyInputAudit(unittest.TestCase):
     def test_unclassifiable_shapes_fail_closed(self) -> None:
         cases = {
             "bare_decorator": (
-                "@given\n"
+                ("@given\n"
                 "def prop(world):\n"
-                "    assert check(world)\n",
+                "    assert check(world)\n"),
                 "bare @given",
             ),
             "star_args": (
-                "@given(*strategies)\n"
+                ("@given(*strategies)\n"
                 "def prop(world):\n"
-                "    assert check(world)\n",
+                "    assert check(world)\n"),
                 r"@given uses \*args",
             ),
             "star_star_kwargs": (
-                "@given(**strategies)\n"
+                ("@given(**strategies)\n"
                 "def prop(world):\n"
-                "    assert check(world)\n",
+                "    assert check(world)\n"),
                 r"@given uses \*\*kwargs",
             ),
             "mixed_positional_keyword": (
-                "@given(worlds(), seed=seeds())\n"
+                ("@given(worlds(), seed=seeds())\n"
                 "def prop(world, seed):\n"
-                "    assert check(world, seed)\n",
+                "    assert check(world, seed)\n"),
                 "mixes positional and keyword",
             ),
             "too_many_positional": (
-                "@given(worlds(), seeds())\n"
+                ("@given(worlds(), seeds())\n"
                 "def prop(world):\n"
-                "    assert check(world)\n",
+                "    assert check(world)\n"),
                 "2 positional strategies for 1 eligible",
             ),
             "keyword_is_not_a_parameter": (
-                "@given(planet=worlds())\n"
+                ("@given(planet=worlds())\n"
                 "def prop(world):\n"
-                "    assert check(world)\n",
+                "    assert check(world)\n"),
                 "'planet', which is not a parameter",
             ),
             "variadic_signature": (
-                "@given(worlds())\n"
+                ("@given(worlds())\n"
                 "def prop(*args):\n"
-                "    assert check(args)\n",
+                "    assert check(args)\n"),
                 "variadic signature",
             ),
             "positional_stateful_rule": (
-                "class Machine(RuleBasedStateMachine):\n"
+                ("class Machine(RuleBasedStateMachine):\n"
                 "    @rule(worlds())\n"
                 "    def add(self, world):\n"
-                "        return self.db.add(world)\n",
+                "        return self.db.add(world)\n"),
                 "keyword strategies only",
             ),
         }
@@ -680,9 +679,8 @@ class TestPropertyInputAudit(unittest.TestCase):
         }
 
         for label, source in cases.items():
-            with self.subTest(label=label):
-                with self.assertRaisesRegex(AssertionError, "imported as"):
-                    assert_unaliased_property_imports(source, "tests/test_alias.py")
+            with self.subTest(label=label), self.assertRaisesRegex(AssertionError, "imported as"):
+                assert_unaliased_property_imports(source, "tests/test_alias.py")
 
     def test_ordinary_hypothesis_imports_are_accepted(self) -> None:
         source = (

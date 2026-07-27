@@ -12,10 +12,17 @@ Terminal audit status: replaced (no outgoing lifecycle transitions).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Literal, Mapping, Protocol, TypeAlias, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Literal,
+    Protocol,
+    runtime_checkable,
+)
 
 if TYPE_CHECKING:
     from lib.pipeline_db.rows import AlbumRequestRow
@@ -28,7 +35,7 @@ class TransitionsDB(Protocol):
     Parity tests live in ``tests/test_transitions.py``.
     """
 
-    def get_request(self, request_id: int) -> "AlbumRequestRow | None": ...
+    def get_request(self, request_id: int) -> AlbumRequestRow | None: ...
 
     def set_downloading(
         self,
@@ -123,7 +130,7 @@ class TransitionConflict:
     actual_status: str | None
 
 
-TransitionResult: TypeAlias = TransitionApplied | TransitionConflict
+type TransitionResult = TransitionApplied | TransitionConflict
 
 
 def publish_initialized_request(
@@ -294,7 +301,9 @@ class RequestTransition:
     target_status: RequestStatus
     from_status: str | None = None
     attempt_type: str | None = None
-    fields: Mapping[str, object] = field(default_factory=lambda: {})
+    fields: Mapping[str, object] = field(
+        default_factory=dict[str, object],
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "fields", MappingProxyType(dict(self.fields)))
@@ -309,7 +318,7 @@ class RequestTransition:
         min_bitrate: object = _OMITTED,
         prev_min_bitrate: object = _OMITTED,
         priority_started_at: object = _OMITTED,
-    ) -> "RequestTransition":
+    ) -> RequestTransition:
         return cls(
             target_status="wanted",
             from_status=from_status,
@@ -329,7 +338,7 @@ class RequestTransition:
         from_status: str | None = None,
         attempt_type: str | None = None,
         fields: Mapping[str, object],
-    ) -> "RequestTransition":
+    ) -> RequestTransition:
         _reject_unknown_fields("wanted", fields, _WANTED_FIELDS)
         return cls.to_wanted(
             from_status=from_status,
@@ -348,7 +357,7 @@ class RequestTransition:
         *,
         state_json: str,
         from_status: str | None = None,
-    ) -> "RequestTransition":
+    ) -> RequestTransition:
         return cls(
             target_status="downloading",
             from_status=from_status,
@@ -374,7 +383,7 @@ class RequestTransition:
         prev_min_bitrate: object = _OMITTED,
         search_filetype_override: object = _OMITTED,
         verified_lossless: object = _OMITTED,
-    ) -> "RequestTransition":
+    ) -> RequestTransition:
         return cls(
             target_status="imported",
             from_status=from_status,
@@ -408,7 +417,7 @@ class RequestTransition:
         *,
         from_status: str | None = None,
         fields: Mapping[str, object],
-    ) -> "RequestTransition":
+    ) -> RequestTransition:
         _reject_unknown_fields("imported", fields, _IMPORTED_FIELDS)
         return cls.to_imported(
             from_status=from_status,
@@ -441,7 +450,7 @@ class RequestTransition:
         cls,
         *,
         from_status: str | None = None,
-    ) -> "RequestTransition":
+    ) -> RequestTransition:
         return cls(target_status="unsearchable", from_status=from_status)
 
     @classmethod
@@ -450,7 +459,7 @@ class RequestTransition:
         *,
         from_status: str | None = None,
         fields: Mapping[str, object],
-    ) -> "RequestTransition":
+    ) -> RequestTransition:
         """Retain a search stop while applying Bad Rip search policy."""
         _reject_unknown_fields("unsearchable", fields, _UNSEARCHABLE_FIELDS)
         return cls(
@@ -465,7 +474,7 @@ class RequestTransition:
         target_status: str,
         *,
         from_status: str | None = None,
-    ) -> "RequestTransition":
+    ) -> RequestTransition:
         if target_status == "wanted":
             return cls.to_wanted(from_status=from_status)
         if target_status == "imported":

@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 from __future__ import annotations
 
 import argparse
@@ -8,19 +7,20 @@ import os
 import sys
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import replace
-from datetime import datetime, timezone
-from typing import Any, Callable, NotRequired, Protocol, TYPE_CHECKING, TypedDict
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, NotRequired, Protocol, TypedDict
 
-from lib.slskd_client import (
-    SLSKD_HTTP_TIMEOUT_S,
-    SlskdClient,
-    derive_slskd_http_pool_size,
-)
 # Unified slskd search lifecycle (issue #466).
 from lib.search_exec import (
     SearchSubmitError,
     execute_search,
+)
+from lib.slskd_client import (
+    SLSKD_HTTP_TIMEOUT_S,
+    SlskdClient,
+    derive_slskd_http_pool_size,
 )
 
 if TYPE_CHECKING:
@@ -77,7 +77,7 @@ logger = logging.getLogger("cratedigger")
 
 
 def _warn_if_verified_lossless_target_below_transparent(
-    config: "CratediggerConfig",
+    config: CratediggerConfig,
 ) -> None:
     """Warn when a proof-bearing conversion target is below archival quality."""
     if not config.verified_lossless_target:
@@ -100,7 +100,7 @@ def _warn_if_verified_lossless_target_below_transparent(
                 f"continue searching for a higher-quality copy. Raise the target "
                 f"format to TRANSPARENT or better."
             )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         logger.debug(f"verified_lossless_target rank check failed: {exc}")
 
 # Per-search progress watchdog (issue #212) + response-settle (issue #242)
@@ -109,7 +109,7 @@ def _warn_if_verified_lossless_target_below_transparent(
 # the top of this module.
 
 # === API client instances (set in main()) ===
-pipeline_db_source: "DatabaseSource | None" = None  # Set in main()
+pipeline_db_source: DatabaseSource | None = None  # Set in main()
 
 # === Runtime context (populated in main()) ===
 # Module-level reference for thin wrappers that can't receive ctx as a parameter.
@@ -129,8 +129,8 @@ def _create_slskd_client(client_cfg: CratediggerConfig) -> SlskdClient:
 
 from lib.browse import shutdown_browse_coordinator
 from lib.enqueue import (
-    FindDownloadResult,
     FindDownloadOwnerPathError,
+    FindDownloadResult,
     find_download,
     prepare_find_download_context,
 )
@@ -139,7 +139,7 @@ from lib.quality import top_candidates_with_skip_split
 
 def _build_search_cache(
     search_results: list[dict[str, Any]],
-    filter_specs: "list[tuple[str, AudioFileSpec]]",
+    filter_specs: list[tuple[str, AudioFileSpec]],
 ) -> tuple[dict[str, dict[str, list[str]]], dict[str, int], dict[str, dict[str, int]]]:
     """Build cache dicts from raw slskd search results.
 
@@ -200,7 +200,7 @@ class _SearchPlanExecutorDB(Protocol):
 
     def get_active_search_plan(
         self, request_id: int,
-    ) -> "ActiveSearchPlan | None": ...
+    ) -> ActiveSearchPlan | None: ...
 
     def record_search_id(
         self, search_id: str, purpose: str, request_id: int | None,
@@ -208,8 +208,8 @@ class _SearchPlanExecutorDB(Protocol):
 
 
 def _select_active_plan_item_for_album(
-    album: "AlbumRecord", db: _SearchPlanExecutorDB,
-) -> "tuple[str, PlanExecutionContext] | None":
+    album: AlbumRecord, db: _SearchPlanExecutorDB,
+) -> tuple[str, PlanExecutionContext] | None:
     """Return ``(query, PlanExecutionContext)`` for the next plan-item to run.
 
     Plan-driven replacement for ``_select_variant_for_album``.
@@ -233,8 +233,8 @@ def _select_active_plan_item_for_album(
     generator already produced a runnable, normalized, repeat-aware
     string.
     """
-    from lib.search import PlanExecutionContext, SEARCH_PLAN_GENERATOR_ID
     from lib.pipeline_db import PLAN_STATUS_ACTIVE
+    from lib.search import SEARCH_PLAN_GENERATOR_ID, PlanExecutionContext
 
     request_id = getattr(album, "db_request_id", None)
     if not request_id:
@@ -290,7 +290,7 @@ def _select_active_plan_item_for_album(
 
 
 def _plan_search_submit_kwargs(
-    query: str, search_cfg: "CratediggerConfig",
+    query: str, search_cfg: CratediggerConfig,
 ) -> dict[str, str | int | bool]:
     """Build the ``searches.search_text`` kwargs for a plan-item search.
 
@@ -311,14 +311,14 @@ def _plan_search_submit_kwargs(
 
 
 def _search_result_from_execution(
-    exec_result: "SearchExecutionResult",
+    exec_result: SearchExecutionResult,
     *,
     album_id: int,
     query: str,
     variant_tag: str | None,
-    plan_execution: "PlanExecutionContext | None",
-    search_cfg: "CratediggerConfig",
-) -> "SearchResult":
+    plan_execution: PlanExecutionContext | None,
+    search_cfg: CratediggerConfig,
+) -> SearchResult:
     """Build a pipeline ``SearchResult`` from a completed ``execute_search``.
 
     Shared by the serial (`search_for_album`) and parallel
@@ -340,7 +340,11 @@ def _search_result_from_execution(
             result_count_uncapped=exec_result.response_count_terminal,
         )
 
-    filter_specs = list(zip(search_cfg.allowed_filetypes, search_cfg.allowed_specs))
+    filter_specs = list(zip(
+        search_cfg.allowed_filetypes,
+        search_cfg.allowed_specs,
+        strict=True,
+    ))
     cache_entries, upload_speeds, dir_audio_counts = _build_search_cache(
         responses, filter_specs
     )
@@ -361,8 +365,8 @@ def _search_result_from_execution(
 
 
 def search_for_album(
-    album: "AlbumRecord", ctx: "CratediggerContext",
-) -> "SearchResult":
+    album: AlbumRecord, ctx: CratediggerContext,
+) -> SearchResult:
     """Search slskd for an album. Returns SearchResult (always non-None).
 
     Thin adapter over the unified lifecycle (``lib.search_exec.execute_search``,
@@ -453,10 +457,10 @@ def search_for_album(
 
 
 def _submit_plan_search(
-    album: "AlbumRecord",
+    album: AlbumRecord,
     query: str,
     strategy_tag: str,
-    search_cfg: "CratediggerConfig",
+    search_cfg: CratediggerConfig,
     # ``Any`` -- mirrors ``lib.context.CratediggerContext.slskd``: tests wire
     # ``FakeSlskdAPI`` in place of the real ``SlskdClient``, and the two are
     # not nominally related.
@@ -527,12 +531,12 @@ def _collect_search_results(
     search_id: str,
     query: str,
     album_id: int,
-    search_cfg: "CratediggerConfig",
+    search_cfg: CratediggerConfig,
     # ``Any`` -- see the matching note on ``_submit_plan_search``.
     slskd_client: Any,
     variant_tag: str | None = None,
     clock_fn: Callable[[], float] = time.monotonic,
-) -> "SearchResult":
+) -> SearchResult:
     """Wait for an already-submitted search to complete and collect results.
 
     Thin adapter over the unified lifecycle (``lib.search_exec.execute_search``,
@@ -564,7 +568,7 @@ def _collect_search_results(
     )
 
 
-def _merge_search_result(result: "SearchResult", ctx: "CratediggerContext") -> None:
+def _merge_search_result(result: SearchResult, ctx: CratediggerContext) -> None:
     """Merge a SearchResult into ctx caches.
 
     Called only from the main thread — no locking needed.
@@ -641,7 +645,7 @@ class _PlanKwargs(TypedDict, total=False):
 
 
 def _log_search_result(
-    album: "AlbumRecord", result: "SearchResult", ctx: "CratediggerContext",
+    album: AlbumRecord, result: SearchResult, ctx: CratediggerContext,
 ) -> None:
     """Persist a search outcome via the plan-aware DB seams.
 
@@ -853,14 +857,14 @@ def _log_search_result(
         )
 
 
-def _candidate_to_jsonable(c: "CandidateScore") -> dict[str, object]:
+def _candidate_to_jsonable(c: CandidateScore) -> dict[str, object]:
     """Convert a CandidateScore (msgspec.Struct) to a plain dict for JSONB."""
     import msgspec
     return msgspec.to_builtins(c)
 
 
 def _is_consumed_outcome(
-    result: "SearchResult", plan_execution: "PlanExecutionContext | None",
+    result: SearchResult, plan_execution: PlanExecutionContext | None,
 ) -> bool:
     """Decide whether this SearchResult represents an accepted-search slot.
 
@@ -895,12 +899,12 @@ def _is_consumed_outcome(
 
 
 def _apply_find_download_result(
-    album: "AlbumRecord",
-    result: "SearchResult",
+    album: AlbumRecord,
+    result: SearchResult,
     find_result: FindDownloadResult,
-    failed_grab: "list[AlbumRecord]",
-    grab_list: "dict[int, GrabListEntry] | None" = None,
-    ctx: "CratediggerContext | None" = None,
+    failed_grab: list[AlbumRecord],
+    grab_list: dict[int, GrabListEntry] | None = None,
+    ctx: CratediggerContext | None = None,
 ) -> None:
     """Translate matching/enqueue outcome into search_log telemetry."""
     # Forensic capture: copy the per-(user, dir, filetype) score list off the
@@ -940,13 +944,13 @@ def _apply_find_download_result(
 
 
 def search_and_queue(
-    albums: "list[AlbumRecord]", ctx: "CratediggerContext",
-) -> "tuple[dict[int, GrabListEntry], list[AlbumRecord], list[AlbumRecord]]":
+    albums: list[AlbumRecord], ctx: CratediggerContext,
+) -> tuple[dict[int, GrabListEntry], list[AlbumRecord], list[AlbumRecord]]:
     if ctx.cfg.parallel_searches > 1 and len(albums) > 1:
         return _search_and_queue_parallel(albums, ctx)
-    grab_list: "dict[int, GrabListEntry]" = {}
-    failed_grab: "list[AlbumRecord]" = []
-    failed_search: "list[AlbumRecord]" = []
+    grab_list: dict[int, GrabListEntry] = {}
+    failed_grab: list[AlbumRecord] = []
+    failed_search: list[AlbumRecord] = []
     total = len(albums)
     try:
         for i, album in enumerate(albums, 1):
@@ -967,8 +971,8 @@ def search_and_queue(
 
 
 def _search_and_queue_parallel(
-    albums: "list[AlbumRecord]", ctx: "CratediggerContext",
-) -> "tuple[dict[int, GrabListEntry], list[AlbumRecord], list[AlbumRecord]]":
+    albums: list[AlbumRecord], ctx: CratediggerContext,
+) -> tuple[dict[int, GrabListEntry], list[AlbumRecord], list[AlbumRecord]]:
     """Pipeline searches and hand successful results to find_download workers.
 
     slskd constraints (from source code):
@@ -978,7 +982,12 @@ def _search_and_queue_parallel(
     Completed searches queue find_download work and immediately refill the
     search slot, so browse/match/enqueue no longer blocks search collection.
     """
-    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
+    from concurrent.futures import (
+        FIRST_COMPLETED,
+        ThreadPoolExecutor,
+        as_completed,
+        wait,
+    )
 
     # Pipeline depth — number of search-collection futures in flight at once.
     # Configurable via cfg.search_max_inflight (issue #198 U4). Submission
@@ -987,9 +996,9 @@ def _search_and_queue_parallel(
     search_cfg = ctx.cfg
     max_inflight = search_cfg.search_max_inflight
 
-    grab_list: "dict[int, GrabListEntry]" = {}
-    failed_grab: "list[AlbumRecord]" = []
-    failed_search: "list[AlbumRecord]" = []
+    grab_list: dict[int, GrabListEntry] = {}
+    failed_grab: list[AlbumRecord] = []
+    failed_search: list[AlbumRecord] = []
     total = len(albums)
     album_queue = list(albums)  # mutable copy we pop from
 
@@ -1000,9 +1009,9 @@ def _search_and_queue_parallel(
     # owner thread re-attaches plan_execution to the SearchResult when the
     # collect future returns; this avoids threading the snapshot through
     # `_collect_search_results` (whose worker has no DB handle).
-    inflight_plan_execution: "dict[Future[SearchResult], PlanExecutionContext]" = {}
+    inflight_plan_execution: dict[Future[SearchResult], PlanExecutionContext] = {}
 
-    def _submit_next() -> "tuple[Future[SearchResult], AlbumRecord] | None":
+    def _submit_next() -> tuple[Future[SearchResult], AlbumRecord] | None:
         """Submit the next album from the queue. Returns (future, album) or None.
 
         Plan-driven (U5): picks the next plan-item from the request's
@@ -1072,7 +1081,7 @@ def _search_and_queue_parallel(
         return None
 
     def _attach_plan_execution(
-        future: "Future[SearchResult]", result: "SearchResult",
+        future: Future[SearchResult], result: SearchResult,
     ) -> None:
         """Re-attach the submit-time plan_execution onto a returned result."""
         plan_exec = inflight_plan_execution.pop(future, None)
@@ -1080,10 +1089,10 @@ def _search_and_queue_parallel(
             result.plan_execution = plan_exec
 
     find_pool: ThreadPoolExecutor | None = None
-    find_inflight: "dict[Future[FindDownloadResult], tuple[AlbumRecord, SearchResult]]" = {}
+    find_inflight: dict[Future[FindDownloadResult], tuple[AlbumRecord, SearchResult]] = {}
     find_merge_time_s = 0.0
 
-    def _submit_find_download(album: "AlbumRecord", result: "SearchResult") -> None:
+    def _submit_find_download(album: AlbumRecord, result: SearchResult) -> None:
         nonlocal find_pool
         if find_pool is None:
             find_pool = ThreadPoolExecutor(
@@ -1096,7 +1105,7 @@ def _search_and_queue_parallel(
         ctx.find_download_queued += 1
 
     def _apply_find_future(
-        future: "Future[FindDownloadResult]", *, log_search: bool = True,
+        future: Future[FindDownloadResult], *, log_search: bool = True,
     ) -> None:
         album, result = find_inflight.pop(future)
         try:
@@ -1159,7 +1168,7 @@ def _search_and_queue_parallel(
     try:
         with ThreadPoolExecutor(max_workers=max_inflight) as pool:
             # Seed the pipeline with initial searches
-            inflight: "dict[Future[SearchResult], AlbumRecord]" = {}
+            inflight: dict[Future[SearchResult], AlbumRecord] = {}
             for _ in range(min(max_inflight, len(album_queue))):
                 submitted = _submit_next()
                 if submitted:
@@ -1236,7 +1245,7 @@ def _search_and_queue_parallel(
 
                     # Break out of the as_completed loop to re-enter with updated dict
                     break
-    except Exception:
+    except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         owner_exc = sys.exception()
         _drain_find_after_owner_exception()
         shutdown_browse_coordinator(ctx, wait=True, cancel_futures=True)
@@ -1288,12 +1297,12 @@ from lib.slskd_transfers import cancel_and_delete as _cancel_and_delete_impl
 # import runs unchanged.
 if TYPE_CHECKING:
     def _grab_most_wanted_impl(
-        albums: "list[AlbumRecord]",
+        albums: list[AlbumRecord],
         search_and_queue: Callable[
-            ["list[AlbumRecord]"],
-            "tuple[dict[int, GrabListEntry], list[AlbumRecord], list[AlbumRecord]]",
+            [list[AlbumRecord]],
+            tuple[dict[int, GrabListEntry], list[AlbumRecord], list[AlbumRecord]],
         ],
-        ctx: "CratediggerContext",
+        ctx: CratediggerContext,
     ) -> int: ...
 else:
     from lib.download import grab_most_wanted as _grab_most_wanted_impl
@@ -1304,18 +1313,18 @@ def _make_ctx():
     return _module_ctx
 
 
-def cancel_and_delete(files: "list[DownloadFile]") -> None:
+def cancel_and_delete(files: list[DownloadFile]) -> None:
     _cancel_and_delete_impl(files, _make_ctx())
 
 
-def grab_most_wanted(albums: "list[AlbumRecord]") -> int:
+def grab_most_wanted(albums: list[AlbumRecord]) -> int:
     # A nested ``def`` (not a lambda) so ``albs`` can carry an explicit
     # annotation -- Python lambdas cannot be annotated, and
     # ``_grab_most_wanted_impl``'s ``search_and_queue: Callable[..., ...]``
     # parameter has no positional signature to infer one from.
     def _search_and_queue_fn(
-        albs: "list[AlbumRecord]",
-    ) -> "tuple[dict[int, GrabListEntry], list[AlbumRecord], list[AlbumRecord]]":
+        albs: list[AlbumRecord],
+    ) -> tuple[dict[int, GrabListEntry], list[AlbumRecord], list[AlbumRecord]]:
         return search_and_queue(albs, _module_ctx)
 
     return _grab_most_wanted_impl(albums, _search_and_queue_fn, _module_ctx)
@@ -1446,10 +1455,10 @@ def main():
             _module_ctx.cooled_down_users = set(cooled)
             if cooled:
                 logger.info(f"User cooldowns active: {', '.join(sorted(cooled))}")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             logger.warning(f"Failed to load user cooldowns: {e}")
 
-        cycle_started_at = datetime.now(timezone.utc)
+        cycle_started_at = datetime.now(UTC)
         cycle_start = time.time()
         # Per-cycle watchdog counter (issue #212). Reset at cycle start;
         # incremented by `_log_search_result` for every SearchResult whose
@@ -1463,6 +1472,7 @@ def main():
         # Phase 2 from overwriting Phase 1's transitions.
         # Phase 1 gets its own DatabaseSource (psycopg2 is not thread-safe).
         from concurrent.futures import ThreadPoolExecutor
+
         from lib.download import poll_active_downloads as _poll_impl
 
         # Closure locals: narrowing on the module globals doesn't reach into
@@ -1538,7 +1548,7 @@ def main():
             from lib.plex_pin_service import reconcile_plex_added_at_pins
             pin_result = reconcile_plex_added_at_pins(
                 cfg, pipeline_db_source._get_db(),
-                now=datetime.now(timezone.utc))
+                now=datetime.now(UTC))
             logger.info(pin_result.to_log_line())
         except Exception:
             logger.exception(
@@ -1558,7 +1568,7 @@ def main():
             )
             jf_pin_result = reconcile_jellyfin_date_created_pins(
                 cfg, pipeline_db_source._get_db(),
-                now=datetime.now(timezone.utc))
+                now=datetime.now(UTC))
             logger.info(jf_pin_result.to_log_line())
         except Exception:
             logger.exception(
@@ -1621,7 +1631,7 @@ def main():
         elapsed = time.time() - cycle_start
         from lib.cycle_summary import format_cycle_summary
         logger.info(format_cycle_summary(_module_ctx, elapsed))
-        cycle_completed_at = datetime.now(timezone.utc)
+        cycle_completed_at = datetime.now(UTC)
         try:
             db = pipeline_db_source._get_db()
             db.record_cycle_metrics(
@@ -1647,7 +1657,7 @@ def main():
                 find_download_completed=_module_ctx.find_download_completed,
                 find_download_drain_time_s=_module_ctx.find_download_drain_time_s,
             )
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             logger.warning(f"Failed to persist cycle metrics: {e}")
         try:
             observations = _module_ctx.peer_observations
@@ -1661,7 +1671,7 @@ def main():
                     "Peer observations persisted: "
                     f"observed={len(observations)} new={new_observations}"
                 )
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             logger.warning(f"Failed to persist peer observations: {e}")
 
     finally:
@@ -1669,7 +1679,7 @@ def main():
         if pipeline_db_source is not None:
             try:
                 pipeline_db_source.close()
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
                 pass
         # Remove the lock file after activity is done
         if not args.no_lock_file and os.path.exists(lock_file_path):

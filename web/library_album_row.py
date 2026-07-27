@@ -5,10 +5,13 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from datetime import datetime
 
-
 import msgspec
 
-from lib.release_identity import ReleaseIdentity, detect_release_source, frontend_release_id
+from lib.release_identity import (
+    ReleaseIdentity,
+    detect_release_source,
+    frontend_release_id,
+)
 
 
 def _pipeline_upgrade_queued(row: Mapping[str, object] | None) -> bool:
@@ -96,7 +99,7 @@ class LibraryAlbumRow(msgspec.Struct, frozen=True):
         album: Mapping[str, object],
         *,
         rank_fn: Callable[[str | None, int | None], str],
-    ) -> "LibraryAlbumRow":
+    ) -> LibraryAlbumRow:
         frontend_id = frontend_release_id(
             album.get("mb_albumid"),
             album.get("discogs_albumid"),
@@ -139,7 +142,7 @@ class LibraryAlbumRow(msgspec.Struct, frozen=True):
         *,
         pipeline_row: Mapping[str, object] | None,
         rank_fn: Callable[[str | None, int | None], str],
-    ) -> "LibraryAlbumRow":
+    ) -> LibraryAlbumRow:
         return cls.from_beets_album(album, rank_fn=rank_fn).with_pipeline_request(
             pipeline_row
         )
@@ -150,7 +153,7 @@ class LibraryAlbumRow(msgspec.Struct, frozen=True):
         row: Mapping[str, object],
         *,
         track_count: int,
-    ) -> "LibraryAlbumRow":
+    ) -> LibraryAlbumRow:
         release_id = frontend_release_id(
             row.get("mb_release_id"),
             row.get("discogs_release_id"),
@@ -187,7 +190,7 @@ class LibraryAlbumRow(msgspec.Struct, frozen=True):
     def with_pipeline_request(
         self,
         pipeline_row: Mapping[str, object] | None,
-    ) -> "LibraryAlbumRow":
+    ) -> LibraryAlbumRow:
         if not pipeline_row:
             return self
         row = self.to_dict()

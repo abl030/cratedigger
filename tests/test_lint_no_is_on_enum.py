@@ -22,7 +22,6 @@ import ast
 import os
 import unittest
 
-
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Directories to skip entirely. ``.claude`` holds agent git worktrees
@@ -54,7 +53,7 @@ def _find_violations(path: str, source: str) -> list[tuple[int, str]]:
     for node in ast.walk(tree):
         if not isinstance(node, ast.Compare):
             continue
-        for op, right in zip(node.ops, node.comparators):
+        for op, right in zip(node.ops, node.comparators, strict=True):
             if not isinstance(op, (ast.Is, ast.IsNot)):
                 continue
             # Allowed: `is None`, `is True`, `is False`.
@@ -79,7 +78,7 @@ def _find_violations(path: str, source: str) -> list[tuple[int, str]]:
             # Reconstruct the right-hand side for the error message.
             try:
                 rhs = ast.unparse(right)
-            except Exception:
+            except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                 rhs = right.attr
             violations.append((
                 node.lineno,

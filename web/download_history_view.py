@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import json
-
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-
 
 import msgspec
 
@@ -308,7 +306,7 @@ def _project_linked_import_evidence(
             continue
         successor_id = successor.get("id")
         if not isinstance(successor_id, int) or isinstance(successor_id, bool):
-            raise ValueError(
+            raise TypeError(
                 "linked import successor has no integer download-log id"
             )
         payload = {
@@ -341,7 +339,7 @@ def build_recents_download_log_rows(
 ) -> list[dict[str, object]]:
     """Render a Recents page through every persisted-evidence projection."""
     items = [_classify_pipeline_log_item(row) for row in rows]
-    for item, row in zip(items, rows):
+    for item, row in zip(items, rows, strict=True):
         _project_current_library_have(item, row)
     linked_items = [
         _classify_pipeline_log_item(row)

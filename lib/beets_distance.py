@@ -42,8 +42,8 @@ from __future__ import annotations
 import logging
 import os
 import time
-from collections.abc import Mapping
-from typing import Callable, Optional, Protocol, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from typing import Protocol
 
 import msgspec
 
@@ -56,6 +56,7 @@ import msgspec
 # tests/test_no_dual_load.py + TestSysPathAudit ban the ambiguity
 # outright.
 from beets import library as _beets_library
+
 # beets 2.x's autotag/__init__ re-exports the `distance` *function* (from
 # .distance import distance), shadowing the submodule of the same name — so
 # `from beets.autotag import distance` binds the function, not the module.
@@ -66,18 +67,13 @@ from beets.autotag import match as _beets_match_mod
 
 from lib.validation_envelope import decode_validation_envelope
 
-
 log = logging.getLogger(__name__)
 
-# ``beets.library.models.Item.from_path``/``.get`` carry no type annotations
-# upstream (``from_path``'s ``path`` param is bare; ``Item.get`` overrides
-# the properly-typed ``dbcore.db.Model.get`` with an unannotated version),
-# so a direct reference propagates Unknown through pyright strict mode.
-# ``getattr`` retrieves the exact same bound callables at runtime
-# (behaviorally identical) but types as ``Any`` under typeshed's two-argument
-# ``getattr`` overload, breaking the Unknown cascade without a suppression
-# comment — same technique as ``lib.pipeline_db._shared.pg_execute_values``.
-_item_from_path_fn = getattr(_beets_library.Item, "from_path")
+# Keep the upstream constructor behind one local seam so tests can replace the
+# tag reader without loading real media files.
+_item_from_path_fn = getattr(  # noqa: B009 - upstream callable is untyped
+    _beets_library.Item, "from_path",
+)
 
 
 def _item_from_path(path: str) -> _beets_library.Item:
@@ -87,7 +83,7 @@ def _item_from_path(path: str) -> _beets_library.Item:
 def _item_field(
     item: _beets_library.Item, key: str, default: object = None,
 ) -> int | float | str | None:
-    return getattr(item, "get")(key, default)
+    return getattr(item, "get")(key, default)  # noqa: B009 - upstream method is untyped
 
 
 class BeetsDistanceResult(msgspec.Struct, kw_only=True):
@@ -100,26 +96,26 @@ class BeetsDistanceResult(msgspec.Struct, kw_only=True):
     """
 
     outcome: str
-    distance: Optional[float] = None
-    matched_tracks: Optional[int] = None
-    total_local_tracks: Optional[int] = None
-    total_mb_tracks: Optional[int] = None
-    extra_local_tracks: Optional[int] = None
-    extra_mb_tracks: Optional[int] = None
+    distance: float | None = None
+    matched_tracks: int | None = None
+    total_local_tracks: int | None = None
+    total_mb_tracks: int | None = None
+    extra_local_tracks: int | None = None
+    extra_mb_tracks: int | None = None
     # Per-component distance breakdown — same names beets emits, useful
     # when an operator wants to know "why is this 0.42?".
-    components: Optional[dict[str, float]] = None
+    components: dict[str, float] | None = None
     # RG IDs for guardrail traceability. Always populated when we got
     # far enough to look them up; ``None`` otherwise.
-    request_release_group_id: Optional[str] = None
-    candidate_release_group_id: Optional[str] = None
-    candidate_mbid: Optional[str] = None
-    download_log_id: Optional[int] = None
-    request_id: Optional[int] = None
-    folder_path: Optional[str] = None
-    error_message: Optional[str] = None
+    request_release_group_id: str | None = None
+    candidate_release_group_id: str | None = None
+    candidate_mbid: str | None = None
+    download_log_id: int | None = None
+    request_id: int | None = None
+    folder_path: str | None = None
+    error_message: str | None = None
     # Latency observability — useful in tests + the eventual UI.
-    duration_ms: Optional[int] = None
+    duration_ms: int | None = None
 
 
 # === Cache protocol =====================================================
@@ -134,7 +130,7 @@ class BeetsDistanceCache(Protocol):
     caching".
     """
 
-    def get(self, key: str) -> Optional[bytes]: ...
+    def get(self, key: str) -> bytes | None: ...
     def set(self, key: str, value: bytes, ttl_seconds: int) -> None: ...
 
 
@@ -156,9 +152,9 @@ class BeetsDistancePipelineDB(Protocol):
 
     def get_download_log_entry(
         self, log_id: int,
-    ) -> "Mapping[str, object] | None": ...
+    ) -> Mapping[str, object] | None: ...
 
-    def get_request(self, request_id: int) -> "Mapping[str, object] | None": ...
+    def get_request(self, request_id: int) -> Mapping[str, object] | None: ...
 
 
 # Reasonable defaults — folder reads are dominated by tag IO so a long
@@ -238,7 +234,7 @@ def _audio_files_under(folder: str) -> list[str]:
     return out
 
 
-def _fingerprint_file(path: str) -> Optional[_AudioFileFingerprint]:
+def _fingerprint_file(path: str) -> _AudioFileFingerprint | None:
     """Read tags via beets ``Item.from_path`` and project to fingerprint.
 
     Returns ``None`` if the file can't be read — caller skips it. We
@@ -277,7 +273,7 @@ def _fingerprint_file(path: str) -> Optional[_AudioFileFingerprint]:
 
 def _read_folder_fingerprints(
     folder: str,
-    cache: Optional[BeetsDistanceCache],
+    cache: BeetsDistanceCache | None,
 ) -> list[_AudioFileFingerprint]:
     """Read fingerprints for every audio file under ``folder``.
 
@@ -293,7 +289,7 @@ def _read_folder_fingerprints(
             st = os.stat(path)
         except OSError:
             continue
-        cached: Optional[_AudioFileFingerprint] = None
+        cached: _AudioFileFingerprint | None = None
         if cache is not None:
             blob = cache.get(_file_cache_key(path, st.st_mtime, st.st_size))
             if blob:
@@ -451,7 +447,7 @@ def _build_items_from_synthetic(
     out: list[_beets_library.Item] = []
     for i, si in enumerate(items):
         item = _beets_library.Item(
-            path=f"synthetic://{i}".encode("utf-8"),
+            path=f"synthetic://{i}".encode(),
             title=si.title,
             artist=si.artist,
             album=si.album,
@@ -472,15 +468,15 @@ def _build_items_from_synthetic(
 
 
 def compute_beets_distance(
-    download_log_id: Optional[int] = None,
-    mbid: Optional[str] = None,
+    download_log_id: int | None = None,
+    mbid: str | None = None,
     *,
-    items_override: Optional[list[SyntheticItem]] = None,
-    mb_release_group_id: Optional[str] = None,
-    pdb: "BeetsDistancePipelineDB",
-    mb_get_release: Callable[[str], Optional[dict[str, object]]],
-    cache: Optional[BeetsDistanceCache] = None,
-    resolve_failed_path: Optional[Callable[[str], Optional[str]]] = None,
+    items_override: list[SyntheticItem] | None = None,
+    mb_release_group_id: str | None = None,
+    pdb: BeetsDistancePipelineDB,
+    mb_get_release: Callable[[str], dict[str, object] | None],
+    cache: BeetsDistanceCache | None = None,
+    resolve_failed_path: Callable[[str], str | None] | None = None,
 ) -> BeetsDistanceResult:
     """Compute beets match distance for one MBID.
 
@@ -555,9 +551,9 @@ def compute_beets_distance(
         )
 
     # Branch: Replace-picker path loads DB rows; Override path skips them.
-    log_row: Optional[Mapping[str, object]] = None
-    request_id: Optional[int] = None
-    request_rg: Optional[str] = None
+    log_row: Mapping[str, object] | None = None
+    request_id: int | None = None
+    request_rg: str | None = None
 
     if download_log_id is not None:
         # 1. Load the download_log entry.
@@ -666,8 +662,8 @@ def compute_beets_distance(
         )
 
     # 6. Build items — either from disk (Replace mode) or from synthetic.
-    resolved: Optional[str] = None
-    fingerprint_count: Optional[int] = None
+    resolved: str | None = None
+    fingerprint_count: int | None = None
     if items_override is not None:
         items = _build_items_from_synthetic(items_override)
     else:
@@ -769,20 +765,20 @@ def compute_beets_distance(
 def _result(
     outcome: str,
     *,
-    distance: Optional[float] = None,
-    matched_tracks: Optional[int] = None,
-    total_local_tracks: Optional[int] = None,
-    total_mb_tracks: Optional[int] = None,
-    extra_local_tracks: Optional[int] = None,
-    extra_mb_tracks: Optional[int] = None,
-    components: Optional[dict[str, float]] = None,
-    request_release_group_id: Optional[str] = None,
-    candidate_release_group_id: Optional[str] = None,
-    candidate_mbid: Optional[str] = None,
-    download_log_id: Optional[int] = None,
-    request_id: Optional[int] = None,
-    folder_path: Optional[str] = None,
-    error: Optional[str] = None,
+    distance: float | None = None,
+    matched_tracks: int | None = None,
+    total_local_tracks: int | None = None,
+    total_mb_tracks: int | None = None,
+    extra_local_tracks: int | None = None,
+    extra_mb_tracks: int | None = None,
+    components: dict[str, float] | None = None,
+    request_release_group_id: str | None = None,
+    candidate_release_group_id: str | None = None,
+    candidate_mbid: str | None = None,
+    download_log_id: int | None = None,
+    request_id: int | None = None,
+    folder_path: str | None = None,
+    error: str | None = None,
     started: float,
 ) -> BeetsDistanceResult:
     return BeetsDistanceResult(

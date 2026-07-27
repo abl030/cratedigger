@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Filesystem and beets integration tests for the destructive service."""
 
 from __future__ import annotations
@@ -10,8 +9,8 @@ import subprocess as sp
 import sys
 import tempfile
 import unittest
+from collections.abc import Iterator
 from contextlib import closing, contextmanager
-from typing import Iterator
 from unittest.mock import patch
 
 from lib.beets_db import BeetsDB
@@ -19,8 +18,8 @@ from lib.beets_delete import (
     BeetsDeleteCompleted,
     BeetsDeleteFailed,
     BeetsDeleteRequest,
-    _OwnedPath,
     _delete_manifest,
+    _OwnedPath,
     run_beets_delete,
 )
 from lib.destructive_release_service import (
@@ -34,7 +33,6 @@ from lib.destructive_release_service import (
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 from tests.test_beets_db import _create_test_db, _insert_album
-
 
 RELEASE_UUID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 

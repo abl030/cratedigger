@@ -4,20 +4,22 @@ from __future__ import annotations
 
 import os
 import tempfile
-from typing import Any, cast
 import unittest
+from typing import Any, cast
 from unittest.mock import patch
 
 from lib.config import CratediggerConfig
 from lib.dispatch import DispatchOutcome
 from lib.dispatch.types import PostCommitCleanup
 from lib.import_evidence import ensure_candidate_evidence_for_action
+from lib.import_job_recovery_service import resolve_import_job_recovery
+from lib.import_preview import force_action_copy_path
 from lib.import_queue import (
-    ForceImportPayload,
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
     IMPORT_JOB_RECOVERY_REQUIRED,
     IMPORT_JOB_YOUTUBE,
+    ForceImportPayload,
     automation_import_dedupe_key,
     force_import_dedupe_key,
     force_import_payload,
@@ -25,8 +27,6 @@ from lib.import_queue import (
 )
 from lib.pipeline_db import PipelineDB
 from lib.quality_evidence import snapshot_audio_files
-from lib.import_preview import force_action_copy_path
-from lib.import_job_recovery_service import resolve_import_job_recovery
 from lib.terminal_outcomes import (
     ImportJobTerminal,
     ImportTerminalOutcome,
@@ -625,16 +625,15 @@ class TestImportOperationFence(unittest.TestCase):
             )
 
         with patch.object(importer, "_cleanup_failed_force_import") as cleanup, \
-             patch.object(importer, "_run_post_commit_cleanup") as post_cleanup:
-            with self.assertRaisesRegex(
-                RuntimeError,
-                "terminal acknowledgement failed",
-            ):
-                importer.process_claimed_job(
-                    cast(Any, db),
-                    claimed,
-                    execute_fn=rejected,
-                )
+             patch.object(importer, "_run_post_commit_cleanup") as post_cleanup, self.assertRaisesRegex(
+            RuntimeError,
+            "terminal acknowledgement failed",
+        ):
+            importer.process_claimed_job(
+                cast(Any, db),
+                claimed,
+                execute_fn=rejected,
+            )
         cleanup.assert_not_called()
         post_cleanup.assert_not_called()
 

@@ -12,7 +12,7 @@ from tests.web._harness import _FakeDbWebServerCase
 
 class TestWorldAuditRoute(_FakeDbWebServerCase):
     def test_reports_shared_service_payload(self) -> None:
-        import web.server as server
+        from web import server
 
         self.db.seed_request(make_request_row(
             id=31,

@@ -21,6 +21,7 @@ from lib.import_evidence import (
 from lib.import_queue import IMPORT_JOB_FORCE
 from lib.quality import AudioQualityMeasurement, ImportResult
 from lib.quality_evidence import snapshot_audio_files
+from tests.fakes import FakePipelineDB
 from tests.helpers import (
     RecordingQualityGate,
     finalize_claimed_dispatch,
@@ -30,7 +31,6 @@ from tests.helpers import (
     noop_quality_gate,
     patch_dispatch_externals,
 )
-from tests.fakes import FakePipelineDB
 
 
 # Migration 021 helpers — seed evidence and wire the FK chain that
@@ -694,7 +694,8 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
             claimed = db.claim_next_import_job(worker_id="importer")
             assert claimed is not None
 
-            from typing import cast as _cast, Any as _Any
+            from typing import Any as _Any
+            from typing import cast as _cast
             from unittest.mock import patch as _patch
             db_any = _cast(_Any, db)
 
@@ -852,7 +853,7 @@ class TestDispatchFromDbAdvisoryLock(unittest.TestCase):
     call fast-fails without running any gates, subprocesses, or log writes.
     """
 
-    def _seed_db(self) -> "FakePipelineDB":
+    def _seed_db(self) -> FakePipelineDB:
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=42, mb_release_id="mbid-123", status="unsearchable",
@@ -861,7 +862,7 @@ class TestDispatchFromDbAdvisoryLock(unittest.TestCase):
         _seed_single_track(db)
         return db
 
-    def _dispatch(self, db: "FakePipelineDB"):
+    def _dispatch(self, db: FakePipelineDB):
         from lib.dispatch import dispatch_import_from_db
         ir = make_import_result(decision="import", new_min_bitrate=320)
         tmpdir = tempfile.mkdtemp()
@@ -1017,21 +1018,19 @@ class TestDispatchFromDbRuntimeConfigSeam(unittest.TestCase):
 class TestDispatchFromDbStorageAuthority(unittest.TestCase):
     def test_partial_storage_override_fails_before_advisory_lock(self):
         from lib.dispatch import dispatch_import_from_db
-
         from lib.pipeline_db import PipelineDB
 
         db = create_autospec(PipelineDB, instance=True)
         for db_path, library_root in (("/only-db", None), (None, "/only-root")):
             with self.subTest(db_path=db_path, library_root=library_root), \
-                 patch.object(db, "advisory_lock", side_effect=AssertionError):
-                with self.assertRaisesRegex(ValueError, "supplied together"):
-                    dispatch_import_from_db(
-                        db,
-                        request_id=42,
-                        failed_path="/never-observed",
-                        beets_library_db_path=db_path,
-                        beets_library_root=library_root,
-                    )
+                 patch.object(db, "advisory_lock", side_effect=AssertionError), self.assertRaisesRegex(ValueError, "supplied together"):
+                dispatch_import_from_db(
+                    db,
+                    request_id=42,
+                    failed_path="/never-observed",
+                    beets_library_db_path=db_path,
+                    beets_library_root=library_root,
+                )
 
 
 class TestDispatchFromDbPrecondition(unittest.TestCase):
@@ -1134,8 +1133,8 @@ class TestLoadEvidenceImportGateDelegation(unittest.TestCase):
 
     def test_helper_failed_status_propagates_to_gate(self):
         """A fail-closed helper result reaches the canonical failed status."""
-        from lib.import_evidence import CurrentEvidenceActionResult
         from lib.dispatch import _load_evidence_import_gate
+        from lib.import_evidence import CurrentEvidenceActionResult
 
         db = FakePipelineDB()
         candidate_result = self._candidate_result()

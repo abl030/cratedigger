@@ -1,16 +1,14 @@
-#!/usr/bin/env python3
 """Contract tests for web/routes/labels.py.
 
 Split from tests/test_web_server.py (#408). Shared harness in
 tests/web/_harness.py.
 """
-
 import os
 import sys
 import unittest
+from typing import ClassVar
 from unittest.mock import patch
 from urllib.error import HTTPError
-
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -18,11 +16,10 @@ from tests.fakes import FakeBeetsDB
 from tests.web._harness import _assert_required_fields, _WebServerCase
 
 
-
 class TestLabelRouteContracts(_WebServerCase):
     """Contract tests for the Discogs label routes (Phase A)."""
 
-    LABEL_HIT_REQUIRED_FIELDS = {
+    LABEL_HIT_REQUIRED_FIELDS: ClassVar = {
         "source", "id", "name", "country", "profile",
         "parent_label_id", "parent_label_name", "release_count",
     }
@@ -36,13 +33,13 @@ class TestLabelRouteContracts(_WebServerCase):
     # asserts only the always-present overlay fields here, plus the
     # label-specific `sub_label_name`. The integration test below
     # exercises the populated path explicitly.
-    LABEL_RELEASE_REQUIRED_FIELDS = {
+    LABEL_RELEASE_REQUIRED_FIELDS: ClassVar = {
         "id", "title", "artist_name", "date", "format", "primary_type",
         "sub_label_name", "in_library", "beets_album_id",
         "pipeline_status", "pipeline_id",
         "pipeline_verified_lossless", "pipeline_provisional",
     }
-    LABEL_DETAIL_RESPONSE_REQUIRED_FIELDS = {
+    LABEL_DETAIL_RESPONSE_REQUIRED_FIELDS: ClassVar = {
         "label", "releases", "sub_labels", "pagination", "include_sublabels",
         "sub_labels_dropped",
     }
@@ -219,7 +216,6 @@ class TestLabelRouteContracts(_WebServerCase):
 
     def test_label_detail_404(self):
         """Adapter raises HTTPError(404) → route returns 404 JSON, not 5xx."""
-        from urllib.error import HTTPError
         from io import BytesIO
 
         def _raise_404(_label_id):
@@ -353,7 +349,6 @@ class TestLabelRouteContracts(_WebServerCase):
         """If `get_label` succeeds but `get_label_releases` raises 404
         (label vanished mid-flight), surface 404 to the client — not a
         generic 500."""
-        from urllib.error import HTTPError
         from io import BytesIO
 
         def _raise_404(_label_id, **_kwargs):

@@ -1,11 +1,10 @@
-#!/usr/bin/env python3
 """Direct tests for the `/api/beets/album/<id>` detail seam."""
 
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 import unittest
+from datetime import UTC, datetime
 
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
@@ -13,7 +12,6 @@ from web.library_album_detail_service import (
     build_library_album_detail,
     load_library_album_detail,
 )
-
 
 RELEASE_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 
@@ -61,7 +59,7 @@ def _history_row(**overrides: object) -> dict[str, object]:
         "id": 1,
         "request_id": 42,
         "outcome": "success",
-        "created_at": datetime(2026, 3, 30, 12, 0, 0, tzinfo=timezone.utc),
+        "created_at": datetime(2026, 3, 30, 12, 0, 0, tzinfo=UTC),
         "soulseek_username": "testuser",
         "beets_scenario": "strong_match",
         "beets_distance": 0.012,

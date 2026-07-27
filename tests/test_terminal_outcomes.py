@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import unittest
+from datetime import UTC
 from typing import Any, cast
 
 from lib import transitions
@@ -20,7 +21,6 @@ from lib.terminal_outcomes import (
     TerminalDenylist,
     TerminalDownloadAudit,
 )
-from tests.test_pipeline_db import TEST_DSN, make_db, requires_postgres
 from tests.fakes import FakePipelineDB
 from tests.fakes.download import RecordingProcessAlbum
 from tests.helpers import (
@@ -28,6 +28,7 @@ from tests.helpers import (
     make_ctx_with_fake_db,
     make_request_row,
 )
+from tests.test_pipeline_db import TEST_DSN, make_db, requires_postgres
 
 
 class InjectedTerminalWriteFailure(RuntimeError):
@@ -178,12 +179,12 @@ def _seed_running_import(
         source="request",
     )
     if unfindable:
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         db.set_unfindable_category(
             request_id,
             category="artist_absent",
-            categorised_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            categorised_at=datetime(2026, 7, 1, tzinfo=UTC),
         )
     active_state = (
         ActiveDownloadState(
@@ -234,7 +235,7 @@ def _seed_running_preview() -> tuple[PipelineDB, int, int]:
         "active_download_state = '{}'::jsonb WHERE id = %s",
         (request_id,),
     )
-    job = db.enqueue_import_job(
+    db.enqueue_import_job(
         IMPORT_JOB_AUTOMATION,
         request_id=request_id,
         dedupe_key=f"preview:{request_id}",
@@ -705,7 +706,7 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
         def persist_terminal() -> None:
             try:
                 terminal_db.persist_import_terminal_outcome(command)
-            except BaseException as exc:
+            except BaseException as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                 terminal_errors.append(exc)
 
         def clear_operator_stop() -> None:
@@ -782,7 +783,7 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
         def persist_terminal() -> None:
             try:
                 terminal_db.persist_import_terminal_outcome(command)
-            except BaseException as exc:
+            except BaseException as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                 terminal_errors.append(exc)
 
         def reassert_operator_stop() -> None:

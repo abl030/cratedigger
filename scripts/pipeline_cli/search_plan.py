@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from typing import Any, Protocol, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Protocol
 
 import msgspec
 
@@ -28,11 +28,11 @@ class _SearchPlanShowDB(Protocol):
     #409 pattern) so ``FakePipelineDB`` conforms without importing that
     private symbol across the module boundary."""
 
-    def get_request(self, request_id: int) -> "AlbumRequestRow | None": ...
+    def get_request(self, request_id: int) -> AlbumRequestRow | None: ...
 
     def get_search_plan_inspection(
         self, request_id: int,
-    ) -> "SearchPlanInspection": ...
+    ) -> SearchPlanInspection: ...
 
     def get_legacy_search_log_summary(
         self, request_id: int, *, limit: int,
@@ -48,7 +48,7 @@ class _SearchPlanShowDB(Protocol):
         *,
         current_only: bool = ...,
         prefetched_history: list[dict[str, Any]] | None = ...,
-    ) -> "SearchPlanStats": ...
+    ) -> SearchPlanStats: ...
 
 
 def _search_plan_exit_code(outcome: str) -> int:
@@ -94,7 +94,7 @@ def _search_plan_exit_code(outcome: str) -> int:
 
 
 def cmd_search_plan_show(
-    db: "_SearchPlanShowDB", args: argparse.Namespace,
+    db: _SearchPlanShowDB, args: argparse.Namespace,
 ) -> int:
     """U6: read-only `pipeline-cli search-plan show <id>`.
 
@@ -132,7 +132,7 @@ def cmd_search_plan_show(
 
 
 def cmd_search_plan_regenerate(
-    db: "SearchPlanDB", args: argparse.Namespace,
+    db: SearchPlanDB, args: argparse.Namespace,
 ) -> int:
     """U8: ``pipeline-cli search-plan regenerate <request_id>``.
 
@@ -230,7 +230,7 @@ def cmd_search_plan_regenerate(
 
 
 def cmd_search_plan_dry_run(
-    db: "SearchPlanDB", args: argparse.Namespace,
+    db: SearchPlanDB, args: argparse.Namespace,
 ) -> int:
     """U6: ``pipeline-cli search-plan dry-run <request_id>``.
 
@@ -272,7 +272,7 @@ def cmd_search_plan_dry_run(
         try:
             active = db.get_active_search_plan(int(args.id))
             has_active = active is not None
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             has_active = False
     payload = dry_run_payload(
         result,
@@ -302,7 +302,7 @@ def cmd_search_plan_dry_run(
                 f"{'yes' if payload['would_supersede_active'] else 'no'}")
         plan = payload["plan"]
         if plan is None:
-            print(f"  Plan:                   (none)")
+            print("  Plan:                   (none)")
             if result.error_message:
                 print(f"  Error message:          {result.error_message}")
         else:
@@ -327,7 +327,7 @@ def cmd_search_plan_dry_run(
                     print(f"          provenance.{key}: {value}")
             prov_plan: dict[str, Any] = plan.get("provenance") or {}
             if prov_plan:
-                print(f"  Plan provenance:")
+                print("  Plan provenance:")
                 for pkey, pvalue in prov_plan.items():
                     if isinstance(pvalue, list):
                         value_list = msgspec.convert(pvalue, type=list[object])
@@ -343,7 +343,7 @@ def cmd_search_plan_dry_run(
 
 
 def cmd_search_plan_saturation(
-    db: "SearchPlanDB", args: argparse.Namespace,
+    db: SearchPlanDB, args: argparse.Namespace,
 ) -> int:
     """U7: ``pipeline-cli search-plan saturation <request_id>``.
 
@@ -407,7 +407,7 @@ def cmd_search_plan_saturation(
 
 
 def cmd_search_plan_advance(
-    db: "SearchPlanDB", args: argparse.Namespace,
+    db: SearchPlanDB, args: argparse.Namespace,
 ) -> int:
     """Forward-only operator advance of the search-plan cursor.
 
@@ -469,7 +469,7 @@ def cmd_search_plan_advance(
 
 
 def cmd_search_plan_history(
-    db: "SearchPlanDB", args: argparse.Namespace,
+    db: SearchPlanDB, args: argparse.Namespace,
 ) -> int:
     """Cursor-paginated read of one request's ``search_log`` rows.
 

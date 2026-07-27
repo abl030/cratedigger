@@ -9,9 +9,10 @@ It is intentionally not a transaction spanning mirror I/O: the durable
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
-from typing import Callable, Literal, Protocol
+from typing import Literal, Protocol
 
 from lib import transitions
 from lib.config import CratediggerConfig
@@ -25,7 +26,6 @@ from lib.pipeline_db import (
 )
 from lib.pipeline_db.rows import AlbumRequestRow
 from lib.search_plan_service import SearchPlanDB, SearchPlanService, ServiceResult
-
 
 CreationOutcome = Literal[
     "created", "resumed", "exists", "busy", "initialization_failed",
@@ -244,7 +244,7 @@ class RequestCreationService:
                 )
                 if isinstance(publication, transitions.TransitionConflict):
                     return self._failed(request_id, "publication CAS lost")
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                 # Resolver/database exceptions may contain upstream URLs or
                 # implementation detail. The retained request id is the
                 # recovery handle; keep the adapter diagnostic safe.

@@ -1,21 +1,19 @@
 """album_requests CRUD, status state machine, and Replace/rescue."""
 import dataclasses
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
+
 import psycopg2
 import psycopg2.extras
-
 
 if TYPE_CHECKING:
     from lib.unfindable_detection_service import UnfindableSearchLogSignal
 
-from lib.release_identity import ReleaseIdentity, normalize_release_id
-
-from lib.pipeline_db.rows import AlbumRequestRow, album_request_row
+from lib.pipeline_db._core import _PipelineDBBase
 from lib.pipeline_db._shared import (
-    AddRequestInput,
     BACKOFF_BASE_MINUTES,
     BACKOFF_MAX_MINUTES,
+    AddRequestInput,
     MbidCollisionError,
     RequestSpectralStateUpdate,
     SupersedeRaceError,
@@ -23,8 +21,8 @@ from lib.pipeline_db._shared import (
     _msgspec_json_dumps,
     validate_request_metadata_fields,
 )
-
-from lib.pipeline_db._core import _PipelineDBBase
+from lib.pipeline_db.rows import AlbumRequestRow, album_request_row
+from lib.release_identity import ReleaseIdentity, normalize_release_id
 
 
 class _RequestsMixin(_PipelineDBBase):
@@ -72,7 +70,7 @@ class _RequestsMixin(_PipelineDBBase):
             reasoning=reasoning, status=status,
             is_va_compilation=bool(is_va_compilation),
         )
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         columns = [f.name for f in dataclasses.fields(request)]
         values = [getattr(request, name) for name in columns]
         col_sql = ", ".join(columns + ["created_at", "updated_at"])
@@ -345,7 +343,7 @@ class _RequestsMixin(_PipelineDBBase):
             Any other exception triggers automatic rollback and re-raises.
         """
         with self._atomic():
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             with self.conn.cursor(
                 cursor_factory=psycopg2.extras.RealDictCursor,
             ) as cur:
@@ -551,7 +549,7 @@ class _RequestsMixin(_PipelineDBBase):
             request_id,
             dict(extra),
             expected_status=expected_status,
-            now=datetime.now(timezone.utc),
+            now=datetime.now(UTC),
         )
         self.conn.commit()
         return applied
@@ -810,7 +808,7 @@ class _RequestsMixin(_PipelineDBBase):
         if expected_status == "replaced":
             return False
         with self._atomic():
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             cur = self._execute(
                 "UPDATE album_requests "
                 "SET status = %s, active_download_state = NULL, "
@@ -908,7 +906,7 @@ class _RequestsMixin(_PipelineDBBase):
             return False
 
         with self._atomic():
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             cur = self._execute(
                 "UPDATE album_requests AS ar "
                 "SET status = 'imported', "
@@ -976,7 +974,7 @@ class _RequestsMixin(_PipelineDBBase):
         that's an audit field describing the most recent download attempt,
         independent of whether the result made it onto disk.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         self._execute(
             """UPDATE album_requests SET
                    verified_lossless = FALSE,
@@ -1039,7 +1037,7 @@ class _RequestsMixin(_PipelineDBBase):
             )
         if expected_status == "replaced":
             return False
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         override_present = "search_filetype_override" in fields
         min_bitrate_present = "min_bitrate" in fields
         prev_min_bitrate_present = "prev_min_bitrate" in fields
@@ -1113,7 +1111,7 @@ class _RequestsMixin(_PipelineDBBase):
             )
         if expected_status != "downloading":
             return False
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         override_present = "search_filetype_override" in fields
         min_bitrate_present = "min_bitrate" in fields
         prev_min_bitrate_present = "prev_min_bitrate" in fields
@@ -1161,7 +1159,7 @@ class _RequestsMixin(_PipelineDBBase):
         """
         if expected_status != "wanted":
             return False
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         cur = self._execute("""
             UPDATE album_requests
             SET status = 'downloading',
@@ -1197,7 +1195,7 @@ class _RequestsMixin(_PipelineDBBase):
         regenerated (active_plan_id mismatch), cursor advanced (ordinal
         mismatch), cycle bumped (cycle_count mismatch).
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         cur = self._execute("""
             UPDATE album_requests
             SET status = 'downloading',
@@ -1225,7 +1223,7 @@ class _RequestsMixin(_PipelineDBBase):
         expected_status: str = "downloading",
     ) -> bool:
         """CAS active download state while the worker still owns the row."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         cur = self._execute("""
             UPDATE album_requests
             SET active_download_state = %s::jsonb,
@@ -1244,7 +1242,7 @@ class _RequestsMixin(_PipelineDBBase):
         state_json: str,
     ) -> bool:
         """Rewrite active_download_state only while the request is downloading."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         cur = self._execute("""
             UPDATE album_requests
             SET active_download_state = %s::jsonb,
@@ -1262,7 +1260,7 @@ class _RequestsMixin(_PipelineDBBase):
         current_path: str | None,
     ) -> bool:
         """Rewrite only ``active_download_state.current_path`` on downloading rows."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         cur = self._execute("""
             UPDATE album_requests
             SET active_download_state = jsonb_set(
@@ -1296,7 +1294,7 @@ class _RequestsMixin(_PipelineDBBase):
         (``failed_imports/...``) and don't carry this state.
         See ``docs/advisory-locks.md``.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         cur = self._execute("""
             UPDATE album_requests
             SET active_download_state = jsonb_set(
@@ -1326,7 +1324,7 @@ class _RequestsMixin(_PipelineDBBase):
     # --- Query methods ---
 
     def get_wanted(self, limit: int | None = None) -> list[AlbumRequestRow]:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         sql = """
             SELECT * FROM album_requests
             WHERE status = 'wanted'
@@ -1537,7 +1535,7 @@ class _RequestsMixin(_PipelineDBBase):
         if attempt_type not in {"search", "download", "validation"}:
             raise ValueError(f"Unknown attempt type: {attempt_type!r}")
         col = f"{attempt_type}_attempts"
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         # Counter + backoff are one CAS. A Replace that wins before this
         # statement leaves the frozen ancestor byte-identical.

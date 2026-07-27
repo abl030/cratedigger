@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Deterministic pins for the harness-session evidence contract (issue #888).
 
 **The invariants this module owns.**
@@ -51,17 +50,18 @@ import stat
 import tempfile
 import unittest
 from collections.abc import Sequence
+from typing import ClassVar
 
 import msgspec
 
 from lib.beets import (
+    _DETAIL_MAX_CHARS,
+    _STDERR_LINE_CHARS,
+    _STDERR_TAIL_CHARS,
     NO_CHOOSE_MATCH_CLAUSE,
     NO_CHOOSE_MATCH_SCENARIO,
     VALIDATION_ERROR_CLAUSE,
     VALIDATION_ERROR_SCENARIO,
-    _DETAIL_MAX_CHARS,
-    _STDERR_LINE_CHARS,
-    _STDERR_TAIL_CHARS,
     beets_validate,
 )
 from lib.import_manifest import move_failed_import_curated
@@ -72,7 +72,6 @@ from lib.wrong_match_policy import (
 )
 from lib.wrong_matches import wrong_match_row_is_visible
 from web.classify import LogEntry, classify_log_entry
-
 
 TARGET_MBID = "aaaaaaaa-1111-2222-3333-444444444444"
 
@@ -566,7 +565,7 @@ class TestThePersistedTextIsBounded(unittest.TestCase):
 class TestDecidedMatchesAreUnchanged(unittest.TestCase):
     """Must-still-work: naming the gaps must not touch the ordinary paths."""
 
-    CASES = [
+    CASES: ClassVar = [
         ("strong match", TARGET_MBID, 0.05, 0, True, "strong_match"),
         ("high distance", TARGET_MBID, 0.4, 0, False, "high_distance"),
         ("extra tracks", TARGET_MBID, 0.02, 2, False, "extra_tracks"),

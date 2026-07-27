@@ -46,7 +46,7 @@ def write_quality_evidence_action_file(payload: QualityEvidenceActionPayload) ->
     directory — never inside a Cratedigger-owned processing album (see
     module docstring).
     """
-    handle = tempfile.NamedTemporaryFile(
+    handle = tempfile.NamedTemporaryFile(  # noqa: SIM115 - ownership escapes the call
         prefix="cratedigger-quality-evidence-action-",
         suffix=".json",
         delete=False,

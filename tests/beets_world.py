@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from contextlib import contextmanager
 import json
 import os
 import re
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 from urllib.parse import urlsplit
 
 from beets import config as beets_config
@@ -23,7 +23,6 @@ from mediafile import MediaFile
 
 from lib.release_identity import detect_release_source
 from lib.world_invariants import LibraryAlbumSnapshot
-
 
 # Exact pre-2026-07-18 path policy recovered from commit 76ad5a0d. With an
 # already-sticky plain Passenger folder, ``label='ATO Records'`` versus an
@@ -337,7 +336,7 @@ class BeetsWorld:
         finally:
             self._tmp.cleanup()
 
-    def __enter__(self) -> "BeetsWorld":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *_args: object) -> None:
@@ -624,7 +623,7 @@ class BeetsWorld:
                 f"conflict release must resolve at least once: "
                 f"{release_id!r} -> {len(matches)}"
             )
-        album = sorted(matches, key=lambda candidate: int(candidate.id))[0]
+        album = min(matches, key=lambda candidate: int(candidate.id))
         album.mb_albumid = release_id
         album.discogs_albumid = int(conflicting_release_id)
         album.store()
@@ -901,9 +900,9 @@ class BeetsWorld:
 
 
 __all__ = [
+    "HISTORICAL_PASSENGER_PATH_TEMPLATE",
     "BeetsWorld",
     "BeetsWorldRelease",
-    "HISTORICAL_PASSENGER_PATH_TEMPLATE",
     "ShippedBeetsWorldConfig",
     "build_subprocess_beets_config",
     "extract_shipped_beets_world_config",

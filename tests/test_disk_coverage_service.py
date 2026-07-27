@@ -105,6 +105,8 @@ if TYPE_CHECKING:
     from lib.beets_db import BeetsDB
     from lib.disk_coverage_service import (
         DiskCoverageBeetsDB as _CovBeetsDB,
+    )
+    from lib.disk_coverage_service import (
         DiskCoveragePipelineDB as _CovPipelineDB,
     )
     from lib.pipeline_db import PipelineDB

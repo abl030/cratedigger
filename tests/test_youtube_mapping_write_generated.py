@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generated round-trip tests for ``PersistedYoutubeRow`` writes — #546 W3.
 
 Invariant: every field of a persisted ``PersistedYoutubeRow`` round-trips
@@ -48,13 +47,11 @@ from typing import Any
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401 — sets TEST_DB_DSN env var
-
-import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
-
 import msgspec
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.pipeline_db import (
     PersistedDistance,
     PersistedTrack,

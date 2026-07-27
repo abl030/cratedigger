@@ -1,13 +1,13 @@
 """Browser icon assets are served, not 404 noise (#161)."""
-
 import unittest
+from typing import ClassVar
 from urllib.request import urlopen
 
 from tests.web._harness import _FakeDbWebServerCase
 
 
 class TestStaticIconAssets(_FakeDbWebServerCase):
-    CASES = [
+    CASES: ClassVar = [
         ("/favicon.ico", "image/x-icon", b"\x00\x00\x01\x00"),
         ("/favicon-16x16.png", "image/png", b"\x89PNG"),
         ("/favicon-32x32.png", "image/png", b"\x89PNG"),

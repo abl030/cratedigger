@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generated property for the fail-loud schema gate (deploy-kill-migrate-wants
 fix, see nix/module.nix + lib/migrator.py::assert_schema_current).
 
@@ -24,11 +23,10 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
-
 from hypothesis import example, given
 from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.migrator import missing_migration_versions
 
 _VERSION_UNIVERSE = st.integers(min_value=1, max_value=9999)

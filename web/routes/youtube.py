@@ -30,6 +30,8 @@ from lib.youtube_album_service import (
 )
 from lib.youtube_ingest_service import (
     OUTCOME_HTTP_STATUS as YOUTUBE_INGEST_HTTP_STATUS,
+)
+from lib.youtube_ingest_service import (
     default_youtube_ingest_service_factory,
 )
 from web import discogs as discogs_api
@@ -43,7 +45,6 @@ from web.routes._registry import (
 )
 from web.routes._server_access import _server
 
-
 log = logging.getLogger(__name__)
 
 
@@ -53,8 +54,8 @@ log = logging.getLogger(__name__)
 # identity is asserted in the contract test — there is no second source
 # of truth.
 __all__ = [
-    "ROUTES",
     "OUTCOME_HTTP_STATUS",
+    "ROUTES",
     "YOUTUBE_INGEST_HTTP_STATUS",
     "YoutubeRescueRequest",
     "get_youtube_album",
@@ -82,7 +83,7 @@ class _RedisYoutubeCache:
         try:
             from web import cache as _cache_mod
             self._redis = getattr(_cache_mod, "_redis", None)
-        except Exception:
+        except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             self._redis = None
 
     def get(self, key: str):
@@ -90,7 +91,7 @@ class _RedisYoutubeCache:
             return None
         try:
             raw = self._redis.get(key)
-        except Exception:
+        except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             return None
         if raw is None:
             return None
@@ -106,7 +107,7 @@ class _RedisYoutubeCache:
         try:
             self._redis.setex(
                 key, ttl_seconds, value)
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
             pass
 
 
@@ -130,8 +131,8 @@ def _build_youtube_client():
     timeout kwarg is the established pattern.
     """
     import requests
-    from urllib3.util.retry import Retry
     from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
     from ytmusicapi import YTMusic
 
     # Bind a default (connect, read) timeout so unresponsive remotes don't
@@ -290,7 +291,7 @@ def get_youtube_album(h: RouteHandler, params: dict[str, list[str]]) -> None:
         # ``YTMusic`` is done with the session.
         try:
             session.close()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
             pass
 
     status = OUTCOME_HTTP_STATUS.get(result.outcome, 500)

@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import unittest
+from pathlib import Path
 
 from tests.structural_audits.ffmpeg_audio_map import (
     assert_ffmpeg_audio_mapping,
 )
-
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PRODUCTION_ROOTS = REPO_ROOT / "tools" / "production_python_sources.txt"

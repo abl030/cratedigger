@@ -3,12 +3,12 @@ import tempfile
 import unittest
 from typing import Any, cast
 
-from lib.grab_list import DownloadFile
 from lib.dispatch import (
     DISPATCH_CODE_IMPORT_MANIFEST_REJECTED,
     DispatchOutcome,
     dispatch_import_from_db,
 )
+from lib.grab_list import DownloadFile
 from lib.import_manifest import (
     check_audio_manifest,
     move_failed_import_curated,
@@ -199,7 +199,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
 
     def test_force_import_rejects_audio_not_in_origin_manifest(self):
         import msgspec
-        from lib.import_queue import IMPORT_JOB_FORCE, force_import_payload
+
         from lib.quality import ImportResult, SpectralAnalysisDetail, SpectralDetail
 
         db = FakePipelineDB()

@@ -44,9 +44,7 @@ def _ignored_finalize_request_calls(tree: ast.AST) -> list[ast.Call]:
         call = node.value
         if not isinstance(call, ast.Call):
             continue
-        if isinstance(call.func, ast.Name) and call.func.id in aliases:
-            ignored.append(call)
-        elif (
+        if isinstance(call.func, ast.Name) and call.func.id in aliases or (
             isinstance(call.func, ast.Attribute)
             and call.func.attr == "finalize_request"
         ):
@@ -162,10 +160,7 @@ class _RequestStatusWriteVisitor(ast.NodeVisitor):
                 "lib/transitions.py",
                 "lib/request_creation_service.py",
             }
-        if _is_pipeline_db_seam(self.rel_path) or self.rel_path == "lib/transitions.py":
-            return True
-
-        return False
+        return bool(_is_pipeline_db_seam(self.rel_path) or self.rel_path == "lib/transitions.py")
 
     def _maybe_record_raw_sql(self, node: ast.Call) -> None:
         func_name: str | None = None
@@ -205,13 +200,12 @@ class _RequestStatusWriteVisitor(ast.NodeVisitor):
             "set_downloading",
             "update_status",
             "publish_initialized_request",
-        }:
-            if not self._allow_direct_transition_call(func_name, node):
-                self.offending.append((
-                    node.lineno,
-                    "direct transition call",
-                    ast.unparse(node),
-                ))
+        } and not self._allow_direct_transition_call(func_name, node):
+            self.offending.append((
+                node.lineno,
+                "direct transition call",
+                ast.unparse(node),
+            ))
         self._maybe_record_raw_sql(node)
         self.generic_visit(node)
 

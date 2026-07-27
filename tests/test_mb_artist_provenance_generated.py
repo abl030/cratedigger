@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generated contract for MusicBrainz artist provenance projection."""
 from __future__ import annotations
 
@@ -10,12 +9,11 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import tests._hypothesis_profiles  # noqa: F401
 from hypothesis import given
 from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401
 from web.mb import get_artist_release_groups
-
 
 ARTIST_ID = "00000000-0000-0000-0000-000000000695"
 OWN_RG = "00000000-0000-0000-0000-000000000696"

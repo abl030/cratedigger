@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass, replace
 import logging
 import time
-from typing import TYPE_CHECKING, Any, Callable, Iterator, Literal, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Any, Literal
 
 from lib.browse import _fanout_browse_users, download_filter, get_browse_coordinator
 from lib.download import build_active_download_state
+from lib.grab_list import DownloadFile, GrabListEntry
+from lib.matching import MatchResult, check_for_match, get_album_by_id
 from lib.processing_paths import attempt_fingerprint
+from lib.quality import CandidateScore
 from lib.slskd_transfers import (
     SlskdEnqueueOutcome,
     cancel_and_delete,
@@ -18,9 +22,6 @@ from lib.slskd_transfers import (
     slskd_do_enqueue,
     slskd_enqueue_with_outcome,
 )
-from lib.grab_list import DownloadFile, GrabListEntry
-from lib.matching import MatchResult, check_for_match, get_album_by_id
-from lib.quality import CandidateScore
 
 if TYPE_CHECKING:
     from cratedigger import SlskdDirectory, TrackRecord
@@ -101,7 +102,7 @@ class FindDownloadMetrics:
     cache_misses: int = 0
 
     @classmethod
-    def from_context(cls, ctx: CratediggerContext) -> "FindDownloadMetrics":
+    def from_context(cls, ctx: CratediggerContext) -> FindDownloadMetrics:
         return cls(
             browse_time_s=ctx.browse_time_s,
             match_time_s=ctx.match_time_s,
@@ -144,7 +145,7 @@ class _WorkerPipelineDBSource:
     def _get_db(self) -> None:
         raise AssertionError("find_download worker attempted owner DB access")
 
-    def get_tracks(self, album_record: object) -> "list[TrackRecord]":
+    def get_tracks(self, album_record: object) -> list[TrackRecord]:
         raise AssertionError("find_download worker attempted owner DB access")
 
     def get_wanted_searchable(
@@ -169,7 +170,7 @@ class FindDownloadOwnerPathError(RuntimeError):
 def prepare_find_download_context(
     album: Any,
     ctx: CratediggerContext,
-    search_result: "SearchResult | None" = None,
+    search_result: SearchResult | None = None,
 ) -> CratediggerContext:
     """Build a worker-local context for one album's find_download run."""
     album_id = album.id
@@ -356,7 +357,7 @@ def _get_denied_users(album_id: int, ctx: CratediggerContext) -> set[str]:
         denied.update(e["username"] for e in db.get_denylisted_users(request_id))
     except AssertionError:
         raise
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
         pass
     ctx.denied_users_cache[request_id] = denied
     return denied
@@ -1128,28 +1129,30 @@ def try_enqueue(
                     candidates=tuple(accumulated),
                     pre_filter_skip_count=pre_filter_skips[0],
                 )
-            if resolution == "verified_no_acceptance":
+            if (
+                resolution == "verified_no_acceptance"
+                and claim.request_id is not None
+            ):
                 # Verified-no-acceptance: surface the rejection in
                 # download_log so the failure is visible immediately
                 # rather than disappearing into a silent status flip.
                 # Today the only path that produces a verified rejection
                 # is a peer-offline classification from
                 # slskd_enqueue_with_outcome (see _is_user_offline_http_error).
-                if claim.request_id is not None:
-                    db = ctx.pipeline_db_source._get_db()
-                    db.log_download(
-                        request_id=claim.request_id,
-                        soulseek_username=username,
-                        filetype=allowed_filetype,
-                        outcome="user_offline",
-                        error_message=outcome.reason or "user offline at enqueue",
-                    )
+                db = ctx.pipeline_db_source._get_db()
+                db.log_download(
+                    request_id=claim.request_id,
+                    soulseek_username=username,
+                    filetype=allowed_filetype,
+                    outcome="user_offline",
+                    error_message=outcome.reason or "user offline at enqueue",
+                )
             had_enqueue_failure = True
             logger.info(
                 f"Failed to enqueue download to slskd for "
                 f"{artist_name} - {album_name} from {username}"
             )
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             if claim.claimed:
                 owned = _leave_claim_for_poll_recovery(
                     claim,

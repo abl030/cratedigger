@@ -47,11 +47,11 @@ class BeetsDeleteRequest(BaseModel):
 
 def post_beets_delete(h: RouteHandler, body: dict[str, object]) -> None:
     from lib.destructive_release_service import (
-        DeleteAlbumNotFound,
         DeleteAlbumAuthorityMismatch,
+        DeleteAlbumNotFound,
         DeleteBeetsAmbiguous,
-        DeleteIncomplete,
         DeleteImporterBusy,
+        DeleteIncomplete,
         DeleteLockContended,
         DeletePipelinePurgeFailure,
         DeleteReleaseMismatch,

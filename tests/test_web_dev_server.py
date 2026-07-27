@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Tests for scripts/web_dev_server.py."""
 
 from __future__ import annotations
@@ -9,14 +8,13 @@ import sys
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
-from urllib.error import HTTPError
-from urllib.request import Request, urlopen
 from unittest.mock import patch
+from urllib.error import HTTPError
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401 — bootstraps TEST_DB_DSN for the live-db test
-from tests.test_web_cache import FakeRedis
 
 from scripts.web_dev_server import (
     DevConfig,
@@ -24,6 +22,7 @@ from scripts.web_dev_server import (
     DevHTTPServer,
     create_server,
 )
+from tests.test_web_cache import FakeRedis
 
 
 class WebDevServerTest(unittest.TestCase):
@@ -242,7 +241,7 @@ class _MetadataMirrorServer(ThreadingHTTPServer):
 class _MetadataMirrorHandler(BaseHTTPRequestHandler):
     server: _MetadataMirrorServer  # pyright: ignore[reportIncompatibleVariableOverride]
 
-    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+    def log_message(self, format: str, *args: object) -> None:
         return
 
     def do_GET(self) -> None:
@@ -295,8 +294,8 @@ class WebDevServerLiveDbMetadataIntegrationTest(unittest.TestCase):
     """The real live-db compare route must use its configured mirrors."""
 
     def setUp(self) -> None:
-        import web.discogs
         import web.cache
+        import web.discogs
         import web.mb
         import web.server
 
@@ -474,13 +473,14 @@ class ConfigureLiveDbReadOnlyTest(unittest.TestCase):
         if ws.db is not None and ws.db is not self._saved[1]:
             try:
                 ws.db.close()
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
                 pass
         (ws._db_dsn, ws.db, ws._try_reconnect_db,
          ws.beets_db_path, ws.beets_library_root, ws._beets) = self._saved
 
     def test_live_db_session_rejects_writes_through_db_accessor(self):
         import psycopg2
+
         from scripts.web_dev_server import configure_live_db
 
         config = DevConfig(

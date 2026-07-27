@@ -10,19 +10,6 @@ dispatch dicts are the "shared registry" argparse-construction and
 import sys
 
 from lib.pipeline_db import PipelineDB
-
-from scripts.pipeline_cli.audit import cmd_audit_world
-from scripts.pipeline_cli.beets_distance import cmd_beets_distance
-from scripts.pipeline_cli.destructive import cmd_ban_source, cmd_library_delete
-from scripts.pipeline_cli.imports import (
-    cmd_force_import,
-    cmd_import_job_recovery,
-    cmd_import_jobs,
-    cmd_import_preview,
-)
-from scripts.pipeline_cli.long_tail import cmd_long_tail
-from scripts.pipeline_cli.quality import cmd_quality, cmd_repair_spectral
-from scripts.pipeline_cli.replace import cmd_replace
 from scripts.pipeline_cli.album_requests import (
     cmd_add,
     cmd_disk_coverage,
@@ -38,7 +25,19 @@ from scripts.pipeline_cli.api_mutations import (
     cmd_upgrade,
     cmd_wrong_match_converge,
 )
+from scripts.pipeline_cli.audit import cmd_audit_world
+from scripts.pipeline_cli.beets_distance import cmd_beets_distance
+from scripts.pipeline_cli.destructive import cmd_ban_source, cmd_library_delete
+from scripts.pipeline_cli.imports import (
+    cmd_force_import,
+    cmd_import_job_recovery,
+    cmd_import_jobs,
+    cmd_import_preview,
+)
+from scripts.pipeline_cli.long_tail import cmd_long_tail
+from scripts.pipeline_cli.quality import cmd_quality, cmd_repair_spectral
 from scripts.pipeline_cli.query import cmd_query
+from scripts.pipeline_cli.replace import cmd_replace
 from scripts.pipeline_cli.routes_meta import _build_parser, cmd_routes
 from scripts.pipeline_cli.search_plan import (
     cmd_search_plan_advance,

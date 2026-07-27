@@ -14,18 +14,19 @@ import sys
 import urllib.error
 import urllib.request
 from contextlib import AbstractContextManager
-from typing import Protocol, TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
+
 import msgspec
 
 from lib import transitions
 from lib.config import read_runtime_config
 from lib.disk_coverage_service import DiskCoveragePipelineDB, disk_coverage
 from lib.pipeline_db.rows import album_request_row
+from lib.release_identity import detect_release_source, normalize_release_id
 from lib.request_creation_service import (
     RequestCreationInput,
     RequestCreationService,
 )
-from lib.release_identity import detect_release_source, normalize_release_id
 
 if TYPE_CHECKING:
     from lib.pipeline_db import (
@@ -94,25 +95,25 @@ class _AlbumRequestsDB(
 
     def get_request_by_release_id(
         self, release_id: object | None,
-    ) -> "AlbumRequestRow | None": ...
+    ) -> AlbumRequestRow | None: ...
 
     # --- lib.search_plan_service.SearchPlanDB, mirrored (see class
     # docstring for why this isn't a base class) ---
 
     def advisory_lock(
         self, namespace: int, key: int,
-    ) -> "AbstractContextManager[bool]": ...
+    ) -> AbstractContextManager[bool]: ...
 
     def get_active_search_plan(
         self, request_id: int,
-    ) -> "ActiveSearchPlan | None": ...
+    ) -> ActiveSearchPlan | None: ...
 
     def create_successful_search_plan(
         self,
         *,
         request_id: int,
         generator_id: str,
-        items: "list[SearchPlanItemInput]",
+        items: list[SearchPlanItemInput],
         metadata_snapshot: dict[str, object] | None = None,
         provenance: dict[str, object] | None = None,
         set_active: bool = True,
@@ -135,7 +136,7 @@ class _AlbumRequestsDB(
         *,
         request_id: int,
         generator_id: str,
-        items: "list[SearchPlanItemInput]",
+        items: list[SearchPlanItemInput],
         metadata_snapshot: dict[str, object] | None = None,
         provenance: dict[str, object] | None = None,
     ) -> int: ...
@@ -150,7 +151,7 @@ class _AlbumRequestsDB(
 
     def get_saturation_summary(
         self, request_id: int, *, window_days: int = 14,
-    ) -> "SaturationSummary": ...
+    ) -> SaturationSummary: ...
 
     def get_search_history_page(
         self,
@@ -158,20 +159,20 @@ class _AlbumRequestsDB(
         *,
         limit: int,
         before_id: int | None = None,
-    ) -> "SearchLogHistoryPage": ...
+    ) -> SearchLogHistoryPage: ...
 
     def get_search_plan_inspection(
         self, request_id: int,
-    ) -> "SearchPlanInspection": ...
+    ) -> SearchPlanInspection: ...
 
     def search_requests(
         self, query: str, *, limit: int = 200, status: str | None = None,
-    ) -> "list[AlbumRequestRow]": ...
+    ) -> list[AlbumRequestRow]: ...
 
     def get_by_status(
         self, status: str, *, limit: int | None = None,
         newest_first: bool = False,
-    ) -> "list[AlbumRequestRow]": ...
+    ) -> list[AlbumRequestRow]: ...
 
     def count_by_status(self) -> dict[str | None, int]: ...
 
@@ -252,7 +253,7 @@ def _json_list_of_dicts(value: object) -> list[dict[str, object]]:
     return msgspec.convert(value, type=list[dict[str, object]])
 
 
-def _num_or_none(value: object) -> "int | float | None":
+def _num_or_none(value: object) -> int | float | None:
     """Narrow an external-JSON (MB) numeric field without asserting.
 
     Issue #784: a prior sweep asserted ``isinstance(x, (int, float))``
@@ -547,7 +548,7 @@ def _cmd_add_discogs(
     try:
         from web import discogs as discogs_api
         release = discogs_api.get_release(int(discogs_id))
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         print(f"  Failed to fetch release from Discogs API: {e}")
         return None
 
@@ -651,7 +652,7 @@ def cmd_set_intent(db: _AlbumRequestsDB, args: argparse.Namespace) -> int:
         print("  Request is still initializing; retry the original add or upgrade.")
         return 4
     if req["status"] == "downloading":
-        print(f"  Cannot set intent while album is downloading.")
+        print("  Cannot set intent while album is downloading.")
         return 1
     if req["status"] == "replaced":
         result = finalize_request(

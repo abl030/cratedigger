@@ -19,7 +19,6 @@ import os
 import shutil
 import tempfile
 import unittest
-from typing import Optional
 
 import music_tag
 
@@ -29,7 +28,6 @@ from lib.beets_distance import (
     SyntheticItem,
     compute_beets_distance,
 )
-
 
 FIXTURE_FLAC = os.path.join(
     os.path.dirname(__file__), "fixtures", "audio_hash", "sine_440.flac")
@@ -58,7 +56,7 @@ class DictCache:
     def __init__(self) -> None:
         self._store: dict[str, bytes] = {}
 
-    def get(self, key: str) -> Optional[bytes]:
+    def get(self, key: str) -> bytes | None:
         return self._store.get(key)
 
     def set(self, key: str, value: bytes, ttl_seconds: int) -> None:
@@ -77,8 +75,8 @@ class _StubPDB:
     def __init__(
         self,
         *,
-        download_log_entry: Optional[dict] = None,
-        request: Optional[dict] = None,
+        download_log_entry: dict | None = None,
+        request: dict | None = None,
     ) -> None:
         self._dl = download_log_entry
         self._request = request
@@ -102,7 +100,7 @@ def _ok_mb_release(
     rg: str = "rg-shared",
     artist: str = "Dr. Octagon",
     album: str = "Dr. Octagonecologyst",
-    tracks: Optional[list[dict]] = None,
+    tracks: list[dict] | None = None,
 ):
     return {
         "id": mbid,
@@ -410,7 +408,7 @@ class TestBeetsDistanceIntegrationSlice(unittest.TestCase):
         *,
         folder: str,
         mb: dict,
-        cache: Optional[BeetsDistanceCache] = None,
+        cache: BeetsDistanceCache | None = None,
     ) -> BeetsDistanceResult:
         pdb = _StubPDB(
             download_log_entry={

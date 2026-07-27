@@ -235,7 +235,7 @@ class FailureEvidence:
     """A non-empty audit blob yielded no usable record."""
 
     @classmethod
-    def from_row(cls, row: Mapping[str, object]) -> "FailureEvidence":
+    def from_row(cls, row: Mapping[str, object]) -> FailureEvidence:
         """Build from a raw ``download_log`` row mapping (CLI side)."""
         raw_detail = row.get("transfer_detail")
         return cls(
@@ -322,7 +322,7 @@ def _quoted(text: str) -> str:
     return f'"{bounded_text(text)}"'
 
 
-def _quoted_evidence(group: "_ReasonGroup") -> str:
+def _quoted_evidence(group: _ReasonGroup) -> str:
     """Quote one group's text, saying whose words they are."""
     if group.from_state:
         return f"slskd state {_quoted(group.message)}"
@@ -879,13 +879,13 @@ _MATERIALIZE_REASON_COPY: Final[dict[str, str]] = {
 _MATERIALIZE_REASON_PREFIX_COPY: Final[tuple[tuple[str, str], ...]] = (
     (
         REASON_SOURCE_OPEN_FAILED_PREFIX,
-        "A downloaded file on the slskd share could not be opened ({errno}); "
-        "requeued",
+        ("A downloaded file on the slskd share could not be opened ({errno}); "
+        "requeued"),
     ),
     (
         REASON_SOURCE_READ_FAILED_PREFIX,
-        "A downloaded file could not be read from the slskd share ({errno}); "
-        "requeued",
+        ("A downloaded file could not be read from the slskd share ({errno}); "
+        "requeued"),
     ),
     (
         REASON_SOURCE_WRITE_FAILED_PREFIX,
@@ -1120,17 +1120,17 @@ __all__ = [
     "FAMILY_REFUSAL",
     "FAMILY_TRANSPORT",
     "FAMILY_UNKNOWN",
-    "FailureEvidence",
-    "FailurePresentation",
     "MAX_DIAGNOSTIC_CHARS",
     "MAX_PEER_NAME_CHARS",
     "MAX_RAW_MESSAGE_CHARS",
     "MAX_RAW_MESSAGE_GROUPS",
-    "PeerFailureFamily",
     "TRANSFER_MESSAGE_LABEL_MIXED",
     "TRANSFER_MESSAGE_LABEL_PEER",
     "TRANSFER_MESSAGE_LABEL_STATE",
     "TRANSFER_MESSAGE_LABEL_STORAGE",
+    "FailureEvidence",
+    "FailurePresentation",
+    "PeerFailureFamily",
     "bounded_text",
     "decode_transfer_detail",
     "materialize_reason_copy",

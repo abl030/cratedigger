@@ -24,15 +24,14 @@ from __future__ import annotations
 
 import email.message
 import json
-import socket
 import unittest
 import urllib.error
+from typing import Self
 from unittest.mock import patch
 
 import web.cache as _cache
-import web.discogs as discogs
-import web.mb as mb
 from tests.fakes import FakeDiscogsLookup, FakeMBLookup, http_error
+from web import discogs, mb
 
 
 class _FakeResp:
@@ -45,7 +44,7 @@ class _FakeResp:
     def read(self) -> bytes:
         return self._body
 
-    def __enter__(self) -> "_FakeResp":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *exc: object) -> bool:
@@ -74,7 +73,7 @@ def _raise_timeout():
     documented transient-failure mode)."""
 
     def _urlopen(*_a: object, **_k: object):
-        raise urllib.error.URLError(socket.timeout("timed out"))
+        raise urllib.error.URLError(TimeoutError("timed out"))
 
     return _urlopen
 
@@ -111,29 +110,25 @@ class _MirrorContractCase(unittest.TestCase):
 
 class TestMBAdapterContract(_MirrorContractCase):
     def test_get_release_raises_HTTPError_on_404(self) -> None:
-        with patch("urllib.request.urlopen", _raise_http(404)):
-            with self.assertRaises(urllib.error.HTTPError) as ctx:
-                mb.get_release("00000000-0000-0000-0000-000000000000")
+        with patch("urllib.request.urlopen", _raise_http(404)), self.assertRaises(urllib.error.HTTPError) as ctx:
+            mb.get_release("00000000-0000-0000-0000-000000000000")
         self.assertEqual(ctx.exception.code, 404)
 
     def test_get_release_raises_HTTPError_on_5xx(self) -> None:
-        with patch("urllib.request.urlopen", _raise_http(503)):
-            with self.assertRaises(urllib.error.HTTPError) as ctx:
-                mb.get_release("00000000-0000-0000-0000-000000000000")
+        with patch("urllib.request.urlopen", _raise_http(503)), self.assertRaises(urllib.error.HTTPError) as ctx:
+            mb.get_release("00000000-0000-0000-0000-000000000000")
         self.assertEqual(ctx.exception.code, 503)
 
     def test_get_release_group_releases_raises_HTTPError_on_404(self) -> None:
-        with patch("urllib.request.urlopen", _raise_http(404)):
-            with self.assertRaises(urllib.error.HTTPError):
-                mb.get_release_group_releases(
-                    "00000000-0000-0000-0000-000000000000")
+        with patch("urllib.request.urlopen", _raise_http(404)), self.assertRaises(urllib.error.HTTPError):
+            mb.get_release_group_releases(
+                "00000000-0000-0000-0000-000000000000")
 
     def test_transport_timeout_propagates(self) -> None:
         """Timeouts surface as a URLError subclass — the field resolver
         classifies these as transient, distinct from a 404."""
-        with patch("urllib.request.urlopen", _raise_timeout()):
-            with self.assertRaises(urllib.error.URLError):
-                mb.get_release("00000000-0000-0000-0000-000000000000")
+        with patch("urllib.request.urlopen", _raise_timeout()), self.assertRaises(urllib.error.URLError):
+            mb.get_release("00000000-0000-0000-0000-000000000000")
 
 
 class TestMBReleaseGroupYearDualContract(_MirrorContractCase):
@@ -145,10 +140,9 @@ class TestMBReleaseGroupYearDualContract(_MirrorContractCase):
     triage bucket. Both prongs are pinned here."""
 
     def test_404_raises(self) -> None:
-        with patch("urllib.request.urlopen", _raise_http(404)):
-            with self.assertRaises(urllib.error.HTTPError):
-                mb.get_release_group_year(
-                    "00000000-0000-0000-0000-000000000000")
+        with patch("urllib.request.urlopen", _raise_http(404)), self.assertRaises(urllib.error.HTTPError):
+            mb.get_release_group_year(
+                "00000000-0000-0000-0000-000000000000")
 
     def test_exists_but_no_year_returns_none(self) -> None:
         # A valid release-group record carrying no first-release-date.
@@ -160,15 +154,13 @@ class TestMBReleaseGroupYearDualContract(_MirrorContractCase):
 
 class TestDiscogsAdapterContract(_MirrorContractCase):
     def test_get_release_raises_HTTPError_on_404(self) -> None:
-        with patch("urllib.request.urlopen", _raise_http(404)):
-            with self.assertRaises(urllib.error.HTTPError) as ctx:
-                discogs.get_release(99999999)
+        with patch("urllib.request.urlopen", _raise_http(404)), self.assertRaises(urllib.error.HTTPError) as ctx:
+            discogs.get_release(99999999)
         self.assertEqual(ctx.exception.code, 404)
 
     def test_get_master_releases_raises_HTTPError_on_404(self) -> None:
-        with patch("urllib.request.urlopen", _raise_http(404)):
-            with self.assertRaises(urllib.error.HTTPError):
-                discogs.get_master_releases(99999999)
+        with patch("urllib.request.urlopen", _raise_http(404)), self.assertRaises(urllib.error.HTTPError):
+            discogs.get_master_releases(99999999)
 
 
 class TestFakesMirrorTheRealContract(unittest.TestCase):

@@ -33,6 +33,7 @@ class TestRunBeetsHarnessScript(unittest.TestCase):
         proc = subprocess.run(
             [str(SCRIPT), "--help"],
             env=env, capture_output=True, text=True,
+            check=False,
         )
         self.assertEqual(proc.returncode, 1, proc.stderr)
         self.assertIn("CRATEDIGGER_BEETS_PYTHON", proc.stderr)
@@ -45,6 +46,7 @@ class TestRunBeetsHarnessScript(unittest.TestCase):
             [str(SCRIPT), "--help"],
             env={**os.environ, "CRATEDIGGER_BEETS_PYTHON": sys.executable},
             capture_output=True, text=True,
+            check=False,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("--search-id", proc.stdout)
@@ -57,13 +59,14 @@ class TestRunBeetsHarnessScript(unittest.TestCase):
         with tempfile.TemporaryDirectory() as beetsdir:
             with open(os.path.join(beetsdir, "config.yaml"), "w",
                       encoding="utf-8") as f:
-                f.write("library: {}/lib.db\n".format(beetsdir))
+                f.write(f"library: {beetsdir}/lib.db\n")
             proc = subprocess.run(
                 [str(SCRIPT), "--pretend", beetsdir],
                 env={**os.environ,
                      "CRATEDIGGER_BEETS_PYTHON": sys.executable,
                      "BEETSDIR": beetsdir},
                 capture_output=True, text=True, input="",
+                check=False,
             )
         self.assertEqual(proc.returncode, 1, proc.stderr)
         self.assertIn("duplicate_keys.album must be exactly", proc.stderr)
@@ -77,12 +80,12 @@ class TestRunBeetsHarnessScript(unittest.TestCase):
             with open(os.path.join(beetsdir, "config.yaml"), "w",
                       encoding="utf-8") as f:
                 f.write(
-                    "library: {}/lib.db\n"
-                    "directory: {}/music\n"
+                    f"library: {beetsdir}/lib.db\n"
+                    f"directory: {beetsdir}/music\n"
                     "import:\n"
                     "  duplicate_keys:\n"
                     "    album: [mb_albumid, discogs_albumid]\n"
-                    "    item: [artist, title]\n".format(beetsdir, beetsdir)
+                    "    item: [artist, title]\n"
                 )
             proc = subprocess.run(
                 [str(SCRIPT), "--pretend", emptydir],
@@ -91,6 +94,7 @@ class TestRunBeetsHarnessScript(unittest.TestCase):
                      "BEETSDIR": beetsdir},
                 capture_output=True, text=True, input="",
                 timeout=120,
+                check=False,
             )
         self.assertNotIn("duplicate_keys.album must be exactly", proc.stderr)
         self.assertEqual(proc.returncode, 0, proc.stderr)

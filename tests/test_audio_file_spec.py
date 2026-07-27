@@ -6,15 +6,13 @@ TDD: Written RED first, then implemented.
 import unittest
 
 from lib.quality import (
-    AudioFileSpec,
-    parse_filetype_config,
+    AUDIO_EXTENSIONS,
+    CATCH_ALL_SPEC,
+    LOSSLESS_CODECS,
     file_identity,
     filetype_matches,
-    AUDIO_EXTENSIONS,
-    LOSSLESS_CODECS,
-    CATCH_ALL_SPEC,
+    parse_filetype_config,
 )
-
 
 # ---------------------------------------------------------------------------
 # AudioFileSpec construction

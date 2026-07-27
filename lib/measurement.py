@@ -30,7 +30,8 @@ from typing import TYPE_CHECKING, Any, Literal
 import msgspec
 
 from lib.audio_hash import AudioHashError, hash_audio_content
-from lib.json_narrow import json_dict as _json_dict, json_list as _json_list
+from lib.json_narrow import json_dict as _json_dict
+from lib.json_narrow import json_list as _json_list
 
 # Extensions audio_hash.py currently knows how to hash. AUDIO_EXTS is broader
 # (includes wav, alac); the bad-hash gate filters to this subset so legitimate
@@ -200,7 +201,7 @@ def collect_release_attempt_spectral_audit(
 
 def resolve_existing_spectral_audit(
     mb_release_id: str,
-    cfg: "CratediggerConfig",
+    cfg: CratediggerConfig,
 ) -> ExistingSpectralAuditLookup:
     """Resolve exact-release files, preserving lookup failure as audit data."""
     if not mb_release_id:
@@ -231,7 +232,7 @@ def resolve_existing_spectral_audit(
 
 
 def existing_spectral_resolver_for_config(
-    cfg: "CratediggerConfig",
+    cfg: CratediggerConfig,
 ) -> ExistingSpectralResolver:
     return lambda release_id: resolve_existing_spectral_audit(release_id, cfg)
 
@@ -266,7 +267,7 @@ class PreimportMeasurement(msgspec.Struct, frozen=True):
     attempt-local ``lossless_candidate`` fact additionally lets preview and
     harness routing reuse the exact classification that selected the scan.
     """
-    corrupt_files: list[str] = msgspec.field(default_factory=lambda: [])
+    corrupt_files: list[str] = msgspec.field(default_factory=list[str])
     audio_validation: AudioValidationReport = msgspec.field(
         default_factory=legacy_unrecorded_audio_validation_report,
     )
@@ -396,11 +397,12 @@ def ffprobe_audio_codec_name(fpath: str) -> str | None:
             text=True,
             errors="replace",
             timeout=10,
+            check=False,
         )
         if result.returncode != 0:
             return None
         payload: object = json.loads(result.stdout or "{}")
-    except Exception:
+    except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         return None
 
     streams = _json_list(_json_dict(payload).get("streams"))
@@ -500,7 +502,7 @@ def _needs_spectral_check(
 
 def _persist_spectral_state(
     *,
-    db: "PipelineDB",
+    db: PipelineDB,
     request_id: int,
     existing_spectral: SpectralMeasurement | None,
 ) -> SpectralMeasurement | None:
@@ -570,7 +572,7 @@ def _iter_audio_files(path: str) -> list[Path]:
 
 def _check_bad_audio_hashes(
     paths: list[Path],
-    db: "PipelineDB",
+    db: PipelineDB,
 ) -> _BadHashMatch | None:
     """Return the first matched bad-hash row, or None.
 
@@ -621,12 +623,12 @@ def measure_preimport_state(
     download_filetype: str,
     download_min_bitrate_bps: int | None,
     download_is_vbr: bool | None,
-    cfg: "CratediggerConfig",
-    db: "PipelineDB | None" = None,
+    cfg: CratediggerConfig,
+    db: PipelineDB | None = None,
     request_id: int | None = None,
     existing_spectral_evidence: SpectralAnalysisDetail | None = None,
     preserve_existing_source_spectral: bool = False,
-    precomputed_inspection: "LocalFileInspection | None" = None,
+    precomputed_inspection: LocalFileInspection | None = None,
     spectral_detail_analyzer: SpectralDetailAnalyzer | None = None,
     existing_spectral_resolver: ExistingSpectralResolver | None = None,
 ) -> PreimportMeasurement:

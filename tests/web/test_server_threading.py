@@ -20,9 +20,9 @@ import os
 import socket
 import struct
 import sys
+import tempfile
 import threading
 import time
-import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -435,7 +435,7 @@ class TestPerThreadBeetsHandles(unittest.TestCase):
             self.assertIsNotNone(handle)
             assert handle is not None
             self.assertEqual(
-                handle._library_root,  # noqa: SLF001 - constructor seam
+                handle._library_root,
                 "/mnt/virtio/Music/Beets",
             )
 
@@ -490,9 +490,8 @@ class TestPerThreadBeetsHandles(unittest.TestCase):
         ), patch(
             "web.server.ThreadingHTTPServer",
             side_effect=BootStop,
-        ):
-            with self.assertRaises(BootStop):
-                srv.main()
+        ), self.assertRaises(BootStop):
+            srv.main()
 
         self.assertEqual(srv.beets_library_root, "/scratch/Music/Beets")
 

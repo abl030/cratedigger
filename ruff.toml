@@ -1,0 +1,15 @@
+required-version = "==0.16.0"
+# Match the supported runtime declared in pyrightconfig.json; the development
+# shell may exercise a newer interpreter.
+target-version = "py313"
+
+[lint]
+extend-select = [
+  "B905",
+]
+
+[lint.per-file-ignores]
+"tools/vulture/whitelist.py" = [
+  "B018",
+  "F821",
+]

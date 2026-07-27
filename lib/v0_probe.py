@@ -60,6 +60,7 @@ def folder_bitrates(
                 text=True,
                 errors="replace",
                 timeout=30,
+                check=False,
             )
             value = result.stdout.strip().rstrip(",")
             if not value or not value.isdigit():
@@ -72,11 +73,12 @@ def folder_bitrates(
                     text=True,
                     errors="replace",
                     timeout=30,
+                    check=False,
                 )
                 value = result.stdout.strip().rstrip(",")
             if value and value.isdigit() and int(value) > 0:
                 bitrates.append(int(value) // 1000)
-        except Exception:  # noqa: BLE001 - research evidence is fail-soft
+        except Exception:
             logger.debug("V0 bitrate probe failed for %s", fpath, exc_info=True)
     return [value for value in bitrates if value > 0]
 
@@ -91,7 +93,7 @@ def probe_duration_seconds(path: str) -> float | None:
         # classes) — third-party, not ours to annotate. Same technique as
         # harness.import_one._probe_source_channels.
         import mutagen
-        mutagen_file = getattr(mutagen, "File")
+        mutagen_file = getattr(mutagen, "File")  # noqa: B009 - dynamic untyped factory
         media = mutagen_file(path)
     except Exception:  # noqa: BLE001 - absence/unreadable is a normal fallback
         return None
@@ -167,6 +169,7 @@ def probe_files_as_v0(
                     timeout=conversion_timeout_seconds(
                         probe_duration_seconds(src_path)
                     ),
+                    check=False,
                 )
             except (OSError, subprocess.TimeoutExpired):
                 logger.warning("V0 research probe failed for %s", src_path)

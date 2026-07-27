@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generated invariants for terminal slskd transfer cleanup.
 
 The write-ahead-ledgered ``(username, filename)`` queue key becomes destructive
@@ -22,11 +21,10 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import tests._hypothesis_profiles  # noqa: F401
-
 from hypothesis import given
 from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401
 from lib.config import CratediggerConfig
 from lib.context import CratediggerContext
 from lib.pipeline_db import TransferLedgerRow

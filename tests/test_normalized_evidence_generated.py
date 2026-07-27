@@ -9,15 +9,19 @@ import unittest
 from typing import TypeGuard
 from unittest.mock import patch
 
-import tests._hypothesis_profiles  # noqa: F401
 from hypothesis import example, given
 from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401
 from lib.config import CratediggerConfig
 from lib.import_preview import measure_and_persist_candidate_evidence
 from lib.measurement import LocalFileInspection, PreimportMeasurement
 from lib.quality import AlbumQualityEvidenceFile
-from lib.quality_evidence import EvidenceBuildResult, snapshot_audio_files, snapshot_fingerprint
+from lib.quality_evidence import (
+    EvidenceBuildResult,
+    snapshot_audio_files,
+    snapshot_fingerprint,
+)
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_album_quality_evidence, make_request_row
 

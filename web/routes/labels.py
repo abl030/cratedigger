@@ -23,7 +23,6 @@ from web.routes._registry import (
     route,
 )
 
-
 # Auto-flip threshold: if the label's `release_count` exceeds this AND the
 # caller did not pass `?include_sublabels=` explicitly, default to False.
 # Mirrors `BIG_LABEL_THRESHOLD` in `web/js/labels.js`; keep in sync. The

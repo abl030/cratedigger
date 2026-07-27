@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Pinned + generated orchestration invariants for convergence steps.
 
 The registry is production ordering data.  The runner must attempt every step
@@ -19,12 +18,11 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
-
-import cratedigger
 from hypothesis import given
 from hypothesis import strategies as st
 
+import cratedigger
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.context import CratediggerContext
 from lib.convergence import (
     CONVERGENCE_STEPS,
@@ -219,7 +217,7 @@ class TestGeneratedConvergenceIsolation(unittest.TestCase):
                     name, raises=should_raise, attempted=attempted),
                 failure_message=f"{name} failed",
             )
-            for name, should_raise in zip(names, raises)
+            for name, should_raise in zip(names, raises, strict=True)
         )
         log = MagicMock()
 

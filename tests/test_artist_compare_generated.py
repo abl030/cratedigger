@@ -6,7 +6,8 @@ import unittest
 from typing import Literal, cast
 
 import msgspec
-from hypothesis import example, given, strategies as st
+from hypothesis import example, given
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401 - registers suite/fuzz
 from lib.artist_catalogue import ArtistCataloguePair, ArtistCatalogueRow
@@ -20,9 +21,8 @@ from web.discogs import (
     _DiscogsArtistMasterEntry,
     _DiscogsArtistMastersResponse,
 )
-from web.routes.browse import _apply_rg_pipeline_overlay, _PipelineHit
 from web.mb import _normalize_artist_release_group
-
+from web.routes.browse import _apply_rg_pipeline_overlay, _PipelineHit
 
 StructuralType = Literal["Album", "EP", "Single"]
 Provenance = Literal["ordinary", "promo", "unofficial"]

@@ -6,7 +6,7 @@ import os
 import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol, TYPE_CHECKING, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from lib.util import FAILED_IMPORT_SEARCH_DIRS, resolve_failed_path
 from lib.validation_envelope import decode_validation_envelope
@@ -51,11 +51,11 @@ class WrongMatchSourceDB(Protocol):
     tests live in ``tests/test_wrong_matches_cleanup.py``.
     """
 
-    def get_wrong_matches(self) -> "list[WrongMatchCandidateRow]": ...
+    def get_wrong_matches(self) -> list[WrongMatchCandidateRow]: ...
 
     def get_download_log_entry(
         self, log_id: int,
-    ) -> "DownloadLogWithEvidenceRow | None": ...
+    ) -> DownloadLogWithEvidenceRow | None: ...
 
     def clear_wrong_match_path(self, log_id: int) -> bool: ...
 
@@ -327,7 +327,7 @@ def cleanup_wrong_match_source(
         except FileNotFoundError:
             deleted_path = None
             path_missing = True
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             return WrongMatchCleanupResult(
                 download_log_id=download_log_id,
                 entry_found=True,

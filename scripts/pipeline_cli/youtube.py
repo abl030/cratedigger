@@ -4,12 +4,14 @@
 distance matrix. ``youtube-rescue`` — submit a rescue ingest for one
 request. Both wrap the U7/U4 service layer (CLI ⇄ API surface symmetry).
 """
+# ruff: noqa: UP037 - quoted Any annotation is part of the typing ratchet
 
 from __future__ import annotations
 
 import argparse
 import sys
-from typing import TYPE_CHECKING, Any, Callable, Optional, Protocol
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, Protocol
 
 import msgspec
 
@@ -20,6 +22,7 @@ from lib.youtube_album_service import (
     OUTCOME_EXIT_CODE,
     resolve_youtube_album,
 )
+
 # U4 / CLI ⇄ API symmetry: import the YT-rescue ingest service's outcome
 # → exit-code mapping with an alias (the youtube_album_service one above
 # is already bound). Keep this the single source of truth for the CLI; the
@@ -27,6 +30,8 @@ from lib.youtube_album_service import (
 # mapping.
 from lib.youtube_ingest_service import (
     OUTCOME_EXIT_CODE as YOUTUBE_INGEST_EXIT_CODE,
+)
+from lib.youtube_ingest_service import (
     default_youtube_ingest_service_factory,
 )
 
@@ -49,15 +54,15 @@ class _YoutubeRescueDB(Protocol):
     ``YoutubeIngestService`` typed against the same surface.
     """
 
-    def get_request(self, request_id: int) -> "AlbumRequestRow | None": ...
+    def get_request(self, request_id: int) -> AlbumRequestRow | None: ...
 
     def get_youtube_album_mapping(
         self, release_group_identifier: str, source: str,
-    ) -> Optional[list[dict[str, Any]]]: ...
+    ) -> list[dict[str, Any]] | None: ...
 
     def find_youtube_album_mapping_for_release(
         self, *, source: str, release_id: str, browse_id: str,
-    ) -> Optional[dict[str, Any]]: ...
+    ) -> dict[str, Any] | None: ...
 
     def get_tracks(self, request_id: int) -> list[dict[str, Any]]: ...
 
@@ -66,11 +71,11 @@ class _YoutubeRescueDB(Protocol):
         *,
         request_id: int,
         browse_id: str,
-        audio_playlist_id: Optional[str],
+        audio_playlist_id: str | None,
         yt_url: str,
         expected_track_count: int,
-        resolver_mapping_id: Optional[int] = None,
-        per_track_video_ids: Optional[list[str]] = None,
+        resolver_mapping_id: int | None = None,
+        per_track_video_ids: list[str] | None = None,
     ) -> int: ...
 
     def update_youtube_terminal(
@@ -79,16 +84,16 @@ class _YoutubeRescueDB(Protocol):
 
     def get_download_log_entry(
         self, log_id: int,
-    ) -> "Optional[DownloadLogWithEvidenceRow]": ...
+    ) -> DownloadLogWithEvidenceRow | None: ...
 
     def enqueue_import_job(
         self,
         job_type: str,
         *,
-        request_id: Optional[int] = None,
-        dedupe_key: Optional[str] = None,
-        payload: Optional[dict[str, Any]] = None,
-        message: Optional[str] = None,
+        request_id: int | None = None,
+        dedupe_key: str | None = None,
+        payload: dict[str, Any] | None = None,
+        message: str | None = None,
     ) -> Any: ...
 
     def enqueue_youtube_import_and_mark_success(
@@ -119,7 +124,7 @@ class _SubmitsYoutubeRescue(Protocol):
 
     def submit(
         self, request_id: int, browse_id: str, /,
-    ) -> "SubmitResult": ...
+    ) -> SubmitResult: ...
 
 
 class _RedisYoutubeCache:
@@ -142,7 +147,7 @@ class _RedisYoutubeCache:
         try:
             from web import cache as _cache_mod
             self._redis = getattr(_cache_mod, "_redis", None)
-        except Exception:
+        except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             self._redis = None
 
     def get(self, key: str):
@@ -150,7 +155,7 @@ class _RedisYoutubeCache:
             return None
         try:
             raw = self._redis.get(key)
-        except Exception:
+        except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             return None
         if raw is None:
             return None
@@ -166,7 +171,7 @@ class _RedisYoutubeCache:
         try:
             self._redis.setex(
                 key, ttl_seconds, value)
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
             pass
 
 
@@ -192,8 +197,8 @@ def _build_youtube_client():
     the ``request`` timeout kwarg is the established pattern.
     """
     import requests
-    from urllib3.util.retry import Retry
     from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
     from ytmusicapi import YTMusic
 
     # Bind a default (connect, read) timeout so unresponsive remotes don't
@@ -223,7 +228,7 @@ def _build_youtube_client():
     return YTMusic(requests_session=session, language="en"), session
 
 
-def cmd_youtube_album(db: "YoutubeResolverDB", args: argparse.Namespace) -> int:
+def cmd_youtube_album(db: YoutubeResolverDB, args: argparse.Namespace) -> int:
     """``pipeline-cli youtube-album <identifier> [--refresh] [--json]``.
 
     Resolves any MB / Discogs release-or-group identifier into the
@@ -243,8 +248,8 @@ def cmd_youtube_album(db: "YoutubeResolverDB", args: argparse.Namespace) -> int:
       * 1 — unknown outcome (safety net)
     """
     from lib.beets_distance import compute_beets_distance
-    from web import mb as mb_api
     from web import discogs as discogs_api
+    from web import mb as mb_api
 
     yt, session = _build_youtube_client()
     cache = _RedisYoutubeCache()
@@ -271,7 +276,7 @@ def cmd_youtube_album(db: "YoutubeResolverDB", args: argparse.Namespace) -> int:
         # gap.
         try:
             session.close()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
             pass
 
     if getattr(args, "json", False):
@@ -317,12 +322,10 @@ def cmd_youtube_album(db: "YoutubeResolverDB", args: argparse.Namespace) -> int:
 
 
 def cmd_youtube_rescue(
-    db: "_YoutubeRescueDB",
+    db: _YoutubeRescueDB,
     args: argparse.Namespace,
     *,
-    service_factory: Optional[
-        Callable[["_YoutubeRescueDB"], "_SubmitsYoutubeRescue"]
-    ] = None,
+    service_factory: Callable[[_YoutubeRescueDB], _SubmitsYoutubeRescue] | None = None,
 ) -> int:
     """``pipeline-cli youtube-rescue <request_id> <browse_id> [--json]``.
 

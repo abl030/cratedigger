@@ -13,7 +13,6 @@ from lib.world_audit_service import audit_world
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_album_quality_evidence, make_request_row
 
-
 RELEASE_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 RELEASE_AMBIGUOUS = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 RELEASE_MISSING = "cccccccc-cccc-cccc-cccc-cccccccccccc"

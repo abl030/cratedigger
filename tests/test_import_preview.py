@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from contextlib import AbstractContextManager
 from types import SimpleNamespace
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 from lib.config import CratediggerConfig
@@ -19,10 +19,10 @@ from lib.import_preview import (
     compose_attempt_spectral_audit,
     enrich_current_v0_research_for_preview,
     enrich_incomplete_current_evidence_for_request,
-    prepare_current_evidence_for_failure,
-    persist_exact_current_spectral_from_attempt,
     load_persisted_existing_spectral,
     measure_and_persist_candidate_evidence,
+    persist_exact_current_spectral_from_attempt,
+    prepare_current_evidence_for_failure,
     preview_import_from_path,
     preview_import_from_values,
 )
@@ -48,15 +48,13 @@ from lib.quality_evidence import (
     snapshot_audio_files,
     snapshot_fingerprint,
 )
-
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import (
+    hermetic_beets_config_defaults,
     make_album_quality_evidence,
     make_audio_corrupt_validation_report,
     make_request_row,
-    hermetic_beets_config_defaults,
 )
-
 
 _HERMETIC_BEETS_DEFAULTS: AbstractContextManager[tuple[str, str]] | None = None
 
@@ -622,7 +620,7 @@ class TestImportPreviewPath(unittest.TestCase):
                         return_value=_preview_config(),
                     ), patch(
                         "lib.beets_db.BeetsDB",
-                        lambda **_kwargs: fake_beets,
+                        lambda fake_beets=fake_beets, **_kwargs: fake_beets,
                     ), patch(
                         "lib.measurement.ffprobe_audio_codec_name",
                         return_value="aac",
@@ -1436,7 +1434,6 @@ class TestImportPreviewPath(unittest.TestCase):
 
             def probe(path: str):
                 calls.append(path)
-                return None
 
             wrong_id = enrich_current_v0_research_for_preview(
                 db,
@@ -1797,7 +1794,7 @@ class TestImportPreviewPath(unittest.TestCase):
                         ),
                     ), patch(
                         "lib.beets_db.BeetsDB",
-                        lambda **_kwargs: fake_beets,
+                        lambda fake_beets=fake_beets, **_kwargs: fake_beets,
                     ), patch(
                         "lib.import_preview.inspect_local_files",
                         return_value=LocalFileInspection(filetype="mp3"),
@@ -2374,7 +2371,11 @@ class TestImportPreviewPath(unittest.TestCase):
                     command=(), returncode=1, stdout="",
                     stderr="no sentinel", import_result=None)),
             ):
-                def run_import(*args: Any, **kwargs: Any) -> ImportOneRun:
+                def run_import(
+                    *args: Any,
+                    run_value: ImportOneRun | Exception = run_value,
+                    **kwargs: Any,
+                ) -> ImportOneRun:
                     if isinstance(run_value, Exception):
                         raise run_value
                     return run_value
@@ -2874,7 +2875,10 @@ class TestOwnedProcessingNormalization(unittest.TestCase):
             with open(track, "rb") as handle:
                 self.assertEqual(handle.read(), b"repaired")
             self.assertEqual(len(persisted_files), 1)
-            self.assertEqual(getattr(persisted_files[0], "size_bytes"), len(b"repaired"))
+            self.assertEqual(
+                getattr(persisted_files[0], "size_bytes"),  # noqa: B009 - callback payload is object-typed
+                len(b"repaired"),
+            )
         finally:
             shutil.rmtree(album, ignore_errors=True)
 

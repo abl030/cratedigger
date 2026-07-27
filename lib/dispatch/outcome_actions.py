@@ -9,7 +9,8 @@ evidence reject helper. ``finalize_request`` is the module-local DI seam
 from __future__ import annotations
 
 import logging
-from typing import Any, Sequence, TYPE_CHECKING
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any
 
 import msgspec
 
@@ -24,17 +25,27 @@ from lib.import_evidence import (
 # ``lib.dispatch.outcome_actions.finalize_request``.
 finalize_request = transitions.finalize_request
 
-from lib.quality import (DownloadInfo, QualityRankConfig, ValidationResult,
-                         dispatch_action, extract_usernames,
-                         is_comparable_lossless_source_probe,
-                         resolve_rejection_search_override)
-
-from lib.dispatch.types import (DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
-                                DispatchOutcome, ImportAttemptResult,
-                                PostCommitCleanup)
-from lib.dispatch.helpers import (_cleanup_staged_dir,
-                                  _populate_dl_info_from_import_result,
-                                  _should_cleanup_path, _v0_probe_log_fields)
+from lib.dispatch.helpers import (
+    _cleanup_staged_dir,
+    _populate_dl_info_from_import_result,
+    _should_cleanup_path,
+    _v0_probe_log_fields,
+)
+from lib.dispatch.types import (
+    DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
+    DispatchOutcome,
+    ImportAttemptResult,
+    PostCommitCleanup,
+)
+from lib.quality import (
+    DownloadInfo,
+    QualityRankConfig,
+    ValidationResult,
+    dispatch_action,
+    extract_usernames,
+    is_comparable_lossless_source_probe,
+    resolve_rejection_search_override,
+)
 from lib.terminal_outcomes import (
     PendingImportTerminalOutcome,
     PreviewTerminalOutcome,
@@ -52,7 +63,7 @@ logger = logging.getLogger("cratedigger")
 
 def _reject_import_from_evidence_decision(
     *,
-    db: "PipelineDB",
+    db: PipelineDB,
     request_id: int,
     dl_info: DownloadInfo,
     attempt_result: ImportAttemptResult,
@@ -114,7 +125,7 @@ def _reject_import_from_evidence_decision(
             current_override = (
                 request.get("search_filetype_override") if request else None
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             logger.debug(
                 "Failed to inspect search_filetype_override before rejection"
             )
@@ -175,9 +186,11 @@ def _reject_import_from_evidence_decision(
         else:
             for username in usernames:
                 db.add_denylist(request_id, username, reason)
-                if cooled_down_users is not None:
-                    if db.check_and_apply_cooldown(username):
-                        cooled_down_users.add(username)
+                if (
+                    cooled_down_users is not None
+                    and db.check_and_apply_cooldown(username)
+                ):
+                    cooled_down_users.add(username)
     cleanup_plan: PostCommitCleanup | None = None
     if action.cleanup and decision == "audio_corrupt" and not preserve_corrupt_source:
         # Corrupt audio is retained for audit in every caller mode. Force
@@ -227,7 +240,7 @@ def _reject_import_from_evidence_decision(
 
 
 def _do_mark_done(
-    db: "PipelineDB",
+    db: PipelineDB,
     request_id: int,
     dl_info: DownloadInfo,
     distance: float | None,
@@ -249,13 +262,13 @@ def _do_mark_done(
     Current library location is resolved from Beets and is never copied onto
     the request row.
     """
-    from lib.quality import SpectralMeasurement, is_verified_lossless
     from lib.pipeline_db import RequestSpectralStateUpdate, RequestV0ProbeStateUpdate
+    from lib.quality import SpectralMeasurement, is_verified_lossless
 
-    update_fields: dict[str, object] = dict(
-        beets_distance=distance,
-        beets_scenario=scenario,
-    )
+    update_fields: dict[str, object] = {
+        "beets_distance": distance,
+        "beets_scenario": scenario,
+    }
     verified_lossless = (
         bool(dl_info.verified_lossless_override)
         if dl_info.verified_lossless_override is not None
@@ -391,7 +404,7 @@ def _do_mark_done(
 
 
 def _finalize_request_and_log_rejection(
-    db: "PipelineDB",
+    db: PipelineDB,
     request_id: int | None,
     log_download_kwargs: dict[str, Any],
     *,
@@ -492,7 +505,7 @@ def _finalize_request_and_log_rejection(
 
 
 def _record_rejection_and_maybe_requeue(
-    db: "PipelineDB",
+    db: PipelineDB,
     request_id: int,
     dl_info: DownloadInfo,
     detail: str | None,
@@ -584,7 +597,7 @@ def _record_rejection_and_maybe_requeue(
 
 
 def _record_preview_measurement_failed(
-    db: "PipelineDB",
+    db: PipelineDB,
     *,
     request_id: int | None,
     import_job_id: int,
@@ -663,7 +676,7 @@ def _record_preview_measurement_failed(
 
 
 def _record_have_analysis_error(
-    db: "PipelineDB",
+    db: PipelineDB,
     *,
     request_id: int,
     dl_info: DownloadInfo,
@@ -733,9 +746,12 @@ def _record_have_analysis_error(
         requeue_to_wanted=requeue_to_wanted,
         record_validation_attempt=requeue_to_wanted,
     )
-    if dl_info.username and db.check_and_apply_cooldown(dl_info.username):
-        if cooled_down_users is not None:
-            cooled_down_users.add(dl_info.username)
+    if (
+        dl_info.username
+        and db.check_and_apply_cooldown(dl_info.username)
+        and cooled_down_users is not None
+    ):
+        cooled_down_users.add(dl_info.username)
     return download_log_id
 
 
