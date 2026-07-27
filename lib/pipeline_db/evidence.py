@@ -10,6 +10,7 @@ from lib.quality import (
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
     AudioValidationReport,
+    CodecFamily,
     VerifiedLosslessProof,
 )
 
@@ -580,6 +581,10 @@ class _EvidenceMixin(_PipelineDBBase):
         expected_snapshot_fingerprint: str,
         grade: str,
         bitrate_kbps: int | None,
+        cliff_hz: int | None = None,
+        codec_family: CodecFamily | None = None,
+        ultrasonic_deficit_db: float | None = None,
+        spectral_measurement_version: int | None = None,
     ) -> bool:
         """Persist a fresh measured installed-subject spectral on one exact snapshot.
 
@@ -590,6 +595,11 @@ class _EvidenceMixin(_PipelineDBBase):
         fill-only-if-NULL guard let a stale legacy grade survive a fresh scan.
         The lossless-lineage R19 CHECK still fires against the hardcoded
         ``installed`` subject, so a source-lineage row is never written here.
+
+        The four measured capture facts (issue #829 phase 5) are one atomic
+        fact with ``grade`` — every writer of ``spectral_grade`` carries them
+        together, so a fresh re-audit here never strands a stale capture
+        fact behind a fresh grade.
         """
         cur = self._execute(
             """
@@ -598,6 +608,10 @@ class _EvidenceMixin(_PipelineDBBase):
                 spectral_bitrate_kbps = %s,
                 spectral_subject = 'installed',
                 spectral_provenance = 'measured',
+                cliff_hz = %s,
+                codec_family = %s,
+                ultrasonic_deficit_db = %s,
+                spectral_measurement_version = %s,
                 updated_at = NOW()
             FROM album_requests AS request
             WHERE request.id = %s
@@ -609,6 +623,10 @@ class _EvidenceMixin(_PipelineDBBase):
             (
                 grade,
                 bitrate_kbps,
+                cliff_hz,
+                codec_family,
+                ultrasonic_deficit_db,
+                spectral_measurement_version,
                 int(request_id),
                 int(expected_evidence_id),
                 expected_snapshot_fingerprint,

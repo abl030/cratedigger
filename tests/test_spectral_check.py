@@ -522,6 +522,16 @@ class TestCodecFamilyFromExtension(unittest.TestCase):
     resolve them (see ``TestCodecFamilyAmbiguousContainersProbeTheRealCodec``
     below), so these fixtures never touch a real file and stick to the
     extensions that genuinely are unambiguous.
+
+    ``.aif``/``.aiff``/``.au``/``.alac``/``.ape`` are deliberately absent
+    too (round 3 review finding E): none of them is in
+    ``AUDIO_EXTENSIONS_DOTTED``, the file-enumeration filter
+    ``analyze_album`` applies before ever calling
+    ``codec_family_from_extension`` — production never reaches this
+    function with one of these extensions, so pinning them as "lossless"
+    here would assert unreachable behaviour. They fall through the shared
+    ``.get(ext, CODEC_FAMILY_OTHER)`` default like any other extension
+    outside the six-family vocabulary (see ``track.mid``/``track`` below).
     """
 
     CASES = [
@@ -531,14 +541,11 @@ class TestCodecFamilyFromExtension(unittest.TestCase):
         ("track.opus", "opus"),
         ("track.flac", "lossless"),
         ("track.wav", "lossless"),
-        ("track.aiff", "lossless"),
-        ("track.aif", "lossless"),
-        ("track.au", "lossless"),
-        ("track.alac", "lossless"),
-        ("track.ape", "lossless"),
         ("track.wma", "other"),
         ("track.mid", "other"),
         ("track", "other"),
+        ("track.aiff", "other"),
+        ("track.alac", "other"),
     ]
 
     def test_extension_maps_to_expected_family(self):
@@ -601,6 +608,20 @@ class TestCodecFamilyAmbiguousContainersProbeTheRealCodec(unittest.TestCase):
             capture_output=True, check=True,
         )
 
+        cls.flac_in_ogg = os.path.join(cls.tmpdir, "flac.ogg")
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=1000:duration=1",
+             "-c:a", "flac", cls.flac_in_ogg],
+            capture_output=True, check=True,
+        )
+
+        # round 3 review finding B: a genuinely unprobeable .m4a (ffprobe
+        # cannot identify a stream at all) must degrade to "other", never
+        # guess "aac" from the ambiguous extension.
+        cls.unprobeable_m4a = os.path.join(cls.tmpdir, "corrupt.m4a")
+        with open(cls.unprobeable_m4a, "wb") as fh:
+            fh.write(b"not a real container\x00\x01\x02")
+
     @classmethod
     def tearDownClass(cls):
         shutil.rmtree(cls.tmpdir, ignore_errors=True)
@@ -627,6 +648,27 @@ class TestCodecFamilyAmbiguousContainersProbeTheRealCodec(unittest.TestCase):
         from lib.spectral_check import codec_family_from_extension
         self.assertEqual(
             codec_family_from_extension(self.aac_in_m4a), "aac",
+        )
+
+    def test_flac_in_ogg_is_lossless(self):
+        """Ogg-FLAC is a real, if rare, container (round 3 review finding
+        B) — ``native_codec_format_label`` has no "flac" entry, so this
+        needs the same probed-codec special case ALAC-in-M4A already
+        gets."""
+        from lib.spectral_check import codec_family_from_extension
+        self.assertEqual(
+            codec_family_from_extension(self.flac_in_ogg), "lossless",
+        )
+
+    def test_unprobeable_m4a_degrades_to_other_not_aac(self):
+        """Round 3 review finding B: the old code passed the ambiguous
+        extension as a fallback to ``native_codec_format_label``, so a
+        genuinely unprobeable .m4a (ffprobe returns no codec at all — could
+        be a truncated/corrupt ALAC file) was silently stamped "aac". This
+        is exactly the codec-blind guess class issue #829 exists to fix."""
+        from lib.spectral_check import codec_family_from_extension
+        self.assertEqual(
+            codec_family_from_extension(self.unprobeable_m4a), "other",
         )
 
 

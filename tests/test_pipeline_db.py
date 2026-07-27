@@ -5014,6 +5014,76 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         self.assertEqual(loaded.measurement.spectral_subject, "installed")
         self.assertEqual(loaded.measurement.spectral_provenance, "measured")
 
+    def test_current_spectral_write_carries_capture_facts_real_pg(self):
+        """Issue #829 Phase 5 finding A (round 3 review): every writer of
+        ``spectral_grade`` must carry the four measured capture facts as one
+        atomic fact — this writer bypassed that contract entirely. Real-PG
+        round-trip (Rule A): the stored row, re-read from the actual
+        ``album_quality_evidence`` columns, must carry the fresh capture
+        facts alongside the fresh grade, and a later re-audit that changes
+        the grade must also replace the capture facts (not strand the old
+        ones behind a new grade)."""
+        evidence = self._seed(
+            mb_release_id="evidence-capture-facts",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=320,
+                avg_bitrate_kbps=320,
+                median_bitrate_kbps=320,
+                format="MP3",
+                spectral_grade=None,
+                spectral_bitrate_kbps=None,
+            ),
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.assertTrue(self.db.set_request_current_evidence(
+            self.req_id, stored.id))
+
+        self.assertTrue(self.db.persist_current_spectral_measurement(
+            request_id=self.req_id,
+            expected_evidence_id=stored.id,
+            expected_snapshot_fingerprint=stored.snapshot_fingerprint,
+            grade="genuine",
+            bitrate_kbps=96,
+            cliff_hz=17500,
+            codec_family="mp3",
+            ultrasonic_deficit_db=12.5,
+            spectral_measurement_version=2,
+        ))
+        loaded = self.db.load_album_quality_evidence_by_id(stored.id)
+        assert loaded is not None
+        self.assertEqual(loaded.measurement.spectral_grade, "genuine")
+        self.assertEqual(loaded.measurement.cliff_hz, 17500)
+        self.assertEqual(loaded.measurement.codec_family, "mp3")
+        self.assertEqual(loaded.measurement.ultrasonic_deficit_db, 12.5)
+        self.assertEqual(loaded.measurement.spectral_measurement_version, 2)
+
+        # A later fresh re-audit with a DIFFERENT grade replaces the capture
+        # facts too — a stale cliff_hz/codec_family must never survive behind
+        # a fresh grade.
+        self.assertTrue(self.db.persist_current_spectral_measurement(
+            request_id=self.req_id,
+            expected_evidence_id=stored.id,
+            expected_snapshot_fingerprint=stored.snapshot_fingerprint,
+            grade="likely_transcode",
+            bitrate_kbps=160,
+            cliff_hz=13000,
+            codec_family="aac",
+            ultrasonic_deficit_db=30.0,
+            spectral_measurement_version=2,
+        ))
+        reloaded = self.db.load_album_quality_evidence_by_id(stored.id)
+        assert reloaded is not None
+        self.assertEqual(reloaded.measurement.spectral_grade, "likely_transcode")
+        self.assertEqual(reloaded.measurement.cliff_hz, 13000)
+        self.assertEqual(reloaded.measurement.codec_family, "aac")
+        self.assertEqual(reloaded.measurement.ultrasonic_deficit_db, 30.0)
+        self.assertEqual(reloaded.measurement.spectral_measurement_version, 2)
+
     def test_current_spectral_write_rejects_lossless_lineage(self):
         from lib.quality import AlbumQualityV0Metric
 

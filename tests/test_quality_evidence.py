@@ -68,6 +68,24 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
                 strict=True,
             )
 
+    def test_out_of_vocabulary_codec_family_is_rejected_at_strict_wire_boundary(
+        self,
+    ):
+        """issue #829 Phase 5 round 3 review finding G: ``CodecFamily`` is a
+        wire-boundary ``Literal`` over exactly six values
+        (mp3/aac/opus/vorbis/lossless/other, per
+        ``lib.quality.evidence_types.CodecFamily``). ``"wma"`` is a real
+        format this pipeline handles but deliberately NOT one of the six
+        measured families (``codec_family_from_extension`` maps it to
+        "other") — feeding it at the strict msgspec boundary must raise,
+        per ``.claude/rules/code-quality.md`` § Wire-boundary types."""
+        with self.assertRaises(msgspec.ValidationError):
+            msgspec.convert(
+                {"codec_family": "wma"},
+                type=AudioQualityMeasurement,
+                strict=True,
+            )
+
     def test_installed_carried_facts_are_invalid_v4_evidence(self):
         evidence = make_album_quality_evidence(
             measurement=AudioQualityMeasurement(

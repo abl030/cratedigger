@@ -82,17 +82,18 @@ SPECTRAL_MEASUREMENT_VERSION = 2
 # ``.ogg`` (Vorbis or Opus) and ``.m4a`` (AAC or ALAC) — both genuinely
 # ambiguous by extension alone, so they are deliberately absent from this
 # dict and always probed instead (see ``codec_family_from_extension``).
+#
+# Scoped to exactly ``AUDIO_EXTENSIONS_DOTTED`` — the only extensions
+# ``analyze_album`` ever passes to ``codec_family_from_extension`` (see its
+# file-enumeration filter below). ``.aif``/``.aiff``/``.au``/``.alac``/
+# ``.ape`` are not in that set, so entries for them here would be
+# unreachable dead code (round 3 review finding E).
 _CODEC_FAMILY_BY_EXT: dict[str, CodecFamily] = {
     ".mp3": CODEC_FAMILY_MP3,
     ".aac": CODEC_FAMILY_AAC,
     ".opus": CODEC_FAMILY_OPUS,
     ".flac": CODEC_FAMILY_LOSSLESS,
     ".wav": CODEC_FAMILY_LOSSLESS,
-    ".aif": CODEC_FAMILY_LOSSLESS,
-    ".aiff": CODEC_FAMILY_LOSSLESS,
-    ".au": CODEC_FAMILY_LOSSLESS,
-    ".alac": CODEC_FAMILY_LOSSLESS,
-    ".ape": CODEC_FAMILY_LOSSLESS,
 }
 
 # The two containers where extension cannot determine the codec family.
@@ -137,10 +138,18 @@ def codec_family_from_extension(filepath: str) -> CodecFamily:
     from lib.measurement import ffprobe_audio_codec_name
     from lib.quality.compare import native_codec_format_label
 
-    probed = ffprobe_audio_codec_name(filepath)
-    if probed == "alac":
+    probed = ffprobe_audio_codec_name(_safe_path(filepath))
+    if probed in ("alac", "flac"):
         return CODEC_FAMILY_LOSSLESS
-    lossy_label = native_codec_format_label(probed, ext.lstrip("."))
+    # No extension fallback: when ffprobe cannot identify the stream,
+    # ``probed`` is None and this must degrade honestly to "other" rather
+    # than guessing from the (ambiguous, by construction) container
+    # extension — ``native_codec_format_label(None, "m4a")`` falls through
+    # to its unconditional ext->label table and returns "aac" for EVERY
+    # unprobeable .m4a, including an ALAC file ffprobe merely failed to
+    # read. That is exactly the codec-blind guess class issue #829 exists
+    # to fix (round 3 review finding B).
+    lossy_label = native_codec_format_label(probed)
     if lossy_label is None:
         return CODEC_FAMILY_OTHER
     return _LOSSY_LABEL_TO_CODEC_FAMILY.get(

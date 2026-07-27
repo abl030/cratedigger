@@ -33,7 +33,9 @@ proving it actually trips on a planted violation.
 
 import math
 import os
+import shutil
 import sys
+import tempfile
 import unittest
 import uuid
 from collections.abc import Callable
@@ -47,15 +49,21 @@ from hypothesis import given
 from hypothesis import strategies as st
 import msgspec
 
+from lib.beets_db import AlbumInfo
 from lib.quality import (
     AlbumQualityEvidence,
     AudioQualityMeasurement,
     CodecFamily,
+    EvidenceProvenance,
     full_pipeline_decision_from_evidence,
+)
+from lib.quality_evidence import (
+    backfill_current_evidence_from_album_info,
+    snapshot_audio_files,
 )
 from lib.spectral_check import EXTENSION_SLICE_FREQS, SLICE_FREQS, TrackResult
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_album_quality_evidence
+from tests.helpers import make_album_quality_evidence, make_request_row
 from tests.test_quality_generated import wild_ready_candidate_evidence
 
 
@@ -517,6 +525,223 @@ class TestExtensionSlicesNeverFeedCliffDetectionProperty(unittest.TestCase):
         self.assertTrue(
             extension_dbs_do_not_change_in_window_outcome(extension_dbs)
         )
+
+
+# ---------------------------------------------------------------------------
+# Invariant 4: the four capture fields are one atomic fact WITH
+# spectral_grade at the widest boundary this PR touches — the REAL
+# ``backfill_current_evidence_from_album_info`` writer composed with the
+# REAL upsert guard over a REAL ``FakePipelineDB`` (round 3 review finding
+# C: the BLOCKING-1 regression class had no patrolling generated property,
+# only the deterministic pins in
+# tests/test_quality_evidence.py::test_v3_touch_rebuild_carries_same_fingerprint_source_facts
+# and ::test_same_snapshot_repair_preserves_installed_facts).
+# ---------------------------------------------------------------------------
+
+_SPECTRAL_GRADES = ("genuine", "marginal", "suspect", "likely_transcode", "error")
+
+# The two branches of backfill_current_evidence_from_album_info that carry
+# a stored spectral grade forward (lib/quality_evidence.py): a "source"
+# subject always carries (any snapshot), and an "installed" subject
+# preserves only on an unchanged (same-address) snapshot. installed+carried
+# is not a legal stored shape (AudioQualityMeasurement.new_row_validation_errors).
+_CARRY_BRANCHES: tuple[tuple[str, EvidenceProvenance], ...] = (
+    ("source", "carried"),
+    ("installed", "measured"),
+)
+
+
+@st.composite
+def _atomic_backfill_worlds(draw: st.DrawFn):
+    subject, expected_provenance = draw(st.sampled_from(_CARRY_BRANCHES))
+    grade = draw(st.sampled_from(_SPECTRAL_GRADES))
+    bitrate = draw(st.one_of(st.none(), st.integers(min_value=32, max_value=1000)))
+    capture = draw(_capture_field_worlds())
+    return subject, expected_provenance, grade, bitrate, capture
+
+
+def spectral_and_capture_facts_move_together(
+    before: AudioQualityMeasurement,
+    after: AudioQualityMeasurement,
+    *,
+    expected_provenance: EvidenceProvenance,
+) -> bool:
+    """Invariant checker (round 3 review finding C): when a real backfill
+    branch carries/preserves ``before``'s spectral_grade into ``after``,
+    the four issue #829 Phase 5 capture facts must ALSO match ``before``'s
+    exact values, with ``after.spectral_provenance`` exactly
+    ``expected_provenance`` — the eight columns move as one atomic fact,
+    never a stale/partial subset of it.
+    """
+    return (
+        after.spectral_grade == before.spectral_grade
+        and after.spectral_bitrate_kbps == before.spectral_bitrate_kbps
+        and after.spectral_provenance == expected_provenance
+        and after.cliff_hz == before.cliff_hz
+        and after.codec_family == before.codec_family
+        and _floats_equal(after.ultrasonic_deficit_db, before.ultrasonic_deficit_db)
+        and after.spectral_measurement_version == before.spectral_measurement_version
+    )
+
+
+class TestSpectralAndCaptureFactsMoveTogetherCheckerSelfTest(unittest.TestCase):
+    """Known-bad self-test: the checker must trip on a stale/partial
+    capture-field subset, and pass on an exact atomic transfer."""
+
+    def test_checker_passes_on_exact_atomic_transfer(self):
+        before = AudioQualityMeasurement(
+            spectral_grade="genuine", spectral_bitrate_kbps=192,
+            cliff_hz=16500, codec_family="mp3",
+            ultrasonic_deficit_db=42.0, spectral_measurement_version=2,
+        )
+        after = AudioQualityMeasurement(
+            spectral_grade="genuine", spectral_bitrate_kbps=192,
+            spectral_provenance="carried",
+            cliff_hz=16500, codec_family="mp3",
+            ultrasonic_deficit_db=42.0, spectral_measurement_version=2,
+        )
+        self.assertTrue(
+            spectral_and_capture_facts_move_together(
+                before, after, expected_provenance="carried",
+            )
+        )
+
+    def test_checker_trips_when_cliff_hz_is_stranded_behind_the_grade(self):
+        """This is the exact BLOCKING-1 regression shape: grade/bitrate
+        carry correctly but a capture field is left behind (None) instead
+        of moving with them."""
+        before = AudioQualityMeasurement(
+            spectral_grade="genuine", spectral_bitrate_kbps=192,
+            cliff_hz=16500, codec_family="mp3",
+            ultrasonic_deficit_db=42.0, spectral_measurement_version=2,
+        )
+        after = AudioQualityMeasurement(
+            spectral_grade="genuine", spectral_bitrate_kbps=192,
+            spectral_provenance="carried",
+            cliff_hz=None, codec_family="mp3",
+            ultrasonic_deficit_db=42.0, spectral_measurement_version=2,
+        )
+        self.assertFalse(
+            spectral_and_capture_facts_move_together(
+                before, after, expected_provenance="carried",
+            )
+        )
+
+    def test_checker_trips_on_wrong_provenance(self):
+        before = AudioQualityMeasurement(
+            spectral_grade="genuine", cliff_hz=16500, codec_family="mp3",
+        )
+        after = AudioQualityMeasurement(
+            spectral_grade="genuine", spectral_provenance="measured",
+            cliff_hz=16500, codec_family="mp3",
+        )
+        self.assertFalse(
+            spectral_and_capture_facts_move_together(
+                before, after, expected_provenance="carried",
+            )
+        )
+
+
+class TestBackfillCurrentEvidenceCaptureFactsAreAtomic(unittest.TestCase):
+    """Pin + generated property: drives the REAL
+    ``backfill_current_evidence_from_album_info`` against a REAL
+    ``FakePipelineDB`` (composition, not a mocked writer — code-quality.md
+    "Never mock our own writers in a composed test") over generated
+    spectral-grade/bitrate/capture-field worlds, for both surviving carry
+    branches (source always; installed only on an unchanged snapshot).
+    Complements the deterministic pins in tests/test_quality_evidence.py."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmpdir = tempfile.mkdtemp(prefix="backfill_atomic_capture_")
+        with open(os.path.join(cls.tmpdir, "01.mp3"), "wb") as fh:
+            fh.write(b"backfill-atomic-capture-track-1")
+        with open(os.path.join(cls.tmpdir, "02.mp3"), "wb") as fh:
+            fh.write(b"backfill-atomic-capture-track-2")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def _run_backfill(self, world) -> bool:
+        subject, expected_provenance, grade, bitrate, capture = world
+        cliff_hz, codec_family, ultrasonic_deficit_db, version = capture
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, verified_lossless=False))
+        existing = make_album_quality_evidence(
+            mb_release_id="mb-atomic-capture",
+            source_path=self.tmpdir,
+            files=snapshot_audio_files(self.tmpdir),
+            lineage_version=3,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=190,
+                avg_bitrate_kbps=190,
+                median_bitrate_kbps=190,
+                format="MP3",
+                spectral_grade=grade,
+                spectral_bitrate_kbps=bitrate,
+                spectral_subject=subject,
+                spectral_provenance="measured",
+                cliff_hz=cliff_hz,
+                codec_family=codec_family,
+                ultrasonic_deficit_db=ultrasonic_deficit_db,
+                spectral_measurement_version=version,
+            ),
+        )
+        db.upsert_album_quality_evidence(existing)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=existing.mb_release_id,
+            snapshot_fingerprint=existing.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_request_current_evidence(42, persisted.id)
+
+        result = backfill_current_evidence_from_album_info(
+            db,
+            request_id=42,
+            mb_release_id=existing.mb_release_id,
+            album_info=AlbumInfo(
+                album_id=1,
+                track_count=2,
+                min_bitrate_kbps=190,
+                avg_bitrate_kbps=190,
+                median_bitrate_kbps=190,
+                is_cbr=False,
+                album_path=self.tmpdir,
+                format="MP3",
+            ),
+        )
+        assert result.evidence is not None
+        # Re-query the STORED row (the real upsert guard already ran) —
+        # not just the in-Python EvidenceBuildResult, per Rule A.
+        reloaded = db.find_album_quality_evidence(
+            mb_release_id=result.evidence.mb_release_id,
+            snapshot_fingerprint=result.evidence.snapshot_fingerprint,
+        )
+        assert reloaded is not None
+        return spectral_and_capture_facts_move_together(
+            existing.measurement, reloaded.measurement,
+            expected_provenance=expected_provenance,
+        )
+
+    def test_pin_source_subject_carries_atomically(self):
+        world = (
+            "source", "carried", "genuine", 192,
+            (16500, "mp3", 42.0, 2),
+        )
+        self.assertTrue(self._run_backfill(world))
+
+    def test_pin_installed_subject_preserves_atomically_on_same_snapshot(self):
+        world = (
+            "installed", "measured", "likely_transcode", 128,
+            (14000, "opus", 51.5, 2),
+        )
+        self.assertTrue(self._run_backfill(world))
+
+    @given(world=_atomic_backfill_worlds())
+    def test_capture_facts_move_atomically_across_generated_worlds(self, world):
+        self.assertTrue(self._run_backfill(world))
 
 
 if __name__ == "__main__":

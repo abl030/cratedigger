@@ -408,16 +408,26 @@ class TestFakePipelineDB(unittest.TestCase):
             expected_snapshot_fingerprint=persisted.snapshot_fingerprint,
             grade="genuine",
             bitrate_kbps=96,
+            cliff_hz=17500,
+            codec_family="mp3",
+            ultrasonic_deficit_db=12.5,
+            spectral_measurement_version=2,
         )
         # Issue #815 fresh-audit-wins: a disagreeing fresh measured audit of
         # the SAME snapshot overwrites (mirrors the production SQL, which
-        # dropped the fill-only-if-NULL guard).
+        # dropped the fill-only-if-NULL guard). Issue #829 Phase 5 finding A
+        # (round 3 review): the four capture facts travel with the grade as
+        # one atomic fact through this writer too.
         overwrite = db.persist_current_spectral_measurement(
             request_id=42,
             expected_evidence_id=persisted.id,
             expected_snapshot_fingerprint=persisted.snapshot_fingerprint,
             grade="likely_transcode",
             bitrate_kbps=160,
+            cliff_hz=13000,
+            codec_family="aac",
+            ultrasonic_deficit_db=30.0,
+            spectral_measurement_version=2,
         )
 
         self.assertFalse(wrong_fingerprint)
@@ -427,6 +437,10 @@ class TestFakePipelineDB(unittest.TestCase):
         assert stored is not None
         self.assertEqual(stored.measurement.spectral_grade, "likely_transcode")
         self.assertEqual(stored.measurement.spectral_bitrate_kbps, 160)
+        self.assertEqual(stored.measurement.cliff_hz, 13000)
+        self.assertEqual(stored.measurement.codec_family, "aac")
+        self.assertEqual(stored.measurement.ultrasonic_deficit_db, 30.0)
+        self.assertEqual(stored.measurement.spectral_measurement_version, 2)
         self.assertEqual(stored.measurement.spectral_subject, "installed")
         self.assertEqual(stored.measurement.spectral_provenance, "measured")
 
