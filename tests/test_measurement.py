@@ -12,11 +12,11 @@ import configparser
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import patch
 
 from lib.measurement import _check_bad_audio_hashes, _iter_audio_files
+from lib.spectral_check import AlbumResult, TrackResult
 from tests.fakes import FakePipelineDB
 
 
@@ -118,11 +118,18 @@ class TestAttemptSpectralAudit(unittest.TestCase):
             def analyze(path: str, trim_seconds: int = 30):
                 del trim_seconds
                 calls.append(path)
-                return SimpleNamespace(
+                return AlbumResult(
                     grade="suspect" if path == existing else "genuine",
                     estimated_bitrate_kbps=(128 if path == existing else None),
                     suspect_pct=(100.0 if path == existing else 0.0),
                     tracks=[],
+                    # issue #829 Phase 5 PR1 review round 2, should-fix 12:
+                    # the HAVE-side capture must be carried through into
+                    # measured.existing_spectral, not measured and discarded.
+                    cliff_hz=(16000 if path == existing else None),
+                    codec_family=("mp3" if path == existing else None),
+                    ultrasonic_deficit_db=(50.0 if path == existing else None),
+                    spectral_measurement_version=(2 if path == existing else None),
                 )
 
             with patch("lib.beets_db.BeetsDB", return_value=beets), \
@@ -145,6 +152,11 @@ class TestAttemptSpectralAudit(unittest.TestCase):
         self.assertTrue(measured.spectral_audit.existing.attempted)
         self.assertEqual(measured.spectral_audit.existing.grade, "suspect")
         self.assertEqual(measured.spectral_audit.existing.bitrate_kbps, 128)
+        assert measured.existing_spectral is not None
+        self.assertEqual(measured.existing_spectral.cliff_hz, 16000)
+        self.assertEqual(measured.existing_spectral.codec_family, "mp3")
+        self.assertEqual(measured.existing_spectral.ultrasonic_deficit_db, 50.0)
+        self.assertEqual(measured.existing_spectral.spectral_measurement_version, 2)
 
     def test_lossless_converted_have_preserves_source_without_derivative_scan(self):
         """FLAC-derived HAVE keeps source evidence and skips installed Opus."""
@@ -179,7 +191,7 @@ class TestAttemptSpectralAudit(unittest.TestCase):
             def analyze(path: str, trim_seconds: int = 30):
                 del trim_seconds
                 calls.append(path)
-                return SimpleNamespace(
+                return AlbumResult(
                     grade="genuine",
                     estimated_bitrate_kbps=None,
                     suspect_pct=0.0,
@@ -209,7 +221,7 @@ class TestAttemptSpectralAudit(unittest.TestCase):
         def analyze(path: str, trim_seconds: int = 30):
             if path == "/candidate":
                 raise RuntimeError("candidate decode failed")
-            return SimpleNamespace(
+            return AlbumResult(
                 grade="suspect",
                 estimated_bitrate_kbps=128,
                 suspect_pct=100.0,
@@ -226,7 +238,7 @@ class TestAttemptSpectralAudit(unittest.TestCase):
 
     def test_normal_harness_collector_only_analyzes_candidate(self):
         from lib.measurement import collect_attempt_spectral_audit
-        result = SimpleNamespace(
+        result = AlbumResult(
             grade="genuine", estimated_bitrate_kbps=None,
             suspect_pct=0.0, tracks=[],
         )
@@ -247,20 +259,32 @@ class TestAttemptSpectralAudit(unittest.TestCase):
         from lib.config import CratediggerConfig
         from lib.measurement import analyze_spectral_audit_path, measure_preimport_state
 
-        result = SimpleNamespace(
+        # hf_deficit_db on the second track is deliberately the wrong type
+        # (str, not float) to exercise round()'s TypeError below. Built as
+        # a real TrackResult (issue #829 Phase 5 PR1 review round 2,
+        # should-fix 14 — a hand-rolled SimpleNamespace stand-in silently
+        # AttributeErrors on the next field this repo's real dataclass
+        # gains) with the one bad field patched in via plain ``setattr``
+        # afterwards, which — unlike a typed keyword argument — needs no
+        # typing-escape-hatch comment (this file's typing ratchet baseline
+        # is frozen, no new hatches allowed).
+        malformed_track = TrackResult(
+            grade="suspect", cliff_detected=True, cliff_freq_hz=17000,
+            estimated_bitrate_kbps=128, error=None,
+        )
+        setattr(  # noqa: B010 - deliberately wrong type, see comment above
+            malformed_track, "hf_deficit_db", "malformed",
+        )
+        result = AlbumResult(
             grade="suspect", estimated_bitrate_kbps=160,
             suspect_pct=75.0,
             tracks=[
-                SimpleNamespace(
+                TrackResult(
                     grade="genuine", hf_deficit_db=20.0,
                     cliff_detected=False, cliff_freq_hz=None,
                     estimated_bitrate_kbps=None, error=None,
                 ),
-                SimpleNamespace(
-                    grade="suspect", hf_deficit_db="malformed",
-                    cliff_detected=True, cliff_freq_hz=17000,
-                    estimated_bitrate_kbps=128, error=None,
-                ),
+                malformed_track,
             ],
         )
         with patch("lib.measurement.spectral_analyze", return_value=result):
@@ -305,7 +329,7 @@ class TestAttemptSpectralAudit(unittest.TestCase):
                 album_id=1, track_count=1, min_bitrate_kbps=320,
                 is_cbr=True, album_path=existing, format="MP3",
             ))
-            existing_result = SimpleNamespace(
+            existing_result = AlbumResult(
                 grade="suspect", estimated_bitrate_kbps=128,
                 suspect_pct=100.0, tracks=[],
             )
@@ -350,7 +374,7 @@ class TestAttemptSpectralAudit(unittest.TestCase):
             )
 
         before = decide()
-        result = SimpleNamespace(
+        result = AlbumResult(
             grade="suspect", estimated_bitrate_kbps=128,
             suspect_pct=100.0, tracks=[],
         )

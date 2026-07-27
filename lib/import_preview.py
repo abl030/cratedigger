@@ -71,6 +71,7 @@ from lib.quality import (
     AudioQualityMeasurement,
     AudioValidationMeasurementError,
     AudioValidationReport,
+    CodecFamily,
     ImportResult,
     MeasurementFailure,
     MeasurementFailureReason,
@@ -541,6 +542,10 @@ class ImportPreviewDB(QualityEvidenceDB, Protocol):
         expected_snapshot_fingerprint: str,
         grade: str,
         bitrate_kbps: int | None,
+        cliff_hz: int | None = None,
+        codec_family: CodecFamily | None = None,
+        ultrasonic_deficit_db: float | None = None,
+        spectral_measurement_version: int | None = None,
     ) -> bool: ...
 
     def claim_current_v0_research_attempt(
@@ -677,6 +682,10 @@ def persist_exact_current_spectral_from_attempt(
             expected_snapshot_fingerprint=current_evidence.snapshot_fingerprint,
             grade=measured_existing.grade,
             bitrate_kbps=measured_existing.bitrate_kbps,
+            cliff_hz=measured_existing.cliff_hz,
+            codec_family=measured_existing.codec_family,
+            ultrasonic_deficit_db=measured_existing.ultrasonic_deficit_db,
+            spectral_measurement_version=measured_existing.spectral_measurement_version,
         )
         loaded = db.load_album_quality_evidence_by_id(current_evidence.id)
         linked_id = db.get_request_current_evidence_id(request_id)

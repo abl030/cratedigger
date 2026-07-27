@@ -52,6 +52,7 @@ from lib.measurement import (
     measure_preimport_state,
 )
 from lib.quality import SpectralAnalysisDetail, SpectralMeasurement
+from lib.spectral_check import AlbumResult, TrackResult
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 from tests.test_integration_slices import _mock_beets_db
@@ -84,10 +85,13 @@ def _have_state_is_never_candidate(
 
 
 def _analyze_result(grade: str, bitrate: int | None, suspect_pct: float = 0.0,
-                    cliff_count: int = 0):
-    """Build a SimpleNamespace mimicking spectral_check.analyze_album's return."""
-    tracks = [SimpleNamespace(cliff_detected=True) for _ in range(cliff_count)]
-    return SimpleNamespace(
+                    cliff_count: int = 0) -> AlbumResult:
+    """Build a real AlbumResult mimicking spectral_check.analyze_album's return."""
+    tracks = [
+        TrackResult(grade="suspect", cliff_detected=True)
+        for _ in range(cliff_count)
+    ]
+    return AlbumResult(
         grade=grade,
         estimated_bitrate_kbps=bitrate,
         suspect_pct=suspect_pct,
@@ -379,7 +383,7 @@ class TestInspectLocalFilesRecursive(unittest.TestCase):
             with open(os.path.join(cd1, "01.mp3"), "wb") as f:
                 f.write(b"fake")
             with patch("lib.spectral_check.analyze_track") as mock_track:
-                mock_track.return_value = SimpleNamespace(
+                mock_track.return_value = TrackResult(
                     grade="suspect", error=None,
                     estimated_bitrate_kbps=128,
                     cliff_detected=True, cliff_freq_hz=12000,
@@ -734,7 +738,7 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
             with patch("lib.measurement.inspect_local_files",
                        return_value=inspected), \
                  patch("lib.measurement.spectral_analyze") as mock_spectral:
-                mock_spectral.return_value = SimpleNamespace(
+                mock_spectral.return_value = AlbumResult(
                     grade="genuine", estimated_bitrate_kbps=None,
                     suspect_pct=0.0, tracks=[])
                 measure_preimport_state(
@@ -788,11 +792,11 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
             with patch("lib.measurement.inspect_local_files",
                        return_value=inspected), \
                  patch("lib.measurement.spectral_analyze") as mock_spectral:
-                mock_spectral.return_value = SimpleNamespace(
+                mock_spectral.return_value = AlbumResult(
                     grade="likely_transcode",
                     estimated_bitrate_kbps=96,
                     suspect_pct=80.0,
-                    tracks=[SimpleNamespace(cliff_detected=True)
+                    tracks=[TrackResult(grade="suspect", cliff_detected=True)
                             for _ in range(5)])
                 measurement = measure_preimport_state(
                     path=tmpdir,
@@ -896,7 +900,7 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
             with patch("lib.measurement.inspect_local_files",
                        return_value=inspected), \
                  patch("lib.measurement.spectral_analyze") as mock_spectral:
-                mock_spectral.return_value = SimpleNamespace(
+                mock_spectral.return_value = AlbumResult(
                     grade="genuine", estimated_bitrate_kbps=None,
                     suspect_pct=0.0, tracks=[])
                 measure_preimport_state(
@@ -938,7 +942,7 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
                    return_value=LocalFileInspection(
                        filetype="mp3", is_vbr=None)), \
              patch("lib.measurement.spectral_analyze") as mock_spectral:
-            mock_spectral.return_value = SimpleNamespace(
+            mock_spectral.return_value = AlbumResult(
                 grade="genuine", estimated_bitrate_kbps=None,
                 suspect_pct=0.0, tracks=[])
             measure_preimport_state(

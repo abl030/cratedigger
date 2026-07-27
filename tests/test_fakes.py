@@ -152,6 +152,58 @@ class TestFakePipelineDB(unittest.TestCase):
             ["a.mp3", "b.mp3"],
         )
 
+    def test_album_quality_evidence_stale_writer_preserves_spectral_pair(self):
+        """issue #829 Phase 5 PR1 review round 2, should-fix 7: this guard
+        (upsert_album_quality_evidence's spectral-preserve CASE) had no
+        self-test at all. A stale writer with no grade must preserve the
+        stored spectral_grade AND the four #829 capture fields — mirrors
+        the real SQL's CASE guard in lib/pipeline_db/evidence.py."""
+        from lib.quality import AudioQualityMeasurement
+
+        db = FakePipelineDB()
+        evidence = make_album_quality_evidence(
+            mb_release_id="mb-stale-writer-preserve",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=192,
+                format="MP3",
+                spectral_grade="genuine",
+                spectral_subject="source",
+                spectral_provenance="measured",
+                cliff_hz=16500,
+                codec_family="mp3",
+                ultrasonic_deficit_db=44.0,
+                spectral_measurement_version=2,
+            ),
+        )
+        db.upsert_album_quality_evidence(evidence)
+
+        stale_writer = msgspec.structs.replace(
+            evidence,
+            measurement=msgspec.structs.replace(
+                evidence.measurement,
+                spectral_grade=None,
+                spectral_bitrate_kbps=None,
+                spectral_subject=None,
+                spectral_provenance=None,
+                cliff_hz=None,
+                codec_family=None,
+                ultrasonic_deficit_db=None,
+                spectral_measurement_version=None,
+            ),
+        )
+        db.upsert_album_quality_evidence(stale_writer)
+
+        loaded = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert loaded is not None
+        self.assertEqual(loaded.measurement.spectral_grade, "genuine")
+        self.assertEqual(loaded.measurement.cliff_hz, 16500)
+        self.assertEqual(loaded.measurement.codec_family, "mp3")
+        self.assertEqual(loaded.measurement.ultrasonic_deficit_db, 44.0)
+        self.assertEqual(loaded.measurement.spectral_measurement_version, 2)
+
     def test_album_quality_evidence_validates_snapshot(self):
         from lib.quality import AlbumQualityEvidenceFile
 
@@ -356,16 +408,26 @@ class TestFakePipelineDB(unittest.TestCase):
             expected_snapshot_fingerprint=persisted.snapshot_fingerprint,
             grade="genuine",
             bitrate_kbps=96,
+            cliff_hz=17500,
+            codec_family="mp3",
+            ultrasonic_deficit_db=12.5,
+            spectral_measurement_version=2,
         )
         # Issue #815 fresh-audit-wins: a disagreeing fresh measured audit of
         # the SAME snapshot overwrites (mirrors the production SQL, which
-        # dropped the fill-only-if-NULL guard).
+        # dropped the fill-only-if-NULL guard). Issue #829 Phase 5 finding A
+        # (round 3 review): the four capture facts travel with the grade as
+        # one atomic fact through this writer too.
         overwrite = db.persist_current_spectral_measurement(
             request_id=42,
             expected_evidence_id=persisted.id,
             expected_snapshot_fingerprint=persisted.snapshot_fingerprint,
             grade="likely_transcode",
             bitrate_kbps=160,
+            cliff_hz=13000,
+            codec_family="aac",
+            ultrasonic_deficit_db=30.0,
+            spectral_measurement_version=2,
         )
 
         self.assertFalse(wrong_fingerprint)
@@ -375,6 +437,10 @@ class TestFakePipelineDB(unittest.TestCase):
         assert stored is not None
         self.assertEqual(stored.measurement.spectral_grade, "likely_transcode")
         self.assertEqual(stored.measurement.spectral_bitrate_kbps, 160)
+        self.assertEqual(stored.measurement.cliff_hz, 13000)
+        self.assertEqual(stored.measurement.codec_family, "aac")
+        self.assertEqual(stored.measurement.ultrasonic_deficit_db, 30.0)
+        self.assertEqual(stored.measurement.spectral_measurement_version, 2)
         self.assertEqual(stored.measurement.spectral_subject, "installed")
         self.assertEqual(stored.measurement.spectral_provenance, "measured")
 
