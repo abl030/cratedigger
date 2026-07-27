@@ -325,50 +325,51 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
                 "176kbps is not better than existing 240kbps; searching continues",
             )
 
-    @given(
-        reason=st.sampled_from((
+    def test_triage_copy_uses_persisted_reason_not_stage_name(self) -> None:
+        reasons = (
             "downgrade",
             "suspect_lossless_downgrade",
             "lossless_source_locked",
-        )),
-        stage=st.sampled_from((
+        )
+        stages = (
             "stage0_spectral_gate:import",
             "stage1_spectral:skipped_vbr_high_avg",
             "stage1_spectral:import",
-        )),
-    )
-    @example(
-        reason="suspect_lossless_downgrade",
-        stage="stage1_spectral:skipped_vbr_high_avg",
-    )
-    def test_triage_copy_uses_persisted_reason_not_stage_name(
-        self,
-        reason: str,
-        stage: str,
-    ) -> None:
-        result = classify_log_entry(_entry(
-            outcome="rejected",
-            beets_scenario="high_distance",
-            validation_result={
-                "wrong_match_triage": {
-                    "action": "deleted_reject",
-                    "outcome": "deleted",
-                    "reason": reason,
-                    "preview_verdict": "confident_reject",
-                    "preview_decision": reason,
-                    "stage_chain": [stage, f"stage2_import:{reason}"],
-                },
-            },
-        ))
-        self.assertEqual(result.badge, "Triaged · download deleted")
-        assert_triaged_rejection_style(
-            "deleted_reject",
-            result.badge,
-            result.badge_class,
-            result.border_color,
         )
-        assert_triage_summary_uses_persisted_reject(
-            result.wrong_match_triage_summary or "", reason)
+        for reason in reasons:
+            for stage in stages:
+                with self.subTest(reason=reason, stage=stage):
+                    result = classify_log_entry(_entry(
+                        outcome="rejected",
+                        beets_scenario="high_distance",
+                        validation_result={
+                            "wrong_match_triage": {
+                                "action": "deleted_reject",
+                                "outcome": "deleted",
+                                "reason": reason,
+                                "preview_verdict": "confident_reject",
+                                "preview_decision": reason,
+                                "stage_chain": [
+                                    stage,
+                                    f"stage2_import:{reason}",
+                                ],
+                            },
+                        },
+                    ))
+                    self.assertEqual(
+                        result.badge,
+                        "Triaged · download deleted",
+                    )
+                    assert_triaged_rejection_style(
+                        "deleted_reject",
+                        result.badge,
+                        result.badge_class,
+                        result.border_color,
+                    )
+                    assert_triage_summary_uses_persisted_reject(
+                        result.wrong_match_triage_summary or "",
+                        reason,
+                    )
 
     def test_triage_checker_rejects_stage_inferred_copy(self) -> None:
         with self.assertRaisesRegex(AssertionError, "persisted reject reason"):
@@ -484,64 +485,92 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
                 uploader="Korveck", distance=0.181, has_have=False,
             )
 
-    @given(
-        path=st.sampled_from(("direct", "triaged")),
-        has_have=st.booleans(),
-        legacy_source=st.booleans(),
-    )
-    @example(path="direct", has_have=True, legacy_source=True)
-    @example(path="triaged", has_have=True, legacy_source=True)
     def test_corrupt_candidate_projection_clears_all_quality_fallbacks(
         self,
-        path: str,
-        has_have: bool,
-        legacy_source: bool,
     ) -> None:
-        current = ({
-            "format": "MP3", "min_bitrate_kbps": 192,
-            "avg_bitrate_kbps": 224,
-        } if has_have else None)
-        common: dict[str, object] = {
-            "outcome": "rejected", "actual_min_bitrate": 0,
-            "was_converted": True, "original_filetype": "flac",
-            "actual_filetype": "opus", "final_format": "opus 128",
-            "source_format": None if legacy_source else "FLAC",
-            "slskd_filetype": "FLAC",
-            "filetype": "mp3",
-            "import_result": _corrupt_import_result(
-                "audio_corrupt" if path == "direct" else None,
-                has_have=has_have,
-                typed_source=not legacy_source,
-            ),
-        }
-        if path == "direct":
-            result = classify_log_entry(_entry(
-                **common, beets_scenario="audio_corrupt",
-            ))
-        else:
-            audit: dict[str, object] = {
-                "action": "deleted_reject", "outcome": "deleted",
-                "reason": "audio_corrupt",
-                "preview_verdict": "confident_reject",
-                "preview_decision": "audio_corrupt",
-                "stage_chain": ["preimport_audio:reject_corrupt"],
-                "candidate_measurement": {
-                    "format": None if legacy_source else "FLAC", "min_bitrate_kbps": 0,
-                    "avg_bitrate_kbps": 0, "median_bitrate_kbps": 0,
-                    "spectral_grade": "genuine", "spectral_bitrate_kbps": 320,
-                },
-                "candidate_v0_probe": {
-                    "kind": "lossless_source_v0", "min_bitrate_kbps": 165,
-                    "avg_bitrate_kbps": 171, "median_bitrate_kbps": 170,
-                },
-            }
-            if current is not None:
-                audit["current_measurement"] = current
-            result = classify_log_entry(_entry(
-                **common, beets_scenario="high_distance", beets_distance=0.181,
-                validation_result={"wrong_match_triage": audit},
-            ))
-        assert_corrupt_candidate_display_is_codec_only(result, has_have=has_have)
+        for path in ("direct", "triaged"):
+            for has_have in (False, True):
+                for legacy_source in (False, True):
+                    with self.subTest(
+                        path=path,
+                        has_have=has_have,
+                        legacy_source=legacy_source,
+                    ):
+                        current = ({
+                            "format": "MP3",
+                            "min_bitrate_kbps": 192,
+                            "avg_bitrate_kbps": 224,
+                        } if has_have else None)
+                        common: dict[str, object] = {
+                            "outcome": "rejected",
+                            "actual_min_bitrate": 0,
+                            "was_converted": True,
+                            "original_filetype": "flac",
+                            "actual_filetype": "opus",
+                            "final_format": "opus 128",
+                            "source_format": (
+                                None if legacy_source else "FLAC"
+                            ),
+                            "slskd_filetype": "FLAC",
+                            "filetype": "mp3",
+                            "import_result": _corrupt_import_result(
+                                (
+                                    "audio_corrupt"
+                                    if path == "direct"
+                                    else None
+                                ),
+                                has_have=has_have,
+                                typed_source=not legacy_source,
+                            ),
+                        }
+                        if path == "direct":
+                            result = classify_log_entry(_entry(
+                                **common,
+                                beets_scenario="audio_corrupt",
+                            ))
+                        else:
+                            audit: dict[str, object] = {
+                                "action": "deleted_reject",
+                                "outcome": "deleted",
+                                "reason": "audio_corrupt",
+                                "preview_verdict": "confident_reject",
+                                "preview_decision": "audio_corrupt",
+                                "stage_chain": [
+                                    "preimport_audio:reject_corrupt",
+                                ],
+                                "candidate_measurement": {
+                                    "format": (
+                                        None
+                                        if legacy_source
+                                        else "FLAC"
+                                    ),
+                                    "min_bitrate_kbps": 0,
+                                    "avg_bitrate_kbps": 0,
+                                    "median_bitrate_kbps": 0,
+                                    "spectral_grade": "genuine",
+                                    "spectral_bitrate_kbps": 320,
+                                },
+                                "candidate_v0_probe": {
+                                    "kind": "lossless_source_v0",
+                                    "min_bitrate_kbps": 165,
+                                    "avg_bitrate_kbps": 171,
+                                    "median_bitrate_kbps": 170,
+                                },
+                            }
+                            if current is not None:
+                                audit["current_measurement"] = current
+                            result = classify_log_entry(_entry(
+                                **common,
+                                beets_scenario="high_distance",
+                                beets_distance=0.181,
+                                validation_result={
+                                    "wrong_match_triage": audit,
+                                },
+                            ))
+                        assert_corrupt_candidate_display_is_codec_only(
+                            result,
+                            has_have=has_have,
+                        )
 
     def test_corrupt_projection_checker_rejects_candidate_leaks_and_erased_have(self) -> None:
         result = classify_log_entry(_entry(
@@ -572,35 +601,36 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "erased point-in-time HAVE"):
             assert_corrupt_candidate_display_is_codec_only(erased_have, has_have=True)
 
-    @given(action=st.sampled_from((
-        "deleted_reject",
-        "deleted_verified_lossless_parent",
-        "kept_would_import",
-        "kept_uncertain",
-        "skipped_current_evidence_missing",
-    )))
-    @example(action="kept_would_import")
-    def test_every_triaged_rejection_stays_red(self, action: str) -> None:
-        result = classify_log_entry(_entry(
-            outcome="rejected",
-            beets_scenario="high_distance",
-            validation_result={
-                "wrong_match_triage": {
-                    "action": action,
-                    "outcome": action,
-                    "reason": "import",
-                    "preview_verdict": "would_import",
-                    "preview_decision": "import",
-                    "stage_chain": ["stage2_import:import"],
-                },
-            },
-        ))
-        assert_triaged_rejection_style(
-            action,
-            result.badge,
-            result.badge_class,
-            result.border_color,
+    def test_every_triaged_rejection_stays_red(self) -> None:
+        actions = (
+            "deleted_reject",
+            "deleted_verified_lossless_parent",
+            "kept_would_import",
+            "kept_uncertain",
+            "skipped_current_evidence_missing",
         )
+        for action in actions:
+            with self.subTest(action=action):
+                result = classify_log_entry(_entry(
+                    outcome="rejected",
+                    beets_scenario="high_distance",
+                    validation_result={
+                        "wrong_match_triage": {
+                            "action": action,
+                            "outcome": action,
+                            "reason": "import",
+                            "preview_verdict": "would_import",
+                            "preview_decision": "import",
+                            "stage_chain": ["stage2_import:import"],
+                        },
+                    },
+                ))
+                assert_triaged_rejection_style(
+                    action,
+                    result.badge,
+                    result.badge_class,
+                    result.border_color,
+                )
 
     @given(
         existing_format=st.one_of(st.none(), st.sampled_from(("MP3", "Opus"))),

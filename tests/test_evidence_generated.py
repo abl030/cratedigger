@@ -257,9 +257,14 @@ class TestGeneratedEvidenceLifecycle(unittest.TestCase):
             result_v0_avg=result_v0_avg,
         )
 
-    @given(fact_shape=st.sampled_from(_CHANGED_SNAPSHOT_FACT_SHAPES))
-    @example(fact_shape=("installed", "installed"))
     def test_changed_snapshot_retry_waits_for_surviving_or_new_facts(
+        self,
+    ) -> None:
+        for fact_shape in _CHANGED_SNAPSHOT_FACT_SHAPES:
+            with self.subTest(fact_shape=fact_shape):
+                self._assert_changed_snapshot_retry(fact_shape)
+
+    def _assert_changed_snapshot_retry(
         self,
         fact_shape: tuple[EvidenceSubject | None, EvidenceSubject | None],
     ) -> None:
@@ -830,57 +835,60 @@ def _run_lossless_spectral_failure_world(
 
 
 class TestGeneratedLosslessSpectralFailureLifecycle(unittest.TestCase):
-    @given(kind=st.sampled_from((
-        "absent",
-        "not_attempted",
-        "error",
-        "grade_none",
-        "grade_error",
-    )))
-    @example(kind="absent")
-    def test_unusable_lossless_spectral_never_reaches_harness(self, kind):
-        (
-            request_status,
-            job_status,
-            preview_status,
-            harness_calls,
-            _decision,
-            _candidate_evidence_id,
-        ) = (
-            _run_lossless_spectral_failure_world(kind)
+    def test_unusable_lossless_spectral_never_reaches_harness(self):
+        kinds = (
+            "absent",
+            "not_attempted",
+            "error",
+            "grade_none",
+            "grade_error",
         )
-        assert_lossless_spectral_failure_lifecycle(
-            request_status=request_status,
-            expected_request_status="downloading",
-            job_status=job_status,
-            preview_status=preview_status,
-            harness_calls=harness_calls,
-        )
+        for kind in kinds:
+            with self.subTest(kind=kind):
+                (
+                    request_status,
+                    job_status,
+                    preview_status,
+                    harness_calls,
+                    _decision,
+                    _candidate_evidence_id,
+                ) = _run_lossless_spectral_failure_world(kind)
+                assert_lossless_spectral_failure_lifecycle(
+                    request_status=request_status,
+                    expected_request_status="downloading",
+                    job_status=job_status,
+                    preview_status=preview_status,
+                    harness_calls=harness_calls,
+                )
 
-    @given(kind=st.sampled_from((
-        "absent",
-        "not_attempted",
-        "error",
-        "grade_none",
-        "grade_error",
-    )))
-    @example(kind="grade_error")
-    def test_audio_corrupt_wins_over_every_spectral_failure_shape(self, kind):
-        (
-            _request_status,
-            job_status,
-            preview_status,
-            harness_calls,
-            decision,
-            candidate_evidence_id,
-        ) = _run_lossless_spectral_failure_world(kind, audio_corrupt=True)
-        assert_integrity_fact_precedes_spectral_failure(
-            job_status=job_status,
-            preview_status=preview_status,
-            decision=decision,
-            harness_calls=harness_calls,
-            candidate_evidence_id=candidate_evidence_id,
+    def test_audio_corrupt_wins_over_every_spectral_failure_shape(self):
+        kinds = (
+            "absent",
+            "not_attempted",
+            "error",
+            "grade_none",
+            "grade_error",
         )
+        for kind in kinds:
+            with self.subTest(kind=kind):
+                (
+                    _request_status,
+                    job_status,
+                    preview_status,
+                    harness_calls,
+                    decision,
+                    candidate_evidence_id,
+                ) = _run_lossless_spectral_failure_world(
+                    kind,
+                    audio_corrupt=True,
+                )
+                assert_integrity_fact_precedes_spectral_failure(
+                    job_status=job_status,
+                    preview_status=preview_status,
+                    decision=decision,
+                    harness_calls=harness_calls,
+                    candidate_evidence_id=candidate_evidence_id,
+                )
 
 
 class TestLosslessSpectralFailureCheckerTripsOnViolations(unittest.TestCase):
