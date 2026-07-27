@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generated tests for the slskd transfer write-ahead ownership ledger
 (issue #571, migration 045).
 
@@ -33,17 +32,16 @@ import os
 import sys
 import unittest
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
-
 from hypothesis import example, given
 from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.download_ownership import DownloadOwnershipWriter
 from lib.pipeline_db import TransferLedgerRow
 from tests.fakes import FakePipelineDB, FakeSlskdAPI
@@ -213,7 +211,7 @@ _STATUSES = (
     "wanted", "downloading", "imported", "unsearchable", "replaced")
 _RETENTION_DAYS = 90
 _RETENTION_SECONDS = _RETENTION_DAYS * 24 * 60 * 60
-_PRUNE_NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
+_PRUNE_NOW = datetime(2026, 1, 1, tzinfo=UTC)
 _PRUNE_CUTOFF = _PRUNE_NOW - timedelta(seconds=_RETENTION_SECONDS)
 
 

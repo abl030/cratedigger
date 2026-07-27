@@ -54,6 +54,12 @@ from lib.pipeline_db import (
     download_log_with_request_row,
     wrong_match_candidate_row,
 )
+from lib.quality import (
+    AlbumQualityV0Metric,
+    AudioQualityMeasurement,
+    SpectralMeasurement,
+    V0ProbeEvidence,
+)
 from tests.helpers import (
     make_album_quality_evidence,
     make_import_result,
@@ -61,12 +67,6 @@ from tests.helpers import (
     make_validation_result,
 )
 from tests.test_pipeline_db import make_db, requires_postgres
-from lib.quality import (
-    AlbumQualityV0Metric,
-    AudioQualityMeasurement,
-    SpectralMeasurement,
-    V0ProbeEvidence,
-)
 
 # conftest boots an ephemeral PostgreSQL and exports TEST_DB_DSN for the whole
 # suite, so this runs unconditionally — NO skip gate (CLAUDE.md § "Skipped tests

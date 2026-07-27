@@ -24,8 +24,8 @@ from unittest.mock import patch
 
 from beets import config as beets_config
 from hypothesis import HealthCheck, example, given, settings
-from hypothesis.database import DirectoryBasedExampleDatabase
 from hypothesis import strategies as st
+from hypothesis.database import DirectoryBasedExampleDatabase
 from hypothesis.stateful import (
     RuleBasedStateMachine,
     initialize,
@@ -37,20 +37,19 @@ from hypothesis.stateful import (
 # Start a throwaway PostgreSQL and apply the real migration stack before the
 # world imports TEST_DB_DSN. This never connects to production.
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-import conftest  # noqa: E402, F401
+import conftest  # noqa: F401
 
-import tests._hypothesis_profiles  # noqa: E402, F401  (loads the active profile)
-from tests.beets_world import (  # noqa: E402
-    BeetsWorldRelease,
-    HISTORICAL_PASSENGER_PATH_TEMPLATE,
-)
-from lib.mbid_replace_service import MbidReplaceService  # noqa: E402
-from lib.quality_evidence import (  # noqa: E402
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
+from lib.mbid_replace_service import MbidReplaceService
+from lib.quality_evidence import (
     snapshot_audio_files,
     snapshot_fingerprint,
 )
-from tests.world_model.support import LifecycleWorld, repository_root  # noqa: E402
-from tests.world_model.census_seeds import (  # noqa: E402
+from tests.beets_world import (
+    HISTORICAL_PASSENGER_PATH_TEMPLATE,
+    BeetsWorldRelease,
+)
+from tests.world_model.census_seeds import (
     EVIDENCE_DRIFT_FACT_SEEDS,
     EVIDENCE_DRIFT_MUTATION_SEEDS,
     MISSING_CURRENT_EVIDENCE_FORMAT_SEEDS,
@@ -74,7 +73,7 @@ from tests.world_model.census_seeds import (  # noqa: E402
     MissingCurrentEvidenceTargetFormatSeed,
     WorldCensusSeed,
 )
-
+from tests.world_model.support import LifecycleWorld, repository_root
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
 if not TEST_DSN:
@@ -107,8 +106,8 @@ _MISSING_EVIDENCE_PRESERVED_FIELDS = (
 _AxisSeed = TypeVar("_AxisSeed")
 
 
-def _axis(axis: tuple[_AxisSeed, ...], name: str) -> _AxisSeed:
-    return next(seed for seed in axis if getattr(seed, "name") == name)
+def _axis[AxisSeed](axis: tuple[_AxisSeed, ...], name: str) -> _AxisSeed:
+    return next(seed for seed in axis if seed.name == name)
 
 
 def _assert_missing_evidence_converges(
@@ -507,12 +506,11 @@ class TestPinnedLifecycleWorld(unittest.TestCase):
                 MbidReplaceService,
                 "replace_request_mbid",
                 insert_after_rejection,
+            ), self.assertRaisesRegex(
+                AssertionError,
+                "conflicting-identity Replace mutated database",
             ):
-                with self.assertRaisesRegex(
-                    AssertionError,
-                    "conflicting-identity Replace mutated database",
-                ):
-                    world.replace_request(request_id)
+                world.replace_request(request_id)
 
     def test_force_import_refreshes_relocated_candidate_authority(self) -> None:
         """A rejected source move cannot create a force-only launch failure."""
@@ -703,28 +701,27 @@ class TestPinnedLifecycleWorld(unittest.TestCase):
                 world.beets,
                 "set_release_item_format",
                 side_effect=lower_label,
+            ), self.assertRaisesRegex(
+                AssertionError,
+                "format axis did not reach the real Beets DB",
             ):
-                with self.assertRaisesRegex(
-                    AssertionError,
-                    "format axis did not reach the real Beets DB",
-                ):
-                    world.seed_missing_current_evidence_release(
-                        BeetsWorldRelease(
-                            release_id=_mb_release_id(85_599),
-                            artist="Format Fidelity Archive",
-                            album="Exact OGG Label",
-                            year=2008,
-                            codec=installed.codec,
-                        ),
-                        origin=origin,
-                        status=status,
-                        identity=identity,
-                        installed_format=installed,
-                        search_override=search,
-                        target_format=target,
-                        legacy_spectral=spectral,
-                        legacy_bitrate=bitrate,
-                    )
+                world.seed_missing_current_evidence_release(
+                    BeetsWorldRelease(
+                        release_id=_mb_release_id(85_599),
+                        artist="Format Fidelity Archive",
+                        album="Exact OGG Label",
+                        year=2008,
+                        codec=installed.codec,
+                    ),
+                    origin=origin,
+                    status=status,
+                    identity=identity,
+                    installed_format=installed,
+                    search_override=search,
+                    target_format=target,
+                    legacy_spectral=spectral,
+                    legacy_bitrate=bitrate,
+                )
 
     def test_live_drift_retry_stays_closed_until_new_facts_exist(self) -> None:
         """Shrunk #743 world: installed facts die with the old fingerprint."""
@@ -773,53 +770,52 @@ class TestPinnedLifecycleWorld(unittest.TestCase):
             ("force", LifecycleWorld.force_import_request),
         )
         for index, (name, action) in enumerate(actions, start=1):
-            with self.subTest(action=name):
-                with LifecycleWorld(TEST_DSN, repository_root()) as world:
-                    request_id = world.seed_evidence_drift_release(
-                        BeetsWorldRelease(
-                            release_id=(
-                                "51000000-0000-4000-8000-"
-                                f"{index:012x}"
-                            ),
-                            artist="Drift Archive",
-                            album=f"Blocked {name.title()} Import",
-                            year=2005,
-                            codec="mp3",
+            with self.subTest(action=name), LifecycleWorld(TEST_DSN, repository_root()) as world:
+                request_id = world.seed_evidence_drift_release(
+                    BeetsWorldRelease(
+                        release_id=(
+                            "51000000-0000-4000-8000-"
+                            f"{index:012x}"
                         ),
-                        facts,
-                    )
-                    world.inject_evidence_drift(
-                        request_id,
-                        "same_name_size_drift",
-                    )
-                    self.assertFalse(world.touch_current_evidence(
-                        request_id
-                    ).available)
+                        artist="Drift Archive",
+                        album=f"Blocked {name.title()} Import",
+                        year=2005,
+                        codec="mp3",
+                    ),
+                    facts,
+                )
+                world.inject_evidence_drift(
+                    request_id,
+                    "same_name_size_drift",
+                )
+                self.assertFalse(world.touch_current_evidence(
+                    request_id
+                ).available)
 
-                    self.assertFalse(action(
-                        world,
-                        request_id,
-                        codec="flac",
-                    ))
-                    self.assertEqual(
-                        world.latest_download_outcome(request_id),
-                        "have_analysis_error",
-                    )
-                    self.assertEqual(
-                        world.request_ids_with_status("wanted"),
-                        [request_id],
-                    )
+                self.assertFalse(action(
+                    world,
+                    request_id,
+                    codec="flac",
+                ))
+                self.assertEqual(
+                    world.latest_download_outcome(request_id),
+                    "have_analysis_error",
+                )
+                self.assertEqual(
+                    world.request_ids_with_status("wanted"),
+                    [request_id],
+                )
 
-                    self.assertEqual(
-                        world.enrich_current_evidence(request_id),
-                        "enriched",
-                    )
-                    self.assertTrue(action(
-                        world,
-                        request_id,
-                        codec="flac",
-                    ))
-                    world.assert_invariants()
+                self.assertEqual(
+                    world.enrich_current_evidence(request_id),
+                    "enriched",
+                )
+                self.assertTrue(action(
+                    world,
+                    request_id,
+                    codec="flac",
+                ))
+                world.assert_invariants()
 
     def test_every_live_filesystem_drift_shape_relinks_exact_snapshot(self) -> None:
         facts = next(
@@ -838,78 +834,76 @@ class TestPinnedLifecycleWorld(unittest.TestCase):
                 with self.subTest(
                     mutation=mutation.name,
                     rename_codec_files=rename_codec_files,
-                ):
-                    with LifecycleWorld(TEST_DSN, repository_root()) as world:
-                        request_id = world.seed_evidence_drift_release(
-                            BeetsWorldRelease(
-                                release_id=(
-                                    "60000000-0000-4000-8000-"
-                                    f"{index:012x}"
-                                ),
-                                artist="Drift Archive",
-                                album=f"Mutation {index}",
-                                year=2006,
-                                codec=mutation.initial_codec,
+                ), LifecycleWorld(TEST_DSN, repository_root()) as world:
+                    request_id = world.seed_evidence_drift_release(
+                        BeetsWorldRelease(
+                            release_id=(
+                                "60000000-0000-4000-8000-"
+                                f"{index:012x}"
                             ),
-                            facts,
-                        )
-                        old_id = world.db.get_request_current_evidence_id(
-                            request_id
-                        )
-                        world.inject_evidence_drift(
-                            request_id,
-                            mutation.mutation,
-                            rename_codec_files=rename_codec_files,
-                        )
+                            artist="Drift Archive",
+                            album=f"Mutation {index}",
+                            year=2006,
+                            codec=mutation.initial_codec,
+                        ),
+                        facts,
+                    )
+                    old_id = world.db.get_request_current_evidence_id(
+                        request_id
+                    )
+                    world.inject_evidence_drift(
+                        request_id,
+                        mutation.mutation,
+                        rename_codec_files=rename_codec_files,
+                    )
 
-                        result = world.touch_current_evidence(request_id)
+                    result = world.touch_current_evidence(request_id)
 
-                        self.assertTrue(result.available)
-                        new_id = world.db.get_request_current_evidence_id(
-                            request_id
-                        )
-                        self.assertNotEqual(new_id, old_id)
-                        linked = world.db.load_album_quality_evidence_by_id(
-                            new_id
-                        )
-                        assert linked is not None
-                        self.assertTrue(linked.current_enrichment_required)
-                        self.assertEqual(linked.lineage_version, 4)
-                        world.assert_invariants()
+                    self.assertTrue(result.available)
+                    new_id = world.db.get_request_current_evidence_id(
+                        request_id
+                    )
+                    self.assertNotEqual(new_id, old_id)
+                    linked = world.db.load_album_quality_evidence_by_id(
+                        new_id
+                    )
+                    assert linked is not None
+                    self.assertTrue(linked.current_enrichment_required)
+                    self.assertEqual(linked.lineage_version, 4)
+                    world.assert_invariants()
 
     def test_every_live_evidence_fact_shape_has_stable_retry_outcome(self) -> None:
         assert TEST_DSN is not None
         for index, facts in enumerate(EVIDENCE_DRIFT_FACT_SEEDS, start=1):
-            with self.subTest(facts=facts.name):
-                with LifecycleWorld(TEST_DSN, repository_root()) as world:
-                    request_id = world.seed_evidence_drift_release(
-                        BeetsWorldRelease(
-                            release_id=(
-                                "61000000-0000-4000-8000-"
-                                f"{index:012x}"
-                            ),
-                            artist="Drift Archive",
-                            album=f"Fact Shape {index}",
-                            year=2006,
-                            codec="mp3",
+            with self.subTest(facts=facts.name), LifecycleWorld(TEST_DSN, repository_root()) as world:
+                request_id = world.seed_evidence_drift_release(
+                    BeetsWorldRelease(
+                        release_id=(
+                            "61000000-0000-4000-8000-"
+                            f"{index:012x}"
                         ),
-                        facts,
-                    )
-                    world.inject_evidence_drift(
-                        request_id,
-                        "same_name_size_drift",
-                    )
+                        artist="Drift Archive",
+                        album=f"Fact Shape {index}",
+                        year=2006,
+                        codec="mp3",
+                    ),
+                    facts,
+                )
+                world.inject_evidence_drift(
+                    request_id,
+                    "same_name_size_drift",
+                )
 
-                    first = world.touch_current_evidence(request_id)
-                    second = world.touch_current_evidence(request_id)
+                first = world.touch_current_evidence(request_id)
+                second = world.touch_current_evidence(request_id)
 
-                    source_facts_survive = (
-                        facts.spectral_subject == "source"
-                        and facts.v0_subject == "source"
-                    )
-                    self.assertEqual(first.available, source_facts_survive)
-                    self.assertEqual(second.available, source_facts_survive)
-                    world.assert_invariants()
+                source_facts_survive = (
+                    facts.spectral_subject == "source"
+                    and facts.v0_subject == "source"
+                )
+                self.assertEqual(first.available, source_facts_survive)
+                self.assertEqual(second.available, source_facts_survive)
+                world.assert_invariants()
 
     def test_retained_import_preserves_existing_lossless_scope(self) -> None:
         seed = next(

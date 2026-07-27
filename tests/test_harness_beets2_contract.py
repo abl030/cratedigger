@@ -390,6 +390,7 @@ class TestAuniqueCollisionContract(unittest.TestCase):
                  "AUNIQUE_SHIPPED_CONFIG": _json.dumps(_shipped_aunique_config())},
             capture_output=True,
             text=True,
+            check=False,
         )
         self.assertEqual(
             proc.returncode, 0,
@@ -419,6 +420,7 @@ class TestHarnessBeets2Contract(unittest.TestCase):
             },
             capture_output=True,
             text=True,
+            check=False,
         )
         self.assertEqual(
             proc.returncode, 0,
@@ -435,6 +437,7 @@ class TestHarnessBeets2Contract(unittest.TestCase):
                  "PYTHONPATH": _REPO + os.pathsep + os.environ.get("PYTHONPATH", "")},
             capture_output=True,
             text=True,
+            check=False,
         )
         self.assertEqual(
             proc.returncode, 0,

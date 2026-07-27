@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import unittest
+from datetime import UTC, datetime
 
 import msgspec
 
@@ -20,7 +20,7 @@ def _job(
     preview_message: str | None = None,
     preview_error: str | None = None,
 ) -> ImportJob:
-    now = datetime(2026, 7, 13, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 13, tzinfo=UTC)
     return ImportJob(
         id=575,
         job_type="force_import",

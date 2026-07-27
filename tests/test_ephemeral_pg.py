@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from unittest.mock import patch
 
 import psycopg2
@@ -49,12 +49,11 @@ class TestEphemeralPostgresIsolation(unittest.TestCase):
             with EphemeralPostgres() as pg:
                 assert pg.dsn is not None
                 self.assertIn("host=%2F", pg.dsn)
-                with psycopg2.connect(pg.dsn) as connection:
-                    with connection.cursor() as cursor:
-                        cursor.execute("SELECT current_database()")
-                        row = cursor.fetchone()
-                        assert row is not None
-                        return str(row[0])
+                with psycopg2.connect(pg.dsn) as connection, connection.cursor() as cursor:
+                    cursor.execute("SELECT current_database()")
+                    row = cursor.fetchone()
+                    assert row is not None
+                    return str(row[0])
 
         with ThreadPoolExecutor(max_workers=4) as executor:
             databases = tuple(executor.map(start_query_stop, range(4)))

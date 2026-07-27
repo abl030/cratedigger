@@ -2,22 +2,23 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import unittest
+from datetime import UTC, datetime
 
-from hypothesis import example, given, strategies as st
+from hypothesis import example, given
+from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401
 from lib.import_queue import (
-    ForceImportPayload,
     IMPORT_JOB_PREVIEW_STATUSES,
+    ForceImportPayload,
     ImportJob,
 )
-import tests._hypothesis_profiles  # noqa: F401
 from web.classify import ImportJobDisplay, classify_import_job_display
 
 
 def _job(status: str, preview_status: str | None, text: str) -> ImportJob:
-    now = datetime(2026, 7, 13, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 13, tzinfo=UTC)
     return ImportJob(
         id=575,
         job_type="force_import",
@@ -46,7 +47,9 @@ def _job(status: str, preview_status: str | None, text: str) -> ImportJob:
 
 def assert_import_job_display_contract(display: object) -> None:
     if not isinstance(display, ImportJobDisplay):
-        raise AssertionError("classifier did not return ImportJobDisplay")
+        raise AssertionError(  # noqa: TRY004 - generated invariant failure
+            "classifier did not return ImportJobDisplay"
+        )
     if not display.badge or not display.badge_class or not display.border_color:
         raise AssertionError("classifier returned an incomplete display contract")
 

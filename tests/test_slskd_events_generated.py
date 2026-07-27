@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generated slskd event-ingestion tests — issue #548 follow-up, extended
 for issue #571 T2.
 
@@ -47,11 +46,10 @@ from dataclasses import dataclass
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
-
 from hypothesis import given
 from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.pipeline_db import TransferLedgerRow
 from lib.quality import ActiveDownloadState
 from lib.slskd_events import EventIngestResult, ingest_download_file_events

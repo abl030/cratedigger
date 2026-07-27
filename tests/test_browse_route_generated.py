@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generated contract patrol for retryable MusicBrainz artist failures."""
 
 from __future__ import annotations
@@ -10,11 +9,11 @@ import uuid
 from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError, URLError
 
-from hypothesis import given, strategies as st
+from hypothesis import given
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401 - registers active profile
 from web.routes.browse import _resolve_discogs, get_artist, get_browse_resolve
-
 
 _CLEAN_ERROR = "MusicBrainz fallback unavailable, retry"
 _NOT_FOUND_ERROR = "MusicBrainz artist not found"
@@ -62,7 +61,9 @@ class _RecordingHandler:
 
     def _json(self, data: object, status: int = 200) -> None:
         if not isinstance(data, dict):
-            raise AssertionError(f"expected JSON object, got {data!r}")
+            raise AssertionError(  # noqa: TRY004 - generated invariant failure
+                f"expected JSON object, got {data!r}"
+            )
         self.status = status
         self.data = data
 

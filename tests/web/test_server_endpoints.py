@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Server-level endpoint tests: static routes, error handling, client disconnects.
 
 Split from tests/test_web_server.py (#408). Shared harness in
@@ -17,19 +16,19 @@ from contextlib import contextmanager
 from email.message import Message
 from io import BytesIO
 from unittest.mock import patch
-from urllib.request import urlopen, Request
 from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
-from hypothesis import example, given, settings, strategies as st
+from hypothesis import example, given, settings
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401 — registers active profile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from tests.web._harness import _FakeDbWebServerCase
-
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
+from tests.web._harness import _FakeDbWebServerCase
 
 
 class _UnreadableBody(BytesIO):
@@ -400,11 +399,11 @@ class TestServerEndpoints(_FakeDbWebServerCase):
             self.assertIn("downloaded_label", data["history"][0])
 
     def test_pipeline_detail_not_found(self):
-        status, data = self._get("/api/pipeline/999")
+        status, _data = self._get("/api/pipeline/999")
         self.assertEqual(status, 404)
 
     def test_unknown_get_returns_404(self):
-        status, data = self._get("/api/nonexistent")
+        status, _data = self._get("/api/nonexistent")
         self.assertEqual(status, 404)
 
     # --- POST endpoints ---
@@ -425,7 +424,7 @@ class TestServerEndpoints(_FakeDbWebServerCase):
         self.assertIn("type", first)
 
     def test_post_pipeline_delete_missing_id(self):
-        status, data = self._post("/api/pipeline/delete", {})
+        status, _data = self._post("/api/pipeline/delete", {})
         self.assertEqual(status, 400)
 
     def test_post_set_intent_success(self):
@@ -447,8 +446,8 @@ class TestServerEndpoints(_FakeDbWebServerCase):
 
     def test_post_force_import_passes_source_username(self):
         from lib.import_queue import (
-            ForceImportPayload,
             IMPORT_JOB_FORCE,
+            ForceImportPayload,
             force_import_dedupe_key,
         )
 
@@ -520,7 +519,7 @@ class TestServerEndpoints(_FakeDbWebServerCase):
 
     def test_post_set_intent_missing_id(self):
         """POST /api/pipeline/set-intent without id returns 400."""
-        status, data = self._post("/api/pipeline/set-intent",
+        status, _data = self._post("/api/pipeline/set-intent",
                                   {"intent": "lossless"})
         self.assertEqual(status, 400)
 
@@ -730,15 +729,15 @@ class TestServerEndpoints(_FakeDbWebServerCase):
         self.assertEqual(len(rgs), 2)
 
         # Album (tier 1) has 2 unique, Single's Track A is covered by Album
-        album_rg = [rg for rg in rgs if rg["release_group_id"] == "rg-1"][0]
-        single_rg = [rg for rg in rgs if rg["release_group_id"] == "rg-2"][0]
+        album_rg = next(rg for rg in rgs if rg["release_group_id"] == "rg-1")
+        single_rg = next(rg for rg in rgs if rg["release_group_id"] == "rg-2")
         self.assertEqual(album_rg["unique_track_count"], 2)
         self.assertEqual(single_rg["unique_track_count"], 1)
 
         # B-side is unique, Track A on single is covered by album
-        bside = [t for t in single_rg["tracks"] if t["title"] == "B-side"][0]
+        bside = next(t for t in single_rg["tracks"] if t["title"] == "B-side")
         self.assertTrue(bside["unique"])
-        track_a = [t for t in single_rg["tracks"] if t["title"] == "Track A"][0]
+        track_a = next(t for t in single_rg["tracks"] if t["title"] == "Track A")
         self.assertFalse(track_a["unique"])
 
         # Pressings should be present with recording_ids
@@ -878,7 +877,7 @@ class TestClientDisconnectHandling(_FakeDbWebServerCase):
         except HTTPError as e:
             with e:
                 return e.code, json.loads(e.read())
-        except Exception:
+        except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             return None, None
 
     def _assert_no_reconnect_no_traceback(self, mock_reconnect, log_records, kind):
@@ -1032,7 +1031,7 @@ class TestClientDisconnectHandling(_FakeDbWebServerCase):
             # assertLogs requires at least one record; a trivial DEBUG log
             # ensures the context manager is satisfied even on a quiet path.
             logging.getLogger("cratedigger-web").debug("test marker: normal POST path")
-            status, _ = self._post_may_disconnect("/api/pipeline/set-intent",
+            _status, _ = self._post_may_disconnect("/api/pipeline/set-intent",
                                    {"id": 100, "intent": "default"})
         self.assertEqual(mock_reconnect.call_count, 0)
         disconnect_warnings = [

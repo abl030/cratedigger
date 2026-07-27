@@ -1,26 +1,31 @@
 """Tests for search query builder."""
-
 import os
 import sys
 import unittest
+from typing import ClassVar
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from lib.search import (
-    strip_special_chars,
-    strip_stopwords,
-    STOPWORDS,
-    wildcard_artist_tokens, cap_tokens,
-    _normalize_query_tokens,
-    generate_search_plan, ReleaseSnapshot, SearchPlanConfig,
-    SearchPlan, SearchPlanItem,
-    SEARCH_PLAN_GENERATOR_ID,
-    PLAN_STATUS_SUCCESS, PLAN_STATUS_GENERATION_FAILED,
+    GENERIC_TITLE_TOKENS,
     MAX_TRACK_SLOTS_PER_PLAN,
     MAX_VA_TRACK_ARTIST_SLOTS,
-    score_track_distinctiveness,
-    GENERIC_TITLE_TOKENS,
+    PLAN_STATUS_GENERATION_FAILED,
+    PLAN_STATUS_SUCCESS,
+    SEARCH_PLAN_GENERATOR_ID,
+    STOPWORDS,
+    ReleaseSnapshot,
+    SearchPlan,
+    SearchPlanConfig,
+    SearchPlanItem,
+    _normalize_query_tokens,
+    cap_tokens,
+    generate_search_plan,
     query_template_for_strategy,
+    score_track_distinctiveness,
+    strip_special_chars,
+    strip_stopwords,
+    wildcard_artist_tokens,
 )
 
 
@@ -121,7 +126,7 @@ class TestStripStopwords(unittest.TestCase):
     explicitly in the PR.
     """
 
-    CASES = [
+    CASES: ClassVar = [
         ("drops_the", ["the", "beatles"], ["beatles"]),
         ("case_insensitive", ["The", "Beatles"], ["Beatles"]),
         # "to" and "a" are NOT in STOPWORDS — verifies the set stays narrow.
@@ -900,7 +905,7 @@ class TestScoreTrackDistinctiveness(unittest.TestCase):
     """
 
     # (description, title, expected_score)
-    CASES = [
+    CASES: ClassVar = [
         ("empty", "", 0.0),
         ("whitespace_only_collapses_to_empty_tokens", "   ", 0.0),
         ("generic_track_n", "Track 7", 0.0),
@@ -1032,7 +1037,7 @@ class TestGenerateSearchPlanSlotMix(unittest.TestCase):
     # are present (or all-present, by membership) and the listed
     # strategies are absent. Slot ordering pinned separately in the
     # GENERATOR_ID pin test.
-    CASES = [
+    CASES: ClassVar = [
         (
             "non_va_catno_present_rg_year_present",
             {
@@ -1386,7 +1391,7 @@ class TestGenerateSearchPlanSlotMix(unittest.TestCase):
                   "Soundtrack")
         artists = ("Catband", "Dogband", "Birdband", "Fishband")
         scored = sorted(
-            zip(titles, artists),
+            zip(titles, artists, strict=True),
             key=lambda p: -score_track_distinctiveness(p[0]),
         )
         # Sanity precondition for the test: ranking is non-trivial.
@@ -1474,7 +1479,7 @@ class TestQueryTemplateForStrategy(unittest.TestCase):
     """
 
     # (description, plan_strategy, expected_template)
-    CASES = [
+    CASES: ClassVar = [
         ("default", "default", "{artist} {title}"),
         ("literal", "literal", "{artist} {title}"),
         ("literal_flac", "literal_flac", "{artist} {title} FLAC"),

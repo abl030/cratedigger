@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import shutil
 import signal
 import subprocess
 import tempfile
 import time
 import unittest
-
+from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HELPER = REPO_ROOT / "scripts" / "run_final_gate.sh"
@@ -100,6 +99,7 @@ class FinalGateReceiptTestCase(unittest.TestCase):
         result = subprocess.run(
             [str(HELPER), "status", str(receipt)], cwd=self.repo.name,
             text=True, capture_output=True,
+            check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout.strip()
@@ -209,6 +209,7 @@ class FinalGateReceiptTestCase(unittest.TestCase):
         result = subprocess.run(
             [str(HELPER), "status", str(receipt)], cwd=self.repo.name,
             text=True, capture_output=True,
+            check=False,
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("not for this committed clean tree", result.stderr)
@@ -238,6 +239,7 @@ class FinalGateReceiptTestCase(unittest.TestCase):
         result = subprocess.run(
             [str(HELPER), "status", str(receipt)], cwd=self.repo.name,
             text=True, capture_output=True,
+            check=False,
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("not canonical", result.stderr)

@@ -13,10 +13,10 @@ from __future__ import annotations
 import logging
 import os
 import time
-from dataclasses import dataclass
-from datetime import datetime, timezone
 from collections.abc import Mapping, Sequence
-from typing import Any, Literal, TYPE_CHECKING
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, Literal
 
 from lib.grab_list import DownloadFile, GrabListEntry
 from lib.processing_paths import (
@@ -160,7 +160,7 @@ def _is_user_offline_http_error(exc: BaseException) -> bool:
         return False
     try:
         body = response.text or ""
-    except Exception:
+    except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         return False
     if not isinstance(body, str):
         return False
@@ -187,7 +187,7 @@ def _extract_enqueue_failure_reason(exc: BaseException) -> str | None:
         return None
     try:
         body = response.text
-    except Exception:
+    except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         return None
     if not isinstance(body, str):
         return None
@@ -421,17 +421,17 @@ def match_transfer_id(
 def _parse_transfer_timestamp(value: Any) -> datetime:
     """Parse slskd transfer timestamps for ordering duplicate snapshots."""
     if not value:
-        return datetime.min.replace(tzinfo=timezone.utc)
+        return datetime.min.replace(tzinfo=UTC)
 
     text = str(value).replace("Z", "+00:00")
     try:
         parsed = datetime.fromisoformat(text)
     except ValueError:
-        return datetime.min.replace(tzinfo=timezone.utc)
+        return datetime.min.replace(tzinfo=UTC)
 
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _transfer_latest_timestamp(transfer: TransferSnapshot) -> datetime:

@@ -12,8 +12,8 @@ from __future__ import annotations
 import os
 import unittest
 
-from tests._typing_ratchet_baseline import TYPING_RATCHET_BASELINE
 from tests._tests_typing_ratchet_baseline import TESTS_TYPING_RATCHET_BASELINE
+from tests._typing_ratchet_baseline import TYPING_RATCHET_BASELINE
 from tests._typing_ratchet_scanner import (
     count_escape_hatches,
     iter_production_paths,

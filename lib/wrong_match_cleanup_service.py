@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Iterable
 from contextlib import AbstractContextManager
-from typing import Any, Iterable, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 import msgspec
 
@@ -18,19 +19,19 @@ from lib.pipeline_db import (
 from lib.quality import (
     AlbumQualityEvidence,
     AlbumQualityEvidenceDecisionFacts,
-    classify_full_pipeline_decision,
-    evidence_decision_name,
-    full_pipeline_decision_from_evidence,
-    narrow_override_on_lossless_source_lock,
     AudioQualityMeasurement,
     QualityComparisonBasis,
     V0ProbeEvidence,
+    classify_full_pipeline_decision,
     comparison_basis_from_decision,
+    evidence_decision_name,
+    full_pipeline_decision_from_evidence,
+    narrow_override_on_lossless_source_lock,
 )
 from lib.quality_evidence import (
     QualityEvidenceDB,
-    load_candidate_evidence_for_source,
     audit_v0_probe_from_metric,
+    load_candidate_evidence_for_source,
 )
 from lib.util import resolve_failed_path
 from lib.validation_envelope import (
@@ -153,7 +154,7 @@ class WrongMatchCleanupOutcome(msgspec.Struct, frozen=True):
     deleted_path: str | None = None
     path_missing: bool = False
     error: str | None = None
-    decision: dict[str, Any] = msgspec.field(default_factory=lambda: {})
+    decision: dict[str, Any] = msgspec.field(default_factory=dict)
     candidate_measurement: AudioQualityMeasurement | None = None
     current_measurement: AudioQualityMeasurement | None = None
     candidate_v0_probe: V0ProbeEvidence | None = None
@@ -257,7 +258,7 @@ def cleanup_wrong_match(
         )
         _persist_cleanup_audit(db, result)
         return result
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.exception(
             "wrong_match_cleanup.operational_failure download_log_id=%s",
             download_log_id,
@@ -737,7 +738,7 @@ def _refresh_stale_candidate_evidence(
             path=source_path,
             download_log_id=download_log_id,
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.exception(
             "wrong_match_cleanup.evidence_refresh_crashed download_log_id=%s",
             download_log_id,
@@ -982,7 +983,7 @@ def _persist_cleanup_audit(
     try:
         db.record_wrong_match_triage(
             result.download_log_id, _cleanup_audit_payload(result))
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.exception(
             "wrong_match_cleanup.audit_persist_failed download_log_id=%s",
             result.download_log_id,

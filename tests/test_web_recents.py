@@ -1,22 +1,20 @@
-#!/usr/bin/env python3
 """Unit tests for web/classify.py — recents tab classification.
 
 Tests every scenario the pipeline can produce, ensuring each gets
 the correct badge, verdict, and summary line.
 """
-
 import os
 import sys
 import unittest
 from dataclasses import replace
+from typing import ClassVar
 
 import msgspec
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from web.classify import (average_quality_label, classify_log_entry,
-                          legacy_floor_quality_label, LogEntry,
-                          ClassifiedEntry, _parse_import_result)
+from datetime import UTC
+
 from lib.quality import (
     AudioQualityMeasurement,
     DuplicateRemoveCandidate,
@@ -29,7 +27,14 @@ from lib.quality import (
     TargetQualityContract,
     V0ProbeEvidence,
 )
-
+from web.classify import (
+    ClassifiedEntry,
+    LogEntry,
+    _parse_import_result,
+    average_quality_label,
+    classify_log_entry,
+    legacy_floor_quality_label,
+)
 
 # ---------------------------------------------------------------------------
 # Helper to build a minimal LogEntry with sensible defaults
@@ -93,8 +98,8 @@ class TestLogEntry(unittest.TestCase):
 
     def test_from_row_datetime_serialized(self):
         """Datetime objects get serialized to ISO strings."""
-        from datetime import datetime, timezone
-        row = {"id": 1, "created_at": datetime(2026, 3, 30, 12, 0, 0, tzinfo=timezone.utc)}
+        from datetime import datetime
+        row = {"id": 1, "created_at": datetime(2026, 3, 30, 12, 0, 0, tzinfo=UTC)}
         entry = LogEntry.from_row(row)
         self.assertIsInstance(entry.created_at, str)
         assert entry.created_at is not None
@@ -110,7 +115,7 @@ class TestLogEntry(unittest.TestCase):
 
     def test_to_json_dict_no_datetime_objects(self):
         """to_json_dict should not contain datetime objects."""
-        from datetime import datetime, timezone
+        from datetime import datetime
         entry = _entry()
         entry.created_at = "2026-03-30T12:00:00+00:00"
         d = entry.to_json_dict()
@@ -2077,8 +2082,11 @@ class TestClassifyComparisonBasis(unittest.TestCase):
 
     def _basis_dict(self, new_kw, existing_kw):
         """Real production basis via compare_quality, as JSONB builtins."""
-        from lib.quality import (AudioQualityMeasurement, QualityRankConfig,
-                                 compare_quality)
+        from lib.quality import (
+            AudioQualityMeasurement,
+            QualityRankConfig,
+            compare_quality,
+        )
         basis = compare_quality(
             AudioQualityMeasurement(**new_kw),
             AudioQualityMeasurement(**existing_kw),
@@ -2087,8 +2095,11 @@ class TestClassifyComparisonBasis(unittest.TestCase):
         return msgspec.to_builtins(basis)
 
     def _bypass_basis_dict(self, new_kw, existing_kw):
-        from lib.quality import (AudioQualityMeasurement, QualityRankConfig,
-                                 import_quality_decision)
+        from lib.quality import (
+            AudioQualityMeasurement,
+            QualityRankConfig,
+            import_quality_decision,
+        )
         result = import_quality_decision(
             AudioQualityMeasurement(**new_kw),
             AudioQualityMeasurement(**existing_kw),
@@ -2098,10 +2109,10 @@ class TestClassifyComparisonBasis(unittest.TestCase):
         assert result.basis is not None
         return msgspec.to_builtins(result.basis)
 
-    _SAY_HELLO_NEW = dict(min_bitrate_kbps=194, avg_bitrate_kbps=288,
-                          format="MP3")
-    _SAY_HELLO_EXISTING = dict(min_bitrate_kbps=194, avg_bitrate_kbps=196,
-                               format="MP3")
+    _SAY_HELLO_NEW: ClassVar = {"min_bitrate_kbps": 194, "avg_bitrate_kbps": 288,
+                          "format": "MP3"}
+    _SAY_HELLO_EXISTING: ClassVar = {"min_bitrate_kbps": 194, "avg_bitrate_kbps": 196,
+                               "format": "MP3"}
 
     def test_upgrade_verdict_renders_the_decision_story(self):
         basis = self._basis_dict(self._SAY_HELLO_NEW, self._SAY_HELLO_EXISTING)
@@ -2145,8 +2156,8 @@ class TestClassifyComparisonBasis(unittest.TestCase):
 
     def test_cross_format_upgrade_names_both_formats(self):
         basis = self._basis_dict(
-            dict(avg_bitrate_kbps=192, format="aac"),
-            dict(avg_bitrate_kbps=196, format="MP3"),
+            {"avg_bitrate_kbps": 192, "format": "aac"},
+            {"avg_bitrate_kbps": 196, "format": "MP3"},
         )
         entry = _entry(
             outcome="success",
@@ -2179,8 +2190,8 @@ class TestClassifyComparisonBasis(unittest.TestCase):
 
     def test_equivalent_tiebreak_reject_keeps_tolerance_in_basis(self):
         basis = self._basis_dict(
-            dict(avg_bitrate_kbps=250, format="MP3"),
-            dict(avg_bitrate_kbps=248, format="MP3"),
+            {"avg_bitrate_kbps": 250, "format": "MP3"},
+            {"avg_bitrate_kbps": 248, "format": "MP3"},
         )
         entry = _entry(
             outcome="rejected",
@@ -2205,12 +2216,12 @@ class TestClassifyComparisonBasis(unittest.TestCase):
         (1000 / 235) that would launder a worse-spectral candidate in on a
         higher declared bitrate alone."""
         basis = self._basis_dict(
-            dict(min_bitrate_kbps=1000, avg_bitrate_kbps=1000, format="MP3",
-                 is_cbr=True, spectral_grade="likely_transcode",
-                 spectral_bitrate_kbps=230),
-            dict(min_bitrate_kbps=235, avg_bitrate_kbps=235, format="MP3",
-                 is_cbr=True, spectral_grade="likely_transcode",
-                 spectral_bitrate_kbps=200),
+            {"min_bitrate_kbps": 1000, "avg_bitrate_kbps": 1000, "format": "MP3",
+                 "is_cbr": True, "spectral_grade": "likely_transcode",
+                 "spectral_bitrate_kbps": 230},
+            {"min_bitrate_kbps": 235, "avg_bitrate_kbps": 235, "format": "MP3",
+                 "is_cbr": True, "spectral_grade": "likely_transcode",
+                 "spectral_bitrate_kbps": 200},
         )
         self.assertEqual(basis["branch"], "spectral_tiebreak")
         self.assertEqual(basis["verdict"], "better")
@@ -2228,8 +2239,8 @@ class TestClassifyComparisonBasis(unittest.TestCase):
 
     def test_verified_lossless_bypass_names_the_bypass(self):
         basis = self._bypass_basis_dict(
-            dict(avg_bitrate_kbps=250, format="MP3"),
-            dict(avg_bitrate_kbps=248, format="MP3"),
+            {"avg_bitrate_kbps": 250, "format": "MP3"},
+            {"avg_bitrate_kbps": 248, "format": "MP3"},
         )
         self.assertTrue(basis["verified_lossless_bypass"])
         entry = _entry(

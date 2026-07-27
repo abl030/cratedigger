@@ -27,30 +27,33 @@ diverging on metadata semantics.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-
 import logging
 import re
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from collections.abc import Mapping
 from contextlib import AbstractContextManager
-from typing import TYPE_CHECKING, Any, Optional, Protocol, runtime_checkable
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from lib.config import CratediggerConfig
 from lib.json_narrow import (
     is_container_like as _is_container_like,
+)
+from lib.json_narrow import (
     is_dict_like as _is_dict_like,
+)
+from lib.json_narrow import (
     is_list_like as _is_list_like,
 )
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_PLAN,
     PLAN_STATUS_ACTIVE,
     ActiveSearchPlan,
+    ReplacedRequestMutationError,
     SaturationSummary,
     SearchLogHistoryPage,
     SearchPlanInspection,
     SearchPlanItemInput,
-    ReplacedRequestMutationError,
 )
 from lib.release_snapshot import (
     ReleaseSnapshot,
@@ -84,7 +87,7 @@ class SearchPlanDB(Protocol):
     Parity tests live in ``tests/test_search_plan_service.py``.
     """
 
-    def get_request(self, request_id: int) -> "AlbumRequestRow | None": ...
+    def get_request(self, request_id: int) -> AlbumRequestRow | None: ...
 
     def get_tracks(self, request_id: int) -> list[dict[str, Any]]: ...
 
@@ -439,7 +442,7 @@ class SaturationResult:
     outcome: str
     request_id: int
     window_days: int
-    summary: "SaturationSummary | None" = None
+    summary: SaturationSummary | None = None
     error_message: str | None = None
 
 
@@ -477,7 +480,7 @@ class SearchPlanService:
         self,
         db: SearchPlanDB,
         config: CratediggerConfig,
-        resolver: Optional[TrackResolver] = None,
+        resolver: TrackResolver | None = None,
     ) -> None:
         self.db = db
         self.config = config
@@ -589,7 +592,7 @@ class SearchPlanService:
         *,
         to_ordinal: int | None = None,
         to_strategy: str | None = None,
-    ) -> "AdvanceResult":
+    ) -> AdvanceResult:
         """Forward-only cursor advance for an operator's active plan.
 
         Resolves the target ordinal from either ``to_ordinal`` (explicit)
@@ -709,7 +712,7 @@ class SearchPlanService:
         *,
         limit: int,
         before_id: int | None = None,
-    ) -> "SearchLogHistoryPageResult":
+    ) -> SearchLogHistoryPageResult:
         """Paginated read of one request's ``search_log`` rows.
 
         Counterpart of ``GET /api/pipeline/<id>/search-plan/history`` and
@@ -772,7 +775,7 @@ class SearchPlanService:
         request_id: int,
         *,
         prepend_artist: bool | None = None,
-    ) -> "DryRunResult":
+    ) -> DryRunResult:
         """U6 read-only simulator: run the generator without persisting.
 
         Loads the request row + persisted tracks, constructs the same
@@ -810,7 +813,7 @@ class SearchPlanService:
             )
         try:
             tracks = self.db.get_tracks(request_id) or []
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             tracks = []
         snapshot = snapshot_from_request_row(
             row, tracks, prepend_artist=prepend,
@@ -839,7 +842,7 @@ class SearchPlanService:
         request_id: int,
         *,
         window_days: int = SATURATION_WINDOW_DEFAULT_DAYS,
-    ) -> "SaturationResult":
+    ) -> SaturationResult:
         """U7 read-only telemetry aggregate over the request's search_log.
 
         Wraps :meth:`PipelineDB.get_saturation_summary` with the
@@ -1004,7 +1007,7 @@ class SearchPlanService:
         """
         try:
             inspection = self.db.get_search_plan_inspection(request_id)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             # If we can't read inspection state, fail open: let the
             # generator run rather than silently never trying again.
             return None
@@ -1058,7 +1061,7 @@ class SearchPlanService:
             return False
         try:
             current_tracks = self.db.get_tracks(request_id) or []
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             return False
         return len(current_tracks) > recorded_int
 
@@ -1110,7 +1113,7 @@ class SearchPlanService:
                 snapshot=None,
                 metadata_snapshot=_metadata_snapshot_from_row(row, []),
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             # Generic dependency failure (unexpected DB / resolver
             # exception). Treat as transient — startup will retry next
             # cycle and we don't want a flaky upstream to permanently
@@ -1223,7 +1226,7 @@ class SearchPlanService:
                 )
             except ReplacedRequestMutationError:
                 return self._replaced_result(request_id)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                 return self._record_failure(
                     request_id,
                     failure_class=FAILURE_CLASS_DEPENDENCY_FAILURE,
@@ -1248,7 +1251,7 @@ class SearchPlanService:
             )
         except ReplacedRequestMutationError:
             return self._replaced_result(request_id)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             return self._record_failure(
                 request_id,
                 failure_class=FAILURE_CLASS_DEPENDENCY_FAILURE,
@@ -1285,7 +1288,7 @@ class SearchPlanService:
             )
         except ReplacedRequestMutationError:
             return self._replaced_result(request_id)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             # If we can't even persist the failure row, surface that as
             # a transient outcome but do not raise — callers (CLI/web)
             # rely on the service never aborting their request flow.
@@ -1323,7 +1326,7 @@ def _envelope(result: Any) -> dict[str, Any]:
 
 
 def dry_run_payload(
-    result: "DryRunResult",
+    result: DryRunResult,
     *,
     current_generator_id: str,
     request_row: Mapping[str, Any] | None,
@@ -1379,7 +1382,7 @@ def dry_run_payload(
     }
 
 
-def saturation_payload(result: "SaturationResult") -> dict[str, Any]:
+def saturation_payload(result: SaturationResult) -> dict[str, Any]:
     """JSON-serialisable payload for U7 saturation CLI + API responses.
 
     The wire shape is always the five summary fields at the top level
@@ -1419,8 +1422,8 @@ def _within_retry_window(created_at: datetime | None) -> bool:
     if created_at is None:
         return False
     if created_at.tzinfo is None:
-        created_at = created_at.replace(tzinfo=timezone.utc)
-    now = datetime.now(timezone.utc)
+        created_at = created_at.replace(tzinfo=UTC)
+    now = datetime.now(UTC)
     return (now - created_at) < _TRANSIENT_FAILURE_RETRY_INTERVAL
 
 

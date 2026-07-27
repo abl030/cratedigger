@@ -41,10 +41,10 @@ the concrete banding function in.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Optional, Protocol
+from collections.abc import Callable
+from typing import Any, Protocol
 
 import msgspec
-
 
 # The ``Missing`` band sentinel — a release id absent from the beets
 # membership set has no library copy to upgrade. ``"unknown"`` (in-library
@@ -82,19 +82,19 @@ class LongTailRow(msgspec.Struct, frozen=True):
     id: int
     artist_name: str
     album_title: str
-    year: Optional[int]
+    year: int | None
     status: str
-    source: Optional[str]
-    mb_release_id: Optional[str]
-    mb_release_group_id: Optional[str]
-    discogs_release_id: Optional[str]
-    target_format: Optional[str]
-    min_bitrate: Optional[int]
-    search_filetype_override: Optional[str]
-    unfindable_category: Optional[str]
+    source: str | None
+    mb_release_id: str | None
+    mb_release_group_id: str | None
+    discogs_release_id: str | None
+    target_format: str | None
+    min_bitrate: int | None
+    search_filetype_override: str | None
+    unfindable_category: str | None
     track_count: int
-    current_spectral_grade: Optional[str]
-    current_spectral_bitrate: Optional[int]
+    current_spectral_grade: str | None
+    current_spectral_bitrate: int | None
     band: str
     in_flight_rescue: bool
 
@@ -114,7 +114,7 @@ class LongTailResult(msgspec.Struct, frozen=True):
 
     outcome: str
     rows: list[LongTailRow]
-    band_filter: Optional[str]
+    band_filter: str | None
 
 
 # ``band_fn`` maps a list of release ids (``mb_release_id`` values) to a
@@ -134,14 +134,14 @@ class _PipelineDB(Protocol):
 
     def get_long_tail_request(
         self, request_id: int,
-    ) -> Optional[dict[str, Any]]: ...
+    ) -> dict[str, Any] | None: ...
 
 
 def list_long_tail(
     pdb: _PipelineDB,
     band_fn: BandFn,
     *,
-    band: Optional[str] = None,
+    band: str | None = None,
 ) -> LongTailResult:
     """Return the ``wanted`` cohort pre-banded and rescue-stamped.
 
@@ -167,7 +167,7 @@ def band_one_long_tail(
     pdb: _PipelineDB,
     band_fn: BandFn,
     request_id: int,
-) -> Optional[LongTailRow]:
+) -> LongTailRow | None:
     """Band a single ``wanted`` request by id.
 
     Backs the post-action single-row refetch (KTD8) and the single-id
@@ -225,7 +225,7 @@ def _band_row(row: dict[str, Any], bands: dict[str, str]) -> LongTailRow:
     )
 
 
-def _int_or_none(value: Any) -> Optional[int]:
+def _int_or_none(value: Any) -> int | None:
     if value is None:
         return None
     try:

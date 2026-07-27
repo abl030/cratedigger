@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -18,7 +18,7 @@ PIN_RETENTION_DAYS = 90
 
 
 def prune_terminal_pin_rows_cycle(
-    ctx: "CratediggerContext",
+    ctx: CratediggerContext,
     *,
     now: datetime | None = None,
 ) -> int:
@@ -28,7 +28,7 @@ def prune_terminal_pin_rows_cycle(
     owns cycle-preserving failure isolation, so this step and any future step
     retain the same behavior without local exception wrappers.
     """
-    reference = now or datetime.now(timezone.utc)
+    reference = now or datetime.now(UTC)
     cutoff = reference - timedelta(days=PIN_RETENTION_DAYS)
     db = ctx.pipeline_db_source._get_db()
     plex_removed = db.prune_terminal_plex_added_at_pins(older_than=cutoff)

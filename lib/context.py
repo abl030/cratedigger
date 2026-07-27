@@ -7,9 +7,10 @@ as their first parameter instead of reading globals.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import threading
-from typing import Any, Protocol, Sequence, TYPE_CHECKING, runtime_checkable
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from cratedigger import TrackRecord
@@ -68,19 +69,19 @@ class CratediggerContext:
     download_ownership: Any = None
 
     # --- Runtime caches (reset each cycle) ---
-    search_cache: dict[int, Any] = field(default_factory=lambda: {})
-    folder_cache: dict[str, Any] = field(default_factory=lambda: {})
-    user_upload_speed: dict[str, int] = field(default_factory=lambda: {})
+    search_cache: dict[int, Any] = field(default_factory=dict)
+    folder_cache: dict[str, Any] = field(default_factory=dict)
+    user_upload_speed: dict[str, int] = field(default_factory=dict)
     broken_user: set[str] = field(default_factory=lambda: set())
     search_dir_audio_count: dict[str, dict[str, int]] = (
-        field(default_factory=lambda: {}))
+        field(default_factory=dict))
     negative_matches: set[tuple[str, str, int, str]] = (
         field(default_factory=lambda: set()))
-    current_album_cache: dict[int, Any] = field(default_factory=lambda: {})
-    denied_users_cache: dict[int, set[str]] = field(default_factory=lambda: {})
+    current_album_cache: dict[int, Any] = field(default_factory=dict)
+    denied_users_cache: dict[int, set[str]] = field(default_factory=dict)
     cooled_down_users: set[str] = field(default_factory=lambda: set())
     prefetched_album_tracks: dict[int, list[TrackRecord]] = (
-        field(default_factory=lambda: {}))
+        field(default_factory=dict))
     peer_cache: Any = None
     peer_cache_negative_skips: set[tuple[str, str]] = (
         field(default_factory=lambda: set()))

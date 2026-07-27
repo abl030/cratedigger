@@ -15,8 +15,8 @@ from lib.replace_status import (
     RESOLVE_STATUS_MASTERLESS,
     RESOLVE_STATUS_MIRROR_UNCONFIGURED,
     RESOLVE_STATUS_MISSING_RELEASE_ID,
-    RESOLVE_STATUS_NON_MB_RELEASE_ID,
     RESOLVE_STATUS_NO_RELEASE_GROUP,
+    RESOLVE_STATUS_NON_MB_RELEASE_ID,
     RESOLVE_STATUS_NOT_FOUND,
     RESOLVE_STATUS_RESOLVED,
     RESOLVE_STATUS_TRANSIENT,
@@ -186,7 +186,7 @@ def post_pipeline_resolve_rg(
                 "error": f"Discogs lookup failed (transient): {exc}",
             }, status=503)
             return
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             h._json({
                 "request_id": request_id,
                 "mb_release_group_id": None,
@@ -231,7 +231,7 @@ def post_pipeline_resolve_rg(
             "error": f"MB lookup failed (transient): {exc}",
         }, status=503)
         return
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         h._json({
             "request_id": request_id,
             "mb_release_group_id": None,
@@ -302,7 +302,6 @@ def post_pipeline_replace(
     """
     from lib.config import read_runtime_config
     from lib.mbid_replace_service import (
-        MbidReplaceService,
         RESULT_MIRROR_UNCONFIGURED,
         RESULT_NOT_FOUND,
         RESULT_REPLACED,
@@ -312,6 +311,7 @@ def post_pipeline_replace(
         RESULT_TARGET_SAME_AS_CURRENT,
         RESULT_TRANSIENT,
         RESULT_WRONG_STATE,
+        MbidReplaceService,
     )
 
     try:

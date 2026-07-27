@@ -16,10 +16,10 @@ from __future__ import annotations
 import json
 import os
 import sys
+import urllib.request
 from collections import defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import TypedDict
-import urllib.request
 from xml.etree.ElementTree import Element
 
 from defusedxml import ElementTree as ET
@@ -111,7 +111,7 @@ def main() -> None:
                 done += 1
                 if done % 200 == 0:
                     print(f"progress {done}/{len(all_rks)}", file=sys.stderr)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                 failures.append({'ratingKey': rk, 'error': str(e)})
 
     # Retry failures once
@@ -129,7 +129,7 @@ def main() -> None:
                     files = [f for f in (p.get('file') for p in root.findall('.//Part')) if f]
                     folders = sorted({os.path.dirname(f) for f in files})
                     rk_data[rk] = {'files': files, 'folders': folders, 'track_count': len(files)}
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                     failures.append({'ratingKey': rk, 'error': str(e)})
 
     group_rows: list[dict[str, object]] = []

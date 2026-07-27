@@ -1,33 +1,30 @@
-#!/usr/bin/env python3
 """Contract tests for web/routes/library.py: beets search/recent/delete.
 
 Split from tests/test_web_server.py (#408). Shared harness in
 tests/web/_harness.py.
 """
-
 import os
 import sys
 import unittest
+from typing import ClassVar
 from unittest.mock import patch
 
 import msgspec
 
-
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from tests.web._harness import (
-    _assert_required_fields,
-    _FakeDbWebServerCase,
-)
-
-from tests.fakes import FakeBeetsDB, FakePipelineDB
-from tests.helpers import make_request_row
-from web.classify import ClassifiedEntry
 from lib.beets_delete import (
     BeetsDeleteCompleted,
     BeetsDeleteFailed,
     BeetsDeleteRequest,
 )
+from tests.fakes import FakeBeetsDB, FakePipelineDB
+from tests.helpers import make_request_row
+from tests.web._harness import (
+    _assert_required_fields,
+    _FakeDbWebServerCase,
+)
+from web.classify import ClassifiedEntry
 
 
 class _FailingDeleteDB(FakePipelineDB):
@@ -41,7 +38,7 @@ class _FailingDeleteDB(FakePipelineDB):
 class TestBeetsRouteContracts(_FakeDbWebServerCase):
     """Contract tests for frontend-consumed beets library routes."""
 
-    ALBUM_REQUIRED_FIELDS = {
+    ALBUM_REQUIRED_FIELDS: ClassVar = {
         "id", "album", "artist", "year", "mb_albumid", "track_count",
         "mb_releasegroupid", "release_group_title", "added", "formats",
         "min_bitrate", "type", "label", "country", "source",
@@ -54,7 +51,7 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
             "download_history",
         }
     )
-    TRACK_REQUIRED_FIELDS = {
+    TRACK_REQUIRED_FIELDS: ClassVar = {
         "id", "artist", "disc", "track", "title", "length", "format",
         "bitrate", "samplerate", "bitdepth", "path",
     }
@@ -82,7 +79,7 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
         "wrong_match_triage_preview_decision",
         "wrong_match_triage_stage_chain", "wrong_match_triage_detail",
     } | {field.name for field in msgspec.structs.fields(ClassifiedEntry)}
-    DELETE_REQUIRED_FIELDS = {
+    DELETE_REQUIRED_FIELDS: ClassVar = {
         "status", "id", "album", "artist", "deleted_files",
         "deleted_artifacts", "pipeline_deleted", "pipeline_id",
         "preserved_paths", "notifications",

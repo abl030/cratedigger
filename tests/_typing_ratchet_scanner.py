@@ -35,7 +35,6 @@ import io
 import os
 import re
 import tokenize
-from typing import Dict
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -55,7 +54,7 @@ _BARE_PYRIGHT_IGNORE_RE = re.compile(r"#\s*pyright:\s*ignore(?!\s*\[)")
 _PRUNE_DIRS = {"tests", "build", "docs", "examples", "__pycache__"}
 
 
-def count_escape_hatches(source: str) -> Dict[str, int]:
+def count_escape_hatches(source: str) -> dict[str, int]:
     """Count banned typing escape hatches in one file's source.
 
     Returns only nonzero keys so baselines stay compact.
@@ -91,9 +90,9 @@ def iter_production_paths():
             yield os.path.relpath(path, REPO_ROOT), path
 
 
-def scan_production_tree() -> Dict[str, Dict[str, int]]:
+def scan_production_tree() -> dict[str, dict[str, int]]:
     """Return ``{relpath: {finding_key: count}}`` for offending files only."""
-    result: Dict[str, Dict[str, int]] = {}
+    result: dict[str, dict[str, int]] = {}
     for rel, path in iter_production_paths():
         with open(path, encoding="utf-8") as f:
             counts = count_escape_hatches(f.read())
@@ -102,7 +101,7 @@ def scan_production_tree() -> Dict[str, Dict[str, int]]:
     return result
 
 
-def render_baseline_module(scan: Dict[str, Dict[str, int]]) -> str:
+def render_baseline_module(scan: dict[str, dict[str, int]]) -> str:
     """Render the baseline module source for the current scan."""
     lines = [
         '"""GENERATED baseline for the typing escape-hatch ratchet (#765).',
@@ -143,9 +142,9 @@ def iter_tests_paths():
             yield os.path.relpath(path, REPO_ROOT), path
 
 
-def scan_tests_tree() -> Dict[str, Dict[str, int]]:
+def scan_tests_tree() -> dict[str, dict[str, int]]:
     """Return ``{relpath: {finding_key: count}}`` for offending tests files."""
-    result: Dict[str, Dict[str, int]] = {}
+    result: dict[str, dict[str, int]] = {}
     for rel, path in iter_tests_paths():
         with open(path, encoding="utf-8") as f:
             counts = count_escape_hatches(f.read())
@@ -154,7 +153,7 @@ def scan_tests_tree() -> Dict[str, Dict[str, int]]:
     return result
 
 
-def render_tests_baseline_module(scan: Dict[str, Dict[str, int]]) -> str:
+def render_tests_baseline_module(scan: dict[str, dict[str, int]]) -> str:
     """Render the tests escape-hatch baseline module source."""
     lines = [
         '"""GENERATED tests escape-hatch freeze baseline (#784).',

@@ -36,7 +36,7 @@ def make_test_flac(path: str, cutoff_hz: int = 15500, duration: int = 5) -> None
         "vol", "0.4", "tremolo", "5", "40",
         "sinc", f"-{cutoff_hz}",
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, check=False)
     if result.returncode != 0:
         raise RuntimeError(f"sox failed: {result.stderr}")
     if not os.path.exists(path):
@@ -65,6 +65,7 @@ def get_bitrate_kbps(path: str) -> int:
         ["ffprobe", "-v", "error", "-select_streams", "a:0",
          "-show_entries", "stream=bit_rate", "-of", "csv=p=0", path],
         capture_output=True, text=True, timeout=30,
+        check=False,
     )
     br_str = result.stdout.strip().rstrip(",")
     # VBR MP3s return N/A — fall back to format bitrate
@@ -73,6 +74,7 @@ def get_bitrate_kbps(path: str) -> int:
             ["ffprobe", "-v", "error",
              "-show_entries", "format=bit_rate", "-of", "csv=p=0", path],
             capture_output=True, text=True, timeout=30,
+            check=False,
         )
         br_str = result.stdout.strip().rstrip(",")
     if not br_str or not br_str.isdigit():

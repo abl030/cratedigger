@@ -8,7 +8,6 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-
 _FAKE_COMMAND = r'''#!/usr/bin/env python3
 import fcntl
 import json
@@ -532,4 +531,5 @@ class FakeDeployPinCommands:
             capture_output=True,
             text=True,
             timeout=20,
+            check=False,
         )

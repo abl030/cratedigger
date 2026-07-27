@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
-from tests.test_final_gate_receipt import HELPER, _FAKE_NIX_SHELL
+from tests.test_final_gate_receipt import _FAKE_NIX_SHELL, HELPER
 
 
 def assert_receipt_contract(
@@ -96,6 +96,7 @@ class TestFinalGateReceiptGenerated(unittest.TestCase):
             }
             result = subprocess.run(
                 [str(HELPER), "pyright"], cwd=repo, text=True, capture_output=True, env=env,
+                check=False,
             )
             receipt = Path(result.stdout.splitlines()[0].removeprefix("receipt: "))
             self.addCleanup(shutil.rmtree, receipt, True)

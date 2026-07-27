@@ -5,8 +5,9 @@ from __future__ import annotations
 import difflib
 import logging
 import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Callable, Sequence, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import msgspec
 
@@ -23,9 +24,9 @@ from lib.util import _track_titles_cross_check
 _browse_directories = _browse_directories_for_ctx
 
 if TYPE_CHECKING:
+    from cratedigger import SlskdDirectory, SlskdFile, TrackRecord
     from lib.config import CratediggerConfig
     from lib.context import CratediggerContext
-    from cratedigger import SlskdDirectory, SlskdFile, TrackRecord
 
 
 logger = logging.getLogger("cratedigger")
@@ -97,7 +98,7 @@ class MatchResult:
     matched: bool
     directory: Any
     file_dir: str
-    candidates: list[CandidateScore] = field(default_factory=lambda: [])
+    candidates: list[CandidateScore] = field(default_factory=list)
     # Authoritative count of dirs rejected by the asymmetric pre-filter
     # before browse; sample rows in ``candidates`` are bounded by
     # ``PRE_FILTER_SKIP_SAMPLE_CAP``.
@@ -119,7 +120,7 @@ class MatchResult:
 
 
 def classify_rejection_reason(
-    candidates: "list[CandidateScore] | tuple[CandidateScore, ...]",
+    candidates: list[CandidateScore] | tuple[CandidateScore, ...],
     pre_filter_skip_count: int,
     matched: bool,
     *,
@@ -184,7 +185,7 @@ def classify_rejection_reason(
 
 
 def classify_rejection_from_log_inputs(
-    candidates: "list[CandidateScore] | tuple[CandidateScore, ...]",
+    candidates: list[CandidateScore] | tuple[CandidateScore, ...],
     pre_filter_skip_count: int,
     outcome: str,
 ) -> str | None:
@@ -235,7 +236,7 @@ def classify_rejection_from_log_inputs(
 
 
 def matcher_score_top1_for(
-    candidates: "list[CandidateScore] | tuple[CandidateScore, ...]",
+    candidates: list[CandidateScore] | tuple[CandidateScore, ...],
 ) -> float | None:
     """Top-1 ``matched_tracks + avg_ratio`` composite over scored entries.
 
@@ -330,8 +331,7 @@ def album_match(
                 slskd_filename, match_cfg.minimum_match_ratio,
             )
 
-            if ratio > best_match:
-                best_match = ratio
+            best_match = max(best_match, ratio)
 
         best_per_track.append(best_match)
         if best_match > match_cfg.minimum_match_ratio:
@@ -493,8 +493,8 @@ def check_for_match(
     username: str,
     ctx: CratediggerContext,
     *,
-    album_match_fn: "Callable[..., Any] | None" = None,
-    cross_check_fn: "Callable[..., bool] | None" = None,
+    album_match_fn: Callable[..., Any] | None = None,
+    cross_check_fn: Callable[..., bool] | None = None,
 ) -> MatchResult:
     """Check candidate directories for an album match.
 

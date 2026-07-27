@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Live-corpus differential for operator-facing derived text.
 
 Two modes, deliberately separate so the tool never does git surgery and
@@ -34,6 +33,7 @@ claim it exists to catch:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib
 import os
 import sys
@@ -98,8 +98,8 @@ class DiffReport(msgspec.Struct, frozen=True):
     changed_rows: int
     changed_by_field: dict[str, int]
     samples: list[FieldChange]
-    base_only_fields: list[str] = msgspec.field(default_factory=lambda: [])
-    current_only_fields: list[str] = msgspec.field(default_factory=lambda: [])
+    base_only_fields: list[str] = msgspec.field(default_factory=list)
+    current_only_fields: list[str] = msgspec.field(default_factory=list)
 
 
 @runtime_checkable
@@ -577,17 +577,17 @@ def render_corpus(
     renderer so a large corpus stays memory-bounded.
     """
     target.prepare(_corpus_rows(corpus_path))
-    handle = sys.stdout if out_path is None else open(
-        out_path, "w", encoding="utf-8")
     count = 0
-    try:
+    output = (
+        contextlib.nullcontext(sys.stdout)
+        if out_path is None
+        else open(out_path, "w", encoding="utf-8")  # noqa: SIM115 - managed below
+    )
+    with output as handle:
         for row in _corpus_rows(corpus_path):
             handle.write(msgspec.json.encode(target.render(row)).decode())
             handle.write("\n")
             count += 1
-    finally:
-        if out_path is not None:
-            handle.close()
     return count
 
 

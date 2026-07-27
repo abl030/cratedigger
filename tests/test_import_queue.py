@@ -8,7 +8,7 @@ import threading
 import time
 import unittest
 from contextlib import AbstractContextManager, contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from unittest.mock import ANY, MagicMock, patch
 
@@ -19,13 +19,19 @@ from lib.dispatch import (
     DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
     DispatchOutcome,
 )
-from lib.download_processing import Completed, CompletionDeferred, CompletionDispatched, CompletionFailed
+from lib.download_processing import (
+    Completed,
+    CompletionDeferred,
+    CompletionDispatched,
+    CompletionFailed,
+)
+from lib.import_preview import ImportPreviewResult
 from lib.import_queue import (
-    AutomationImportPayload,
-    ForceImportPayload,
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
     IMPORT_JOB_YOUTUBE,
+    AutomationImportPayload,
+    ForceImportPayload,
     ImportJob,
     YoutubeImportPayload,
     automation_import_dedupe_key,
@@ -33,7 +39,6 @@ from lib.import_queue import (
     force_import_payload,
     validate_payload,
 )
-from lib.import_preview import ImportPreviewResult
 from lib.quality import (
     AudioQualityMeasurement,
     ImportResult,
@@ -43,14 +48,12 @@ from lib.quality_evidence import snapshot_audio_files
 from lib.staged_album import StagedAlbum
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import (
+    hermetic_beets_config_defaults,
     make_album_quality_evidence,
     make_ctx_with_fake_db,
-    make_download_file,
     make_grab_list_entry,
     make_request_row,
-    hermetic_beets_config_defaults,
 )
-
 
 _HERMETIC_BEETS_DEFAULTS: AbstractContextManager[tuple[str, str]] | None = None
 _HERMETIC_BEETS_PAIR: tuple[str, str] | None = None
@@ -999,15 +1002,14 @@ class TestImporterWorker(unittest.TestCase):
                 ),
             ), patch(
                 "lib.wrong_match_cleanup_service.cleanup_wrong_match",
-            ) as cleanup_wrong_match:
-                with patch(
-                    "lib.wrong_match_cleanup_service.full_pipeline_decision_from_evidence",
-                    side_effect=AssertionError("cleanup must not re-decide"),
-                ), patch(
-                    "lib.quality.full_pipeline_decision_from_evidence",
-                    side_effect=AssertionError("cleanup must not re-decide"),
-                ):
-                    updated = importer.process_claimed_job(cast(Any, db), claimed)
+            ) as cleanup_wrong_match, patch(
+                "lib.wrong_match_cleanup_service.full_pipeline_decision_from_evidence",
+                side_effect=AssertionError("cleanup must not re-decide"),
+            ), patch(
+                "lib.quality.full_pipeline_decision_from_evidence",
+                side_effect=AssertionError("cleanup must not re-decide"),
+            ):
+                updated = importer.process_claimed_job(cast(Any, db), claimed)
 
             cleanup_wrong_match.assert_not_called()
             assert updated is not None
@@ -1418,8 +1420,8 @@ class TestImporterWorker(unittest.TestCase):
 
     def test_force_import_requeue_leaves_next_preview_action_copy_intact(self):
         """A requeued importer cannot reclaim an action a new preview owns."""
-        from scripts import importer
         from lib.dispatch import DISPATCH_CODE_REQUEUED_FOR_PREVIEW
+        from scripts import importer
 
         db = FakePipelineDB()
         root, source = _make_failed_import_source()
@@ -1509,8 +1511,8 @@ class TestImporterWorker(unittest.TestCase):
         surfaces the issue to ops; the operator re-triggers once the DB
         problem is resolved.
         """
-        from scripts import importer
         from lib.dispatch import DISPATCH_CODE_REQUEUE_FAILED
+        from scripts import importer
 
         db = FakePipelineDB()
         root, source = _make_failed_import_source()
@@ -1979,8 +1981,8 @@ class TestImporterWorker(unittest.TestCase):
         self.assertEqual(self._result(updated)["success"], False)
 
     def test_requeued_automation_job_abandons_interrupted_auto_import(self):
-        from scripts import importer
         from lib.processing_paths import stage_to_ai_path
+        from scripts import importer
 
         with tempfile.TemporaryDirectory() as tmpdir:
             staging_root = os.path.join(tmpdir, "staging")
@@ -2195,7 +2197,7 @@ class TestImportPreviewWorker(unittest.TestCase):
                 handle.write(b"audio")
             db = FakePipelineDB()
             download_log_id = _force_download_log(db, 42, source)
-            job = db.enqueue_import_job(
+            db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=42,
                 dedupe_key=force_import_dedupe_key(download_log_id),
@@ -2256,8 +2258,8 @@ class TestImportPreviewWorker(unittest.TestCase):
         ``execute_preview_job`` instead makes the production config reject
         this private test source at the exact execute boundary.
         """
-        from scripts import import_preview_worker
         from lib.fs_authority import FilesystemAuthorityError
+        from scripts import import_preview_worker
 
         with _force_preview_source() as (source, cfg):
             with open(os.path.join(source, "01.mp3"), "wb") as handle:
@@ -2432,8 +2434,8 @@ class TestImportPreviewWorker(unittest.TestCase):
             self.assertEqual(claimed_for_import.id, updated.id)
 
     def test_evidence_readiness_fallback_preserves_collected_audit(self):
-        from scripts import import_preview_worker
         from lib.quality import SpectralAnalysisDetail, SpectralDetail
+        from scripts import import_preview_worker
 
         with tempfile.TemporaryDirectory() as source:
             with open(os.path.join(source, "01.mp3"), "wb") as handle:
@@ -2480,7 +2482,7 @@ class TestImportPreviewWorker(unittest.TestCase):
             with open(os.path.join(source, "01.mp3"), "wb") as handle:
                 handle.write(b"audio")
             db = FakePipelineDB()
-            setattr(db, "dsn", "postgresql://fake")
+            db.dsn = "postgresql://fake"
             download_log_id = _force_download_log(db, 42, source)
             db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
@@ -2550,7 +2552,7 @@ class TestImportPreviewWorker(unittest.TestCase):
 
         db = FakePipelineDB()
         dsn = "postgresql://fake"
-        setattr(db, "dsn", dsn)
+        db.dsn = dsn
         db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=42,
@@ -2562,7 +2564,7 @@ class TestImportPreviewWorker(unittest.TestCase):
         )
         claimed = db.claim_next_import_preview_job(worker_id="dead-worker")
         assert claimed is not None
-        old = datetime.now(timezone.utc) - timedelta(hours=2)
+        old = datetime.now(UTC) - timedelta(hours=2)
         for row in db._import_jobs:
             if row["id"] == claimed.id:
                 row["preview_started_at"] = old
@@ -2865,7 +2867,6 @@ class TestImportPreviewWorker(unittest.TestCase):
                 calls += 1
                 if calls == 1:
                     raise RuntimeError("db connection died")
-            return None
 
         with (
             patch("scripts.import_preview_worker.PipelineDB",
@@ -2899,6 +2900,7 @@ class TestImportPreviewWorker(unittest.TestCase):
         error, log it, back off, and keep polling.
         """
         import psycopg2
+
         from scripts import import_preview_worker
 
         class ThreadDB:
@@ -2924,7 +2926,6 @@ class TestImportPreviewWorker(unittest.TestCase):
             stop = stop_holder.get("stop")
             if stop is not None:
                 stop.set()
-            return None
 
         # Capture the ``stop`` event from inside ``run_threaded_workers``
         # by monkeypatching ``threading.Event``.
@@ -3052,9 +3053,9 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
 
     def test_force_job_valid_evidence_skips_measurement(self):
         """AE4 force: matching snapshot + valid evidence → no measurement."""
-        from scripts import import_preview_worker
         from lib.beets_db import AlbumInfo
         from lib.quality import SpectralAnalysisDetail
+        from scripts import import_preview_worker
 
         with _force_preview_source() as (source, cfg), \
              tempfile.TemporaryDirectory() as existing:
@@ -3161,8 +3162,8 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
 
     def test_reused_candidate_fails_when_have_enrichment_loses_authority(self):
         """The front gate cannot reinterpret stale HAVE as library absence."""
-        from scripts import import_preview_worker
         from lib.quality_evidence import EvidenceBuildResult
+        from scripts import import_preview_worker
 
         with _force_preview_source() as (source, cfg):
             with open(os.path.join(source, "01.mp3"), "wb") as handle:
@@ -3262,9 +3263,9 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
 
     def test_reused_evidence_scans_ordinary_have_path(self):
         """Front-gate reuse still analyzes non-lossless-converted HAVE."""
-        from scripts import import_preview_worker
         from lib.measurement import ExistingSpectralAuditLookup
         from lib.quality import SpectralAnalysisDetail
+        from scripts import import_preview_worker
 
         with _force_preview_source() as (source, cfg), \
              tempfile.TemporaryDirectory() as existing:
@@ -3344,10 +3345,10 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
         result, so the importer's decision ran with a spectrally blind
         HAVE side and called a ~96k transcode an upgrade.
         """
-        from scripts import import_preview_worker
         from lib.beets_db import AlbumInfo
         from lib.measurement import ExistingSpectralAuditLookup
         from lib.quality import SpectralAnalysisDetail
+        from scripts import import_preview_worker
 
         with _force_preview_source() as (source, cfg), \
              tempfile.TemporaryDirectory() as existing:
@@ -3431,9 +3432,9 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
 
     def test_reused_evidence_never_overwrites_present_have_spectral(self):
         """A fresh audit scan must not clobber persisted HAVE provenance."""
-        from scripts import import_preview_worker
         from lib.measurement import ExistingSpectralAuditLookup
         from lib.quality import SpectralAnalysisDetail
+        from scripts import import_preview_worker
 
         with _force_preview_source() as (source, cfg), \
              tempfile.TemporaryDirectory() as existing:
@@ -3503,9 +3504,9 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
 
     def test_have_lookup_failure_does_not_reanalyze_reused_candidate(self):
         """A HAVE lookup failure cannot revoke matching candidate evidence."""
-        from scripts import import_preview_worker
         from lib.measurement import ExistingSpectralAuditLookup
         from lib.quality import SpectralAnalysisDetail
+        from scripts import import_preview_worker
 
         class HaveLookupFailureDB(FakePipelineDB):
             def get_request_current_evidence_id(self, request_id: int):
@@ -3624,8 +3625,8 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
         Crucially, no materialization either: the path-derivation helper must
         not invoke _materialize_processing_dir.
         """
-        from scripts import import_preview_worker
         from lib.quality import SpectralAnalysisDetail
+        from scripts import import_preview_worker
 
         with tempfile.TemporaryDirectory() as staged:
             with open(os.path.join(staged, "01.flac"), "wb") as handle:
@@ -3839,9 +3840,9 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
 
     def test_rolling_stones_force_reuses_all_twelve_unchanged_flacs(self):
         """Live dl 37709: unchanged force-import candidate is measured once."""
-        from lib.quality_evidence import EvidenceBuildResult
         from lib.measurement import ExistingSpectralAuditLookup
         from lib.quality import SpectralAnalysisDetail
+        from lib.quality_evidence import EvidenceBuildResult
         from scripts import import_preview_worker
 
         with _force_preview_source() as (source, cfg):
@@ -3947,7 +3948,7 @@ class TestYoutubeImportJobType(unittest.TestCase):
         self.assertEqual(IMPORT_JOB_YOUTUBE, "youtube_import")
 
     def test_validate_job_type_accepts_youtube_import(self):
-        from lib.import_queue import validate_job_type, IMPORT_JOB_YOUTUBE
+        from lib.import_queue import IMPORT_JOB_YOUTUBE, validate_job_type
         self.assertEqual(
             validate_job_type(IMPORT_JOB_YOUTUBE), IMPORT_JOB_YOUTUBE,
         )
@@ -3984,7 +3985,7 @@ class TestYoutubeImportJobType(unittest.TestCase):
         self.assertEqual(payload["download_log_id"], 99)
 
     def test_validate_payload_youtube_rejects_missing_staged_path(self):
-        from lib.import_queue import validate_payload, IMPORT_JOB_YOUTUBE
+        from lib.import_queue import IMPORT_JOB_YOUTUBE, validate_payload
         with self.assertRaises(msgspec.ValidationError):
             validate_payload(IMPORT_JOB_YOUTUBE, {
                 "request_id": 42, "browse_id": "MPREb_abc",
@@ -3992,7 +3993,7 @@ class TestYoutubeImportJobType(unittest.TestCase):
             })
 
     def test_validate_payload_youtube_rejects_empty_staged_path(self):
-        from lib.import_queue import validate_payload, IMPORT_JOB_YOUTUBE
+        from lib.import_queue import IMPORT_JOB_YOUTUBE, validate_payload
         with self.assertRaises(msgspec.ValidationError):
             validate_payload(IMPORT_JOB_YOUTUBE, {
                 "staged_path": "",
@@ -4002,7 +4003,7 @@ class TestYoutubeImportJobType(unittest.TestCase):
             })
 
     def test_validate_payload_youtube_rejects_missing_request_id(self):
-        from lib.import_queue import validate_payload, IMPORT_JOB_YOUTUBE
+        from lib.import_queue import IMPORT_JOB_YOUTUBE, validate_payload
         with self.assertRaises(msgspec.ValidationError):
             validate_payload(IMPORT_JOB_YOUTUBE, {
                 "staged_path": "/Incoming/auto-import/x",
@@ -4011,7 +4012,7 @@ class TestYoutubeImportJobType(unittest.TestCase):
             })
 
     def test_validate_payload_youtube_rejects_non_int_request_id(self):
-        from lib.import_queue import validate_payload, IMPORT_JOB_YOUTUBE
+        from lib.import_queue import IMPORT_JOB_YOUTUBE, validate_payload
         with self.assertRaises(msgspec.ValidationError):
             validate_payload(IMPORT_JOB_YOUTUBE, {
                 "staged_path": "/Incoming/auto-import/x",
@@ -4021,7 +4022,7 @@ class TestYoutubeImportJobType(unittest.TestCase):
             })
 
     def test_validate_payload_youtube_rejects_missing_browse_id(self):
-        from lib.import_queue import validate_payload, IMPORT_JOB_YOUTUBE
+        from lib.import_queue import IMPORT_JOB_YOUTUBE, validate_payload
         with self.assertRaises(msgspec.ValidationError):
             validate_payload(IMPORT_JOB_YOUTUBE, {
                 "staged_path": "/Incoming/auto-import/x",
@@ -4038,7 +4039,7 @@ class TestYoutubeImportJobType(unittest.TestCase):
             })
 
     def test_validate_payload_youtube_rejects_non_int_download_log_id(self):
-        from lib.import_queue import validate_payload, IMPORT_JOB_YOUTUBE
+        from lib.import_queue import IMPORT_JOB_YOUTUBE, validate_payload
         with self.assertRaises(msgspec.ValidationError):
             validate_payload(IMPORT_JOB_YOUTUBE, {
                 "staged_path": "/Incoming/auto-import/x",
@@ -4286,8 +4287,8 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
         which mirrors what the production pipeline does inside
         ``dispatch_import_from_db`` on import success.
         """
-        from scripts import importer
         from lib import transitions
+        from scripts import importer
 
         with tempfile.TemporaryDirectory() as staged:
             db = FakePipelineDB()
@@ -4298,7 +4299,7 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
                 mb_release_id="mbid-yt-rescue",
                 unfindable_category="wrong_pressing_available",
                 unfindable_categorised_at=datetime(
-                    2026, 5, 1, tzinfo=timezone.utc),
+                    2026, 5, 1, tzinfo=UTC),
             ))
             job = self._enqueue_youtube_job(
                 db, request_id=42, staged_path=staged, download_log_id=13,
@@ -4346,8 +4347,8 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
         """AE9: a request started ``unsearchable`` transitions to
         ``imported`` through the same single source-agnostic
         write site (``mark_imported_with_rescue``)."""
-        from scripts import importer
         from lib import transitions
+        from scripts import importer
 
         with tempfile.TemporaryDirectory() as staged:
             db = FakePipelineDB()
@@ -4358,7 +4359,7 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
                 mb_release_id="mbid-yt-from-unsearchable",
                 unfindable_category="album_absent_artist_present",
                 unfindable_categorised_at=datetime(
-                    2026, 5, 1, tzinfo=timezone.utc),
+                    2026, 5, 1, tzinfo=UTC),
             ))
             job = self._enqueue_youtube_job(
                 db, request_id=42, staged_path=staged, download_log_id=14,
@@ -4628,8 +4629,8 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
         self.assertIn("not found", str(updated.message))
 
     def test_missing_request_id_returns_failed_dispatch_outcome(self):
-        from scripts import importer
         from lib.import_queue import ImportJob
+        from scripts import importer
 
         # Construct an ImportJob with request_id=None directly — this is
         # a defensive guard for a path the production codepaths shouldn't
@@ -4708,12 +4709,12 @@ class TestFrontGateSourcePathYoutubeImport(unittest.TestCase):
     """
 
     def test_youtube_job_returns_payload_staged_path(self):
-        from scripts import import_preview_worker
         from lib.import_queue import (
             ImportJob,
-            youtube_import_payload,
             youtube_import_dedupe_key,
+            youtube_import_payload,
         )
+        from scripts import import_preview_worker
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="wanted"))
@@ -4741,12 +4742,12 @@ class TestFrontGateSourcePathYoutubeImport(unittest.TestCase):
         """KTD1 at the front-gate: even if active_download_state has a
         current_path populated, the YT branch returns the payload's
         staged_path."""
-        from scripts import import_preview_worker
         from lib.import_queue import (
             ImportJob,
-            youtube_import_payload,
             youtube_import_dedupe_key,
+            youtube_import_payload,
         )
+        from scripts import import_preview_worker
 
         db = FakePipelineDB()
         # Seed a row with active_download_state pointing somewhere else.
@@ -4783,8 +4784,8 @@ class TestFrontGateSourcePathYoutubeImport(unittest.TestCase):
 
     def test_automation_branch_uses_authoritative_current_path(self):
         """Automation keeps using active_download_state, not YT payload."""
-        from scripts import import_preview_worker
         from lib.import_queue import ImportJob, automation_import_dedupe_key
+        from scripts import import_preview_worker
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -4834,12 +4835,12 @@ class TestFrontGateSourcePathYoutubeImport(unittest.TestCase):
     def test_preview_input_uses_payload_staged_path_for_youtube(self):
         """The ``_preview_input`` helper (the slow-path measurement seam)
         also reads the YT payload, not active_download_state."""
-        from scripts import import_preview_worker
         from lib.import_queue import (
             ImportJob,
-            youtube_import_payload,
             youtube_import_dedupe_key,
+            youtube_import_payload,
         )
+        from scripts import import_preview_worker
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="wanted"))
@@ -4884,8 +4885,8 @@ class TestFrontGateSourcePathYoutubeImport(unittest.TestCase):
 class TestForcePreviewPathAuthority(unittest.TestCase):
     def test_front_gate_uses_db_failed_path_not_payload_and_cleans_snapshot(self) -> None:
         """The force payload is audit metadata, never filesystem authority."""
-        from scripts import import_preview_worker
         from lib.quality_evidence import EvidenceBuildResult
+        from scripts import import_preview_worker
 
         with tempfile.TemporaryDirectory() as parent:
             incoming = os.path.join(parent, "Incoming")

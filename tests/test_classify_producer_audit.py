@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Producer audit for ``web/classify.py``'s decision-name copy (issue #882).
 
 Every decision-name literal the Recents classifier matches against is a
@@ -49,7 +48,6 @@ prohibited"):
   say) is outside the grammar. Assignments at any scope and literal tables
   used in place are inside it.
 """
-
 import ast
 import datetime
 import functools
@@ -60,12 +58,12 @@ import unittest
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import ClassVar
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import msgspec
 
-import web.classify as classify
 from lib.quality import (
     CandidateSummary,
     HarnessTrackInfo,
@@ -74,6 +72,7 @@ from lib.quality import (
 )
 from lib.quality.dispatch_actions import decision_denylists
 from tests.helpers import make_import_result
+from web import classify
 from web.classify import LogEntry, classify_log_entry
 
 _REPO_ROOT = os.path.join(os.path.dirname(__file__), "..")
@@ -269,7 +268,7 @@ NON_MATCH_TARGETS: dict[str, str] = {
 # Producer evidence — a spelling, not a mention
 # ---------------------------------------------------------------------------
 
-def spelled_string_literals(source: str) -> "Counter[str]":
+def spelled_string_literals(source: str) -> Counter[str]:
     """How many times a Python source actually SPELLS each string literal.
 
     Parsed, not grepped. A comment is not a spelling at all, and a
@@ -287,14 +286,14 @@ def spelled_string_literals(source: str) -> "Counter[str]":
 
 
 @functools.cache
-def _spellings(relpath: str) -> "Counter[str]":
+def _spellings(relpath: str) -> Counter[str]:
     with open(os.path.join(_REPO_ROOT, relpath), encoding="utf-8") as handle:
         return spelled_string_literals(handle.read())
 
 
 def producer_spellings(
-    relpaths: "Sequence[str]",
-) -> "dict[str, Counter[str]]":
+    relpaths: Sequence[str],
+) -> dict[str, Counter[str]]:
     """Read the spellings of each named production file."""
     return {relpath: _spellings(relpath) for relpath in relpaths}
 
@@ -302,7 +301,7 @@ def producer_spellings(
 def spelled_count(
     literal: str,
     producers: _Producers,
-    spellings: "Mapping[str, Counter[str]]",
+    spellings: Mapping[str, Counter[str]],
 ) -> int:
     """How many spellings across the registered FILES back this literal."""
     needle = literal.casefold() if producers.casefold else literal
@@ -321,8 +320,8 @@ def spelled_count(
 def check_literal_has_a_producer(
     literal: str,
     producers: _Producers,
-    spellings: "Mapping[str, Counter[str]]",
-    historical: "Mapping[str, _Historical] | None" = None,
+    spellings: Mapping[str, Counter[str]],
+    historical: Mapping[str, _Historical] | None = None,
 ) -> str | None:
     """Return why this literal is unproducible, or None when it is real.
 
@@ -366,8 +365,8 @@ def check_literal_has_a_producer(
 
 def check_subject_is_registered(
     subject: str,
-    registry: "Mapping[str, _Producers] | None" = None,
-    exemptions: "Mapping[str, str] | None" = None,
+    registry: Mapping[str, _Producers] | None = None,
+    exemptions: Mapping[str, str] | None = None,
 ) -> str | None:
     """Return why a discovered match target is unaccounted for, or None."""
     known = MATCH_SUBJECTS if registry is None else registry
@@ -382,10 +381,10 @@ def check_subject_is_registered(
 
 def check_match_target(
     subject: str,
-    literals: "Sequence[str]",
-    registry: "Mapping[str, _Producers] | None" = None,
-    historical: "Mapping[str, _Historical] | None" = None,
-    exemptions: "Mapping[str, str] | None" = None,
+    literals: Sequence[str],
+    registry: Mapping[str, _Producers] | None = None,
+    historical: Mapping[str, _Historical] | None = None,
+    exemptions: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Everything unaccounted for about one discovered match target.
 
@@ -460,7 +459,7 @@ class _MatchTargetScan(ast.NodeVisitor):
         self._scope: list[str] = []
 
     # -- recording ----------------------------------------------------
-    def _record(self, subject: str, values: "Sequence[str]") -> None:
+    def _record(self, subject: str, values: Sequence[str]) -> None:
         if values:
             self.targets[subject] = tuple(dict.fromkeys(
                 self.targets.get(subject, ()) + tuple(values)))
@@ -485,7 +484,7 @@ class _MatchTargetScan(ast.NodeVisitor):
 
     # -- inline comparisons -------------------------------------------
     def visit_Compare(self, node: ast.Compare) -> None:
-        for op, comparator in zip(node.ops, node.comparators):
+        for op, comparator in zip(node.ops, node.comparators, strict=True):
             if isinstance(op, _MATCH_OPS):
                 self._record(
                     ast.unparse(node.left), _constant_strings(comparator))
@@ -565,7 +564,7 @@ def source_match_targets(source: str) -> dict[str, tuple[str, ...]]:
 
 
 def module_level_match_targets(
-    namespace: "Mapping[str, object]",
+    namespace: Mapping[str, object],
 ) -> dict[str, tuple[str, ...]]:
     """String tables a module holds at module level, by runtime value.
 
@@ -597,7 +596,7 @@ def module_level_match_targets(
 
 def classify_match_targets(
     source: str | None = None,
-    namespace: "Mapping[str, object] | None" = None,
+    namespace: Mapping[str, object] | None = None,
 ) -> dict[str, tuple[str, ...]]:
     """Every string ``web/classify.py`` can match a producer value against."""
     if source is None:
@@ -913,7 +912,7 @@ class TestTheAuditIsFailClosed(unittest.TestCase):
         """Review N5: prose is not evidence — a plausible sentence let a
         brand-new invention register as history."""
         producers = _Producers((), "no producer")
-        spellings: "dict[str, Counter[str]]" = {}
+        spellings: dict[str, Counter[str]] = {}
         self.assertIsNotNone(check_literal_has_a_producer(
             "invented", producers, spellings, historical={}))
         # No live rows: the entry describes copy nothing can reach.
@@ -1246,7 +1245,7 @@ class TestUnhandledScenariosReadAsWords(unittest.TestCase):
     caught a second time).
     """
 
-    CASES = [
+    CASES: ClassVar = [
         ("strong_match", "strong match", 5),
     ]
 
@@ -1287,7 +1286,7 @@ class TestProducibleRejectionScenariosNameTheirProducersFact(
     """
 
     #: literal -> live rejected rows that RENDER under it.
-    LIVE_ROWS = {
+    LIVE_ROWS: ClassVar = {
         "import_failed": 47,
         "extra_tracks": 45,
         "exception": 19,

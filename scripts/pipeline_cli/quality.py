@@ -8,8 +8,7 @@ by stale ``current_spectral_bitrate`` (issue #18).
 from __future__ import annotations
 
 import argparse
-
-from typing import TypedDict, TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 from lib import transitions
 from scripts.pipeline_cli._format import _fmt_br
@@ -56,7 +55,7 @@ class _ScenarioParams(TypedDict, total=False):
 finalize_request = transitions.finalize_request
 
 
-def _load_runtime_rank_config() -> "QualityRankConfig":
+def _load_runtime_rank_config() -> QualityRankConfig:
     """Load the runtime QualityRankConfig from the active config.ini."""
     from lib.config import read_runtime_rank_config
 
@@ -145,10 +144,10 @@ def _print_decision_outcome(
 
 
 def _print_live_candidate_replay(
-    db: "PipelineDB",
+    db: PipelineDB,
     request_id: int,
     *,
-    rank_cfg: "QualityRankConfig",
+    rank_cfg: QualityRankConfig,
     target_format: str | None,
     verified_lossless_target: str | None,
     runtime_audio_check: str,
@@ -221,13 +220,16 @@ def _print_live_candidate_replay(
     )
 
 
-def cmd_quality(db: "PipelineDB", args: argparse.Namespace) -> None:
+def cmd_quality(db: PipelineDB, args: argparse.Namespace) -> None:
     """Show quality state and simulate decisions for common download scenarios."""
     from lib.dispatch import load_quality_gate_state
-    from lib.quality import (full_pipeline_decision, quality_gate_decision,
-                             gate_rank,
-                             rejection_backfill_override,
-                             compute_effective_override_bitrate)
+    from lib.quality import (
+        compute_effective_override_bitrate,
+        full_pipeline_decision,
+        gate_rank,
+        quality_gate_decision,
+        rejection_backfill_override,
+    )
 
     rank_cfg = _load_runtime_rank_config()
 
@@ -257,7 +259,7 @@ def cmd_quality(db: "PipelineDB", args: argparse.Namespace) -> None:
             db=db,
             mb_id=req.get("mb_release_id"),
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         # This is a diagnostic command. Missing/stale evidence must fail open
         # without reviving the legacy request spectral scalar as authority.
         gate_state = None
@@ -349,13 +351,13 @@ def cmd_quality(db: "PipelineDB", args: argparse.Namespace) -> None:
     if backfill and backfill != q_override:
         print(f"  Backfill:      would set search_filetype_override='{backfill}' on next rejection")
     elif q_override == "lossless":
-        print(f"  Backfill:      not needed (search_filetype_override already set)")
+        print("  Backfill:      not needed (search_filetype_override already set)")
     elif q_override:
         print("  Backfill:      won't fire lossless-only (ordinary per-tier narrowing remains)")
     elif linked_current_measurement is None:
         print("  Backfill:      won't fire (linked current evidence unavailable)")
     else:
-        print(f"  Backfill:      won't fire (conditions not met)")
+        print("  Backfill:      won't fire (conditions not met)")
 
     # --- Simulate common scenarios ---
     # A missing mode makes current-album comparisons nonclaiming.  Candidate
@@ -486,7 +488,7 @@ def cmd_quality(db: "PipelineDB", args: argparse.Namespace) -> None:
             "has_nested_audio": True}),
     ])
 
-    print(f"\n  What would happen if we downloaded:")
+    print("\n  What would happen if we downloaded:")
     for name, params in scenarios:
         # Apply runtime audio_check_mode as a default; scenarios that
         # explicitly override it still win (dict unpack order).
@@ -538,7 +540,7 @@ def cmd_quality(db: "PipelineDB", args: argparse.Namespace) -> None:
 
 
 def cmd_repair_spectral(
-    db: "PipelineDB", args: argparse.Namespace,
+    db: PipelineDB, args: argparse.Namespace,
 ) -> int | None:
     """Find and repair albums stuck by stale current_spectral_bitrate.
 
@@ -602,7 +604,7 @@ def cmd_repair_spectral(
         print(f"         after repair: quality_gate_decision → {decision}")
 
         if args.dry_run:
-            print(f"         [DRY RUN] would clear spectral + remove stale denylists")
+            print("         [DRY RUN] would clear spectral + remove stale denylists")
             continue
 
         expected_after_transition = "wanted"
@@ -647,7 +649,7 @@ def cmd_repair_spectral(
             print(f"         un-denylisted: {entry['username']} ({entry['reason']})")
 
         if decision == "accept" and effective_min_br is not None:
-            print(f"         → transitioned to imported")
+            print("         → transitioned to imported")
         else:
             print(f"         → remains wanted (gate says {decision})")
 
@@ -658,7 +660,7 @@ def cmd_repair_spectral(
 
 
 def add_quality_subparsers(
-    sub: "argparse._SubParsersAction[argparse.ArgumentParser]",
+    sub: argparse._SubParsersAction[argparse.ArgumentParser],
 ) -> None:
     """Add ``quality`` / ``repair-spectral`` (#521 carve out of
     ``routes_meta._build_parser``, verbatim argument definitions)."""

@@ -5,11 +5,11 @@ from __future__ import annotations
 import unittest
 from typing import Protocol
 
-from hypothesis import example, given, strategies as st
 import msgspec
+from hypothesis import example, given
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
-from tests.test_web_recents import _entry
 from lib.quality import (
     AudioQualityMeasurement,
     ImportResult,
@@ -18,12 +18,12 @@ from lib.quality import (
     SpectralDetail,
     V0ProbeEvidence,
 )
+from tests.test_web_recents import _entry
 from web.classify import classify_log_entry
 from web.routes.pipeline import (
     _project_current_library_have,
     _project_linked_import_evidence,
 )
-
 
 REJECT_SCENARIOS = (
     "quality_downgrade",

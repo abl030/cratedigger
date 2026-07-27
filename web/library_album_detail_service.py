@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import datetime
-from typing import Protocol, TYPE_CHECKING, TypeGuard
+from typing import TYPE_CHECKING, Protocol, TypeGuard
 
 import msgspec
 
@@ -23,7 +23,10 @@ from lib.release_identity import (
     frontend_release_id,
     normalize_release_id,
 )
-from web.download_history_view import DownloadHistoryViewRow, build_download_history_rows
+from web.download_history_view import (
+    DownloadHistoryViewRow,
+    build_download_history_rows,
+)
 
 if TYPE_CHECKING:
     from lib.pipeline_db.rows import DownloadLogWithEvidenceRow
@@ -44,7 +47,7 @@ class SupportsLibraryAlbumDetailPipelineDB(
 
     def get_download_history(
         self, request_id: int,
-    ) -> "list[DownloadLogWithEvidenceRow]":
+    ) -> list[DownloadLogWithEvidenceRow]:
         ...
 
 
@@ -66,7 +69,7 @@ def _timestamp(value: object | None) -> float | str | None:
     )
 
 
-def _track_formats(tracks: Sequence["LibraryAlbumTrack"]) -> str:
+def _track_formats(tracks: Sequence[LibraryAlbumTrack]) -> str:
     seen: set[str] = set()
     formats: list[str] = []
     for track in tracks:
@@ -78,7 +81,7 @@ def _track_formats(tracks: Sequence["LibraryAlbumTrack"]) -> str:
     return ",".join(formats)
 
 
-def _min_track_bitrate(tracks: Sequence["LibraryAlbumTrack"]) -> int | None:
+def _min_track_bitrate(tracks: Sequence[LibraryAlbumTrack]) -> int | None:
     bitrates = [
         track.bitrate
         for track in tracks

@@ -8,7 +8,7 @@ import configparser
 import os
 import threading
 from dataclasses import dataclass, field
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 
 from lib.quality import QualityRankConfig
 
@@ -171,18 +171,18 @@ class CratediggerConfig:
     peer_cache_redis_operation_timeout_ms: int = 100
 
     # --- Plex ---
-    plex_url: Optional[str] = None
-    plex_token: Optional[str] = None
+    plex_url: str | None = None
+    plex_token: str | None = None
     plex_token_file: str = ""
-    plex_library_section_id: Optional[str] = None
-    plex_path_map: Optional[str] = None  # "local_prefix:container_prefix" e.g. "/mnt/virtio/Music/Beets:/prom_music"
+    plex_library_section_id: str | None = None
+    plex_path_map: str | None = None  # "local_prefix:container_prefix" e.g. "/mnt/virtio/Music/Beets:/prom_music"
 
     # --- Jellyfin ---
-    jellyfin_url: Optional[str] = None
-    jellyfin_token: Optional[str] = None
+    jellyfin_url: str | None = None
+    jellyfin_token: str | None = None
     jellyfin_token_file: str = ""
-    jellyfin_library_id: Optional[str] = None  # deletion-observation fallback
-    jellyfin_path_map: Optional[str] = None  # "local_prefix:container_prefix" e.g. "/mnt/virtio/Music/Beets:/mnt/fuse/Media/Music/Beets"
+    jellyfin_library_id: str | None = None  # deletion-observation fallback
+    jellyfin_path_map: str | None = None  # "local_prefix:container_prefix" e.g. "/mnt/virtio/Music/Beets:/mnt/fuse/Media/Music/Beets"
 
     # --- Paths (derived from args) ---
     var_dir: str = "."
@@ -214,7 +214,7 @@ class CratediggerConfig:
     # intentional: it keeps a single spelling of the precedence rule
     # (file over direct) that every notifier and client relies on.
 
-    def _resolve_secret(self, direct: Optional[str], file_path: str) -> Optional[str]:
+    def _resolve_secret(self, direct: str | None, file_path: str) -> str | None:
         if file_path:
             return read_secret_file(file_path)
         return direct or None
@@ -222,15 +222,15 @@ class CratediggerConfig:
     def resolved_slskd_api_key(self) -> str:
         return self._resolve_secret(self.slskd_api_key, self.slskd_api_key_file) or ""
 
-    def resolved_plex_token(self) -> Optional[str]:
+    def resolved_plex_token(self) -> str | None:
         return self._resolve_secret(self.plex_token, self.plex_token_file)
 
-    def resolved_jellyfin_token(self) -> Optional[str]:
+    def resolved_jellyfin_token(self) -> str | None:
         return self._resolve_secret(self.jellyfin_token, self.jellyfin_token_file)
 
     @classmethod
     def from_ini(cls, config: configparser.RawConfigParser,
-                 config_dir: str = ".", var_dir: str = ".") -> "CratediggerConfig":
+                 config_dir: str = ".", var_dir: str = ".") -> Self:
         """Parse a ConfigParser into a CratediggerConfig.
 
         Reproduces the exact same parsing logic as main() in cratedigger.py.

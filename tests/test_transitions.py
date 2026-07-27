@@ -1,7 +1,7 @@
 """Tests for lib/transitions.py — state transition validation and side effects."""
 
 import unittest
-from typing import Any, TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from lib.transitions import (
     VALID_TRANSITIONS,

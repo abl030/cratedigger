@@ -12,9 +12,24 @@ the unrelated "wrong-match triage" console in web/routes/imports.py
 
 import msgspec
 
-from web.routes._registry import RouteHandler, RouteRegistration, pattern_route, route
-from web.routes._server_access import _server
-
+# Page-size bounds for ``GET /api/triage/list`` — re-exports of the
+# single-source-of-truth constants on ``lib.triage_service`` so the CLI
+# and API enforce the same ranges. Mirrors the convention established by
+# ``get_pipeline_search_plan_history`` (1..200): a hard upper bound
+# prevents an unbounded scan; the lower bound rules out the nonsense
+# ``limit=0`` request shape.
+from lib.triage_service import (
+    DEFAULT_TRIAGE_PAGE_SIZE as _TRIAGE_LIST_DEFAULT_LIMIT,
+)
+from lib.triage_service import (
+    TRIAGE_AFTER_MIN as _TRIAGE_LIST_MIN_AFTER,
+)
+from lib.triage_service import (
+    TRIAGE_LIMIT_MAX as _TRIAGE_LIST_MAX_LIMIT,
+)
+from lib.triage_service import (
+    TRIAGE_LIMIT_MIN as _TRIAGE_LIST_MIN_LIMIT,
+)
 
 # --- U17: /api/triage HTTP endpoints --------------------------------------
 #
@@ -38,24 +53,14 @@ from web.routes._server_access import _server
 # ``GET /api/triage/quarantine`` separately mirrors
 # ``pipeline-cli triage quarantine`` through one shared read-only lifecycle
 # service; both map an unavailable complete scan to 503 / exit 5.
-
 # Filter forms surfaced in the 400 body — single source of truth lives
 # in ``lib.triage_service.VALID_FILTER_FORMS`` so the CLI and the HTTP
 # 400 envelope advertise the same vocabulary.
-from lib.triage_service import VALID_FILTER_FORMS as _TRIAGE_VALID_FILTER_FORMS_API  # noqa: E402
-
-# Page-size bounds for ``GET /api/triage/list`` — re-exports of the
-# single-source-of-truth constants on ``lib.triage_service`` so the CLI
-# and API enforce the same ranges. Mirrors the convention established by
-# ``get_pipeline_search_plan_history`` (1..200): a hard upper bound
-# prevents an unbounded scan; the lower bound rules out the nonsense
-# ``limit=0`` request shape.
-from lib.triage_service import (  # noqa: E402
-    DEFAULT_TRIAGE_PAGE_SIZE as _TRIAGE_LIST_DEFAULT_LIMIT,
-    TRIAGE_AFTER_MIN as _TRIAGE_LIST_MIN_AFTER,
-    TRIAGE_LIMIT_MAX as _TRIAGE_LIST_MAX_LIMIT,
-    TRIAGE_LIMIT_MIN as _TRIAGE_LIST_MIN_LIMIT,
+from lib.triage_service import (
+    VALID_FILTER_FORMS as _TRIAGE_VALID_FILTER_FORMS_API,
 )
+from web.routes._registry import RouteHandler, RouteRegistration, pattern_route, route
+from web.routes._server_access import _server
 
 
 def get_triage_quarantine(
@@ -74,7 +79,7 @@ def get_triage_quarantine(
 
     try:
         db = _server()._db()
-    except Exception:
+    except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         h._json(
             {"error": "Could not open pipeline database for quarantine scan"},
             status=503,

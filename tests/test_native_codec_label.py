@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Native-download codec labelling — the Opus-recorded-as-MP3 bug.
 
 Live bug (request 4679, Darcie Haven — Angel of the Apocalypse, 2026-05-31):
@@ -34,7 +33,7 @@ def _make_audio(path: str, codec_args: list[str], duration: int = 1) -> None:
         "-i", f"sine=frequency=440:duration={duration}",
         "-ac", "2", *codec_args, path,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, check=False)
     if result.returncode != 0 or not os.path.exists(path):
         raise RuntimeError(f"ffmpeg failed for {path}: {result.stderr}")
 

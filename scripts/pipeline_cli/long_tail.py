@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from typing import Any, Optional, Protocol, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Protocol
 
 import msgspec
 
@@ -29,7 +29,7 @@ class _LongTailDB(Protocol):
 
     def get_long_tail_request(
         self, request_id: int,
-    ) -> Optional[dict[str, Any]]: ...
+    ) -> dict[str, Any] | None: ...
 
 
 def _cli_band_fn(release_ids: list[str]) -> dict[str, str]:
@@ -47,8 +47,8 @@ def _cli_band_fn(release_ids: list[str]) -> dict[str, str]:
     unreachable every id bands ``"missing"`` (no on-disk copy to upgrade
     is the honest fallback).
     """
-    from lib.beets_db import open_beets_db
     from lib.banding import band_from_detail, load_rank_config
+    from lib.beets_db import open_beets_db
 
     ids_list = [str(rid) for rid in release_ids]
     if not ids_list:
@@ -61,7 +61,7 @@ def _cli_band_fn(release_ids: list[str]) -> dict[str, str]:
                 beets.check_mbids_detail(list(in_library))
                 if in_library else {}
             )
-    except Exception:
+    except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         return {rid: "missing" for rid in ids_list}
     return {
         rid: band_from_detail(rid, in_library, quality, cfg)
@@ -70,10 +70,10 @@ def _cli_band_fn(release_ids: list[str]) -> dict[str, str]:
 
 
 def cmd_long_tail(
-    db: "_LongTailDB",
+    db: _LongTailDB,
     args: argparse.Namespace,
     *,
-    band_fn: "Optional[BandFn]" = None,
+    band_fn: BandFn | None = None,
 ) -> int:
     """``pipeline-cli long-tail [--band=<band>] [--json]``.
 
@@ -169,7 +169,8 @@ def cmd_long_tail(
             _truncate(r.unfindable_category or "-", 22),
         )
         print("  ".join(
-            cell.ljust(width) for cell, (_, width) in zip(row_cells, header_cols)
+            cell.ljust(width)
+            for cell, (_, width) in zip(row_cells, header_cols, strict=True)
         ))
     print(f"  ({len(result.rows)} rows)")
     return 0

@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import unittest
 
-from hypothesis import example, given, strategies as st
+from hypothesis import example, given
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401 - loads the active profile
 from tests.test_property_input_audit import (
@@ -23,7 +24,6 @@ from tests.test_property_input_audit import (
     assert_every_drawn_input_used,
     find_property_functions,
 )
-
 
 _RELPATH = "tests/test_synthetic_world.py"
 

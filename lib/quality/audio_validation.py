@@ -13,7 +13,6 @@ from typing import Literal
 
 import msgspec
 
-
 AUDIO_VALIDATION_POLICY_ID = "audio-integrity-v2"
 AUDIO_VALIDATION_DIAGNOSTIC_LIMIT = 16
 AUDIO_VALIDATION_STDERR_LIMIT_BYTES = 2048
@@ -65,7 +64,7 @@ class AudioValidationReport(msgspec.Struct, frozen=True):
     files_checked: int = 0
     files_failed: int = 0
     diagnostics: list[AudioToolDiagnostic] = msgspec.field(
-        default_factory=lambda: [],
+        default_factory=list,
     )
     omitted_diagnostics: int = 0
 
@@ -198,14 +197,13 @@ def validate_audio_validation_report(report: AudioValidationReport) -> None:
             or report.diagnostics[0].category != "legacy_failure"
         ):
             raise ValueError("legacy_failure report is not the legacy sentinel")
-    elif report.outcome == "legacy_unrecorded":
-        if (
-            report.files_checked
-            or report.files_failed
-            or report.diagnostics
-            or report.omitted_diagnostics
-        ):
-            raise ValueError("legacy_unrecorded report carries measured state")
+    elif report.outcome == "legacy_unrecorded" and (
+        report.files_checked
+        or report.files_failed
+        or report.diagnostics
+        or report.omitted_diagnostics
+    ):
+        raise ValueError("legacy_unrecorded report carries measured state")
 
 
 @dataclass(frozen=True)

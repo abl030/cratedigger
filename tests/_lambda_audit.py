@@ -37,7 +37,6 @@ from __future__ import annotations
 
 import ast
 import os
-from typing import Dict, List, Tuple
 
 TESTS_DIR = os.path.abspath(os.path.dirname(__file__))
 
@@ -56,7 +55,7 @@ STRICT_RAISE_ADAPTER_KWARGS = frozenset({
 # ``"<filename>::<enclosing_function>" -> rationale``. New violations must
 # either use the canonical fake or earn an entry here with a one-line
 # reason. Keep this list short; it is a tripwire, not a dumping ground.
-ALLOWLIST: Dict[str, str] = {
+ALLOWLIST: dict[str, str] = {
     "test_beets_distance.py::test_mb_lookup_failed_when_returns_empty":
         "benign: compute_beets_distance has an explicit `if release is None` "
         "branch (-> mb_lookup_failed); the production exception path (real "
@@ -82,8 +81,8 @@ class _Visitor(ast.NodeVisitor):
     the function stack so each finding gets a stable, line-free key."""
 
     def __init__(self) -> None:
-        self._func_stack: List[str] = []
-        self.findings: List[Tuple[str, int, str]] = []
+        self._func_stack: list[str] = []
+        self.findings: list[tuple[str, int, str]] = []
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         self._func_stack.append(node.name)
@@ -104,7 +103,7 @@ class _Visitor(ast.NodeVisitor):
         self.generic_visit(node)
 
 
-def scan_file(path: str) -> List[Tuple[str, int, str]]:
+def scan_file(path: str) -> list[tuple[str, int, str]]:
     """Return ``[(enclosing_function, lineno, kwarg), ...]`` for one file."""
     with open(path, "r", encoding="utf-8") as fh:
         tree = ast.parse(fh.read(), filename=path)
@@ -132,7 +131,7 @@ def iter_test_files():
                 yield rel, path
 
 
-def scan_tree() -> Dict[str, List[Tuple[str, int, str]]]:
+def scan_tree() -> dict[str, list[tuple[str, int, str]]]:
     """Scan every test module under ``tests/`` (recursively) and return
     non-allowlisted violations.
 
@@ -141,7 +140,7 @@ def scan_tree() -> Dict[str, List[Tuple[str, int, str]]]:
     directly in ``tests/`` the relpath is the bare filename, so existing
     allowlist keys are unchanged.
     """
-    out: Dict[str, List[Tuple[str, int, str]]] = {}
+    out: dict[str, list[tuple[str, int, str]]] = {}
     for name, path in iter_test_files():
         kept = [
             (func, lineno, kwarg)

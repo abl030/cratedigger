@@ -9,8 +9,9 @@ remaining types are value-only definitions shared above every use site.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Callable, Protocol, Sequence, TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import msgspec
 
@@ -22,9 +23,14 @@ if TYPE_CHECKING:
     from lib.config import CratediggerConfig
     from lib.import_evidence import CandidateEvidenceActionResult
     from lib.pipeline_db import DownloadLogOutcome, PipelineDB
-    from lib.quality import (AlbumQualityEvidence, AudioQualityMeasurement,
-                             DownloadInfo, ImportResult, SpectralDetail,
-                             V0ProbeEvidence)
+    from lib.quality import (
+        AlbumQualityEvidence,
+        AudioQualityMeasurement,
+        DownloadInfo,
+        ImportResult,
+        SpectralDetail,
+        V0ProbeEvidence,
+    )
     from lib.terminal_outcomes import PendingImportTerminalOutcome
 
 
@@ -107,7 +113,7 @@ class DispatchOutcome:
     message: str
     deferred: bool = False
     code: str | None = None
-    terminal_outcome: "PendingImportTerminalOutcome | None" = None
+    terminal_outcome: PendingImportTerminalOutcome | None = None
     post_commit_wrong_match_scenario: str | None = None
     post_commit_cleanup: PostCommitCleanup | None = None
 
@@ -132,20 +138,20 @@ class DispatchCoreFn(Protocol):
         target_format: str | None = None,
         verified_lossless_target: str = "",
         beets_harness_path: str,
-        db: "PipelineDB",
-        dl_info: "DownloadInfo",
+        db: PipelineDB,
+        dl_info: DownloadInfo,
         distance: float | None = None,
         scenario: str = "auto_import",
         files: Sequence[object] | None = None,
-        cfg: "CratediggerConfig | None" = None,
-        outcome_label: "DownloadLogOutcome" = "success",
+        cfg: CratediggerConfig | None = None,
+        outcome_label: DownloadLogOutcome = "success",
         requeue_on_failure: bool = True,
         cooled_down_users: set[str] | None = None,
         source_dirs: list[str] | None = None,
         candidate_import_job_id: int | None = None,
         candidate_download_log_id: int | None = None,
-        prevalidated_candidate_result: "CandidateEvidenceActionResult | None" = None,
-        quality_gate_fn: "QualityGateFn" = ...,
+        prevalidated_candidate_result: CandidateEvidenceActionResult | None = None,
+        quality_gate_fn: QualityGateFn = ...,
     ) -> DispatchOutcome: ...
 
 
@@ -181,7 +187,7 @@ class ImportOneRunner(Protocol):
         verified_lossless_target: str,
         beets_harness_path: str,
         quality_rank_config_json: str | None,
-        existing_v0_probe: "V0ProbeEvidence | None",
+        existing_v0_probe: V0ProbeEvidence | None,
         quality_evidence_action_file: str | None,
         beets_config_dir: str | None,
         beets_python: str | None,
@@ -199,24 +205,24 @@ class ImportAttemptResult:
     when a terminal download-log writer calls :meth:`finalize_into`.
     """
 
-    _audit: "SpectralDetail | None"
-    _result: "ImportResult | None" = field(init=False, default=None, repr=False)
+    _audit: SpectralDetail | None
+    _result: ImportResult | None = field(init=False, default=None, repr=False)
 
     @property
-    def audit(self) -> "SpectralDetail | None":
+    def audit(self) -> SpectralDetail | None:
         return self._audit
 
     @property
-    def result(self) -> "ImportResult | None":
+    def result(self) -> ImportResult | None:
         return self._result
 
     @classmethod
     def from_import_job(
         cls,
-        db: "PipelineDB",
+        db: PipelineDB,
         import_job_id: int | None,
-        audit: "SpectralDetail | None" = None,
-    ) -> "ImportAttemptResult":
+        audit: SpectralDetail | None = None,
+    ) -> ImportAttemptResult:
         """Recover the preview audit once, before any terminal branch."""
         if audit is not None or import_job_id is None:
             return cls(audit)
@@ -249,18 +255,18 @@ class ImportAttemptResult:
             )
         return cls(audit)
 
-    def merge(self, result: "ImportResult") -> "ImportResult":
+    def merge(self, result: ImportResult) -> ImportResult:
         if self._audit is not None:
             result.spectral = self._audit
         self._result = result
         return result
 
-    def apply(self, mutation: Callable[["ImportResult"], None]) -> None:
+    def apply(self, mutation: Callable[[ImportResult], None]) -> None:
         if self._result is None:
             raise RuntimeError("cannot mutate an import attempt before a result exists")
         mutation(self._result)
 
-    def finalize_into(self, dl_info: "DownloadInfo") -> None:
+    def finalize_into(self, dl_info: DownloadInfo) -> None:
         result = self._result
         if result is None and self._audit is not None:
             from lib.quality import ImportResult

@@ -1,19 +1,17 @@
-#!/usr/bin/env python3
 """Contract tests for web/routes/youtube.py + pipeline youtube-rescue.
 
 Split from tests/test_web_server.py (#408). Shared harness in
 tests/web/_harness.py.
 """
-
 import contextlib
 import json
 import os
 import sys
 import unittest
+from typing import ClassVar
 from unittest.mock import patch
-from urllib.request import urlopen, Request
 from urllib.error import HTTPError
-
+from urllib.request import Request, urlopen
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -76,7 +74,7 @@ class TestYoutubeRouteContracts(_FakeDbWebServerCase):
     typed Structs, not bare dicts).
     """
 
-    REQUIRED_FIELDS = {
+    REQUIRED_FIELDS: ClassVar = {
         "outcome",
         "release_group_identifier",
         "source",
@@ -86,7 +84,7 @@ class TestYoutubeRouteContracts(_FakeDbWebServerCase):
         "duration_ms",
     }
 
-    REQUIRED_RELEASE_FIELDS = {
+    REQUIRED_RELEASE_FIELDS: ClassVar = {
         "yt_browse_id",
         "yt_audio_playlist_id",
         "yt_url",
@@ -96,7 +94,7 @@ class TestYoutubeRouteContracts(_FakeDbWebServerCase):
         "distances",
     }
 
-    REQUIRED_DISTANCE_FIELDS = {
+    REQUIRED_DISTANCE_FIELDS: ClassVar = {
         "mbid",
         "outcome",
         "distance",
@@ -114,12 +112,12 @@ class TestYoutubeRouteContracts(_FakeDbWebServerCase):
 
     def setUp(self) -> None:
         super().setUp()
+        from lib.beets_distance import SyntheticItem
         from lib.youtube_album_service import (
             ResolvedDistance,
             ResolvedYoutubeRelease,
             YoutubeAlbumResolverResult,
         )
-        from lib.beets_distance import SyntheticItem
         self._Result = YoutubeAlbumResolverResult
         self._Release = ResolvedYoutubeRelease
         self._Distance = ResolvedDistance
@@ -205,7 +203,6 @@ class TestYoutubeRouteContracts(_FakeDbWebServerCase):
                 # this, the close() helper in the route module could
                 # be deleted and no test would catch it.
                 type(self).close_calls += 1
-                return None
 
         # Reset the counter for each ``_patch_service`` invocation so
         # close-count assertions are scoped to one test call.
@@ -228,8 +225,8 @@ class TestYoutubeRouteContracts(_FakeDbWebServerCase):
         """``web.routes.youtube`` must re-export ``OUTCOME_HTTP_STATUS``
         from ``lib.youtube_album_service`` — single source of truth per
         the PR #381 lesson."""
-        from web.routes import youtube as route_mod
         from lib import youtube_album_service as svc_mod
+        from web.routes import youtube as route_mod
         self.assertIs(
             route_mod.OUTCOME_HTTP_STATUS,
             svc_mod.OUTCOME_HTTP_STATUS,
@@ -394,7 +391,6 @@ class TestYoutubeRouteContracts(_FakeDbWebServerCase):
 
             def close(self) -> None:
                 type(self).close_calls += 1
-                return None
 
         _FakeSession.close_calls = 0
 
@@ -415,7 +411,7 @@ class TestYoutubeRouteContracts(_FakeDbWebServerCase):
             # care that the session was still closed.
             try:
                 self._get(f"/api/youtube-album?identifier={self.UUID_A}")
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
                 pass
 
         self.assertEqual(
@@ -436,7 +432,7 @@ class TestPipelineYoutubeRescueContract(_FakeDbWebServerCase):
     of truth shared with the CLI's ``OUTCOME_EXIT_CODE``).
     """
 
-    REQUIRED_FIELDS = {"download_log_id", "outcome", "detail"}
+    REQUIRED_FIELDS: ClassVar = {"download_log_id", "outcome", "detail"}
 
     def _patch_service(self, **result_kwargs):
         """Patch ``YoutubeIngestService.submit`` to return a canned
@@ -448,6 +444,7 @@ class TestPipelineYoutubeRescueContract(_FakeDbWebServerCase):
         through ``msgspec.to_builtins`` round-trips faithfully.
         """
         from unittest.mock import patch as _patch
+
         from lib.youtube_ingest_service import SubmitResult
         return _patch(
             "lib.youtube_ingest_service.YoutubeIngestService.submit",
@@ -492,7 +489,7 @@ class TestPipelineYoutubeRescueContract(_FakeDbWebServerCase):
         # The table itself must match the literal coverage above —
         # forces future contributors to keep the subTest table and
         # the service map aligned.
-        self.assertEqual(set(o for o, _ in cases), set(TABLE),
+        self.assertEqual({o for o, _ in cases}, set(TABLE),
                          "subTest cases drifted from OUTCOME_HTTP_STATUS")
         for outcome, expected_status in cases:
             with self.subTest(outcome=outcome):
@@ -596,6 +593,7 @@ class TestPipelineYoutubeRescueContract(_FakeDbWebServerCase):
         body). Regression guard against a future refactor that picks
         ``request_id`` off the body."""
         from unittest.mock import patch as _patch
+
         from lib.youtube_ingest_service import SubmitResult
         with _patch(
             "lib.youtube_ingest_service.YoutubeIngestService.submit",

@@ -6,16 +6,12 @@ import mimetypes
 import os
 import re
 import stat
-from collections.abc import Generator
+from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager
-from urllib.parse import quote
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence, TypeGuard
+from typing import Any, TypeGuard
+from urllib.parse import quote
 
-from lib.json_narrow import (
-    is_object_list as _is_object_list,
-    is_str_object_dict as _is_str_object_dict,
-)
 from lib.config import read_runtime_config
 from lib.fs_authority import (
     FilesystemAuthorityError,
@@ -23,6 +19,12 @@ from lib.fs_authority import (
     OpenedRegularFile,
     open_configured_quarantine_directory,
     open_regular_relative,
+)
+from lib.json_narrow import (
+    is_object_list as _is_object_list,
+)
+from lib.json_narrow import (
+    is_str_object_dict as _is_str_object_dict,
 )
 from lib.processing_paths import (
     normalize_source_dirs,
@@ -143,11 +145,7 @@ def _opened_wrong_match_root(
     entry: Mapping[str, object],
     *,
     cfg: object | None = None,
-) -> Generator[
-    tuple[ValidationResultEnvelope, HeldDirectory],
-    None,
-    None,
-]:
+) -> Generator[tuple[ValidationResultEnvelope, HeldDirectory]]:
     """Yield a validation envelope and its held authoritative directory."""
     validation_result = decode_validation_envelope(entry.get("validation_result"))
     failed_path = validation_result.failed_path or ""
@@ -381,14 +379,14 @@ def _inspect_audio_file(handle: int) -> tuple[dict[str, list[str]], float | None
         # classes) — third-party, not ours to annotate. Same pattern as
         # harness/import_one.py::_probe_source_channels.
         import mutagen
-        _mutagen_file = getattr(mutagen, "File")
+        _mutagen_file = mutagen.File
     except ImportError:
         return {}, None, None
 
     try:
         with os.fdopen(os.dup(handle), "rb") as source:
             audio = _mutagen_file(source, easy=True)
-    except Exception:
+    except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         return {}, None, None
     if audio is None:
         return {}, None, None
@@ -503,7 +501,7 @@ def build_wrong_match_explorer(
                         "mime_type": _audio_mime_type(name),
                         "playable": playable,
                         "duration_seconds": duration_seconds,
-                        "bitrate_kbps": int(round(bitrate_bps / 1000)) if isinstance(bitrate_bps, int) and bitrate_bps > 0 else None,
+                        "bitrate_kbps": round(bitrate_bps / 1000) if isinstance(bitrate_bps, int) and bitrate_bps > 0 else None,
                         "size_bytes": info.st_size,
                         "tags": tags,
                         "stream_url": "/api/wrong-matches/audio" f"?download_log_id={int(download_log_id)}" f"&path={quote(relative)}" if playable else None,

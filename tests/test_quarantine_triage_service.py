@@ -41,7 +41,7 @@ def _seed_wrong_match(
 
 
 class _FailingWrongMatchesDB(FakePipelineDB):
-    def get_wrong_matches(self) -> "list[WrongMatchCandidateRow]":
+    def get_wrong_matches(self) -> list[WrongMatchCandidateRow]:
         raise RuntimeError("database unavailable")
 
 
@@ -207,13 +207,12 @@ class TestQuarantineTriageService(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root, patch(
             "lib.quarantine_triage_service.os.scandir",
             return_value=_ScandirResult(),
+        ), self.assertRaisesRegex(
+            QuarantineScanError, "scan quarantine directory",
         ):
-            with self.assertRaisesRegex(
-                QuarantineScanError, "scan quarantine directory",
-            ):
-                list_unreferenced_quarantine_folders(
-                    FakePipelineDB(), root,
-                )
+            list_unreferenced_quarantine_folders(
+                FakePipelineDB(), root,
+            )
 
 
 if __name__ == "__main__":

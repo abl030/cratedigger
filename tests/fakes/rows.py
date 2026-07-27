@@ -8,6 +8,7 @@ from typing import Any
 
 from tests.fakes._shared import _utcnow
 
+
 @dataclass
 class DownloadLogRow:
     """One row in download_log, captured by FakePipelineDB.log_download."""

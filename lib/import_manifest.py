@@ -5,8 +5,9 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from lib.quality import AUDIO_EXTENSIONS_DOTTED
 from lib.staged_album import staged_filename
@@ -105,7 +106,7 @@ def _allocate_leftover_target(
     return target_path
 
 
-def manifest_trace_summary(files: Iterable["DownloadFile"]) -> str:
+def manifest_trace_summary(files: Iterable[DownloadFile]) -> str:
     """One-line disc-coverage summary of a download manifest (log-only).
 
     Renders ``files=<n> discs={<disk_no>:<count>,...}`` so ``MANIFEST-TRACE``
@@ -139,7 +140,7 @@ def audio_relative_paths(root: str) -> list[str]:
     return sorted(paths)
 
 
-def tracked_audio_paths_for_downloads(files: Iterable["DownloadFile"]) -> list[str]:
+def tracked_audio_paths_for_downloads(files: Iterable[DownloadFile]) -> list[str]:
     """Return staged relative paths for the selected download audio files."""
     paths: list[str] = []
     for file in files:

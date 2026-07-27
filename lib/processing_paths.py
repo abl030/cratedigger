@@ -6,7 +6,8 @@ import hashlib
 import json
 import os
 import re
-from typing import Protocol, Sequence
+from collections.abc import Sequence
+from typing import Protocol
 
 AUTO_IMPORT_STAGING_SUBDIR = "auto-import"
 POST_VALIDATION_STAGING_SUBDIR = "post-validation"

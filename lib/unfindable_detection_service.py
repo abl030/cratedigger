@@ -53,13 +53,12 @@ See:
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-
 import logging
 import re
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Callable, Protocol
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from lib.pipeline_db.rows import AlbumRequestRow
@@ -419,7 +418,7 @@ def run_artist_probe(
     slskd_client: Any,
     *,
     artist_name: str,
-    db: "_PipelineDBProto",
+    db: _PipelineDBProto,
     request_id: int | None = None,
     search_timeout_ms: int = 30000,
     response_limit: int = 100,
@@ -518,7 +517,7 @@ class _PipelineDBProto(Protocol):
     through ``self.db.<x>``.
     """
 
-    def get_request(self, request_id: int) -> "AlbumRequestRow | None": ...
+    def get_request(self, request_id: int) -> AlbumRequestRow | None: ...
     def get_tracks(self, request_id: int) -> list[dict[str, Any]]: ...
     def list_unfindable_probe_candidates(
         self, *, limit: int, probe_interval_days: int,
@@ -582,7 +581,7 @@ class UnfindableDetectionService:
         # Kwarg-DI seam (.claude/rules/code-quality.md § Mocks). Tests
         # inject a synchronous fake; production uses ``run_artist_probe``.
         self._probe_runner = probe_runner or run_artist_probe
-        self._now_fn = now_fn or (lambda: datetime.now(timezone.utc))
+        self._now_fn = now_fn or (lambda: datetime.now(UTC))
 
     # ---------- public surface ----------
 
@@ -636,7 +635,7 @@ class UnfindableDetectionService:
                 self.slskd_client, artist_name=artist_name,
                 db=self.db, request_id=request_id,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.exception(
                 "unfindable_detection: probe failed for request %s "
                 "(artist=%r)", request_id, artist_name,
@@ -739,7 +738,7 @@ class UnfindableDetectionService:
             rid = int(cand["id"])
             try:
                 result = self.categorise_request(rid)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 # Defence-in-depth: a single bad row cannot poison the
                 # rest of the batch. We log + record a probe-failed-
                 # equivalent outcome so the operator surface still sees
@@ -798,7 +797,7 @@ def _as_datetime(value: Any) -> datetime | None:
     if not isinstance(value, datetime):
         return None
     if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
+        return value.replace(tzinfo=UTC)
     return value
 
 
@@ -807,10 +806,10 @@ def _as_datetime(value: Any) -> datetime | None:
 # advance_for_request` typo in this module triggers an ImportError
 # rather than silently shadowing).
 __all__ = (
-    "ARTIST_MATCH_THRESHOLD",
     "ALL_CATEGORIES",
-    "CATEGORY_ARTIST_ABSENT",
+    "ARTIST_MATCH_THRESHOLD",
     "CATEGORY_ALBUM_ABSENT_ARTIST_PRESENT",
+    "CATEGORY_ARTIST_ABSENT",
     "CATEGORY_ONE_TRACK_STRUCTURAL",
     "CATEGORY_WRONG_PRESSING_AVAILABLE",
     "DEFAULT_BATCH_SIZE",
@@ -819,11 +818,13 @@ __all__ = (
     "REQUIRED_ZERO_FIND_CYCLES",
     "RESULT_CATEGORISED",
     "RESULT_DOWNGRADED",
-    "RESULT_NO_CHANGE",
     "RESULT_NOT_DUE",
+    "RESULT_NO_CHANGE",
     "RESULT_PROBE_FAILED",
     "RESULT_REQUEST_NOT_FOUND",
     "SEARCH_LOG_WINDOW_DAYS",
+    "WRONG_PRESSING_MATCHER_THRESHOLD",
+    "WRONG_PRESSING_MIN_HITS",
     "ArtistProbeResult",
     "ProbeDegradedError",
     "UnfindableCategorisation",
@@ -831,8 +832,6 @@ __all__ = (
     "UnfindableInputs",
     "UnfindableSearchLogSignal",
     "UnfindableServiceResult",
-    "WRONG_PRESSING_MATCHER_THRESHOLD",
-    "WRONG_PRESSING_MIN_HITS",
     "classify_unfindable_from_state",
     "fuzzy_artist_observed_in_probe",
     "run_artist_probe",

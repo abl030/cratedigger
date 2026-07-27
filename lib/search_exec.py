@@ -26,8 +26,9 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 logger = logging.getLogger("cratedigger.search_exec")
 
@@ -105,7 +106,7 @@ class SearchExecutionResult:
       * ``elapsed_s`` — wall time of the ``execute_search`` call.
     """
 
-    responses: list[dict[str, Any]] = field(default_factory=lambda: [])
+    responses: list[dict[str, Any]] = field(default_factory=list)
     final_state: str | None = None
     response_count_terminal: int | None = None
     watchdog_fired: bool = False
@@ -244,7 +245,7 @@ def execute_search(
                 "InProgress" not in state and "Queued" not in state
             ):
                 break
-        except Exception:
+        except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             # A state-poll failure breaks to a best-effort harvest (the loop
             # must be resilient to run the #212 watchdog at all), but it
             # marks the execution *degraded* so callers that can't trust a
@@ -260,7 +261,7 @@ def execute_search(
             )
             try:
                 slskd_client.searches.stop(search_id)
-            except Exception:
+            except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                 logger.info(
                     "searches.stop(%s) failed; proceeding with harvest anyway",
                     search_id,
@@ -305,7 +306,7 @@ def execute_search(
         if delete:
             try:
                 slskd_client.searches.delete(search_id)
-            except Exception:
+            except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                 logger.warning(
                     "searches.delete(%s) failed; slskd will GC it", search_id,
                 )

@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 import unittest
 from collections.abc import Sequence
 from dataclasses import replace
-import os
 from pathlib import Path
-import tempfile
 
 from hypothesis import example, given
 from hypothesis import strategies as st
@@ -31,7 +31,6 @@ from scripts.run_python_tests import (
     STRATEGY_SPACE_EXHAUSTED,
     HypothesisPropertyStats,
 )
-
 
 #: Reasons Hypothesis reports, exhaustion plus the ordinary budget endings.
 STOPPED_BECAUSE = (
@@ -443,8 +442,8 @@ class TestDepthCheckersTripOnViolations(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "below the discard threshold"):
             assert_report_names_exactly_the_discarding_properties(
                 (quiet,),
-                (f"DISCARD 1% of 101 examples (1 discarded, 100 worlds) "
-                 f"{quiet.test_id}",),
+                ((f"DISCARD 1% of 101 examples (1 discarded, 100 worlds) "
+                 f"{quiet.test_id}"),),
             )
 
     def test_discard_checker_rejects_an_omitted_discarding_property(self) -> None:

@@ -31,7 +31,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import msgspec
@@ -44,7 +44,6 @@ from lib.slskd_client import (
     decode_download_directory_complete,
     decode_download_file_complete,
 )
-
 
 logger = logging.getLogger("cratedigger")
 
@@ -96,8 +95,8 @@ def _parse_event_timestamp(value: str) -> datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _collect_new_events(

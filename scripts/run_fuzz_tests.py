@@ -24,7 +24,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.run_python_tests import (  # noqa: E402
+from scripts.run_python_tests import (
     STRATEGY_SPACE_EXHAUSTED,
     ChildTargetResult,
     HypothesisPropertyStats,
@@ -33,7 +33,6 @@ from scripts.run_python_tests import (  # noqa: E402
     resolve_hypothesis_settings,
     settings_max_examples,
 )
-
 
 TARGET_RUNNER = REPO_ROOT / "scripts" / "run_python_tests.py"
 DEFAULT_PROFILE = "fuzz"
@@ -436,10 +435,10 @@ def format_depth_report(depths: Sequence[PropertyDepth]) -> tuple[str, ...]:
         key=lambda depth: (-discard_rate(depth), depth.test_id),
     )
     lines = [
-        f"DEPTH {len(depths)} properties measured, "
+        (f"DEPTH {len(depths)} properties measured, "
         f"{len(shallow)} shallow (space exhausted below budget), "
         f"{len(discarding)} discarding at least "
-        f"{DISCARD_RATE_THRESHOLD:.0%} of their examples"
+        f"{DISCARD_RATE_THRESHOLD:.0%} of their examples")
     ]
     for depth in shallow[:DEPTH_REPORT_LIMIT]:
         lines.append(
@@ -667,7 +666,7 @@ def run_fuzz_targets(
             completed_count += 1
             try:
                 outcome = future.result()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                 outcome = FuzzInfrastructureFailure(
                     target=target,
                     detail=f"{type(exc).__name__}: {exc}",

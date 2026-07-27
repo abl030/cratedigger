@@ -15,7 +15,8 @@ import copy
 import json
 import logging
 import threading
-from typing import Any, Callable, TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 import msgspec
 
@@ -45,7 +46,7 @@ _GROUP_PATTERNS: dict[str, list[str]] = {
 if TYPE_CHECKING:
     import redis as _redis_mod
 
-_redis: "_redis_mod.Redis | None" = None
+_redis: _redis_mod.Redis | None = None
 
 
 class _MetadataFlight:
@@ -88,7 +89,7 @@ def init(host: str, port: int = 6379) -> None:
                              socket_connect_timeout=1, socket_timeout=1)
         _redis_call("ping")
         log.info("Redis connected: %s:%d", host, port)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         log.warning("Redis unavailable (%s), running without cache", e)
         _redis = None
 
@@ -170,7 +171,7 @@ def redis_metrics() -> dict[str, Any]:
             "avg_ttl_ms": _int_or_none(db0.get("avg_ttl")),
             "connected_clients": _int_or_none(clients.get("connected_clients")),
         }
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         return {"enabled": True, "status": "error", "error": str(e)}
 
 
@@ -194,7 +195,7 @@ def meta_get(key: str) -> Any:
             # decode_responses=True yields str hits; None on miss.
             return None
         return json.loads(raw)
-    except Exception:
+    except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         return None
 
 
@@ -205,7 +206,7 @@ def meta_set(key: str, value: Any, ttl: int = TTL_MB) -> None:
     try:
         _redis.setex(
             f"{_META_PREFIX}{key}", ttl, json.dumps(value))
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
         pass
 
 
@@ -304,7 +305,7 @@ def invalidate_pattern(pattern: str) -> None:
                 _redis.delete(*keys)
             if cursor == 0:
                 break
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
         pass
 
 

@@ -2,18 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from contextlib import AbstractContextManager
-from typing import Any, Iterable, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 import msgspec
 
 from lib.import_queue import ImportJob
-from lib.wrong_matches import (
-    WrongMatchSourceDB,
-    cleanup_wrong_match_source,
-    unsafe_failed_import_path_reason,
-)
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_WRONG_MATCH_CLEANUP,
     wrong_match_cleanup_lock_key,
@@ -23,6 +18,11 @@ from lib.util import resolve_failed_path
 from lib.validation_envelope import (
     ValidationResultEnvelope,
     decode_validation_envelope,
+)
+from lib.wrong_matches import (
+    WrongMatchSourceDB,
+    cleanup_wrong_match_source,
+    unsafe_failed_import_path_reason,
 )
 
 
@@ -124,7 +124,7 @@ def delete_wrong_match(
             ignore_import_job_id=ignore_import_job_id,
             require_visible=require_visible,
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         return WrongMatchDeleteResult(
             download_log_id=download_log_id,
             outcome=OUTCOME_DELETE_FAILED,

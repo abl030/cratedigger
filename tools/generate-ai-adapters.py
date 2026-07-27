@@ -13,7 +13,6 @@ from typing import Any
 
 import msgspec
 
-
 ROOT = Path(__file__).resolve().parent.parent
 CLAUDE_AGENTS = ROOT / ".claude" / "agents"
 CODEX_AGENTS = ROOT / ".codex" / "agents"

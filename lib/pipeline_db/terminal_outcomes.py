@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import psycopg2.extras
 
-from lib.pipeline_db.rows import AlbumRequestRow, album_request_row
-
 from lib import transitions
 from lib.import_queue import ImportJob, validate_preview_failure_status
+from lib.pipeline_db._core import _PipelineDBBase
+from lib.pipeline_db._shared import (
+    BACKOFF_BASE_MINUTES,
+    BACKOFF_MAX_MINUTES,
+    _msgspec_json_dumps,
+    validate_request_metadata_fields,
+)
+from lib.pipeline_db.rows import AlbumRequestRow, album_request_row
 from lib.terminal_outcomes import (
     ImportTerminalOutcome,
     PreviewTerminalOutcome,
@@ -22,14 +28,6 @@ from lib.terminal_outcomes import (
     operator_search_stop_is_current,
 )
 from lib.validation_envelope import derive_validation_log_columns
-
-from lib.pipeline_db._core import _PipelineDBBase
-from lib.pipeline_db._shared import (
-    BACKOFF_BASE_MINUTES,
-    BACKOFF_MAX_MINUTES,
-    _msgspec_json_dumps,
-    validate_request_metadata_fields,
-)
 
 
 class ImportJobTerminalConflict(RuntimeError):
@@ -126,7 +124,7 @@ class _TransactionalTransitionsDB:
             )
         if expected_status is None or expected_status == "replaced":
             return False
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         override_present = "search_filetype_override" in fields
         min_bitrate_present = "min_bitrate" in fields
         prev_min_bitrate_present = "prev_min_bitrate" in fields
@@ -185,7 +183,7 @@ class _TransactionalTransitionsDB:
             )
         if expected_status != "downloading":
             return False
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         override_present = "search_filetype_override" in fields
         min_bitrate_present = "min_bitrate" in fields
         prev_min_bitrate_present = "prev_min_bitrate" in fields
@@ -239,7 +237,7 @@ class _TransactionalTransitionsDB:
                 "wanted policy does not accept fields: " + ", ".join(unknown)
             )
         if fields:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             override_present = "search_filetype_override" in fields
             min_bitrate_present = "min_bitrate" in fields
             prev_min_bitrate_present = "prev_min_bitrate" in fields
@@ -289,7 +287,7 @@ class _TransactionalTransitionsDB:
             request_id,
             dict(fields),
             expected_status=expected_status,
-            now=datetime.now(timezone.utc),
+            now=datetime.now(UTC),
         )
 
     def record_attempt(
@@ -302,7 +300,7 @@ class _TransactionalTransitionsDB:
         if attempt_type not in {"search", "download", "validation"}:
             raise ValueError(f"Unknown attempt type: {attempt_type!r}")
         column = f"{attempt_type}_attempts"
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         cur = self._db._execute(
             f"UPDATE album_requests "
             f"SET {column} = COALESCE({column}, 0) + 1, "
@@ -343,7 +341,7 @@ class _TransactionalTransitionsDB:
         validate_request_metadata_fields(dict(extra))
         if expected_status is None or expected_status == "replaced":
             return False
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         cur = self._db._execute(
             "UPDATE album_requests AS ar "
             "SET status = 'imported', active_download_state = NULL, "
@@ -383,7 +381,7 @@ class _TransactionalTransitionsDB:
         validate_request_metadata_fields(dict(extra))
         if expected_status is None or expected_status == "replaced":
             return False
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         cur = self._db._execute(
             "UPDATE album_requests "
             "SET status = %s, active_download_state = NULL, updated_at = %s "

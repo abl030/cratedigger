@@ -1,14 +1,13 @@
 """Tests for lib/spectral_check.py — spectral quality verification."""
 
-import math
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
-import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
@@ -192,14 +191,14 @@ class TestClassifyAlbum(unittest.TestCase):
     """Test album-level classification from track results."""
 
     def test_all_genuine(self):
-        from lib.spectral_check import classify_album, TrackResult
+        from lib.spectral_check import TrackResult, classify_album
         tracks = [TrackResult("genuine", 35.0, False, None, None)] * 10
         grade, pct = classify_album(tracks)
         self.assertEqual(grade, "genuine")
         self.assertEqual(pct, 0.0)
 
     def test_majority_suspect(self):
-        from lib.spectral_check import classify_album, TrackResult
+        from lib.spectral_check import TrackResult, classify_album
         tracks = ([TrackResult("suspect", 70.0, True, 16000, 128)] * 7 +
                   [TrackResult("genuine", 35.0, False, None, None)] * 3)
         grade, pct = classify_album(tracks)
@@ -207,7 +206,7 @@ class TestClassifyAlbum(unittest.TestCase):
         self.assertEqual(pct, 70.0)
 
     def test_below_threshold(self):
-        from lib.spectral_check import classify_album, TrackResult
+        from lib.spectral_check import TrackResult, classify_album
         tracks = ([TrackResult("suspect", 70.0, True, 16000, 128)] * 4 +
                   [TrackResult("genuine", 35.0, False, None, None)] * 6)
         grade, pct = classify_album(tracks)
@@ -216,7 +215,7 @@ class TestClassifyAlbum(unittest.TestCase):
 
     def test_empty_tracks(self):
         from lib.spectral_check import classify_album
-        grade, pct = classify_album([])
+        grade, _pct = classify_album([])
         self.assertEqual(grade, "genuine")
 
 
@@ -224,7 +223,7 @@ class TestAnalyzeTrackMocked(unittest.TestCase):
     """Test analyze_track with mocked subprocess (no sox needed)."""
 
     def _make_sox_output(self, rms):
-        return "", "RMS     amplitude:     %.6f\n" % rms
+        return "", f"RMS     amplitude:     {rms:.6f}\n"
 
     @patch("lib.spectral_check.subprocess.run")
     def test_calls_sox_with_correct_args(self, mock_run):
@@ -252,7 +251,7 @@ class TestAnalyzeTrackMocked(unittest.TestCase):
                 rms = 0.1  # reference
             else:
                 rms = 0.005  # ~-26dB below ref = healthy HF
-            return MagicMock(stderr="RMS     amplitude:     %.6f\n" % rms, returncode=0)
+            return MagicMock(stderr=f"RMS     amplitude:     {rms:.6f}\n", returncode=0)
         mock_run.side_effect = side_effect
         result = analyze_track("/fake/genuine.mp3")
         self.assertEqual(result.grade, "genuine")
@@ -268,6 +267,7 @@ class TestAnalyzeTrackMocked(unittest.TestCase):
     @patch("lib.spectral_check.subprocess.run")
     def test_sox_timeout(self, mock_run):
         import subprocess
+
         from lib.spectral_check import analyze_track
         mock_run.side_effect = subprocess.TimeoutExpired(cmd="sox", timeout=60)
         result = analyze_track("/fake/path.mp3")

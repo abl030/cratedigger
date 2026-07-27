@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import unittest
 
-from hypothesis import assume, given, strategies as st
+from hypothesis import assume, given
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from tests.test_dispatch_core import TestDispatchCoreOrchestration

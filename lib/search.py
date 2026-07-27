@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from lib.quality import CandidateScore
@@ -86,7 +86,7 @@ class SearchResult:
     # log time the DB compares it to the request's current plan_cycle_count
     # to detect completions after mid-flight regeneration. None for
     # legacy / no-plan code paths.
-    plan_execution: "PlanExecutionContext | None" = None
+    plan_execution: PlanExecutionContext | None = None
     # U11 R23: uncapped result count from slskd's terminal state
     # response. ``responseCount`` is what slskd's writer tracked;
     # ``result_count`` is what our harvest call returned. The two
@@ -855,7 +855,7 @@ def _append_format_hint(literal_body: str | None, hint: str) -> str | None:
 def _generate_normal_plan(
     snapshot: ReleaseSnapshot,
     config: SearchPlanConfig,
-) -> tuple[list["_Candidate"], list[dict[str, Any]]]:
+) -> tuple[list[_Candidate], list[dict[str, Any]]]:
     """Build the candidate ladder for a non-self-titled request.
 
     Returns ``(candidates, track_omissions)``. Caller folds them into
@@ -1152,7 +1152,7 @@ def _unwild_rg_year_candidate(
 def _generate_va_plan(
     snapshot: ReleaseSnapshot,
     config: SearchPlanConfig,
-) -> tuple[list["_Candidate"], list[dict[str, Any]]]:
+) -> tuple[list[_Candidate], list[dict[str, Any]]]:
     """Build the candidate ladder for a Various Artists compilation (R13).
 
     The VA mix replaces the artist+title-driven slots (default / literal /
@@ -1213,7 +1213,7 @@ def _build_va_track_artist_candidates(
     snapshot: ReleaseSnapshot,
     max_slots: int,
     track_omissions: list[dict[str, Any]],
-) -> list["_Candidate"]:
+) -> list[_Candidate]:
     """Build per-track-artist candidate slots for the VA branch (R13).
 
     Pairs each ``track_title`` with its corresponding ``track_artist``
@@ -1345,7 +1345,7 @@ def _compilation_series_candidate(snapshot: ReleaseSnapshot) -> _Candidate:
 def _generate_selftitled_plan(
     snapshot: ReleaseSnapshot,
     config: SearchPlanConfig,
-) -> tuple[list["_Candidate"], list[dict[str, Any]]]:
+) -> tuple[list[_Candidate], list[dict[str, Any]]]:
     """Build the dedicated candidate ladder for self-titled releases (R11).
 
     The default/literal slots are skipped — they collapse to bare artist
@@ -1513,7 +1513,7 @@ def _build_track_candidates(
     track_omissions: list[dict[str, Any]],
     *,
     slot_label_suffix: str,
-) -> list["_Candidate"]:
+) -> list[_Candidate]:
     """Rank per-track pairs and emit up to ``max_track_slots`` candidates.
 
     Ranking is driven by ``score_track_distinctiveness`` on the RAW

@@ -168,8 +168,7 @@ def _is_repo_path_candidate(value: str, repo_root: Path) -> bool:
 def _normalise_repo_path(value: str, repo_root: Path) -> str | None:
     """Return a literal repo path, excluding glob/template conventions."""
     without_anchor = value.split("#", 1)[0]
-    if without_anchor.startswith("./"):
-        without_anchor = without_anchor[2:]
+    without_anchor = without_anchor.removeprefix("./")
     without_line = _LINE_SUFFIX_RE.sub("", without_anchor)
     if not _is_repo_path_candidate(without_line, repo_root):
         return None
@@ -233,7 +232,7 @@ def _broken_repo_reference(
     repo_root: Path,
 ) -> str | None:
     rel_source = _relative(path, repo_root)
-    normalised_code = code[2:] if code.startswith("./") else code
+    normalised_code = code.removeprefix("./")
     symbol_match = _PY_SYMBOL_REFERENCE_RE.fullmatch(normalised_code)
     if symbol_match is not None:
         repo_path = symbol_match.group("path")

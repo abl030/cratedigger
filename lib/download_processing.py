@@ -10,10 +10,9 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol, TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
-from lib import download_materialization
-from lib import download_validation
+from lib import download_materialization, download_validation
 from lib.dispatch import DispatchCoreFn, DispatchOutcome
 from lib.grab_list import GrabListEntry
 from lib.processing_paths import canonical_folder_for_row, processing_albums_dir

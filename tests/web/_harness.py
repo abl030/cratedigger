@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Shared HTTP test harness for the web route contract tests (#408, #430).
 
 Starts a real HTTP server on a random port; the ``tests/web/test_*.py``
@@ -16,8 +15,8 @@ import threading
 import unittest
 from http.server import HTTPServer, ThreadingHTTPServer
 from unittest.mock import patch
-from urllib.request import urlopen, Request
 from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 

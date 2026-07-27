@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
-from lib.fs_authority import FilesystemAuthorityError, open_configured_quarantine_directory
-from lib.import_queue import ImportJob, IMPORT_JOB_FORCE, force_import_dedupe_key, force_import_payload
+from lib.fs_authority import (
+    FilesystemAuthorityError,
+    open_configured_quarantine_directory,
+)
+from lib.import_queue import (
+    IMPORT_JOB_FORCE,
+    ImportJob,
+    force_import_dedupe_key,
+    force_import_payload,
+)
 from lib.processing_paths import normalize_source_dirs
 from lib.validation_envelope import decode_validation_envelope
 
@@ -40,9 +48,9 @@ FORCE_IMPORT_HTTP_STATUS = {
 
 
 class ForceImportDB(Protocol):
-    def get_download_log_entry(self, log_id: int) -> "DownloadLogWithEvidenceRow | None": ...
+    def get_download_log_entry(self, log_id: int) -> DownloadLogWithEvidenceRow | None: ...
 
-    def get_request(self, request_id: int) -> "AlbumRequestRow | None": ...
+    def get_request(self, request_id: int) -> AlbumRequestRow | None: ...
 
     def enqueue_import_job(
         self,

@@ -1,16 +1,15 @@
-#!/usr/bin/env python3
 """Contract tests for web/routes/browse.py: search, browse, library artist.
 
 Split from tests/test_web_server.py (#408). Shared harness in
 tests/web/_harness.py.
 """
-
-from datetime import datetime, timezone
 import email.message
 import os
 import sys
 import tempfile
 import unittest
+from datetime import UTC, datetime
+from typing import ClassVar
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 
@@ -20,10 +19,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from lib.artist_catalogue import ArtistCatalogueRow
 from lib.pipeline_db import AlbumRequestRow
-from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
-
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_request_row
+from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
 from web.library_album_row import LibraryAlbumRow
 
 
@@ -35,44 +33,44 @@ def _catalogue(rows: list[dict]) -> list[ArtistCatalogueRow]:
 class TestBrowseRouteContracts(_FakeDbWebServerCase):
     """Contract tests for browse and MusicBrainz-backed routes."""
 
-    ARTIST_SEARCH_REQUIRED_FIELDS = {"id", "name", "disambiguation"}
-    RELEASE_SEARCH_REQUIRED_FIELDS = {
+    ARTIST_SEARCH_REQUIRED_FIELDS: ClassVar = {"id", "name", "disambiguation"}
+    RELEASE_SEARCH_REQUIRED_FIELDS: ClassVar = {
         "id", "title", "artist_id", "artist_name", "primary_type",
     }
-    ARTIST_RG_REQUIRED_FIELDS = {
+    ARTIST_RG_REQUIRED_FIELDS: ClassVar = {
         "id", "title", "type", "source", "identity_kind", "primary_types",
         "secondary_types", "format_qualifiers", "provenance",
         "first_release_date", "artist_credit", "primary_artist_id",
         "is_appearance",
     }
-    LIBRARY_ALBUM_REQUIRED_FIELDS = set(LibraryAlbumRow.__struct_fields__)
-    RELEASE_GROUP_REQUIRED_FIELDS = {
+    LIBRARY_ALBUM_REQUIRED_FIELDS: ClassVar = set(LibraryAlbumRow.__struct_fields__)
+    RELEASE_GROUP_REQUIRED_FIELDS: ClassVar = {
         "id", "title", "country", "date", "format", "track_count", "status",
         "in_library", "beets_album_id", "pipeline_status", "pipeline_id",
         "pipeline_verified_lossless", "pipeline_provisional",
     }
-    RELEASE_DETAIL_REQUIRED_FIELDS = {
+    RELEASE_DETAIL_REQUIRED_FIELDS: ClassVar = {
         "id", "title", "tracks", "in_library", "beets_album_id",
         "pipeline_status", "pipeline_id",
     }
-    RELEASE_TRACK_REQUIRED_FIELDS = {
+    RELEASE_TRACK_REQUIRED_FIELDS: ClassVar = {
         "disc_number", "track_number", "title", "length_seconds",
     }
-    DISAMBIGUATE_RESPONSE_REQUIRED_FIELDS = {
+    DISAMBIGUATE_RESPONSE_REQUIRED_FIELDS: ClassVar = {
         "artist_id", "artist_name", "release_groups",
     }
-    DISAMBIGUATE_RG_REQUIRED_FIELDS = {
+    DISAMBIGUATE_RG_REQUIRED_FIELDS: ClassVar = {
         "release_group_id", "title", "primary_type", "first_date",
         "release_ids", "pressings", "track_count", "unique_track_count",
         "covered_by", "library_status", "pipeline_status", "pipeline_id",
         "tracks",
     }
-    DISAMBIGUATE_PRESSING_REQUIRED_FIELDS = {
+    DISAMBIGUATE_PRESSING_REQUIRED_FIELDS: ClassVar = {
         "release_id", "title", "date", "format", "track_count", "country",
         "recording_ids", "in_library", "beets_album_id", "pipeline_status",
         "pipeline_id",
     }
-    DISAMBIGUATE_TRACK_REQUIRED_FIELDS = {
+    DISAMBIGUATE_TRACK_REQUIRED_FIELDS: ClassVar = {
         "recording_id", "title", "unique", "also_on",
     }
 
@@ -157,7 +155,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             source="request",
             status="wanted",
             min_bitrate=320,
-            created_at=datetime(2026, 4, 1, 3, 47, 54, tzinfo=timezone.utc),
+            created_at=datetime(2026, 4, 1, 3, 47, 54, tzinfo=UTC),
             search_filetype_override="flac",
         ))
         fake_db.set_tracks(42, [
@@ -195,7 +193,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             artist_name="Test Artist",
             album_title="Duplicate Pipeline Row",
             status="wanted",
-            created_at=datetime(2026, 4, 1, 3, 47, 54, tzinfo=timezone.utc),
+            created_at=datetime(2026, 4, 1, 3, 47, 54, tzinfo=UTC),
         ))
         beets_album = {
             "id": 7,
@@ -241,7 +239,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             album_title="Discogs Import",
             source="request",
             status="wanted",
-            created_at=datetime(2026, 4, 1, 3, 47, 54, tzinfo=timezone.utc),
+            created_at=datetime(2026, 4, 1, 3, 47, 54, tzinfo=UTC),
         ))
         beets_album = {
             "id": 8,
@@ -323,7 +321,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             album_title="Older Request",
             year=1997,
             status="wanted",
-            created_at=datetime(2026, 4, 1, 3, 47, 54, tzinfo=timezone.utc),
+            created_at=datetime(2026, 4, 1, 3, 47, 54, tzinfo=UTC),
         ))
         beets_album = {
             "id": 9,
@@ -1112,22 +1110,22 @@ class TestArtistFailureBoundary(_FakeDbWebServerCase):
 class TestDiscogsBrowseRouteContracts(_FakeDbWebServerCase):
     """Contract tests for Discogs browse routes."""
 
-    DISCOGS_SEARCH_REQUIRED_FIELDS = {
+    DISCOGS_SEARCH_REQUIRED_FIELDS: ClassVar = {
         "id", "title", "artist_name", "artist_id",
         "primary_type", "first_release_date",
     }
-    DISCOGS_MASTER_RELEASE_REQUIRED_FIELDS = {
+    DISCOGS_MASTER_RELEASE_REQUIRED_FIELDS: ClassVar = {
         "id", "title", "country", "format",
         "in_library", "beets_album_id", "pipeline_status", "pipeline_id",
     }
-    DISCOGS_RELEASE_REQUIRED_FIELDS = {
+    DISCOGS_RELEASE_REQUIRED_FIELDS: ClassVar = {
         "id", "title", "artist_name", "tracks",
         "in_library", "beets_album_id", "pipeline_status", "pipeline_id",
     }
-    DISCOGS_ARTIST_REQUIRED_FIELDS = {
+    DISCOGS_ARTIST_REQUIRED_FIELDS: ClassVar = {
         "artist_id", "artist_name", "release_groups", "ungrouped_releases",
     }
-    DISCOGS_ARTIST_ROW_REQUIRED_FIELDS = {
+    DISCOGS_ARTIST_ROW_REQUIRED_FIELDS: ClassVar = {
         "id", "title", "type", "source", "identity_kind", "primary_types",
         "secondary_types", "format_qualifiers", "provenance",
         "first_release_date", "artist_credit", "primary_artist_id",
@@ -1361,7 +1359,7 @@ class TestDiscogsBrowseRouteContracts(_FakeDbWebServerCase):
 class TestSearchByIdResolveContract(_FakeDbWebServerCase):
     """Contract tests for /api/browse/resolve — the search-by-ID resolver."""
 
-    REQUIRED_FIELDS = {
+    REQUIRED_FIELDS: ClassVar = {
         "source", "kind", "artist_id", "artist_name",
         "is_va", "target_identity_kind", "expand_id", "leaf_id",
     }
@@ -1584,7 +1582,7 @@ class TestSearchByIdResolveContract(_FakeDbWebServerCase):
             from urllib.error import HTTPError
             mock_mb.get_release.side_effect = HTTPError(
                 url="x", code=404, msg="Not Found", hdrs=email.message.Message(), fp=None)
-            status, data = self._get(
+            status, _data = self._get(
                 f"/api/browse/resolve?source=mb&id={self.MB_RG_ID}&kind=release")
 
         self.assertEqual(status, 404)
@@ -1610,16 +1608,16 @@ class TestSearchByIdResolveContract(_FakeDbWebServerCase):
         self.assertIn("error", data)
 
     def test_missing_source(self):
-        status, data = self._get(f"/api/browse/resolve?id={self.MB_RELEASE_ID}")
+        status, _data = self._get(f"/api/browse/resolve?id={self.MB_RELEASE_ID}")
         self.assertEqual(status, 400)
 
     def test_invalid_source(self):
-        status, data = self._get(
+        status, _data = self._get(
             f"/api/browse/resolve?source=apple&id={self.MB_RELEASE_ID}")
         self.assertEqual(status, 400)
 
     def test_invalid_kind(self):
-        status, data = self._get(
+        status, _data = self._get(
             f"/api/browse/resolve?source=mb&id={self.MB_RELEASE_ID}&kind=garbage")
         self.assertEqual(status, 400)
 
@@ -1630,7 +1628,6 @@ class TestLibraryArtistContract(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         import sqlite3
-        import tempfile
         cls._tmpdir = tempfile.mkdtemp()
         cls._db_path = os.path.join(cls._tmpdir, "beets.db")
         conn = sqlite3.connect(cls._db_path)
@@ -1687,13 +1684,13 @@ class TestLibraryArtistContract(unittest.TestCase):
 
     # Fields the frontend (library.js, discography.js) requires for rendering.
     # These must match _album_row_to_dict() output — the single source of truth.
-    REQUIRED_FIELDS = {
+    REQUIRED_FIELDS: ClassVar = {
         "id", "album", "artist", "year", "mb_albumid", "track_count",
         "mb_releasegroupid", "release_group_title", "added",
         "formats", "min_bitrate", "avg_bitrate", "type", "label", "country", "source",
     }
 
-    FIELD_TYPES = {
+    FIELD_TYPES: ClassVar = {
         "id": int, "album": str, "artist": str, "year": int,
         "track_count": int, "min_bitrate": int, "avg_bitrate": int,
         "added": float,

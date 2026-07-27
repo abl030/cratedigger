@@ -8,14 +8,14 @@ No I/O, no database — fully unit-testable.
 
 import json
 from dataclasses import dataclass, fields
-from typing import Any, Optional
+from typing import Any, Self
 
 import msgspec
 
 from lib.failure_presentation import (
+    MAX_DIAGNOSTIC_CHARS,
     FailureEvidence,
     FailurePresentation,
-    MAX_DIAGNOSTIC_CHARS,
     bounded_text,
     decode_transfer_detail,
     present_failure,
@@ -42,70 +42,70 @@ class LogEntry:
     id: int = 0
     request_id: int = 0
     outcome: str = ""
-    created_at: Optional[str] = None  # ISO string after serialization
+    created_at: str | None = None  # ISO string after serialization
 
     # match result
-    beets_scenario: Optional[str] = None
-    beets_distance: Optional[float] = None
-    source_download_log_id: Optional[int] = None
-    original_beets_distance: Optional[float] = None
-    beets_detail: Optional[str] = None
-    soulseek_username: Optional[str] = None
-    error_message: Optional[str] = None
-    download_path: Optional[str] = None
-    staged_path: Optional[str] = None
-    import_result: Optional[dict[str, object] | str] = None
-    validation_result: Optional[dict[str, object] | str] = None
+    beets_scenario: str | None = None
+    beets_distance: float | None = None
+    source_download_log_id: int | None = None
+    original_beets_distance: float | None = None
+    beets_detail: str | None = None
+    soulseek_username: str | None = None
+    error_message: str | None = None
+    download_path: str | None = None
+    staged_path: str | None = None
+    import_result: dict[str, object] | str | None = None
+    validation_result: dict[str, object] | str | None = None
     # Per-file failure detail audit blob (issue #564 C7, migration 043) —
     # a list of FileFailureDetail dicts behind a download-timeout row's
     # composed error_message summary. Read by lib/failure_presentation.py
     # (issue #868): the humane verdict and the bounded raw peer message on
     # the classified entry are BOTH derived from it at render time; this
     # column itself is never rewritten.
-    transfer_detail: Optional[list[dict[str, object]]] = None
+    transfer_detail: list[dict[str, object]] | None = None
 
     # download quality
-    filetype: Optional[str] = None
-    bitrate: Optional[int] = None              # bps — the ONLY field in bps
+    filetype: str | None = None
+    bitrate: int | None = None              # bps — the ONLY field in bps
     was_converted: bool = False
-    original_filetype: Optional[str] = None
-    actual_filetype: Optional[str] = None
-    actual_min_bitrate: Optional[int] = None   # kbps
+    original_filetype: str | None = None
+    actual_filetype: str | None = None
+    actual_min_bitrate: int | None = None   # kbps
     # Immutable candidate-evidence presentation fallback for historical rows
     # without a native import_result/source projection.
-    source_format: Optional[str] = None
-    source_min_bitrate: Optional[int] = None
-    source_avg_bitrate: Optional[int] = None
-    source_median_bitrate: Optional[int] = None
-    slskd_filetype: Optional[str] = None
-    spectral_grade: Optional[str] = None
-    spectral_bitrate: Optional[int] = None     # kbps
-    existing_min_bitrate: Optional[int] = None  # kbps
-    existing_spectral_bitrate: Optional[int] = None  # kbps
-    existing_spectral_grade: Optional[str] = None
-    final_format: Optional[str] = None
-    v0_probe_kind: Optional[str] = None
-    v0_probe_min_bitrate: Optional[int] = None
-    v0_probe_avg_bitrate: Optional[int] = None
-    v0_probe_median_bitrate: Optional[int] = None
-    existing_v0_probe_kind: Optional[str] = None
-    existing_v0_probe_min_bitrate: Optional[int] = None
-    existing_v0_probe_avg_bitrate: Optional[int] = None
-    existing_v0_probe_median_bitrate: Optional[int] = None
+    source_format: str | None = None
+    source_min_bitrate: int | None = None
+    source_avg_bitrate: int | None = None
+    source_median_bitrate: int | None = None
+    slskd_filetype: str | None = None
+    spectral_grade: str | None = None
+    spectral_bitrate: int | None = None     # kbps
+    existing_min_bitrate: int | None = None  # kbps
+    existing_spectral_bitrate: int | None = None  # kbps
+    existing_spectral_grade: str | None = None
+    final_format: str | None = None
+    v0_probe_kind: str | None = None
+    v0_probe_min_bitrate: int | None = None
+    v0_probe_avg_bitrate: int | None = None
+    v0_probe_median_bitrate: int | None = None
+    existing_v0_probe_kind: str | None = None
+    existing_v0_probe_min_bitrate: int | None = None
+    existing_v0_probe_avg_bitrate: int | None = None
+    existing_v0_probe_median_bitrate: int | None = None
 
     # album_requests columns (from JOIN — empty for history-only queries)
     album_title: str = ""
     artist_name: str = ""
-    mb_release_id: Optional[str] = None
-    request_status: Optional[str] = None
-    request_min_bitrate: Optional[int] = None  # kbps
-    search_filetype_override: Optional[str] = None
-    source: Optional[str] = None
-    request_source: Optional[str] = None
-    youtube_metadata: Optional[dict[str, Any]] = None
+    mb_release_id: str | None = None
+    request_status: str | None = None
+    request_min_bitrate: int | None = None  # kbps
+    search_filetype_override: str | None = None
+    source: str | None = None
+    request_source: str | None = None
+    youtube_metadata: dict[str, Any] | None = None
 
     @classmethod
-    def from_row(cls, row: dict[str, Any]) -> "LogEntry":
+    def from_row(cls, row: dict[str, Any]) -> Self:
         """Construct from a psycopg2 RealDictRow or plain dict.
 
         Handles datetime serialization and missing fields gracefully.
@@ -150,35 +150,35 @@ class ClassifiedEntry(msgspec.Struct):
     # mirror ``BeetsOpFailureReason`` Literal: "timeout" | "nonzero_rc" |
     # "exception". ``disambiguation_detail`` carries the short human-readable
     # ``detail`` for hover/tooltip — do not parse it.
-    disambiguation_failure: Optional[str] = None
-    disambiguation_detail: Optional[str] = None
-    bad_extensions: list[str] = msgspec.field(default_factory=lambda: [])
-    wrong_match_triage_action: Optional[str] = None
-    wrong_match_triage_summary: Optional[str] = None
-    wrong_match_triage_reason: Optional[str] = None
-    wrong_match_triage_preview_verdict: Optional[str] = None
-    wrong_match_triage_preview_decision: Optional[str] = None
-    wrong_match_triage_stage_chain: list[str] = msgspec.field(default_factory=lambda: [])
-    wrong_match_triage_detail: Optional[str] = None
+    disambiguation_failure: str | None = None
+    disambiguation_detail: str | None = None
+    bad_extensions: list[str] = msgspec.field(default_factory=list)
+    wrong_match_triage_action: str | None = None
+    wrong_match_triage_summary: str | None = None
+    wrong_match_triage_reason: str | None = None
+    wrong_match_triage_preview_verdict: str | None = None
+    wrong_match_triage_preview_decision: str | None = None
+    wrong_match_triage_stage_chain: list[str] = msgspec.field(default_factory=list)
+    wrong_match_triage_detail: str | None = None
     # The on-disk codec at download time, from import_result JSONB
     # (current_measurement.format). Rank-driven upgrades at equal
     # bitrate are unreadable without it (issue #575: AAC 256 replacing
     # unverified MP3 256 rendered as "256kbps (was 256kbps)").
-    existing_format: Optional[str] = None
+    existing_format: str | None = None
     # v3 lineage facts. Historical v1/v2 rows leave source_* unset because
     # their projected source measurement can be a target-labelled V0 proxy.
-    source_format: Optional[str] = None
-    source_min_bitrate: Optional[int] = None
-    source_avg_bitrate: Optional[int] = None
-    source_median_bitrate: Optional[int] = None
-    target_contract_format: Optional[str] = None
-    legacy_projection_version: Optional[int] = None
+    source_format: str | None = None
+    source_min_bitrate: int | None = None
+    source_avg_bitrate: int | None = None
+    source_median_bitrate: int | None = None
+    target_contract_format: str | None = None
+    legacy_projection_version: int | None = None
     # Post-conversion files measured from Beets postflight. These are distinct
     # from source_measurement (downloaded-source decision input).
-    materialized_format: Optional[str] = None
-    materialized_min_bitrate: Optional[int] = None
-    materialized_avg_bitrate: Optional[int] = None
-    materialized_median_bitrate: Optional[int] = None
+    materialized_format: str | None = None
+    materialized_min_bitrate: int | None = None
+    materialized_avg_bitrate: int | None = None
+    materialized_median_bitrate: int | None = None
     # The persisted QualityComparisonBasis as JSON-plain builtins, for the
     # frontend evidence strip / detail grid. None on rows predating the
     # field (request 6039 lesson: labels re-derived from min bitrate lie).
@@ -723,7 +723,7 @@ def _extract_materialized_measurement(
 
 def _extract_disambiguation_failure(
     entry: LogEntry,
-) -> tuple[Optional[str], Optional[str]]:
+) -> tuple[str | None, str | None]:
     """Pull ``postflight.disambiguation_failure.{reason, detail}`` out of the
     ImportResult JSONB. Returns ``(None, None)`` when no failure is present
     or the blob is missing/unreadable — callers render the chip conditionally.
@@ -1298,7 +1298,7 @@ def _verdict_from_basis(basis: QualityComparisonBasis) -> str:
 def _upgrade_verdict_from_basis(
     basis: QualityComparisonBasis,
     was_converted: bool,
-    original_ft: Optional[str],
+    original_ft: str | None,
     is_verified_lossless: bool,
 ) -> str:
     """Basis-driven twin of _upgrade_verdict, keeping the legacy suffixes."""
@@ -1339,9 +1339,12 @@ def _downloaded_min_bitrate_kbps(entry: LogEntry) -> int | None:
     if entry.actual_min_bitrate:
         return entry.actual_min_bitrate
     ir = _parse_import_result(entry)
-    if ir is not None and ir.source_measurement is not None:
-        if ir.source_measurement.min_bitrate_kbps is not None:
-            return ir.source_measurement.min_bitrate_kbps
+    if (
+        ir is not None
+        and ir.source_measurement is not None
+        and ir.source_measurement.min_bitrate_kbps is not None
+    ):
+        return ir.source_measurement.min_bitrate_kbps
     if entry.source_min_bitrate:
         return entry.source_min_bitrate
     if entry.bitrate:
@@ -1795,10 +1798,10 @@ def _rejection_verdict(entry: LogEntry) -> str:
     return _humanize_token(scenario) or "Rejected"
 
 
-def _upgrade_verdict(prev_br: Optional[int], cur_br: Optional[int],
-                     was_converted: bool, original_ft: Optional[str],
+def _upgrade_verdict(prev_br: int | None, cur_br: int | None,
+                     was_converted: bool, original_ft: str | None,
                      is_verified_lossless: bool,
-                     actual_filetype: Optional[str] = None) -> str:
+                     actual_filetype: str | None = None) -> str:
     """Build verdict for a successful upgrade."""
     fmt = actual_filetype or "mp3"
     prev_label = legacy_floor_quality_label("mp3", prev_br) if prev_br else "?"

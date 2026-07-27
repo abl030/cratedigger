@@ -32,12 +32,13 @@ rendered corpora:
 from __future__ import annotations
 
 import unittest
-from typing import NamedTuple
-
-from hypothesis import example, given, strategies as st
+from typing import ClassVar, NamedTuple
 
 import msgspec
+from hypothesis import example, given
+from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401
 from scripts.render_differential import (
     ClassifyRenderTarget,
     DiffReport,
@@ -49,7 +50,6 @@ from scripts.render_differential import (
     unwatched_field_names,
     watched_field_names,
 )
-import tests._hypothesis_profiles  # noqa: F401
 from web.classify import ClassifiedEntry
 from web.routes.pipeline import _classify_pipeline_log_item
 
@@ -283,7 +283,7 @@ class TestRenderDiffFailsClosed(unittest.TestCase):
     @given(corpora=rendered_corpora(min_rows=1))
     def test_field_dropped_from_current(self, corpora: Corpora) -> None:
         base, current = corpora
-        dropped = sorted(base[0].fields)[0]
+        dropped = min(base[0].fields)
         thinned = [
             RenderedRow(
                 id=row.id,
@@ -299,7 +299,7 @@ class TestRenderDiffFailsClosed(unittest.TestCase):
         self, corpora: Corpora,
     ) -> None:
         base, current = corpora
-        dropped = sorted(base[0].fields)[0]
+        dropped = min(base[0].fields)
         thinned = [
             RenderedRow(
                 id=row.id,
@@ -698,7 +698,7 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
 class TestDerivationCheckersTripOnViolations(unittest.TestCase):
     """The derivation checkers detect a fail-open watched set."""
 
-    SHAPES = {
+    SHAPES: ClassVar = {
         "text": Shape(str, False),
         "basis": Shape(dict[str, object], False),
         "number": Shape(int, True),

@@ -31,14 +31,13 @@ full design.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-
 import json
 import logging
 import os
 import shutil
 import socket
-from typing import Any, Callable, Protocol, TYPE_CHECKING, runtime_checkable
+from collections.abc import Callable, Mapping
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from urllib.error import URLError
 
 import msgspec
@@ -59,7 +58,6 @@ _TRANSIENT_LOOKUP_EXCEPTIONS: tuple[type[BaseException], ...] = (
     json.JSONDecodeError,
 )
 
-from lib.config import CratediggerConfig
 from lib.beets_db import (
     CurrentBeetsAmbiguous,
     CurrentBeetsResolution,
@@ -71,15 +69,22 @@ from lib.beets_delete import (
     BeetsDeleteRequest,
     run_beets_delete,
 )
+from lib.config import CratediggerConfig
+from lib.pipeline_db import (
+    ADVISORY_LOCK_NAMESPACE_IMPORT,
+    MbidCollisionError,
+    SupersedeRaceError,
+)
+from lib.processing_paths import stage_to_ai_path
 from lib.release_identity import (
     ReleaseIdentity,
     detect_release_source,
     normalize_release_id,
 )
 from lib.replace_status import (
+    REPLACE_REASON_CROSS_PATHWAY_TARGET,
     REPLACE_REASON_CURRENT_BEETS_AMBIGUOUS,
     REPLACE_REASON_CURRENT_BEETS_UNAVAILABLE,
-    REPLACE_REASON_CROSS_PATHWAY_TARGET,
     REPLACE_REASON_SOURCE_IDENTITY_INVALID,
     REPLACE_REASON_SOURCE_NO_RELEASE_GROUP,
     REPLACE_REASON_TARGET_NO_RELEASE_GROUP,
@@ -95,12 +100,6 @@ from lib.replace_status import (
     RESULT_TRANSIENT,
     RESULT_WRONG_STATE,
 )
-from lib.pipeline_db import (
-    ADVISORY_LOCK_NAMESPACE_IMPORT,
-    MbidCollisionError,
-    SupersedeRaceError,
-)
-from lib.processing_paths import stage_to_ai_path
 from lib.search_plan_service import SearchPlanDB, SearchPlanService
 from lib.util import (
     trigger_jellyfin_scan,
@@ -128,15 +127,15 @@ class MbidReplaceDB(
 
     def get_request_by_mb_release_id(
         self, mb_release_id: str,
-    ) -> "AlbumRequestRow | None": ...
+    ) -> AlbumRequestRow | None: ...
 
     def get_request_by_release_id(
         self, release_id: object | None,
-    ) -> "AlbumRequestRow | None": ...
+    ) -> AlbumRequestRow | None: ...
 
     def get_request_by_replaces_request_id(
         self, replaced_id: int,
-    ) -> "AlbumRequestRow | None": ...
+    ) -> AlbumRequestRow | None: ...
 
     def supersede_request_mbid(
         self,
@@ -558,7 +557,7 @@ class MbidReplaceService:
                 request_id=request_id,
                 error_message=f"MB lookup failed (transient): {exc}",
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             logger.warning(
                 "Replace: unexpected MB lookup error resolving %s "
                 "(request_id=%d): %s: %s",
@@ -761,7 +760,7 @@ class MbidReplaceService:
                 request_id=request_id,
                 error_message=f"Discogs lookup failed (transient): {exc}",
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             logger.warning(
                 "Replace: unexpected Discogs lookup error resolving %s "
                 "(request_id=%d): %s: %s",
@@ -965,7 +964,7 @@ class MbidReplaceService:
                             f"failed {delete_outcome.reason}: "
                             f"{delete_outcome.detail}"
                         )
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                     warnings.append(
                         f"beets removal raised "
                         f"{type(exc).__name__}: {exc}"
@@ -979,7 +978,7 @@ class MbidReplaceService:
                         f"{wm_summary.errors} errors "
                         f"({wm_summary.remaining} remaining)"
                     )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                 warnings.append(
                     f"wrong-matches cleanup raised "
                     f"{type(exc).__name__}: {exc}"
@@ -1011,7 +1010,7 @@ class MbidReplaceService:
                             shutil.rmtree(path)
                         except FileNotFoundError:
                             pass
-                        except Exception as exc:  # noqa: BLE001
+                        except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                             warnings.append(
                                 f"staging rmtree failed for {path}: "
                                 f"{type(exc).__name__}: {exc}"
@@ -1028,7 +1027,7 @@ class MbidReplaceService:
             self.search_plan_service.generate_for_request(
                 new_request_id, regenerate=False,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             warnings.append(
                 f"search-plan generation failed for new request "
                 f"{new_request_id}: {type(exc).__name__}: {exc}"
@@ -1038,7 +1037,7 @@ class MbidReplaceService:
             trigger_plex_scan(
                 self.config, imported_path=current_album_path
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             warnings.append(
                 f"plex rescan failed: {type(exc).__name__}: {exc}"
             )
@@ -1046,7 +1045,7 @@ class MbidReplaceService:
             trigger_jellyfin_scan(
                 self.config, imported_path=current_album_path
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             warnings.append(
                 f"jellyfin rescan failed: {type(exc).__name__}: {exc}"
             )

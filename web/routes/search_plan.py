@@ -8,6 +8,7 @@ see CLAUDE.md).
 """
 
 import logging
+from typing import Self
 
 import msgspec
 from pydantic import BaseModel, Field, model_validator
@@ -99,7 +100,7 @@ def get_pipeline_search_plan_dry_run(
         try:
             active = db.get_active_search_plan(request_id)
             has_active = active is not None
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             has_active = False
     payload = dry_run_payload(
         result,
@@ -408,7 +409,7 @@ class PipelineSearchPlanAdvanceRequest(BaseModel):
     to_strategy: str | None = None
 
     @model_validator(mode="after")
-    def _exactly_one_target(self) -> "PipelineSearchPlanAdvanceRequest":
+    def _exactly_one_target(self) -> Self:
         if (self.to_ordinal is None) == (self.to_strategy is None):
             raise ValueError(
                 "exactly one of to_ordinal or to_strategy is required"

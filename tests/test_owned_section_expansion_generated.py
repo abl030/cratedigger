@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import subprocess
 import unittest
+from pathlib import Path
 
-from hypothesis import example, given, strategies as st
+from hypothesis import example, given
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
-
 
 ROOT = Path(__file__).resolve().parents[1]
 ARTIST_ID = "artist-id"

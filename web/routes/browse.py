@@ -17,6 +17,12 @@ from lib.artist_catalogue import (
     ArtistCatalogueRow,
     ArtistCompareSkeleton,
 )
+
+# VA constants are imported directly so that test patches of `discogs_api`
+# (web.routes.browse.discogs_api) and `mb_api` (web.server.mb_api) don't
+# replace the constants with auto-generated Mock attributes.
+from lib.artist_compare import annotate_in_library, merge_discographies
+from lib.banding import current_library_bitrate
 from lib.release_identity import (
     ReleaseIdentity,
     normalize_release_id,
@@ -24,13 +30,8 @@ from lib.release_identity import (
 from web import cache as _cache
 from web import discogs as discogs_api
 from web.discogs import VA_ARTIST_ID as _DISCOGS_VA_ARTIST_ID
-from web.mb import VA_ARTIST_MBID as _MB_VA_ARTIST_MBID
-# VA constants are imported directly so that test patches of `discogs_api`
-# (web.routes.browse.discogs_api) and `mb_api` (web.server.mb_api) don't
-# replace the constants with auto-generated Mock attributes.
-from lib.artist_compare import annotate_in_library, merge_discographies
-from lib.banding import current_library_bitrate
 from web.library_artist_service import list_library_artist_rows
+from web.mb import VA_ARTIST_MBID as _MB_VA_ARTIST_MBID
 from web.routes._overlay import overlay_release_rows_in_place
 from web.routes._registry import (
     RouteHandler,
@@ -276,8 +277,8 @@ def _build_disambiguate_skeleton(artist_id: str) -> _DisambiguateSkeleton:
     """
     srv = _server()
     from lib.artist_releases import (  # local to avoid heavy import at route-load
-        filter_non_live,
         analyse_artist_releases,
+        filter_non_live,
     )
 
     raw_releases = srv.mb_api.get_artist_releases_with_recordings(artist_id)

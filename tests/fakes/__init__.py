@@ -37,10 +37,12 @@ from tests.fakes.slskd import (
 from tests.fakes.ytmusic import FakeYTMusic
 
 __all__ = [
+    "_EPOCH",
+    "_PERTH_TZ",
     "CancelDownloadCall",
     "DenylistEntry",
-    "DownloadLogRow",
     "DispatchCoreCall",
+    "DownloadLogRow",
     "EnqueueCall",
     "FakeBeetsDB",
     "FakeCursor",
@@ -54,11 +56,15 @@ __all__ = [
     "FakeSlskdUsers",
     "FakeYTMusic",
     "FieldResolutionRow",
+    "ProcessAlbumCall",
+    "RecordingDispatchCore",
+    "RecordingProcessAlbum",
     "SearchLogRow",
     "SearchTextCall",
-    "RecordingDispatchCore",
-    "ProcessAlbumCall",
-    "RecordingProcessAlbum",
     "UserCooldownRow",
+    "_FakeSearchPlanItemRow",
+    "_FakeSearchPlanRow",
+    "_as_datetime",
+    "_utcnow",
     "http_error",
 ]

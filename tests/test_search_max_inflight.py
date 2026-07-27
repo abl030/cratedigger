@@ -33,7 +33,9 @@ from lib.grab_list import DownloadFile, GrabListEntry
 from lib.pipeline_db import SearchPlanItemInput
 from lib.quality import CandidateScore
 from lib.search import (
-    SEARCH_PLAN_GENERATOR_ID, PlanExecutionContext, SearchResult,
+    SEARCH_PLAN_GENERATOR_ID,
+    PlanExecutionContext,
+    SearchResult,
 )
 from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
 

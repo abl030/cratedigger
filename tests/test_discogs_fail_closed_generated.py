@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generated fail-closed matrix for all cached Discogs adapters."""
 
 from __future__ import annotations
@@ -6,7 +5,8 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from hypothesis import given, strategies as st
+from hypothesis import given
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
 from tests.test_discogs_fail_closed import (
@@ -17,7 +17,6 @@ from tests.test_discogs_fail_closed import (
 )
 from tests.test_web_cache import FakeRedis
 from web import cache, discogs
-
 
 _QUERY = st.text(
     alphabet=st.characters(min_codepoint=ord("a"), max_codepoint=ord("z")),
@@ -58,7 +57,7 @@ class TestGeneratedPublicDiscogsFailClosed(unittest.TestCase):
 
             discogs.DISCOGS_API_BASE = None
 
-            def call_warm_adapter() -> object:
+            def call_warm_adapter(surface: str = surface) -> object:
                 return call_public_cached_adapter(
                     surface, query=query, entity_id=entity_id,
                 )

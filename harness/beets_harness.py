@@ -18,10 +18,9 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING
-
 from collections.abc import Sequence
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from beets import config, library, plugins
 from beets.autotag import AlbumInfo, AlbumMatch, TrackInfo, TrackMatch
@@ -33,8 +32,8 @@ from beets.util import PathBytes
 
 if TYPE_CHECKING:
     from beets.autotag.hooks import JSONDict
-    from beets.importer.tasks import ImportTask
     from beets.dbcore.db import Results
+    from beets.importer.tasks import ImportTask
     from confuse import ConfigView
 
     def _lib_albums(
@@ -92,7 +91,7 @@ def _serialize_item(item: library.Item) -> dict[str, object]:
     # getattr (not direct `.path`) keeps this Any-typed rather than the
     # narrow `bytes` LibModel declares, so the bytes/str defensive check
     # below stays meaningful to pyright instead of "always true."
-    path = getattr(item, "path")
+    path = item.path
     if isinstance(path, bytes):
         path = path.decode("utf-8", errors="replace")
     return {
@@ -241,11 +240,11 @@ def _mbid_swap_event(
     if not existing:
         return None
     # Deterministic pick for tests; in practice items of an album share one mbid.
-    old_mbid = sorted(existing)[0]
+    old_mbid = min(existing)
     path = _path_str(task.paths[0]) if getattr(task, "paths", None) else ""
     return {
         "event": "harness_mbid_swap",
-        "ts": datetime.now(timezone.utc).isoformat(),
+        "ts": datetime.now(UTC).isoformat(),
         "path": path,
         "old_mb_albumid": old_mbid,
         "new_mb_albumid": new_mbid,
@@ -436,7 +435,9 @@ def _install_release_id_duplicate_lookup() -> None:
     ) -> list[library.Album]:
         return _find_duplicates_with_mapped_release_ids(self, lib)
 
-    setattr(find_duplicates, "_cratedigger_release_id_mapping", True)
+    setattr(  # noqa: B010 - marker is intentionally attached at runtime
+        find_duplicates, "_cratedigger_release_id_mapping", True,
+    )
     BeetsImportTask.find_duplicates = find_duplicates
 
 
@@ -481,7 +482,7 @@ def _album_item_count(album: object) -> int:
         return 0
     try:
         return len(list(items()))
-    except Exception:
+    except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         return 0
 
 
@@ -493,7 +494,7 @@ def _album_path(album: object) -> str:
             path = item_dir()
             if path:
                 return _path_str(path)
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
             pass
 
     items = getattr(album, "items", None)
@@ -503,7 +504,7 @@ def _album_path(album: object) -> str:
                 path = getattr(item, "path", None)
                 if path:
                     return os.path.dirname(_path_str(path))
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
             pass
     return ""
 
@@ -595,7 +596,11 @@ class HarnessImportSession(ImportSession):
             "path": _path_str(task.paths[0]) if task.paths else "",
             "cur_artist": getattr(task, "cur_artist", "") or "",
             "cur_title": getattr(getattr(task, "item", None), "title", "") if hasattr(task, "item") else "",
-            "item": _serialize_item(getattr(task, "item")) if hasattr(task, "item") else {},
+            "item": (
+                _serialize_item(getattr(task, "item"))  # noqa: B009 - Beets adds it dynamically
+                if hasattr(task, "item")
+                else {}
+            ),
             "recommendation": task.rec.name if task.rec else "none",
             "candidate_count": len(candidates),
             "candidates": serialized_candidates,

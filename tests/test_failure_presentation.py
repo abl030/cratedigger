@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Deterministic pins for lib/failure_presentation.py (issue #868 PR2).
 
 Each pin here has a generated twin in
@@ -13,15 +12,15 @@ The row rendered as ``Download failed: all 29 files errored — 29×
 'Verification required'``, which reads like Cratedigger's own validation
 failing rather than a peer refusing to upload.
 """
-
 import os
+import re
 import sys
 import tempfile
 import unittest
-from collections.abc import Mapping, Sequence, Set as AbstractSet
+from collections.abc import Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
-
-import re
+from typing import ClassVar
 
 import msgspec
 
@@ -29,7 +28,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import lib.download_materialization as materialization
 from lib.failure_presentation import (
-    transfer_detail_unreadable,
     FAMILY_LOCAL_STORAGE,
     FAMILY_PEER_FILE,
     FAMILY_REFUSAL,
@@ -46,6 +44,7 @@ from lib.failure_presentation import (
     materialize_reason_copy,
     peer_failure_family,
     present_failure,
+    transfer_detail_unreadable,
 )
 from lib.fs_authority import (
     FilesystemAuthorityError,
@@ -199,7 +198,7 @@ class TestDownloadLog38272(unittest.TestCase):
 class TestPeerFailureFamily(unittest.TestCase):
     """Every message in the issue's 45-day live census."""
 
-    CASES = [
+    CASES: ClassVar = [
         # --- refusal before transfer ---
         ("Verification required", FAMILY_REFUSAL),
         ("Transfer rejected: File not shared.", FAMILY_REFUSAL),
@@ -218,14 +217,14 @@ class TestPeerFailureFamily(unittest.TestCase):
          FAMILY_TRANSPORT),
         ("Transfer failed: Read error: Remote connection closed",
          FAMILY_TRANSPORT),
-        ("Transfer failed: Read error: Unable to read data from the "
-         "transport connection", FAMILY_TRANSPORT),
+        (("Transfer failed: Read error: Unable to read data from the "
+         "transport connection"), FAMILY_TRANSPORT),
         ("Download reported as failed by remote client", FAMILY_TRANSPORT),
         ("Download of c:\\music\\a\\b.mp3 reported as failed by jaswal",
          FAMILY_TRANSPORT),
         ("The wait timed out after 30000 milliseconds", FAMILY_TRANSPORT),
-        ("Failed to establish a direct or indirect transfer connection to "
-         "KingKaNeN (1.2.3.4:5678)", FAMILY_TRANSPORT),
+        (("Failed to establish a direct or indirect transfer connection to "
+         "KingKaNeN (1.2.3.4:5678)"), FAMILY_TRANSPORT),
         ('enqueue failed: "The wait timed out after 5000 milliseconds"',
          FAMILY_TRANSPORT),
         ("Application shut down", FAMILY_TRANSPORT),
@@ -235,21 +234,21 @@ class TestPeerFailureFamily(unittest.TestCase):
          FAMILY_TRANSPORT),
         ("Failed to write 16384 bytes to 1.2.3.4:5: Remote connection closed",
          FAMILY_TRANSPORT),
-        ("An attempt was made to transition a task to a final state when it "
-         "had already completed", FAMILY_TRANSPORT),
+        (("An attempt was made to transition a task to a final state when it "
+         "had already completed"), FAMILY_TRANSPORT),
         ("Download failed to enqueue remotely after hard time limit of 60 secs",
          FAMILY_TRANSPORT),
         ("Completed, TimedOut", FAMILY_TRANSPORT),
         ("Completed, Cancelled", FAMILY_TRANSPORT),
         # --- peer-side file problem ---
         ("File read error.", FAMILY_PEER_FILE),
-        ("Transfer aborted: the remote size of 100 does not match expected "
-         "size 200", FAMILY_PEER_FILE),
+        (("Transfer aborted: the remote size of 100 does not match expected "
+         "size 200"), FAMILY_PEER_FILE),
         # --- local storage (ours, not the peer's) ---
-        ("Failed to create file 01 - x.flac: Stale file handle : "
-         "'/mnt/virtio/music/slskd/incomplete/y'", FAMILY_LOCAL_STORAGE),
-        ("Failed to create file 01 - x.flac: Could not find a part of the "
-         "path '/mnt/virtio/music/slskd/incomplete/y'", FAMILY_LOCAL_STORAGE),
+        (("Failed to create file 01 - x.flac: Stale file handle : "
+         "'/mnt/virtio/music/slskd/incomplete/y'"), FAMILY_LOCAL_STORAGE),
+        (("Failed to create file 01 - x.flac: Could not find a part of the "
+         "path '/mnt/virtio/music/slskd/incomplete/y'"), FAMILY_LOCAL_STORAGE),
         ("Could not find a part of the path.", FAMILY_LOCAL_STORAGE),
         # --- unknown ---
         ("", FAMILY_UNKNOWN),
@@ -335,9 +334,9 @@ class TestPeerFamilyCopy(unittest.TestCase):
         presentation = self._present([
             _transfer_row(
                 "bob", f"f{i}", last_state="Completed, Errored",
-                last_exception="Failed to create file 0{}.flac: Stale file "
+                last_exception=f"Failed to create file 0{i}.flac: Stale file "
                                "handle : '/mnt/virtio/music/slskd/incomplete/x'"
-                               .format(i))
+                               )
             for i in range(3)
         ])
         verdict = presentation.verdict or ""
@@ -492,11 +491,11 @@ class TestPeerFamilyCopy(unittest.TestCase):
 
 class TestOwnDownloadMessages(unittest.TestCase):
 
-    CASES = [
+    CASES: ClassVar = [
         (
             "retry limit keeps only the basename",
-            "file exceeded retry limit after 3 retries: d:\\new music\\my "
-            "music\\ambient; dark ambient; drone\\05 - The Rooster Moans.flac",
+            ("file exceeded retry limit after 3 retries: d:\\new music\\my "
+            "music\\ambient; dark ambient; drone\\05 - The Rooster Moans.flac"),
             'Gave up on "05 - The Rooster Moans.flac" after 3 retries',
         ),
         (
@@ -521,8 +520,8 @@ class TestOwnDownloadMessages(unittest.TestCase):
         ),
         (
             "vanished drops the slskd-restart guess",
-            "transfers vanished from slskd before any status was observed "
-            "(slskd restart?)",
+            ("transfers vanished from slskd before any status was observed "
+            "(slskd restart?)"),
             "Transfers disappeared from slskd before the download finished",
         ),
         (
@@ -533,8 +532,8 @@ class TestOwnDownloadMessages(unittest.TestCase):
         (
             "vanished with last-observed evidence keeps the evidence",
             "transfers no longer in slskd — last observed: 2× 'File read error.'",
-            "Transfers disappeared from slskd — last observed: "
-            "2× 'File read error.'",
+            ("Transfers disappeared from slskd — last observed: "
+            "2× 'File read error.'"),
         ),
     ]
 
@@ -1044,7 +1043,7 @@ class TestFailedRowCopy(unittest.TestCase):
 
 class TestMeasurementFailureCopy(unittest.TestCase):
 
-    CASES = [
+    CASES: ClassVar = [
         (
             "doubled failed prefix",
             "failed: current Beets authority resolution raised",
@@ -1094,9 +1093,8 @@ class TestMeasurementFailureCopy(unittest.TestCase):
                 os.mkdir(directory, 0o700)
             outside = os.path.join(parent, "elsewhere", "Album")
             os.makedirs(outside)
-            with self.assertRaises(FilesystemAuthorityError) as caught:
-                with open_configured_quarantine_directory(outside, roots):
-                    pass
+            with self.assertRaises(FilesystemAuthorityError) as caught, open_configured_quarantine_directory(outside, roots):
+                pass
 
         # Exactly how lib/import_preview.py composes the persisted detail.
         detail = f"{type(caught.exception).__name__}: {caught.exception}"
@@ -1345,7 +1343,7 @@ _NON_TRIGGER_CONSTANTS: dict[str, str] = {
 
 
 def _match_targets(
-    namespace: "Mapping[str, object] | None" = None,
+    namespace: Mapping[str, object] | None = None,
 ) -> dict[str, tuple[str, ...]]:
     """Every module-level thing the presenter can match a message against.
 
@@ -1394,8 +1392,8 @@ def _match_targets(
 
 def check_target_is_registered(
     name: str,
-    values: "Sequence[str]",
-    registered: "AbstractSet[str]",
+    values: Sequence[str],
+    registered: AbstractSet[str],
 ) -> str | None:
     """Return why a discovered match target is unaccounted for, or None."""
     if name in _NON_TRIGGER_TABLES or name in _NON_TRIGGER_CONSTANTS:

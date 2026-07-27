@@ -1,10 +1,9 @@
-#!/usr/bin/env python3
 """Tests for the typed /api/library/artist album-row contract."""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import unittest
+from datetime import UTC, datetime
 
 import msgspec
 
@@ -205,7 +204,7 @@ class TestLibraryAlbumRow(unittest.TestCase):
                 "mb_release_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
                 "discogs_release_id": None,
                 "mb_release_group_id": "11111111-1111-1111-1111-111111111111",
-                "created_at": datetime(2026, 4, 1, 3, 47, 54, tzinfo=timezone.utc),
+                "created_at": datetime(2026, 4, 1, 3, 47, 54, tzinfo=UTC),
                 "search_filetype_override": None,
                 "target_format": None,
             },
@@ -231,7 +230,7 @@ class TestLibraryAlbumRow(unittest.TestCase):
                 "mb_release_id": None,
                 "discogs_release_id": "12856590",
                 "mb_release_group_id": None,
-                "created_at": datetime(2026, 4, 1, 3, 47, 54, tzinfo=timezone.utc),
+                "created_at": datetime(2026, 4, 1, 3, 47, 54, tzinfo=UTC),
                 "search_filetype_override": "flac",
                 "target_format": None,
             },
@@ -264,7 +263,7 @@ class TestLibraryAlbumRow(unittest.TestCase):
                 "mb_release_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
                 "discogs_release_id": None,
                 "mb_release_group_id": None,
-                "created_at": datetime(2026, 4, 1, 3, 47, 54, tzinfo=timezone.utc),
+                "created_at": datetime(2026, 4, 1, 3, 47, 54, tzinfo=UTC),
                 "search_filetype_override": None,
                 "target_format": None,
             },
@@ -321,7 +320,7 @@ class TestLibraryAlbumRow(unittest.TestCase):
                     "mb_release_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
                     "discogs_release_id": None,
                     "mb_release_group_id": None,
-                    "created_at": datetime(2026, 4, 1, 3, 47, 54, tzinfo=timezone.utc),
+                    "created_at": datetime(2026, 4, 1, 3, 47, 54, tzinfo=UTC),
                     "search_filetype_override": None,
                     "target_format": None,
                 },

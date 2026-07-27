@@ -112,24 +112,20 @@ class TestDecodeValidationEnvelope(unittest.TestCase):
 
     def test_projection_preserves_non_object_validation_errors(self) -> None:
         for raw in ('null', '"not an object"', '[]', b'null'):
-            with self.subTest(raw=raw):
-                with self.assertRaises(msgspec.ValidationError):
-                    derive_validation_log_columns(raw)
+            with self.subTest(raw=raw), self.assertRaises(msgspec.ValidationError):
+                derive_validation_log_columns(raw)
 
     def test_projection_preserves_malformed_json_error_parity(self) -> None:
         for raw in ('{', b'{"distance":', b'\xff'):
             with self.subTest(raw=raw):
-                with self.assertRaises(Exception) as decode_error:
+                expected_errors = (json.JSONDecodeError, UnicodeDecodeError)
+                with self.assertRaises(expected_errors) as decode_error:
                     decode_validation_envelope(raw)
-                with self.assertRaises(Exception) as projection_error:
+                with self.assertRaises(expected_errors) as projection_error:
                     derive_validation_log_columns(raw)
                 self.assertIs(
                     type(projection_error.exception),
                     type(decode_error.exception),
-                )
-                self.assertIn(
-                    type(decode_error.exception),
-                    (json.JSONDecodeError, UnicodeDecodeError),
                 )
 
 

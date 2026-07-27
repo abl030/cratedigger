@@ -7,12 +7,12 @@ import tempfile
 import unittest
 
 from beets import util as beets_util
-from hypothesis import example, given, strategies as st
+from hypothesis import example, given
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
 from lib.beets_db import _resolve_library_path
 from lib.sidecar import SIDECAR_FILENAME
-
 
 _COMPONENT = st.text(
     alphabet=st.characters(

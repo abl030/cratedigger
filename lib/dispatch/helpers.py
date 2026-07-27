@@ -10,11 +10,10 @@ from __future__ import annotations
 import logging
 import os
 import shutil
-from typing import TypedDict, TYPE_CHECKING
-
-from lib.quality import DownloadInfo, SpectralMeasurement
+from typing import TYPE_CHECKING, TypedDict
 
 from lib.dispatch.types import FORCE_IMPORT_SCENARIOS
+from lib.quality import DownloadInfo, SpectralMeasurement
 
 if TYPE_CHECKING:
     from lib.grab_list import GrabListEntry
@@ -23,7 +22,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger("cratedigger")
 
 
-def _should_cleanup_path(scenario: str, action: "DispatchAction") -> bool:
+def _should_cleanup_path(scenario: str, action: DispatchAction) -> bool:
     """Whether ``_cleanup_staged_dir`` is safe for this dispatch outcome.
 
     Issue #89 rules:
@@ -177,8 +176,8 @@ def _build_download_info(album_data: GrabListEntry) -> DownloadInfo:
     files = album_data.files
     if not files:
         return DownloadInfo()
-    usernames = set(f.username for f in files if f.username)
-    filetypes = set(f.filename.split(".")[-1].lower() for f in files if "." in f.filename)
+    usernames = {f.username for f in files if f.username}
+    filetypes = {f.filename.split(".")[-1].lower() for f in files if "." in f.filename}
     bitrates = [f.bitRate for f in files if f.bitRate is not None]
     sample_rates = [f.sampleRate for f in files if f.sampleRate is not None]
     bit_depths = [f.bitDepth for f in files if f.bitDepth is not None]

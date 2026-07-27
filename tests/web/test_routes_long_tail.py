@@ -1,24 +1,22 @@
-#!/usr/bin/env python3
 """Contract tests for web/routes/long_tail.py.
 
 Split from tests/web/test_routes_pipeline.py (#481 item 3), which itself
 split from tests/test_web_server.py (#408). Shared harness in
 tests/web/_harness.py.
 """
-
 import os
 import sys
 import unittest
+from typing import ClassVar
 from unittest.mock import patch
 
 import msgspec
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
-
 from tests.fakes import FakeBeetsDB
 from tests.helpers import make_request_row
+from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
 
 
 class TestLongTailRouteContracts(_FakeDbWebServerCase):
@@ -36,7 +34,7 @@ class TestLongTailRouteContracts(_FakeDbWebServerCase):
     # The frontend long-tail list renders these fields per row out of the
     # serialized ``LongTailRow``. Pin every one so a rename can't silently
     # break the JS.
-    ROW_REQUIRED_FIELDS = {
+    ROW_REQUIRED_FIELDS: ClassVar = {
         "id", "artist_name", "album_title", "year", "status", "source",
         "mb_release_id", "discogs_release_id", "target_format",
         "min_bitrate", "search_filetype_override", "unfindable_category",
@@ -47,7 +45,7 @@ class TestLongTailRouteContracts(_FakeDbWebServerCase):
         # off the row — the single-row refetch must not drop it (#398).
         "mb_release_group_id",
     }
-    ENVELOPE_REQUIRED_FIELDS = {"results", "band", "count"}
+    ENVELOPE_REQUIRED_FIELDS: ClassVar = {"results", "band", "count"}
 
     def test_missing_row_bands_missing_and_imported_absent(self):
         """AE1 at the HTTP boundary: a wanted row with no beets album

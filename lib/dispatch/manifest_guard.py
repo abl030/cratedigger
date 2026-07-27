@@ -10,19 +10,20 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from lib.quality import DownloadInfo
+from lib.dispatch.outcome_actions import _record_rejection_and_maybe_requeue
+from lib.dispatch.types import (
+    DISPATCH_CODE_IMPORT_MANIFEST_REJECTED,
+    DispatchOutcome,
+    ImportAttemptResult,
+)
 from lib.import_manifest import (
     audio_relative_paths,
     check_audio_manifest,
     tracked_audio_paths_from_validation_items,
 )
-from lib.validation_envelope import decode_validation_envelope
-from lib.quality import ValidationResult
-
-from lib.dispatch.types import (DISPATCH_CODE_IMPORT_MANIFEST_REJECTED,
-                                DispatchOutcome, ImportAttemptResult)
-from lib.dispatch.outcome_actions import _record_rejection_and_maybe_requeue
+from lib.quality import DownloadInfo, ValidationResult
 from lib.terminal_outcomes import PendingImportTerminalOutcome
+from lib.validation_envelope import decode_validation_envelope
 
 if TYPE_CHECKING:
     from lib.pipeline_db import PipelineDB
@@ -31,7 +32,7 @@ logger = logging.getLogger("cratedigger")
 
 
 def _origin_manifest_for_download_log(
-    db: "PipelineDB",
+    db: PipelineDB,
     *,
     download_log_id: int | None,
     failed_path: str,
@@ -47,7 +48,7 @@ def _origin_manifest_for_download_log(
     return tracked_audio_paths_from_validation_items(vr.items, root=failed_path)
 
 
-def _expected_request_track_count(db: "PipelineDB", request_id: int) -> int | None:
+def _expected_request_track_count(db: PipelineDB, request_id: int) -> int | None:
     try:
         tracks = db.get_tracks(request_id)
     except Exception:
@@ -57,7 +58,7 @@ def _expected_request_track_count(db: "PipelineDB", request_id: int) -> int | No
 
 
 def _guard_reject(
-    db: "PipelineDB",
+    db: PipelineDB,
     *,
     request_id: int,
     failed_path: str,
@@ -126,7 +127,7 @@ def _guard_reject(
 
 
 def _guard_force_import_audio_manifest(
-    db: "PipelineDB",
+    db: PipelineDB,
     *,
     request_id: int,
     failed_path: str,

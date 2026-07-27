@@ -26,8 +26,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from lib.json_narrow import json_dict, json_list  # noqa: E402 - after path setup
-
+from lib.json_narrow import json_dict, json_list
 
 DEFAULT_MAX_WORKERS = 12
 DEFAULT_DURATIONS = 15
@@ -825,7 +824,7 @@ def _run_targets(
             target = futures[future]
             try:
                 result = future.result()
-            except Exception as exc:  # worker infrastructure boundary
+            except Exception as exc:  # noqa: BLE001 - worker infrastructure boundary
                 infrastructure_failures.append(
                     TargetInfrastructureFailure(
                         target=target,

@@ -26,7 +26,6 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
-
 # beets 2.x IS in the dev shell, but these unit tests mock it to isolate the
 # harness's pure helpers from beets internals. The real-beets import + API
 # contract (beets 2.12 get_duplicate_action / Library) is covered by
@@ -47,11 +46,10 @@ _beets_mocks = {
 for name, mock in _beets_mocks.items():
     sys.modules.setdefault(name, mock)
 
-setattr(sys.modules["beets.importer.session"], "ImportSession",
-        type("ImportSession", (object,), {}))
+sys.modules["beets.importer.session"].ImportSession = type("ImportSession", (object,), {})
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from harness import beets_harness  # noqa: E402
+from harness import beets_harness
 
 
 def _make_item(mb_albumid: str | None):

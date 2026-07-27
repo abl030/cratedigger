@@ -33,11 +33,11 @@ from tempfile import TemporaryDirectory
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from scripts.pipeline_cli.routes_meta import (  # noqa: E402
+from scripts.pipeline_cli.routes_meta import (
     _build_parser,
     _collect_cli_routes,
 )
-from tests._docs_reference_audit import (  # noqa: E402
+from tests._docs_reference_audit import (
     REMOVAL_STABLE_REPO_ROOTS,
     REMOVAL_STABLE_ROOT_FILES,
     broken_repo_references,

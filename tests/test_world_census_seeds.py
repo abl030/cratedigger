@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 import unittest
+from dataclasses import replace
 
 from tests.world_model.census_seeds import (
     EVIDENCE_DRIFT_FACT_SEEDS,
@@ -255,9 +255,8 @@ class TestWorldCensusSeeds(unittest.TestCase):
             ),
         )
         for known_bad in known_bads:
-            with self.subTest(seed=known_bad.name):
-                with self.assertRaisesRegex(AssertionError, "anonymized"):
-                    assert_missing_current_evidence_seed_anonymized(known_bad)
+            with self.subTest(seed=known_bad.name), self.assertRaisesRegex(AssertionError, "anonymized"):
+                assert_missing_current_evidence_seed_anonymized(known_bad)
 
 
 if __name__ == "__main__":

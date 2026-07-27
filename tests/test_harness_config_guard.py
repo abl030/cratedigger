@@ -25,7 +25,7 @@ import os
 import sys
 import unittest
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 from unittest.mock import MagicMock
 
 if TYPE_CHECKING:
@@ -53,11 +53,10 @@ for name, mock in _beets_mocks.items():
     sys.modules.setdefault(name, mock)
 
 # ImportSession needs to be a class so subclassing works.
-setattr(sys.modules["beets.importer.session"], "ImportSession",
-        type("ImportSession", (object,), {}))
+sys.modules["beets.importer.session"].ImportSession = type("ImportSession", (object,), {})
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from harness import beets_harness  # noqa: E402
+from harness import beets_harness
 
 
 def _make_cfg(keys: list[str]) -> ConfigView:
@@ -132,7 +131,7 @@ class TestDuplicateLookupMetadata(unittest.TestCase):
 
     def test_uses_album_info_item_data_mapping(self):
         class FakeAlbumInfo:
-            item_data = {
+            item_data: ClassVar = {
                 "albumartist": "The National",
                 "album": "High Violet",
                 "mb_albumid": "mb-123",
@@ -161,7 +160,7 @@ class TestDuplicateLookupMetadata(unittest.TestCase):
 
     def test_find_duplicates_queries_mapped_release_fields(self):
         class FakeAlbumInfo:
-            item_data = {
+            item_data: ClassVar = {
                 "albumartist": "The National",
                 "album": "High Violet",
                 "mb_albumid": "mb-123",

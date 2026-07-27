@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Tests for harness/_serialize_*() — wire-boundary type contract.
 
 The harness emits JSON over stdout for consumers in lib/. Every ID-like
@@ -24,7 +23,6 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
-
 # beets 2.x IS in the dev shell, but these unit tests mock it to isolate the
 # harness's pure helpers from beets internals. The real-beets import + API
 # contract (beets 2.12 get_duplicate_action / Library) is covered by
@@ -46,12 +44,10 @@ for name, mock in _beets_mocks.items():
     sys.modules.setdefault(name, mock)
 
 # ImportSession needs to be a class so subclassing works.
-setattr(sys.modules["beets.importer.session"], "ImportSession",
-        type("ImportSession", (object,), {}))
+sys.modules["beets.importer.session"].ImportSession = type("ImportSession", (object,), {})
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from harness import beets_harness  # noqa: E402
-
+from harness import beets_harness
 
 # ---------------------------------------------------------------------------
 # _serialize_album_candidate — AlbumInfo IDs (album_id, releasegroup_id)
@@ -68,17 +64,17 @@ class TestAlbumCandidateIdCoercion(unittest.TestCase):
         shape without depending on real beets classes; typed ``Any`` so
         pyright doesn't demand a real ``AlbumMatch``.
         """
-        info_attrs = dict(
-            artist="Test Artist", album="Test Album",
-            album_id="default-id", albumdisambig="",
-            year=2020, original_year=2020, country="US",
-            label="", catalognum="", media="", mediums=1,
-            albumtype="", albumtypes=[], albumstatus="Official",
-            releasegroup_id="default-rg-id", release_group_title="",
-            va=False, language=None, script=None,
-            data_source="MusicBrainz", barcode="", asin="",
-            tracks=[],
-        )
+        info_attrs = {
+            "artist": "Test Artist", "album": "Test Album",
+            "album_id": "default-id", "albumdisambig": "",
+            "year": 2020, "original_year": 2020, "country": "US",
+            "label": "", "catalognum": "", "media": "", "mediums": 1,
+            "albumtype": "", "albumtypes": [], "albumstatus": "Official",
+            "releasegroup_id": "default-rg-id", "release_group_title": "",
+            "va": False, "language": None, "script": None,
+            "data_source": "MusicBrainz", "barcode": "", "asin": "",
+            "tracks": [],
+        }
         info_attrs.update(info_overrides)
         info = SimpleNamespace(**info_attrs)
 
@@ -134,12 +130,12 @@ class TestTrackInfoIdCoercion(unittest.TestCase):
 
     def _track_info(self, **overrides) -> Any:
         """Duck-typed TrackInfo stand-in — see ``_candidate`` above."""
-        attrs = dict(
-            title="X", artist="A", index=1, medium=1, medium_index=1,
-            medium_total=1, length=200.0,
-            track_id="default-tid", release_track_id="default-rtid",
-            track_alt=None, disctitle=None, data_source="MusicBrainz",
-        )
+        attrs = {
+            "title": "X", "artist": "A", "index": 1, "medium": 1, "medium_index": 1,
+            "medium_total": 1, "length": 200.0,
+            "track_id": "default-tid", "release_track_id": "default-rtid",
+            "track_alt": None, "disctitle": None, "data_source": "MusicBrainz",
+        }
         attrs.update(overrides)
         return SimpleNamespace(**attrs)
 
@@ -175,9 +171,9 @@ class TestTrackCandidateIdCoercion(unittest.TestCase):
 
     def _track_candidate(self, **info_overrides) -> Any:
         """Duck-typed TrackMatch stand-in — see ``_candidate`` above."""
-        info_attrs = dict(
-            title="X", artist="A", track_id="default-tid", length=200.0,
-        )
+        info_attrs = {
+            "title": "X", "artist": "A", "track_id": "default-tid", "length": 200.0,
+        }
         info_attrs.update(info_overrides)
         info = SimpleNamespace(**info_attrs)
         distance = MagicMock()

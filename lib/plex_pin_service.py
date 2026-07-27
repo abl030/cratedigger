@@ -29,9 +29,10 @@ contract explicit in its own module.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from lib.pipeline_db.pin_status import PlexTerminalPinStatus
 from lib.util import (
@@ -97,8 +98,8 @@ class ReconcileResult:
 
 
 def capture_plex_added_at_pin(
-    cfg: "CratediggerConfig",
-    db: "PipelineDB | _PinDBProto",
+    cfg: CratediggerConfig,
+    db: PipelineDB | _PinDBProto,
     imported_path: str | None,
     request_id: int | None,
     *,
@@ -137,8 +138,8 @@ def capture_plex_added_at_pin(
 
 
 def reconcile_plex_added_at_pins(
-    cfg: "CratediggerConfig",
-    db: "PipelineDB | _PinDBProto",
+    cfg: CratediggerConfig,
+    db: PipelineDB | _PinDBProto,
     *,
     now: datetime,
     grace_seconds: int = DEFAULT_GRACE_SECONDS,

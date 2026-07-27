@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generated audio-only validation contracts for issue #835."""
 
 from __future__ import annotations
@@ -10,7 +9,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from hypothesis import HealthCheck, example, given, settings, strategies as st
+from hypothesis import HealthCheck, example, given, settings
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401 - registers suite/fuzz
 from lib.quality import AudioValidationReport, AudioValidationResult
@@ -136,6 +136,7 @@ class TestAudioValidationGenerated(unittest.TestCase):
                     "-",
                 ],
                 capture_output=True,
+                check=False,
             )
             self.assertEqual(
                 old.returncode,

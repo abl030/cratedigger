@@ -13,7 +13,6 @@ from typing import Literal
 
 import msgspec
 
-
 ArtistCatalogueSource = Literal["mb", "discogs"]
 ArtistIdentityKind = Literal["work", "release"]
 ArtistStructuralType = Literal["Album", "EP", "Single"]

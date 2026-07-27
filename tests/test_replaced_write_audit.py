@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import ast
-from dataclasses import dataclass
 import hashlib
-from pathlib import Path
 import re
 import unittest
-
+from dataclasses import dataclass
+from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PRODUCTION_ROOTS = ("lib", "scripts", "web")

@@ -1,13 +1,15 @@
 """Import-queue + preview-queue lifecycle."""
-from datetime import datetime, timedelta, timezone
-from typing import Any, Iterable
+from collections.abc import Iterable
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
 import msgspec
 import psycopg2
 import psycopg2.extras
 
 from lib.import_queue import (
-    ForceImportPayload,
     IMPORT_JOB_PREVIEW_WAITING,
+    ForceImportPayload,
     ImportJob,
     YoutubeImportPayload,
     validate_job_type,
@@ -15,7 +17,6 @@ from lib.import_queue import (
     validate_preview_failure_status,
     validate_status,
 )
-
 from lib.pipeline_db._core import _PipelineDBBase
 
 
@@ -853,7 +854,7 @@ class _ImportJobsMixin(_PipelineDBBase):
         message: str,
         limit: int = 50,
     ) -> list[ImportJob]:
-        cutoff = datetime.now(timezone.utc) - older_than
+        cutoff = datetime.now(UTC) - older_than
         cur = self._execute("""
             WITH stale AS (
                 SELECT id

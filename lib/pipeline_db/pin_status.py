@@ -1,7 +1,6 @@
 """Closed status taxonomies for media-server Recently Added pins."""
 from typing import Literal, get_args
 
-
 # These Literals and the latest named CHECK constraints in migrations/ are the
 # only two authored sync points for the pin-status taxonomies. The frozensets
 # are derived, never hand-maintained; TestPinStatusTaxonomySync fails if Python

@@ -1,22 +1,22 @@
-#!/usr/bin/env python3
 """Generated contract checks for path-scoped post-import Jellyfin updates."""
 
 from __future__ import annotations
 
-from email.message import Message
 import io
 import json
 import unittest
 import urllib.error
 import urllib.request
+from email.message import Message
+from typing import Self
 from unittest.mock import patch
 
-from hypothesis import given, strategies as st
+from hypothesis import given
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401 - registers suite/fuzz
 from lib.config import CratediggerConfig
 from lib.util import trigger_jellyfin_scan
-
 
 _SAFE_SEGMENT = st.text(
     alphabet="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 _-",
@@ -33,7 +33,7 @@ _TOKEN = st.text(
 class _QueuedResponse:
     status = 204
 
-    def __enter__(self) -> "_QueuedResponse":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *_args: object) -> bool:

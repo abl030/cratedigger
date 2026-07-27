@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generated companion for issue #868's materialize-failure evidence.
 
 The deterministic pins live in ``tests/test_download.py``
@@ -63,13 +62,12 @@ import tempfile
 import unittest
 import unittest.mock
 from collections.abc import Sequence
-from datetime import datetime, timedelta, timezone
-
-import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
+from datetime import UTC, datetime, timedelta
 
 from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.config import CratediggerConfig
 from lib.download import (
     PROCESSING_MATERIALIZE_GRACE_S,
@@ -82,30 +80,31 @@ from lib.download_materialization import (
     REASON_EVENT_PATH_NEVER_STAMPED,
     REASON_MATERIALIZE_AUTHORITY_FAILED,
     REASON_PRIVATE_MATERIALIZE_FAILED,
-    REASON_PROCESSING_WRITE_FAILED_PREFIX,
-    REASON_SOURCE_READ_FAILED_PREFIX,
-    _fsync_private_directory,
-    materialize_authority_reason,
     REASON_PROCESSING_AUTHORITY_UNSAFE,
     REASON_PROCESSING_OPEN_FAILED_PREFIX,
     REASON_PROCESSING_PATH_MISSING,
+    REASON_PROCESSING_WRITE_FAILED_PREFIX,
     REASON_SLSKD_ROOT_MISSING,
     REASON_SLSKD_ROOT_OPEN_FAILED_PREFIX,
     REASON_SLSKD_ROOT_REFUSED,
     REASON_SLSKD_ROOT_UNSAFE,
     REASON_SOURCE_OPEN_FAILED_PREFIX,
     REASON_SOURCE_PREFLIGHT_REFUSED,
+    REASON_SOURCE_READ_FAILED_PREFIX,
     REASON_UNSAFE_SOURCE_PATH,
+    Materialized,
     MaterializeFailed,
     MaterializeGuarded,
-    Materialized,
     _evaluate_staged_path_readiness,
+    _fsync_private_directory,
     _materialize_processing_dir,
+    materialize_authority_reason,
     shared_download_root_reason,
     source_preflight_reason,
 )
 from lib.download_reconstruction import reconstruct_grab_list_entry
 from lib.download_recovery import ProcessingPathLocation
+from lib.failure_presentation import FailureEvidence, present_failure
 from lib.fs_authority import (
     CopyDestinationWriteError,
     FilesystemAuthorityError,
@@ -114,7 +113,6 @@ from lib.fs_authority import (
     open_regular_under_held_root,
     open_shared_download_root,
 )
-from lib.failure_presentation import FailureEvidence, present_failure
 from lib.grab_list import DownloadFile
 from lib.processing_paths import (
     canonical_folder_for_row,
@@ -130,7 +128,6 @@ from tests.helpers import (
     make_request_row,
 )
 from tests.test_path_authority import assert_publication_invariant
-
 
 # ============================================================================
 # Invariant checkers — module level so the known-bad self-tests can call them
@@ -800,7 +797,7 @@ class TestGeneratedMaterializeLifecycle(unittest.TestCase):
     ) -> None:
         """Drives the REAL poller enqueue path: real materialize, real
         grace arbitration, real transition, real audit write."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         started = (
             now - timedelta(seconds=PROCESSING_MATERIALIZE_GRACE_S + 600)
             if grace_expired
@@ -844,7 +841,7 @@ class TestGeneratedMaterializeLifecycle(unittest.TestCase):
         self, reason: str, age_seconds: int,
     ) -> None:
         """I5 at the decision itself: only the tag and the clock matter."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         started = (now - timedelta(seconds=age_seconds)).isoformat()
         expected = "reset" if age_seconds > PROCESSING_MATERIALIZE_GRACE_S else "retry"
         self.assertEqual(
@@ -878,7 +875,7 @@ def _staged_gate_world(
         request_id=1,
         auto_import=True,
     )
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     state = ActiveDownloadState(
         filetype=filetype,
         enqueued_at=now,

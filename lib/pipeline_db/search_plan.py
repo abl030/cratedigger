@@ -1,9 +1,10 @@
 """Search-plan lifecycle, cursor, search_log, attempts, saturation."""
-from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Sequence, TypedDict
+from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any, TypedDict
+
 import psycopg2
 import psycopg2.extras
-
 
 if TYPE_CHECKING:
     from lib.quality import CandidateScore
@@ -11,36 +12,27 @@ if TYPE_CHECKING:
 from lib.import_queue import (
     IMPORT_JOB_YOUTUBE,
 )
-
-from lib.search_classification import (
-    SearchSummary as _SearchSummary,
-    classify_failure_class as _classify_failure_class,
-)
-from lib.search_scheduler import (
-    NEW_REQUEST_PRIORITY_HOURS,
-    search_cohort_slots,
-)
-
+from lib.pipeline_db._core import _PipelineDBBase
 from lib.pipeline_db._shared import (
-    ActiveSearchPlan,
     BACKOFF_BASE_MINUTES,
     BACKOFF_MAX_MINUTES,
     CURSOR_UPDATE_ADVANCED,
     CURSOR_UPDATE_STALE,
     CURSOR_UPDATE_UNCHANGED,
     CURSOR_UPDATE_WRAPPED,
-    ConsumedAttemptInput,
-    ConsumedAttemptResult,
-    DryRunPlanClassification,
-    NonConsumingAttemptInput,
     PLAN_STATUS_ACTIVE,
     PLAN_STATUS_FAILED_DETERMINISTIC,
     PLAN_STATUS_FAILED_TRANSIENT,
     PLAN_STATUS_SUPERSEDED,
-    ReplacedRequestMutationError,
     SEARCH_LOG_STAGE_ACCEPTED,
     SEARCH_LOG_STAGE_PRE_ATTEMPT,
     SEARCH_LOG_STAGE_STALE_COMPLETION,
+    ActiveSearchPlan,
+    ConsumedAttemptInput,
+    ConsumedAttemptResult,
+    DryRunPlanClassification,
+    NonConsumingAttemptInput,
+    ReplacedRequestMutationError,
     SaturationSummary,
     SearchLogHistoryPage,
     SearchPlanInspection,
@@ -59,8 +51,16 @@ from lib.pipeline_db._shared import (
     _plan_provenance_from_jsonb,
     pg_execute_values,
 )
-
-from lib.pipeline_db._core import _PipelineDBBase
+from lib.search_classification import (
+    SearchSummary as _SearchSummary,
+)
+from lib.search_classification import (
+    classify_failure_class as _classify_failure_class,
+)
+from lib.search_scheduler import (
+    NEW_REQUEST_PRIORITY_HOURS,
+    search_cohort_slots,
+)
 
 
 class _ReadinessBucketRow(TypedDict):
@@ -198,7 +198,7 @@ class _SearchPlanMixin(_PipelineDBBase):
 
     def get_saturation_summary(
         self, request_id: int, *, window_days: int = 14,
-    ) -> "SaturationSummary":
+    ) -> SaturationSummary:
         """U7: saturation rate + pre-filter skip total for one request.
 
         Aggregates ``search_log`` rows for ``request_id`` whose
@@ -291,7 +291,7 @@ class _SearchPlanMixin(_PipelineDBBase):
         *,
         limit: int,
         before_id: int | None = None,
-    ) -> "SearchLogHistoryPage":
+    ) -> SearchLogHistoryPage:
         """Cursor-paginated ``search_log`` rows for one request.
 
         Returns at most ``limit`` rows for ``request_id`` ordered by
@@ -477,7 +477,7 @@ class _SearchPlanMixin(_PipelineDBBase):
                 "create_successful_search_plan requires at least one item; "
                 "use create_failed_search_plan for empty results.")
         with self._atomic():
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             with self.conn.cursor(
                 cursor_factory=psycopg2.extras.RealDictCursor,
             ) as cur:
@@ -647,7 +647,7 @@ class _SearchPlanMixin(_PipelineDBBase):
             raise ValueError(
                 "supersede_search_plan_with_replacement requires items.")
         with self._atomic():
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             with self.conn.cursor(
                 cursor_factory=psycopg2.extras.RealDictCursor,
             ) as cur:
@@ -954,7 +954,7 @@ class _SearchPlanMixin(_PipelineDBBase):
         older ``get_wanted`` (no plan filter) so they can show every
         wanted row regardless of plan readiness.
         """
-        snapshot_at = now or datetime.now(timezone.utc)
+        snapshot_at = now or datetime.now(UTC)
         blacklist = [term for term in title_blacklist if term]
         eligible_cte = """
             WITH eligible AS MATERIALIZED (
@@ -1339,7 +1339,7 @@ class _SearchPlanMixin(_PipelineDBBase):
         ``search_attempts`` field stays a scheduler-only counter.
         """
         with self._atomic():
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             with self.conn.cursor(
                 cursor_factory=psycopg2.extras.RealDictCursor,
             ) as cur:
@@ -1626,7 +1626,7 @@ class _SearchPlanMixin(_PipelineDBBase):
         Returns the new ``search_log.id``.
         """
         with self._atomic():
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             with self.conn.cursor(
                 cursor_factory=psycopg2.extras.RealDictCursor,
             ) as cur:

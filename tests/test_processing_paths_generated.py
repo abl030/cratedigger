@@ -10,11 +10,11 @@ from __future__ import annotations
 import os
 import unittest
 
-from hypothesis import example, given, strategies as st
+from hypothesis import example, given
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
 from lib.processing_paths import stage_to_ai_path
-
 
 _UNICODE_METADATA = st.text(
     alphabet=st.characters(blacklist_categories=("Cs",), max_codepoint=0x2FFFF),

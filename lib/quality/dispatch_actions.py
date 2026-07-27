@@ -3,18 +3,6 @@
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from lib.quality.evidence_types import (
-    AudioQualityMeasurement,
-    SPECTRAL_TRANSCODE_GRADES,
-)
-from lib.quality.download_state import DownloadInfo
-from lib.quality.filetypes import (
-    LOSSLESS_CODECS,
-    QUALITY_LOSSLESS,
-    rejection_backfill_override,
-)
-from lib.quality.import_result_types import SpectralAnalysisDetail
-from lib.quality.ranks import QualityRankConfig
 from lib.quality.decisions import (
     DECISION_LOSSLESS_SOURCE_LOCKED,
     DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
@@ -23,7 +11,18 @@ from lib.quality.decisions import (
     DECISION_VERIFIED_LOSSLESS_LOCKED,
     post_import_search_action_if_known,
 )
-
+from lib.quality.download_state import DownloadInfo
+from lib.quality.evidence_types import (
+    SPECTRAL_TRANSCODE_GRADES,
+    AudioQualityMeasurement,
+)
+from lib.quality.filetypes import (
+    LOSSLESS_CODECS,
+    QUALITY_LOSSLESS,
+    rejection_backfill_override,
+)
+from lib.quality.import_result_types import SpectralAnalysisDetail
+from lib.quality.ranks import QualityRankConfig
 
 # ---------------------------------------------------------------------------
 # Dispatch logic — extracted from import_dispatch.py for testability
@@ -58,24 +57,22 @@ def dispatch_action(decision: str) -> DispatchAction:
             cleanup=True,
             preserve_imported=True,
         )
-    elif decision == DECISION_PROVISIONAL_LOSSLESS_UPGRADE:
-        return DispatchAction(mark_done=True, trigger_notifiers=True,
-                              cleanup=True)
-    elif decision in ("transcode_upgrade", "transcode_first"):
+    elif decision in (
+        DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
+        "transcode_upgrade",
+        "transcode_first",
+    ):
         return DispatchAction(mark_done=True, trigger_notifiers=True,
                               cleanup=True)
     elif decision in (
         DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
         DECISION_SUSPECT_LOSSLESS_PROBE_MISSING,
         DECISION_LOSSLESS_SOURCE_LOCKED,
+        "transcode_downgrade",
+        "spectral_reject",
     ):
         return DispatchAction(record_rejection=True, denylist=True,
                               cleanup=True)
-    elif decision == "transcode_downgrade":
-        return DispatchAction(record_rejection=True, denylist=True,
-                              cleanup=True)
-    elif decision == "spectral_reject":
-        return DispatchAction(record_rejection=True, denylist=True, cleanup=True)
     elif decision == "audio_corrupt":
         # U11: folder/audio-integrity reject. The source decoded as garbage —
         # denylist the peer + clean the staged dir. The caller owns whether
@@ -166,7 +163,7 @@ def extract_usernames(files: Any) -> set[str]:
     return {f.username for f in files if f.username}
 
 
-def rejected_download_tier(dl_info: "DownloadInfo") -> str | None:
+def rejected_download_tier(dl_info: DownloadInfo) -> str | None:
     """Determine which search_filetype_override tier a rejected download corresponds to.
 
     Maps from DownloadInfo properties to the tier string used in search_filetype_override
@@ -187,7 +184,7 @@ def rejected_download_tier(dl_info: "DownloadInfo") -> str | None:
 
 
 def narrow_override_on_downgrade(search_filetype_override: str | None,
-                                 dl_info: "DownloadInfo") -> str | None:
+                                 dl_info: DownloadInfo) -> str | None:
     """Remove the rejected filetype tier from search_filetype_override after downgrade.
 
     When a download is rejected as a downgrade (existing quality >= download),

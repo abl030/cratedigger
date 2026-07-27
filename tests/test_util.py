@@ -1,5 +1,4 @@
 """Tests for lib/util.py — pure utility functions extracted from cratedigger.py."""
-
 import json
 import os
 import shutil
@@ -8,7 +7,8 @@ import subprocess
 import tempfile
 import unittest
 import urllib.error
-from unittest.mock import patch, MagicMock
+from typing import ClassVar
+from unittest.mock import MagicMock, patch
 
 from defusedxml.common import DefusedXmlException
 
@@ -466,7 +466,7 @@ class TestValidateAudioStderrPolicy(unittest.TestCase):
     """
 
     # (description, returncode, stderr) — rc=0 cases must produce corrupt_files=[]
-    FALSE_POSITIVE_CASES = [
+    FALSE_POSITIVE_CASES: ClassVar = [
         ("empty_stderr_happy_path", 0, ""),
         (
             "mp3float_backstep_recovery",
@@ -476,37 +476,37 @@ class TestValidateAudioStderrPolicy(unittest.TestCase):
         (
             "bom_lyrics_id3_skipped",
             0,
-            "[id3v2 @ 0xdeadbeef] Incorrect BOM value\n"
-            "Error reading lyrics, skipped",
+            ("[id3v2 @ 0xdeadbeef] Incorrect BOM value\n"
+            "Error reading lyrics, skipped"),
         ),
         (
             "bom_comment_frame_id3_skipped",
             0,
-            "[id3v2 @ 0xdeadbeef] Incorrect BOM value\n"
-            "Error reading comment frame, skipped",
+            ("[id3v2 @ 0xdeadbeef] Incorrect BOM value\n"
+            "Error reading comment frame, skipped"),
         ),
         (
             "mjpeg_app_fields_warning",
             0,
-            "[mjpeg @ 0xdeadbeef] unable to decode APP fields: "
-            "Invalid data found when processing input",
+            ("[mjpeg @ 0xdeadbeef] unable to decode APP fields: "
+            "Invalid data found when processing input"),
         ),
         (
             "attached_picture_mimetype_warning",
             0,
-            "[flac @ 0xdeadbeef] Could not read mimetype from an attached "
-            "picture.",
+            ("[flac @ 0xdeadbeef] Could not read mimetype from an attached "
+            "picture."),
         ),
     ]
 
     # (description, returncode, stderr) — positive exits MUST still reject
-    REAL_CORRUPTION_CASES = [
+    REAL_CORRUPTION_CASES: ClassVar = [
         (
             "invalid_sync_code_decode_failure",
             1,
-            "[mp3 @ 0xdeadbeef] invalid sync code\n"
+            ("[mp3 @ 0xdeadbeef] invalid sync code\n"
             "[mp3 @ 0xdeadbeef] invalid frame header\n"
-            "decode_frame() failed",
+            "decode_frame() failed"),
         ),
         (
             "illegal_residual_coding_method",
@@ -565,6 +565,7 @@ class TestAudioValidationWireBoundary(unittest.TestCase):
 
     def test_report_round_trips_every_diagnostic_field(self):
         import msgspec
+
         from lib.quality import (
             AudioToolDiagnostic,
             AudioValidationReport,
@@ -1208,6 +1209,7 @@ class TestPlexAddedAtPinClient(unittest.TestCase):
         # When the album-title search misses, the artist-search fallback must
         # fire with the real artist ("Muse"), not the FS-root segment ("mnt").
         import xml.etree.ElementTree as ET
+
         from lib.util import plex_find_album_by_path
         cfg = self._cfg(
             plex_url="http://plex:32400",
@@ -1314,8 +1316,8 @@ class TestJellyfinDateCreatedClient(unittest.TestCase):
             "/mnt/fuse/Media/Music/Beets/X/Y")
 
     def test_container_path_none_when_not_absolutizable(self):
-        from lib.util import _jellyfin_container_path
         from lib.config import CratediggerConfig
+        from lib.util import _jellyfin_container_path
         cfg = CratediggerConfig(jellyfin_url="http://jf:8096")
         self.assertIsNone(_jellyfin_container_path(cfg, "Artist/Album"))
         self.assertIsNone(_jellyfin_container_path(cfg, ""))
@@ -1389,8 +1391,8 @@ class TestJellyfinDateCreatedClient(unittest.TestCase):
         self.assertEqual(ref.item_id, "alb-1")
 
     def test_find_album_none_when_jellyfin_unconfigured(self):
-        from lib.util import jellyfin_find_album_by_path
         from lib.config import CratediggerConfig
+        from lib.util import jellyfin_find_album_by_path
         self.assertIsNone(jellyfin_find_album_by_path(
             CratediggerConfig(), "A/B",
             get_json=lambda path, **p: {"Items": []}))
@@ -1604,9 +1606,8 @@ class TestBeetsSubprocessEnv(unittest.TestCase):
         with self._with_runtime_config("[Slskd]\nhost_url = http://x\n"):
             no_beetsdir = {k: v for k, v in os.environ.items()
                            if k != "BEETSDIR"}
-            with patch.dict(os.environ, no_beetsdir, clear=True):
-                with self.assertRaises(RuntimeError) as ctx:
-                    beets_subprocess_env()
+            with patch.dict(os.environ, no_beetsdir, clear=True), self.assertRaises(RuntimeError) as ctx:
+                beets_subprocess_env()
         self.assertIn("[Beets] config_dir", str(ctx.exception))
 
     def test_no_home_override_remains(self) -> None:

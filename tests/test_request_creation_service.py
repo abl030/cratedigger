@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from typing import ClassVar
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -34,7 +35,7 @@ class _UnpersistedPlan:
 
 
 class _CapturePlan:
-    release_group_years: list[object] = []
+    release_group_years: ClassVar[list[object]] = []
 
     def __init__(self, db: RequestCreationDB, cfg: CratediggerConfig) -> None:
         self.delegate = SearchPlanService(db, cfg)

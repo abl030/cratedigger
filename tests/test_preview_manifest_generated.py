@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Preview-sidecar canonical-manifest-purity tests — issue #859.
 
 PR #858 (fix for #853) let the automation preview worker operate directly
@@ -47,11 +46,10 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
-
 from hypothesis import example, given
 from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.config import CratediggerConfig
 from lib.context import CratediggerContext
 from lib.dispatch import DispatchCoreFn, DispatchOutcome
@@ -110,7 +108,7 @@ _extra_filenames_strategy = st.sets(
 # ============================================================================
 
 def _stamped_files(
-    basenames: "frozenset[str]", src_dir: str, *, username: str = "peer0",
+    basenames: frozenset[str], src_dir: str, *, username: str = "peer0",
 ) -> list[DownloadFile]:
     """Real on-disk, event-stamped DownloadFiles for a generated manifest."""
     files: list[DownloadFile] = []
@@ -118,7 +116,7 @@ def _stamped_files(
     for basename in sorted(basenames):
         src_path = os.path.join(src_dir, basename)
         with open(src_path, "wb") as handle:
-            handle.write(f"fake-audio-bytes:{basename}".encode("utf-8"))
+            handle.write(f"fake-audio-bytes:{basename}".encode())
         file = DownloadFile(
             filename=f"{username}\\Music\\{basename}",
             id=f"{username}:{basename}",
@@ -136,9 +134,9 @@ def _materialize_canonical_album(
     *,
     request_id: int,
     mb_release_id: str,
-    basenames: "frozenset[str]",
+    basenames: frozenset[str],
     beets_validation_enabled: bool = False,
-) -> "tuple[FakePipelineDB, CratediggerContext, GrabListEntry, StagedAlbum]":
+) -> tuple[FakePipelineDB, CratediggerContext, GrabListEntry, StagedAlbum]:
     """Build and materialize a real Cratedigger-owned canonical album.
 
     Returns ``(db, ctx, album, staged_album)`` with
@@ -269,7 +267,7 @@ def _run_owned_preview_action(
 
 def _expected_basenames(
     album: GrabListEntry, staged_album: StagedAlbum,
-) -> "frozenset[str]":
+) -> frozenset[str]:
     return frozenset(
         os.path.basename(staged_album.import_path_for(f)) for f in album.files
     )
@@ -295,8 +293,8 @@ def _fresh_rematerialize(
 # ============================================================================
 
 def assert_canonical_manifest_pure(
-    actual_basenames: "frozenset[str]",
-    expected_basenames: "frozenset[str]",
+    actual_basenames: frozenset[str],
+    expected_basenames: frozenset[str],
     *, label: str,
 ) -> None:
     """A canonical processing album must remain an exact media manifest
@@ -344,7 +342,7 @@ def assert_rematerializes_cleanly(result: MaterializeResult, *, label: str) -> N
     ``Materialized`` — a leaked control-plane file breaks the manifest-
     equality guard and stalls the request in ``downloading`` forever."""
     if not isinstance(result, Materialized):
-        raise AssertionError(
+        raise AssertionError(  # noqa: TRY004 - generated invariant failure
             f"{label}: rematerialize after preview must return Materialized, "
             f"got {result!r}"
         )

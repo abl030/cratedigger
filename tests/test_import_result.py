@@ -1,26 +1,36 @@
-#!/usr/bin/env python3
 """Tests for ImportResult dataclass, JSON serialization, and stdout parsing.
 
 RED/GREEN TDD — these tests define the contract before implementation.
 """
-
 import json
 import os
 import sys
 import unittest
+from typing import ClassVar
 
 import msgspec
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from datetime import UTC
+
 from lib.quality import (
-    ImportResult, ConversionInfo, SpectralAnalysisDetail, SpectralDetail,
-    SpectralTrackDetail, PostflightInfo,
-    AudioQualityMeasurement, DuplicateRemoveCandidate,
+    IMPORT_RESULT_SENTINEL,
+    AudioQualityMeasurement,
+    ConversionInfo,
+    DownloadInfo,
+    DuplicateRemoveCandidate,
     DuplicateRemoveGuardInfo,
-    DownloadInfo, SpectralMeasurement, TargetQualityContract, V0ProbeEvidence,
+    ImportResult,
+    PostflightInfo,
+    SpectralAnalysisDetail,
+    SpectralDetail,
+    SpectralMeasurement,
+    SpectralTrackDetail,
+    TargetQualityContract,
+    V0ProbeEvidence,
     VerifiedLosslessProof,
-    parse_import_result, IMPORT_RESULT_SENTINEL,
+    parse_import_result,
 )
 
 
@@ -1528,8 +1538,8 @@ class TestImportAttemptResult(unittest.TestCase):
     def test_merge_preserves_rich_result_and_exact_preview_audit(self):
         from lib.dispatch.types import ImportAttemptResult
         from lib.quality import (
-            QualityEvidenceActionProvenance,
             QualityComparisonBasis,
+            QualityEvidenceActionProvenance,
             SpectralAnalysisDetail,
             SpectralDetail,
         )
@@ -1615,7 +1625,7 @@ class TestActiveDownloadState(unittest.TestCase):
 
     def test_active_download_state_to_json(self):
         """Serialize, verify JSON structure."""
-        from lib.quality import ActiveDownloadState, ActiveDownloadFileState
+        from lib.quality import ActiveDownloadFileState, ActiveDownloadState
         state = ActiveDownloadState(
             filetype="flac",
             enqueued_at="2026-04-03T12:00:00+00:00",
@@ -1654,7 +1664,7 @@ class TestActiveDownloadState(unittest.TestCase):
         Files are only ever (de)serialized as part of the parent state, so
         the round-trip is exercised through ``ActiveDownloadState`` — the one
         wire boundary — rather than via a file-level helper."""
-        from lib.quality import ActiveDownloadState, ActiveDownloadFileState
+        from lib.quality import ActiveDownloadFileState, ActiveDownloadState
         stamped = ActiveDownloadState(
             filetype="flac", enqueued_at="2026-04-03T12:00:00+00:00",
             files=[ActiveDownloadFileState(
@@ -1691,7 +1701,7 @@ class TestActiveDownloadState(unittest.TestCase):
 
     def test_active_download_state_from_json(self):
         """Deserialize, verify all fields."""
-        from lib.quality import ActiveDownloadState, ActiveDownloadFileState
+        from lib.quality import ActiveDownloadState
         raw = json.dumps({
             "filetype": "mp3 v0",
             "enqueued_at": "2026-04-03T14:30:00+00:00",
@@ -1728,7 +1738,7 @@ class TestActiveDownloadState(unittest.TestCase):
 
     def test_active_download_state_roundtrip(self):
         """to_json → from_json identity."""
-        from lib.quality import ActiveDownloadState, ActiveDownloadFileState
+        from lib.quality import ActiveDownloadFileState, ActiveDownloadState
         original = ActiveDownloadState(
             filetype="flac",
             enqueued_at="2026-04-03T12:00:00+00:00",
@@ -1832,14 +1842,14 @@ class TestActiveDownloadState(unittest.TestCase):
         )
         j = json.loads(state.to_json())
         # Should be valid ISO8601 — parse it
-        from datetime import datetime, timezone
+        from datetime import datetime
         dt = datetime.fromisoformat(j["enqueued_at"])
-        self.assertEqual(dt.tzinfo, timezone.utc)
+        self.assertEqual(dt.tzinfo, UTC)
 
     # --- issue #467: msgspec wire-boundary contract -----------------------
 
     def _full_state(self):
-        from lib.quality import ActiveDownloadState, ActiveDownloadFileState
+        from lib.quality import ActiveDownloadFileState, ActiveDownloadState
         return ActiveDownloadState(
             filetype="flac",
             enqueued_at="2026-04-03T12:00:00+00:00",
@@ -1856,7 +1866,7 @@ class TestActiveDownloadState(unittest.TestCase):
         )
 
     def _minimal_state(self):
-        from lib.quality import ActiveDownloadState, ActiveDownloadFileState
+        from lib.quality import ActiveDownloadFileState, ActiveDownloadState
         return ActiveDownloadState(
             filetype="flac", enqueued_at="2026-04-03T12:00:00+00:00",
             files=[ActiveDownloadFileState(
@@ -1864,7 +1874,7 @@ class TestActiveDownloadState(unittest.TestCase):
 
     # The exact wire the hand-rolled (@dataclass) encoder produced, captured
     # from the pre-refactor code and frozen here as the legacy contract.
-    LEGACY_FULL_WIRE = {
+    LEGACY_FULL_WIRE: ClassVar = {
         "current_path": "/tmp/staged/user1/Album",
         "enqueued_at": "2026-04-03T12:00:00+00:00",
         "files": [{
@@ -1877,7 +1887,7 @@ class TestActiveDownloadState(unittest.TestCase):
         "last_progress_at": "2026-04-03T12:01:00+00:00",
         "processing_started_at": "2026-04-03T12:02:00+00:00",
     }
-    LEGACY_MINIMAL_WIRE = {
+    LEGACY_MINIMAL_WIRE: ClassVar = {
         "current_path": None,
         "enqueued_at": "2026-04-03T12:00:00+00:00",
         "files": [{
@@ -2003,9 +2013,8 @@ class TestActiveDownloadState(unittest.TestCase):
         than silently stringifying garbage into from_json."""
         from lib.quality import ActiveDownloadState
         for bad in (42, ["not", "a", "state"], object()):
-            with self.subTest(bad=bad):
-                with self.assertRaises(ValueError):
-                    ActiveDownloadState.from_raw(bad)
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                ActiveDownloadState.from_raw(bad)
 
 
 if __name__ == "__main__":

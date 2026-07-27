@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -15,10 +15,10 @@ _PERTH_TZ = ZoneInfo("Australia/Perth")
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
-_EPOCH = datetime.min.replace(tzinfo=timezone.utc)
+_EPOCH = datetime.min.replace(tzinfo=UTC)
 
 
 def _as_datetime(value: Any) -> datetime:
@@ -33,14 +33,14 @@ def _as_datetime(value: Any) -> datetime:
     if value is None:
         return _EPOCH
     if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
     if isinstance(value, str):
         try:
             parsed = datetime.fromisoformat(value)
         except ValueError:
             return _EPOCH
         return parsed if parsed.tzinfo else parsed.replace(
-            tzinfo=timezone.utc)
+            tzinfo=UTC)
     return _EPOCH
 
 

@@ -6,18 +6,20 @@ hand-rolling dicts or dataclass constructors with many fields.
 
 from __future__ import annotations
 
-import json
-import msgspec
-import os
-import requests
-import types
-import tempfile
 import configparser
-from copy import deepcopy
+import json
+import os
+import tempfile
+import types
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
-from datetime import datetime, timezone
-from typing import Any, Callable, Generator
+from copy import deepcopy
+from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import MagicMock, patch
+
+import msgspec
+import requests
 
 from lib.grab_list import DownloadFile, GrabListEntry
 from lib.quality import (
@@ -38,19 +40,17 @@ from lib.quality import (
     DownloadInfo,
     ImportResult,
     PostflightInfo,
-    QualityRank,
     QualityRankConfig,
     RankBitrateMetric,
     SpectralMeasurement,
     TargetQualityContract,
-    VerifiedLosslessProof,
     V0ProbeEvidence,
     ValidationResult,
+    VerifiedLosslessProof,
     legacy_unrecorded_audio_validation_report,
 )
 from lib.quality_evidence import snapshot_fingerprint
 from lib.slskd_client import DownloadDirectory, DownloadUser, TransferSnapshot
-
 
 _DEPLOYED_BEETS_DB_PATHS = frozenset({
     "/mnt/virtio/Music/beets-library.db",
@@ -59,7 +59,7 @@ _DEPLOYED_BEETS_DB_PATHS = frozenset({
 
 
 @contextmanager
-def hermetic_beets_config_defaults() -> Generator[tuple[str, str], None, None]:
+def hermetic_beets_config_defaults() -> Generator[tuple[str, str]]:
     """Give one test module a disposable complete Beets authority pair.
 
     Omitted authority receives the pair. A test that supplies either half must
@@ -67,6 +67,7 @@ def hermetic_beets_config_defaults() -> Generator[tuple[str, str], None, None]:
     root (or the reverse).
     """
     from beets import library as beets_library
+
     from lib.beets_db import validate_beets_storage_pair
     from lib.config import CratediggerConfig
 
@@ -127,12 +128,12 @@ def hermetic_beets_config_defaults() -> Generator[tuple[str, str], None, None]:
             return original_from_ini(cls, config, config_dir, var_dir)
 
         CratediggerConfig.__init__ = hermetic_init
-        setattr(CratediggerConfig, "from_ini", classmethod(hermetic_from_ini))
+        CratediggerConfig.from_ini = classmethod(hermetic_from_ini)
         try:
             yield (library_db, library_root)
         finally:
             CratediggerConfig.__init__ = original_init
-            setattr(CratediggerConfig, "from_ini", classmethod(original_from_ini))
+            CratediggerConfig.from_ini = classmethod(original_from_ini)
             deployed = [
                 config.beets_library_db
                 for config in constructed_configs
@@ -213,9 +214,9 @@ def make_request_row(**overrides: Any) -> dict[str, Any]:
         "current_evidence_id": None,
         # Migration 023 — supersede lineage.
         "replaces_request_id": None,
-        "created_at": datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+        "created_at": datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
         "priority_started_at": None,
-        "updated_at": datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
+        "updated_at": datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
     }
     row.update(overrides)
     if "mb_release_id" not in overrides:
@@ -257,7 +258,7 @@ def make_album_quality_evidence(
     produces a self-consistent row.
     """
     if measured_at is None:
-        measured_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+        measured_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     if files is None:
         files = [
             AlbumQualityEvidenceFile(
@@ -490,7 +491,7 @@ def build_parity_candidate_evidence(
         snapshot_fingerprint=snapshot_fingerprint,
         source_path="/Incoming/auto-import/candidate",
         measurement=measurement,
-        measured_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        measured_at=datetime(2026, 5, 16, tzinfo=UTC),
         files=files,
         codec=codec,
         container=container,
@@ -557,7 +558,7 @@ def build_parity_current_evidence(
                 if spectral_grade is not None else None
             ),
         ),
-        measured_at=datetime(2026, 5, 16, tzinfo=timezone.utc),
+        measured_at=datetime(2026, 5, 16, tzinfo=UTC),
         files=files,
         codec=container,
         container=container,
@@ -917,14 +918,14 @@ def noop_quality_gate(**_kwargs: Any) -> None:
     about the post-import quality gate's side effects — they want a
     no-op so the dispatch decision tree runs end-to-end without
     inspecting beets DB state."""
-    return None
+    return
 
 
 def make_requests_http_error(
     body: str,
     *,
     status_code: int = 500,
-) -> "requests.HTTPError":
+) -> requests.HTTPError:
     """Build a real requests HTTPError with its immutable response supplied.
 
     ``requests.HTTPError.response`` is read-only in current stubs.  Passing a

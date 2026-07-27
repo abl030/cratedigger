@@ -8,7 +8,6 @@ cleanup path.
 
 from __future__ import annotations
 
-
 WRONG_MATCH_QUARANTINE_DIR = "wrong_matches"
 
 

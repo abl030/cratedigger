@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generated real-Beets destructive contracts across common config profiles."""
 
 from __future__ import annotations
@@ -10,7 +9,7 @@ import sys
 import tempfile
 import unittest
 from dataclasses import dataclass, replace
-from functools import lru_cache
+from functools import cache
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -18,7 +17,8 @@ from unittest.mock import patch
 import msgspec
 import yaml
 from beets import library
-from hypothesis import HealthCheck, example, given, settings, strategies as st
+from hypothesis import HealthCheck, example, given, settings
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
 from lib.beets_db import BeetsDB
@@ -36,7 +36,6 @@ from lib.destructive_release_service import (
 )
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
-
 
 REPO = Path(__file__).resolve().parent.parent
 MODULE_TEXT = (REPO / "nix" / "module.nix").read_text(encoding="utf-8")
@@ -151,7 +150,9 @@ def assert_real_beets_contract(observation: RealBeetsObservation) -> None:
     if observation.cli_files_present:
         raise AssertionError("Ban Source exact delete left owned tracks behind")
     if not isinstance(observation.child_outcome, BeetsDeleteCompleted):
-        raise AssertionError(f"exact-delete failed: {observation.child_outcome!r}")
+        raise AssertionError(  # noqa: TRY004 - generated invariant failure
+            f"exact-delete failed: {observation.child_outcome!r}"
+        )
     if observation.child_album_present or observation.child_items_present:
         raise AssertionError("exact-delete left metadata behind")
     if observation.child_files_present:
@@ -289,7 +290,7 @@ def _track_count(path: Path) -> int:
     return len(tuple(path.glob("*.flac"))) if path.exists() else 0
 
 
-@lru_cache(maxsize=None)
+@cache
 def exercise_real_beets_world(
     profile: ConfigProfile,
     track_count: int,
@@ -398,6 +399,7 @@ def exercise_real_beets_world(
             capture_output=True,
             env=child_env,
             timeout=30,
+            check=False,
         )
         outcome = msgspec.json.decode(child.stdout, type=BeetsDeleteOutcome)
         child_album_present, child_items_present = _metadata_state(
@@ -567,6 +569,7 @@ child.main()
             capture_output=True,
             cwd=REPO,
             timeout=10,
+            check=False,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr.decode(errors="replace"))
         outcome = msgspec.json.decode(proc.stdout, type=BeetsDeleteOutcome)

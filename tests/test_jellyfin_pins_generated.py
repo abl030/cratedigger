@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generated tests for the Jellyfin DateCreated pin lifecycle (issue #574).
 
 Properties over generated worlds of {pin snapshot} x {live Jellyfin state}
@@ -44,15 +43,14 @@ import os
 import sys
 import unittest
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
-import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 
 from hypothesis import example, given
 from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.config import CratediggerConfig
 from lib.jellyfin_pin_service import (
     CaptureResult,
@@ -63,7 +61,7 @@ from lib.util import JellyfinAlbumRef, JellyfinItemRef
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 
-NOW = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 7, 10, 12, 0, tzinfo=UTC)
 GRACE_SECONDS = 180
 TTL_HOURS = 48
 
@@ -87,7 +85,7 @@ _CHILD_POOL = ["c1", "c2", "c3", "n1", "n2"]
 
 def _parse_iso_date(value: str) -> datetime:
     """Parse a generated ISO date independently of production code."""
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return datetime.fromisoformat(value)
 
 
 def _date_newer(a: str, b: str) -> bool:
@@ -338,7 +336,7 @@ class TestCaptureProperty(unittest.TestCase):
             _cfg(), db, "Artist/2026 - Album", 42,
             historical_added_at=(
                 int(datetime.fromisoformat(
-                    historical_date.replace("Z", "+00:00")
+                    historical_date
                 ).timestamp())
                 if historical_date is not None else None
             ),
@@ -402,7 +400,7 @@ capture_worlds = st.builds(
 
 
 def _iso_epoch(iso: str) -> int:
-    return int(datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp())
+    return int(datetime.fromisoformat(iso).timestamp())
 
 
 def _run_capture_fallback(
@@ -412,7 +410,7 @@ def _run_capture_fallback(
         db.seed_request(make_request_row(
             id=42,
             created_at=datetime.fromisoformat(
-                w.chain_created.replace("Z", "+00:00"))))
+                w.chain_created)))
 
     def find_fn(cfg, path):
         if path == "New/Path" and w.album_at_new:
@@ -488,14 +486,14 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
     """Known-bad self-tests: prove the harness detects what it claims to."""
 
     def _world(self, **kw) -> World:
-        base = dict(
-            original="2026-01-01T00:00:00Z", snapshot_children=["c1"],
-            age_minutes=10,
-            find_outcome="present", children_raises=False,
-            live_album_recreated=False,
-            live_album_date="2026-01-01T00:00:00Z",
-            live_children=[("c1", "2025-01-01T00:00:00Z")],
-            set_fail_ids=set())
+        base = {
+            "original": "2026-01-01T00:00:00Z", "snapshot_children": ["c1"],
+            "age_minutes": 10,
+            "find_outcome": "present", "children_raises": False,
+            "live_album_recreated": False,
+            "live_album_date": "2026-01-01T00:00:00Z",
+            "live_children": [("c1", "2025-01-01T00:00:00Z")],
+            "set_fail_ids": set()}
         base.update(kw)
         return World(**base)  # type: ignore[arg-type]
 

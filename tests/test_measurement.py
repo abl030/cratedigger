@@ -9,10 +9,10 @@ hashing-error / DB-error fall-through behavior of the gate.
 from __future__ import annotations
 
 import configparser
-import unittest
 import tempfile
-from types import SimpleNamespace
+import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import patch
 
@@ -293,8 +293,8 @@ class TestAttemptSpectralAudit(unittest.TestCase):
         from lib.beets_db import AlbumInfo
         from lib.config import CratediggerConfig
         from lib.measurement import measure_preimport_state
-        from tests.fakes import FakeBeetsDB
         from lib.quality import SpectralAnalysisDetail
+        from tests.fakes import FakeBeetsDB
 
         with tempfile.TemporaryDirectory() as candidate, \
              tempfile.TemporaryDirectory() as existing:
@@ -660,6 +660,7 @@ class TestMeasurePreimportState(unittest.TestCase):
     def test_nested_layout_detected_via_inspection(self):
         """has_nested_audio=True in the inspection → folder_layout='nested'."""
         from pathlib import Path
+
         from lib.config import CratediggerConfig
         from lib.measurement import LocalFileInspection, measure_preimport_state
 

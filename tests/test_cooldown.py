@@ -1,17 +1,17 @@
 """Tests for global user cooldown system (issue #39)."""
 
 import configparser
-from dataclasses import dataclass, replace
 import logging
-from typing import Sequence
 import unittest
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
 from unittest.mock import MagicMock, patch
 
+from cratedigger import TrackRecord
 from lib.config import CratediggerConfig
 from lib.context import CratediggerContext
 from lib.matching import MatchResult
 from lib.quality import CooldownConfig, should_cooldown
-from cratedigger import TrackRecord
 from tests.fakes import (
     DenylistEntry,
     FakePipelineDB,

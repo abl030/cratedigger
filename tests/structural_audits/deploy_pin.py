@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 
-
 _UNQUOTED_GIT_FORMAT = re.compile(
     r"(?<!['\"])--format=%G\?(?!['\"])",
 )

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Repair/orphan-recovery CLI — detect and fix inconsistent pipeline DB state.
 
 Usage:
@@ -14,27 +13,38 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Protocol
+from typing import Protocol
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from lib.config import read_runtime_config
 from lib import transitions
+from lib.config import read_runtime_config
 
 # Module-level DI seam for ``transitions.finalize_request`` — see
 # ``lib.dispatch.outcome_actions.finalize_request`` for the rationale.
 finalize_request = transitions.finalize_request
 
-from lib.download_recovery import (BlockedRecoveryIssue,
-                                   find_blocked_processing_path_issues,
-                                   find_blocked_recovery_issues)
-from lib.pipeline_db import (ADVISORY_LOCK_NAMESPACE_RELEASE, PipelineDB,
-                             release_id_to_lock_key)
+from lib.download_recovery import (
+    BlockedRecoveryIssue,
+    find_blocked_processing_path_issues,
+    find_blocked_recovery_issues,
+)
+from lib.pipeline_db import (
+    ADVISORY_LOCK_NAMESPACE_RELEASE,
+    PipelineDB,
+    release_id_to_lock_key,
+)
 from lib.processing_paths import directory_has_entries, processing_albums_dir
-from lib.repair import (OrphanInfo, SlskdOrphanTransfer, find_inconsistencies,
-                        find_orphaned_downloads, find_slskd_orphans,
-                        suggest_repair)
+from lib.repair import (
+    OrphanInfo,
+    SlskdOrphanTransfer,
+    find_inconsistencies,
+    find_orphaned_downloads,
+    find_slskd_orphans,
+    suggest_repair,
+)
 from lib.slskd_client import DownloadUser
 
 
@@ -174,7 +184,7 @@ def _auto_import_in_progress(
         if row:
             return bool(row[0])
         return False
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         print(
             "  slskd: could not probe auto-import lock for "
             f"request {request_id}: {e}",
@@ -210,7 +220,7 @@ def _collect_issues(
     if slskd_host and slskd_key:
         try:
             downloads = _fetch_slskd_downloads(slskd_host, slskd_key)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             print(f"  slskd: could not check orphans: {e}")
             return CollectedIssues(issues=_dedupe_issues(issues), slskd_orphans=[])
 
@@ -234,7 +244,7 @@ def _collect_issues(
 
         try:
             cfg = read_runtime_config()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             print(f"  slskd: could not load runtime config for local-path checks: {e}")
             return CollectedIssues(
                 issues=_dedupe_issues(issues), slskd_orphans=slskd_orphans,
@@ -265,7 +275,7 @@ def _collect_issues(
                     ),
                 )
             ]
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             print(f"  slskd: could not inspect local recovery paths: {e}")
             local_path_scan_failed = True
 
@@ -284,7 +294,7 @@ def _collect_issues(
                     has_entries=directory_has_entries,
                 )
             ]
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             print(f"  slskd: could not inspect local recovery paths: {e}")
             local_path_scan_failed = True
 

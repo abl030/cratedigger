@@ -13,7 +13,7 @@ row instead of momentarily surfacing as pipeline-only.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from typing import Protocol, TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from lib.release_identity import ReleaseIdentity
 from web.library_album_row import LibraryAlbumRow

@@ -10,7 +10,7 @@ import subprocess as sp
 
 import msgspec
 
-from lib.quality import HarnessSessionEvidence, ValidationResult, ChooseMatchMessage
+from lib.quality import ChooseMatchMessage, HarnessSessionEvidence, ValidationResult
 from lib.util import beets_subprocess_env
 
 logger = logging.getLogger("cratedigger")
@@ -175,7 +175,7 @@ def beets_validate(
         proc = sp.Popen(cmd, stdin=sp.PIPE, stdout=sp.PIPE, stderr=sp.PIPE,
                         text=True, errors="replace",
                         env=beets_subprocess_env())
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         result.error = f"Failed to start harness: {e}"
         logger.error(f"BEETS_VALIDATE: {result.error}")
         _record_unmatched_run(
@@ -294,7 +294,7 @@ def beets_validate(
             elif msg_type == "session_end":
                 session_end_seen = True
                 break
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         result.error = str(e)
         logger.error(f"BEETS_VALIDATE: exception: {e}")
     finally:
@@ -304,7 +304,7 @@ def beets_validate(
         stderr_out = ""
         try:
             stderr_out = proc.stderr.read()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
             pass
         proc.terminate()
         try:

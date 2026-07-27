@@ -8,15 +8,14 @@ and CLI callers are adapters only; they never select what is deleted.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-
 import json
 import logging
+from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Literal, Protocol, TYPE_CHECKING, TypeAlias
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 if TYPE_CHECKING:
     from lib.pipeline_db.rows import AlbumRequestRow
@@ -49,7 +48,6 @@ from lib.pipeline_db import (
 from lib.quality import resolve_user_requeue_override
 from lib.release_identity import ReleaseIdentity, normalize_release_id
 
-
 log = logging.getLogger("cratedigger")
 
 
@@ -58,7 +56,7 @@ class SupportsReleaseLookupDB(Protocol):
 
     def get_request_by_release_id(
         self, release_id: object | None,
-    ) -> "AlbumRequestRow | None": ...
+    ) -> AlbumRequestRow | None: ...
 
 
 class SupportsDestructivePipelineDB(transitions.TransitionsDB, Protocol):
@@ -66,7 +64,7 @@ class SupportsDestructivePipelineDB(transitions.TransitionsDB, Protocol):
 
     def get_request_by_release_id(
         self, release_id: object | None,
-    ) -> "AlbumRequestRow | None": ...
+    ) -> AlbumRequestRow | None: ...
     def get_active_import_job_for_request(self, request_id: int) -> object | None: ...
     def advisory_lock(
         self, namespace: int, key: int,
@@ -140,7 +138,7 @@ def resolve_pipeline_request(
     pipeline_db: SupportsReleaseLookupDB | None,
     *,
     release_id: str,
-) -> "AlbumRequestRow | None":
+) -> AlbumRequestRow | None:
     """Resolve the pipeline overlay from a server-derived release ID."""
     if pipeline_db is None or not normalize_release_id(release_id):
         return None
@@ -233,7 +231,7 @@ class BanSourceBeetsAmbiguous:
     reason: CurrentBeetsAmbiguityReason
 
 
-BanSourceResult: TypeAlias = (
+type BanSourceResult = (
     BanSourceSuccess
     | BanSourceCleanupIncomplete
     | BanSourceRequestNotFound
@@ -293,7 +291,7 @@ def _ban_source_locked(
     quality = resolve_user_requeue_override(current.get("search_filetype_override"))
     fields: dict[str, object] = {
         "search_filetype_override": quality,
-        "priority_started_at": datetime.now(timezone.utc),
+        "priority_started_at": datetime.now(UTC),
     }
     if current.get("min_bitrate") is not None:
         fields["min_bitrate"] = current["min_bitrate"]
@@ -573,7 +571,7 @@ class DeleteIncomplete:
     preserved_paths: tuple[str, ...]
 
 
-DeleteResult: TypeAlias = (
+type DeleteResult = (
     DeleteSuccess
     | DeleteAlbumNotFound
     | DeleteReleaseMismatch
@@ -639,7 +637,7 @@ def _incomplete_delete_detail(
     else:
         pipeline_context = (
             f"Pipeline request #{int(pipeline_row['id'])} "
-            f"({str(pipeline_row.get('status') or 'unknown')}) was preserved."
+            f"({pipeline_row.get('status') or 'unknown'!s}) was preserved."
         )
     path_context = (
         f" Inspect the exact former album path {former_album_path!r} before "
@@ -794,7 +792,7 @@ def _delete_under_release_lock(
         deleted_pipeline_id = int(current_pipeline["id"])
         try:
             pipeline_db.delete_request(deleted_pipeline_id)
-        except Exception:  # noqa: BLE001 -- typed operator outcome
+        except Exception:
             log.exception("Failed to purge pipeline request %s", deleted_pipeline_id)
             return DeletePipelinePurgeFailure(
                 album_id=current_beets.album_id,
@@ -854,7 +852,7 @@ def _notify_completed_delete(
     if isinstance(result, (DeleteSuccess, DeletePipelinePurgeFailure)):
         try:
             notifications = notify_fn(result.former_album_path)
-        except Exception as exc:  # noqa: BLE001 -- deletion is already committed
+        except Exception as exc:
             log.exception("Post-delete media notification failed")
             detail = f"notification boundary failed: {type(exc).__name__}: {exc}"
             notifications = (

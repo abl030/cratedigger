@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Benchmark parallel Soulseek searches to find the optimal concurrency level.
 
 Runs the same set of searches at different concurrency levels (1, 2, 4, 8, 12,
@@ -29,11 +28,11 @@ from typing import Protocol
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from lib.slskd_client import SlskdClient  # noqa: E402  — after sys.path insert
-from lib.search_exec import (  # noqa: E402  — after sys.path insert
+from lib.search_exec import (
     SearchSubmitError,
     execute_search,
 )
+from lib.slskd_client import SlskdClient
 
 
 class _EphemeralSlskdHandle(Protocol):
@@ -70,7 +69,7 @@ def _build_ephemeral(creds_path: str) -> _EphemeralSlskdHandle:
     """
     import importlib
     module = importlib.import_module("ephemeral_slskd")
-    ephemeral_cls = getattr(module, "EphemeralSlskd")
+    ephemeral_cls = module.EphemeralSlskd
     return ephemeral_cls(creds_path)
 
 
@@ -216,7 +215,7 @@ def main():
     try:
         ver = client.application.version()
         print(f"slskd version: {ver}")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         print(f"ERROR: Cannot connect to slskd at {host}: {e}")
         sys.exit(1)
 
@@ -233,7 +232,7 @@ def main():
             print("WARNING: slskd not connected to Soulseek network — searches will return 0 results")
         else:
             print(f"Soulseek: connected, logged in as '{server.get('username', '?')}'")
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
         pass
 
     print()
@@ -253,7 +252,7 @@ def main():
 
         total_results, errors = print_run(results)
 
-        print(f"  ---")
+        print("  ---")
         print(f"  Wall time: {wall_elapsed:.1f}s | "
               f"Total results: {total_results} | "
               f"Errors: {errors}")
@@ -269,7 +268,7 @@ def main():
     baseline_results = summary[0][2] if summary else 0
 
     print(f"\n{'='*70}")
-    print(f"  SUMMARY")
+    print("  SUMMARY")
     print(f"{'='*70}")
     print(f"  {'Level':>5s}  {'Wall':>7s}  {'Speedup':>7s}  {'Results':>8s}  {'Delta':>7s}  {'Errors':>6s}")
     print(f"  {'-----':>5s}  {'-------':>7s}  {'-------':>7s}  {'--------':>8s}  {'-------':>7s}  {'------':>6s}")

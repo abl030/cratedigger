@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Thin entry shim for ``pipeline-cli`` (#495 carve).
 
 Nix (``nix/module.nix`` / ``nix/wrappers.nix``) execs this file directly
@@ -25,7 +24,7 @@ REPO_ROOT = os.path.abspath(
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from scripts.pipeline_cli.cli import main  # noqa: E402
+from scripts.pipeline_cli.cli import main
 
 if __name__ == "__main__":
     main()

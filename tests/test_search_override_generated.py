@@ -2,12 +2,13 @@
 
 import unittest
 
-from hypothesis import example, given, strategies as st
+from hypothesis import example, given
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
 from lib.quality import (
-    AudioQualityMeasurement,
     QUALITY_LOSSLESS,
+    AudioQualityMeasurement,
     QualityRank,
     QualityRankConfig,
     SpectralAnalysisDetail,
@@ -15,7 +16,6 @@ from lib.quality import (
     rejection_backfill_override,
     resolve_retained_search_override,
 )
-
 
 CFG = QualityRankConfig.defaults()
 

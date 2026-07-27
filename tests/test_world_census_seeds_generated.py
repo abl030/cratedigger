@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import unittest
 
-from hypothesis import given, strategies as st
+from hypothesis import given
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads active profile)
 from tests.world_model.census_seeds import (

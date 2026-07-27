@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Tests for the MeasurementFailure wire-boundary Struct (U4).
 
 These cover the typed payload that preview emits when it cannot produce
@@ -22,7 +21,7 @@ import msgspec
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from lib.quality import MeasurementFailure, MeasurementFailureReason  # noqa: E402
+from lib.quality import MeasurementFailure
 
 
 class TestMeasurementFailureStruct(unittest.TestCase):

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Contract tests for web/routes/pipeline.py — core pipeline CRUD, log,
 detail, recent, all, search, downloading, import jobs, and wrong-match
 triage sweep.
@@ -13,33 +12,33 @@ tests/web/test_routes_decisions.py, and
 tests/web/test_routes_beets_distance.py (#522), following
 web/routes/pipeline.py's own split.
 """
-
-from datetime import datetime, timezone
 import os
 import sys
 import threading
 import unittest
+from datetime import UTC, datetime
+from typing import ClassVar
 from unittest.mock import patch
 
 import msgspec
+
 from web.classify import ClassifiedEntry, LogEntry, classify_log_entry
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
+from tests.fakes import FakeBeetsDB
+from tests.helpers import make_request_row
 from tests.web._harness import (
     _assert_required_fields,
     _FakeDbWebServerCase,
     _fresh_triage_runner,
 )
 
-from tests.fakes import FakeBeetsDB
-from tests.helpers import make_request_row
-
 
 class TestPipelineRouteContracts(_FakeDbWebServerCase):
     """Contract tests for frontend-consumed pipeline GET routes."""
 
-    PIPELINE_ITEM_REQUIRED_FIELDS = {
+    PIPELINE_ITEM_REQUIRED_FIELDS: ClassVar = {
         "id", "artist_name", "album_title", "year", "format", "country",
         "source", "created_at", "status", "search_attempts",
         "download_attempts", "validation_attempts", "beets_distance",
@@ -94,14 +93,14 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         "wrong_match_triage_preview_decision",
         "wrong_match_triage_stage_chain", "wrong_match_triage_detail",
     } | {field.name for field in msgspec.structs.fields(ClassifiedEntry)}
-    STATUS_WANTED_REQUIRED_FIELDS = {
+    STATUS_WANTED_REQUIRED_FIELDS: ClassVar = {
         "id", "artist", "album", "mb_release_id", "source", "created_at",
     }
-    IMPORT_PREVIEW_REQUIRED_FIELDS = {
+    IMPORT_PREVIEW_REQUIRED_FIELDS: ClassVar = {
         "mode", "verdict", "would_import", "confident_reject", "uncertain",
         "cleanup_eligible", "decision", "reason", "stage_chain",
     }
-    WRONG_MATCH_TRIAGE_SUMMARY_REQUIRED_FIELDS = {
+    WRONG_MATCH_TRIAGE_SUMMARY_REQUIRED_FIELDS: ClassVar = {
         "processed", "deleted", "deleted_verified_lossless_parent",
         "kept_would_import", "kept_uncertain",
         "skipped_candidate_evidence_missing", "skipped_candidate_evidence_stale",
@@ -110,10 +109,10 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         "skipped_active_job", "skipped_invalid_row", "skipped_missing_path",
         "skipped_operational", "delete_failed", "results",
     }
-    WRONG_MATCH_TRIAGE_STATUS_REQUIRED_FIELDS = {
+    WRONG_MATCH_TRIAGE_STATUS_REQUIRED_FIELDS: ClassVar = {
         "state", "started_at", "finished_at", "summary", "error",
     }
-    IMPORT_JOB_REQUIRED_FIELDS = {
+    IMPORT_JOB_REQUIRED_FIELDS: ClassVar = {
         "id", "job_type", "status", "request_id", "dedupe_key", "payload",
         "result", "message", "error", "attempts", "worker_id", "created_at",
         "updated_at", "started_at", "heartbeat_at", "completed_at", "deduped",
@@ -125,15 +124,15 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         "beets_launch_request_status",
         "beets_launch_snapshot_fingerprint",
     }
-    DISK_COVERAGE_COUNT_FIELDS = {
+    DISK_COVERAGE_COUNT_FIELDS: ClassVar = {
         "active_total", "on_disk_total", "off_disk_total", "by_status",
         "on_disk_by_status", "off_disk_by_status", "inverse_total",
     }
-    DISK_COVERAGE_ROW_FIELDS = {
+    DISK_COVERAGE_ROW_FIELDS: ClassVar = {
         "id", "status", "artist_name", "album_title", "mb_release_id",
         "discogs_release_id",
     }
-    DISK_COVERAGE_INVERSE_FIELDS = {
+    DISK_COVERAGE_INVERSE_FIELDS: ClassVar = {
         "id", "album", "albumartist", "mb_albumid", "discogs_albumid",
     }
 
@@ -414,7 +413,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
 
         evidence = make_album_quality_evidence(
             mb_release_id="test-mbid-0100",
-            measured_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            measured_at=datetime(2026, 7, 1, tzinfo=UTC),
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=90,
                 avg_bitrate_kbps=97,
@@ -1043,11 +1042,12 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         """#426: the imported bucket is capped (newest first) and the
         payload flags the truncation so the UI can say so."""
         from datetime import timedelta
+
         from web.routes.pipeline import IMPORTED_RECENT_LIMIT
         # setUp already seeded one imported row (id=100); add enough to
         # exceed the cap by 10. Stagger updated_at so newest-first
         # ordering is observable.
-        base = datetime(2026, 5, 1, tzinfo=timezone.utc)
+        base = datetime(2026, 5, 1, tzinfo=UTC)
         for i in range(IMPORTED_RECENT_LIMIT + 10):
             self.db.seed_request(make_request_row(
                 id=1000 + i, status="imported",
@@ -1065,7 +1065,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(data["imported"][0]["album_title"],
                          f"Imported {IMPORTED_RECENT_LIMIT + 9}")
 
-    SEARCH_REQUIRED_FIELDS = {"query", "items", "total"}
+    SEARCH_REQUIRED_FIELDS: ClassVar = {"query", "items", "total"}
 
     def test_pipeline_search_contract(self):
         self.db.seed_request(make_request_row(
@@ -1089,13 +1089,13 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(status, 200)
         self.assertEqual(data["items"], [])
 
-    DETAIL_RESPONSE_REQUIRED_FIELDS = {
+    DETAIL_RESPONSE_REQUIRED_FIELDS: ClassVar = {
         "request", "history", "tracks", "last_search", "current_library",
     }
-    LAST_SEARCH_REQUIRED_FIELDS = {
+    LAST_SEARCH_REQUIRED_FIELDS: ClassVar = {
         "variant", "final_state", "outcome", "top_candidates",
     }
-    CANDIDATE_SCORE_REQUIRED_FIELDS = {
+    CANDIDATE_SCORE_REQUIRED_FIELDS: ClassVar = {
         "username", "dir", "filetype", "matched_tracks", "total_tracks",
         "avg_ratio", "missing_titles", "file_count",
     }
@@ -1608,7 +1608,6 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
 
     @patch("web.routes.imports.cleanup_all_wrong_matches")
     def test_wrong_match_triage_rejects_concurrent_sweep(self, mock_cleanup):
-        import threading
 
         from lib.wrong_match_cleanup_service import WrongMatchCleanupSummary
         runner = _fresh_triage_runner(self)
@@ -1695,7 +1694,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         row = next(row for row in self.db._import_jobs if row["id"] == job_id)
         row.update({
             "status": "recovery_required",
-            "beets_launch_authorized_at": datetime.now(timezone.utc),
+            "beets_launch_authorized_at": datetime.now(UTC),
             "beets_launch_release_id": release_id,
             "beets_launch_source_path": "/tmp/Test Album",
             "beets_launch_request_status": self.db.request(100)["status"],

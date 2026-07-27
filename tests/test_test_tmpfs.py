@@ -12,7 +12,6 @@ import unittest
 from collections.abc import Mapping
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TMPFS_SETUP = REPO_ROOT / "scripts" / "test_tmpfs.sh"
 NIX_SHELL = REPO_ROOT / "nix" / "shell.nix"

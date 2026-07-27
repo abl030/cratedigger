@@ -1,20 +1,20 @@
-"""Generated qualification of the production dead-code gates."""
+"""Generated qualification of the repository lint and liveness gates."""
 
 from __future__ import annotations
 
 import keyword
 import unittest
 
-from hypothesis import assume, example, given, strategies as st
+from hypothesis import assume, example, given
+from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401 - registers suite/fuzz tiers
 from tests.test_unused_import_audit import (
-    assert_redundant_alias_baseline,
     assert_import_liveness,
+    assert_redundant_alias_baseline,
     redundant_aliases,
     ruff_findings,
 )
-
 
 _SCAFFOLDING_NAMES = frozenset({
     "__debug__",

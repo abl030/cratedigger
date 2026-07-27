@@ -1,10 +1,8 @@
-#!/usr/bin/env python3
 """Contract tests for web/routes/imports.py wrong-match surfaces.
 
 Split from tests/test_web_server.py (#408). Shared harness in
 tests/web/_harness.py.
 """
-
 import copy
 import os
 import sys
@@ -13,21 +11,20 @@ import unittest
 from contextlib import contextmanager
 from email.message import Message
 from io import BufferedIOBase, BytesIO, IOBase
+from typing import ClassVar
 from unittest.mock import patch
-from urllib.request import urlopen, Request
-
+from urllib.request import Request, urlopen
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from lib.import_queue import ForceImportPayload
+from tests.helpers import make_request_row
 from tests.web._harness import (
     _DEFAULT_WRONG_MATCH_VALIDATION,
     _assert_required_fields,
     _FakeDbWebServerCase,
     _fresh_triage_runner,
 )
-
-from tests.helpers import make_request_row
 
 
 class TestWrongMatchesContract(_FakeDbWebServerCase):
@@ -68,8 +65,8 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         # See project_converge_operator_authority memory + post_wrong_match_converge
         # docstring — converge must route deletion through delete_wrong_match,
         # never through cleanup_wrong_match.
-        from lib.wrong_match_cleanup_service import cleanup_wrong_match as _cwm_sentinel
         import web.routes.imports as _imports_mod
+        from lib.wrong_match_cleanup_service import cleanup_wrong_match as _cwm_sentinel
         _imports_mod.cleanup_wrong_match = _cwm_sentinel  # pyright: ignore[reportAttributeAccessIssue]
         cleanup_patch = patch(
             "web.routes.imports.cleanup_wrong_match",
@@ -95,7 +92,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self.addCleanup(resolve_patch.stop)
         self.addCleanup(lambda: delattr(_imports_mod, "cleanup_wrong_match"))
 
-    GROUP_REQUIRED_FIELDS = {
+    GROUP_REQUIRED_FIELDS: ClassVar = {
         "request_id", "artist", "album", "mb_release_id",
         # Release-group id surfaces so the frontend can render the
         # Replace button (R7) — it asks "what RG is this row in?".
@@ -109,7 +106,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         # user what's actually on disk, not the most recent attempt.
         "latest_import",
     }
-    ENTRY_REQUIRED_FIELDS = {
+    ENTRY_REQUIRED_FIELDS: ClassVar = {
         "download_log_id", "soulseek_username", "failed_path", "files_exist",
         "distance", "scenario", "detail", "source_dirs", "candidate", "local_items",
         # Per-candidate stored evidence (R1+R2 of the spectral-evidence
@@ -124,19 +121,19 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         # dashes from the legacy denorm columns. Drives entry sort order.
         "format", "min_bitrate", "avg_bitrate", "verified_lossless", "quality_rank",
     }
-    DELETE_RESULT_REQUIRED_FIELDS = {
+    DELETE_RESULT_REQUIRED_FIELDS: ClassVar = {
         "status", "download_log_id", "outcome", "success", "request_id",
         "entry_found", "visible", "raw_failed_path", "failed_path_hint",
         "resolved_path", "deleted_path", "path_missing", "cleared_rows",
         "skipped", "reason", "error",
     }
-    DELETE_GROUP_REQUIRED_FIELDS = {
+    DELETE_GROUP_REQUIRED_FIELDS: ClassVar = {
         "status", "request_id", "outcome", "success", "processed", "deleted",
         "deleted_paths", "cleared", "skipped", "errors", "remaining",
         "group_empty", "results",
     }
 
-    GROUP_FIELD_TYPES = {
+    GROUP_FIELD_TYPES: ClassVar = {
         "request_id": int,
         "artist": str,
         "album": str,
@@ -146,7 +143,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         "status": str,
         "verified_lossless": bool,
     }
-    ENTRY_FIELD_TYPES = {
+    ENTRY_FIELD_TYPES: ClassVar = {
         "download_log_id": int,
         "failed_path": str,
         "files_exist": bool,
@@ -392,7 +389,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self.assertIn(101, [group["request_id"] for group in data["groups"]])
 
     def test_group_has_required_fields_and_types(self):
-        status, data = self._get("/api/wrong-matches")
+        _status, data = self._get("/api/wrong-matches")
         self.assertGreater(len(data["groups"]), 0)
         for group in data["groups"]:
             _assert_required_fields(
@@ -404,7 +401,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
                     f"group.{field}={group[field]!r} should be {expected_type}")
 
     def test_entry_has_required_fields_and_types(self):
-        status, data = self._get("/api/wrong-matches")
+        _status, data = self._get("/api/wrong-matches")
         for group in data["groups"]:
             self.assertGreater(len(group["entries"]), 0)
             for entry in group["entries"]:
@@ -456,10 +453,10 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         # kinds like lossless_source_v0) — the COALESCE path the route
         # falls back to for pre-evidence rows.
         self.db.delete_request(100)
-        self._seed_wrong_match(download_log_id=43, log_overrides=dict(
-            spectral_grade="suspect", spectral_bitrate=320,
-            v0_probe_kind="lossless_source_v0", v0_probe_avg_bitrate=265,
-        ))
+        self._seed_wrong_match(download_log_id=43, log_overrides={
+            "spectral_grade": "suspect", "spectral_bitrate": 320,
+            "v0_probe_kind": "lossless_source_v0", "v0_probe_avg_bitrate": 265,
+        })
 
         _, data = self._get("/api/wrong-matches")
         entry = data["groups"][0]["entries"][0]
@@ -571,7 +568,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
                 bitrate = 320000
 
             class _FakeAudio:
-                tags = {
+                tags: ClassVar = {
                     "APIC:": ["embedded cover art"],
                     "TALB": ["Shut Up And Listen To Majosha"],
                     "TCON": ["Funk Rock"],
@@ -676,8 +673,9 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         """A file truncated mid-stream writes fewer bytes than the
         declared Content-Length; the server must close the keep-alive
         socket instead of letting the next response desync (#427)."""
-        import tempfile
         import os as _os
+        import tempfile
+
         from lib.fs_authority import (
             OpenedRegularFile,
             open_directory_path,
@@ -767,12 +765,11 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
                 f"?download_log_id={log_id}&path=01%20-%20Track.mp3",
                 headers={"Range": "bytes=1-3"},
             )
-            with self._wrong_match_runtime_config(tmpdir):
-                with urlopen(req) as resp:
-                    body = resp.read()
-                    status = resp.status
-                    content_range = resp.headers["Content-Range"]
-                    accept_ranges = resp.headers["Accept-Ranges"]
+            with self._wrong_match_runtime_config(tmpdir), urlopen(req) as resp:
+                body = resp.read()
+                status = resp.status
+                content_range = resp.headers["Content-Range"]
+                accept_ranges = resp.headers["Accept-Ranges"]
 
         self.assertEqual(status, 206)
         self.assertEqual(body, b"bcd")
@@ -799,7 +796,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
             self.assertIsNone(entry[field])
         # R3 regression guard: no preview-related keys leak into the
         # entry dict as part of this feature.
-        for key in entry.keys():
+        for key in entry:
             self.assertFalse(
                 key.lower().startswith("preview"),
                 f"entry exposed unexpected preview-related key: {key!r}")
@@ -962,7 +959,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self.assertTrue(self.db.mark_imported_with_rescue(
             100, expected_status="wanted", min_bitrate=207,
             verified_lossless=True, current_spectral_grade="genuine"))
-        status, data = self._get("/api/wrong-matches")
+        _status, data = self._get("/api/wrong-matches")
         group = data["groups"][0]
         self.assertEqual(group["status"], "imported")
         self.assertEqual(group["min_bitrate"], 194)
@@ -976,7 +973,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
     def test_group_shows_nothing_on_disk_when_wanted(self):
         """Wanted album: no files in library yet — fields are null, label signals 'not on disk'."""
         # setUp's request 100 is already wanted with no on-disk quality.
-        status, data = self._get("/api/wrong-matches")
+        _status, data = self._get("/api/wrong-matches")
         group = data["groups"][0]
         self.assertEqual(group["status"], "wanted")
         self.assertIsNone(group["min_bitrate"])
@@ -1104,7 +1101,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
             100, outcome="rejected", soulseek_username="newestuser",
             actual_filetype="mp3", actual_min_bitrate=192,
             beets_scenario="high_distance")
-        status, data = self._get("/api/wrong-matches")
+        _status, data = self._get("/api/wrong-matches")
         group = data["groups"][0]
         latest = group["latest_import"]
         self.assertIsNotNone(latest)
@@ -1120,14 +1117,14 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
                              soulseek_username="u2")
         self.db.log_download(100, outcome="rejected",
                              soulseek_username="u1")
-        status, data = self._get("/api/wrong-matches")
+        _status, data = self._get("/api/wrong-matches")
         group = data["groups"][0]
         self.assertIsNone(group["latest_import"])
 
     def test_group_latest_import_none_when_batch_empty(self):
         """Edge case: no history rows at all → latest_import is None."""
         # Only the setUp rejection exists — no import history at all.
-        status, data = self._get("/api/wrong-matches")
+        _status, data = self._get("/api/wrong-matches")
         group = data["groups"][0]
         self.assertIsNone(group["latest_import"])
 
@@ -1161,7 +1158,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self.assertEqual([e["download_log_id"] for e in group["entries"]], [20])
 
     def test_candidate_has_distance_breakdown(self):
-        status, data = self._get("/api/wrong-matches")
+        _status, data = self._get("/api/wrong-matches")
         entry = data["groups"][0]["entries"][0]
         candidate = entry["candidate"]
         self.assertIsNotNone(candidate)

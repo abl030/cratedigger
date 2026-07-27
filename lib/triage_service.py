@@ -31,10 +31,9 @@ ships green before either wrapper exists; U16 / U17 fill those in.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-
+from collections.abc import Iterable, Mapping
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Iterable, Optional, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import msgspec
 
@@ -50,7 +49,6 @@ from lib.unfindable_detection_service import (
     CATEGORY_ONE_TRACK_STRUCTURAL,
     CATEGORY_WRONG_PRESSING_AVAILABLE,
 )
-
 
 # --- Filter parsing -------------------------------------------------------
 
@@ -133,10 +131,10 @@ class ParsedTriageFilter(msgspec.Struct, frozen=True):
     """
 
     kind: str
-    unfindable_category: Optional[str] = None
-    field_name: Optional[str] = None
-    status_code: Optional[str] = None
-    reason_code: Optional[str] = None
+    unfindable_category: str | None = None
+    field_name: str | None = None
+    status_code: str | None = None
+    reason_code: str | None = None
     raw: str = ""
 
 
@@ -230,16 +228,16 @@ class RequestMeta(msgspec.Struct, frozen=True):
     id: int
     artist_name: str
     album_title: str
-    year: Optional[int]
+    year: int | None
     status: str
-    source: Optional[str]
-    mb_release_id: Optional[str]
-    discogs_release_id: Optional[str]
-    release_group_year: Optional[int]
+    source: str | None
+    mb_release_id: str | None
+    discogs_release_id: str | None
+    release_group_year: int | None
     is_va_compilation: bool
-    catalog_number: Optional[str]
-    failure_class: Optional[str]
-    search_filetype_override: Optional[str]
+    catalog_number: str | None
+    failure_class: str | None
+    search_filetype_override: str | None
 
 
 class UnfindableState(msgspec.Struct, frozen=True):
@@ -252,12 +250,12 @@ class UnfindableState(msgspec.Struct, frozen=True):
     surface can render "no concerns" without a sentinel struct.
     """
 
-    category: Optional[str]
-    categorised_at: Optional[datetime]
-    last_artist_probe_at: Optional[datetime]
-    last_artist_probe_match_count: Optional[int]
-    rescued_at: Optional[datetime]
-    prior_unfindable_category: Optional[str]
+    category: str | None
+    categorised_at: datetime | None
+    last_artist_probe_at: datetime | None
+    last_artist_probe_match_count: int | None
+    rescued_at: datetime | None
+    prior_unfindable_category: str | None
 
 
 class FieldResolutionState(msgspec.Struct, frozen=True):
@@ -265,7 +263,7 @@ class FieldResolutionState(msgspec.Struct, frozen=True):
 
     field_name: str
     status: str
-    reason_code: Optional[str]
+    reason_code: str | None
     attempts: int
     resolved_at: datetime
 
@@ -282,12 +280,12 @@ class SearchLogEntry(msgspec.Struct, frozen=True):
 
     id: int
     created_at: datetime
-    plan_strategy: Optional[str]
-    query: Optional[str]
+    plan_strategy: str | None
+    query: str | None
     outcome: str
-    result_count: Optional[int]
-    rejection_reason: Optional[str]
-    matcher_score_top1: Optional[float]
+    result_count: int | None
+    rejection_reason: str | None
+    matcher_score_top1: float | None
 
 
 class SearchForensicsSummary(msgspec.Struct, frozen=True):
@@ -305,9 +303,9 @@ class SearchForensicsSummary(msgspec.Struct, frozen=True):
     near_cap_count: int
     zero_results_count: int
     pre_filter_skips_total: int
-    first_strategy_with_cands: Optional[str]
-    dominant_rejection_reason: Optional[str]
-    last_search_at: Optional[datetime]
+    first_strategy_with_cands: str | None
+    dominant_rejection_reason: str | None
+    last_search_at: datetime | None
     recent_entries: list[SearchLogEntry]
 
 
@@ -320,7 +318,7 @@ class TriageResult(msgspec.Struct, frozen=True):
     """
 
     request_meta: RequestMeta
-    unfindable: Optional[UnfindableState]
+    unfindable: UnfindableState | None
     field_quality: list[FieldResolutionState]
     search_forensics: SearchForensicsSummary
 
@@ -349,14 +347,14 @@ class _PipelineDB(Protocol):
     class so tests can drop in a ``FakePipelineDB`` without monkey-patching.
     """
 
-    def get_request(self, request_id: int) -> "AlbumRequestRow | None": ...
+    def get_request(self, request_id: int) -> AlbumRequestRow | None: ...
 
     def list_triage_page(
         self,
         *,
         filter_spec: ParsedTriageFilter,
         page_size: int,
-        after_request_id: Optional[int],
+        after_request_id: int | None,
     ) -> list[dict[str, Any]]: ...
 
     def get_field_resolutions_for_requests(
@@ -378,7 +376,7 @@ class _PipelineDB(Protocol):
 def compose_triage_for_request(
     request_id: int,
     pdb: _PipelineDB,
-) -> Optional[TriageResult]:
+) -> TriageResult | None:
     """Compose a single-request triage payload.
 
     Returns ``None`` when the row doesn't exist. Composes by reading
@@ -410,7 +408,7 @@ def list_triage(
     pdb: _PipelineDB,
     *,
     page_size: int = DEFAULT_TRIAGE_PAGE_SIZE,
-    after_request_id: Optional[int] = None,
+    after_request_id: int | None = None,
 ) -> list[TriageResult]:
     """List one page of triage results matching ``filter_spec``.
 
@@ -463,7 +461,7 @@ def list_triage(
 def _compose_one(
     request_row: Mapping[str, Any],
     field_rows: Iterable[dict[str, Any]],
-    summary_row: Optional[dict[str, Any]],
+    summary_row: dict[str, Any] | None,
     log_rows: Iterable[dict[str, Any]],
 ) -> TriageResult:
     request_meta = _request_meta(request_row)
@@ -496,7 +494,7 @@ def _request_meta(row: Mapping[str, Any]) -> RequestMeta:
     )
 
 
-def _unfindable_state(row: Mapping[str, Any]) -> Optional[UnfindableState]:
+def _unfindable_state(row: Mapping[str, Any]) -> UnfindableState | None:
     category = row.get("unfindable_category")
     categorised_at = row.get("unfindable_categorised_at")
     last_probe = row.get("last_artist_probe_at")
@@ -527,7 +525,7 @@ def _field_resolution(row: dict[str, Any]) -> FieldResolutionState:
 
 
 def _search_forensics(
-    summary_row: Optional[dict[str, Any]],
+    summary_row: dict[str, Any] | None,
     log_rows: Iterable[dict[str, Any]],
 ) -> SearchForensicsSummary:
     entries = [_search_log_entry(r) for r in log_rows]
@@ -564,7 +562,7 @@ def _search_forensics(
 
 def _search_log_entry(row: dict[str, Any]) -> SearchLogEntry:
     matcher = row.get("matcher_score_top1")
-    matcher_f: Optional[float] = None
+    matcher_f: float | None = None
     if matcher is not None:
         try:
             matcher_f = float(matcher)
@@ -582,7 +580,7 @@ def _search_log_entry(row: dict[str, Any]) -> SearchLogEntry:
     )
 
 
-def _int_or_none(value: Any) -> Optional[int]:
+def _int_or_none(value: Any) -> int | None:
     if value is None:
         return None
     try:

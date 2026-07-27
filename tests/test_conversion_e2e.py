@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """End-to-end conversion tests with real audio files.
 
 Tests the full conversion pipeline: generate FLAC → convert via
@@ -10,7 +9,6 @@ determine_verified_lossless.
 """
 
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -22,8 +20,7 @@ ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 HARNESS_DIR = os.path.join(ROOT_DIR, "harness")
 sys.path.insert(0, ROOT_DIR)
 
-from tests.audio_fixtures import make_test_flac, make_test_album, get_bitrate_kbps
-
+from tests.audio_fixtures import get_bitrate_kbps, make_test_album, make_test_flac
 
 # ============================================================================
 # Audio fixtures sanity
@@ -41,7 +38,7 @@ class TestAudioFixtures(unittest.TestCase):
             subprocess.run(
                 ["ffmpeg", "-i", flac, "-codec:a", "libmp3lame", "-q:a", "0",
                  "-map_metadata", "0", "-id3v2_version", "3", "-y", mp3],
-                capture_output=True, timeout=30)
+                capture_output=True, timeout=30, check=False)
             br = get_bitrate_kbps(mp3)
             self.assertGreater(br, 210, f"Genuine FLAC V0 bitrate {br}kbps should be > 210")
             self.assertLess(br, 300, f"V0 bitrate {br}kbps unexpectedly high")
@@ -55,7 +52,7 @@ class TestAudioFixtures(unittest.TestCase):
             subprocess.run(
                 ["ffmpeg", "-i", flac, "-codec:a", "libmp3lame", "-q:a", "0",
                  "-map_metadata", "0", "-id3v2_version", "3", "-y", mp3],
-                capture_output=True, timeout=30)
+                capture_output=True, timeout=30, check=False)
             br = get_bitrate_kbps(mp3)
             self.assertLess(br, 210, f"Transcode FLAC V0 bitrate {br}kbps should be < 210")
 
@@ -80,8 +77,10 @@ class TestConversionTimeoutWiring(unittest.TestCase):
 
     def test_scaled_timeout_reaches_ffmpeg(self):
         from harness.import_one import (
-            convert_lossless, V0_SPEC,
-            _conversion_timeout_seconds, _probe_duration_seconds,
+            V0_SPEC,
+            _conversion_timeout_seconds,
+            _probe_duration_seconds,
+            convert_lossless,
         )
         with tempfile.TemporaryDirectory() as d:
             album = os.path.join(d, "album")
@@ -437,38 +436,38 @@ class TestLosslessTierMatching(unittest.TestCase):
     """The 'lossless' tier should match flac, alac, and wav files."""
 
     def test_lossless_matches_flac(self):
-        from lib.quality import parse_filetype_config, file_identity, filetype_matches
+        from lib.quality import file_identity, filetype_matches, parse_filetype_config
         lossless = parse_filetype_config("lossless")
         flac = file_identity({"filename": "track.flac", "bitRate": 900})
         self.assertTrue(filetype_matches(flac, lossless))
 
     def test_lossless_matches_alac(self):
-        from lib.quality import parse_filetype_config, file_identity, filetype_matches
+        from lib.quality import file_identity, filetype_matches, parse_filetype_config
         lossless = parse_filetype_config("lossless")
         alac = file_identity({"filename": "track.m4a", "bitRate": 900, "bitDepth": 16})
         self.assertTrue(filetype_matches(alac, lossless))
 
     def test_lossless_matches_wav(self):
-        from lib.quality import parse_filetype_config, file_identity, filetype_matches
+        from lib.quality import file_identity, filetype_matches, parse_filetype_config
         lossless = parse_filetype_config("lossless")
         wav = file_identity({"filename": "track.wav", "bitRate": 1411})
         self.assertTrue(filetype_matches(wav, lossless))
 
     def test_lossless_rejects_mp3(self):
-        from lib.quality import parse_filetype_config, file_identity, filetype_matches
+        from lib.quality import file_identity, filetype_matches, parse_filetype_config
         lossless = parse_filetype_config("lossless")
         mp3 = file_identity({"filename": "track.mp3", "bitRate": 320})
         self.assertFalse(filetype_matches(mp3, lossless))
 
     def test_lossless_rejects_opus(self):
-        from lib.quality import parse_filetype_config, file_identity, filetype_matches
+        from lib.quality import file_identity, filetype_matches, parse_filetype_config
         lossless = parse_filetype_config("lossless")
         opus = file_identity({"filename": "track.opus", "bitRate": 128})
         self.assertFalse(filetype_matches(opus, lossless))
 
     def test_lossless_rejects_aac(self):
         """AAC (lossy m4a) should not match lossless tier."""
-        from lib.quality import parse_filetype_config, file_identity, filetype_matches
+        from lib.quality import file_identity, filetype_matches, parse_filetype_config
         lossless = parse_filetype_config("lossless")
         aac = file_identity({"filename": "track.m4a", "bitRate": 256})
         self.assertFalse(filetype_matches(aac, lossless))
@@ -517,12 +516,13 @@ class TestConvertLosslessE2E(unittest.TestCase):
             ["ffprobe", "-v", "error", "-select_streams", "a:0",
              "-show_entries", "stream=codec_name", "-of", "csv=p=0", path],
             capture_output=True, text=True, timeout=30,
+            check=False,
         )
         return result.stdout.strip().lower()
 
     def test_v0_conversion_genuine(self):
         """Genuine FLAC → V0: only .mp3 files on disk, bitrate > 210."""
-        from harness.import_one import convert_lossless, V0_SPEC
+        from harness.import_one import V0_SPEC, convert_lossless
         with tempfile.TemporaryDirectory() as d:
             album = os.path.join(d, "album")
             make_test_album(album, track_count=2, cutoff_hz=15500)
@@ -541,11 +541,11 @@ class TestConvertLosslessE2E(unittest.TestCase):
 
     def test_v0_conversion_transcode(self):
         """Transcode FLAC → V0: .mp3 on disk, bitrate < 210."""
-        from harness.import_one import convert_lossless, V0_SPEC
+        from harness.import_one import V0_SPEC, convert_lossless
         with tempfile.TemporaryDirectory() as d:
             album = os.path.join(d, "album")
             make_test_album(album, track_count=2, cutoff_hz=12000)
-            converted, failed, orig_ext, _ = convert_lossless(album, V0_SPEC)
+            converted, failed, _orig_ext, _ = convert_lossless(album, V0_SPEC)
             self.assertEqual(converted, 2)
             self.assertEqual(failed, 0)
             for f in os.listdir(album):
@@ -555,7 +555,7 @@ class TestConvertLosslessE2E(unittest.TestCase):
 
     def test_v0_keep_source(self):
         """keep_source=True preserves FLAC alongside MP3."""
-        from harness.import_one import convert_lossless, V0_SPEC
+        from harness.import_one import V0_SPEC, convert_lossless
         with tempfile.TemporaryDirectory() as d:
             album = os.path.join(d, "album")
             make_test_album(album, track_count=2, cutoff_hz=15500)
@@ -571,7 +571,7 @@ class TestConvertLosslessE2E(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             album = os.path.join(d, "album")
             make_test_album(album, track_count=2, cutoff_hz=15500)
-            converted, failed, orig_ext, _ = convert_lossless(album, spec)
+            converted, failed, _orig_ext, _ = convert_lossless(album, spec)
             self.assertEqual(converted, 2)
             self.assertEqual(failed, 0)
             exts = self._count_by_ext(album)
@@ -585,7 +585,7 @@ class TestConvertLosslessE2E(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             album = os.path.join(d, "album")
             make_test_album(album, track_count=2, cutoff_hz=15500)
-            converted, failed, _, _ = convert_lossless(album, spec)
+            converted, _failed, _, _ = convert_lossless(album, spec)
             self.assertEqual(converted, 2)
             exts = self._count_by_ext(album)
             self.assertEqual(exts.get(".mp3", 0), 2)
@@ -598,7 +598,7 @@ class TestConvertLosslessE2E(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             album = os.path.join(d, "album")
             make_test_album(album, track_count=2, cutoff_hz=15500)
-            converted, failed, _, _ = convert_lossless(album, spec)
+            converted, _failed, _, _ = convert_lossless(album, spec)
             self.assertEqual(converted, 2)
             exts = self._count_by_ext(album)
             self.assertEqual(exts.get(".m4a", 0), 2)
@@ -639,7 +639,7 @@ class TestConvertLosslessE2E(unittest.TestCase):
 
     def test_wav_to_flac_normalization(self):
         """WAV → FLAC via FLAC_SPEC: .flac files on disk, WAV removed."""
-        from harness.import_one import convert_lossless, FLAC_SPEC
+        from harness.import_one import FLAC_SPEC, convert_lossless
         with tempfile.TemporaryDirectory() as d:
             album = os.path.join(d, "album")
             os.makedirs(album)
@@ -658,7 +658,7 @@ class TestConvertLosslessE2E(unittest.TestCase):
 
     def test_alac_to_flac_normalization(self):
         """ALAC .m4a → FLAC via FLAC_SPEC: .flac on disk, .m4a removed."""
-        from harness.import_one import convert_lossless, FLAC_SPEC
+        from harness.import_one import FLAC_SPEC, convert_lossless
         with tempfile.TemporaryDirectory() as d:
             album = os.path.join(d, "album")
             os.makedirs(album)
@@ -667,7 +667,7 @@ class TestConvertLosslessE2E(unittest.TestCase):
                 ["ffmpeg", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
                  "-c:a", "alac", "-y", src],
                 capture_output=True, check=True, timeout=30)
-            converted, failed, orig_ext, _ = convert_lossless(album, FLAC_SPEC)
+            converted, _failed, orig_ext, _ = convert_lossless(album, FLAC_SPEC)
             self.assertEqual(converted, 1)
             self.assertEqual(orig_ext, "m4a")
             exts = self._count_by_ext(album)
@@ -683,18 +683,18 @@ class TestConvertLosslessE2E(unittest.TestCase):
         This is harmless — the normalization path in import_one.py main()
         only calls FLAC_SPEC for non-FLAC sources (ALAC/WAV).
         """
-        from harness.import_one import convert_lossless, FLAC_SPEC
+        from harness.import_one import FLAC_SPEC, convert_lossless
         with tempfile.TemporaryDirectory() as d:
             album = os.path.join(d, "album")
             make_test_album(album, track_count=1, cutoff_hz=15500)
-            converted, failed, _, _ = convert_lossless(album, FLAC_SPEC)
+            converted, _failed, _, _ = convert_lossless(album, FLAC_SPEC)
             self.assertEqual(converted, 1)  # re-compresses via temp file
             exts = self._count_by_ext(album)
             self.assertEqual(exts.get(".flac", 0), 1)
 
     def test_no_lossless_files_noop(self):
         """Directory with only MP3s → no conversion."""
-        from harness.import_one import convert_lossless, V0_SPEC
+        from harness.import_one import V0_SPEC, convert_lossless
         with tempfile.TemporaryDirectory() as d:
             # Create a fake mp3
             with open(os.path.join(d, "track.mp3"), "w") as f:
@@ -706,11 +706,11 @@ class TestConvertLosslessE2E(unittest.TestCase):
 
     def test_dry_run_no_output(self):
         """Dry run should not create output files."""
-        from harness.import_one import convert_lossless, V0_SPEC
+        from harness.import_one import V0_SPEC, convert_lossless
         with tempfile.TemporaryDirectory() as d:
             album = os.path.join(d, "album")
             make_test_album(album, track_count=1, cutoff_hz=15500)
-            converted, failed, _, _ = convert_lossless(album, V0_SPEC, dry_run=True)
+            converted, _failed, _, _ = convert_lossless(album, V0_SPEC, dry_run=True)
             self.assertEqual(converted, 1)
             exts = self._count_by_ext(album)
             self.assertNotIn(".mp3", exts, "Dry run should not create files")
@@ -730,13 +730,12 @@ class TestConversionPipelineE2E(unittest.TestCase):
 
     def test_genuine_flac_default_is_verified_lossless(self):
         """Genuine FLAC → V0 + affirmative spectral proof → verified."""
-        from harness.import_one import convert_lossless, V0_SPEC
-        from lib.quality import (determine_verified_lossless,
-                                 transcode_detection)
+        from harness.import_one import V0_SPEC, convert_lossless
+        from lib.quality import determine_verified_lossless, transcode_detection
         with tempfile.TemporaryDirectory() as d:
             album = os.path.join(d, "album")
             make_test_album(album, track_count=2, cutoff_hz=15500)
-            converted, failed, _, _ = convert_lossless(album, V0_SPEC)
+            converted, _failed, _, _ = convert_lossless(album, V0_SPEC)
 
             # Decision chain
             is_transcode = transcode_detection(
@@ -749,13 +748,12 @@ class TestConversionPipelineE2E(unittest.TestCase):
 
     def test_transcode_flac_not_verified(self):
         """Transcode FLAC → V0 + suspect spectral grade → not verified."""
-        from harness.import_one import convert_lossless, V0_SPEC
-        from lib.quality import (determine_verified_lossless,
-                                 transcode_detection)
+        from harness.import_one import V0_SPEC, convert_lossless
+        from lib.quality import determine_verified_lossless, transcode_detection
         with tempfile.TemporaryDirectory() as d:
             album = os.path.join(d, "album")
             make_test_album(album, track_count=2, cutoff_hz=12000)
-            converted, failed, _, _ = convert_lossless(album, V0_SPEC)
+            converted, _failed, _, _ = convert_lossless(album, V0_SPEC)
 
             is_transcode = transcode_detection(
                 converted, spectral_grade="suspect")
@@ -767,10 +765,12 @@ class TestConversionPipelineE2E(unittest.TestCase):
 
     def test_genuine_flac_with_target_converts_twice(self):
         """Genuine FLAC → V0 (verify) → Opus 128 (final): only .opus on disk."""
-        from harness.import_one import (convert_lossless, V0_SPEC,
-                                parse_verified_lossless_target)
-        from lib.quality import (determine_verified_lossless,
-                                 transcode_detection)
+        from harness.import_one import (
+            V0_SPEC,
+            convert_lossless,
+            parse_verified_lossless_target,
+        )
+        from lib.quality import determine_verified_lossless, transcode_detection
         with tempfile.TemporaryDirectory() as d:
             album = os.path.join(d, "album")
             make_test_album(album, track_count=2, cutoff_hz=15500)
@@ -795,13 +795,13 @@ class TestConversionPipelineE2E(unittest.TestCase):
 
             # Step 3: Convert FLAC → Opus (from originals, not V0)
             spec = parse_verified_lossless_target("opus 128")
-            opus_converted, opus_failed, _, _ = convert_lossless(album, spec)
+            opus_converted, _opus_failed, _, _ = convert_lossless(album, spec)
             self.assertEqual(opus_converted, 2)
 
             # Step 4: Clean up V0 (ephemeral) + FLAC (consumed)
             for f in os.listdir(album):
                 fp = os.path.join(album, f)
-                if f.endswith(".mp3") or f.endswith(".flac"):
+                if f.endswith((".mp3", ".flac")):
                     os.remove(fp)
 
             # Verify final state: only opus
@@ -813,9 +813,8 @@ class TestConversionPipelineE2E(unittest.TestCase):
 
     def test_transcode_flac_with_target_skips_second_conversion(self):
         """Transcode FLAC + target configured → keep V0, skip target conversion."""
-        from harness.import_one import convert_lossless, V0_SPEC
-        from lib.quality import (determine_verified_lossless,
-                                 transcode_detection)
+        from harness.import_one import V0_SPEC, convert_lossless
+        from lib.quality import determine_verified_lossless, transcode_detection
         with tempfile.TemporaryDirectory() as d:
             album = os.path.join(d, "album")
             make_test_album(album, track_count=2, cutoff_hz=12000)
@@ -850,9 +849,13 @@ class TestConversionPipelineE2E(unittest.TestCase):
         conversion, convert_lossless() would skip all files (output exists)
         and leave zero audio files after cleanup.
         """
-        from harness.import_one import (convert_lossless, V0_SPEC,
-                                parse_verified_lossless_target,
-                                _remove_files_by_ext, _remove_lossless_files)
+        from harness.import_one import (
+            V0_SPEC,
+            _remove_files_by_ext,
+            _remove_lossless_files,
+            convert_lossless,
+            parse_verified_lossless_target,
+        )
         with tempfile.TemporaryDirectory() as d:
             album = os.path.join(d, "album")
             make_test_album(album, track_count=2, cutoff_hz=15500)

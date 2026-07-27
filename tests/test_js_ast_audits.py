@@ -8,7 +8,6 @@ import unittest
 
 from tests.structural_audits.js_ast import parse_javascript
 
-
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -38,11 +37,10 @@ export { Example, markup };
         )
         self.assertTrue(paths)
         for path in paths:
-            with self.subTest(path=os.path.relpath(path, REPO_ROOT)):
-                with open(path, "r", encoding="utf-8") as handle:
-                    parse_javascript(
-                        handle.read(), origin=os.path.relpath(path, REPO_ROOT)
-                    )
+            with self.subTest(path=os.path.relpath(path, REPO_ROOT)), open(path, "r", encoding="utf-8") as handle:
+                parse_javascript(
+                    handle.read(), origin=os.path.relpath(path, REPO_ROOT)
+                )
 
 
 if __name__ == "__main__":

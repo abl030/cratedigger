@@ -135,21 +135,21 @@ class _DBProto(Protocol):
 
     def list_wanted_for_plan_reconciliation(
         self,
-    ) -> "list[WantedReconciliationCandidate]": ...
+    ) -> list[WantedReconciliationCandidate]: ...
 
     def get_search_plan_inspection(
         self,
         request_id: int,
-    ) -> "SearchPlanInspection": ...
+    ) -> SearchPlanInspection: ...
 
     def list_search_plan_classification_for_requests(
         self,
         request_ids: list[int],
-    ) -> "dict[int, DryRunPlanClassification]": ...
+    ) -> dict[int, DryRunPlanClassification]: ...
 
 
 def reconcile_search_plans(
-    db: "PipelineDB | _DBProto",
+    db: PipelineDB | _DBProto,
     service: SearchPlanService | None,
     *,
     dry_run: bool = False,
@@ -203,7 +203,7 @@ def reconcile_search_plans(
     # plan. Dry-run uses it to stay read-only; live reconciliation uses
     # it to avoid re-inspecting sticky deterministic / recent transient
     # failures every cycle.
-    plan_classifications: "dict[int, DryRunPlanClassification]" = {}
+    plan_classifications: dict[int, DryRunPlanClassification] = {}
     if candidates:
         # Only request rows that actually need classification: rows
         # without an active plan. Rows with an active plan are
@@ -240,14 +240,14 @@ def reconcile_search_plans(
                 plan_classification=plan_classifications.get(
                     candidate.request_id),
             )
-        except Exception as exc:  # noqa: BLE001 — per-row isolation
+        except Exception:
             # Per-row isolation: one row's exception must not stop the
             # others. We surface the request id so the operator can
             # follow up.
             logger.exception(
-                "search_plan_reconciliation: request_id=%s raised %s; "
+                "search_plan_reconciliation: request_id=%s raised; "
                 "treating as unclassified no-plan",
-                candidate.request_id, exc,
+                candidate.request_id,
             )
             outcome = "unclassified_no_plan"
 
@@ -313,13 +313,13 @@ def reconcile_search_plans(
 
 
 def _reconcile_one(
-    db: "PipelineDB | _DBProto",
+    db: PipelineDB | _DBProto,
     service: SearchPlanService | None,
-    candidate: "WantedReconciliationCandidate",
+    candidate: WantedReconciliationCandidate,
     *,
     generator_id: str,
     dry_run: bool,
-    plan_classification: "DryRunPlanClassification | None" = None,
+    plan_classification: DryRunPlanClassification | None = None,
 ) -> str:
     """Classify and (when not dry-run) repair one wanted row.
 
@@ -334,9 +334,8 @@ def _reconcile_one(
     # repair current plans whose persisted snapshot is now stale, such as
     # a plan generated before all tracks were attached.
     if (candidate.active_plan_id is not None
-            and candidate.active_plan_generator_id == generator_id):
-        if dry_run:
-            return "active_current"
+            and candidate.active_plan_generator_id == generator_id) and dry_run:
+        return "active_current"
 
     if dry_run:
         return _classify_dry_run(
@@ -393,7 +392,7 @@ def _reconcile_one(
 
 
 def _classify_live_sticky_failure(
-    classification: "DryRunPlanClassification | None",
+    classification: DryRunPlanClassification | None,
     *,
     generator_id: str,
 ) -> str | None:
@@ -411,11 +410,11 @@ def _classify_live_sticky_failure(
 
 
 def _classify_dry_run(
-    db: "PipelineDB | _DBProto",
-    candidate: "WantedReconciliationCandidate",
+    db: PipelineDB | _DBProto,
+    candidate: WantedReconciliationCandidate,
     *,
     generator_id: str,
-    classification: "DryRunPlanClassification | None" = None,
+    classification: DryRunPlanClassification | None = None,
 ) -> str:
     """Read-only classification path for dry-run.
 

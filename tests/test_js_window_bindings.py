@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import os
 import json
-from pathlib import Path
+import os
 import subprocess
 import unittest
+from pathlib import Path
 
 from tests.structural_audits.js_ast import (
     assert_window_bindings,
@@ -14,7 +14,6 @@ from tests.structural_audits.js_ast import (
     emitted_window_handlers,
     exposed_window_bindings,
 )
-
 
 TEST_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(TEST_DIR)
@@ -273,18 +272,18 @@ console.log(JSON.stringify(values.map(value => value.length)));
 
     def test_binding_owner_rejects_every_semantic_object_computed_call(self) -> None:
         for source in (
-            'const method = "unrelated"; Object.assign(window, { supported }); '
-            "Object[method]({ nested: window }, { fetch });",
-            'const method = "unrelated"; Object.assign(window, { supported }); '
-            "(Object)[method](window, { fetch });",
-            'const method = "unrelated"; Object.assign(window, { supported }); '
-            "globalThis.Object[method](window, { fetch });",
-            'const method = "unrelated"; Object.assign(window, { supported }); '
-            "globalThis['Object'][method](window, { fetch });",
-            'const method = "unrelated"; Object.assign(window, { supported }); '
-            "globalThis.window.Object[method](window, { fetch });",
-            'const method = "unrelated"; Object.assign(window, { supported }); '
-            "globalThis['window']['Object'][method](window, { fetch });",
+            ('const method = "unrelated"; Object.assign(window, { supported }); '
+            "Object[method]({ nested: window }, { fetch });"),
+            ('const method = "unrelated"; Object.assign(window, { supported }); '
+            "(Object)[method](window, { fetch });"),
+            ('const method = "unrelated"; Object.assign(window, { supported }); '
+            "globalThis.Object[method](window, { fetch });"),
+            ('const method = "unrelated"; Object.assign(window, { supported }); '
+            "globalThis['Object'][method](window, { fetch });"),
+            ('const method = "unrelated"; Object.assign(window, { supported }); '
+            "globalThis.window.Object[method](window, { fetch });"),
+            ('const method = "unrelated"; Object.assign(window, { supported }); '
+            "globalThis['window']['Object'][method](window, { fetch });"),
         ):
             with self.subTest(source=source), self.assertRaises(ValueError):
                 exposed_window_bindings(source)

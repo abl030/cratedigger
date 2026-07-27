@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generated download-manifest lifecycle tests — issue #548 method.
 
 Property-based tests over the download-manifest seams touched by #550:
@@ -51,11 +50,10 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
-
 from hypothesis import example, given
 from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.download import build_active_download_state
 from lib.download_reconstruction import reconstruct_grab_list_entry
 from lib.download_validation import _check_staged_audio_manifest
@@ -130,7 +128,7 @@ def _round_trip_files(draw) -> list[DownloadFile]:
 
 
 def _manifest_snapshot(
-    files: "list[DownloadFile]",
+    files: list[DownloadFile],
 ) -> dict[tuple[str, str], tuple]:
     """(username, filename) -> the fields the manifest round trip owes."""
     return {

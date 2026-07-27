@@ -20,7 +20,7 @@ import sys
 import unittest
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from _lambda_audit import ALLOWLIST, iter_test_files, scan_file, scan_tree  # noqa: E402
+from _lambda_audit import ALLOWLIST, iter_test_files, scan_file, scan_tree
 
 
 class TestAdapterLambdaAudit(unittest.TestCase):

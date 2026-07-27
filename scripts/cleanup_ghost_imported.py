@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Find and optionally purge ghost imported pipeline rows.
 
 A ghost imported row is ``album_requests.status='imported'`` but the
@@ -14,6 +13,7 @@ import argparse
 import os
 import sys
 from collections.abc import Mapping, Sequence
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from lib.beets_db import (
@@ -102,7 +102,7 @@ def cmd_apply(db: PipelineDB, beets: BeetsDB) -> int:
     for row in ghosts:
         request_id = row["id"]
         if not isinstance(request_id, int):
-            raise ValueError(f"invalid imported request id: {request_id!r}")
+            raise TypeError(f"invalid imported request id: {request_id!r}")
         db.delete_request(request_id)
         print(
             f"deleted {request_id}: "

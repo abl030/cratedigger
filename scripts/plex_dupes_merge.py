@@ -58,10 +58,7 @@ class _DupesFile(msgspec.Struct):
 
 
 def pick_primary(members: list[_MemberRow]) -> _MemberRow:
-    return sorted(
-        members,
-        key=lambda m: (-m.track_count, int(m.ratingKey)),
-    )[0]
+    return min(members, key=lambda m: (-m.track_count, int(m.ratingKey)))
 
 
 def merge(primary_rk: str, ghost_rks: list[str], token: str) -> tuple[int, bytes]:
@@ -126,7 +123,7 @@ def main() -> None:
         label = f"{g.parent_title} / {g.title} ({g.year})"
         print(f"[{i:>4}/{len(targets)}] {label}")
         print(f"        keep rk={primary.ratingKey:>6} tracks={primary.track_count:>3}  "
-              f"merge ghosts={list(zip(ghost_rks, ghost_counts))}")
+              f"merge ghosts={list(zip(ghost_rks, ghost_counts, strict=True))}")
         if not args.commit:
             continue
         try:
@@ -137,14 +134,14 @@ def main() -> None:
             else:
                 fail += 1
                 print(f"        ✗ HTTP {status}")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             fail += 1
             print(f"        ✗ ERROR: {e}")
 
     if args.commit:
         print(f"\nDone. ok={ok} fail={fail}", file=sys.stderr)
     else:
-        print(f"\nDry-run only. Re-run with --commit to execute.", file=sys.stderr)
+        print("\nDry-run only. Re-run with --commit to execute.", file=sys.stderr)
 
 
 if __name__ == "__main__":

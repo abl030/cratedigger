@@ -16,7 +16,6 @@ from dataclasses import dataclass
 
 from lib.artist_catalogue import ArtistCataloguePair, ArtistCatalogueRow
 
-
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 _STRUCTURAL_TYPES = frozenset({"Album", "EP", "Single"})
 

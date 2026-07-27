@@ -12,7 +12,6 @@ from tests.structural_audits.ffmpeg_audio_map import (
     assert_ffmpeg_audio_mapping,
 )
 
-
 _EXTRA_ARGS = st.lists(
     st.sampled_from(("-nostdin", "-y", "-hide_banner", "-loglevel", "error")),
     max_size=6,

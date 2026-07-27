@@ -1,6 +1,6 @@
 """Tests for lib/va_identity.py — split_va_query()."""
-
 import unittest
+from typing import ClassVar
 
 from lib.va_identity import split_va_query
 
@@ -8,7 +8,7 @@ from lib.va_identity import split_va_query
 class TestSplitVaQuery(unittest.TestCase):
     """Free-text VA-token detection for the browse search builders (#199)."""
 
-    CASES = [
+    CASES: ClassVar = [
         # (desc, query, expected_remainder, expected_va)
         ("phrase trailing", "Rock Christmas Various Artists", "Rock Christmas", True),
         ("phrase leading", "Various Artists Rock Christmas", "Rock Christmas", True),

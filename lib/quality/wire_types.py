@@ -4,9 +4,10 @@ Extracted verbatim from the monolithic ``lib/quality.py`` (issue #477).
 Pure move: every definition is AST-identical to the original.
 """
 
-from typing import Optional, Sequence
-import msgspec
+from collections.abc import Sequence
+from typing import Self
 
+import msgspec
 
 # ---------------------------------------------------------------------------
 # Harness wire-boundary types — msgspec.Struct with strict `str` validation.
@@ -52,7 +53,7 @@ class HarnessItem(msgspec.Struct):
     track: int = 0
     disc: int = 0
     length: float = 0.0
-    bitrate: Optional[int] = None
+    bitrate: int | None = None
     format: str = ""
     mb_trackid: str = ""
     data_source: str = ""
@@ -67,15 +68,15 @@ class HarnessTrackInfo(msgspec.Struct):
     """
     title: str = ""
     artist: str = ""
-    index: Optional[int] = None
-    medium: Optional[int] = None
-    medium_index: Optional[int] = None
-    medium_total: Optional[int] = None
+    index: int | None = None
+    medium: int | None = None
+    medium_index: int | None = None
+    medium_total: int | None = None
     length: float = 0.0
     track_id: str = ""
     release_track_id: str = ""
-    track_alt: Optional[str] = None
-    disctitle: Optional[str] = None
+    track_alt: str | None = None
+    disctitle: str | None = None
     data_source: str = ""
 
 
@@ -114,21 +115,21 @@ class CandidateSummary(msgspec.Struct, rename={"mbid": "album_id"}):
     is_target: bool = False
     # AlbumInfo metadata
     albumdisambig: str = ""
-    year: Optional[int] = None
-    original_year: Optional[int] = None
-    country: Optional[str] = None
-    label: Optional[str] = None
-    catalognum: Optional[str] = None
-    media: Optional[str] = None
-    mediums: Optional[int] = None
-    albumtype: Optional[str] = None
+    year: int | None = None
+    original_year: int | None = None
+    country: str | None = None
+    label: str | None = None
+    catalognum: str | None = None
+    media: str | None = None
+    mediums: int | None = None
+    albumtype: str | None = None
     albumtypes: list[str] = []
-    albumstatus: Optional[str] = None
+    albumstatus: str | None = None
     releasegroup_id: str = ""
     release_group_title: str = ""
     va: bool = False
-    language: Optional[str] = None
-    script: Optional[str] = None
+    language: str | None = None
+    script: str | None = None
     data_source: str = ""
     barcode: str = ""
     asin: str = ""
@@ -185,7 +186,7 @@ class HarnessSessionEvidence(msgspec.Struct):
     # of a Python traceback — the exception line is at the bottom, which is
     # the same reason ``beets_validate`` logs stderr in full rather than
     # head-slicing it (the 2026-05-04 Psilodump crash).
-    stderr_tail: Optional[str] = None
+    stderr_tail: str | None = None
 
 
 class ValidationResult(msgspec.Struct):
@@ -201,45 +202,45 @@ class ValidationResult(msgspec.Struct):
     ``msgspec.json.encode``, decode via ``msgspec.convert`` — symmetric.
     """
     valid: bool = False
-    distance: Optional[float] = None
-    scenario: Optional[str] = None
-    detail: Optional[str] = None
+    distance: float | None = None
+    scenario: str | None = None
+    detail: str | None = None
     mbid_found: bool = False
-    target_mbid: Optional[str] = None
+    target_mbid: str | None = None
     candidate_count: int = 0
     candidates: list[CandidateSummary] = []
     # Local file info (from harness choose_match items) — JSON-plain
     # projection (``msgspec.to_builtins``) of ``HarnessItem``, not the
     # Struct itself.
     items: list[dict[str, object]] = []
-    local_track_count: Optional[int] = None
-    recommendation: Optional[str] = None        # beets confidence: "strong", "medium", "none"
-    path: Optional[str] = None                  # album path being validated
+    local_track_count: int | None = None
+    recommendation: str | None = None        # beets confidence: "strong", "medium", "none"
+    path: str | None = None                  # album path being validated
     # Source info (populated by cratedigger.py)
-    soulseek_username: Optional[str] = None
-    download_folder: Optional[str] = None
-    failed_path: Optional[str] = None
+    soulseek_username: str | None = None
+    download_folder: str | None = None
+    failed_path: str | None = None
     source_dirs: list[str] = []
     denylisted_users: list[str] = []
     # Audio integrity
     corrupt_files: list[str] = []
-    error: Optional[str] = None
+    error: str | None = None
     # Populated by ``beets_validate`` exactly when it returns without having
     # processed a ``choose_match`` — i.e. alongside ``scenario ==
     # "no_choose_match"``. ``None`` on every other result (issue #888).
-    harness_session: Optional[HarnessSessionEvidence] = None
+    harness_session: HarnessSessionEvidence | None = None
     # Bad-audio-hash gate (pre-import defense, plan 2026-04-29-005 / U5).
     # Populated when ``scenario == "bad_audio_hash"``: the matched
     # ``bad_audio_hashes.id`` and the candidate track that hashed to it.
-    matched_bad_hash_id: Optional[int] = None
-    matched_bad_track_path: Optional[str] = None
+    matched_bad_hash_id: int | None = None
+    matched_bad_track_path: str | None = None
 
     def to_json(self) -> str:
         """Serialize to JSON string via msgspec.json.encode."""
         return msgspec.json.encode(self).decode()
 
     @classmethod
-    def from_dict(cls, d: dict[str, object]) -> "ValidationResult":
+    def from_dict(cls, d: dict[str, object]) -> Self:
         """Construct from a dict — strict-typed decode at the boundary.
 
         Every nested ``CandidateSummary`` / ``TrackMapping`` / ``HarnessItem``
@@ -248,7 +249,7 @@ class ValidationResult(msgspec.Struct):
         return msgspec.convert(d, type=cls)
 
     @classmethod
-    def from_json(cls, s: str) -> "ValidationResult":
+    def from_json(cls, s: str) -> Self:
         """Deserialize from JSON string."""
         return msgspec.json.decode(s.encode(), type=cls)
 

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import unittest
 
-from hypothesis import example, given, strategies as st
+from hypothesis import example, given
+from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401
 from scripts.cratedigger_deploy_hold import (
     MAIN_SERVICE,
     MAIN_TIMER,
@@ -21,7 +23,6 @@ from scripts.cratedigger_deploy_hold import (
     prepare_controlled,
     recover_held,
 )
-import tests._hypothesis_profiles  # noqa: F401
 from tests.fakes.deploy_hold import FakeDeployHoldBackend
 
 

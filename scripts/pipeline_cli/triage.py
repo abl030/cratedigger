@@ -20,7 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from typing import TYPE_CHECKING, Any, Optional, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import msgspec
 
@@ -43,14 +43,14 @@ class _TriagePipelineDB(Protocol):
     structurally so ``PipelineDB`` / ``FakePipelineDB`` conform without
     importing that private symbol across the module boundary."""
 
-    def get_request(self, request_id: int) -> "AlbumRequestRow | None": ...
+    def get_request(self, request_id: int) -> AlbumRequestRow | None: ...
 
     def list_triage_page(
         self,
         *,
-        filter_spec: "ParsedTriageFilter",
+        filter_spec: ParsedTriageFilter,
         page_size: int,
-        after_request_id: Optional[int],
+        after_request_id: int | None,
     ) -> list[dict[str, Any]]: ...
 
     def get_field_resolutions_for_requests(
@@ -76,22 +76,22 @@ class _QuarantineWrongMatchesDB(Protocol):
     concrete DB conforms without importing the private symbol across the
     module boundary."""
 
-    def get_wrong_matches(self) -> "list[WrongMatchCandidateRow]": ...
+    def get_wrong_matches(self) -> list[WrongMatchCandidateRow]: ...
 
 
 _TRIAGE_VALID_FILTER_FORMS = (
     "all",
     "unfindable",
-    "unfindable:<category>  (category ∈ "
+    ("unfindable:<category>  (category ∈ "
     "{artist_absent, album_absent_artist_present, "
-    "one_track_structural, wrong_pressing_available})",
+    "one_track_structural, wrong_pressing_available})"),
     "data_quality",
-    "data_quality:<field_name>  (field ∈ "
-    "{release_group_year, release_group_id, track_artist, catalog_number})",
-    "data_quality:status=<resolver_status>  (e.g. "
-    "unresolved_4xx_client, unresolved_404, unresolved_timeout)",
-    "data_quality:reason=<reason_code>  (e.g. http_400, http_410, "
-    "http_422)",
+    ("data_quality:<field_name>  (field ∈ "
+    "{release_group_year, release_group_id, track_artist, catalog_number})"),
+    ("data_quality:status=<resolver_status>  (e.g. "
+    "unresolved_4xx_client, unresolved_404, unresolved_timeout)"),
+    ("data_quality:reason=<reason_code>  (e.g. http_400, http_410, "
+    "http_422)"),
     "search_not_converting",
 )
 
@@ -243,10 +243,10 @@ def cmd_triage_list(db: _TriagePipelineDB, args: argparse.Namespace) -> int:
            "page_size": <int>, "filter": <spec>}``
     """
     from lib.triage_service import (
-        InvalidFilterError,
         TRIAGE_AFTER_MIN,
         TRIAGE_LIMIT_MAX,
         TRIAGE_LIMIT_MIN,
+        InvalidFilterError,
         list_triage,
     )
 
@@ -365,7 +365,8 @@ def cmd_triage_list(db: _TriagePipelineDB, args: argparse.Namespace) -> int:
             _truncate(last_search, 20),
         )
         print("  ".join(
-            cell.ljust(width) for cell, (_, width) in zip(row_cells, header_cols)
+            cell.ljust(width)
+            for cell, (_, width) in zip(row_cells, header_cols, strict=True)
         ))
 
     print(f"  ({len(results)} rows)")

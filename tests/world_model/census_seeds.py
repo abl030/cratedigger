@@ -7,8 +7,8 @@ not assertions about a live database that will continue changing.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
 import re
+from dataclasses import asdict, dataclass
 
 
 @dataclass(frozen=True)

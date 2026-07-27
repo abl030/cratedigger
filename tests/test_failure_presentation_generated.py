@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generated properties for lib/failure_presentation.py (issue #868 PR2).
 
 The pins in ``tests/test_failure_presentation.py`` prove the exact live
@@ -38,17 +37,20 @@ import unittest
 from collections.abc import Sequence
 
 import msgspec
-from hypothesis import assume, example, given, strategies as st
+from hypothesis import assume, example, given
+from hypothesis import strategies as st
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
-
 from lib.download_materialization import (
     _PRIVATE_TREE_VOCABULARY,
     _SHARED_ROOT_VOCABULARY,
     _SOURCE_FILE_VOCABULARY,
     _ReasonVocabulary,
+)
+from lib.failure_presentation import (
+    _FAMILY_BREAKDOWN_LABELS as _BREAKDOWN_LABELS,
 )
 from lib.failure_presentation import (
     FAMILY_LOCAL_STORAGE,
@@ -70,11 +72,7 @@ from lib.failure_presentation import (
     peer_failure_family,
     present_failure,
 )
-from lib.failure_presentation import (
-    _FAMILY_BREAKDOWN_LABELS as _BREAKDOWN_LABELS,
-)
 from web.classify import LogEntry, classify_log_entry
-
 
 # ---------------------------------------------------------------------------
 # Worlds
@@ -124,10 +122,10 @@ _FAMILY_MESSAGES: dict[PeerFailureFamily, tuple[str, ...]] = {
         "Transfer aborted: the remote size of 100 does not match expected size 200",
     ),
     FAMILY_LOCAL_STORAGE: (
-        "Failed to create file 01 - track.flac: Stale file handle : "
-        "'/mnt/virtio/music/slskd/incomplete/x'",
-        "Failed to create file 02 - track.flac: Could not find a part of the "
-        "path '/mnt/virtio/music/slskd/incomplete/x'",
+        ("Failed to create file 01 - track.flac: Stale file handle : "
+        "'/mnt/virtio/music/slskd/incomplete/x'"),
+        ("Failed to create file 02 - track.flac: Could not find a part of the "
+        "path '/mnt/virtio/music/slskd/incomplete/x'"),
         "Could not find a part of the path.",
     ),
 }
@@ -203,8 +201,8 @@ _OWN_MESSAGES = st.sampled_from((
     "no download progress for 600s (stalled_timeout 600s)",
     "remote_queue_timeout 3600s exceeded",
     "file exceeded retry limit after 3 retries: d:\\music\\x\\05 - Track.flac",
-    "transfers vanished from slskd before any status was observed "
-    "(slskd restart?)",
+    ("transfers vanished from slskd before any status was observed "
+    "(slskd restart?)"),
     "all 29 files errored — 29× 'Verification required'",
 ))
 
@@ -259,7 +257,7 @@ def check_evidence_survives_rendering(
     message = presentation.transfer_message
     if not message:
         return "per-file evidence existed but no transfer_message was rendered"
-    dominant = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+    dominant = min(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0]
     if bounded_text(dominant) not in message:
         return (
             "the dominant peer message is missing from transfer_message: "
@@ -284,8 +282,8 @@ _FORBIDDEN_FAMILY_CLAIMS: dict[PeerFailureFamily, tuple[tuple[str, str], ...]] =
         ("could not read",
          "the size-mismatch member read its file fine; slskd aborted"),
         ("unreadable",
-         "the adjective form of the same retracted claim — this is how it "
-         "survived B1 in the breakdown label table"),
+         ("the adjective form of the same retracted claim — this is how it "
+         "survived B1 in the breakdown label table")),
         ("its own files",
          "a size mismatch is about what was advertised, not ownership"),
         ("rejected", "nothing in this family is a refusal"),
@@ -381,7 +379,7 @@ def dominant_family(raw_files: Sequence[dict[str, object]]) -> str | None:
             counts[reason] = counts.get(reason, 0) + 1
     if not counts:
         return None
-    dominant = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+    dominant = min(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0]
     return peer_failure_family(dominant)
 
 

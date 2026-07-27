@@ -369,7 +369,7 @@ def _plan_provenance_line(prov: dict[str, Any] | None) -> list[str]:
     out = ["      provenance:"]
     for key, raw_value in prov.items():
         if isinstance(raw_value, list):
-            value = _as_list(prov[key])
+            value = _as_list(raw_value)
             out.append(f"        {key}: {len(value)} item(s)")
             for entry in value[:5]:
                 out.append(f"          - {entry}")

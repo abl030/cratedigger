@@ -1,14 +1,13 @@
-#!/usr/bin/env python3
 """Real shipped-Beets contracts at CLI and request-detail API boundaries."""
 
 from __future__ import annotations
 
 import argparse
 import io
+import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
-import unittest
 
 from lib.beets_db import CurrentBeetsResolution
 from lib.release_identity import ReleaseIdentity
@@ -17,7 +16,6 @@ from tests.beets_world import BeetsWorld, BeetsWorldRelease
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_request_row
 from tests.web._harness import _FakeDbWebServerCase
-
 
 REPO = Path(__file__).resolve().parent.parent
 MB_TARGET = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -139,23 +137,22 @@ class TestCurrentLibraryCliRealBeets(unittest.TestCase):
 
     def test_modern_and_legacy_discogs_render_the_same_unique_authority(self) -> None:
         for legacy in (False, True):
-            with self.subTest(layout="legacy" if legacy else "modern"):
-                with BeetsWorld(REPO) as world:
-                    snapshot = world.import_release(_release(DISCOGS_TARGET))
-                    world.set_discogs_identity_layout(
-                        DISCOGS_TARGET, legacy=legacy,
-                    )
-                    world.set_release_paths_relative(DISCOGS_TARGET)
-                    db = FakePipelineDB()
-                    db.seed_request(_request(2, DISCOGS_TARGET))
+            with self.subTest(layout="legacy" if legacy else "modern"), BeetsWorld(REPO) as world:
+                snapshot = world.import_release(_release(DISCOGS_TARGET))
+                world.set_discogs_identity_layout(
+                    DISCOGS_TARGET, legacy=legacy,
+                )
+                world.set_release_paths_relative(DISCOGS_TARGET)
+                db = FakePipelineDB()
+                db.seed_request(_request(2, DISCOGS_TARGET))
 
-                    output = _show(db, 2, world)
+                output = _show(db, 2, world)
 
-                    self.assertIn("Current Library: unique", output)
-                    self.assertIn(
-                        f"Current Path:    {snapshot.album_path}", output,
-                    )
-                    self.assertNotIn("/poisoned/request/cache", output)
+                self.assertIn("Current Library: unique", output)
+                self.assertIn(
+                    f"Current Path:    {snapshot.album_path}", output,
+                )
+                self.assertNotIn("/poisoned/request/cache", output)
 
     def test_same_metadata_sibling_is_missing_and_duplicates_are_ambiguous(
         self,
@@ -229,7 +226,7 @@ class TestCurrentLibraryCliRealBeets(unittest.TestCase):
                             beets_db=None,
                             beets_directory=None,
                         ),
-                        open_beets_fn=lambda **_kwargs: beets,
+                        open_beets_fn=lambda beets=beets, **_kwargs: beets,
                     )
 
                 self.assertIn(
@@ -261,7 +258,7 @@ class TestCurrentLibraryApiRealBeets(_FakeDbWebServerCase):
 
     def test_api_returns_fresh_path_and_tracks_without_request_cache(self) -> None:
         with BeetsWorld(REPO) as world:
-            initial = world.import_release(_release(MB_TARGET))
+            world.import_release(_release(MB_TARGET))
             moved = world.relocate_release_out_of_band(
                 MB_TARGET,
                 world.library_root / "API" / "moved-current",

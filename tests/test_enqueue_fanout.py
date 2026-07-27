@@ -22,14 +22,16 @@ from __future__ import annotations
 import configparser
 import json
 import unittest
+from collections.abc import Sequence
 from dataclasses import replace
-from typing import Any, Sequence, cast
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 from cratedigger import TrackRecord
 from lib.browse import BrowseManyResult
 from lib.config import CratediggerConfig
 from lib.context import CratediggerContext
+from lib.download_ownership import DownloadOwnershipWriter
 from lib.enqueue import (
     _WorkerPipelineDBSource,
     get_album_tracks,
@@ -37,10 +39,9 @@ from lib.enqueue import (
     try_enqueue,
     try_multi_enqueue,
 )
-from lib.slskd_transfers import SlskdEnqueueOutcome
-from lib.download_ownership import DownloadOwnershipWriter
 from lib.grab_list import DownloadFile
 from lib.matching import MatchResult
+from lib.slskd_transfers import SlskdEnqueueOutcome
 from tests.fakes import (
     DenylistEntry,
     FakePipelineDB,
@@ -48,7 +49,6 @@ from tests.fakes import (
     FakeSlskdAPI,
 )
 from tests.helpers import make_request_row
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -813,11 +813,10 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
         )
 
         with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
-             patch("lib.enqueue.slskd_enqueue_with_outcome", side_effect=KeyboardInterrupt):
-            with self.assertRaises(KeyboardInterrupt):
-                try_enqueue(
-                    _make_tracks(), results, "flac", ctx, match_fn=_const_match(match),
-                )
+             patch("lib.enqueue.slskd_enqueue_with_outcome", side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
+            try_enqueue(
+                _make_tracks(), results, "flac", ctx, match_fn=_const_match(match),
+            )
 
         row = db.request(1)
         self.assertEqual(row["status"], "downloading")

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generated + pinned tests for the on-disk orphan reaper (issue #550
 defect 3, flipped to positive ledger ownership by issue #571's
 good-citizen doctrine).
@@ -54,19 +53,17 @@ import tempfile
 import time
 import unittest
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
-
 import msgspec
 from hypothesis import example, given
 from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.download import build_active_download_state
 from lib.pipeline_db import TransferLedgerRow
 from lib.processing_paths import (
@@ -598,30 +595,29 @@ class TestDiskReaperDeterministicPins(unittest.TestCase):
             ("missing state", None),
             ("undecodable state", {"garbage": True}),
         ):
-            with self.subTest(desc=desc):
-                with tempfile.TemporaryDirectory() as root:
-                    fake_db = FakePipelineDB()
-                    owned_canonical = _seed_owned_inactive(
-                        fake_db, request_id=8, artist="Orphan Artist",
-                        title="Orphan Album", year="2001",
-                        file_pairs=[("op", "op\\Album\\01.flac")], root=root)
-                    orphan = os.path.join(owned_canonical, "01.flac")
-                    _write_aged_file(orphan, age_days=_OLD_DAYS)
-                    stale_empty = os.path.join(root, "Empty Stale Folder")
-                    os.makedirs(stale_empty)
-                    _age_dir(stale_empty, age_days=_OLD_DAYS)
-                    fake_db.seed_request(make_request_row(
-                        id=7, status="downloading",
-                        active_download_state=bad_state))
-                    ctx = _make_ctx(root, fake_db=fake_db)
+            with self.subTest(desc=desc), tempfile.TemporaryDirectory() as root:
+                fake_db = FakePipelineDB()
+                owned_canonical = _seed_owned_inactive(
+                    fake_db, request_id=8, artist="Orphan Artist",
+                    title="Orphan Album", year="2001",
+                    file_pairs=[("op", "op\\Album\\01.flac")], root=root)
+                orphan = os.path.join(owned_canonical, "01.flac")
+                _write_aged_file(orphan, age_days=_OLD_DAYS)
+                stale_empty = os.path.join(root, "Empty Stale Folder")
+                os.makedirs(stale_empty)
+                _age_dir(stale_empty, age_days=_OLD_DAYS)
+                fake_db.seed_request(make_request_row(
+                    id=7, status="downloading",
+                    active_download_state=bad_state))
+                ctx = _make_ctx(root, fake_db=fake_db)
 
-                    summary = reap_disk_orphans(ctx)
+                summary = reap_disk_orphans(ctx)
 
-                    self.assertTrue(os.path.exists(orphan))
-                    self.assertTrue(os.path.isdir(stale_empty))
-                    self.assertTrue(summary.aborted)
-                    self.assertEqual(summary.removed, 0)
-                    self.assertEqual(summary.pruned_dirs, 0)
+                self.assertTrue(os.path.exists(orphan))
+                self.assertTrue(os.path.isdir(stale_empty))
+                self.assertTrue(summary.aborted)
+                self.assertEqual(summary.removed, 0)
+                self.assertEqual(summary.pruned_dirs, 0)
 
     def test_one_undecodable_row_aborts_despite_healthy_rows(self):
         """ANY undecodable downloading row aborts — a healthy sibling
@@ -1169,23 +1165,23 @@ class TestDiskReaperCheckerTripsOnViolations(unittest.TestCase):
     """Each planted violation must trip assert_disk_reaper_invariants."""
 
     def _base_result(self, **overrides: Any) -> DiskReaperRunResult:
-        defaults: dict[str, Any] = dict(
-            root=tempfile.gettempdir(),
-            summary=DiskReapSummary(),
-            path_expected_survive={},
-            path_actual_survive={},
-            folder_expected_exists={},
-            folder_actual_exists={},
-            empty_stale_unowned_path=None,
-            empty_stale_unowned_survived=True,
-            empty_stale_owned_path=None,
-            empty_stale_owned_expected_survive=False,
-            empty_stale_owned_survived=False,
-            empty_fresh_path=None,
-            empty_fresh_survived=False,
-            root_intact=True,
-            expect_abort=False,
-        )
+        defaults: dict[str, Any] = {
+            "root": tempfile.gettempdir(),
+            "summary": DiskReapSummary(),
+            "path_expected_survive": {},
+            "path_actual_survive": {},
+            "folder_expected_exists": {},
+            "folder_actual_exists": {},
+            "empty_stale_unowned_path": None,
+            "empty_stale_unowned_survived": True,
+            "empty_stale_owned_path": None,
+            "empty_stale_owned_expected_survive": False,
+            "empty_stale_owned_survived": False,
+            "empty_fresh_path": None,
+            "empty_fresh_survived": False,
+            "root_intact": True,
+            "expect_abort": False,
+        }
         defaults.update(overrides)
         return DiskReaperRunResult(**defaults)
 

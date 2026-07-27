@@ -12,10 +12,9 @@ import subprocess as sp
 import sys
 from typing import TYPE_CHECKING
 
+from lib.dispatch.types import ImportOneRun
 from lib.quality import parse_import_result
 from lib.util import beets_subprocess_env
-
-from lib.dispatch.types import ImportOneRun
 
 if TYPE_CHECKING:
     from lib.quality import V0ProbeEvidence
@@ -157,6 +156,7 @@ def run_import_one(
             beets_library_db_path=beets_library_db_path,
             beets_library_root=beets_library_root,
         ),
+        check=False,
     )
     stdout = result.stdout or ""
     stderr = result.stderr or ""

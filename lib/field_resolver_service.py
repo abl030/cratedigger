@@ -33,12 +33,13 @@ import socket
 import threading
 import time
 import urllib.error
-from typing import Any, Callable, Literal, Protocol
+from collections.abc import Callable
+from typing import Any, Literal, Protocol
 
 import msgspec
 
-from lib.json_narrow import json_dict as _json_dict, json_list as _json_list
-
+from lib.json_narrow import json_dict as _json_dict
+from lib.json_narrow import json_list as _json_list
 
 logger = logging.getLogger(__name__)
 
@@ -76,11 +77,10 @@ FIELD_CATALOG_NUMBER = "catalog_number"
 # ``lib/va_identity.py``. Re-exported here so the existing import paths
 # (``from lib.field_resolver_service import MB_VA_ARTIST_MBID``) keep
 # working without forcing every caller to learn the new module.
-from lib.va_identity import (  # noqa: E402
+from lib.va_identity import (
     DISCOGS_VA_ARTIST_ID,
     MB_VA_ARTIST_MBID,
 )
-
 
 # Network-style exceptions we treat as transient mirror failures
 # (``unresolved_mirror_unavailable``). Subclasses of ``URLError`` and
@@ -303,7 +303,7 @@ def _record(
                 "field=%s status=%s",
                 request_id, field_name, result.status,
             )
-    except Exception:  # noqa: BLE001
+    except Exception:
         # Recording is best-effort observability; an upsert failure must
         # not block the caller from using the resolved value. The
         # resolver itself already succeeded; the value is what the
@@ -367,7 +367,7 @@ def resolve_release_group_year(
             return result
         try:
             year = fetch(master_id)
-        except BaseException as exc:  # noqa: BLE001
+        except BaseException as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             status, reason = _classify_lookup_exception(exc)
             result = ResolverResult(
                 field_name=FIELD_RELEASE_GROUP_YEAR,
@@ -408,7 +408,7 @@ def resolve_release_group_year(
     fetch_mb = mb_get_release_group_year or _default_mb_get_release_group_year
     try:
         year = fetch_mb(rg_mbid)
-    except BaseException as exc:  # noqa: BLE001
+    except BaseException as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         status, reason = _classify_lookup_exception(exc)
         result = ResolverResult(
             field_name=FIELD_RELEASE_GROUP_YEAR,
@@ -490,7 +490,7 @@ def resolve_release_group_id(
             fetch = discogs_get_release or _default_discogs_get_release
             try:
                 data = fetch(str(discogs_release_id), fresh=True)
-            except BaseException as exc:  # noqa: BLE001
+            except BaseException as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                 status, reason = _classify_lookup_exception(exc)
                 result = ResolverResult(
                     field_name=FIELD_RELEASE_GROUP_ID,
@@ -533,7 +533,7 @@ def resolve_release_group_id(
         fetch_mb = mb_get_release or _default_mb_get_release
         try:
             data = fetch_mb(mb_id, fresh=True)
-        except BaseException as exc:  # noqa: BLE001
+        except BaseException as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             status, reason = _classify_lookup_exception(exc)
             result = ResolverResult(
                 field_name=FIELD_RELEASE_GROUP_ID,
@@ -618,7 +618,7 @@ def resolve_track_artists(
             fetch_d = discogs_get_release or _default_discogs_get_release
             try:
                 data = fetch_d(str(discogs_release_id), fresh=True)
-            except BaseException as exc:  # noqa: BLE001
+            except BaseException as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                 status, reason = _classify_lookup_exception(exc)
                 per_track = [ResolverResult(
                     field_name=FIELD_TRACK_ARTIST,
@@ -647,7 +647,7 @@ def resolve_track_artists(
         fetch_mb = mb_get_release or _default_mb_get_release
         try:
             data = fetch_mb(mb_id, fresh=True)
-        except BaseException as exc:  # noqa: BLE001
+        except BaseException as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             status, reason = _classify_lookup_exception(exc)
             per_track = [ResolverResult(
                 field_name=FIELD_TRACK_ARTIST,
@@ -916,7 +916,7 @@ def resolve_catalog_number(
             fetch = discogs_get_release or _default_discogs_get_release
             try:
                 data = fetch(str(discogs_release_id), fresh=True)
-            except BaseException as exc:  # noqa: BLE001
+            except BaseException as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                 status, reason = _classify_lookup_exception(exc)
                 result = ResolverResult(
                     field_name=FIELD_CATALOG_NUMBER,
@@ -958,7 +958,7 @@ def resolve_catalog_number(
         fetch_mb = mb_get_release or _default_mb_get_release
         try:
             data = fetch_mb(mb_id, fresh=True)
-        except BaseException as exc:  # noqa: BLE001
+        except BaseException as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             status, reason = _classify_lookup_exception(exc)
             result = ResolverResult(
                 field_name=FIELD_CATALOG_NUMBER,
@@ -1181,7 +1181,7 @@ def detect_va_compilation(
 
     # Rule 1.
     artist_id = request.get("mb_artist_id")
-    if is_discogs:
+    if is_discogs and isinstance(discogs_release_payload, dict):
         # request rows from the Discogs path don't always carry the
         # discogs artist id directly; the payload is authoritative.
         # Two shapes appear in the wild:
@@ -1190,16 +1190,15 @@ def detect_va_compilation(
         #   * Direct Discogs-mirror payloads carry the nested
         #     ``payload["artists"][0]["id"]`` shape.
         # Read both; either presence overrides the skeleton value.
-        if isinstance(discogs_release_payload, dict):
-            top_level = discogs_release_payload.get("artist_id")
-            if top_level not in (None, ""):
-                artist_id = top_level
-            else:
-                artists = _json_list(discogs_release_payload.get("artists"))
-                if artists:
-                    first_raw = artists[0]
-                    if isinstance(first_raw, dict):
-                        artist_id = _json_dict(first_raw).get("id")
+        top_level = discogs_release_payload.get("artist_id")
+        if top_level not in (None, ""):
+            artist_id = top_level
+        else:
+            artists = _json_list(discogs_release_payload.get("artists"))
+            if artists:
+                first_raw = artists[0]
+                if isinstance(first_raw, dict):
+                    artist_id = _json_dict(first_raw).get("id")
     if _is_canonical_va_credit(artist_id, source_is_discogs=is_discogs):
         return True
 
@@ -1481,7 +1480,7 @@ def resolve_all(
                     try:
                         outputs[key] = fut.result(timeout=0)
                         continue
-                    except Exception:  # noqa: BLE001
+                    except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
                         # Fall through to the timeout-recording path
                         # below — a completed-but-raised future is
                         # equivalent to "we got nothing useful".
@@ -1506,7 +1505,7 @@ def resolve_all(
                         status="unresolved_timeout",
                         reason_code="budget_exhausted",
                     )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 # The four resolvers handle their own exception
                 # classification internally — anything escaping here is
                 # either a transient that slipped past the resolver's
@@ -1519,13 +1518,13 @@ def resolve_all(
                 # ``reason_code='bug_<ExcName>'`` so it sticks rather
                 # than masquerading as a recoverable mirror outage.
                 logger.exception(
-                    "resolve_all: %s raised unexpectedly for request=%d: %s",
-                    field_name, request_id, exc,
+                    "resolve_all: %s raised unexpectedly for request=%d",
+                    field_name, request_id,
                 )
                 outputs[key] = None
                 try:
                     status, reason = _classify_lookup_exception(exc)
-                except BaseException:  # noqa: BLE001
+                except BaseException:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                     status = "unresolved_internal_error"
                     reason = f"bug_{type(exc).__name__}"
                 if not deferred.already_recorded(field_name):

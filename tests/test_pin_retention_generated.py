@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Pinned + generated invariants for terminal media-server pin retention."""
 from __future__ import annotations
 
@@ -7,15 +6,15 @@ import os
 import sys
 import unittest
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import tests._hypothesis_profiles  # noqa: F401
+import psycopg2.errors
 from hypothesis import given
 from hypothesis import strategies as st
-import psycopg2.errors
 
+import tests._hypothesis_profiles  # noqa: F401
 from lib.pipeline_db import (
     JELLYFIN_PIN_STATUSES,
     JELLYFIN_TERMINAL_PIN_STATUSES,
@@ -25,7 +24,7 @@ from lib.pipeline_db import (
 from tests.fakes import FakePipelineDB
 
 RETENTION_DAYS = 90
-NOW = datetime(2026, 7, 11, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 7, 11, 0, 0, tzinfo=UTC)
 CUTOFF = NOW - timedelta(days=RETENTION_DAYS)
 
 
@@ -125,7 +124,7 @@ def assert_status_write_matches_domain(
                 f"valid {backend} status {status!r} was not persisted")
         return
     if not isinstance(error, psycopg2.errors.CheckViolation):
-        raise AssertionError(
+        raise AssertionError(  # noqa: TRY004 - generated invariant failure
             f"invalid {backend} status {status!r} did not raise CheckViolation")
     if after != before:
         raise AssertionError(
@@ -163,7 +162,7 @@ def _run_status_write(backend: str, status: str) -> tuple[
     dict[str, object], dict[str, object], Exception | None,
 ]:
     db = FakePipelineDB()
-    now = datetime(2026, 7, 11, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 11, tzinfo=UTC)
     if backend == "plex":
         pin_id = db.add_plex_added_at_pin(
             imported_path="A/B", original_added_at=1,
@@ -181,14 +180,14 @@ def _run_status_write(backend: str, status: str) -> tuple[
             db.mark_plex_added_at_pin(
                 pin_id, status=status,  # type: ignore[arg-type]
                 reconciled_at=now)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             error = exc
     else:
         try:
             db.mark_jellyfin_date_created_pin(
                 pin_id, status=status,  # type: ignore[arg-type]
                 reconciled_at=now)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             error = exc
     return before, copy.deepcopy(row), error
 

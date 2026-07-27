@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generated invariants for process-local metadata single-flight.
 
 Across arbitrary cold/warm waves and cache keys, each cold key is fetched once,
@@ -18,10 +17,10 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import tests._hypothesis_profiles  # noqa: F401
 from hypothesis import example, given
 from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401
 from tests.test_web_cache import FakeRedis
 from web import cache
 
@@ -144,7 +143,13 @@ class TestGeneratedMetadataSingleFlight(unittest.TestCase):
                 key: threading.Event() for key in expected_wave_fetches
             }
 
-            def call(key: str) -> dict[str, Any]:
+            def call(
+                key: str,
+                *,
+                start: threading.Barrier = start,
+                entered: dict[str, threading.Event] = entered,
+                release: dict[str, threading.Event] = release,
+            ) -> dict[str, Any]:
                 start.wait(timeout=5)
 
                 def fetch() -> dict[str, Any]:
@@ -158,23 +163,22 @@ class TestGeneratedMetadataSingleFlight(unittest.TestCase):
 
                 return cache.memoize_meta(key, fetch)
 
-            with patch.object(cache, "_MetadataFlight", _ObservedMetadataFlight):
-                with ThreadPoolExecutor(max_workers=len(keys)) as pool:
-                    futures = [pool.submit(call, key) for key in keys]
-                    start.wait(timeout=5)
-                    try:
-                        for key in expected_wave_fetches:
-                            self.assertTrue(
-                                entered[key].wait(timeout=5),
-                                f"no leader entered the fill for {key}",
-                            )
-                            _wait_for_actual_followers(
-                                self, key, keys.count(key) - 1,
-                            )
-                    finally:
-                        for gate in release.values():
-                            gate.set()
-                    results = [future.result(timeout=5) for future in futures]
+            with patch.object(cache, "_MetadataFlight", _ObservedMetadataFlight), ThreadPoolExecutor(max_workers=len(keys)) as pool:
+                futures = [pool.submit(call, key) for key in keys]
+                start.wait(timeout=5)
+                try:
+                    for key in expected_wave_fetches:
+                        self.assertTrue(
+                            entered[key].wait(timeout=5),
+                            f"no leader entered the fill for {key}",
+                        )
+                        _wait_for_actual_followers(
+                            self, key, keys.count(key) - 1,
+                        )
+                finally:
+                    for gate in release.values():
+                        gate.set()
+                results = [future.result(timeout=5) for future in futures]
 
             assert_singleflight_wave(
                 expected_fetches, fetches, keys, results,
@@ -238,21 +242,20 @@ class TestGeneratedMetadataSingleFlight(unittest.TestCase):
 
             return cache.memoize_meta(key, fail)
 
-        with patch.object(cache, "_MetadataFlight", _ObservedMetadataFlight):
-            with ThreadPoolExecutor(max_workers=callers) as pool:
-                futures = [pool.submit(call) for _ in range(callers)]
-                started.wait(timeout=5)
+        with patch.object(cache, "_MetadataFlight", _ObservedMetadataFlight), ThreadPoolExecutor(max_workers=callers) as pool:
+            futures = [pool.submit(call) for _ in range(callers)]
+            started.wait(timeout=5)
+            try:
+                self.assertTrue(entered.wait(timeout=5))
+                _wait_for_actual_followers(self, key, callers - 1)
+            finally:
+                release.set()
+            raised: list[BaseException] = []
+            for future in futures:
                 try:
-                    self.assertTrue(entered.wait(timeout=5))
-                    _wait_for_actual_followers(self, key, callers - 1)
-                finally:
-                    release.set()
-                raised: list[BaseException] = []
-                for future in futures:
-                    try:
-                        future.result(timeout=5)
-                    except BaseException as exc:
-                        raised.append(exc)
+                    future.result(timeout=5)
+                except BaseException as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
+                    raised.append(exc)
 
         self.assertEqual(fetches, 1)
         self.assertEqual(len(raised), callers)
@@ -289,16 +292,15 @@ class TestGeneratedMetadataSingleFlight(unittest.TestCase):
 
             return cache.memoize_meta(key, fetch)
 
-        with patch.object(cache, "_MetadataFlight", _ObservedMetadataFlight):
-            with ThreadPoolExecutor(max_workers=callers) as pool:
-                futures = [pool.submit(call) for _ in range(callers)]
-                started.wait(timeout=5)
-                try:
-                    self.assertTrue(entered.wait(timeout=5))
-                    _wait_for_actual_followers(self, key, callers - 1)
-                finally:
-                    release.set()
-                results = [future.result(timeout=5) for future in futures]
+        with patch.object(cache, "_MetadataFlight", _ObservedMetadataFlight), ThreadPoolExecutor(max_workers=callers) as pool:
+            futures = [pool.submit(call) for _ in range(callers)]
+            started.wait(timeout=5)
+            try:
+                self.assertTrue(entered.wait(timeout=5))
+                _wait_for_actual_followers(self, key, callers - 1)
+            finally:
+                release.set()
+            results = [future.result(timeout=5) for future in futures]
 
         self.assertEqual(fetches, 1)
         self.assertEqual(len({id(result) for result in results}), callers)

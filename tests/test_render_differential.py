@@ -15,16 +15,16 @@ from tempfile import TemporaryDirectory
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import msgspec  # noqa: E402
-import msgspec.inspect  # noqa: E402
+import msgspec
+import msgspec.inspect
 
-from lib.quality import (  # noqa: E402
+from lib.quality import (
     AudioQualityMeasurement,
     ImportResult,
     QualityComparisonBasis,
     TargetQualityContract,
 )
-from scripts.render_differential import (  # noqa: E402
+from scripts.render_differential import (
     DEFAULT_TARGET_SPEC,
     ClassifyRenderTarget,
     DiffReport,
@@ -41,8 +41,8 @@ from scripts.render_differential import (  # noqa: E402
     unwatched_field_names,
     watched_field_names,
 )
-from web.classify import ClassifiedEntry, LogEntry, classify_log_entry  # noqa: E402
-from web.routes.pipeline import (  # noqa: E402
+from web.classify import ClassifiedEntry, LogEntry, classify_log_entry
+from web.routes.pipeline import (
     _classify_pipeline_log_item,
     _project_linked_import_evidence,
 )
@@ -88,7 +88,7 @@ def _download_log_row(**overrides: object) -> dict[str, object]:
         "request_id": 77,
         "outcome": "rejected",
         "created_at": datetime.datetime(
-            2026, 7, 26, 4, 30, tzinfo=datetime.timezone.utc),
+            2026, 7, 26, 4, 30, tzinfo=datetime.UTC),
         "beets_scenario": "mbid_not_found",
         "beets_distance": 0.04,
         "soulseek_username": "peer",
@@ -275,7 +275,10 @@ class TestConverseOracle(unittest.TestCase):
     def test_non_json_value_fails_closed(self) -> None:
         with self.assertRaises(RenderDifferentialError):
             project_output_fields(
-                {"verdict": datetime.datetime(2026, 7, 26)}, ("verdict",), ())
+                {"verdict": datetime.datetime(2026, 7, 26, tzinfo=datetime.UTC)},
+                ("verdict",),
+                (),
+            )
 
 
 class TestClassifyRenderTargetIsTheProductionPath(unittest.TestCase):
@@ -391,7 +394,7 @@ class TestClassifyRenderTargetIsTheProductionPath(unittest.TestCase):
         _project_linked_import_evidence(whole_set, [])
         target = ClassifyRenderTarget()
         target.prepare(rows)
-        for row, expected in zip(rows, whole_set):
+        for row, expected in zip(rows, whole_set, strict=True):
             rendered = target.render(row)
             for name in watched_field_names(ClassifiedEntry):
                 with self.subTest(row=row["id"], field=name):

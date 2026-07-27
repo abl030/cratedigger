@@ -71,8 +71,10 @@ LABEL_RELEASES_INCLUDE_TIMEOUT_SECONDS = 20
 # comparison against `artist_id` fields, which are always normalised to str.
 # Single declaration site at ``lib/va_identity.py`` — re-exported here so
 # the existing ``from web.discogs import VA_ARTIST_ID`` imports keep working.
-from lib.va_identity import (  # noqa: E402
+from lib.va_identity import (
     DISCOGS_VA_ARTIST_ID as VA_ARTIST_ID,
+)
+from lib.va_identity import (
     split_va_query,
 )
 
@@ -835,7 +837,7 @@ class LabelEntity(msgspec.Struct):
     parent_label_id: str | None
     parent_label_name: str | None
     release_count: int
-    sub_labels: list[dict[str, object]] = msgspec.field(default_factory=lambda: [])
+    sub_labels: list[dict[str, object]] = msgspec.field(default_factory=list)
 
 
 def _label_entity_from_hit(hit: _DiscogsLabelHit) -> LabelEntity:
@@ -1021,7 +1023,7 @@ def get_label_releases(label_id: int | str, *, include_sublabels: bool = True,
         if e.code == 503 and include_sublabels:
             return _fallback_without_sublabels()
         raise
-    except (TimeoutError, socket.timeout, urllib.error.URLError) as e:
+    except (TimeoutError, urllib.error.URLError) as e:
         if include_sublabels and _is_timeout_error(e):
             return _fallback_without_sublabels()
         raise

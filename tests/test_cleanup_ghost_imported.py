@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Tests for scripts/cleanup_ghost_imported.py."""
 
 import io
@@ -186,9 +185,8 @@ class TestDefaultDsnFailsLoud(unittest.TestCase):
     def test_main_fails_loud_when_dsn_is_not_configured(self) -> None:
         with patch.object(sys, "argv", ["cleanup_ghost_imported.py"]):
             stderr = io.StringIO()
-            with redirect_stderr(stderr):
-                with self.assertRaises(SystemExit) as cm:
-                    cleanup_ghost_imported.main()
+            with redirect_stderr(stderr), self.assertRaises(SystemExit) as cm:
+                cleanup_ghost_imported.main()
 
         self.assertEqual(cm.exception.code, 2)
         self.assertIn("PIPELINE_DB_DSN", stderr.getvalue())

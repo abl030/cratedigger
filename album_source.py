@@ -9,9 +9,9 @@ from __future__ import annotations
 import json
 import logging
 import urllib.request
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Sequence, TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, TypedDict
 from urllib.parse import quote
 
 if TYPE_CHECKING:
@@ -268,7 +268,7 @@ class DatabaseSource:
             records.append(record)
         return records
 
-    def get_tracks(self, album_record: AlbumRecord | object) -> "list[TrackRecord]":
+    def get_tracks(self, album_record: AlbumRecord | object) -> list[TrackRecord]:
         """Get tracks for an album in normalized track format.
 
         Returns list of dicts with keys: title, trackNumber, mediumNumber, duration.
@@ -450,7 +450,7 @@ class DatabaseSource:
             req.add_header("User-Agent", "cratedigger-db/1.0")
             with urllib.request.urlopen(req, timeout=15) as resp:
                 data: _MBReleaseJSON = json.loads(resp.read())
-        except Exception:
+        except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             logger.warning(f"Failed to fetch tracks from MB API for {mb_id}")
             return []
 
@@ -488,7 +488,7 @@ class DatabaseSource:
             req.add_header("User-Agent", "cratedigger-db/1.0")
             with urllib.request.urlopen(req, timeout=15) as resp:
                 data: _DiscogsReleaseJSON = json.loads(resp.read())
-        except Exception:
+        except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             logger.warning(f"Failed to fetch tracks from Discogs API for {discogs_id}")
             return []
 

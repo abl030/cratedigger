@@ -7,14 +7,15 @@ builder are the production entry points; ``FakePipelineDB`` supplies state.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 import unittest
+from collections.abc import Mapping
 
 import msgspec
-from hypothesis import example, given, strategies as st
+from hypothesis import example, given
+from hypothesis import strategies as st
 
-from lib.quality import ImportResult, ValidationResult
 import tests._hypothesis_profiles  # noqa: F401
+from lib.quality import ImportResult, ValidationResult
 from tests.helpers import make_request_row
 from tests.web._harness import _FakeDbWebServerCase
 from web.classify import ClassifiedEntry

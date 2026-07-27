@@ -22,7 +22,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import ParseResult, parse_qs, urlparse
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WEB_ROOT = REPO_ROOT / "web"
 FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "web"
@@ -122,7 +121,7 @@ class DevHTTPServer(ThreadingHTTPServer):
 class DevHandler(BaseHTTPRequestHandler):
     server: DevHTTPServer  # pyright: ignore[reportIncompatibleVariableOverride]
 
-    def log_message(self, format: str, *args: object) -> None:  # noqa: A002 - match base signature
+    def log_message(self, format: str, *args: object) -> None:
         print(f"{self.address_string()} - {format % args}", flush=True)
 
     def do_GET(self) -> None:
@@ -254,7 +253,7 @@ class DevHandler(BaseHTTPRequestHandler):
             # ``Message[str, str]`` shape ``_proxy_response`` expects.
             exc_headers: Message[str, str] = exc.headers
             self._proxy_response(exc.read(), exc_headers, status=exc.code)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             self._json({"error": str(exc), "upstream": url}, status=502)
 
     def _proxy_response(
@@ -296,7 +295,7 @@ class DevHandler(BaseHTTPRequestHandler):
             # Dev sessions should exercise the same 503, not a generic 500
             # (#501 item 4).
             self._error(str(exc), 503)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             web_server.log.exception("dev live-db GET %s failed", path)
             web_server._try_reconnect_db()
             self._error(str(exc), 500)
@@ -406,7 +405,7 @@ def configure_live_db(config: DevConfig) -> None:
         if web_server.db is not None:
             try:
                 web_server.db.conn.close()
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
                 pass
         web_server.db = PipelineDB(config.dsn)
         web_server.db._execute("SET default_transaction_read_only = on")

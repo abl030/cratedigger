@@ -5,15 +5,14 @@ mismatches at the boundary between raw slskd dicts and DownloadFile instances.
 """
 
 import copy
-import json
 import os
-import shutil
 import sys
 import tempfile
 import unittest
+from collections.abc import Sequence
 from dataclasses import replace
-from typing import Sequence, TYPE_CHECKING
-from unittest.mock import MagicMock, patch, PropertyMock
+from typing import TYPE_CHECKING
+from unittest.mock import MagicMock, patch
 
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
@@ -27,10 +26,10 @@ import cratedigger
 from lib import browse as browse_module
 from lib import enqueue as enqueue_module
 from lib import matching as matching_module
+from lib.context import CratediggerContext
+from lib.dispatch import _build_download_info
 from lib.grab_list import DownloadFile
 from lib.slskd_transfers import cancel_and_delete, slskd_do_enqueue
-from lib.dispatch import _build_download_info
-from lib.context import CratediggerContext
 from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
 from tests.helpers import (
     make_download_file,
@@ -135,12 +134,12 @@ def make_search_result(username, files, upload_speed=1048576):
     }
 
 
-def make_tracks(*track_defs: tuple[int, str, int]) -> list["cratedigger.TrackRecord"]:
+def make_tracks(*track_defs: tuple[int, str, int]) -> list[cratedigger.TrackRecord]:
     """Build a list of TrackRecord dicts from (albumId, title, mediumNumber) tuples."""
     return [{"albumId": a, "title": t, "mediumNumber": m} for a, t, m in track_defs]
 
 
-def make_directory(dir_path: str, files: list[dict[str, object]]) -> "cratedigger.SlskdDirectory":
+def make_directory(dir_path: str, files: list[dict[str, object]]) -> cratedigger.SlskdDirectory:
     """Build a directory dict as slskd.users.directory() returns it."""
     return {
         "directory": dir_path,
@@ -169,7 +168,7 @@ class TestBuildSearchCache(unittest.TestCase):
             {"filename": "Music\\Album\\01.flac", "size": 100},
             {"filename": "Music\\Album\\02.flac", "size": 100},
         ])]
-        entries, speeds, counts = cratedigger._build_search_cache(results, self._specs("flac"))
+        entries, _speeds, counts = cratedigger._build_search_cache(results, self._specs("flac"))
         self.assertIn("user1", entries)
         self.assertIn("flac", entries["user1"])
         self.assertEqual(entries["user1"]["flac"], ["Music\\Album"])
@@ -247,7 +246,7 @@ class TestBuildSearchCache(unittest.TestCase):
         results = [make_search_result("user1", [
             {"filename": "A\\cover.jpg", "size": 50},
         ])]
-        entries, _, counts = cratedigger._build_search_cache(results, self._specs("flac"))
+        entries, _, _counts = cratedigger._build_search_cache(results, self._specs("flac"))
         # User entry created but no filetypes
         self.assertEqual(entries.get("user1", {}), {})
 
@@ -576,7 +575,7 @@ class TestAlbumRecordAttrAccess(unittest.TestCase):
 
     def test_get_tracks_with_album_record(self):
         """get_tracks receives AlbumRecord — uses .db_request_id attribute."""
-        from album_source import AlbumRecord, DatabaseSource, ReleaseRecord
+        from album_source import AlbumRecord, DatabaseSource
         record = AlbumRecord(
             id=-1, title="T", release_date="2024-01-01T00:00:00Z",
             artist_id=0, artist_name="A", foreign_artist_id="",
@@ -1034,6 +1033,7 @@ class TestSearchLoggingOutcomes(unittest.TestCase):
         # MagicMock-as-cfg silently swallowed missing fields and is the exact
         # anti-pattern code-quality.md § "Decision Logic" warns against.
         import configparser
+
         from lib.config import CratediggerConfig
         self._orig_cfg = cratedigger.cfg
         cratedigger.cfg = CratediggerConfig.from_ini(configparser.ConfigParser())

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Acquire and release Cratedigger's strict systemd deployment hold.
 
 The fixed unit set and root-owned runtime receipt are deliberate. This helper
@@ -9,17 +8,16 @@ control link it did not create and record itself.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
 import os
-from pathlib import Path
 import re
 import stat
 import subprocess
 import sys
 import time
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
-
 
 CONTROL_DIR = "/run/systemd/system.control"
 STATE_DIR = Path("/run/cratedigger-deploy-hold")

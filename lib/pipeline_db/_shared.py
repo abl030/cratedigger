@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Pipeline DB — PostgreSQL-based source of truth for the download pipeline.
 
 Connects to PostgreSQL via a DSN (connection string). Both doc1 and doc2
@@ -17,12 +16,12 @@ import re
 import zlib
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Optional
+from datetime import UTC, datetime
+from typing import Any
 
+import msgspec
 import psycopg2
 import psycopg2.extras
-import msgspec
 
 from lib.quality import (
     SpectralMeasurement,
@@ -128,7 +127,7 @@ def _float_or_none(value: Any) -> float | None:
 # ``Any`` under typeshed's two-argument ``getattr`` overload, breaking the
 # Unknown cascade without a suppression comment. One typed wrapper here is
 # shared by every INSERT ... VALUES %s batch-insert call site.
-_execute_values_fn = getattr(psycopg2.extras, "execute_values")
+_execute_values_fn = psycopg2.extras.execute_values
 
 
 def pg_execute_values(
@@ -158,7 +157,7 @@ def _msgspec_json_dumps(value: object) -> str:
 def _stable_hash(label: str, *parts: str) -> str:
     """Return a namespaced SHA-256 digest for privacy-preserving counters."""
     digest = hashlib.sha256()
-    digest.update(f"cratedigger:{label}\0".encode("utf-8"))
+    digest.update(f"cratedigger:{label}\0".encode())
     for part in parts:
         encoded = part.encode("utf-8")
         digest.update(str(len(encoded)).encode("ascii"))
@@ -879,19 +878,19 @@ def _row_dt(value: Any) -> datetime | None:
     if value is None:
         return None
     if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
     if isinstance(value, str):
         try:
             parsed = datetime.fromisoformat(value)
         except ValueError:
             return None
-        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
     return None
 
 
 def _aggregate_group(
     rows: list[dict[str, Any]], identity: dict[str, object],
-) -> "SearchPlanStatsGroup":
+) -> SearchPlanStatsGroup:
     """Aggregate one cohort of search_log rows into a stats group.
 
     Counts attempts/outcomes, computes mean/p95 elapsed, and means for
@@ -964,7 +963,7 @@ def _build_stats_bucket(
     plan_aware_rows: list[dict[str, Any]],
     legacy_rows: list[dict[str, Any]],
     include_legacy_bucket: bool,
-) -> "SearchPlanStatsBucket":
+) -> SearchPlanStatsBucket:
     """Group plan-aware rows by slot + query-group, render legacy bucket.
 
     Slot grouping is sorted by (plan_id, ordinal); query-group
@@ -1085,27 +1084,27 @@ class PersistedTrack(msgspec.Struct, kw_only=True):
     the exact per-track videos selected from the resolver row.
     """
 
-    title: Optional[str] = None
-    artists: Optional[list[dict[str, Any]]] = None
-    length_seconds: Optional[float] = None
-    track_number: Optional[int] = None
-    disc_number: Optional[int] = None
-    video_id: Optional[str] = None
+    title: str | None = None
+    artists: list[dict[str, Any]] | None = None
+    length_seconds: float | None = None
+    track_number: int | None = None
+    disc_number: int | None = None
+    video_id: str | None = None
 
 
 class PersistedDistance(msgspec.Struct, kw_only=True):
     """One persisted per-pair distance inside ``distances`` JSONB."""
 
-    mbid: Optional[str] = None
-    outcome: Optional[str] = None
-    distance: Optional[float] = None
-    components: Optional[dict[str, float]] = None
-    matched_tracks: Optional[int] = None
-    total_local_tracks: Optional[int] = None
-    total_mb_tracks: Optional[int] = None
-    extra_local_tracks: Optional[int] = None
-    extra_mb_tracks: Optional[int] = None
-    error_message: Optional[str] = None
+    mbid: str | None = None
+    outcome: str | None = None
+    distance: float | None = None
+    components: dict[str, float] | None = None
+    matched_tracks: int | None = None
+    total_local_tracks: int | None = None
+    total_mb_tracks: int | None = None
+    extra_local_tracks: int | None = None
+    extra_mb_tracks: int | None = None
+    error_message: str | None = None
 
 
 class PersistedYoutubeRow(msgspec.Struct, kw_only=True):
@@ -1137,15 +1136,15 @@ class PersistedYoutubeRow(msgspec.Struct, kw_only=True):
     yt_track_count: int
     # Genuinely optional: ``yt_audio_playlist_id`` and ``yt_year`` are
     # documented NULLable in migration 034.
-    yt_audio_playlist_id: Optional[str] = None
-    yt_year: Optional[int] = None
+    yt_audio_playlist_id: str | None = None
+    yt_year: int | None = None
     # Album-level facts persisted alongside the row so the cache
     # rehydration in ``_rows_to_youtube_releases`` produces SyntheticItem
     # values structurally identical to the fresh-resolve path. Both are
     # nullable to allow legacy rows written before migration 036 (none
     # in production yet, but the column is nullable per the migration).
-    album_title: Optional[str] = None
-    album_artist: Optional[str] = None
+    album_title: str | None = None
+    album_artist: str | None = None
     yt_tracks: list[PersistedTrack] = msgspec.field(default_factory=list[PersistedTrack])
     distances: list[PersistedDistance] = msgspec.field(default_factory=list[PersistedDistance])
 
@@ -1173,4 +1172,4 @@ class TransferLedgerRow(msgspec.Struct, kw_only=True):
     request_id: int
     username: str
     filename: str
-    attempt_fingerprint: Optional[str] = None
+    attempt_fingerprint: str | None = None

@@ -71,7 +71,6 @@ from scripts.pipeline_cli.album_requests import (
     finalize_request,
     tracks_from_mb_release,
 )
-from scripts.pipeline_cli.audit import cmd_audit_world
 from scripts.pipeline_cli.api_mutations import (
     cmd_pipeline_delete,
     cmd_resolve_rg,
@@ -79,12 +78,10 @@ from scripts.pipeline_cli.api_mutations import (
     cmd_upgrade,
     cmd_wrong_match_converge,
 )
-from scripts.pipeline_cli.query import cmd_query
-from scripts.pipeline_cli.show import cmd_show
-from scripts.pipeline_cli.quality import (
-    cmd_quality,
-    cmd_repair_spectral,
-)
+from scripts.pipeline_cli.audit import cmd_audit_world
+from scripts.pipeline_cli.beets_distance import cmd_beets_distance
+from scripts.pipeline_cli.cli import PipelineDB, main
+from scripts.pipeline_cli.destructive import cmd_ban_source, cmd_library_delete
 from scripts.pipeline_cli.imports import (
     SPECTRAL_GRADE_CHOICES,
     cmd_force_import,
@@ -92,11 +89,14 @@ from scripts.pipeline_cli.imports import (
     cmd_import_jobs,
     cmd_import_preview,
 )
-from scripts.pipeline_cli.wrong_match import (
-    cmd_wrong_match_delete,
-    cmd_wrong_match_delete_group,
-    cmd_wrong_match_triage,
+from scripts.pipeline_cli.long_tail import cmd_long_tail
+from scripts.pipeline_cli.quality import (
+    cmd_quality,
+    cmd_repair_spectral,
 )
+from scripts.pipeline_cli.query import cmd_query
+from scripts.pipeline_cli.replace import cmd_replace
+from scripts.pipeline_cli.routes_meta import cmd_routes
 from scripts.pipeline_cli.search_plan import (
     cmd_search_plan_advance,
     cmd_search_plan_dry_run,
@@ -105,40 +105,40 @@ from scripts.pipeline_cli.search_plan import (
     cmd_search_plan_saturation,
     cmd_search_plan_show,
 )
-from scripts.pipeline_cli.replace import cmd_replace
-from scripts.pipeline_cli.beets_distance import cmd_beets_distance
-from scripts.pipeline_cli.destructive import cmd_ban_source, cmd_library_delete
+from scripts.pipeline_cli.show import cmd_show
+from scripts.pipeline_cli.triage import (
+    cmd_triage_list,
+    cmd_triage_quarantine,
+    cmd_triage_show,
+)
+from scripts.pipeline_cli.wrong_match import (
+    cmd_wrong_match_delete,
+    cmd_wrong_match_delete_group,
+    cmd_wrong_match_triage,
+)
 from scripts.pipeline_cli.youtube import (
     OUTCOME_EXIT_CODE,
     cmd_youtube_album,
     cmd_youtube_rescue,
     resolve_youtube_album,
 )
-from scripts.pipeline_cli.triage import (
-    cmd_triage_list,
-    cmd_triage_quarantine,
-    cmd_triage_show,
-)
-from scripts.pipeline_cli.long_tail import cmd_long_tail
-from scripts.pipeline_cli.routes_meta import cmd_routes
-from scripts.pipeline_cli.cli import PipelineDB, main
 
 __all__ = [
     "OUTCOME_EXIT_CODE",
-    "PipelineDB",
     "SPECTRAL_GRADE_CHOICES",
     "VALID_STATUSES",
+    "PipelineDB",
     "cmd_add",
     "cmd_audit_world",
-    "cmd_beets_distance",
     "cmd_ban_source",
+    "cmd_beets_distance",
     "cmd_disk_coverage",
     "cmd_force_import",
     "cmd_import_job_recovery",
     "cmd_import_jobs",
     "cmd_import_preview",
-    "cmd_list",
     "cmd_library_delete",
+    "cmd_list",
     "cmd_long_tail",
     "cmd_pipeline_delete",
     "cmd_quality",
@@ -162,9 +162,9 @@ __all__ = [
     "cmd_triage_quarantine",
     "cmd_triage_show",
     "cmd_upgrade",
+    "cmd_wrong_match_converge",
     "cmd_wrong_match_delete",
     "cmd_wrong_match_delete_group",
-    "cmd_wrong_match_converge",
     "cmd_wrong_match_triage",
     "cmd_youtube_album",
     "cmd_youtube_rescue",

@@ -28,7 +28,6 @@ from scripts.run_python_tests import (
     HypothesisPropertyStats,
 )
 
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RUNNER = REPO_ROOT / "scripts" / "run_fuzz_tests.py"
 WRAPPER = REPO_ROOT / "scripts" / "fuzz_burst.sh"
@@ -301,8 +300,8 @@ class TestBurstDepthReport(unittest.TestCase):
         self.assertEqual(
             [line for line in format_depth_report(depths) if "SHALLOW" in line],
             [
-                "SHALLOW 4 worlds vs 2500 examples per shard "
-                f"(8 shards, 20000 total) {self.PROPERTY}"
+                ("SHALLOW 4 worlds vs 2500 examples per shard "
+                f"(8 shards, 20000 total) {self.PROPERTY}")
             ],
         )
 
@@ -314,8 +313,8 @@ class TestBurstDepthReport(unittest.TestCase):
         self.assertEqual(
             [line for line in format_depth_report(depths) if "SHALLOW" in line],
             [
-                "SHALLOW 4 worlds vs 50 examples per shard "
-                f"(1 shard, 50 total) {self.PROPERTY}"
+                ("SHALLOW 4 worlds vs 50 examples per shard "
+                f"(1 shard, 50 total) {self.PROPERTY}")
             ],
         )
 
@@ -375,8 +374,8 @@ class TestBurstDepthReport(unittest.TestCase):
         self.assertEqual(
             [line for line in format_depth_report((depth,)) if "DISCARD" in line],
             [
-                f"DISCARD 50% of 300 examples (150 discarded, 150 worlds) "
-                f"{self.PROPERTY}"
+                (f"DISCARD 50% of 300 examples (150 discarded, 150 worlds) "
+                f"{self.PROPERTY}")
             ],
         )
 

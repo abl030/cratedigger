@@ -2,24 +2,24 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 import unittest
+from dataclasses import replace
 
 import msgspec
-from hypothesis import example, given, strategies as st
+from hypothesis import example, given
+from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401
 from lib.import_queue import (
-    AutomationImportPayload,
-    ForceImportPayload,
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
     IMPORT_JOB_YOUTUBE,
+    AutomationImportPayload,
+    ForceImportPayload,
     ImportJob,
     YoutubeImportPayload,
     validate_payload,
 )
-import tests._hypothesis_profiles  # noqa: F401
-
 
 _TEXT = st.text(
     alphabet=st.characters(blacklist_categories=("Cs", "Cc")),
@@ -182,7 +182,7 @@ def assert_job_payload_matches_type(job: ImportJob) -> None:
         IMPORT_JOB_YOUTUBE: YoutubeImportPayload,
     }[job.job_type]
     if not isinstance(job.payload, expected):
-        raise AssertionError(
+        raise AssertionError(  # noqa: TRY004 - generated invariant failure
             f"{job.job_type} decoded to {type(job.payload).__name__}, "
             f"not {expected.__name__}",
         )

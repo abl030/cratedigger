@@ -24,8 +24,8 @@ import socket
 import subprocess
 import tempfile
 import time
-import urllib.request
 import urllib.error
+import urllib.request
 
 
 def _find_free_port():
@@ -110,6 +110,7 @@ flags:
         subprocess.run(
             ["docker", "pull", SLSKD_IMAGE],
             capture_output=True, timeout=120, env=docker_env,
+            check=False,
         )
 
         # Start container
@@ -122,6 +123,7 @@ flags:
                 SLSKD_IMAGE,
             ],
             capture_output=True, text=True, timeout=30, env=docker_env,
+            check=False,
         )
         if result.returncode != 0:
             raise RuntimeError(f"docker run failed: {result.stderr}")
@@ -181,6 +183,7 @@ flags:
             subprocess.run(
                 ["docker", "stop", self.container_id],
                 capture_output=True, timeout=15, env=_docker_cmd(),
+                check=False,
             )
             self.container_id = None
 
@@ -190,6 +193,7 @@ flags:
                 ["docker", "run", "--rm", "-v", f"{self._tmpdir}:/cleanup",
                  "alpine", "rm", "-rf", "/cleanup"],
                 capture_output=True, timeout=15, env=_docker_cmd(),
+                check=False,
             )
             shutil.rmtree(self._tmpdir, ignore_errors=True)
             self._tmpdir = None

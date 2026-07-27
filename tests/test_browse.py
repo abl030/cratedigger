@@ -406,8 +406,7 @@ class TestFanoutBrowseConcurrencyCap(unittest.TestCase):
             nonlocal peak, in_flight
             with lock:
                 in_flight += delta
-                if in_flight > peak:
-                    peak = in_flight
+                peak = max(peak, in_flight)
 
         slskd.users.in_flight_probe = probe
 

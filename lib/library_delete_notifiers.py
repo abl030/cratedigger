@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Literal
 
 import msgspec
 
@@ -17,7 +18,6 @@ from lib.util import (
     request_jellyfin_refresh,
     request_plex_scan,
 )
-
 
 log = logging.getLogger("cratedigger")
 
