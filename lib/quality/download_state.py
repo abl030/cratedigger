@@ -208,16 +208,42 @@ def decide_download_action(
 
 @dataclass(frozen=True)
 class SpectralMeasurement:
-    """One spectral analysis result pair."""
+    """One spectral analysis result pair.
+
+    ``cliff_hz``/``codec_family``/``ultrasonic_deficit_db``/
+    ``spectral_measurement_version`` are issue #829 Phase 5 PR1 capture
+    fields — pure passengers carried alongside ``grade``/``bitrate_kbps``
+    from a fresh ``SpectralAnalysisDetail`` measurement into
+    ``AudioQualityMeasurement``. No decision reads them in this PR.
+    """
     grade: Optional[str] = None
     bitrate_kbps: Optional[int] = None
+    cliff_hz: Optional[int] = None
+    codec_family: Optional[str] = None
+    ultrasonic_deficit_db: Optional[float] = None
+    spectral_measurement_version: Optional[int] = None
 
     @staticmethod
-    def from_parts(grade: Optional[str], bitrate_kbps: Optional[int]) -> "SpectralMeasurement | None":
+    def from_parts(
+        grade: Optional[str],
+        bitrate_kbps: Optional[int],
+        *,
+        cliff_hz: Optional[int] = None,
+        codec_family: Optional[str] = None,
+        ultrasonic_deficit_db: Optional[float] = None,
+        spectral_measurement_version: Optional[int] = None,
+    ) -> "SpectralMeasurement | None":
         """Build a measurement when any spectral data exists, else None."""
         if grade is None and bitrate_kbps is None:
             return None
-        return SpectralMeasurement(grade=grade, bitrate_kbps=bitrate_kbps)
+        return SpectralMeasurement(
+            grade=grade,
+            bitrate_kbps=bitrate_kbps,
+            cliff_hz=cliff_hz,
+            codec_family=codec_family,
+            ultrasonic_deficit_db=ultrasonic_deficit_db,
+            spectral_measurement_version=spectral_measurement_version,
+        )
 
 
 # ---------------------------------------------------------------------------

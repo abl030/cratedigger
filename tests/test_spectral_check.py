@@ -234,8 +234,9 @@ class TestAnalyzeTrackMocked(unittest.TestCase):
             returncode=0
         )
         analyze_track("/fake/path.mp3", trim_seconds=30)
-        # Should be called 17 times: 1 reference + 16 slices
-        self.assertEqual(mock_run.call_count, 17)
+        # Should be called 21 times: 1 reference + 16 in-window slices + 4
+        # extension slices (issue #829 Phase 5 PR1 capture).
+        self.assertEqual(mock_run.call_count, 21)
         # First call should be reference band 1000-4000
         first_call_args = mock_run.call_args_list[0][0][0]
         self.assertIn("1000-4000", first_call_args)
@@ -477,6 +478,296 @@ class TestNaNRmsGuard(unittest.TestCase):
     def test_inf_rms_returns_none(self):
         from lib.spectral_check import parse_rms_from_stat
         self.assertIsNone(parse_rms_from_stat("RMS     amplitude:     inf\n"))
+
+
+# ============================================================
+# issue #829 Phase 5 PR1 — spectral capture (cliff_hz, codec_family,
+# ultrasonic_deficit_db, spectral_measurement_version). Capture only:
+# nothing here may change grade/cliff_detected/estimated_bitrate_kbps.
+# ============================================================
+
+class TestSliceWindowUnchanged(unittest.TestCase):
+    """Locks the decision-path window: widening SLICE_FREQS shifts cliff
+    detections and introduces false cliffs on genuine lossless near 20kHz
+    (measured, see the Phase 5 plan). The extension slices are a separate,
+    additive constant."""
+
+    def test_slice_freqs_is_still_the_original_16_element_window(self):
+        from lib.spectral_check import SLICE_FREQS
+        self.assertEqual(SLICE_FREQS, list(range(12000, 20000, 500)))
+        self.assertEqual(len(SLICE_FREQS), 16)
+
+    def test_extension_slice_freqs(self):
+        from lib.spectral_check import EXTENSION_SLICE_FREQS
+        self.assertEqual(EXTENSION_SLICE_FREQS, [20000, 20500, 21000, 21500])
+
+    def test_ultrasonic_deficit_slice_freqs_is_the_top_three_extension_slices(self):
+        from lib.spectral_check import ULTRASONIC_DEFICIT_SLICE_FREQS
+        self.assertEqual(ULTRASONIC_DEFICIT_SLICE_FREQS, [20500, 21000, 21500])
+
+    def test_spectral_measurement_version_is_2(self):
+        from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
+        self.assertEqual(SPECTRAL_MEASUREMENT_VERSION, 2)
+
+
+class TestCodecFamilyFromExtension(unittest.TestCase):
+    """Extension-based codec family normalisation (issue #829 Phase 5 PR1)."""
+
+    CASES = [
+        ("track.mp3", "mp3"),
+        ("track.MP3", "mp3"),
+        ("track.aac", "aac"),
+        ("track.m4a", "aac"),  # documented simplification — see docstring
+        ("track.opus", "opus"),
+        ("track.ogg", "vorbis"),
+        ("track.flac", "lossless"),
+        ("track.wav", "lossless"),
+        ("track.aiff", "lossless"),
+        ("track.aif", "lossless"),
+        ("track.au", "lossless"),
+        ("track.alac", "lossless"),
+        ("track.ape", "lossless"),
+        ("track.wma", "other"),
+        ("track.mid", "other"),
+        ("track", "other"),
+    ]
+
+    def test_extension_maps_to_expected_family(self):
+        from lib.spectral_check import codec_family_from_extension
+        for filename, expected in self.CASES:
+            with self.subTest(filename=filename):
+                self.assertEqual(
+                    codec_family_from_extension(f"/some/dir/{filename}"),
+                    expected,
+                )
+
+    def test_result_is_always_one_of_the_six_known_families(self):
+        from lib.spectral_check import codec_family_from_extension
+        known = {"mp3", "aac", "opus", "vorbis", "lossless", "other"}
+        for filename, _expected in self.CASES:
+            self.assertIn(
+                codec_family_from_extension(f"/x/{filename}"), known,
+            )
+
+
+class TestComputeUltrasonicDeficitDb(unittest.TestCase):
+    """Level-invariant ultrasonic deficit (issue #829 Phase 5 PR1)."""
+
+    def test_matches_reference_formula(self):
+        from lib.spectral_check import _Slice, compute_ultrasonic_deficit_db
+        slices: list[_Slice] = [
+            {"freq": 20000, "db": -50.0},  # captured, excluded from the mean
+            {"freq": 20500, "db": -60.0},
+            {"freq": 21000, "db": -70.0},
+            {"freq": 21500, "db": -80.0},
+        ]
+        # ref_db - mean(20500, 21000, 21500) = -10 - (-70) = 60
+        result = compute_ultrasonic_deficit_db(-10.0, slices)
+        assert result is not None
+        self.assertAlmostEqual(result, 60.0)
+
+    def test_20000hz_slice_is_captured_but_excluded_from_the_mean(self):
+        """Changing ONLY the 20000Hz value must not move the result —
+        proves the statistic really excludes it (matches score_v3)."""
+        from lib.spectral_check import _Slice, compute_ultrasonic_deficit_db
+        base: list[_Slice] = [
+            {"freq": 20000, "db": -50.0},
+            {"freq": 20500, "db": -60.0},
+            {"freq": 21000, "db": -70.0},
+            {"freq": 21500, "db": -80.0},
+        ]
+        moved: list[_Slice] = [
+            {"freq": s["freq"], "db": s["db"]} for s in base
+        ]
+        moved[0]["db"] = -999.0
+        self.assertEqual(
+            compute_ultrasonic_deficit_db(-10.0, base),
+            compute_ultrasonic_deficit_db(-10.0, moved),
+        )
+
+    def test_missing_required_slice_returns_none(self):
+        from lib.spectral_check import _Slice, compute_ultrasonic_deficit_db
+        # 21500Hz missing — only two of the three required slices present.
+        slices: list[_Slice] = [
+            {"freq": 20000, "db": -50.0},
+            {"freq": 20500, "db": -60.0},
+            {"freq": 21000, "db": -70.0},
+        ]
+        self.assertIsNone(compute_ultrasonic_deficit_db(-10.0, slices))
+
+    def test_no_slices_at_all_returns_none(self):
+        from lib.spectral_check import compute_ultrasonic_deficit_db
+        self.assertIsNone(compute_ultrasonic_deficit_db(-10.0, []))
+
+
+class TestAggregateAlbumSpectralCapture(unittest.TestCase):
+    """Pure album-level aggregation of per-track capture facts (issue #829
+    Phase 5 PR1) — direct unit tests, no I/O."""
+
+    def test_empty_track_list(self):
+        from lib.spectral_check import aggregate_album_spectral_capture
+        self.assertEqual(
+            aggregate_album_spectral_capture([]), (None, None, None),
+        )
+
+    def test_cliff_hz_is_min_of_detected_cliffs(self):
+        from lib.spectral_check import (
+            TrackResult, aggregate_album_spectral_capture,
+        )
+        tracks = [
+            TrackResult("suspect", cliff_freq_hz=18000, codec_family="mp3"),
+            TrackResult("suspect", cliff_freq_hz=16000, codec_family="mp3"),
+            TrackResult("genuine", cliff_freq_hz=None, codec_family="mp3"),
+        ]
+        cliff_hz, _codec_family, _deficit = (
+            aggregate_album_spectral_capture(tracks)
+        )
+        self.assertEqual(cliff_hz, 16000)
+
+    def test_cliff_hz_none_when_no_track_has_a_cliff(self):
+        from lib.spectral_check import (
+            TrackResult, aggregate_album_spectral_capture,
+        )
+        tracks = [TrackResult("genuine", codec_family="flac") for _ in range(3)]
+        cliff_hz, _codec_family, _deficit = (
+            aggregate_album_spectral_capture(tracks)
+        )
+        self.assertIsNone(cliff_hz)
+
+    def test_ultrasonic_deficit_db_is_mean_of_available_values(self):
+        from lib.spectral_check import (
+            TrackResult, aggregate_album_spectral_capture,
+        )
+        tracks = [
+            TrackResult("genuine", ultrasonic_deficit_db=40.0),
+            TrackResult("genuine", ultrasonic_deficit_db=60.0),
+            TrackResult("genuine", ultrasonic_deficit_db=None),  # excluded
+        ]
+        _cliff_hz, _codec_family, deficit = (
+            aggregate_album_spectral_capture(tracks)
+        )
+        assert deficit is not None
+        self.assertAlmostEqual(deficit, 50.0)
+
+    def test_ultrasonic_deficit_db_none_when_no_track_has_one(self):
+        from lib.spectral_check import (
+            TrackResult, aggregate_album_spectral_capture,
+        )
+        tracks = [TrackResult("genuine") for _ in range(2)]
+        _cliff_hz, _codec_family, deficit = (
+            aggregate_album_spectral_capture(tracks)
+        )
+        self.assertIsNone(deficit)
+
+    def test_codec_family_is_first_track(self):
+        from lib.spectral_check import (
+            TrackResult, aggregate_album_spectral_capture,
+        )
+        tracks = [
+            TrackResult("genuine", codec_family="opus"),
+            TrackResult("genuine", codec_family="mp3"),
+        ]
+        _cliff_hz, codec_family, _deficit = (
+            aggregate_album_spectral_capture(tracks)
+        )
+        self.assertEqual(codec_family, "opus")
+
+
+class TestExtensionSlicesNeverFeedCliffDetection(unittest.TestCase):
+    """issue #829 Phase 5 PR1: the four extension slices (20000-21500Hz)
+    must never influence detect_cliff/cliff_detected/cliff_freq_hz/grade.
+    """
+
+    # 16 in-window slices (12000..19500) with no cliff, plus 4 extension
+    # slices (20000..21500) that DO contain a steep dropoff.
+    _NO_CLIFF_IN_WINDOW = [-20.0] * 16
+    _CLIFF_IN_EXTENSION_ONLY = [-20.0, -35.0, -60.0, -90.0]
+
+    def test_fixture_would_show_a_cliff_if_extension_slices_leaked_in(self):
+        """Sanity check: feeding detect_cliff the WIDER 20-slice vector
+        DOES find a cliff — proves the exclusion below is a real
+        constraint, not a no-op."""
+        from lib.spectral_check import (
+            EXTENSION_SLICE_FREQS, SLICE_FREQS, _Slice, detect_cliff,
+        )
+        in_window: list[_Slice] = [
+            {"freq": f, "db": d}
+            for f, d in zip(SLICE_FREQS, self._NO_CLIFF_IN_WINDOW)
+        ]
+        self.assertIsNone(detect_cliff(in_window))
+
+        extended: list[_Slice] = in_window + [
+            {"freq": f, "db": d}
+            for f, d in zip(EXTENSION_SLICE_FREQS, self._CLIFF_IN_EXTENSION_ONLY)
+        ]
+        self.assertIsNotNone(
+            detect_cliff(extended),
+            "fixture must show a cliff when extension slices are "
+            "included — otherwise this test doesn't prove anything",
+        )
+
+    @patch("lib.spectral_check.subprocess.run")
+    def test_analyze_track_ignores_extension_band_content(self, mock_run):
+        """The production analyze_track() must grade this track 'genuine'
+        with no cliff, even though the SAME dB values — if detect_cliff
+        saw them — would report one at the window boundary."""
+        from lib.spectral_check import (
+            EXTENSION_SLICE_FREQS, SLICE_FREQS, analyze_track,
+        )
+
+        ref_db_value = -20.0
+        band_db = {1000: ref_db_value}
+        band_db.update(zip(SLICE_FREQS, self._NO_CLIFF_IN_WINDOW))
+        band_db.update(zip(EXTENSION_SLICE_FREQS, self._CLIFF_IN_EXTENSION_ONLY))
+
+        def _rms_for_db(db):
+            return 10 ** (db / 20.0)
+
+        def side_effect(cmd, **kwargs):
+            sinc_idx = cmd.index("sinc")
+            lo_hz = int(cmd[sinc_idx + 1].split("-")[0])
+            db = band_db.get(lo_hz, ref_db_value)
+            return MagicMock(
+                stderr="RMS     amplitude:     %.8f\n" % _rms_for_db(db),
+                returncode=0,
+            )
+
+        mock_run.side_effect = side_effect
+        result = analyze_track("/fake/no_cliff.flac", trim_seconds=30)
+
+        self.assertFalse(result.cliff_detected)
+        self.assertIsNone(result.cliff_freq_hz)
+        self.assertEqual(result.grade, "genuine")
+
+
+class TestAnalyzeAlbumCaptureFieldsRealAudio(unittest.TestCase):
+    """Real sox end-to-end: analyze_album must stamp the new capture
+    fields on genuine audio, not just in mocked unit tests."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmpdir = tempfile.mkdtemp(prefix="spectral_capture_test_")
+        cls.tone_flac = os.path.join(cls.tmpdir, "01 - Tone.flac")
+        subprocess.run(
+            ["sox", "-n", "-r", "44100", "-c", "2",
+             cls.tone_flac, "synth", "3", "sin", "1000", "vol", "0.5"],
+            check=True, capture_output=True,
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def test_album_result_carries_capture_fields(self):
+        from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION, analyze_album
+        result = analyze_album(self.tmpdir, trim_seconds=2)
+        self.assertNotEqual(result.grade, "error")
+        self.assertEqual(
+            result.spectral_measurement_version, SPECTRAL_MEASUREMENT_VERSION,
+        )
+        self.assertEqual(result.codec_family, "lossless")
+        self.assertEqual(len(result.tracks), 1)
+        self.assertEqual(result.tracks[0].codec_family, "lossless")
 
 
 if __name__ == "__main__":

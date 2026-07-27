@@ -11,12 +11,13 @@ from __future__ import annotations
 import configparser
 import unittest
 import tempfile
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import patch
 
 from lib.measurement import _check_bad_audio_hashes, _iter_audio_files
+from lib.spectral_check import AlbumResult
 from tests.fakes import FakePipelineDB
 
 
@@ -118,7 +119,7 @@ class TestAttemptSpectralAudit(unittest.TestCase):
             def analyze(path: str, trim_seconds: int = 30):
                 del trim_seconds
                 calls.append(path)
-                return SimpleNamespace(
+                return AlbumResult(
                     grade="suspect" if path == existing else "genuine",
                     estimated_bitrate_kbps=(128 if path == existing else None),
                     suspect_pct=(100.0 if path == existing else 0.0),
@@ -179,7 +180,7 @@ class TestAttemptSpectralAudit(unittest.TestCase):
             def analyze(path: str, trim_seconds: int = 30):
                 del trim_seconds
                 calls.append(path)
-                return SimpleNamespace(
+                return AlbumResult(
                     grade="genuine",
                     estimated_bitrate_kbps=None,
                     suspect_pct=0.0,
@@ -209,7 +210,7 @@ class TestAttemptSpectralAudit(unittest.TestCase):
         def analyze(path: str, trim_seconds: int = 30):
             if path == "/candidate":
                 raise RuntimeError("candidate decode failed")
-            return SimpleNamespace(
+            return AlbumResult(
                 grade="suspect",
                 estimated_bitrate_kbps=128,
                 suspect_pct=100.0,
@@ -226,7 +227,7 @@ class TestAttemptSpectralAudit(unittest.TestCase):
 
     def test_normal_harness_collector_only_analyzes_candidate(self):
         from lib.measurement import collect_attempt_spectral_audit
-        result = SimpleNamespace(
+        result = AlbumResult(
             grade="genuine", estimated_bitrate_kbps=None,
             suspect_pct=0.0, tracks=[],
         )
@@ -247,9 +248,19 @@ class TestAttemptSpectralAudit(unittest.TestCase):
         from lib.config import CratediggerConfig
         from lib.measurement import analyze_spectral_audit_path, measure_preimport_state
 
+        # hf_deficit_db on the second track is deliberately the wrong type
+        # (str, not float). A real TrackResult's field type would fail
+        # pyright on that value, so this whole AlbumResult-shaped object is
+        # built as a SimpleNamespace instead — analyze_spectral_audit_path
+        # only ever reads grade/cliff_hz/codec_family/ultrasonic_deficit_db/
+        # spectral_measurement_version (album level) and
+        # grade/hf_deficit_db/cliff_detected/cliff_freq_hz/
+        # estimated_bitrate_kbps/error (per track), all present below.
         result = SimpleNamespace(
             grade="suspect", estimated_bitrate_kbps=160,
             suspect_pct=75.0,
+            cliff_hz=None, codec_family=None,
+            ultrasonic_deficit_db=None, spectral_measurement_version=None,
             tracks=[
                 SimpleNamespace(
                     grade="genuine", hf_deficit_db=20.0,
@@ -305,7 +316,7 @@ class TestAttemptSpectralAudit(unittest.TestCase):
                 album_id=1, track_count=1, min_bitrate_kbps=320,
                 is_cbr=True, album_path=existing, format="MP3",
             ))
-            existing_result = SimpleNamespace(
+            existing_result = AlbumResult(
                 grade="suspect", estimated_bitrate_kbps=128,
                 suspect_pct=100.0, tracks=[],
             )
@@ -350,7 +361,7 @@ class TestAttemptSpectralAudit(unittest.TestCase):
             )
 
         before = decide()
-        result = SimpleNamespace(
+        result = AlbumResult(
             grade="suspect", estimated_bitrate_kbps=128,
             suspect_pct=100.0, tracks=[],
         )

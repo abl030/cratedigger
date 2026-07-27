@@ -1498,6 +1498,10 @@ def _preview_spectral_audit_from_action_file(
             attempted=True,
             grade=measurement.spectral_grade,
             bitrate_kbps=measurement.spectral_bitrate_kbps,
+            cliff_hz=measurement.cliff_hz,
+            codec_family=measurement.codec_family,
+            ultrasonic_deficit_db=measurement.ultrasonic_deficit_db,
+            spectral_measurement_version=measurement.spectral_measurement_version,
         ),
         existing=SpectralAnalysisDetail(attempted=False),
     )
@@ -2032,6 +2036,12 @@ def main():
     spectral_bitrate: int | None = None
     existing_spectral_grade: str | None = None
     existing_spectral_bitrate: int | None = None
+    # issue #829 Phase 5 PR1 capture — passengers alongside spectral_grade/
+    # spectral_bitrate above; never read by any decision in this function.
+    spectral_cliff_hz: int | None = None
+    spectral_codec_family: str | None = None
+    spectral_ultrasonic_deficit_db: float | None = None
+    spectral_measurement_version: int | None = None
     stage_start = time.monotonic()
     from lib.measurement import collect_attempt_spectral_audit
     # Preview owns candidate measurement when it supplies an evidence payload;
@@ -2049,6 +2059,10 @@ def main():
     if candidate_audit is not None:
         spectral_grade = candidate_audit.grade
         spectral_bitrate = candidate_audit.bitrate_kbps
+        spectral_cliff_hz = candidate_audit.cliff_hz
+        spectral_codec_family = candidate_audit.codec_family
+        spectral_ultrasonic_deficit_db = candidate_audit.ultrasonic_deficit_db
+        spectral_measurement_version = candidate_audit.spectral_measurement_version
         r.spectral.suspect_pct = candidate_audit.suspect_pct or 0.0
         r.spectral.per_track = list(candidate_audit.per_track)
         _log(f"  spectral_grade={spectral_grade}")
@@ -2288,6 +2302,10 @@ def main():
         spectral_provenance=(
             EVIDENCE_PROVENANCE_MEASURED if spectral_grade is not None else None
         ),
+        cliff_hz=spectral_cliff_hz,
+        codec_family=spectral_codec_family,
+        ultrasonic_deficit_db=spectral_ultrasonic_deficit_db,
+        spectral_measurement_version=spectral_measurement_version,
     )
     target_contract = projected_target_quality_contract(
         new_format_label,

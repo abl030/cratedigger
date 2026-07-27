@@ -74,6 +74,8 @@ class _EvidenceMixin(_PipelineDBBase):
                     spectral_grade, spectral_bitrate_kbps,
                     spectral_subject, spectral_provenance,
                     verified_lossless, was_converted_from,
+                    cliff_hz, codec_family, ultrasonic_deficit_db,
+                    spectral_measurement_version,
                     v0_min_bitrate_kbps, v0_avg_bitrate_kbps,
                     v0_median_bitrate_kbps, v0_subject,
                     v0_provenance,
@@ -94,6 +96,7 @@ class _EvidenceMixin(_PipelineDBBase):
                     %s, %s, %s, %s, -- storage/target + lineage
                     %s, %s, %s, %s, %s, -- bitrate/format/mode
                     %s, %s, %s, %s, %s, %s, -- spectral/lossless/conversion
+                    %s, %s, %s, %s, -- spectral capture facts (issue #829 PR1)
                     %s, %s, %s, %s, %s, -- V0 metric
                     %s, -- on-disk V0 research attempted
                     %s, -- changed-current enrichment required
@@ -197,6 +200,76 @@ class _EvidenceMixin(_PipelineDBBase):
                         )
                         THEN EXCLUDED.spectral_provenance
                         ELSE album_quality_evidence.spectral_provenance END,
+                    -- issue #829 Phase 5 PR1: cliff_hz/codec_family/
+                    -- ultrasonic_deficit_db/spectral_measurement_version are
+                    -- measured in the SAME pass as spectral_grade above, so
+                    -- they are gated by the exact same guard — one atomic
+                    -- fact, now eight columns wide instead of four.
+                    cliff_hz = CASE WHEN
+                        album_quality_evidence.lineage_version < 4 OR
+                        EXCLUDED.spectral_grade IS NOT NULL OR
+                        (
+                            album_quality_evidence.spectral_subject =
+                                'installed' AND
+                            (
+                                EXCLUDED.v0_subject = 'source' OR
+                                EXCLUDED.verified_lossless IS TRUE OR
+                                LOWER(COALESCE(
+                                    EXCLUDED.was_converted_from, ''))
+                                    IN ('flac', 'alac', 'wav')
+                            )
+                        )
+                        THEN EXCLUDED.cliff_hz
+                        ELSE album_quality_evidence.cliff_hz END,
+                    codec_family = CASE WHEN
+                        album_quality_evidence.lineage_version < 4 OR
+                        EXCLUDED.spectral_grade IS NOT NULL OR
+                        (
+                            album_quality_evidence.spectral_subject =
+                                'installed' AND
+                            (
+                                EXCLUDED.v0_subject = 'source' OR
+                                EXCLUDED.verified_lossless IS TRUE OR
+                                LOWER(COALESCE(
+                                    EXCLUDED.was_converted_from, ''))
+                                    IN ('flac', 'alac', 'wav')
+                            )
+                        )
+                        THEN EXCLUDED.codec_family
+                        ELSE album_quality_evidence.codec_family END,
+                    ultrasonic_deficit_db = CASE WHEN
+                        album_quality_evidence.lineage_version < 4 OR
+                        EXCLUDED.spectral_grade IS NOT NULL OR
+                        (
+                            album_quality_evidence.spectral_subject =
+                                'installed' AND
+                            (
+                                EXCLUDED.v0_subject = 'source' OR
+                                EXCLUDED.verified_lossless IS TRUE OR
+                                LOWER(COALESCE(
+                                    EXCLUDED.was_converted_from, ''))
+                                    IN ('flac', 'alac', 'wav')
+                            )
+                        )
+                        THEN EXCLUDED.ultrasonic_deficit_db
+                        ELSE album_quality_evidence.ultrasonic_deficit_db END,
+                    spectral_measurement_version = CASE WHEN
+                        album_quality_evidence.lineage_version < 4 OR
+                        EXCLUDED.spectral_grade IS NOT NULL OR
+                        (
+                            album_quality_evidence.spectral_subject =
+                                'installed' AND
+                            (
+                                EXCLUDED.v0_subject = 'source' OR
+                                EXCLUDED.verified_lossless IS TRUE OR
+                                LOWER(COALESCE(
+                                    EXCLUDED.was_converted_from, ''))
+                                    IN ('flac', 'alac', 'wav')
+                            )
+                        )
+                        THEN EXCLUDED.spectral_measurement_version
+                        ELSE album_quality_evidence.spectral_measurement_version
+                        END,
                     verified_lossless = EXCLUDED.verified_lossless,
                     was_converted_from = EXCLUDED.was_converted_from,
                     -- V0 is one atomic fact, not six independently mergeable
@@ -368,6 +441,10 @@ class _EvidenceMixin(_PipelineDBBase):
                 m.spectral_provenance,
                 proof is not None,
                 m.was_converted_from,
+                m.cliff_hz,
+                m.codec_family,
+                m.ultrasonic_deficit_db,
+                m.spectral_measurement_version,
                 v0.min_bitrate_kbps if v0 else None,
                 v0.avg_bitrate_kbps if v0 else None,
                 v0.median_bitrate_kbps if v0 else None,
@@ -785,6 +862,12 @@ class _EvidenceMixin(_PipelineDBBase):
                 spectral_subject=row.get("spectral_subject"),
                 spectral_provenance=row.get("spectral_provenance"),
                 was_converted_from=row.get("was_converted_from"),
+                cliff_hz=row.get("cliff_hz"),
+                codec_family=row.get("codec_family"),
+                ultrasonic_deficit_db=row.get("ultrasonic_deficit_db"),
+                spectral_measurement_version=row.get(
+                    "spectral_measurement_version"
+                ),
             ),
             measured_at=row["measured_at"],
             files=[

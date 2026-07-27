@@ -85,6 +85,23 @@ class AudioQualityMeasurement(msgspec.Struct, frozen=True):
     spectral_subject: EvidenceSubject | None = None
     spectral_provenance: EvidenceProvenance | None = None
     was_converted_from: Optional[str] = None
+    # issue #829 Phase 5 PR1 — measured facts captured alongside the
+    # spectral tuple above (same subject/provenance, same measurement
+    # pass). Pure passengers: no decision reads them in this PR.
+    #   cliff_hz:                 raw in-window cliff frequency (Hz) —
+    #                              exactly what detect_cliff() returns,
+    #                              vs. spectral_bitrate_kbps's bucketed
+    #                              interpretation of the same fact.
+    #   codec_family:              mp3/aac/opus/vorbis/lossless/other.
+    #   ultrasonic_deficit_db:     level-invariant ultrasonic deficit
+    #                              (PR3's proof-leg statistic).
+    #   spectral_measurement_version: 2 for rows measured by the PR1+
+    #                              spectral_check code; None for legacy
+    #                              rows (forward-only, no backfill).
+    cliff_hz: Optional[int] = None
+    codec_family: Optional[str] = None
+    ultrasonic_deficit_db: Optional[float] = None
+    spectral_measurement_version: Optional[int] = None
 
     def new_row_validation_errors(
         self,

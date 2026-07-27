@@ -3198,6 +3198,11 @@ class FakePipelineDB:
                     == EVIDENCE_SUBJECT_INSTALLED
             )
         ):
+            # issue #829 Phase 5 PR1: cliff_hz/codec_family/
+            # ultrasonic_deficit_db/spectral_measurement_version are measured
+            # in the same pass as spectral_grade, so they preserve under the
+            # exact same guard (mirrors the SQL CASE conditions in
+            # lib/pipeline_db/evidence.py).
             evidence = msgspec.structs.replace(
                 evidence,
                 measurement=msgspec.structs.replace(
@@ -3209,6 +3214,14 @@ class FakePipelineDB:
                     spectral_subject=existing.measurement.spectral_subject,
                     spectral_provenance=(
                         existing.measurement.spectral_provenance
+                    ),
+                    cliff_hz=existing.measurement.cliff_hz,
+                    codec_family=existing.measurement.codec_family,
+                    ultrasonic_deficit_db=(
+                        existing.measurement.ultrasonic_deficit_db
+                    ),
+                    spectral_measurement_version=(
+                        existing.measurement.spectral_measurement_version
                     ),
                 ),
             )

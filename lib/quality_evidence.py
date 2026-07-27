@@ -619,6 +619,20 @@ def evidence_from_measurement(
             if download_spectral is not None and download_spectral.grade is not None
             else None
         ),
+        cliff_hz=(
+            download_spectral.cliff_hz if download_spectral is not None else None
+        ),
+        codec_family=(
+            download_spectral.codec_family if download_spectral is not None else None
+        ),
+        ultrasonic_deficit_db=(
+            download_spectral.ultrasonic_deficit_db
+            if download_spectral is not None else None
+        ),
+        spectral_measurement_version=(
+            download_spectral.spectral_measurement_version
+            if download_spectral is not None else None
+        ),
     )
     codec = files[0].codec if files else None
     container = files[0].container if files else None
@@ -917,6 +931,23 @@ def propagate_candidate_evidence_to_current(
         spectral_subject=(EVIDENCE_SUBJECT_SOURCE if carry_spectral else None),
         spectral_provenance=(
             EVIDENCE_PROVENANCE_CARRIED if carry_spectral else None
+        ),
+        # issue #829 Phase 5 PR1 — these are one atomic fact alongside
+        # spectral_grade above (same measurement pass), so they carry under
+        # the exact same gate.
+        cliff_hz=(
+            candidate_measurement.cliff_hz if carry_spectral else None
+        ),
+        codec_family=(
+            candidate_measurement.codec_family if carry_spectral else None
+        ),
+        ultrasonic_deficit_db=(
+            candidate_measurement.ultrasonic_deficit_db
+            if carry_spectral else None
+        ),
+        spectral_measurement_version=(
+            candidate_measurement.spectral_measurement_version
+            if carry_spectral else None
         ),
         was_converted_from=output_source_format,
     )

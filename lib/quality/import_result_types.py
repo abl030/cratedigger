@@ -83,6 +83,13 @@ class SpectralAnalysisDetail(msgspec.Struct, frozen=True):
         default_factory=list[SpectralTrackDetail]
     )
     error: Optional[str] = None
+    # issue #829 Phase 5 PR1 capture — album-level facts from
+    # ``lib.spectral_check.AlbumResult``. Pure passengers: never read by any
+    # decision in this PR.
+    cliff_hz: Optional[int] = None
+    codec_family: Optional[str] = None
+    ultrasonic_deficit_db: Optional[float] = None
+    spectral_measurement_version: Optional[int] = None
 
 
 class SpectralDetail(msgspec.Struct):

@@ -72,11 +72,19 @@ def analyze_spectral_audit_path(path: str) -> SpectralAnalysisDetail:
     bitrate_kbps: int | None = None
     suspect_pct: float | None = None
     per_track: list[SpectralTrackDetail] = []
+    cliff_hz: int | None = None
+    codec_family: str | None = None
+    ultrasonic_deficit_db: float | None = None
+    spectral_measurement_version: int | None = None
     try:
         result = spectral_analyze(path, trim_seconds=30)
         grade = result.grade
         bitrate_kbps = result.estimated_bitrate_kbps
         suspect_pct = result.suspect_pct
+        cliff_hz = result.cliff_hz
+        codec_family = result.codec_family
+        ultrasonic_deficit_db = result.ultrasonic_deficit_db
+        spectral_measurement_version = result.spectral_measurement_version
         for track in result.tracks:
             per_track.append(SpectralTrackDetail(
                 grade=track.grade,
@@ -95,6 +103,10 @@ def analyze_spectral_audit_path(path: str) -> SpectralAnalysisDetail:
             suspect_pct=suspect_pct,
             per_track=per_track,
             error=f"{type(exc).__name__}: {exc}",
+            cliff_hz=cliff_hz,
+            codec_family=codec_family,
+            ultrasonic_deficit_db=ultrasonic_deficit_db,
+            spectral_measurement_version=spectral_measurement_version,
         )
     return SpectralAnalysisDetail(
         attempted=True,
@@ -102,6 +114,10 @@ def analyze_spectral_audit_path(path: str) -> SpectralAnalysisDetail:
         bitrate_kbps=bitrate_kbps,
         suspect_pct=suspect_pct,
         per_track=per_track,
+        cliff_hz=cliff_hz,
+        codec_family=codec_family,
+        ultrasonic_deficit_db=ultrasonic_deficit_db,
+        spectral_measurement_version=spectral_measurement_version,
     )
 
 
@@ -861,7 +877,14 @@ def measure_preimport_state(
         candidate_audit = spectral_audit.candidate
         assert candidate_audit is not None
         download_spectral = SpectralMeasurement.from_parts(
-            candidate_audit.grade, candidate_audit.bitrate_kbps)
+            candidate_audit.grade, candidate_audit.bitrate_kbps,
+            cliff_hz=candidate_audit.cliff_hz,
+            codec_family=candidate_audit.codec_family,
+            ultrasonic_deficit_db=candidate_audit.ultrasonic_deficit_db,
+            spectral_measurement_version=(
+                candidate_audit.spectral_measurement_version
+            ),
+        )
         if download_spectral is not None:
             cliff_count = sum(
                 1 for track in candidate_audit.per_track
