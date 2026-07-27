@@ -15,6 +15,17 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Optional, TypedDict
 
+from lib.quality import (
+    AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS,
+    CODEC_FAMILY_AAC,
+    CODEC_FAMILY_LOSSLESS,
+    CODEC_FAMILY_MP3,
+    CODEC_FAMILY_OPUS,
+    CODEC_FAMILY_OTHER,
+    CODEC_FAMILY_VORBIS,
+    CodecFamily,
+)
+
 # --- Thresholds ---
 HF_DEFICIT_SUSPECT = 60.0   # dB — above this = suspect (no cliff needed)
 HF_DEFICIT_MARGINAL = 40.0  # dB — above this = marginal
@@ -67,36 +78,74 @@ SPECTRAL_MEASUREMENT_VERSION = 2
 # Extension-only, extension-based codec family classification (issue #829
 # Phase 5 PR1 capture). This is deliberately simple: the six measured
 # families the calibration work established (mp3/aac/opus/vorbis/lossless/
-# other) collapse cleanly onto file extension for every container except
-# ``.m4a``, which can hold either AAC or ALAC. ``.m4a`` maps to "aac" here —
-# the dominant case in this pipeline's downloads; ALAC-in-M4A is undercounted
-# as a known, documented PR1 limitation. Nothing in this PR reads this fact
-# for any decision (PR2 owns per-codec interpretation).
-_CODEC_FAMILY_BY_EXT: dict[str, str] = {
-    ".mp3": "mp3",
-    ".aac": "aac",
-    ".m4a": "aac",
-    ".opus": "opus",
-    ".ogg": "vorbis",
-    ".flac": "lossless",
-    ".wav": "lossless",
-    ".aif": "lossless",
-    ".aiff": "lossless",
-    ".au": "lossless",
-    ".alac": "lossless",
-    ".ape": "lossless",
+# other) collapse cleanly onto file extension for every container EXCEPT
+# ``.ogg`` (Vorbis or Opus) and ``.m4a`` (AAC or ALAC) — both genuinely
+# ambiguous by extension alone, so they are deliberately absent from this
+# dict and always probed instead (see ``codec_family_from_extension``).
+_CODEC_FAMILY_BY_EXT: dict[str, CodecFamily] = {
+    ".mp3": CODEC_FAMILY_MP3,
+    ".aac": CODEC_FAMILY_AAC,
+    ".opus": CODEC_FAMILY_OPUS,
+    ".flac": CODEC_FAMILY_LOSSLESS,
+    ".wav": CODEC_FAMILY_LOSSLESS,
+    ".aif": CODEC_FAMILY_LOSSLESS,
+    ".aiff": CODEC_FAMILY_LOSSLESS,
+    ".au": CODEC_FAMILY_LOSSLESS,
+    ".alac": CODEC_FAMILY_LOSSLESS,
+    ".ape": CODEC_FAMILY_LOSSLESS,
+}
+
+# The two containers where extension cannot determine the codec family.
+_AMBIGUOUS_CODEC_EXTS: frozenset[str] = frozenset({".ogg", ".m4a"})
+
+# Lossy families native_codec_format_label can return, normalised to this
+# module's lowercase vocabulary (it returns bare "MP3" for mp3).
+_LOSSY_LABEL_TO_CODEC_FAMILY: dict[str, CodecFamily] = {
+    "mp3": CODEC_FAMILY_MP3,
+    "aac": CODEC_FAMILY_AAC,
+    "opus": CODEC_FAMILY_OPUS,
+    "vorbis": CODEC_FAMILY_VORBIS,
 }
 
 
-def codec_family_from_extension(filepath: str) -> str:
-    """Normalise a file's extension into one of six measured codec families:
+def codec_family_from_extension(filepath: str) -> CodecFamily:
+    """Normalise a file's extension (probing the real codec where the
+    extension is ambiguous) into one of six measured codec families:
     ``mp3`` / ``aac`` / ``opus`` / ``vorbis`` / ``lossless`` / ``other``.
 
-    See ``_CODEC_FAMILY_BY_EXT`` for the exact mapping and its one known
-    ambiguity (``.m4a``).
+    Extension alone resolves every container in ``_CODEC_FAMILY_BY_EXT``.
+    ``.ogg`` (Vorbis or Opus) and ``.m4a`` (AAC or ALAC) are genuinely
+    ambiguous, so both are probed via the SAME ffprobe invocation the repo
+    already uses for this exact class of ambiguity
+    (``lib.measurement.ffprobe_audio_codec_name`` — the probe
+    ``lib.measurement.has_supported_lossless_audio`` calls to tell
+    AAC-in-M4A from ALAC-in-M4A), folded through the repo's existing
+    probed-codec -> lossy-family mapping
+    (``lib.quality.compare.native_codec_format_label``). issue #829
+    BLOCKING 2: guessing ``.ogg`` -> vorbis unconditionally reproduces
+    exactly the codec-blind bug class #829 exists to fix — an Opus stream
+    in an .ogg container would be scored on Vorbis's decision-grade ladder
+    in PR2, which cannot apply to Opus (audit-only, unconditional per the
+    plan). Both imports are deferred (function-local) to keep this leaf
+    module's import-time footprint unchanged for every extension that
+    doesn't need them.
     """
     ext = os.path.splitext(filepath)[1].lower()
-    return _CODEC_FAMILY_BY_EXT.get(ext, "other")
+    if ext not in _AMBIGUOUS_CODEC_EXTS:
+        return _CODEC_FAMILY_BY_EXT.get(ext, CODEC_FAMILY_OTHER)
+
+    from lib.measurement import ffprobe_audio_codec_name
+    from lib.quality.compare import native_codec_format_label
+
+    probed = ffprobe_audio_codec_name(filepath)
+    if probed == "alac":
+        return CODEC_FAMILY_LOSSLESS
+    lossy_label = native_codec_format_label(probed, ext.lstrip("."))
+    if lossy_label is None:
+        return CODEC_FAMILY_OTHER
+    return _LOSSY_LABEL_TO_CODEC_FAMILY.get(
+        lossy_label.lower(), CODEC_FAMILY_OTHER,
+    )
 
 
 def compute_ultrasonic_deficit_db(
@@ -129,9 +178,6 @@ def compute_ultrasonic_deficit_db(
     return ref_db - (sum(values) / len(values))
 
 
-from lib.quality import AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS
-
-
 # --- Data classes ---
 
 class _Slice(TypedDict):
@@ -149,7 +195,7 @@ class TrackResult:
     estimated_bitrate_kbps: Optional[int] = None
     error: Optional[str] = None
     # issue #829 Phase 5 PR1 capture — never fed into grade/cliff_detected.
-    codec_family: str = "other"
+    codec_family: CodecFamily = CODEC_FAMILY_OTHER
     ultrasonic_deficit_db: Optional[float] = None
 
 
@@ -168,7 +214,7 @@ class AlbumResult:
     # in practice); ``spectral_measurement_version`` is always stamped
     # ``SPECTRAL_MEASUREMENT_VERSION`` whenever this function runs.
     cliff_hz: Optional[int] = None
-    codec_family: Optional[str] = None
+    codec_family: CodecFamily | None = None
     ultrasonic_deficit_db: Optional[float] = None
     spectral_measurement_version: Optional[int] = None
 
@@ -265,7 +311,7 @@ def classify_track(
     hf_deficit_db: float,
     cliff_freq_hz: int | None,
     *,
-    codec_family: str = "other",
+    codec_family: CodecFamily = CODEC_FAMILY_OTHER,
     ultrasonic_deficit_db: Optional[float] = None,
 ) -> TrackResult:
     """Classify a single track based on HF deficit and cliff detection.
@@ -322,7 +368,7 @@ def classify_album(
 
 def aggregate_album_spectral_capture(
     track_results: "list[TrackResult]",
-) -> "tuple[Optional[int], Optional[str], Optional[float]]":
+) -> "tuple[Optional[int], CodecFamily | None, Optional[float]]":
     """Aggregate per-track issue #829 Phase 5 PR1 capture facts to
     album-level ``(cliff_hz, codec_family, ultrasonic_deficit_db)``.
 
@@ -424,13 +470,26 @@ def _get_band_rms(
 def _ffmpeg_to_wav(src: str, dst: str, trim_seconds: int = 30) -> None:
     """Decode src to WAV at dst (trimmed to trim_seconds).
 
-    One ffmpeg call per file replaces 17 ffmpeg calls (one per sox band)
-    when AAC/ALAC/WMA inputs reach analyze_track. Probe bounds
+    One ffmpeg call per file replaces 21 ffmpeg calls (one per sox band —
+    1 reference + 16 in-window + 4 extension slices, issue #829 Phase 5
+    PR1) when AAC/ALAC/WMA inputs reach analyze_track. Probe bounds
     (``-analyzeduration`` / ``-probesize``) cap atom-table parsing so a
     hostile MP4 with deeply-nested moov boxes can't spin until timeout;
-    the 30s wall clock backstops anything that slips past. Output is
-    forced to 48kHz/2ch — spectral analysis tops at 20kHz so anything
-    higher is wasted I/O. Raises ``_DecodeFailedError`` on any failure."""
+    the 30s wall clock backstops anything that slips past.
+
+    Output is forced to 48kHz/2ch — NOT purely a size optimisation.
+    ``EXTENSION_SLICE_FREQS`` measures up to 22000Hz, so 48kHz (Nyquist
+    24kHz) is the minimum sample rate that keeps every extension band
+    genuinely measurable for every ffmpeg-routed container; anything
+    lower reproduces issue #829 BLOCKING 3's fabricated-deficit bug for
+    every AAC/ALAC/WMA file, not just low-sample-rate sox-native ones.
+    It also keeps parity with the calibration instrument that measured
+    the ``ultrasonic_deficit_db`` thresholds PR3 will gate on
+    (calibration-tmp/measurements/score_v3.py) — lowering this sample
+    rate would shift ``ultrasonic_deficit_db`` by more than PR3's entire
+    ``U>=62`` threshold margin with no test in this module failing, since
+    nothing here pins the sample-rate choice itself. Raises
+    ``_DecodeFailedError`` on any failure."""
     cmd = [
         "ffmpeg", "-nostdin", "-loglevel", "error", "-y",
         "-analyzeduration", "5M", "-probesize", "5M",
@@ -497,10 +556,11 @@ def analyze_track(filepath: str, trim_seconds: int = 30) -> TrackResult:
 
 
 def _analyze_decoded(sox_input: str, sox_trim: int) -> TrackResult:
-    """Run the 17 sox calls against a decode-ready file. Extracted from
-    analyze_track so the sox-native and ffmpeg-fallback paths share one
-    body. Reference-band None RMS now grades 'error' (was 'genuine' as the
-    silent-track early-out — see the rc=0 leg in _get_band_rms)."""
+    """Run the 21 sox calls against a decode-ready file (1 reference + 16
+    in-window + 4 extension slices, issue #829 Phase 5 PR1). Extracted
+    from analyze_track so the sox-native and ffmpeg-fallback paths share
+    one body. Reference-band None RMS now grades 'error' (was 'genuine' as
+    the silent-track early-out — see the rc=0 leg in _get_band_rms)."""
     # Reference band: 1-4kHz. None RMS at the reference is a decode-side
     # failure (band would have musical content); reserve the silent-track
     # early-out for genuinely near-zero RMS only.
@@ -534,18 +594,27 @@ def _analyze_decoded(sox_input: str, sox_trim: int) -> TrackResult:
     avg_hf_db = sum(s["db"] for s in hf_slices) / len(hf_slices)
     hf_deficit = ref_db - avg_hf_db
 
-    # Extension slices (issue #829 Phase 5 PR1): same floor-on-decode-
-    # failure treatment as the in-band slices above — these ultrasonic
-    # bands are commonly near-silent on genuine masters, which is not a
-    # decode failure.
+    # Extension slices (issue #829 Phase 5 PR1) — deliberately NOT the same
+    # floor-on-decode-failure treatment as the in-band slices above. Once
+    # the reference band has already decoded successfully, a decode
+    # failure THIS far above 20kHz is sox refusing an out-of-Nyquist band
+    # ("filter frequency must be less than sample-rate/2" — any sox-native
+    # file below ~44.1kHz hits this on some or all of these slices); a
+    # genuinely near-silent band measures a valid near-zero RMS and never
+    # raises. Flooring an unmeasurable band to DB_FLOOR fabricated a
+    # deficit near 115dB against a real 44.1kHz control's ~23dB on a real
+    # 32kHz WAV (issue #829 BLOCKING 3) — indistinguishable from a launder
+    # under PR3's U>=62 gate. Excluding the slice entirely instead makes
+    # compute_ultrasonic_deficit_db's missing-slice -> None branch
+    # reachable, so an unmeasurable band reports "not measured", not a
+    # fabricated deficit.
     ext_slices: list[_Slice] = []
     for freq in EXTENSION_SLICE_FREQS:
         try:
             rms = _get_band_rms(sox_input, freq, freq + SLICE_WIDTH, sox_trim)
-            db = rms_to_db(rms)
         except _DecodeFailedError:
-            db = DB_FLOOR
-        ext_slices.append({"freq": freq, "db": db})
+            continue
+        ext_slices.append({"freq": freq, "db": rms_to_db(rms)})
     ultrasonic_deficit_db = compute_ultrasonic_deficit_db(ref_db, ext_slices)
 
     return classify_track(
@@ -586,12 +655,18 @@ def analyze_album(folder_path: str, trim_seconds: int = 30) -> AlbumResult:
     # files at all" — e.g. a docs-only folder), so we have to distinguish
     # the two cases here, before delegating.
     if files and not track_results:
+        # issue #829 Phase 5 PR1 review round 2, should-fix 11:
+        # spectral_measurement_version signals "cliff_hz/ultrasonic_deficit_db
+        # were actually measured by this code" — an all-errored album
+        # measured neither, so it stays NULL here (codec_family is still
+        # legitimately derivable from the file extension alone, independent
+        # of whether the spectral measurement itself succeeded).
         return AlbumResult(
             grade="error", suspect_pct=0.0, tracks=[], estimated_bitrate_kbps=None,
-            codec_family=(
-                codec_family_from_extension(files[0]) if files else None
-            ),
-            spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+            # `files` is already proven truthy by the enclosing `if` above
+            # (issue #829 Phase 5 PR1 review round 2, should-fix 14 — the
+            # old `if files else None` guard here was dead).
+            codec_family=codec_family_from_extension(files[0]),
         )
 
     grade, suspect_pct = classify_album(track_results)

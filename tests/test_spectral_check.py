@@ -443,6 +443,11 @@ class TestAlbumLevelSilentGenuineCollapse(unittest.TestCase):
             "silent-genuine bug class the codec fix was meant to close. "
             "Empty track_results from a non-empty file list must fail closed.",
         )
+        # issue #829 Phase 5 PR1 review round 2, should-fix 11:
+        # spectral_measurement_version claims "cliff_hz/
+        # ultrasonic_deficit_db were measured by this code" — an
+        # all-errored album measured neither, so it must stay None.
+        self.assertIsNone(result.spectral_measurement_version)
 
 
 class TestRcZeroNoRmsLineNoLongerSilent(unittest.TestCase):
@@ -511,15 +516,19 @@ class TestSliceWindowUnchanged(unittest.TestCase):
 
 
 class TestCodecFamilyFromExtension(unittest.TestCase):
-    """Extension-based codec family normalisation (issue #829 Phase 5 PR1)."""
+    """Extension-based codec family normalisation (issue #829 Phase 5 PR1).
+
+    ``.ogg``/``.m4a`` are deliberately absent here — extension cannot
+    resolve them (see ``TestCodecFamilyAmbiguousContainersProbeTheRealCodec``
+    below), so these fixtures never touch a real file and stick to the
+    extensions that genuinely are unambiguous.
+    """
 
     CASES = [
         ("track.mp3", "mp3"),
         ("track.MP3", "mp3"),
         ("track.aac", "aac"),
-        ("track.m4a", "aac"),  # documented simplification — see docstring
         ("track.opus", "opus"),
-        ("track.ogg", "vorbis"),
         ("track.flac", "lossless"),
         ("track.wav", "lossless"),
         ("track.aiff", "lossless"),
@@ -548,6 +557,77 @@ class TestCodecFamilyFromExtension(unittest.TestCase):
             self.assertIn(
                 codec_family_from_extension(f"/x/{filename}"), known,
             )
+
+
+class TestCodecFamilyAmbiguousContainersProbeTheRealCodec(unittest.TestCase):
+    """issue #829 BLOCKING 2: ``.ogg`` and ``.m4a`` cannot be resolved by
+    extension alone — an Opus stream in an .ogg container is Opus, not
+    Vorbis, and an ALAC stream in an .m4a container is lossless, not AAC.
+    Verified against real encoded files (real ffprobe, real codec_family_
+    from_extension — no mocks): guessing wrong here reproduces exactly the
+    codec-blind bug class #829 exists to fix (an Opus album would be
+    scored on Vorbis's decision-grade ladder in PR2, which cannot apply to
+    Opus)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmpdir = tempfile.mkdtemp(prefix="spectral_codec_family_test_")
+
+        cls.opus_in_ogg = os.path.join(cls.tmpdir, "opus.ogg")
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=1000:duration=1",
+             "-c:a", "libopus", cls.opus_in_ogg],
+            capture_output=True, check=True,
+        )
+
+        cls.vorbis_in_ogg = os.path.join(cls.tmpdir, "vorbis.ogg")
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=1000:duration=1",
+             "-c:a", "libvorbis", cls.vorbis_in_ogg],
+            capture_output=True, check=True,
+        )
+
+        cls.alac_in_m4a = os.path.join(cls.tmpdir, "alac.m4a")
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=1000:duration=1",
+             "-c:a", "alac", cls.alac_in_m4a],
+            capture_output=True, check=True,
+        )
+
+        cls.aac_in_m4a = os.path.join(cls.tmpdir, "aac.m4a")
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=1000:duration=1",
+             "-c:a", "aac", cls.aac_in_m4a],
+            capture_output=True, check=True,
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def test_opus_in_ogg_is_opus_not_vorbis(self):
+        from lib.spectral_check import codec_family_from_extension
+        self.assertEqual(
+            codec_family_from_extension(self.opus_in_ogg), "opus",
+        )
+
+    def test_vorbis_in_ogg_is_vorbis(self):
+        from lib.spectral_check import codec_family_from_extension
+        self.assertEqual(
+            codec_family_from_extension(self.vorbis_in_ogg), "vorbis",
+        )
+
+    def test_alac_in_m4a_is_lossless_not_aac(self):
+        from lib.spectral_check import codec_family_from_extension
+        self.assertEqual(
+            codec_family_from_extension(self.alac_in_m4a), "lossless",
+        )
+
+    def test_aac_in_m4a_is_aac(self):
+        from lib.spectral_check import codec_family_from_extension
+        self.assertEqual(
+            codec_family_from_extension(self.aac_in_m4a), "aac",
+        )
 
 
 class TestComputeUltrasonicDeficitDb(unittest.TestCase):
@@ -600,6 +680,65 @@ class TestComputeUltrasonicDeficitDb(unittest.TestCase):
         self.assertIsNone(compute_ultrasonic_deficit_db(-10.0, []))
 
 
+class TestUltrasonicDeficitUnmeasurableBandReturnsNone(unittest.TestCase):
+    """issue #829 BLOCKING 3: a sox-native file whose sample rate puts the
+    20.5-22kHz extension bands above Nyquist must report
+    ultrasonic_deficit_db=None, not a fabricated ~115dB deficit that would
+    be indistinguishable from a genuine launder under PR3's U>=62 gate.
+    Real sox, real low-sample-rate WAV, real analyze_track — no mocks."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmpdir = tempfile.mkdtemp(prefix="spectral_low_samplerate_test_")
+
+        # 32kHz: Nyquist=16kHz, well below the 20.5-22kHz extension bands
+        # sox must refuse ("filter frequency must be less than
+        # sample-rate/2") — the exact shape the review reproduced.
+        cls.low_rate_wav = os.path.join(cls.tmpdir, "01 - low_rate.wav")
+        subprocess.run(
+            ["sox", "-n", "-r", "32000", "-c", "2",
+             cls.low_rate_wav, "synth", "3", "sin", "1000", "vol", "0.5"],
+            check=True, capture_output=True,
+        )
+
+        # 44.1kHz control — same tone, real Nyquist headroom for every
+        # extension band.
+        cls.control_flac = os.path.join(cls.tmpdir, "02 - control.flac")
+        subprocess.run(
+            ["sox", "-n", "-r", "44100", "-c", "2",
+             cls.control_flac, "synth", "3", "sin", "1000", "vol", "0.5"],
+            check=True, capture_output=True,
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def test_sub_44khz_file_reports_none_not_a_fabricated_deficit(self):
+        from lib.spectral_check import analyze_track
+        result = analyze_track(self.low_rate_wav, trim_seconds=2)
+        self.assertNotEqual(result.grade, "error")
+        self.assertIsNone(
+            result.ultrasonic_deficit_db,
+            "a 32kHz file's unmeasurable extension bands must report "
+            "None, not a Nyquist-artifact deficit "
+            f"(got {result.ultrasonic_deficit_db})",
+        )
+
+    def test_44khz_control_reports_a_real_bounded_deficit(self):
+        """Guard against over-correcting to None-always: a genuine
+        44.1kHz file must still produce a real, boundedly-small deficit."""
+        from lib.spectral_check import analyze_track
+        result = analyze_track(self.control_flac, trim_seconds=2)
+        self.assertNotEqual(result.grade, "error")
+        assert result.ultrasonic_deficit_db is not None
+        # A pure synthetic tone's ultrasonic bands are silent by
+        # construction, same as a genuine sparse-HF master — this asserts
+        # the value is a normal measured deficit, nowhere near the ~115dB
+        # Nyquist-artifact magnitude BLOCKING 3 produced.
+        self.assertLess(result.ultrasonic_deficit_db, 100.0)
+
+
 class TestAggregateAlbumSpectralCapture(unittest.TestCase):
     """Pure album-level aggregation of per-track capture facts (issue #829
     Phase 5 PR1) — direct unit tests, no I/O."""
@@ -628,7 +767,7 @@ class TestAggregateAlbumSpectralCapture(unittest.TestCase):
         from lib.spectral_check import (
             TrackResult, aggregate_album_spectral_capture,
         )
-        tracks = [TrackResult("genuine", codec_family="flac") for _ in range(3)]
+        tracks = [TrackResult("genuine", codec_family="lossless") for _ in range(3)]
         cliff_hz, _codec_family, _deficit = (
             aggregate_album_spectral_capture(tracks)
         )
@@ -768,6 +907,13 @@ class TestAnalyzeAlbumCaptureFieldsRealAudio(unittest.TestCase):
         self.assertEqual(result.codec_family, "lossless")
         self.assertEqual(len(result.tracks), 1)
         self.assertEqual(result.tracks[0].codec_family, "lossless")
+        # issue #829 BLOCKING 3 regression guard: a real 44.1kHz file has
+        # Nyquist headroom for every extension band, so this must be a
+        # real measured value (not None) and nowhere near the ~115dB
+        # Nyquist-artifact magnitude a sub-44.1kHz file used to fabricate.
+        self.assertIsNotNone(result.ultrasonic_deficit_db)
+        assert result.ultrasonic_deficit_db is not None
+        self.assertLess(result.ultrasonic_deficit_db, 100.0)
 
 
 if __name__ == "__main__":

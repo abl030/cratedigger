@@ -14,6 +14,7 @@ from lib.quality.audio_validation import (
 )
 from lib.quality.evidence_types import (
     AudioQualityMeasurement,
+    CodecFamily,
     EVIDENCE_PROVENANCE_CARRIED,
     EVIDENCE_PROVENANCE_MEASURED,
     EVIDENCE_SUBJECT_INSTALLED,
@@ -87,7 +88,7 @@ class SpectralAnalysisDetail(msgspec.Struct, frozen=True):
     # ``lib.spectral_check.AlbumResult``. Pure passengers: never read by any
     # decision in this PR.
     cliff_hz: Optional[int] = None
-    codec_family: Optional[str] = None
+    codec_family: CodecFamily | None = None
     ultrasonic_deficit_db: Optional[float] = None
     spectral_measurement_version: Optional[int] = None
 

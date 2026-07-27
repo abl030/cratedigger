@@ -621,6 +621,16 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
                 spectral_bitrate_kbps=None,
                 spectral_subject="source",
                 spectral_provenance="measured",
+                # issue #829 Phase 5 PR1 capture facts — must carry
+                # alongside spectral_grade (BLOCKING 1: the album_info
+                # rebuild path produces None for all four, and the upsert's
+                # atomic-pair guard nulls stored good values the instant a
+                # carrying grade lands unless the Python replace also
+                # carries these).
+                cliff_hz=16500,
+                codec_family="opus",
+                ultrasonic_deficit_db=44.0,
+                spectral_measurement_version=2,
             ),
             v0_metric=AlbumQualityV0Metric(
                 subject="source",
@@ -665,6 +675,30 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
             result.evidence.verified_lossless_proof,
             msgspec.structs.replace(proof, provenance="carried"),
         )
+        self.assertEqual(result.evidence.measurement.cliff_hz, 16500)
+        self.assertEqual(result.evidence.measurement.codec_family, "opus")
+        self.assertEqual(
+            result.evidence.measurement.ultrasonic_deficit_db, 44.0
+        )
+        self.assertEqual(
+            result.evidence.measurement.spectral_measurement_version, 2
+        )
+
+        # BLOCKING 1 reproduction: the function already persisted via the
+        # real upsert path (atomic-pair guard, keyed on
+        # EXCLUDED.spectral_grade IS NOT NULL) — re-query to confirm the
+        # STORED row, not just the in-Python EvidenceBuildResult, carries
+        # the capture fields.
+        reloaded = db.find_album_quality_evidence(
+            mb_release_id=result.evidence.mb_release_id,
+            snapshot_fingerprint=result.evidence.snapshot_fingerprint,
+        )
+        assert reloaded is not None
+        self.assertEqual(reloaded.measurement.spectral_grade, "genuine")
+        self.assertEqual(reloaded.measurement.cliff_hz, 16500)
+        self.assertEqual(reloaded.measurement.codec_family, "opus")
+        self.assertEqual(reloaded.measurement.ultrasonic_deficit_db, 44.0)
+        self.assertEqual(reloaded.measurement.spectral_measurement_version, 2)
 
     def test_v3_touch_normalizes_source_facts_with_unknown_provenance(self):
         db = FakePipelineDB()
@@ -818,6 +852,13 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
                 spectral_grade="likely_transcode",
                 spectral_subject="installed",
                 spectral_provenance="measured",
+                # issue #829 Phase 5 PR1 capture facts — same-address
+                # repair must preserve these verbatim alongside
+                # spectral_grade (BLOCKING 1).
+                cliff_hz=14000,
+                codec_family="opus",
+                ultrasonic_deficit_db=51.5,
+                spectral_measurement_version=2,
             ),
             v0_metric=AlbumQualityV0Metric(
                 subject="installed",
@@ -859,12 +900,29 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         self.assertEqual(m.spectral_grade, "likely_transcode")
         self.assertEqual(m.spectral_subject, "installed")
         self.assertEqual(m.spectral_provenance, "measured")
+        self.assertEqual(m.cliff_hz, 14000)
+        self.assertEqual(m.codec_family, "opus")
+        self.assertEqual(m.ultrasonic_deficit_db, 51.5)
+        self.assertEqual(m.spectral_measurement_version, 2)
         v0 = result.evidence.v0_metric
         assert v0 is not None
         self.assertEqual(v0.subject, "installed")
         self.assertEqual(v0.provenance, "measured")
         self.assertEqual(v0.avg_bitrate_kbps, 213)
         self.assertTrue(result.evidence.on_disk_v0_research_attempted)
+
+        # BLOCKING 1 reproduction: re-query the STORED row (the function
+        # already persisted via the real upsert path) rather than trusting
+        # only the in-Python EvidenceBuildResult.
+        reloaded = db.find_album_quality_evidence(
+            mb_release_id=result.evidence.mb_release_id,
+            snapshot_fingerprint=result.evidence.snapshot_fingerprint,
+        )
+        assert reloaded is not None
+        self.assertEqual(reloaded.measurement.cliff_hz, 14000)
+        self.assertEqual(reloaded.measurement.codec_family, "opus")
+        self.assertEqual(reloaded.measurement.ultrasonic_deficit_db, 51.5)
+        self.assertEqual(reloaded.measurement.spectral_measurement_version, 2)
 
     def test_fingerprint_flip_carries_only_source_facts(self):
         db = FakePipelineDB()
@@ -962,6 +1020,64 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         self.assertFalse(result.available)
         self.assertEqual(result.status, "incomplete")
         self.assertIn("duplicate snapshot relative_path", result.reason or "")
+
+
+class TestCaptureFieldsAreOneAtomicFactWithSpectralGrade(unittest.TestCase):
+    """issue #829 Phase 5 PR1, review round 2 should-fix 6:
+    cliff_hz/codec_family/ultrasonic_deficit_db/spectral_measurement_version
+    are the SAME measurement pass as spectral_grade — a row with no grade
+    cannot legitimately carry any of them. One-directional: a grade
+    WITHOUT the four fields must stay valid (every legacy row)."""
+
+    CAPTURE_FIELD_OVERRIDES = [
+        ("cliff_hz", {"cliff_hz": 16500}),
+        ("codec_family", {"codec_family": "mp3"}),
+        ("ultrasonic_deficit_db", {"ultrasonic_deficit_db": 44.0}),
+        ("spectral_measurement_version", {"spectral_measurement_version": 2}),
+    ]
+
+    def test_any_capture_field_without_a_grade_is_rejected(self):
+        for field_name, override in self.CAPTURE_FIELD_OVERRIDES:
+            with self.subTest(field=field_name):
+                measurement = AudioQualityMeasurement(
+                    min_bitrate_kbps=192, format="MP3", **override,
+                )
+                errors = measurement.new_row_validation_errors()
+                self.assertTrue(
+                    any("require a spectral grade" in e for e in errors),
+                    f"{field_name} without spectral_grade must be rejected, "
+                    f"got errors={errors}",
+                )
+
+    def test_no_capture_fields_and_no_grade_is_valid(self):
+        measurement = AudioQualityMeasurement(min_bitrate_kbps=192, format="MP3")
+        self.assertEqual(measurement.new_row_validation_errors(), [])
+
+    def test_grade_with_all_four_capture_fields_is_valid(self):
+        measurement = AudioQualityMeasurement(
+            min_bitrate_kbps=192,
+            format="MP3",
+            spectral_grade="genuine",
+            spectral_subject="source",
+            spectral_provenance="measured",
+            cliff_hz=16500,
+            codec_family="mp3",
+            ultrasonic_deficit_db=44.0,
+            spectral_measurement_version=2,
+        )
+        self.assertEqual(measurement.new_row_validation_errors(), [])
+
+    def test_grade_without_any_capture_field_stays_valid_legacy_shape(self):
+        """Forward-only, no backfill (scope.md): every pre-PR1 row has a
+        real spectral_grade and all four new fields NULL forever."""
+        measurement = AudioQualityMeasurement(
+            min_bitrate_kbps=192,
+            format="MP3",
+            spectral_grade="genuine",
+            spectral_subject="source",
+            spectral_provenance="measured",
+        )
+        self.assertEqual(measurement.new_row_validation_errors(), [])
 
 
 class TestBlankSourcePathPolicy(unittest.TestCase):

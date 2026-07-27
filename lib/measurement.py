@@ -40,6 +40,7 @@ from lib.pipeline_db import RequestSpectralStateUpdate
 from lib.quality import (
     AudioValidationMeasurementError,
     AudioValidationReport,
+    CodecFamily,
     SpectralAnalysisDetail,
     SpectralDetail,
     SpectralMeasurement,
@@ -73,7 +74,7 @@ def analyze_spectral_audit_path(path: str) -> SpectralAnalysisDetail:
     suspect_pct: float | None = None
     per_track: list[SpectralTrackDetail] = []
     cliff_hz: int | None = None
-    codec_family: str | None = None
+    codec_family: CodecFamily | None = None
     ultrasonic_deficit_db: float | None = None
     spectral_measurement_version: int | None = None
     try:
@@ -899,9 +900,21 @@ def measure_preimport_state(
         existing_audit = spectral_audit.existing
         assert existing_audit is not None
         measured_existing_min = existing_lookup.min_bitrate_kbps
+        # issue #829 Phase 5 PR1 review round 2, should-fix 12: the HAVE
+        # side runs through the exact same analyze_album/analyze_track
+        # pipeline as the candidate, which always measures the 4 extension
+        # slices — carry the result through rather than measuring it and
+        # then throwing it away (no downstream consumer yet, matching the
+        # rest of this PR's capture-only scope; a future PR3 proof-gate
+        # comparison against the current library copy is the first
+        # candidate consumer).
         measured_existing = SpectralMeasurement.from_parts(
             existing_audit.grade,
             existing_audit.bitrate_kbps,
+            cliff_hz=existing_audit.cliff_hz,
+            codec_family=existing_audit.codec_family,
+            ultrasonic_deficit_db=existing_audit.ultrasonic_deficit_db,
+            spectral_measurement_version=existing_audit.spectral_measurement_version,
         )
         # Preserve the old policy input: an existing spectral measurement was
         # considered only when candidate spectral analysis succeeded. The

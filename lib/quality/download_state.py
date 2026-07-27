@@ -18,7 +18,7 @@ from typing import Optional
 
 import msgspec
 
-from lib.quality.evidence_types import V0ProbeEvidence
+from lib.quality.evidence_types import CodecFamily, V0ProbeEvidence
 
 
 # --- Download state reducer (pure decision for async poller) ---
@@ -219,7 +219,7 @@ class SpectralMeasurement:
     grade: Optional[str] = None
     bitrate_kbps: Optional[int] = None
     cliff_hz: Optional[int] = None
-    codec_family: Optional[str] = None
+    codec_family: CodecFamily | None = None
     ultrasonic_deficit_db: Optional[float] = None
     spectral_measurement_version: Optional[int] = None
 
@@ -229,7 +229,7 @@ class SpectralMeasurement:
         bitrate_kbps: Optional[int],
         *,
         cliff_hz: Optional[int] = None,
-        codec_family: Optional[str] = None,
+        codec_family: CodecFamily | None = None,
         ultrasonic_deficit_db: Optional[float] = None,
         spectral_measurement_version: Optional[int] = None,
     ) -> "SpectralMeasurement | None":

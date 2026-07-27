@@ -1058,12 +1058,24 @@ def backfill_current_evidence_from_album_info(
         )
         measurement = result.evidence.measurement
         if carry_spectral:
+            # issue #829 Phase 5 PR1: cliff_hz/codec_family/
+            # ultrasonic_deficit_db/spectral_measurement_version are one
+            # atomic fact alongside spectral_grade (same measurement pass)
+            # — they must carry together or the upsert's atomic-pair guard
+            # (keyed on EXCLUDED.spectral_grade IS NOT NULL) nulls them out
+            # over a stored good value the instant a carrying grade lands.
             measurement = msgspec.structs.replace(
                 measurement,
                 spectral_grade=existing_measurement.spectral_grade,
                 spectral_bitrate_kbps=existing_measurement.spectral_bitrate_kbps,
                 spectral_subject=EVIDENCE_SUBJECT_SOURCE,
                 spectral_provenance=EVIDENCE_PROVENANCE_CARRIED,
+                cliff_hz=existing_measurement.cliff_hz,
+                codec_family=existing_measurement.codec_family,
+                ultrasonic_deficit_db=existing_measurement.ultrasonic_deficit_db,
+                spectral_measurement_version=(
+                    existing_measurement.spectral_measurement_version
+                ),
             )
         elif (
             same_snapshot
@@ -1077,13 +1089,21 @@ def backfill_current_evidence_from_album_info(
             # verbatim (installed keeps provenance 'measured' per the
             # cross-product rule; facts are invalidated by byte change, not
             # by row repair). Ambiguous/off-vocabulary facts still drop —
-            # they cannot legally exist on a v4 row.
+            # they cannot legally exist on a v4 row. The four #829 PR1
+            # capture fields are the same atomic fact as spectral_grade
+            # here too (see the carry_spectral branch above).
             measurement = msgspec.structs.replace(
                 measurement,
                 spectral_grade=existing_measurement.spectral_grade,
                 spectral_bitrate_kbps=existing_measurement.spectral_bitrate_kbps,
                 spectral_subject=EVIDENCE_SUBJECT_INSTALLED,
                 spectral_provenance=EVIDENCE_PROVENANCE_MEASURED,
+                cliff_hz=existing_measurement.cliff_hz,
+                codec_family=existing_measurement.codec_family,
+                ultrasonic_deficit_db=existing_measurement.ultrasonic_deficit_db,
+                spectral_measurement_version=(
+                    existing_measurement.spectral_measurement_version
+                ),
             )
         existing_v0 = existing.v0_metric
         has_v0_values = existing_v0 is not None and any(

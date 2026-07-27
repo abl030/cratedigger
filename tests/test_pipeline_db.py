@@ -4784,29 +4784,33 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         assert loaded.v0_metric is not None
         self.assertEqual(loaded.v0_metric.avg_bitrate_kbps, 228)
 
-    def test_upsert_then_find_round_trips_new_spectral_capture_fields(self):
-        """Rule A (``.claude/rules/test-fidelity.md``): cliff_hz/
-        codec_family/ultrasonic_deficit_db/spectral_measurement_version
-        (issue #829 Phase 5 PR1) must read back through real PG unchanged —
-        ``FakePipelineDB`` alone would hide SQL column-list drift."""
+    def test_upsert_then_find_round_trips_every_measurement_field(self):
+        """Rule A (``.claude/rules/test-fidelity.md`` — "EVERY input key",
+        review round 2 should-fix 8): every ``AudioQualityMeasurement``
+        field, not just the four issue #829 Phase 5 PR1 capture fields,
+        must read back through real PG unchanged — ``FakePipelineDB``
+        alone would hide SQL column-list drift."""
         from lib.quality import AudioQualityMeasurement
 
+        measurement_in = AudioQualityMeasurement(
+            min_bitrate_kbps=192,
+            avg_bitrate_kbps=200,
+            median_bitrate_kbps=196,
+            format="MP3",
+            is_cbr=False,
+            spectral_grade="suspect",
+            spectral_bitrate_kbps=192,
+            spectral_subject="source",
+            spectral_provenance="measured",
+            was_converted_from=None,
+            cliff_hz=16500,
+            codec_family="mp3",
+            ultrasonic_deficit_db=42.5,
+            spectral_measurement_version=2,
+        )
         evidence = self._seed(
             mb_release_id="mbid-spectral-capture",
-            measurement=AudioQualityMeasurement(
-                min_bitrate_kbps=192,
-                avg_bitrate_kbps=192,
-                median_bitrate_kbps=192,
-                format="MP3",
-                spectral_grade="suspect",
-                spectral_bitrate_kbps=192,
-                spectral_subject="source",
-                spectral_provenance="measured",
-                cliff_hz=16500,
-                codec_family="mp3",
-                ultrasonic_deficit_db=42.5,
-                spectral_measurement_version=2,
-            ),
+            measurement=measurement_in,
         )
 
         self.db.upsert_album_quality_evidence(evidence)
@@ -4816,16 +4820,12 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         )
 
         assert loaded is not None
-        for field, expected in (
-            ("cliff_hz", 16500),
-            ("codec_family", "mp3"),
-            ("ultrasonic_deficit_db", 42.5),
-            ("spectral_measurement_version", 2),
-        ):
-            with self.subTest(field=field):
+        for field in msgspec.structs.fields(AudioQualityMeasurement):
+            with self.subTest(field=field.name):
                 self.assertEqual(
-                    getattr(loaded.measurement, field), expected,
-                    f"measurement.{field} was dropped at the PG boundary",
+                    getattr(loaded.measurement, field.name),
+                    getattr(measurement_in, field.name),
+                    f"measurement.{field.name} was dropped at the PG boundary",
                 )
 
     def test_upsert_new_spectral_capture_fields_null_by_default(self):

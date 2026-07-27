@@ -60,7 +60,8 @@ from lib import transitions
 # ``lib.dispatch.outcome_actions.finalize_request`` for the rationale.
 finalize_request = transitions.finalize_request
 from lib.quality import (AUDIO_EXTENSIONS_DOTTED as AUDIO_EXTENSIONS,
-                         AudioQualityMeasurement, DuplicateRemoveCandidate,
+                         AudioQualityMeasurement, CodecFamily,
+                         DuplicateRemoveCandidate,
                          AudioToolDiagnostic,
                          AudioToolDiagnosticCategory,
                          AudioValidationReport,
@@ -2039,7 +2040,7 @@ def main():
     # issue #829 Phase 5 PR1 capture — passengers alongside spectral_grade/
     # spectral_bitrate above; never read by any decision in this function.
     spectral_cliff_hz: int | None = None
-    spectral_codec_family: str | None = None
+    spectral_codec_family: CodecFamily | None = None
     spectral_ultrasonic_deficit_db: float | None = None
     spectral_measurement_version: int | None = None
     stage_start = time.monotonic()

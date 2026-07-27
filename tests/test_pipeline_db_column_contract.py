@@ -114,6 +114,11 @@ CONTRACTS: list[tuple[str, str, set[str]]] = [
      _struct_columns(PersistedYoutubeRow)),
     ("TransferLedgerRow", "slskd_transfer_ledger",
      _struct_columns(TransferLedgerRow)),
+    # issue #829 Phase 5 PR1 review round 2, should-fix 8: makes column-list
+    # drift structurally impossible for every field PR2/PR3/PR4 add to this
+    # struct — each field name IS the album_quality_evidence column name.
+    ("AudioQualityMeasurement", "album_quality_evidence",
+     _struct_columns(AudioQualityMeasurement)),
 ]
 
 

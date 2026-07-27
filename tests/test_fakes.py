@@ -152,6 +152,58 @@ class TestFakePipelineDB(unittest.TestCase):
             ["a.mp3", "b.mp3"],
         )
 
+    def test_album_quality_evidence_stale_writer_preserves_spectral_pair(self):
+        """issue #829 Phase 5 PR1 review round 2, should-fix 7: this guard
+        (upsert_album_quality_evidence's spectral-preserve CASE) had no
+        self-test at all. A stale writer with no grade must preserve the
+        stored spectral_grade AND the four #829 capture fields — mirrors
+        the real SQL's CASE guard in lib/pipeline_db/evidence.py."""
+        from lib.quality import AudioQualityMeasurement
+
+        db = FakePipelineDB()
+        evidence = make_album_quality_evidence(
+            mb_release_id="mb-stale-writer-preserve",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=192,
+                format="MP3",
+                spectral_grade="genuine",
+                spectral_subject="source",
+                spectral_provenance="measured",
+                cliff_hz=16500,
+                codec_family="mp3",
+                ultrasonic_deficit_db=44.0,
+                spectral_measurement_version=2,
+            ),
+        )
+        db.upsert_album_quality_evidence(evidence)
+
+        stale_writer = msgspec.structs.replace(
+            evidence,
+            measurement=msgspec.structs.replace(
+                evidence.measurement,
+                spectral_grade=None,
+                spectral_bitrate_kbps=None,
+                spectral_subject=None,
+                spectral_provenance=None,
+                cliff_hz=None,
+                codec_family=None,
+                ultrasonic_deficit_db=None,
+                spectral_measurement_version=None,
+            ),
+        )
+        db.upsert_album_quality_evidence(stale_writer)
+
+        loaded = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert loaded is not None
+        self.assertEqual(loaded.measurement.spectral_grade, "genuine")
+        self.assertEqual(loaded.measurement.cliff_hz, 16500)
+        self.assertEqual(loaded.measurement.codec_family, "mp3")
+        self.assertEqual(loaded.measurement.ultrasonic_deficit_db, 44.0)
+        self.assertEqual(loaded.measurement.spectral_measurement_version, 2)
+
     def test_album_quality_evidence_validates_snapshot(self):
         from lib.quality import AlbumQualityEvidenceFile
 

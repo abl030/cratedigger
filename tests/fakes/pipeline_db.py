@@ -3187,10 +3187,19 @@ class FakePipelineDB:
         # R19 is the exception: new lossless lineage clears a stored
         # installed-subject tuple because those derivative bytes are not an
         # authoritative spectral subject.
+        #
+        # This condition mirrors the real SQL's CASE guard exactly (issue
+        # #829 Phase 5 PR1 review round 2, should-fix 7) — it does NOT
+        # additionally require ``existing.measurement.spectral_grade is not
+        # None``. The SQL's ELSE (preserve-stored) branch fires whenever
+        # ``lineage_version >= 4 AND EXCLUDED.spectral_grade IS NULL AND NOT
+        # exception``, regardless of what the STORED grade already was; an
+        # earlier draft of this fake added that extra precondition, which a
+        # previous version of this comment claimed (wrongly) was already an
+        # exact mirror.
         if (
             existing is not None
             and existing.lineage_version >= 4
-            and existing.measurement.spectral_grade is not None
             and evidence.measurement.spectral_grade is None
             and not (
                 incoming_lossless_lineage
@@ -3198,11 +3207,9 @@ class FakePipelineDB:
                     == EVIDENCE_SUBJECT_INSTALLED
             )
         ):
-            # issue #829 Phase 5 PR1: cliff_hz/codec_family/
-            # ultrasonic_deficit_db/spectral_measurement_version are measured
-            # in the same pass as spectral_grade, so they preserve under the
-            # exact same guard (mirrors the SQL CASE conditions in
-            # lib/pipeline_db/evidence.py).
+            # cliff_hz/codec_family/ultrasonic_deficit_db/
+            # spectral_measurement_version are measured in the same pass as
+            # spectral_grade, so they preserve under the exact same guard.
             evidence = msgspec.structs.replace(
                 evidence,
                 measurement=msgspec.structs.replace(
