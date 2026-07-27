@@ -147,6 +147,49 @@ checker owes a known-bad self-test.
 - Reference implementation: `calibration-tmp/measurements/score_v3.py`
   (frozen 2026-07-26; its `_window_legs` / `gate` are the shape to port).
 
+#### PR3 hard constraint — the lossless-derived cohort can never be backfilled
+
+**93% of existing verified-lossless proofs sit on rows whose source no longer
+exists.** Measured on prod 2026-07-27:
+
+| | rows | albums |
+|---|---:|---:|
+| evidence rows derived from lossless (`was_converted_from` ∈ flac/wav/alac) | **15,222** | **6,346** |
+| …of those, also carrying verified-lossless proof | **14,391** | |
+| all verified-lossless proof rows | 15,501 | |
+
+Why they are unreachable: `lib/import_preview.py::preserve_existing_source_spectral`
+(R19) makes the preview worker **refuse** to persist an installed-subject
+spectral for a lossless-sourced copy — it returns `skipped`, *"lossless-sourced
+copy keeps its source spectral (R19)"*. That rule is correct and must stay:
+Opus is fullband and scans clean at any bitrate, so measuring the derivative
+would launder a transcode-like source into apparently-genuine. The row wears
+its SOURCE's spectral.
+
+But the operator's default target is `verified_lossless_target = opus 128`, so
+for this cohort the source FLAC was converted away and is gone. The ultrasonic
+statistic PR3's proof leg needs can only be computed from that source. It
+therefore **cannot be backfilled by re-measuring anything on disk** — the only
+genuine backfill is re-downloading the 6,346 albums' FLACs, which is not
+proposed.
+
+Consequences PR3 must implement, not discover:
+
+1. **`ultrasonic_deficit_db IS NULL` is three different states** and they must
+   be distinguishable: (a) preserved-source, never measurable here (R19
+   skipped); (b) legacy row predating `spectral_measurement_version = 2`;
+   (c) genuinely unmeasured. Treating them alike mis-handles most of the
+   library. The version stamp separates (b); R19/`was_converted_from` +
+   lineage separates (a).
+2. **The proof gate must not retroactively demote.** Existing stamps remain
+   proofs under the old model per the §2 authority; PR3 applies going forward.
+   A row that cannot be re-proved because its source is gone must not thereby
+   lose the proof it already holds.
+3. **Operator surfaces must say which model proved a row.** Otherwise "verified
+   lossless" silently means two different things across the library.
+4. Fresh imports are unaffected — they capture the source-side statistic at
+   import time, which is exactly what PR1 wired up.
+
 ### PR4 — Tiered verdict persistence + display semantics
 
 - Persist the **fired-leg set** and derived tier, not just the boolean.
