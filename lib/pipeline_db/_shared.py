@@ -127,7 +127,9 @@ def _float_or_none(value: Any) -> float | None:
 # ``Any`` under typeshed's two-argument ``getattr`` overload, breaking the
 # Unknown cascade without a suppression comment. One typed wrapper here is
 # shared by every INSERT ... VALUES %s batch-insert call site.
-_execute_values_fn = psycopg2.extras.execute_values
+_execute_values_fn = getattr(  # noqa: B009 - psycopg2 helper is untyped
+    psycopg2.extras, "execute_values",
+)
 
 
 def pg_execute_values(

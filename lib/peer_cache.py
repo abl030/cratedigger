@@ -257,7 +257,7 @@ def connect_from_config(cfg: CratediggerConfig) -> PeerCache:
         # getattr overload, breaking the Unknown cascade without a
         # suppression comment — same technique as
         # lib.beets_distance._item_from_path_fn.
-        client.ping()
+        getattr(client, "ping")()  # noqa: B009 - redis-py method is untyped
     except Exception:
         stats.cache_errors += 1
         logger.info(

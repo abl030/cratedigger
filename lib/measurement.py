@@ -267,7 +267,7 @@ class PreimportMeasurement(msgspec.Struct, frozen=True):
     attempt-local ``lossless_candidate`` fact additionally lets preview and
     harness routing reuse the exact classification that selected the scan.
     """
-    corrupt_files: list[str] = msgspec.field(default_factory=list)
+    corrupt_files: list[str] = msgspec.field(default_factory=list[str])
     audio_validation: AudioValidationReport = msgspec.field(
         default_factory=legacy_unrecorded_audio_validation_report,
     )

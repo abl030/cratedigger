@@ -152,13 +152,15 @@ class ClassifiedEntry(msgspec.Struct):
     # ``detail`` for hover/tooltip — do not parse it.
     disambiguation_failure: str | None = None
     disambiguation_detail: str | None = None
-    bad_extensions: list[str] = msgspec.field(default_factory=list)
+    bad_extensions: list[str] = msgspec.field(default_factory=list[str])
     wrong_match_triage_action: str | None = None
     wrong_match_triage_summary: str | None = None
     wrong_match_triage_reason: str | None = None
     wrong_match_triage_preview_verdict: str | None = None
     wrong_match_triage_preview_decision: str | None = None
-    wrong_match_triage_stage_chain: list[str] = msgspec.field(default_factory=list)
+    wrong_match_triage_stage_chain: list[str] = msgspec.field(
+        default_factory=list[str],
+    )
     wrong_match_triage_detail: str | None = None
     # The on-disk codec at download time, from import_result JSONB
     # (current_measurement.format). Rank-driven upgrades at equal

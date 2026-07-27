@@ -94,8 +94,8 @@ class DiffReport(msgspec.Struct, frozen=True):
     changed_rows: int
     changed_by_field: dict[str, int]
     samples: list[FieldChange]
-    base_only_fields: list[str] = msgspec.field(default_factory=list)
-    current_only_fields: list[str] = msgspec.field(default_factory=list)
+    base_only_fields: list[str] = msgspec.field(default_factory=list[str])
+    current_only_fields: list[str] = msgspec.field(default_factory=list[str])
 
 
 @runtime_checkable

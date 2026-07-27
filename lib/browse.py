@@ -33,7 +33,9 @@ def _routine_browse_http_status(error: Exception) -> int | None:
 
 @dataclass(frozen=True)
 class BrowseManyResult:
-    directories: dict[tuple[str, str], Any] = field(default_factory=dict)
+    directories: dict[tuple[str, str], Any] = field(
+        default_factory=dict[tuple[str, str], Any],
+    )
     negative_skips: set[tuple[str, str]] = field(default_factory=lambda: set())
     browse_attempts: int = 0
 

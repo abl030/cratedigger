@@ -91,7 +91,7 @@ def _serialize_item(item: library.Item) -> dict[str, object]:
     # getattr (not direct `.path`) keeps this Any-typed rather than the
     # narrow `bytes` LibModel declares, so the bytes/str defensive check
     # below stays meaningful to pyright instead of "always true."
-    path = item.path
+    path = getattr(item, "path")  # noqa: B009 - Beets path may be bytes or str at runtime
     if isinstance(path, bytes):
         path = path.decode("utf-8", errors="replace")
     return {

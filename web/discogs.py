@@ -837,7 +837,9 @@ class LabelEntity(msgspec.Struct):
     parent_label_id: str | None
     parent_label_name: str | None
     release_count: int
-    sub_labels: list[dict[str, object]] = msgspec.field(default_factory=list)
+    sub_labels: list[dict[str, object]] = msgspec.field(
+        default_factory=list[dict[str, object]],
+    )
 
 
 def _label_entity_from_hit(hit: _DiscogsLabelHit) -> LabelEntity:

@@ -64,7 +64,7 @@ class AudioValidationReport(msgspec.Struct, frozen=True):
     files_checked: int = 0
     files_failed: int = 0
     diagnostics: list[AudioToolDiagnostic] = msgspec.field(
-        default_factory=list,
+        default_factory=list[AudioToolDiagnostic],
     )
     omitted_diagnostics: int = 0
 

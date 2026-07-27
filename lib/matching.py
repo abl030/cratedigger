@@ -98,7 +98,9 @@ class MatchResult:
     matched: bool
     directory: Any
     file_dir: str
-    candidates: list[CandidateScore] = field(default_factory=list)
+    candidates: list[CandidateScore] = field(
+        default_factory=list[CandidateScore],
+    )
     # Authoritative count of dirs rejected by the asymmetric pre-filter
     # before browse; sample rows in ``candidates`` are bounded by
     # ``PRE_FILTER_SKIP_SAMPLE_CAP``.

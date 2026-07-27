@@ -301,7 +301,9 @@ class RequestTransition:
     target_status: RequestStatus
     from_status: str | None = None
     attempt_type: str | None = None
-    fields: Mapping[str, object] = field(default_factory=dict)
+    fields: Mapping[str, object] = field(
+        default_factory=dict[str, object],
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "fields", MappingProxyType(dict(self.fields)))

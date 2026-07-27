@@ -186,7 +186,7 @@ def flac_streaminfo_md5(path: Path) -> bytes | None:
         raise AudioHashError(f"failed to read FLAC {path}: {e}") from e
     # Keep the dynamic STREAMINFO field behind an object-typed boundary:
     # mutagen does not annotate ``md5_signature``.
-    info = flac.info
+    info = getattr(flac, "info")  # noqa: B009 - mutagen leaves this field untyped
     raw: object = getattr(info, "md5_signature", None)
     if raw is None:
         return None

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import msgspec
 
@@ -367,9 +367,10 @@ def _plan_provenance_line(prov: dict[str, Any] | None) -> list[str]:
     if not prov:
         return ["      provenance:     (none)"]
     out = ["      provenance:"]
-    for key, raw_value in prov.items():
+    for key, raw_value_any in prov.items():
+        raw_value: object = raw_value_any
         if isinstance(raw_value, list):
-            value = _as_list(raw_value)
+            value = _as_list(cast(object, raw_value))
             out.append(f"        {key}: {len(value)} item(s)")
             for entry in value[:5]:
                 out.append(f"          - {entry}")

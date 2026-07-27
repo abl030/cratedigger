@@ -71,7 +71,9 @@ log = logging.getLogger(__name__)
 
 # Keep the upstream constructor behind one local seam so tests can replace the
 # tag reader without loading real media files.
-_item_from_path_fn = _beets_library.Item.from_path
+_item_from_path_fn = getattr(  # noqa: B009 - upstream callable is untyped
+    _beets_library.Item, "from_path",
+)
 
 
 def _item_from_path(path: str) -> _beets_library.Item:
@@ -81,7 +83,7 @@ def _item_from_path(path: str) -> _beets_library.Item:
 def _item_field(
     item: _beets_library.Item, key: str, default: object = None,
 ) -> int | float | str | None:
-    return item.get(key, default)
+    return getattr(item, "get")(key, default)  # noqa: B009 - upstream method is untyped
 
 
 class BeetsDistanceResult(msgspec.Struct, kw_only=True):
