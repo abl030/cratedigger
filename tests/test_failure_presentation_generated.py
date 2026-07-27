@@ -833,12 +833,11 @@ class TestReasonPartition(unittest.TestCase):
         ("shared root", _SHARED_ROOT_VOCABULARY),
     )
 
-    @given(errno=st.sampled_from((
-        "ESTALE", "EIO", "EACCES", "ENOTDIR", "EPERM", "UNKNOWN",
-    )))
-    def test_every_vocabulary_slot_keeps_its_meaning(self, errno: str) -> None:
-        for name, vocabulary in self.VOCABULARIES:
-            self._check_vocabulary(name, vocabulary, errno)
+    def test_every_vocabulary_slot_keeps_its_meaning(self) -> None:
+        for errno in ("ESTALE", "EIO", "EACCES", "ENOTDIR", "EPERM", "UNKNOWN"):
+            with self.subTest(errno=errno):
+                for name, vocabulary in self.VOCABULARIES:
+                    self._check_vocabulary(name, vocabulary, errno)
 
     def _check_vocabulary(
         self, name: str, vocabulary: _ReasonVocabulary, errno: str,
@@ -972,15 +971,11 @@ class TestUnknownTextStaysBounded(unittest.TestCase):
             {"refusal", "transport", "peer_file", "local_storage", "unknown"},
         )
 
-    @given(
-        family=st.sampled_from(tuple(_FAMILY_MESSAGES)),
-        data=st.data(),
-    )
-    def test_census_messages_keep_their_declared_family(
-        self, family: PeerFailureFamily, data: st.DataObject,
-    ) -> None:
-        message = data.draw(st.sampled_from(_FAMILY_MESSAGES[family]))
-        self.assertEqual(peer_failure_family(message), family)
+    def test_census_messages_keep_their_declared_family(self) -> None:
+        for family, messages in _FAMILY_MESSAGES.items():
+            for message in messages:
+                with self.subTest(family=family, message=message):
+                    self.assertEqual(peer_failure_family(message), family)
 
 
 class TestPresentationIsPure(unittest.TestCase):

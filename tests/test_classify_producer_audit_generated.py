@@ -577,23 +577,21 @@ class TestUnproducedNamesAreNeverRewritten(unittest.TestCase):
 class TestMatchedNamesRenderWords(unittest.TestCase):
     """C3 — the other half of the ``no_candidates`` defect."""
 
-    @given(scenario=st.sampled_from(REJECTION_SCENARIO_LITERALS))
-    @example(scenario="mbid_not_found")
-    def test_every_matched_rejection_scenario_renders_a_sentence(
-        self, scenario: str,
-    ) -> None:
-        classified = classify_log_entry(
-            LogEntry(id=1, request_id=2, outcome="rejected",
-                     beets_scenario=scenario))
-        violation = check_matched_name_renders_words(
-            scenario, classified.verdict)
-        self.assertIsNone(violation, violation)
+    def test_every_matched_rejection_scenario_renders_a_sentence(self) -> None:
+        for scenario in REJECTION_SCENARIO_LITERALS:
+            with self.subTest(scenario=scenario):
+                classified = classify_log_entry(
+                    LogEntry(id=1, request_id=2, outcome="rejected",
+                             beets_scenario=scenario))
+                violation = check_matched_name_renders_words(
+                    scenario, classified.verdict)
+                self.assertIsNone(violation, violation)
 
 
 class TestRenderedCountsAreTheProducers(unittest.TestCase):
     """C4 — issue #888 PR4's one rendered number."""
 
-    @given(unmatched=st.integers(min_value=1, max_value=120))
+    @given(unmatched=st.integers(min_value=1, max_value=512))
     @example(unmatched=1)
     @example(unmatched=3)
     @example(unmatched=9)

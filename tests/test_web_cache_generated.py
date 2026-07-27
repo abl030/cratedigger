@@ -210,7 +210,7 @@ class TestGeneratedMetadataSingleFlight(unittest.TestCase):
         meta_set.assert_not_called()
 
     @given(
-        key=st.sampled_from(("artist:a", "artist:b", "artist:c")),
+        key=st.text(min_size=1, max_size=40),
         callers=st.integers(min_value=1, max_value=5),
         abort=st.booleans(),
     )
@@ -266,7 +266,7 @@ class TestGeneratedMetadataSingleFlight(unittest.TestCase):
         )
 
     @given(
-        key=st.sampled_from(("artist:a", "artist:b", "artist:c")),
+        key=st.text(min_size=1, max_size=40),
         callers=st.integers(min_value=1, max_value=5),
     )
     @example(key="artist:c", callers=2)

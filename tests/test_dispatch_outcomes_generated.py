@@ -45,12 +45,13 @@ import unittest
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from itertools import product
 from typing import Any, cast
 from unittest.mock import MagicMock, mock_open, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from hypothesis import example, given, settings
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
@@ -1155,19 +1156,27 @@ class TestGeneratedOperatorRetainedLifecycle(unittest.TestCase):
         self.runtime.start()
         self.addCleanup(self.runtime.stop)
 
-    @given(
-        decision=st.sampled_from(tuple(sorted(_AUTOMATIC_RETAINED_ACTIONS))),
-        initial_status=st.sampled_from(("wanted", "unsearchable")),
-    )
-    @example(
-        decision="provisional_lossless_upgrade",
-        initial_status="wanted",
-    )
-    def test_retained_policy_preserves_starting_search_lifecycle(
+    def test_retained_policy_preserves_starting_search_lifecycle(self) -> None:
+        cases = product(
+            sorted(_AUTOMATIC_RETAINED_ACTIONS),
+            ("wanted", "unsearchable"),
+        )
+        for decision, initial_status in cases:
+            with self.subTest(
+                decision=decision,
+                initial_status=initial_status,
+            ):
+                self._assert_retained_policy(
+                    decision=decision,
+                    initial_status=initial_status,
+                )
+
+    def _assert_retained_policy(
         self,
-        decision,
-        initial_status,
-    ):
+        *,
+        decision: str,
+        initial_status: str,
+    ) -> None:
         expected_override = _AUTOMATIC_RETAINED_ACTIONS[decision][1]
         world = DispatchWorld(
             mode="decision",
@@ -1195,21 +1204,27 @@ class TestGeneratedOperatorRetainedLifecycle(unittest.TestCase):
 
 
 class TestGeneratedArchivalQuarantineIsolation(unittest.TestCase):
-    @given(
-        scenario=st.one_of(
-            st.none(),
-            st.sampled_from((
-                "force_import",
-                "strong_mismatch",
-                "audio_corrupt",
-                "untracked_audio",
-            )),
-        ),
-        link_fault=st.sampled_from(("none", "read", "write")),
-    )
-    @example(scenario=None, link_fault="read")
-    def test_archive_plan_never_reaches_wrong_match_cleanup(
+    def test_archive_plan_never_reaches_wrong_match_cleanup(self) -> None:
+        scenarios = (
+            None,
+            "force_import",
+            "strong_mismatch",
+            "audio_corrupt",
+            "untracked_audio",
+        )
+        for scenario, link_fault in product(
+            scenarios,
+            ("none", "read", "write"),
+        ):
+            with self.subTest(scenario=scenario, link_fault=link_fault):
+                self._assert_archive_plan_isolated(
+                    scenario=scenario,
+                    link_fault=link_fault,
+                )
+
+    def _assert_archive_plan_isolated(
         self,
+        *,
         scenario: str | None,
         link_fault: str,
     ) -> None:

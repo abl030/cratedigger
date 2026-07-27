@@ -41,6 +41,16 @@ _ROW_FIELDS = (
     "primary_artist_id",
     "is_masterless",
 )
+_MALFORMED_IDENTITIES: tuple[tuple[int | str, bool], ...] = (
+    ("foo", True),
+    ("release-", True),
+    ("release-abc", True),
+    ("release-0", True),
+    ("release--1", True),
+    (0, False),
+    (-1, False),
+    ("122", False),
+)
 _ENVELOPE_FIELDS = ("results", "total", "page", "per_page")
 
 
@@ -285,31 +295,24 @@ class TestGeneratedBulkCatalogue(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "positive integer"):
             _run_consumer([invalid], [])
 
-    @given(
-        malformed=st.sampled_from((
-            ("foo", True),
-            ("release-", True),
-            ("release-abc", True),
-            ("release-0", True),
-            ("release--1", True),
-            (0, False),
-            (-1, False),
-            ("122", False),
-        )),
-    )
-    def test_malformed_discogs_identities_fail_the_real_consumer(
-        self, malformed: tuple[int | str, bool],
-    ) -> None:
-        raw_id, is_masterless = malformed
-        invalid = {
-            **_artist_row_example(),
-            "id": raw_id,
-            "is_masterless": is_masterless,
-        }
-        with self.assertRaisesRegex(AssertionError, "invalid .* identity"):
-            assert_identity_marker_consistent(invalid)
-        with self.assertRaises(ValueError):
-            _run_consumer([invalid], [])
+    def test_malformed_discogs_identities_fail_the_real_consumer(self) -> None:
+        for raw_id, is_masterless in _MALFORMED_IDENTITIES:
+            with self.subTest(
+                raw_id=raw_id,
+                is_masterless=is_masterless,
+            ):
+                invalid = {
+                    **_artist_row_example(),
+                    "id": raw_id,
+                    "is_masterless": is_masterless,
+                }
+                with self.assertRaisesRegex(
+                    AssertionError,
+                    "invalid .* identity",
+                ):
+                    assert_identity_marker_consistent(invalid)
+                with self.assertRaises(ValueError):
+                    _run_consumer([invalid], [])
 
     @given(
         rows=st.lists(_artist_rows(), max_size=4),

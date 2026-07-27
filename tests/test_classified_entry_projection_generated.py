@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import unittest
 from collections.abc import Mapping
+from itertools import product
 
 import msgspec
 from hypothesis import example, given
@@ -185,20 +186,29 @@ class TestGeneratedClassifiedEntryProjection(_ClassifiedEntryProjectionHarness):
         )
         assert_classified_fields_forwarded(log_payload, detail_payload)
 
-    @given(
-        lossless_format=st.sampled_from(["flac", "alac", "wav", "aiff", "ape"]),
-        lossy_format=st.sampled_from(["mp3", "aac", "m4a", "ogg", "opus", "wma"]),
-        validation_scenario=st.sampled_from([
-            "strong_match", "medium_match", "validation_passed",
-        ]),
-    )
-    @example(
-        lossless_format="flac",
-        lossy_format="ogg",
-        validation_scenario="strong_match",
-    )
     def test_terminal_mixed_source_decision_drives_every_projection_world(
         self,
+    ) -> None:
+        cases = product(
+            ("flac", "alac", "wav", "aiff", "ape"),
+            ("mp3", "aac", "m4a", "ogg", "opus", "wma"),
+            ("strong_match", "medium_match", "validation_passed"),
+        )
+        for lossless_format, lossy_format, validation_scenario in cases:
+            with self.subTest(
+                lossless_format=lossless_format,
+                lossy_format=lossy_format,
+                validation_scenario=validation_scenario,
+            ):
+                self._assert_terminal_mixed_source_projection(
+                    lossless_format=lossless_format,
+                    lossy_format=lossy_format,
+                    validation_scenario=validation_scenario,
+                )
+
+    def _assert_terminal_mixed_source_projection(
+        self,
+        *,
         lossless_format: str,
         lossy_format: str,
         validation_scenario: str,

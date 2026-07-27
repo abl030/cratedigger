@@ -29,15 +29,11 @@ import os
 import sys
 import unittest
 from dataclasses import dataclass
+from itertools import product
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
-from hypothesis import example, given
-from hypothesis import strategies as st
-
-import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 
 _beets_mocks = {
     "beets": MagicMock(),
@@ -83,15 +79,6 @@ class _CandidateWorld:
     data_source: str
     album_id: str
     releasegroup_id: str
-
-
-@st.composite
-def _candidate_worlds(draw) -> _CandidateWorld:
-    return _CandidateWorld(
-        data_source=draw(st.sampled_from(_DATA_SOURCES)),
-        album_id=draw(st.sampled_from(_ID_SHAPES)),
-        releasegroup_id=draw(st.sampled_from(_ID_SHAPES)),
-    )
 
 
 def _build_candidate(world: _CandidateWorld) -> SimpleNamespace:
@@ -154,14 +141,32 @@ class TestGeneratedDiscogsNeutralizeInvariant(unittest.TestCase):
     neutralization always leaves the candidate safe, and never touches a
     non-Discogs candidate's album_id."""
 
-    @given(world=_candidate_worlds())
-    @example(world=_CandidateWorld(
-        data_source="Discogs", album_id="1505049", releasegroup_id="339103"))
-    @example(world=_CandidateWorld(
-        data_source="MusicBrainz",
-        album_id="11111111-2222-3333-4444-555555555555",
-        releasegroup_id=""))
-    def test_every_candidate_is_safe_after_neutralization(self, world):
+    def test_every_candidate_is_safe_after_neutralization(self) -> None:
+        decisive_examples = (
+            _CandidateWorld(
+                data_source="Discogs",
+                album_id="1505049",
+                releasegroup_id="339103",
+            ),
+            _CandidateWorld(
+                data_source="MusicBrainz",
+                album_id="11111111-2222-3333-4444-555555555555",
+                releasegroup_id="",
+            ),
+        )
+        generated_matrix = (
+            _CandidateWorld(data_source, album_id, releasegroup_id)
+            for data_source, album_id, releasegroup_id in product(
+                _DATA_SOURCES,
+                _ID_SHAPES,
+                _ID_SHAPES,
+            )
+        )
+        for world in (*decisive_examples, *generated_matrix):
+            with self.subTest(world=world):
+                self._assert_candidate_safe(world)
+
+    def _assert_candidate_safe(self, world: _CandidateWorld) -> None:
         candidate = _build_candidate(world)
         original_album_id = candidate.info.album_id
         beets_harness._neutralize_discogs_provider_ids(candidate)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import unittest
 from dataclasses import dataclass
+from itertools import product
 
 import msgspec
 import psycopg2
@@ -251,17 +252,27 @@ class TestGeneratedLosslessLineageCheck(unittest.TestCase):
 
 
 class TestGeneratedLosslessLineageMerge(unittest.TestCase):
-    @given(
-        existing_subject=st.sampled_from((None, "installed", "source")),
-        anchor=st.sampled_from(("source_v0", "proof", "conversion")),
-        converted_from=st.sampled_from(("flac", "FLAC", "alac", "wav")),
-    )
-    @example(existing_subject="installed", anchor="source_v0", converted_from="flac")
-    @example(existing_subject="installed", anchor="proof", converted_from="flac")
-    @example(existing_subject="installed", anchor="conversion", converted_from="FLAC")
-    @example(existing_subject="source", anchor="source_v0", converted_from="flac")
-    def test_same_address_merge_converges_to_r19(
+    def test_same_address_merge_converges_to_r19(self) -> None:
+        cases = product(
+            (None, "installed", "source"),
+            ("source_v0", "proof", "conversion"),
+            ("flac", "FLAC", "alac", "wav"),
+        )
+        for existing_subject, anchor, converted_from in cases:
+            with self.subTest(
+                existing_subject=existing_subject,
+                anchor=anchor,
+                converted_from=converted_from,
+            ):
+                self._assert_same_address_merge(
+                    existing_subject=existing_subject,
+                    anchor=anchor,
+                    converted_from=converted_from,
+                )
+
+    def _assert_same_address_merge(
         self,
+        *,
         existing_subject: str | None,
         anchor: str,
         converted_from: str,

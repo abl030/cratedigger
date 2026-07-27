@@ -787,12 +787,19 @@ class TestGeneratedMaterializeFailureReasons(unittest.TestCase):
 
 
 class TestGeneratedMaterializeLifecycle(unittest.TestCase):
-    @given(world=st.sampled_from(_FAILING_WORLDS), grace_expired=st.booleans())
-    @example(world="never_stamped", grace_expired=True)
-    @example(world="gone_from_disk", grace_expired=True)
-    @example(world="unreadable", grace_expired=False)
-    @settings(deadline=None)
-    def test_reason_changes_the_evidence_not_the_lifecycle(
+    def test_reason_changes_the_evidence_not_the_lifecycle(self) -> None:
+        for world in _FAILING_WORLDS:
+            for grace_expired in (False, True):
+                with self.subTest(
+                    world=world,
+                    grace_expired=grace_expired,
+                ):
+                    self._assert_reason_changes_only_evidence(
+                        world=world,
+                        grace_expired=grace_expired,
+                    )
+
+    def _assert_reason_changes_only_evidence(
         self, world: str, grace_expired: bool,
     ) -> None:
         """Drives the REAL poller enqueue path: real materialize, real
