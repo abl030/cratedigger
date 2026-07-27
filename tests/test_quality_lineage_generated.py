@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import string
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -63,6 +64,37 @@ from tests.helpers import (
     make_request_row,
 )
 from web.classify import LogEntry, classify_log_entry
+
+_LABEL_WHITESPACE = st.text(
+    alphabet=(" ", "\t", "\n", "\r", "\v", "\f", "\u00a0", "\u2003"),
+    max_size=6,
+)
+_MP3_SPELLINGS = st.sampled_from(("mp3", "mP3", "Mp3", "MP3"))
+_EXPLICIT_MP3_LABELS = st.builds(
+    lambda prefix, spelling, separator, mode, suffix: (
+        f"{prefix}{spelling}{separator}{mode}{suffix}"
+    ),
+    _LABEL_WHITESPACE,
+    _MP3_SPELLINGS,
+    st.text(
+        alphabet=(" ", "\t", "\n", "\r", "\v", "\f", "\u00a0", "\u2003"),
+        min_size=1,
+        max_size=4,
+    ),
+    st.sampled_from(("v0", "V0", "320")),
+    _LABEL_WHITESPACE,
+)
+_BARE_MP3_LABELS = st.builds(
+    lambda prefix, spelling, suffix: f"{prefix}{spelling}{suffix}",
+    _LABEL_WHITESPACE,
+    _MP3_SPELLINGS,
+    _LABEL_WHITESPACE,
+)
+_BARE_CODEC_LABELS = st.text(
+    alphabet=string.ascii_letters + string.digits + "+._-",
+    min_size=1,
+    max_size=16,
+)
 
 
 def _coherent_three_track_metrics(
@@ -1467,7 +1499,7 @@ class TestQualityLineageGenerated(unittest.TestCase):
             )
 
     @given(
-        label=st.sampled_from(("mp3 v0", "MP3 V0", "mp3 320", " MP3 320 ")),
+        label=_EXPLICIT_MP3_LABELS,
         supplied_mode=st.booleans(),
     )
     @example(label="mp3 v0", supplied_mode=True)
@@ -1478,7 +1510,7 @@ class TestQualityLineageGenerated(unittest.TestCase):
         supplied_mode: bool,
     ) -> None:
         cfg = QualityRankConfig.defaults()
-        expected_cbr = label.strip().lower() == "mp3 320"
+        expected_cbr = label.strip().lower().split() == ["mp3", "320"]
         bitrate = 320 if expected_cbr else 245
         contract = TargetQualityContract.from_projection(
             label,
@@ -1554,50 +1586,34 @@ class TestQualityLineageGenerated(unittest.TestCase):
         self.assertIsNone(built.evidence.target_format)
         self.assertIsNone(built.evidence.target_is_cbr)
 
-    @given(
-        prefix=st.sampled_from(("", " ", "\t", "\n ")),
-        spelling=st.sampled_from(("mp3", "MP3", "Mp3", "mP3")),
-        suffix=st.sampled_from(("", " ", "\t", " \n")),
-    )
-    @example(prefix=" ", spelling="MP3", suffix=" ")
+    @given(label=_BARE_MP3_LABELS)
+    @example(label=" MP3 ")
     def test_bare_mp3_always_requires_an_explicit_mode(
         self,
-        prefix: str,
-        spelling: str,
-        suffix: str,
+        label: str,
     ) -> None:
         with self.assertRaisesRegex(ValueError, "bare MP3"):
-            TargetQualityContract.from_explicit_label(
-                prefix + spelling + suffix
-            )
+            TargetQualityContract.from_explicit_label(label)
 
     @given(
-        prefix=st.sampled_from(("", " ", "\t", "\n ")),
-        spelling=st.sampled_from(("mp3", "MP3", "Mp3", "mP3")),
-        suffix=st.sampled_from(("", " ", "\t", " \n")),
+        label=_BARE_MP3_LABELS,
         projected_is_cbr=st.booleans(),
     )
     @example(
-        prefix=" ",
-        spelling="MP3",
-        suffix=" ",
+        label=" MP3 ",
         projected_is_cbr=False,
     )
     @example(
-        prefix="\t",
-        spelling="Mp3",
-        suffix="\n",
+        label="\tMp3\n",
         projected_is_cbr=True,
     )
     def test_projection_api_preserves_required_bare_mp3_mode(
         self,
-        prefix: str,
-        spelling: str,
-        suffix: str,
+        label: str,
         projected_is_cbr: bool,
     ) -> None:
         contract = TargetQualityContract.from_projection(
-            prefix + spelling + suffix,
+            label,
             projected_is_cbr=projected_is_cbr,
         )
         self.assertEqual(contract.is_cbr, projected_is_cbr)
@@ -1964,7 +1980,10 @@ class TestQualityLineageGenerated(unittest.TestCase):
         )
         self.assertEqual(built.status, "incomplete")
 
-    @given(source_codec=st.sampled_from(["FLAC", "WAV", "ALAC"]))
+    @given(source_codec=_BARE_CODEC_LABELS)
+    @example(source_codec="FLAC")
+    @example(source_codec="WAV")
+    @example(source_codec="ALAC")
     def test_source_measurement_never_carries_output_lineage(
         self, source_codec: str
     ) -> None:

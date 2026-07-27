@@ -37,6 +37,7 @@ import os
 import sys
 import unittest
 from collections.abc import Mapping
+from itertools import product
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -194,37 +195,24 @@ def assert_wanted_quality_fields(
 
 
 class TestReadOnlyMetadataCasGenerated(unittest.TestCase):
-    @given(
-        exists=st.booleans(),
-        status=st.sampled_from(sorted(LEGAL_STATUSES)),
-        include_expected_status=st.booleans(),
-        expected_status=st.sampled_from(sorted(LEGAL_STATUSES)),
-    )
-    @example(
-        exists=True,
-        status="wanted",
-        include_expected_status=False,
-        expected_status="unsearchable",
-    )
-    @example(
-        exists=True,
-        status="wanted",
-        include_expected_status=True,
-        expected_status="unsearchable",
-    )
-    @example(
-        exists=True,
-        status="replaced",
-        include_expected_status=False,
-        expected_status="replaced",
-    )
-    @example(
-        exists=False,
-        status="wanted",
-        include_expected_status=True,
-        expected_status="wanted",
-    )
-    def test_empty_and_control_only_updates_match_truth_table(
+    def test_empty_and_control_only_updates_match_truth_table(self) -> None:
+        statuses = sorted(LEGAL_STATUSES)
+        cases = product((False, True), statuses, (False, True), statuses)
+        for exists, status, include_expected_status, expected_status in cases:
+            with self.subTest(
+                exists=exists,
+                status=status,
+                include_expected_status=include_expected_status,
+                expected_status=expected_status,
+            ):
+                self._assert_empty_and_control_only_update(
+                    exists=exists,
+                    status=status,
+                    include_expected_status=include_expected_status,
+                    expected_status=expected_status,
+                )
+
+    def _assert_empty_and_control_only_update(
         self,
         *,
         exists: bool,
@@ -354,19 +342,23 @@ class TestWantedQualityFieldsGenerated(unittest.TestCase):
 
 
 class TestResolverSourceStatusGenerated(unittest.TestCase):
-    @given(
-        exists=st.booleans(),
-        status=st.sampled_from(
-            ["wanted", "downloading", "imported", "unsearchable"],
-        ),
-        expected_status=st.sampled_from(
-            ["wanted", "downloading", "imported", "unsearchable"],
-        ),
-    )
-    @example(exists=True, status="unsearchable", expected_status="wanted")
-    @example(exists=True, status="wanted", expected_status="wanted")
-    @example(exists=False, status="wanted", expected_status="wanted")
-    def test_stale_source_cannot_mutate_ancestor_or_children(
+    def test_stale_source_cannot_mutate_ancestor_or_children(self) -> None:
+        statuses = ("wanted", "downloading", "imported", "unsearchable")
+        for exists, status, expected_status in product(
+            (False, True), statuses, statuses,
+        ):
+            with self.subTest(
+                exists=exists,
+                status=status,
+                expected_status=expected_status,
+            ):
+                self._assert_resolver_source_status(
+                    exists=exists,
+                    status=status,
+                    expected_status=expected_status,
+                )
+
+    def _assert_resolver_source_status(
         self,
         *,
         exists: bool,

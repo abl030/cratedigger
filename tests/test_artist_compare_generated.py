@@ -28,6 +28,18 @@ StructuralType = Literal["Album", "EP", "Single"]
 Provenance = Literal["ordinary", "promo", "unofficial"]
 _STRUCTURAL_TYPES: tuple[StructuralType, ...] = ("Album", "EP", "Single")
 _PROVENANCE: tuple[Provenance, ...] = ("ordinary", "promo", "unofficial")
+_DISCOGS_ARTIST_ROW_FIELDS = (
+    "id",
+    "title",
+    "type",
+    "primary_types",
+    "format_qualifiers",
+    "provenance",
+    "first_release_date",
+    "artist_credit",
+    "primary_artist_id",
+    "is_masterless",
+)
 
 
 def _mb(
@@ -979,44 +991,28 @@ class TestArtistCompareGenerated(unittest.TestCase):
         }
         assert_wire_payload_rejected(payload)
 
-    @given(
-        missing=st.sampled_from(
-            (
-                "id",
-                "title",
-                "type",
-                "primary_types",
-                "format_qualifiers",
-                "provenance",
-                "first_release_date",
-                "artist_credit",
-                "primary_artist_id",
-                "is_masterless",
-            )
-        )
-    )
-    def test_missing_artist_row_field_never_crosses_boundary(
-        self, missing: str
-    ) -> None:
-        row = {
-            "id": 1,
-            "title": "Invalid",
-            "type": "Album",
-            "primary_types": ["Album"],
-            "format_qualifiers": [],
-            "provenance": ["ordinary"],
-            "first_release_date": "2000",
-            "artist_credit": "Artist",
-            "primary_artist_id": 1,
-            "is_masterless": False,
-        }
-        del row[missing]
-        assert_wire_payload_rejected({
-            "results": [row],
-            "total": 1,
-            "page": 1,
-            "per_page": 100,
-        })
+    def test_missing_artist_row_field_never_crosses_boundary(self) -> None:
+        for missing in _DISCOGS_ARTIST_ROW_FIELDS:
+            with self.subTest(missing=missing):
+                row = {
+                    "id": 1,
+                    "title": "Invalid",
+                    "type": "Album",
+                    "primary_types": ["Album"],
+                    "format_qualifiers": [],
+                    "provenance": ["ordinary"],
+                    "first_release_date": "2000",
+                    "artist_credit": "Artist",
+                    "primary_artist_id": 1,
+                    "is_masterless": False,
+                }
+                del row[missing]
+                assert_wire_payload_rejected({
+                    "results": [row],
+                    "total": 1,
+                    "page": 1,
+                    "per_page": 100,
+                })
 
     def test_declared_wire_row_type_is_strict(self) -> None:
         self.assertTrue(issubclass(_DiscogsArtistMasterEntry, msgspec.Struct))

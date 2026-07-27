@@ -7,7 +7,7 @@ import unittest
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from hypothesis import given
+from hypothesis import example, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  # profile registration side effect
@@ -376,97 +376,110 @@ def boundary_worlds(draw: st.DrawFn) -> BoundaryWorld:
     )
 
 
-_UNSUPPORTED_PAYLOADS = st.sampled_from(
-    (
-        f"{_CALL_NAME}({{[fieldName]: 1}});",
-        f"{_CALL_NAME}({{...base, outcome: 'success'}});",
-        f"{_CALL_NAME}(fixture);",
-        f"{_CALL_NAME}([fixture]);",
-        f"{_CALL_NAME}([...rows]);",
-        f"{_CALL_NAME}([{{outcome: 'success'}}, ...rows]);",
-        f"{_CALL_NAME}([, {{outcome: 'success'}}]);",
-        f"{_CALL_NAME}({{method() {{ return 1; }}}});",
-    )
+_UNSUPPORTED_PAYLOADS = (
+    f"{_CALL_NAME}({{[fieldName]: 1}});",
+    f"{_CALL_NAME}({{...base, outcome: 'success'}});",
+    f"{_CALL_NAME}(fixture);",
+    f"{_CALL_NAME}([fixture]);",
+    f"{_CALL_NAME}([...rows]);",
+    f"{_CALL_NAME}([{{outcome: 'success'}}, ...rows]);",
+    f"{_CALL_NAME}([, {{outcome: 'success'}}]);",
+    f"{_CALL_NAME}({{method() {{ return 1; }}}});",
 )
 
-_UNSUPPORTED_RENDERER_REFERENCES = st.sampled_from(
+_UNSUPPORTED_RENDERER_REFERENCES = (
+    f'globalThis["{_CALL_NAME}"]({{invented_client_only: 1}});',
+    'globalThis["renderDownloadHistory\\u0049tem"]({invented_client_only: 1});',
     (
-        f'globalThis["{_CALL_NAME}"]({{invented_client_only: 1}});',
-        'globalThis["renderDownloadHistory\\u0049tem"]({invented_client_only: 1});',
-        (
-            f'const name = "{_CALL_NAME}"; '
-            "__test__[name]({invented_client_only: 1});"
-        ),
-        f"__test__?.{_CALL_NAME}({{invented_client_only: 1}});",
-        f"(0, {_CALL_NAME})({{invented_client_only: 1}});",
-        f"{_CALL_NAME}.call(null, {{invented_client_only: 1}});",
-        f"{_CALL_NAME}?.({{invented_client_only: 1}});",
-        f"const alias = {_CALL_NAME}; alias({{invented_client_only: 1}});",
-        (
-            f"let alias; alias = {_CALL_NAME}; "
-            "alias({invented_client_only: 1});"
-        ),
-        (
-            f"const {{{_CALL_NAME}: alias}} = helpers; "
-            "alias({invented_client_only: 1});"
-        ),
-        (
-            f"import {{{_CALL_NAME} as alias}} from './fixture.js'; "
-            "alias({invented_client_only: 1});"
-        ),
-    )
+        f'const name = "{_CALL_NAME}"; '
+        "__test__[name]({invented_client_only: 1});"
+    ),
+    f"__test__?.{_CALL_NAME}({{invented_client_only: 1}});",
+    f"(0, {_CALL_NAME})({{invented_client_only: 1}});",
+    f"{_CALL_NAME}.call(null, {{invented_client_only: 1}});",
+    f"{_CALL_NAME}?.({{invented_client_only: 1}});",
+    f"const alias = {_CALL_NAME}; alias({{invented_client_only: 1}});",
+    (
+        f"let alias; alias = {_CALL_NAME}; "
+        "alias({invented_client_only: 1});"
+    ),
+    (
+        f"const {{{_CALL_NAME}: alias}} = helpers; "
+        "alias({invented_client_only: 1});"
+    ),
+    (
+        f"import {{{_CALL_NAME} as alias}} from './fixture.js'; "
+        "alias({invented_client_only: 1});"
+    ),
 )
 
-_UNSUPPORTED_WINDOW_BINDINGS = st.sampled_from(
+_UNSUPPORTED_WINDOW_BINDINGS = (
+    "Object.assign(window, { supported }); Object['assign'](window, { fetch });",
+    "Object.assign(window, { supported }); Object.assign((window), { fetch });",
+    r"Object.assign(window, { supported }); Object.\u0061ssign(window, { fetch });",
+    "Object.assign(window, { supported }); Object.assign?.(window, { fetch });",
     (
-        "Object.assign(window, { supported }); Object['assign'](window, { fetch });",
-        "Object.assign(window, { supported }); Object.assign((window), { fetch });",
-        r"Object.assign(window, { supported }); Object.\u0061ssign(window, { fetch });",
-        "Object.assign(window, { supported }); Object.assign?.(window, { fetch });",
-        (
-            'const method = "assign"; '
-            "Object.assign(window, { supported }); Object[method](window, { fetch });"
-        ),
-        "Object.assign(window, { supported }); Object.assign(globalThis, { fetch });",
-        "Object.assign(window, { supported }); Object.assign(self, { fetch });",
-        "Object.assign(window, { supported }); globalThis.fetch = localFetch;",
-        "Object.assign(window, { supported }); globalThis.window.fetch = localFetch;",
-        "Object.assign(window, { supported }); Object?.assign(window, { fetch });",
-        (
-            'let method = "assign"; Object.assign(window, { supported }); '
-            "Object[method](window, { fetch });"
-        ),
-        (
-            'const methods = {current: "unrelated"}; methods.current = "assign"; '
-            "Object.assign(window, { supported }); "
-            "Object[methods.current](window, { fetch });"
-        ),
-        (
-            "const alias = Object.assign; "
-            "Object.assign(window, { supported }); alias(window, { fetch });"
-        ),
-        (
-            "const {assign: alias} = Object; "
-            "Object.assign(window, { supported }); alias(window, { fetch });"
-        ),
-        (
-            "const target = window; Object.assign(window, { supported }); "
-            "Object.assign(target, { fetch });"
-        ),
-        "Object.assign(window, { supported }); (window).fetch = localFetch;",
-    )
+        'const method = "assign"; '
+        "Object.assign(window, { supported }); Object[method](window, { fetch });"
+    ),
+    "Object.assign(window, { supported }); Object.assign(globalThis, { fetch });",
+    "Object.assign(window, { supported }); Object.assign(self, { fetch });",
+    "Object.assign(window, { supported }); globalThis.fetch = localFetch;",
+    "Object.assign(window, { supported }); globalThis.window.fetch = localFetch;",
+    "Object.assign(window, { supported }); Object?.assign(window, { fetch });",
+    (
+        'let method = "assign"; Object.assign(window, { supported }); '
+        "Object[method](window, { fetch });"
+    ),
+    (
+        'const methods = {current: "unrelated"}; methods.current = "assign"; '
+        "Object.assign(window, { supported }); "
+        "Object[methods.current](window, { fetch });"
+    ),
+    (
+        "const alias = Object.assign; "
+        "Object.assign(window, { supported }); alias(window, { fetch });"
+    ),
+    (
+        "const {assign: alias} = Object; "
+        "Object.assign(window, { supported }); alias(window, { fetch });"
+    ),
+    (
+        "const target = window; Object.assign(window, { supported }); "
+        "Object.assign(target, { fetch });"
+    ),
+    "Object.assign(window, { supported }); (window).fetch = localFetch;",
 )
 
-_SUPPORTED_UNRELATED_COMPUTED_CALLS = st.sampled_from(
-    (
-        'const key = "unrelated"; globalThis[key]();',
-        'const label = "renderDownloadHistoryItem"; console.log(label);',
-        "const key = getRuntimeName(); unrelatedNamespace[key]();",
-    )
+_SUPPORTED_UNRELATED_COMPUTED_CALLS = (
+    'const key = "unrelated"; globalThis[key]();',
+    'const label = "renderDownloadHistoryItem"; console.log(label);',
+    "const key = getRuntimeName(); unrelatedNamespace[key]();",
 )
 
 
 _HANDLER_NAMES = tuple(f"generatedHandler{i:02d}" for i in range(16))
+# Test-owned contract: do not derive this oracle from the production set.
+_EXPECTED_NATIVE_WINDOW_CALLS = (
+    "alert",
+    "blur",
+    "cancelAnimationFrame",
+    "clearInterval",
+    "clearTimeout",
+    "close",
+    "confirm",
+    "fetch",
+    "focus",
+    "open",
+    "print",
+    "prompt",
+    "requestAnimationFrame",
+    "scroll",
+    "scrollBy",
+    "scrollTo",
+    "setInterval",
+    "setTimeout",
+)
 
 
 class TestJsAstGenerated(unittest.TestCase):
@@ -478,29 +491,36 @@ class TestJsAstGenerated(unittest.TestCase):
             world, fixture_fields_for_call(world.source, _CALL_NAME)
         )
 
-    @given(_UNSUPPORTED_PAYLOADS)
-    def test_unsupported_payload_worlds_fail_closed(self, source: str) -> None:
-        with self.assertRaises(ValueError):
-            fixture_fields_for_call(source, _CALL_NAME)
+    def test_unsupported_payload_worlds_fail_closed(self) -> None:
+        for source in _UNSUPPORTED_PAYLOADS:
+            with self.subTest(source=source), self.assertRaises(ValueError):
+                fixture_fields_for_call(source, _CALL_NAME)
 
-    @given(_UNSUPPORTED_RENDERER_REFERENCES)
-    def test_unsupported_renderer_references_fail_closed(self, source: str) -> None:
-        assert_unsupported_renderer_reference_is_rejected(source)
+    def test_unsupported_renderer_references_fail_closed(self) -> None:
+        for source in _UNSUPPORTED_RENDERER_REFERENCES:
+            with self.subTest(source=source):
+                assert_unsupported_renderer_reference_is_rejected(source)
 
-    @given(_UNSUPPORTED_WINDOW_BINDINGS)
-    def test_unsupported_window_binding_references_fail_closed(
-        self, source: str
-    ) -> None:
-        assert_unsupported_window_binding_is_rejected(source)
+    def test_unsupported_window_binding_references_fail_closed(self) -> None:
+        for source in _UNSUPPORTED_WINDOW_BINDINGS:
+            with self.subTest(source=source):
+                assert_unsupported_window_binding_is_rejected(source)
 
-    @given(_SUPPORTED_UNRELATED_COMPUTED_CALLS)
     def test_unrelated_computed_calls_and_inert_strings_remain_supported(
-        self, source: str
+        self,
     ) -> None:
-        if "Object.assign" in source:
-            self.assertEqual(exposed_window_bindings(source), {"supported"})
-        else:
-            self.assertEqual(fixture_fields_for_call(source, _CALL_NAME), set())
+        for source in _SUPPORTED_UNRELATED_COMPUTED_CALLS:
+            with self.subTest(source=source):
+                if "Object.assign" in source:
+                    self.assertEqual(
+                        exposed_window_bindings(source),
+                        {"supported"},
+                    )
+                else:
+                    self.assertEqual(
+                        fixture_fields_for_call(source, _CALL_NAME),
+                        set(),
+                    )
 
     @given(boundary_worlds())
     def test_explicit_boundaries_match_independent_state_world_oracle(
@@ -530,55 +550,84 @@ class TestJsAstGenerated(unittest.TestCase):
             window_rejected=window_rejected,
         )
 
-    @given(
-        st.sampled_from(("'", "`")),
-        st.sampled_from(("\u2028", "\u2029")),
-    )
     def test_unicode_line_continuations_preserve_static_window_handler(
-        self, delimiter: str, separator: str
+        self,
     ) -> None:
-        literal = (
-            f"{delimiter}window.generated\\{separator}Handler()"
-            f"{delimiter}"
-        )
-        audit = audit_window_bindings(
-            {"generated.js": f"const value = {literal};"},
-            "",
-            "Object.assign(window, { generatedHandler });",
-        )
-        assert_window_world(
-            audit,
-            required={"generatedHandler"},
-            exposed={"generatedHandler"},
-        )
+        for delimiter in ("'", "`"):
+            for separator in ("\u2028", "\u2029"):
+                with self.subTest(delimiter=delimiter, separator=separator):
+                    literal = (
+                        f"{delimiter}window.generated\\{separator}Handler()"
+                        f"{delimiter}"
+                    )
+                    audit = audit_window_bindings(
+                        {"generated.js": f"const value = {literal};"},
+                        "",
+                        "Object.assign(window, { generatedHandler });",
+                    )
+                    assert_window_world(
+                        audit,
+                        required={"generatedHandler"},
+                        exposed={"generatedHandler"},
+                    )
 
     @given(
-        st.sampled_from(("'", "`")),
-        st.sampled_from((r"\uD800", r"\uDC00", r"\u{D800}", r"\u{DC00}")),
+        delimiter=st.sampled_from(("'", '"', "`")),
+        codepoint=st.integers(min_value=0xD800, max_value=0xDFFF),
+        braced=st.booleans(),
     )
+    @example(delimiter="'", codepoint=0xD800, braced=False)
+    @example(delimiter="'", codepoint=0xDC00, braced=False)
+    @example(delimiter="'", codepoint=0xD800, braced=True)
+    @example(delimiter="'", codepoint=0xDC00, braced=True)
+    @example(delimiter='"', codepoint=0xD800, braced=False)
+    @example(delimiter='"', codepoint=0xDC00, braced=False)
+    @example(delimiter='"', codepoint=0xD800, braced=True)
+    @example(delimiter='"', codepoint=0xDC00, braced=True)
+    @example(delimiter="`", codepoint=0xD800, braced=False)
+    @example(delimiter="`", codepoint=0xDC00, braced=False)
+    @example(delimiter="`", codepoint=0xD800, braced=True)
+    @example(delimiter="`", codepoint=0xDC00, braced=True)
     def test_valid_surrogate_escape_worlds_parse(
-        self, delimiter: str, escape: str
+        self,
+        delimiter: str,
+        codepoint: int,
+        braced: bool,
     ) -> None:
+        escape = (
+            f"\\u{{{codepoint:04X}}}"
+            if braced
+            else f"\\u{codepoint:04X}"
+        )
         source = f"const value = {delimiter}{escape}{delimiter};"
         self.assertEqual(
             emitted_window_handlers({"surrogate.js": source}, "").handlers,
             set(),
         )
 
-    @given(
-        st.sampled_from(("fetch", "alert", "open", "setTimeout")),
-        st.integers(min_value=0, max_value=15),
-    )
     def test_escaped_native_binding_keys_still_collide(
-        self, name: str, selector: int
+        self,
     ) -> None:
-        index = selector % len(name)
-        escaped = name[:index] + f"\\u{ord(name[index]):04x}" + name[index + 1:]
-        source = f"Object.assign(window, {{ {escaped} }});"
-        audit = audit_window_bindings({}, "", source)
-        self.assertEqual(audit.native_collisions, {name})
-        with self.assertRaisesRegex(ValueError, "reserved native window names"):
-            assert_window_bindings({}, "", source)
+        self.assertLessEqual(
+            {"fetch", "alert", "open", "setTimeout"},
+            set(_EXPECTED_NATIVE_WINDOW_CALLS),
+        )
+        for name in _EXPECTED_NATIVE_WINDOW_CALLS:
+            for index in range(len(name)):
+                with self.subTest(name=name, index=index):
+                    escaped = (
+                        name[:index]
+                        + f"\\u{ord(name[index]):04x}"
+                        + name[index + 1:]
+                    )
+                    source = f"Object.assign(window, {{ {escaped} }});"
+                    audit = audit_window_bindings({}, "", source)
+                    self.assertEqual(audit.native_collisions, {name})
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "reserved native window names",
+                    ):
+                        assert_window_bindings({}, "", source)
 
     @given(
         st.lists(
@@ -622,24 +671,26 @@ class TestJsAstGenerated(unittest.TestCase):
         )
         assert_window_world(audit, required=required, exposed=exposed)
 
-    @given(
-        st.sampled_from(
-            (
-                'const html = `<button onclick="window.${handler}()">x</button>`;',
-                r'const html = `<button onclick="window\u002e${handler}()">x</button>`;',
-                "const html = '<button onclick=\"window[handler]()\">x</button>';",
-            )
+    def test_dynamic_window_callee_worlds_fail_closed(self) -> None:
+        sources = (
+            'const html = `<button onclick="window.${handler}()">x</button>`;',
+            r'const html = `<button onclick="window\u002e${handler}()">x</button>`;',
+            "const html = '<button onclick=\"window[handler]()\">x</button>';",
         )
-    )
-    def test_dynamic_window_callee_worlds_fail_closed(self, source: str) -> None:
-        audit = audit_window_bindings(
-            {"generated.js": source}, "", "Object.assign(window, {});"
-        )
-        self.assertTrue(audit.dynamic_callees)
-        with self.assertRaisesRegex(ValueError, "dynamic window callee"):
-            assert_window_bindings(
-                {"generated.js": source}, "", "Object.assign(window, {});"
-            )
+        for source in sources:
+            with self.subTest(source=source):
+                audit = audit_window_bindings(
+                    {"generated.js": source},
+                    "",
+                    "Object.assign(window, {});",
+                )
+                self.assertTrue(audit.dynamic_callees)
+                with self.assertRaisesRegex(ValueError, "dynamic window callee"):
+                    assert_window_bindings(
+                        {"generated.js": source},
+                        "",
+                        "Object.assign(window, {});",
+                    )
 
     def test_known_bad_quoted_key_escape_mutant_trips_oracle(self) -> None:
         world = PayloadLiteralWorld(

@@ -14,6 +14,7 @@ docs/generated-testing.md.
 from __future__ import annotations
 
 import unittest
+from itertools import product
 
 from hypothesis import example, given
 from hypothesis import strategies as st
@@ -27,9 +28,10 @@ from tests.test_property_input_audit import (
 
 _RELPATH = "tests/test_synthetic_world.py"
 
-_NAMES = st.sampled_from(
-    ["alpha", "beta", "gamma", "delta", "world", "seed", "album", "download"]
+_NAME_VALUES = (
+    "alpha", "beta", "gamma", "delta", "world", "seed", "album", "download",
 )
+_NAMES = st.sampled_from(_NAME_VALUES)
 
 #: Modes that leave a ``Load`` of the drawn name in the body, and modes that
 #: do not. The second group is the defect class.
@@ -46,7 +48,7 @@ _INPUTS = st.lists(
 _CONTAINERS = st.sampled_from(["module", "method", "nested"])
 _DECORATORS = st.sampled_from(["given_kw", "given_pos", "rule_kw"])
 
-_MALFORMED = st.sampled_from([
+_MALFORMED_VALUES = (
     "bare",
     "star_args",
     "star_star_kwargs",
@@ -54,7 +56,7 @@ _MALFORMED = st.sampled_from([
     "surplus_positional",
     "unknown_keyword",
     "variadic",
-])
+)
 
 
 def _body_lines(name: str, mode: str) -> list[str]:
@@ -209,19 +211,16 @@ class TestGeneratedPropertyInputAudit(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, "stale allowlist"):
                 assert_every_drawn_input_used((prop,), {prop.key: "stale"})
 
-    @given(name=_NAMES, shape=_MALFORMED)
-    def test_malformed_shapes_fail_closed_even_when_allowlisted(
-        self,
-        name: str,
-        shape: str,
-    ) -> None:
-        source = render_malformed_property(name, shape)
+    def test_malformed_shapes_fail_closed_even_when_allowlisted(self) -> None:
+        for name, shape in product(_NAME_VALUES, _MALFORMED_VALUES):
+            with self.subTest(name=name, shape=shape):
+                source = render_malformed_property(name, shape)
 
-        (prop,) = find_property_functions(source, _RELPATH)
+                (prop,) = find_property_functions(source, _RELPATH)
 
-        self.assertIsNotNone(prop.unclassified_reason, source)
-        with self.assertRaisesRegex(AssertionError, "unclassifiable"):
-            assert_every_drawn_input_used((prop,), {prop.key: "excused"})
+                self.assertIsNotNone(prop.unclassified_reason, source)
+                with self.assertRaisesRegex(AssertionError, "unclassifiable"):
+                    assert_every_drawn_input_used((prop,), {prop.key: "excused"})
 
     @given(inputs=_INPUTS, container=_CONTAINERS)
     def test_known_bad_del_only_checker_accepts_a_never_mentioned_input(

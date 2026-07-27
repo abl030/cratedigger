@@ -552,12 +552,21 @@ class TestGeneratedSimpleArtistCatalogue(unittest.TestCase):
             expected_other_source_works,
         )
 
-    @given(
-        qualifier=st.sampled_from(("Compilation", "Live")),
-        exact_owned=st.booleans(),
-    )
-    @example(qualifier="Compilation", exact_owned=False)
     def test_rolling_title_collision_never_fabricates_ownership_or_expansion(
+        self,
+    ) -> None:
+        for qualifier in ("Compilation", "Live"):
+            for exact_owned in (False, True):
+                with self.subTest(
+                    qualifier=qualifier,
+                    exact_owned=exact_owned,
+                ):
+                    self._assert_rolling_title_collision(
+                        qualifier=qualifier,
+                        exact_owned=exact_owned,
+                    )
+
+    def _assert_rolling_title_collision(
         self, qualifier: str, exact_owned: bool,
     ) -> None:
         row_id = "owned-rg" if exact_owned else "collision-rg"

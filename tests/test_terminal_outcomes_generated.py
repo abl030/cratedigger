@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import unittest
 from dataclasses import dataclass
+from itertools import product
 
-from hypothesis import example, given, settings
+from hypothesis import example, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401 - registers active profile
@@ -342,143 +343,148 @@ class TestTerminalOutcomeGenerated(unittest.TestCase):
             ),
         )
 
-    @given(fail_after=st.one_of(st.none(), st.integers(min_value=1, max_value=5)))
-    def test_fake_transaction_is_unchanged_or_complete(
-        self,
-        fail_after: int | None,
-    ) -> None:
-        class FaultDB(FakePipelineDB):
-            def _terminal_outcome_write_boundary(
-                self,
-                index: int,
-                label: str,
-            ) -> None:
-                del label
-                if index == fail_after:
-                    raise RuntimeError("generated terminal write failure")
+    def test_fake_transaction_is_unchanged_or_complete(self) -> None:
+        for fail_after in (None, 1, 2, 3, 4, 5):
+            with self.subTest(fail_after=fail_after):
+                class FaultDB(FakePipelineDB):
+                    def _terminal_outcome_write_boundary(
+                        self,
+                        index: int,
+                        label: str,
+                        *,
+                        fail_after: int | None = fail_after,
+                    ) -> None:
+                        del label
+                        if index == fail_after:
+                            raise RuntimeError(
+                                "generated terminal write failure"
+                            )
 
-        db = FaultDB()
-        db.seed_request(make_request_row(
-            id=42,
-            status="downloading",
-            active_download_state={"files": []},
-        ))
-        job = db.enqueue_import_job(
-            IMPORT_JOB_FORCE,
-            request_id=42,
-            payload={"download_log_id": 1, "failed_path": "/tmp/generated"},
-        )
-        db.mark_import_job_preview_importable(job.id, preview_result={"ready": True})
-        claimed = db.claim_next_import_job(worker_id="generated")
-        assert claimed is not None
+                db = FaultDB()
+                db.seed_request(make_request_row(
+                    id=42,
+                    status="downloading",
+                    active_download_state={"files": []},
+                ))
+                job = db.enqueue_import_job(
+                    IMPORT_JOB_FORCE,
+                    request_id=42,
+                    payload={
+                        "download_log_id": 1,
+                        "failed_path": "/tmp/generated",
+                    },
+                )
+                db.mark_import_job_preview_importable(
+                    job.id,
+                    preview_result={"ready": True},
+                )
+                claimed = db.claim_next_import_job(worker_id="generated")
+                assert claimed is not None
 
-        before = TerminalSnapshot(False, False, False, False, False)
-        command = _terminal_command(42, claimed.id)
-        if fail_after is None:
-            db.persist_import_terminal_outcome(command)
-        else:
-            with self.assertRaisesRegex(RuntimeError, "generated terminal"):
-                db.persist_import_terminal_outcome(command)
+                before = TerminalSnapshot(False, False, False, False, False)
+                command = _terminal_command(42, claimed.id)
+                if fail_after is None:
+                    db.persist_import_terminal_outcome(command)
+                else:
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "generated terminal",
+                    ):
+                        db.persist_import_terminal_outcome(command)
 
-        request = db.request(42)
-        persisted_job = db.get_import_job(claimed.id)
-        assert persisted_job is not None
-        after = TerminalSnapshot(
-            request_terminal=request["status"] == "wanted",
-            audit_present=len(db.download_logs) == 1,
-            denylist_present=len(db.denylist) == 1,
-            attempt_recorded=request.get("validation_attempts") == 1,
-            job_terminal=persisted_job.status == "failed",
-        )
-        assert_terminal_snapshot_all_or_none(before, after)
-
-    @given(
-        request_terminal=st.booleans(),
-        audit_present=st.booleans(),
-        denylist_present=st.booleans(),
-        attempt_recorded=st.booleans(),
-        job_terminal=st.booleans(),
-    )
-    def test_generated_checker_rejects_every_partial_world(
-        self,
-        request_terminal: bool,
-        audit_present: bool,
-        denylist_present: bool,
-        attempt_recorded: bool,
-        job_terminal: bool,
-    ) -> None:
-        before = TerminalSnapshot(False, False, False, False, False)
-        after = TerminalSnapshot(
-            request_terminal,
-            audit_present,
-            denylist_present,
-            attempt_recorded,
-            job_terminal,
-        )
-        all_false = after == before
-        all_true = all((
-            request_terminal,
-            audit_present,
-            denylist_present,
-            attempt_recorded,
-            job_terminal,
-        ))
-        if all_false or all_true:
-            assert_terminal_snapshot_all_or_none(before, after)
-        else:
-            with self.assertRaises(AssertionError):
+                request = db.request(42)
+                persisted_job = db.get_import_job(claimed.id)
+                assert persisted_job is not None
+                after = TerminalSnapshot(
+                    request_terminal=request["status"] == "wanted",
+                    audit_present=len(db.download_logs) == 1,
+                    denylist_present=len(db.denylist) == 1,
+                    attempt_recorded=request.get("validation_attempts") == 1,
+                    job_terminal=persisted_job.status == "failed",
+                )
                 assert_terminal_snapshot_all_or_none(before, after)
+
+    def test_generated_checker_rejects_every_partial_world(self) -> None:
+        before = TerminalSnapshot(False, False, False, False, False)
+        for values in product((False, True), repeat=5):
+            (
+                request_terminal,
+                audit_present,
+                denylist_present,
+                attempt_recorded,
+                job_terminal,
+            ) = values
+            with self.subTest(
+                request_terminal=request_terminal,
+                audit_present=audit_present,
+                denylist_present=denylist_present,
+                attempt_recorded=attempt_recorded,
+                job_terminal=job_terminal,
+            ):
+                after = TerminalSnapshot(
+                    request_terminal,
+                    audit_present,
+                    denylist_present,
+                    attempt_recorded,
+                    job_terminal,
+                )
+                all_false = after == before
+                all_true = all(values)
+                if all_false or all_true:
+                    assert_terminal_snapshot_all_or_none(before, after)
+                else:
+                    with self.assertRaises(AssertionError):
+                        assert_terminal_snapshot_all_or_none(before, after)
 
 
 
 @requires_postgres
 class TestProductionTerminalOutcomeGenerated(unittest.TestCase):
-    @settings(max_examples=12, deadline=None)
-    @example(fail_after=None)
-    @example(fail_after=1)
-    @example(fail_after=2)
-    @example(fail_after=3)
-    @example(fail_after=4)
-    @example(fail_after=5)
-    @given(fail_after=st.one_of(st.none(), st.integers(min_value=1, max_value=5)))
-    def test_real_transaction_is_unchanged_or_complete(
-        self,
-        fail_after: int | None,
-    ) -> None:
-        assert TEST_DSN is not None
-        seed_db, request_id, job_id = _seed_running_import()
-        seed_db.close()
-        before_observer = PipelineDB(TEST_DSN)
-        before = _read_terminal_snapshot(before_observer, request_id, job_id)
-        before_observer.close()
-
-        writer: PipelineDB
-        if fail_after is None:
-            writer = PipelineDB(TEST_DSN)
-        else:
-            writer = FaultInjectingPipelineDB(
-                TEST_DSN,
-                fail_after_write=fail_after,
-            )
-        try:
-            if fail_after is None:
-                writer.persist_import_terminal_outcome(
-                    _terminal_command(request_id, job_id)
+    def test_real_transaction_is_unchanged_or_complete(self) -> None:
+        for fail_after in (None, 1, 2, 3, 4, 5):
+            with self.subTest(fail_after=fail_after):
+                assert TEST_DSN is not None
+                seed_db, request_id, job_id = _seed_running_import()
+                seed_db.close()
+                before_observer = PipelineDB(TEST_DSN)
+                before = _read_terminal_snapshot(
+                    before_observer,
+                    request_id,
+                    job_id,
                 )
-            else:
-                with self.assertRaises(InjectedTerminalWriteFailure):
-                    writer.persist_import_terminal_outcome(
-                        _terminal_command(request_id, job_id)
-                    )
-        finally:
-            writer.close()
+                before_observer.close()
 
-        observer = PipelineDB(TEST_DSN)
-        try:
-            after = _read_terminal_snapshot(observer, request_id, job_id)
-        finally:
-            observer.close()
-        assert_terminal_snapshot_all_or_none(before, after)
+                writer: PipelineDB
+                if fail_after is None:
+                    writer = PipelineDB(TEST_DSN)
+                else:
+                    writer = FaultInjectingPipelineDB(
+                        TEST_DSN,
+                        fail_after_write=fail_after,
+                    )
+                try:
+                    if fail_after is None:
+                        writer.persist_import_terminal_outcome(
+                            _terminal_command(request_id, job_id)
+                        )
+                    else:
+                        with self.assertRaises(InjectedTerminalWriteFailure):
+                            writer.persist_import_terminal_outcome(
+                                _terminal_command(request_id, job_id)
+                            )
+                finally:
+                    writer.close()
+
+                observer = PipelineDB(TEST_DSN)
+                try:
+                    after = _read_terminal_snapshot(
+                        observer,
+                        request_id,
+                        job_id,
+                    )
+                finally:
+                    observer.close()
+                assert_terminal_snapshot_all_or_none(before, after)
 
     def test_faulted_split_writer_trips_same_oracle(self) -> None:
         assert TEST_DSN is not None

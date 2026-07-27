@@ -5,12 +5,9 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from itertools import product
 from types import SimpleNamespace
 
-from hypothesis import example, given
-from hypothesis import strategies as st
-
-import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.force_import_service import RESULT_QUEUED, enqueue_force_import
 from lib.processing_paths import processing_albums_dir
 from tests.fakes import FakePipelineDB
@@ -41,66 +38,58 @@ def assert_force_import_authority_invariant(
 
 
 class TestForceImportAuthorityGenerated(unittest.TestCase):
-    @given(
-        root=st.sampled_from(sorted(MARKERS_BY_ROOT)),
-        marker=st.sampled_from(_MARKERS),
-        missing=st.booleans(),
-        nested=st.booleans(),
-    )
-    @example(
-        # The asymmetry itself: staging must NOT authorize a wrong-match
-        # quarantine, however the path is shaped.
-        root="staging", marker="wrong_matches", missing=False, nested=False,
-    )
-    @example(
-        # Must-still-work: the ordinary authorized world.
-        root="staging", marker="failed_imports", missing=False, nested=False,
-    )
-    @example(
-        # Marker is a path COMPONENT, not a prefix — the lookalike is refused
-        # from every root.
-        root="slskd", marker="failed_imports-lookalike", missing=False,
-        nested=True,
-    )
-    def test_only_existing_configured_quarantine_sources_enqueue(
-        self, root: str, marker: str, missing: bool, nested: bool,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            staging = os.path.join(tmp, "Incoming")
-            slskd = os.path.join(tmp, "slskd")
-            processing = os.path.join(tmp, "processing")
-            os.makedirs(staging)
-            os.makedirs(slskd)
-            # The processing quarantine root is the albums/ child, not the
-            # processing dir itself.
-            os.makedirs(processing_albums_dir(processing))
-            root_path = {
-                "slskd": slskd,
-                "staging": staging,
-                "processing": processing_albums_dir(processing),
-            }[root]
-            prefix = ("auto-import", "Artist") if nested else ()
-            path = os.path.join(root_path, *prefix, marker, "Album")
-            if not missing:
-                os.makedirs(path)
-            db = FakePipelineDB()
-            db.seed_request(make_request_row(id=867, mb_release_id="mb-867"))
-            log_id = db.log_download(
-                request_id=867,
-                outcome="rejected",
-                validation_result={"failed_path": path},
-            )
-            cfg = SimpleNamespace(
-                beets_staging_dir=staging,
-                slskd_download_dir=slskd,
-                processing_dir=processing,
-            )
-            result = enqueue_force_import(db, cfg, log_id)
-            assert_force_import_authority_invariant(
-                authorized=marker in MARKERS_BY_ROOT[root] and not missing,
-                outcome=result.outcome,
-                job_count=len(db.list_import_jobs()),
-            )
+    def test_only_existing_configured_quarantine_sources_enqueue(self) -> None:
+        # Exhaustive finite authority table. It includes the decisive staging
+        # asymmetry, ordinary staging authorization, and component-lookalike
+        # worlds that were previously pinned with @example.
+        worlds = product(
+            sorted(MARKERS_BY_ROOT),
+            _MARKERS,
+            (False, True),
+            (False, True),
+        )
+        for root, marker, missing, nested in worlds:
+            with self.subTest(
+                root=root,
+                marker=marker,
+                missing=missing,
+                nested=nested,
+            ), tempfile.TemporaryDirectory() as tmp:
+                staging = os.path.join(tmp, "Incoming")
+                slskd = os.path.join(tmp, "slskd")
+                processing = os.path.join(tmp, "processing")
+                os.makedirs(staging)
+                os.makedirs(slskd)
+                # The processing quarantine root is the albums/ child, not the
+                # processing dir itself.
+                os.makedirs(processing_albums_dir(processing))
+                root_path = {
+                    "slskd": slskd,
+                    "staging": staging,
+                    "processing": processing_albums_dir(processing),
+                }[root]
+                prefix = ("auto-import", "Artist") if nested else ()
+                path = os.path.join(root_path, *prefix, marker, "Album")
+                if not missing:
+                    os.makedirs(path)
+                db = FakePipelineDB()
+                db.seed_request(make_request_row(id=867, mb_release_id="mb-867"))
+                log_id = db.log_download(
+                    request_id=867,
+                    outcome="rejected",
+                    validation_result={"failed_path": path},
+                )
+                cfg = SimpleNamespace(
+                    beets_staging_dir=staging,
+                    slskd_download_dir=slskd,
+                    processing_dir=processing,
+                )
+                result = enqueue_force_import(db, cfg, log_id)
+                assert_force_import_authority_invariant(
+                    authorized=marker in MARKERS_BY_ROOT[root] and not missing,
+                    outcome=result.outcome,
+                    job_count=len(db.list_import_jobs()),
+                )
 
     def test_invariant_checker_rejects_unauthorized_job(self) -> None:
         with self.assertRaisesRegex(AssertionError, "unauthorized"):

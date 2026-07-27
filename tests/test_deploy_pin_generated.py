@@ -517,77 +517,74 @@ class TestGeneratedDeployPinLifecycle(unittest.TestCase):
                 max_receipt_updates=2 if replacement_recovery else 1,
             )
 
-    @settings(max_examples=12, deadline=None)
-    @given(
-        remote_matches_receipt=st.booleans(),
-        verifier_available=st.booleans(),
-    )
-    @example(remote_matches_receipt=True, verifier_available=True)
-    @example(remote_matches_receipt=True, verifier_available=False)
-    @example(remote_matches_receipt=False, verifier_available=True)
-    @example(remote_matches_receipt=False, verifier_available=False)
     def test_divergent_sibling_receipt_is_superseded_only_by_equivalent_verified_remote(
-        self, remote_matches_receipt: bool, verifier_available: bool,
+        self,
     ) -> None:
-        with tempfile.TemporaryDirectory() as tempdir:
-            fake = FakeDeployPinCommands(Path(tempdir))
-            receipt = fake.seed_divergent_receipt(
-                remote_target=(
-                    fake.OLD_TARGET if remote_matches_receipt else fake.TARGET_REV
-                )
-            )
-            fake.update_state(
-                remote_signature_status="G" if verifier_available else "U"
-            )
+        for remote_matches_receipt in (False, True):
+            for verifier_available in (False, True):
+                with self.subTest(
+                    remote_matches_receipt=remote_matches_receipt,
+                    verifier_available=verifier_available,
+                ), tempfile.TemporaryDirectory() as tempdir:
+                    fake = FakeDeployPinCommands(Path(tempdir))
+                    receipt = fake.seed_divergent_receipt(
+                        remote_target=(
+                            fake.OLD_TARGET
+                            if remote_matches_receipt
+                            else fake.TARGET_REV
+                        )
+                    )
+                    fake.update_state(
+                        remote_signature_status="G" if verifier_available else "U"
+                    )
 
-            fake.run(SCRIPT)
+                    fake.run(SCRIPT)
 
-            assert_divergent_receipt_invariants(
-                fake.state,
-                receipt=receipt,
-                remote=fake.OTHER_REV,
-                new_target=fake.TARGET_REV,
-                remote_matches_receipt=remote_matches_receipt,
-                verifier_available=verifier_available,
-            )
+                    assert_divergent_receipt_invariants(
+                        fake.state,
+                        receipt=receipt,
+                        remote=fake.OTHER_REV,
+                        new_target=fake.TARGET_REV,
+                        remote_matches_receipt=remote_matches_receipt,
+                        verifier_available=verifier_available,
+                    )
 
-    @settings(max_examples=18, deadline=None)
-    @given(
-        remote_relation=st.sampled_from(("requested", "parent", "other")),
-        verifier_available=st.booleans(),
-    )
-    @example(remote_relation="requested", verifier_available=True)
-    @example(remote_relation="parent", verifier_available=True)
-    @example(remote_relation="parent", verifier_available=False)
-    @example(remote_relation="other", verifier_available=True)
-    def test_same_target_divergent_receipt_recovery_is_bounded(
-        self, remote_relation: str, verifier_available: bool,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as tempdir:
-            fake = FakeDeployPinCommands(Path(tempdir))
-            remote_target = {
-                "requested": fake.TARGET_REV,
-                "parent": fake.OLD_TARGET,
-                "other": "7" * 40,
-            }[remote_relation]
-            receipt = fake.seed_divergent_receipt(
-                receipt_target=fake.TARGET_REV,
-                remote_target=remote_target,
-            )
-            fake.update_state(
-                remote_signature_status="G" if verifier_available else "U"
-            )
+    def test_same_target_divergent_receipt_recovery_is_bounded(self) -> None:
+        # Exhaustive six-world relation/signature table. The requested,
+        # verified-parent, unknown-parent, and verified-other decisive worlds
+        # are all retained.
+        for remote_relation in ("requested", "parent", "other"):
+            for verifier_available in (False, True):
+                with self.subTest(
+                    remote_relation=remote_relation,
+                    verifier_available=verifier_available,
+                ), tempfile.TemporaryDirectory() as tempdir:
+                    fake = FakeDeployPinCommands(Path(tempdir))
+                    remote_target = {
+                        "requested": fake.TARGET_REV,
+                        "parent": fake.OLD_TARGET,
+                        "other": "7" * 40,
+                    }[remote_relation]
+                    receipt = fake.seed_divergent_receipt(
+                        receipt_target=fake.TARGET_REV,
+                        remote_target=remote_target,
+                    )
+                    fake.update_state(
+                        remote_signature_status=(
+                            "G" if verifier_available else "U"
+                        )
+                    )
 
-            fake.run(SCRIPT)
+                    fake.run(SCRIPT)
 
-            assert_same_target_divergent_invariants(
-                fake.state,
-                receipt=receipt,
-                remote=fake.OTHER_REV,
-                target=fake.TARGET_REV,
-                remote_relation=remote_relation,
-                verifier_available=verifier_available,
-            )
+                    assert_same_target_divergent_invariants(
+                        fake.state,
+                        receipt=receipt,
+                        remote=fake.OTHER_REV,
+                        target=fake.TARGET_REV,
+                        remote_relation=remote_relation,
+                        verifier_available=verifier_available,
+                    )
 
     @settings(max_examples=7, deadline=None)
     @given(

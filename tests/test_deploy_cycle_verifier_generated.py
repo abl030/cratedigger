@@ -132,83 +132,89 @@ class TestExactCycleCheckerKnownBad(unittest.TestCase):
 
 
 class TestGeneratedExactCycleVerifier(unittest.TestCase):
-    @settings(max_examples=20, deadline=None)
-    @given(
-        old_source_first=st.booleans(),
-        failed_target=st.booleans(),
-        target_has_process_record=st.booleans(),
-        later_healthy_target_source=st.booleans(),
-    )
-    @example(
-        old_source_first=False,
-        failed_target=True,
-        target_has_process_record=False,
-        later_healthy_target_source=True,
-    )
     def test_capture_chooses_first_target_source_start_from_journal_history(
         self,
-        old_source_first: bool,
-        failed_target: bool,
-        target_has_process_record: bool,
-        later_healthy_target_source: bool,
     ) -> None:
-        with tempfile.TemporaryDirectory() as tempdir:
-            fake = FakeDeployCycleCommands(Path(tempdir))
-            starts: list[dict[str, str]] = []
-            journals: dict[str, list[list[dict[str, str]]]] = {}
-            if old_source_first:
-                starts.append(fake.start_record(fake.OLD_SUCCESSOR))
-                journals[fake.OLD_SUCCESSOR] = [[fake.source_record(
-                    invocation=fake.OLD_SUCCESSOR,
-                    source="/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-source",
-                )]]
-            target_records = (
-                [fake.source_record()] if target_has_process_record else []
-            )
-            if failed_target:
-                target_records.append({
-                    "INVOCATION_ID": fake.TARGET,
-                    "JOB_RESULT": "failed",
-                    "JOB_TYPE": "start",
-                    "MESSAGE": "Failed to start Cratedigger.",
-                })
-            else:
-                target_records.append({
-                    "INVOCATION_ID": fake.TARGET,
-                    "JOB_RESULT": "done",
-                    "JOB_TYPE": "start",
-                    "MESSAGE": "Finished Cratedigger — Soulseek download pipeline.",
-                })
-            starts.append(fake.start_record(fake.TARGET))
-            journals[fake.TARGET] = [target_records]
-            starts.append(fake.start_record(fake.NEXT))
-            later_source = (
-                fake.SOURCE
-                if later_healthy_target_source
-                else "/nix/store/cccccccccccccccccccccccccccccccc-source"
-            )
-            journals[fake.NEXT] = [[fake.source_record(
-                invocation=fake.NEXT,
-                source=later_source,
-            )]]
-            fake.write_state(
-                system_states=[
-                    fake.system_state(fake.OLD),
-                    fake.system_state(fake.NEXT),
-                ],
-                journal_snapshots=journals,
-                start_journal_snapshots=[starts],
-            )
+        # Exhaustive Cartesian table over the four journal-history facts,
+        # including the failed target followed by a healthy target-source
+        # successor that was formerly pinned with @example.
+        for old_source_first in (False, True):
+            for failed_target in (False, True):
+                for target_has_process_record in (False, True):
+                    for later_healthy_target_source in (False, True):
+                        with self.subTest(
+                            old_source_first=old_source_first,
+                            failed_target=failed_target,
+                            target_has_process_record=target_has_process_record,
+                            later_healthy_target_source=later_healthy_target_source,
+                        ), tempfile.TemporaryDirectory() as tempdir:
+                            fake = FakeDeployCycleCommands(Path(tempdir))
+                            starts: list[dict[str, str]] = []
+                            journals: dict[str, list[list[dict[str, str]]]] = {}
+                            if old_source_first:
+                                starts.append(fake.start_record(fake.OLD_SUCCESSOR))
+                                journals[fake.OLD_SUCCESSOR] = [[fake.source_record(
+                                    invocation=fake.OLD_SUCCESSOR,
+                                    source=(
+                                        "/nix/store/"
+                                        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-source"
+                                    ),
+                                )]]
+                            target_records = (
+                                [fake.source_record()]
+                                if target_has_process_record
+                                else []
+                            )
+                            if failed_target:
+                                target_records.append({
+                                    "INVOCATION_ID": fake.TARGET,
+                                    "JOB_RESULT": "failed",
+                                    "JOB_TYPE": "start",
+                                    "MESSAGE": "Failed to start Cratedigger.",
+                                })
+                            else:
+                                target_records.append({
+                                    "INVOCATION_ID": fake.TARGET,
+                                    "JOB_RESULT": "done",
+                                    "JOB_TYPE": "start",
+                                    "MESSAGE": (
+                                        "Finished Cratedigger — "
+                                        "Soulseek download pipeline."
+                                    ),
+                                })
+                            starts.append(fake.start_record(fake.TARGET))
+                            journals[fake.TARGET] = [target_records]
+                            starts.append(fake.start_record(fake.NEXT))
+                            later_source = (
+                                fake.SOURCE
+                                if later_healthy_target_source
+                                else (
+                                    "/nix/store/"
+                                    "cccccccccccccccccccccccccccccccc-source"
+                                )
+                            )
+                            journals[fake.NEXT] = [[fake.source_record(
+                                invocation=fake.NEXT,
+                                source=later_source,
+                            )]]
+                            fake.write_state(
+                                system_states=[
+                                    fake.system_state(fake.OLD),
+                                    fake.system_state(fake.NEXT),
+                                ],
+                                journal_snapshots=journals,
+                                start_journal_snapshots=[starts],
+                            )
 
-            proc = fake.run(
-                SCRIPT,
-                "capture-target",
-                fake.CURSOR,
-                fake.SOURCE,
-            )
+                            proc = fake.run(
+                                SCRIPT,
+                                "capture-target",
+                                fake.CURSOR,
+                                fake.SOURCE,
+                            )
 
-            self.assertEqual(proc.returncode, 0, proc.stderr)
-            self.assertEqual(proc.stdout.strip(), fake.TARGET)
+                            self.assertEqual(proc.returncode, 0, proc.stderr)
+                            self.assertEqual(proc.stdout.strip(), fake.TARGET)
 
     @settings(max_examples=40, deadline=None)
     @given(
