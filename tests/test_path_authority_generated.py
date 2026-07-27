@@ -91,24 +91,28 @@ class TestGeneratedDescriptorAuthority(unittest.TestCase):
                     finally:
                         opened.close()
 
-    @given(unsafe_ancestor=st.booleans())
-    def test_private_root_acceptance_tracks_ancestor_writability(
-        self, unsafe_ancestor: bool,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as parent:
-            source = os.path.join(parent, "source")
-            container = os.path.join(parent, "container")
-            processing = os.path.join(container, "processing")
-            os.mkdir(source)
-            os.mkdir(container, 0o777 if unsafe_ancestor else 0o755)
-            os.chmod(container, 0o777 if unsafe_ancestor else 0o755)
-            os.mkdir(processing, 0o700)
-            if unsafe_ancestor:
-                with self.assertRaises(FilesystemAuthorityError), open_private_processing_root(processing, source):
-                    pass
-            else:
-                with open_private_processing_root(processing, source):
-                    pass
+    def test_private_root_acceptance_tracks_ancestor_writability(self) -> None:
+        for unsafe_ancestor in (False, True):
+            with (
+                self.subTest(unsafe_ancestor=unsafe_ancestor),
+                tempfile.TemporaryDirectory() as parent,
+            ):
+                source = os.path.join(parent, "source")
+                container = os.path.join(parent, "container")
+                processing = os.path.join(container, "processing")
+                os.mkdir(source)
+                os.mkdir(container, 0o777 if unsafe_ancestor else 0o755)
+                os.chmod(container, 0o777 if unsafe_ancestor else 0o755)
+                os.mkdir(processing, 0o700)
+                if unsafe_ancestor:
+                    with (
+                        self.assertRaises(FilesystemAuthorityError),
+                        open_private_processing_root(processing, source),
+                    ):
+                        pass
+                else:
+                    with open_private_processing_root(processing, source):
+                            pass
 
     @given(entry_count=st.integers(min_value=0, max_value=6))
     def test_preview_snapshot_total_entry_limit_is_global(
@@ -774,42 +778,61 @@ class TestGeneratedForceFrontGateAuthority(unittest.TestCase):
 
 
 class TestGeneratedRootRelocation(unittest.TestCase):
-    @given(replacement_extra=st.booleans())
-    def test_real_publish_relocation_never_commits_to_replacement(self, replacement_extra: bool) -> None:
-        parent, source, processing, cfg = _private_world()
-        with parent:
-            source_path = os.path.join(source, "track.mp3")
-            with open(source_path, "wb") as handle:
-                handle.write(b"audio")
-            file = DownloadFile(
-                filename="peer\\\\track.mp3", username="peer", id="1",
-                file_dir="peer", size=5,
-            )
-            file.local_path = source_path
-            album = make_grab_list_entry(files=[file], artist="Artist", title="Album", year="2020")
-            canonical = canonical_folder_for_row(album, processing_albums_dir(processing))
-            relocated = f"{processing}-relocated"
+    def test_real_publish_relocation_never_commits_to_replacement(self) -> None:
+        for replacement_extra in (False, True):
+            with self.subTest(replacement_extra=replacement_extra):
+                parent, source, processing, cfg = _private_world()
+                with parent:
+                    source_path = os.path.join(source, "track.mp3")
+                    with open(source_path, "wb") as handle:
+                        handle.write(b"audio")
+                    file = DownloadFile(
+                        filename="peer\\\\track.mp3", username="peer", id="1",
+                        file_dir="peer", size=5,
+                    )
+                    file.local_path = source_path
+                    album = make_grab_list_entry(
+                        files=[file], artist="Artist", title="Album", year="2020",
+                    )
+                    canonical = canonical_folder_for_row(
+                        album, processing_albums_dir(processing),
+                    )
+                    relocated = f"{processing}-relocated"
 
-            def relocate_before_publish(_albums_fd: int, _destination: str) -> None:
-                os.rename(processing, relocated)
-                os.mkdir(processing, 0o700)
-                os.mkdir(os.path.join(processing, "albums"), 0o700)
-                os.mkdir(os.path.join(processing, "preview"), 0o700)
-                if replacement_extra:
-                    with open(os.path.join(processing, "replacement-marker"), "wb") as handle:
-                        handle.write(b"replacement")
+                    def relocate_before_publish(
+                        _albums_fd: int, _destination: str,
+                        processing_path: str = processing,
+                        relocated_path: str = relocated,
+                        replacement_extra_value: bool = replacement_extra,
+                    ) -> None:
+                        os.rename(processing_path, relocated_path)
+                        os.mkdir(processing_path, 0o700)
+                        os.mkdir(
+                            os.path.join(processing_path, "albums"), 0o700,
+                        )
+                        os.mkdir(
+                            os.path.join(processing_path, "preview"), 0o700,
+                        )
+                        if replacement_extra_value:
+                            with open(
+                                os.path.join(
+                                    processing_path, "replacement-marker",
+                                ),
+                                "wb",
+                            ) as handle:
+                                handle.write(b"replacement")
 
-            result = _materialize_processing_dir(
-                album,
-                StagedAlbum.from_entry(album, default_path=canonical),
-                make_ctx_with_fake_db(FakePipelineDB(), cfg=cfg),
-                before_publish=relocate_before_publish,
-            )
-            assert_generated_relocation_invariant(
-                result=result,
-                source_exists=os.path.exists(source_path),
-                replacement_has_canonical=os.path.exists(canonical),
-            )
+                    result = _materialize_processing_dir(
+                        album,
+                        StagedAlbum.from_entry(album, default_path=canonical),
+                        make_ctx_with_fake_db(FakePipelineDB(), cfg=cfg),
+                        before_publish=relocate_before_publish,
+                    )
+                    assert_generated_relocation_invariant(
+                        result=result,
+                        source_exists=os.path.exists(source_path),
+                        replacement_has_canonical=os.path.exists(canonical),
+                    )
 
 
 class TestGeneratedPublicationResultTypeGate(unittest.TestCase):

@@ -713,37 +713,34 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
             assert isinstance(result, BeetsDeleteFailed)
             self.assertEqual(result.reason, "protocol_error")
 
-    @given(initial_status=st.sampled_from(("imported", "unsearchable")))
-    @example(initial_status="unsearchable")
-    def test_successful_ban_preserves_searchability(
-        self,
-        initial_status: str,
-    ) -> None:
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=41,
-            status=initial_status,
-            mb_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-        ))
-        beets = FakeBeetsDB()
+    def test_successful_ban_preserves_searchability(self) -> None:
+        for initial_status in ("imported", "unsearchable"):
+            with self.subTest(initial_status=initial_status):
+                db = FakePipelineDB()
+                db.seed_request(make_request_row(
+                    id=41,
+                    status=initial_status,
+                    mb_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                ))
+                beets = FakeBeetsDB()
 
-        result = ban_source(
-            pipeline_db=db,
-            beets_db=beets,
-            request=BanSourceRequest(41),
-        )
+                result = ban_source(
+                    pipeline_db=db,
+                    beets_db=beets,
+                    request=BanSourceRequest(41),
+                )
 
-        self.assertIsInstance(result, BanSourceSuccess)
-        assert isinstance(result, BanSourceSuccess)
-        self.assertEqual(result.request_status, db.request(41)["status"])
-        assert_ban_searchability_preserved(
-            initial_status=initial_status,
-            final_status=str(db.request(41)["status"]),
-        )
-        self.assertIsNotNone(
-            db.request(41).get("priority_started_at"),
-            "a successful bad-rip action did not start its priority window",
-        )
+                self.assertIsInstance(result, BanSourceSuccess)
+                assert isinstance(result, BanSourceSuccess)
+                self.assertEqual(result.request_status, db.request(41)["status"])
+                assert_ban_searchability_preserved(
+                    initial_status=initial_status,
+                    final_status=str(db.request(41)["status"]),
+                )
+                self.assertIsNotNone(
+                    db.request(41).get("priority_started_at"),
+                    "a successful bad-rip action did not start its priority window",
+                )
 
     @example(
         mb_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
