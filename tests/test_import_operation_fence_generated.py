@@ -245,58 +245,61 @@ class TestGeneratedImportOperationFence(unittest.TestCase):
             replay_claimed=replay_claimed,
         )
 
-    @given(job_type=st.sampled_from([
-        IMPORT_JOB_AUTOMATION,
-        IMPORT_JOB_FORCE,
-        IMPORT_JOB_YOUTUBE,
-    ]))
-    def test_definitely_not_started_recovery_may_retry(self, job_type: str) -> None:
-        authorized, _status, invocations, replay_claimed = _exercise_world(
-            OperationWorld(job_type, "not_executed", False),
-            beets=self.beets,
-        )
-        self.assertFalse(authorized)
-        self.assertTrue(replay_claimed)
-        self.assertEqual(invocations, [])
+    def test_definitely_not_started_recovery_may_retry(self) -> None:
+        for job_type in (
+            IMPORT_JOB_AUTOMATION,
+            IMPORT_JOB_FORCE,
+            IMPORT_JOB_YOUTUBE,
+        ):
+            with self.subTest(job_type=job_type):
+                authorized, _status, invocations, replay_claimed = _exercise_world(
+                    OperationWorld(job_type, "not_executed", False),
+                    beets=self.beets,
+                )
+                self.assertFalse(authorized)
+                self.assertTrue(replay_claimed)
+                self.assertEqual(invocations, [])
 
-    @given(job_type=st.sampled_from([
-        IMPORT_JOB_AUTOMATION,
-        IMPORT_JOB_FORCE,
-        IMPORT_JOB_YOUTUBE,
-    ]))
-    def test_may_have_started_recovery_never_replays(self, job_type: str) -> None:
-        authorized, status, invocations, replay_claimed = _exercise_world(
-            OperationWorld(job_type, "current", False),
-            beets=self.beets,
-        )
-        assert_operation_fence(
-            authorized=authorized,
-            terminal_acknowledged=False,
-            final_status=status,
-            beets_invocations=invocations,
-            replay_claimed=replay_claimed,
-        )
-        self.assertEqual(len(invocations), 1)
+    def test_may_have_started_recovery_never_replays(self) -> None:
+        for job_type in (
+            IMPORT_JOB_AUTOMATION,
+            IMPORT_JOB_FORCE,
+            IMPORT_JOB_YOUTUBE,
+        ):
+            with self.subTest(job_type=job_type):
+                authorized, status, invocations, replay_claimed = _exercise_world(
+                    OperationWorld(job_type, "current", False),
+                    beets=self.beets,
+                )
+                assert_operation_fence(
+                    authorized=authorized,
+                    terminal_acknowledged=False,
+                    final_status=status,
+                    beets_invocations=invocations,
+                    replay_claimed=replay_claimed,
+                )
+                self.assertEqual(len(invocations), 1)
 
-    @given(job_type=st.sampled_from([
-        IMPORT_JOB_AUTOMATION,
-        IMPORT_JOB_FORCE,
-        IMPORT_JOB_YOUTUBE,
-    ]))
-    def test_terminal_acknowledgement_prevents_recovery(self, job_type: str) -> None:
-        authorized, status, invocations, replay_claimed = _exercise_world(
-            OperationWorld(job_type, "current", True),
-            beets=self.beets,
-        )
-        assert_operation_fence(
-            authorized=authorized,
-            terminal_acknowledged=True,
-            final_status=status,
-            beets_invocations=invocations,
-            replay_claimed=replay_claimed,
-        )
-        self.assertEqual(status, "completed")
-        self.assertFalse(replay_claimed)
+    def test_terminal_acknowledgement_prevents_recovery(self) -> None:
+        for job_type in (
+            IMPORT_JOB_AUTOMATION,
+            IMPORT_JOB_FORCE,
+            IMPORT_JOB_YOUTUBE,
+        ):
+            with self.subTest(job_type=job_type):
+                authorized, status, invocations, replay_claimed = _exercise_world(
+                    OperationWorld(job_type, "current", True),
+                    beets=self.beets,
+                )
+                assert_operation_fence(
+                    authorized=authorized,
+                    terminal_acknowledged=True,
+                    final_status=status,
+                    beets_invocations=invocations,
+                    replay_claimed=replay_claimed,
+                )
+                self.assertEqual(status, "completed")
+                self.assertFalse(replay_claimed)
 
 
 class TestImportOperationFenceChecker(unittest.TestCase):
