@@ -845,64 +845,68 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
         result = simulate(_FRESH_ALBUM, download)
         assert_unverified_lossy_never_terminal(result)
 
-    @given(decision=st.sampled_from(tuple(_POST_IMPORT_EXPECTATIONS)))
-    def test_real_quality_gate_matches_post_import_action_table(self, decision):
-        measurement = {
-            "accept": AudioQualityMeasurement(
-                format="opus 64", min_bitrate_kbps=64,
-                avg_bitrate_kbps=64,
-            ),
-            "requeue_lossless": AudioQualityMeasurement(
-                format="MP3", min_bitrate_kbps=320,
-                avg_bitrate_kbps=320, is_cbr=True,
-                spectral_grade="genuine",
-                spectral_subject=EVIDENCE_SUBJECT_INSTALLED,
-                spectral_provenance="measured",
-            ),
-            "requeue_upgrade": AudioQualityMeasurement(
-                format="MP3", min_bitrate_kbps=320,
-                avg_bitrate_kbps=320, is_cbr=True,
-                spectral_grade="suspect", spectral_bitrate_kbps=192,
-                spectral_subject=EVIDENCE_SUBJECT_INSTALLED,
-                spectral_provenance="measured",
-            ),
-        }[decision]
-        self.assertEqual(
-            quality_gate_decision(
-                measurement,
-                verified_lossless_proof=decision == "accept",
-            ),
-            decision,
-        )
-        state = QualityGateState(
-            measurement=measurement,
-            verified_lossless_proof=decision == "accept",
-        )
-        plan = _check_quality_gate_core(
-            mb_id="generated-mbid", label="Generated",
-            request_id=42,
-            files=[SimpleNamespace(username="peer")],
-            db=SimpleNamespace(
-                get_request=lambda _request_id: {
-                    "search_filetype_override": None,
-                },
-            ),  # type: ignore[arg-type]
-            apply=False,
-            state_loader=lambda **_kwargs: state,
-        )
-        self.assertIsNotNone(plan)
-        assert plan is not None
-        raw_override = plan.transition.fields.get("search_filetype_override")
-        if raw_override is not None and not isinstance(raw_override, str):
-            raise AssertionError(
-                f"quality gate wrote a non-string override: {raw_override!r}"
-            )
-        assert_post_import_action_matches(
-            decision=decision,
-            status=plan.transition.target_status,
-            search_filetype_override=raw_override,
-            denylist=bool(plan.denylists),
-        )
+    def test_real_quality_gate_matches_post_import_action_table(self):
+        for decision in _POST_IMPORT_EXPECTATIONS:
+            with self.subTest(decision=decision):
+                measurement = {
+                    "accept": AudioQualityMeasurement(
+                        format="opus 64", min_bitrate_kbps=64,
+                        avg_bitrate_kbps=64,
+                    ),
+                    "requeue_lossless": AudioQualityMeasurement(
+                        format="MP3", min_bitrate_kbps=320,
+                        avg_bitrate_kbps=320, is_cbr=True,
+                        spectral_grade="genuine",
+                        spectral_subject=EVIDENCE_SUBJECT_INSTALLED,
+                        spectral_provenance="measured",
+                    ),
+                    "requeue_upgrade": AudioQualityMeasurement(
+                        format="MP3", min_bitrate_kbps=320,
+                        avg_bitrate_kbps=320, is_cbr=True,
+                        spectral_grade="suspect", spectral_bitrate_kbps=192,
+                        spectral_subject=EVIDENCE_SUBJECT_INSTALLED,
+                        spectral_provenance="measured",
+                    ),
+                }[decision]
+                self.assertEqual(
+                    quality_gate_decision(
+                        measurement,
+                        verified_lossless_proof=decision == "accept",
+                    ),
+                    decision,
+                )
+                state = QualityGateState(
+                    measurement=measurement,
+                    verified_lossless_proof=decision == "accept",
+                )
+                plan = _check_quality_gate_core(
+                    mb_id="generated-mbid", label="Generated",
+                    request_id=42,
+                    files=[SimpleNamespace(username="peer")],
+                    db=SimpleNamespace(
+                        get_request=lambda _request_id: {
+                            "search_filetype_override": None,
+                        },
+                    ),  # type: ignore[arg-type]
+                    apply=False,
+                    state_loader=lambda **_kwargs: state,
+                )
+                self.assertIsNotNone(plan)
+                assert plan is not None
+                raw_override = plan.transition.fields.get(
+                    "search_filetype_override",
+                )
+                if raw_override is not None and not isinstance(raw_override, str):
+                    raise AssertionError(
+                        "quality gate wrote a non-string override: "
+                        f"{raw_override!r}"
+                    )
+                assert_post_import_action_matches(
+                    decision=decision,
+                    status=plan.transition.target_status,
+                    search_filetype_override=raw_override,
+                    denylist=bool(plan.denylists),
+                )
 
     @given(
         verified_lossless_proof=st.booleans(),
@@ -957,31 +961,31 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
         self.assertIn("reopening full-tier search", "\n".join(captured.output))
         assert_quality_decision_failure_reopens_full_tier(plan)
 
-    @given(subject=st.sampled_from((
-        EVIDENCE_SUBJECT_SOURCE,
-        EVIDENCE_SUBJECT_INSTALLED,
-    )))
-    def test_lossless_narrowing_is_subject_blind_for_genuine_transparent(
-        self, subject
-    ):
+    def test_lossless_narrowing_is_subject_blind_for_genuine_transparent(self):
         # Decision 17: the transparent+genuine narrowing rule keys on the
         # grade, never the subject label — an unconverted import's
         # source-subject grade describes the installed bytes.
-        measurement = AudioQualityMeasurement(
-            format="MP3",
-            min_bitrate_kbps=320,
-            avg_bitrate_kbps=320,
-            is_cbr=True,
-            spectral_grade="genuine",
-            spectral_subject=subject,
-            spectral_provenance=(
-                "measured"
-                if subject == EVIDENCE_SUBJECT_INSTALLED
-                else "carried"
-            ),
+        subjects = (
+            EVIDENCE_SUBJECT_SOURCE,
+            EVIDENCE_SUBJECT_INSTALLED,
         )
-        self.assertEqual(
-            quality_gate_decision(measurement), "requeue_lossless")
+        for subject in subjects:
+            with self.subTest(subject=subject):
+                measurement = AudioQualityMeasurement(
+                    format="MP3",
+                    min_bitrate_kbps=320,
+                    avg_bitrate_kbps=320,
+                    is_cbr=True,
+                    spectral_grade="genuine",
+                    spectral_subject=subject,
+                    spectral_provenance=(
+                        "measured"
+                        if subject == EVIDENCE_SUBJECT_INSTALLED
+                        else "carried"
+                    ),
+                )
+                self.assertEqual(
+                    quality_gate_decision(measurement), "requeue_lossless")
 
     @given(
         target_format=st.sampled_from(_TARGET_FORMATS),

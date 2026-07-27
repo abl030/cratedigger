@@ -210,15 +210,16 @@ class TestGeneratedPinRetention(unittest.TestCase):
             error=error,
         )
 
-    @given(backend=st.sampled_from(("plex", "jellyfin")))
-    def test_every_status_is_pending_or_terminal(self, backend):
-        full, terminal = (
-            (PLEX_PIN_STATUSES, PLEX_TERMINAL_PIN_STATUSES)
-            if backend == "plex"
-            else (JELLYFIN_PIN_STATUSES, JELLYFIN_TERMINAL_PIN_STATUSES)
-        )
-        assert_status_domain_partition(
-            backend=backend, full=full, terminal=terminal)
+    def test_every_status_is_pending_or_terminal(self):
+        for backend in ("plex", "jellyfin"):
+            with self.subTest(backend=backend):
+                full, terminal = (
+                    (PLEX_PIN_STATUSES, PLEX_TERMINAL_PIN_STATUSES)
+                    if backend == "plex"
+                    else (JELLYFIN_PIN_STATUSES, JELLYFIN_TERMINAL_PIN_STATUSES)
+                )
+                assert_status_domain_partition(
+                    backend=backend, full=full, terminal=terminal)
 
 
 class TestPinRetentionCheckerTripsOnViolation(unittest.TestCase):
