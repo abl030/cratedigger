@@ -115,48 +115,65 @@ class TestGeneratedDescriptorAuthority(unittest.TestCase):
                     with open_private_processing_root(processing, source):
                             pass
 
-    @given(entry_count=st.integers(min_value=0, max_value=256))
     def test_preview_snapshot_total_entry_limit_is_global(
-        self, entry_count: int,
+        self,
     ) -> None:
         """Nested traversal has one total ceiling, not per-directory limits."""
-        with tempfile.TemporaryDirectory() as parent:
-            source = os.path.join(parent, "source")
-            processing = os.path.join(parent, "processing")
-            os.mkdir(source)
-            os.mkdir(processing, 0o700)
-            os.mkdir(os.path.join(processing, "albums"), 0o700)
-            preview = os.path.join(processing, "preview")
-            os.mkdir(preview, 0o700)
-            for index in range(entry_count):
-                nested = os.path.join(source, f"nested-{index}")
-                os.mkdir(nested)
-                with open(os.path.join(nested, "track.mp3"), "wb") as handle:
-                    handle.write(b"audio")
-            cfg = CratediggerConfig(
-                slskd_download_dir=source,
-                processing_dir=processing,
-            )
-            if entry_count * 2 > 3:
-                with self.assertRaisesRegex(
-                    FilesystemAuthorityError, "entry limit",
-                ):
-                    _snapshot_authorized_directory(
+        cases = (
+            ("empty tree", (), True),
+            ("one directory and file below limit", (1,), True),
+            ("one directory and two files at limit", (2,), True),
+            ("first directory and file pair above limit", (1, 1), False),
+        )
+        for case, nested_file_counts, expected_success in cases:
+            with (
+                self.subTest(case=case),
+                tempfile.TemporaryDirectory() as parent,
+            ):
+                source = os.path.join(parent, "source")
+                processing = os.path.join(parent, "processing")
+                os.mkdir(source)
+                os.mkdir(processing, 0o700)
+                os.mkdir(os.path.join(processing, "albums"), 0o700)
+                preview = os.path.join(processing, "preview")
+                os.mkdir(preview, 0o700)
+                for index, file_count in enumerate(nested_file_counts):
+                    nested = os.path.join(source, f"nested-{index}")
+                    os.mkdir(nested)
+                    for track_index in range(file_count):
+                        with open(
+                            os.path.join(nested, f"track-{track_index}.mp3"),
+                            "wb",
+                        ) as handle:
+                            handle.write(b"audio")
+                cfg = CratediggerConfig(
+                    slskd_download_dir=source,
+                    processing_dir=processing,
+                )
+                if not expected_success:
+                    with self.assertRaisesRegex(
+                        FilesystemAuthorityError,
+                        "entry limit",
+                    ):
+                        _snapshot_authorized_directory(
+                            source,
+                            cfg,
+                            limits=PreviewSnapshotLimits(max_entries=3),
+                        )
+                    self.assertEqual(os.listdir(preview), [])
+                else:
+                    snapshot = _snapshot_authorized_directory(
                         source,
                         cfg,
                         limits=PreviewSnapshotLimits(max_entries=3),
                     )
-                self.assertEqual(os.listdir(preview), [])
-            else:
-                snapshot = _snapshot_authorized_directory(
-                    source,
-                    cfg,
-                    limits=PreviewSnapshotLimits(max_entries=3),
-                )
-                try:
-                    self.assertEqual(len(os.listdir(snapshot)), entry_count)
-                finally:
-                    remove_preview_snapshot(snapshot, cfg)
+                    try:
+                        self.assertEqual(
+                            len(os.listdir(snapshot)),
+                            len(nested_file_counts),
+                        )
+                    finally:
+                        remove_preview_snapshot(snapshot, cfg)
 
 
 def assert_generated_publication_invariant(
@@ -474,98 +491,136 @@ class TestGeneratedMaterializePublication(unittest.TestCase):
 
 
 class TestGeneratedPreviewCopyBounds(unittest.TestCase):
-    @given(
-        declared_bytes=st.integers(min_value=0, max_value=6),
-        growth_bytes=st.integers(min_value=0, max_value=3),
-        available_bytes=st.integers(min_value=0, max_value=8),
-    )
-    @example(declared_bytes=4, growth_bytes=0, available_bytes=6)
-    @example(declared_bytes=5, growth_bytes=0, available_bytes=7)
-    @example(declared_bytes=4, growth_bytes=1, available_bytes=6)
-    @example(declared_bytes=4, growth_bytes=0, available_bytes=5)
     def test_real_preview_copy_obeys_caps_growth_and_reserve(
         self,
-        declared_bytes: int,
-        growth_bytes: int,
-        available_bytes: int,
     ) -> None:
-        parent, source, processing, cfg = _private_world()
-        with parent:
-            source_path = os.path.join(source, "track.mp3")
-            with open(source_path, "wb") as handle:
-                handle.write(b"a" * declared_bytes)
-            def grow_before_real_copy(
-                source_fd: int,
-                destination_fd: int,
-                *,
-                max_bytes: int | None = None,
-                before_write: Callable[[int], None] | None = None,
-            ) -> int:
-                if growth_bytes:
-                    with open(source_path, "ab") as handle:
-                        handle.write(b"g" * growth_bytes)
-                return copy_opened_file(
-                    source_fd,
-                    destination_fd,
-                    max_bytes=max_bytes,
-                    before_write=before_write,
-                )
+        cases = (
+            (
+                "initial reserve one byte short",
+                0,
+                0,
+                1,
+                "insufficient private preview space",
+            ),
+            ("empty source at exact reserve", 0, 0, 2, None),
+            ("below cap at exact write reserve", 3, 0, 5, None),
+            ("at cap and exact write reserve", 4, 0, 6, None),
+            (
+                "declared cap one byte over",
+                5,
+                0,
+                7,
+                "preview snapshot limit exceeded",
+            ),
+            (
+                "growth one byte over preflight",
+                4,
+                1,
+                6,
+                "source grew beyond copy limit",
+            ),
+            (
+                "write reserve one byte short",
+                4,
+                0,
+                5,
+                "insufficient private preview space",
+            ),
+        )
+        for (
+            case,
+            declared_bytes,
+            growth_bytes,
+            available_bytes,
+            expected_error,
+        ) in cases:
+            with self.subTest(case=case):
+                parent, source, processing, cfg = _private_world()
+                with parent:
+                    source_path = os.path.join(source, "track.mp3")
+                    with open(source_path, "wb") as handle:
+                        handle.write(b"a" * declared_bytes)
 
-            snapshot: str | None = None
-            expected_success = (
-                growth_bytes == 0
-                and declared_bytes <= 4
-                and available_bytes >= declared_bytes + 2
-            )
-            try:
-                snapshot = _snapshot_authorized_directory(
-                    source,
-                    cfg,
-                    limits=PreviewSnapshotLimits(
-                        max_bytes=4,
-                        free_reserve_bytes=2,
-                    ),
-                    available_bytes_fn=lambda _preview_fd: available_bytes,
-                    copy_fn=grow_before_real_copy,
-                )
-            except FilesystemAuthorityError as exc:
-                snapshot = None
-                if expected_success:
-                    self.fail(f"expected preview copy success, got {exc}")
-                if available_bytes < 2:
-                    self.assertEqual(str(exc), "insufficient private preview space")
-                elif declared_bytes > 4:
-                    self.assertEqual(str(exc), "preview snapshot limit exceeded")
-                elif growth_bytes:
-                    self.assertEqual(str(exc), "source grew beyond copy limit")
-                else:
-                    self.assertEqual(str(exc), "insufficient private preview space")
-            else:
-                if not expected_success:
-                    self.fail("preview copy succeeded outside the exact bounded world")
-            preview = os.path.join(processing, "preview")
-            if snapshot is None:
-                assert_generated_preview_invariant(
-                    succeeded=False,
-                    preview_children=os.listdir(preview),
-                    copied_bytes=0,
-                    expected_bytes=0,
-                    lock_path=os.path.join(processing, ".preview-snapshot.lock"),
-                )
-            else:
-                try:
-                    copied = os.path.join(snapshot, "track.mp3")
-                    assert_generated_preview_invariant(
-                        succeeded=True,
-                        preview_children=os.listdir(preview),
-                        copied_bytes=os.path.getsize(copied),
-                        expected_bytes=declared_bytes,
-                        lock_path=os.path.join(processing, ".preview-snapshot.lock"),
-                    )
-                    with open(copied, "rb") as handle:
-                        self.assertEqual(handle.read(), b"a" * declared_bytes)
-                finally:
-                    remove_preview_snapshot(snapshot, cfg)
+                    def grow_before_real_copy(
+                        source_fd: int,
+                        destination_fd: int,
+                        *,
+                        max_bytes: int | None = None,
+                        before_write: Callable[[int], None] | None = None,
+                        _growth_bytes: int = growth_bytes,
+                        _source_path: str = source_path,
+                    ) -> int:
+                        if _growth_bytes:
+                            with open(_source_path, "ab") as handle:
+                                handle.write(b"g" * _growth_bytes)
+                        return copy_opened_file(
+                            source_fd,
+                            destination_fd,
+                            max_bytes=max_bytes,
+                            before_write=before_write,
+                        )
+
+                    snapshot: str | None = None
+                    try:
+                        snapshot = _snapshot_authorized_directory(
+                            source,
+                            cfg,
+                            limits=PreviewSnapshotLimits(
+                                max_bytes=4,
+                                free_reserve_bytes=2,
+                            ),
+                            available_bytes_fn=(
+                                lambda _preview_fd, _available=available_bytes: (
+                                    _available
+                                )
+                            ),
+                            copy_fn=grow_before_real_copy,
+                        )
+                    except FilesystemAuthorityError as exc:
+                        snapshot = None
+                        if expected_error is None:
+                            self.fail(
+                                f"expected preview copy success, got {exc}",
+                            )
+                        self.assertEqual(str(exc), expected_error)
+                    else:
+                        if expected_error is not None:
+                            self.fail(
+                                "preview copy succeeded outside the exact "
+                                f"bounded world: expected {expected_error}",
+                            )
+                    preview = os.path.join(processing, "preview")
+                    if snapshot is None:
+                        assert_generated_preview_invariant(
+                            succeeded=False,
+                            preview_children=os.listdir(preview),
+                            copied_bytes=0,
+                            expected_bytes=0,
+                            lock_path=os.path.join(
+                                processing,
+                                ".preview-snapshot.lock",
+                            ),
+                        )
+                    else:
+                        try:
+                            copied = os.path.join(snapshot, "track.mp3")
+                            assert_generated_preview_invariant(
+                                succeeded=True,
+                                preview_children=os.listdir(preview),
+                                copied_bytes=os.path.getsize(copied),
+                                expected_bytes=declared_bytes,
+                                lock_path=os.path.join(
+                                    processing,
+                                    ".preview-snapshot.lock",
+                                ),
+                            )
+                            with open(copied, "rb") as handle:
+                                self.assertEqual(
+                                    handle.read(),
+                                    b"a" * declared_bytes,
+                                )
+                        finally:
+                            remove_preview_snapshot(snapshot, cfg)
 
 
 class TestGeneratedWrongMatchExplorerBounds(unittest.TestCase):
