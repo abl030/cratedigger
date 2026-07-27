@@ -847,10 +847,12 @@ _MATERIALIZE_REASON_COPY: Final[dict[str, str]] = {
     ),
     # --- staged-path readiness (literal reasons, same persisted column) ---
     "staged_path_missing": (
-        "The staged download folder disappeared before import; requeued"
+        "The staged download folder could not be accessed before import "
+        "(possible filesystem error); requeued"
     ),
     "staged_path_missing_tracked_files": (
-        "Files were missing from the staged download folder; requeued"
+        "Tracked files in the staged download folder could not be accessed "
+        "before import (possible filesystem error); requeued"
     ),
     "empty_manifest": (
         "The download attempt tracked no files; requeued"

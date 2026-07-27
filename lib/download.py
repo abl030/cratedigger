@@ -789,10 +789,11 @@ def materialize_failure_action(
 ) -> str:
     """Decide what the poller does with a non-``Materialized`` outcome.
 
-    - ``"leave"`` — ``MaterializeGuarded`` marks paths needing manual
-      recovery; NEVER auto-reset those, regardless of age. (Also the
-      no-op answer if ``materialized`` is actually ``Materialized`` —
-      callers only invoke this after already excluding that case.)
+    - ``"leave"`` — ``MaterializeGuarded`` means this caller must not apply
+      a generic reset: either manual recovery owns the path or a successful
+      abandonment already reset and audited it. (Also the no-op answer if
+      ``materialized`` is actually ``Materialized`` — callers only invoke
+      this after already excluding that case.)
     - ``"retry"`` — ``MaterializeFailed`` within the grace window retries
       next cycle (covers the benign completion-vs-event-write race,
       which resolves on the next ingest).
@@ -996,15 +997,6 @@ def _processing_path_ready_for_importer(
         return False
 
     assert isinstance(result, MaterializeFailed)
-    # This gate writes no ``download_log`` row (deliberately — it fails
-    # closed BEFORE any import attempt exists to audit), so the journal is
-    # the only place the cause can land. Name it (issue #868).
-    logger.warning(
-        "PRE-ENQUEUE GATE RESET: request_id=%s reason=%s current_path=%s",
-        request_id,
-        result.reason,
-        state.current_path,
-    )
     transitions.require_transition_applied(transitions.finalize_request(
         db,
         request_id,
@@ -1013,6 +1005,20 @@ def _processing_path_ready_for_importer(
             attempt_type="download",
         ),
     ))
+    db.log_download(
+        request_id=request_id,
+        soulseek_username=None,
+        filetype=state.filetype,
+        outcome="failed",
+        beets_detail=result.reason,
+        error_message=result.reason,
+    )
+    logger.warning(
+        "PRE-ENQUEUE GATE RESET: request_id=%s reason=%s current_path=%s",
+        request_id,
+        result.reason,
+        state.current_path,
+    )
     return False
 
 

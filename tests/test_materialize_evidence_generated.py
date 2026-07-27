@@ -11,12 +11,10 @@ Invariants under patrol
 -----------------------
 
 **I1 — a materialize failure never resets a request uncaused.** The
-reason reaches the journal at every failure site, and wherever the reset
-also writes a ``download_log`` row, that row carries the reason. (The
-pre-enqueue gate ``lib.download._processing_path_ready_for_importer``
-deliberately writes no row at all — it fails closed before any import
-attempt exists to audit — so the journal is its only record. Giving that
-path an audit row is a lifecycle change, tracked separately.)
+reason reaches the journal at every failure site, and every reset writes
+a ``download_log`` row carrying that reason. The pre-enqueue gate writes
+its two staged-path failures peer-neutrally because no peer verdict was
+involved.
 
 **I2 — distinguishable outcomes never collapse.** "slskd never stamped a
 location", "the stamp points at nothing", "the name failed containment"
@@ -64,6 +62,7 @@ import socket
 import tempfile
 import unittest
 import unittest.mock
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
@@ -75,6 +74,7 @@ from lib.config import CratediggerConfig
 from lib.download import (
     PROCESSING_MATERIALIZE_GRACE_S,
     _enqueue_completed_processing,
+    _processing_path_ready_for_importer,
     materialize_failure_action,
 )
 from lib.download_materialization import (
@@ -99,11 +99,13 @@ from lib.download_materialization import (
     MaterializeFailed,
     MaterializeGuarded,
     Materialized,
+    _evaluate_staged_path_readiness,
     _materialize_processing_dir,
-    materialize_authority_reason,
     shared_download_root_reason,
     source_preflight_reason,
 )
+from lib.download_reconstruction import reconstruct_grab_list_entry
+from lib.download_recovery import ProcessingPathLocation
 from lib.fs_authority import (
     CopyDestinationWriteError,
     FilesystemAuthorityError,
@@ -112,12 +114,21 @@ from lib.fs_authority import (
     open_regular_under_held_root,
     open_shared_download_root,
 )
+from lib.failure_presentation import FailureEvidence, present_failure
 from lib.grab_list import DownloadFile
-from lib.processing_paths import canonical_folder_for_row, processing_albums_dir
-from lib.quality import ActiveDownloadState
+from lib.processing_paths import (
+    canonical_folder_for_row,
+    processing_albums_dir,
+    stage_to_ai_path,
+)
+from lib.quality import ActiveDownloadFileState, ActiveDownloadState
 from lib.staged_album import StagedAlbum
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_ctx_with_fake_db, make_grab_list_entry, make_request_row
+from tests.helpers import (
+    make_ctx_with_fake_db,
+    make_grab_list_entry,
+    make_request_row,
+)
 from tests.test_path_authority import assert_publication_invariant
 
 
@@ -234,9 +245,9 @@ def assert_lifecycle_unchanged_by_reason(
     ``failed`` row carrying the reason; an open grace window always
     leaves the row alone with no audit at all — whatever the reason is.
 
-    I1 is scoped to THIS path, which does write a row. The poller's own
-    pre-enqueue gate resets without writing one at all and records its
-    cause in the journal only; that is deliberate and out of scope here.
+    I1 is scoped to THIS grace-window path. The poller's pre-enqueue gate
+    has its own generated property below: its reset writes one peer-neutral
+    failed row carrying the staged-path reason.
     """
     if not grace_expired:
         if status != "downloading":
@@ -263,6 +274,48 @@ def assert_lifecycle_unchanged_by_reason(
             f"expired grace persisted {persisted_details!r}, expected [{reason!r}] "
             "— a reset without a recoverable cause",
         )
+
+
+def check_pre_enqueue_reset_evidence(
+    *,
+    reason: str,
+    filetype: str,
+    event: (
+        tuple[str | None, str | None, str | None, str | None, str | None]
+        | None
+    ),
+    verdict: str | None,
+) -> str | None:
+    """Return why the reset evidence/copy is wrong, or ``None``."""
+    expected_event = ("failed", None, filetype, reason, reason)
+    if event != expected_event:
+        return f"pre-enqueue reset event {event!r}, expected {expected_event!r}"
+    lowered = (verdict or "").casefold()
+    if "possible filesystem error" not in lowered:
+        return f"pre-enqueue copy hid filesystem uncertainty: {verdict!r}"
+    for false_claim in ("missing", "disappeared", "deleted"):
+        if false_claim in lowered:
+            return f"pre-enqueue copy asserted {false_claim!r}: {verdict!r}"
+    if "peer" in lowered:
+        return f"pre-enqueue copy attributed the failure to a peer: {verdict!r}"
+    return None
+
+
+def check_abandonment_handled_once(
+    result: Materialized | MaterializeFailed | MaterializeGuarded,
+    transitions: Sequence[tuple[int, str]],
+    audits: Sequence[tuple[str | None, str | None]],
+) -> str | None:
+    """Return why successful abandonment could fall through, or ``None``."""
+    if not isinstance(result, MaterializeGuarded):
+        return f"successful abandonment returned {result!r}, allowing reset fallthrough"
+    if result.detail != "abandoned_interrupted_auto_import":
+        return f"successful abandonment returned detail {result.detail!r}"
+    if transitions != [(1, "wanted")]:
+        return f"successful abandonment transitioned {transitions!r}"
+    if audits != [("failed", "abandoned_auto_import")]:
+        return f"successful abandonment audited {audits!r}"
+    return None
 
 
 # ============================================================================
@@ -809,6 +862,168 @@ class TestGeneratedMaterializeLifecycle(unittest.TestCase):
         )
 
 
+def _staged_gate_world(
+    parent: str,
+    *,
+    filetype: str,
+    path_state: str,
+    subprocess_started_at: str | None,
+):
+    """Build one persisted staged-path world and reconstruct its entry."""
+    built = _build_world(parent, "healthy", "track")
+    current_path = stage_to_ai_path(
+        artist="Artist",
+        title="Album",
+        staging_dir=built.cfg.beets_staging_dir,
+        request_id=1,
+        auto_import=True,
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    state = ActiveDownloadState(
+        filetype=filetype,
+        enqueued_at=now,
+        files=[
+            ActiveDownloadFileState(
+                username=built.file.username,
+                filename=built.file.filename,
+                file_dir=built.file.file_dir,
+                size=built.file.size,
+                local_path=built.file.local_path,
+            ),
+        ],
+        processing_started_at=now,
+        import_subprocess_started_at=subprocess_started_at,
+        current_path=current_path,
+    )
+    db = FakePipelineDB()
+    db.seed_request(make_request_row(
+        id=1,
+        status="downloading",
+        artist_name="Artist",
+        album_title="Album",
+        year=2020,
+        source="request",
+        active_download_state=state.to_json(),
+    ))
+    entry = reconstruct_grab_list_entry(db.request(1), state)
+    if path_state != "directory_missing":
+        os.makedirs(current_path)
+    if path_state == "present":
+        staged = StagedAlbum.from_entry(entry, default_path=current_path)
+        staged.bind_import_paths(entry.files)
+        for file in entry.files:
+            assert file.import_path is not None
+            with open(file.import_path, "wb") as handle:
+                handle.write(b"audio")
+    ctx = make_ctx_with_fake_db(db, cfg=built.cfg)
+    return built, current_path, entry, state, db, ctx
+
+
+class TestGeneratedPreEnqueueFailureHistory(unittest.TestCase):
+    @given(
+        failure=st.sampled_from(("directory", "tracked_file")),
+        filetype=st.sampled_from(("flac", "mp3 v0", "opus")),
+    )
+    @example(failure="directory", filetype="opus")
+    @example(failure="tracked_file", filetype="flac")
+    @settings(deadline=None, max_examples=6)
+    def test_reset_is_a_single_peer_neutral_visible_event(
+        self,
+        failure: str,
+        filetype: str,
+    ) -> None:
+        """Drive the real readiness classifier, transition, writer and presenter."""
+        with tempfile.TemporaryDirectory() as parent:
+            built, _, entry, state, db, ctx = _staged_gate_world(
+                parent,
+                filetype=filetype,
+                path_state=(
+                    "directory_missing"
+                    if failure == "directory"
+                    else "tracked_file_missing"
+                ),
+                subprocess_started_at=None,
+            )
+            reason = (
+                "staged_path_missing"
+                if failure == "directory"
+                else "staged_path_missing_tracked_files"
+            )
+            try:
+                ready = _processing_path_ready_for_importer(
+                    entry, 1, state, db, ctx,
+                )
+            finally:
+                built.close()
+
+            self.assertFalse(ready)
+            self.assertEqual(db.request(1)["status"], "wanted")
+            self.assertEqual(db.status_history, [(1, "wanted")])
+            self.assertEqual(db.cooldowns_applied, [])
+            self.assertEqual(db.list_import_jobs(request_id=1), [])
+            self.assertEqual(len(db.download_logs), 1)
+            row = db.download_logs[0]
+            presentation = present_failure(FailureEvidence(
+                outcome=row.outcome or "",
+                soulseek_username=row.soulseek_username,
+                error_message=row.error_message,
+                beets_detail=row.beets_detail,
+            ))
+            violation = check_pre_enqueue_reset_evidence(
+                reason=reason,
+                filetype=filetype,
+                event=(
+                    row.outcome,
+                    row.soulseek_username,
+                    row.filetype,
+                    row.beets_detail,
+                    row.error_message,
+                ),
+                verdict=presentation.verdict,
+            )
+            self.assertIsNone(violation, violation)
+
+    @given(
+        path_present=st.booleans(),
+        filetype=st.sampled_from(("flac", "mp3 v0", "opus")),
+    )
+    @example(path_present=True, filetype="flac")
+    @settings(deadline=None, max_examples=6)
+    def test_successful_abandonment_is_a_handled_stop(
+        self,
+        path_present: bool,
+        filetype: str,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as parent:
+            built, current_path, entry, _, db, _ = _staged_gate_world(
+                parent,
+                filetype=filetype,
+                path_state="present" if path_present else "directory_missing",
+                subprocess_started_at="2026-07-27T00:00:00+00:00",
+            )
+            staged = StagedAlbum.from_entry(entry, default_path=current_path)
+            location = ProcessingPathLocation(
+                path=current_path,
+                kind="request_scoped_auto_import_staged",
+            )
+            try:
+                result = _evaluate_staged_path_readiness(
+                    entry, staged, location, db,
+                )
+            finally:
+                built.close()
+
+            violation = check_abandonment_handled_once(
+                result,
+                list(db.status_history),
+                [
+                    (row.outcome, row.beets_scenario)
+                    for row in db.download_logs
+                ],
+            )
+            self.assertIsNone(violation, violation)
+
+
 # ============================================================================
 # Known-bad self-tests — a checker that never trips proves nothing
 # ============================================================================
@@ -892,6 +1107,58 @@ class TestMaterializeEvidenceCheckersTripOnViolations(unittest.TestCase):
                 log_outcomes=[],
                 persisted_details=[],
             )
+
+    def test_pre_enqueue_checker_rejects_missing_persistence_and_false_copy(
+        self,
+    ) -> None:
+        event = (
+            "failed", None, "flac", "staged_path_missing",
+            "staged_path_missing",
+        )
+        good_copy = (
+            "The staged download folder could not be accessed before import "
+            "(possible filesystem error); requeued"
+        )
+        for observed, verdict in (
+            (None, good_copy),
+            (event, "The staged download folder disappeared before import"),
+        ):
+            with self.subTest(event=observed, verdict=verdict):
+                self.assertIsNotNone(check_pre_enqueue_reset_evidence(
+                    reason="staged_path_missing",
+                    filetype="flac",
+                    event=observed,
+                    verdict=verdict,
+                ))
+
+    def test_abandonment_checker_rejects_fallthrough_and_duplicate_reset(
+        self,
+    ) -> None:
+        handled = MaterializeGuarded(
+            detail="abandoned_interrupted_auto_import",
+        )
+        audit = [("failed", "abandoned_auto_import")]
+        for result, transitions, audits in (
+            (
+                MaterializeFailed(
+                    reason="abandoned_interrupted_auto_import",
+                ),
+                [(1, "wanted")],
+                audit,
+            ),
+            (handled, [(1, "wanted"), (1, "wanted")], audit),
+            (handled, [(1, "wanted")], []),
+        ):
+            with self.subTest(
+                result=result,
+                transitions=transitions,
+                audits=audits,
+            ):
+                self.assertIsNotNone(check_abandonment_handled_once(
+                    result,
+                    transitions,
+                    audits,
+                ))
 
     def test_leg_checker_rejects_a_root_refusal_blamed_on_one_file(self) -> None:
         """The exact D1 defect: the share refused, but the reason names a
