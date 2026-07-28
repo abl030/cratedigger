@@ -1,10 +1,8 @@
 """Shared scanner for the stateful-MagicMock audit.
 
-Isolated so test_mock_audit.py and the baseline-rebuild helper share one
-source of truth for the heuristic. See CLAUDE.md § "Mocks: leaf-seam only"
-and issue #290.
+See CLAUDE.md § "Mocks: leaf-seam only" and issue #290.
 
-The heuristic flags two anti-patterns:
+The heuristic flags three anti-patterns:
 
 1. **Stateful-collaborator MagicMock by variable name.** Lines that
    assign ``MagicMock(...)`` to a variable whose name implies a stateful
@@ -19,6 +17,11 @@ The heuristic flags two anti-patterns:
    the outermost edge — subprocess, urllib/requests, os.path, time.sleep,
    third-party libs we don't own (``music_tag``, ``redis``), and a small
    set of one-way notifier helpers in ``lib.util``.
+
+3. **Retired web MagicMock harness names.** ``tests/web`` must use
+   ``FakePipelineDB`` and ``FakeBeetsDB`` state, never the old ``mock_db`` /
+   beets-mock names. The deleted ``_pipeline_db_test_harness`` constructor is
+   forbidden throughout the scanned test tree.
 
 Patch calls split across physical lines are parsed through the AST. Existing
 multiline debt is held to an exact target-count baseline; new occurrences fail
@@ -70,8 +73,17 @@ _PATCH_OBJECT_RE = re.compile(
     r'\bpatch\.object\s*\(\s*([A-Za-z_][A-Za-z0-9_.]*)\s*,\s*["\']([^"\']+)["\']'
 )
 
+# Direct zero-tolerance names left behind by the completed #430 and #445
+# migrations. These remain deliberately lexical: the names themselves encode
+# the retired test shapes, while current fakes use ``self.db`` /
+# ``self.beets_db``.
+_WEB_HARNESS_MOCK_DB_RE = re.compile(r"\bmock_db\b")
+_HARNESS_CTOR_RE = re.compile(r"\b_pipeline_db_test_harness\b")
+_WEB_BEETS_MOCK_RE = re.compile(
+    r"\bmock_beets\w*|self\._beets\b|self\.beets\b")
+
 # Module aliases the audit knows how to resolve to canonical paths.
-# Keep narrow — false positives become baseline noise. Detected by
+# Keep narrow — false positives become audit noise. Detected by
 # scanning each file's import statements before classification.
 _ALIAS_TO_CANONICAL = {
     "cratedigger": "cratedigger",
@@ -521,45 +533,59 @@ def scan_multiline_patch_targets() -> dict[str, int]:
     return dict(counts)
 
 
-def scan_file(path: str) -> dict[str, int]:
-    """Return ``{finding_key: count}`` for one test file.
-
-    Finding keys are stable (no line numbers) so the baseline survives
-    line shifts from refactors.
-    """
+def scan_source(source: str, *, web_file: bool) -> dict[str, int]:
+    """Return grouped mock-audit findings for one source string."""
     counts: dict[str, int] = defaultdict(int)
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            if _STATEFUL_ASSIGN_RE.match(line):
-                # Group findings by the assigned name so the baseline is
-                # informative when shrinking.
-                m = _STATEFUL_ASSIGN_RE.match(line)
-                assert m is not None
-                counts[f"stateful_mock_assign:{m.group(1)}"] += 1
-            for pm in _PATCH_RE.finditer(line):
-                target = pm.group(1)
-                if not _is_repo_target(target):
-                    continue
-                if _is_leaf_seam(target):
-                    continue
-                counts[f"patch:{target}"] += 1
-            # patch.object(MODULE_REF, "name", ...) form — the first arg
-            # is an identifier (typically a module alias from imports);
-            # we resolve it against _ALIAS_TO_CANONICAL to recover the
-            # canonical patch target ``<canonical>.<name>``. Unknown
-            # aliases are reported verbatim so they show up in the
-            # baseline and either land on the allowlist or get migrated.
-            for pom in _PATCH_OBJECT_RE.finditer(line):
-                module_ref = pom.group(1)
-                attr_name = pom.group(2)
-                canonical = _ALIAS_TO_CANONICAL.get(module_ref, module_ref)
-                target = f"{canonical}.{attr_name}"
-                if not _is_repo_target(target):
-                    continue
-                if _is_leaf_seam(target):
-                    continue
-                counts[f"patch:{target}"] += 1
+    for line in source.splitlines():
+        if _STATEFUL_ASSIGN_RE.match(line):
+            # Group findings by assigned name so the failure identifies
+            # the stateful collaborator shape.
+            m = _STATEFUL_ASSIGN_RE.match(line)
+            assert m is not None
+            counts[f"stateful_mock_assign:{m.group(1)}"] += 1
+        for pm in _PATCH_RE.finditer(line):
+            target = pm.group(1)
+            if not _is_repo_target(target):
+                continue
+            if _is_leaf_seam(target):
+                continue
+            counts[f"patch:{target}"] += 1
+        # patch.object(MODULE_REF, "name", ...) form — the first arg
+        # is an identifier (typically a module alias from imports);
+        # we resolve it against _ALIAS_TO_CANONICAL to recover the
+        # canonical patch target ``<canonical>.<name>``. Unknown
+        # aliases are reported verbatim so they can be migrated or
+        # deliberately allowlisted.
+        for pom in _PATCH_OBJECT_RE.finditer(line):
+            module_ref = pom.group(1)
+            attr_name = pom.group(2)
+            canonical = _ALIAS_TO_CANONICAL.get(module_ref, module_ref)
+            target = f"{canonical}.{attr_name}"
+            if not _is_repo_target(target):
+                continue
+            if _is_leaf_seam(target):
+                continue
+            counts[f"patch:{target}"] += 1
+
+    harness_count = len(_HARNESS_CTOR_RE.findall(source))
+    if harness_count:
+        counts["retired_pipeline_db_harness"] = harness_count
+    if web_file:
+        db_count = len(_WEB_HARNESS_MOCK_DB_RE.findall(source))
+        if db_count:
+            counts["web_mock_db"] = db_count
+        beets_count = len(_WEB_BEETS_MOCK_RE.findall(source))
+        if beets_count:
+            counts["web_beets_mock"] = beets_count
     return dict(counts)
+
+
+def scan_file(path: str) -> dict[str, int]:
+    """Return grouped mock-audit findings for one test file."""
+    with open(path, encoding="utf-8") as source_file:
+        source = source_file.read()
+    rel = os.path.relpath(path, TESTS_DIR)
+    return scan_source(source, web_file=rel.startswith("web" + os.sep))
 
 
 def iter_scan_paths():
@@ -594,122 +620,3 @@ def scan_tree() -> dict[str, dict[str, int]]:
         if counts:
             result[rel] = counts
     return result
-
-
-# === Web-harness MagicMock ratchet (#430) ===
-#
-# The tests/web contract harness historically injected a MagicMock
-# pipeline DB (now ``MagicMock(wraps=FakePipelineDB)``), so contract
-# tests pass whenever the mock's shape matches the assertion's shape —
-# production query semantics never enter the loop. Issue #430 migrates
-# the harness and every per-route test to a bare ``FakePipelineDB``,
-# route-module by route-module.
-#
-# This ratchet counts MagicMock-harness usage OCCURRENCES: every
-# ``mock_db`` reference in a ``tests/web`` file (dotted, aliased,
-# passed bare — aliasing the mock away is the evasion the occurrence
-# count exists to close) plus every ``_pipeline_db_test_harness``
-# reference in ANY scanned test file. The audit test requires the live
-# counts to match this baseline EXACTLY — and the baseline is now
-# permanently empty: contract tests seed FakePipelineDB state, never
-# configure mock returns.
-
-_WEB_HARNESS_MOCK_DB_RE = re.compile(r"\bmock_db\b")
-_HARNESS_CTOR_RE = re.compile(r"\b_pipeline_db_test_harness\b")
-
-# EMPTY — the #430 migration is complete (PRs #440-#443 + the final
-# harness deletion). The ratchet stays armed at zero: any reintroduced
-# ``mock_db`` reference in tests/web, or ``_pipeline_db_test_harness``
-# reference anywhere, fails the audit immediately.
-WEB_HARNESS_MOCK_BASELINE: dict[str, int] = {}
-
-
-def count_harness_overrides(text: str, *, web_file: bool) -> int:
-    """Count MagicMock-harness usage occurrences in one file's text.
-
-    ``mock_db`` references only count inside ``tests/web`` files (the
-    name has no meaning elsewhere); ``_pipeline_db_test_harness``
-    references count everywhere the scanner walks.
-    """
-    n = len(_HARNESS_CTOR_RE.findall(text))
-    if web_file:
-        n += len(_WEB_HARNESS_MOCK_DB_RE.findall(text))
-    return n
-
-
-def scan_web_harness_overrides() -> dict[str, int]:
-    """Count MagicMock-harness usage occurrences per test file."""
-    counts: dict[str, int] = {}
-    web_prefix = "web" + os.sep
-    for rel, path in iter_scan_paths():
-        with open(path, encoding="utf-8") as f:
-            n = count_harness_overrides(
-                f.read(), web_file=rel.startswith(web_prefix))
-        if n:
-            counts[rel] = n
-    return counts
-
-
-# === Web beets-MagicMock ratchet (#445 item 1) ===
-#
-# The #430 migration covered the pipeline DB; the browse / library /
-# pipeline contract tests historically configured MagicMock shapes for
-# the OTHER stateful collaborator — ``BeetsDB``. Those mocks evaded the
-# stateful-assign heuristic purely by variable naming: ``mock_beets``,
-# ``self._beets`` and ``self.beets`` don't match ``STATEFUL_VAR_NAMES``
-# (same evasion class the r1 ratchet review caught for ``mock_db``).
-#
-# This ratchet counts OCCURRENCES of the beets-mock variable names in
-# ``tests/web`` files: ``mock_beets`` (plus suffixed forms like
-# ``mock_beets_cls``), ``self._beets`` and ``self.beets``. It does NOT
-# count the production attribute ``web.server._beets`` itself —
-# migrated tests still inject a fake via ``srv._beets = fake`` (the
-# same constructor-replacement seam as ``web.server.db``), and
-# ``test_routes_browse``'s real-SQLite class fixture (``cls._beets =
-# BeetsDB(...)``) is legitimate. The audit test requires the live
-# counts to match this baseline EXACTLY — growth fails, and an
-# un-shrunk baseline after a migration also fails, so every migration
-# PR is forced to record its own progress. The replacement is
-# ``FakeBeetsDB`` from ``tests/fakes.py`` (extend it + add a self-test
-# in ``tests/test_fakes.py::TestFakeBeetsDB`` when a route exercises a
-# method it lacks).
-#
-# Known limits (adversarial review of the landing PR):
-# - Name the migrated attribute ``self.beets_db`` (uncounted), NOT
-#   ``self._beets = FakeBeetsDB()`` — the regex counts the name, not
-#   the type, so reusing the mock's name would keep the file's count
-#   inflated and make the failure message lie.
-# - ``cls``-level shapes are uncounted because browse's real-SQLite
-#   fixture legitimately uses ``cls._beets``. Do NOT introduce
-#   ``cls._beets = MagicMock()`` — the general stateful-assign audit
-#   misses it too; it is a review tripwire, not a sanctioned gap.
-# - Shrinking this baseline is only legitimate when the mocks were
-#   replaced with ``FakeBeetsDB`` seeding — aliasing
-#   (``b = self._beets``) also shrinks the count and is an evasion.
-
-_WEB_BEETS_MOCK_RE = re.compile(
-    r"\bmock_beets\w*|self\._beets\b|self\.beets\b")
-
-# EMPTY — the #445 item 1 migration is complete (ratchet + four
-# migration batches). The ratchet stays armed at zero: any reintroduced
-# beets-mock variable name in tests/web fails the audit immediately.
-WEB_BEETS_MOCK_BASELINE: dict[str, int] = {}
-
-
-def count_beets_mock_overrides(text: str) -> int:
-    """Count beets-MagicMock variable-name occurrences in one file's text."""
-    return len(_WEB_BEETS_MOCK_RE.findall(text))
-
-
-def scan_web_beets_overrides() -> dict[str, int]:
-    """Count beets-MagicMock occurrences per ``tests/web`` test file."""
-    counts: dict[str, int] = {}
-    web_prefix = "web" + os.sep
-    for rel, path in iter_scan_paths():
-        if not rel.startswith(web_prefix):
-            continue
-        with open(path, encoding="utf-8") as f:
-            n = count_beets_mock_overrides(f.read())
-        if n:
-            counts[rel] = n
-    return counts

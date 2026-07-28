@@ -584,9 +584,8 @@ may still patrol nothing; only review and mutant-kill counts show that.
   too, since discovery is by decorator name. A future DRY idiom such as
   `@given(**_COMMON_STRATEGIES)` is therefore a hard build break until the
   audit is extended — deliberate: an unmappable decorator must not pass.
-- `PROPERTY_INPUT_ALLOWLIST` is **empty and armed**, the same ratchet shape as
-  `WEB_HARNESS_MOCK_BASELINE` in `tests/_mock_audit_scanner.py`. The one
-  property that used to flag — the planted-bad-decider self-test in
+- `PROPERTY_INPUT_ALLOWLIST` is **empty and armed**. The one property that
+  used to flag — the planted-bad-decider self-test in
   `tests/test_quality_generated.py` — now passes its world to a decider that
   ignores it, which models "a decider that ignores its world" more faithfully
   than discarding the world did. A stale entry that no longer flags also fails

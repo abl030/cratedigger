@@ -9,7 +9,7 @@ metadata:
 
 Issue #445 items 1 and 4 shipped 2026-06-12 (PRs #446, #447, #448, all merged):
 
-- `WEB_BEETS_MOCK_BASELINE` in `tests/_mock_audit_scanner.py` is permanently EMPTY — tests/web has zero beets-collaborator MagicMocks. Migrated fakes are named `self.beets_db` (the ratchet counts `mock_beets*`/`self._beets`/`self.beets`, not `beets_db`).
+- Tests/web has zero beets-collaborator MagicMocks. The direct zero-tolerance rule in `tests/test_mock_audit.py` bans `mock_beets*`/`self._beets`/`self.beets`; migrated fakes are named `self.beets_db`. Issue #895 retired the completed migration's empty baseline without weakening that rule.
 - `FakePipelineDB` enforces UNIQUE(mb_release_id) (seed/add/update paths) and sequence-faithful download_log id minting. `make_request_row` default mbid is id-derived (`test-mbid-{id:04d}`; id=1 keeps the old literal).
 - `FakeBeetsDB` now covers the web-route surface: `get_album_ids_by_mbids`, `get_tracks_by_mb_release_id`, `search_albums`, `get_recent`, `get_album_detail`, `get_min_bitrate`, and `locate` with a typed `queue_locate_results` API (rejects production-impossible ReleaseLocations). `album_exists`/`get_min_bitrate` route through one `_presence` helper (queued locate head → explicit seed → album-ids store → default), mirroring production's single locate seam (issue #121).
 

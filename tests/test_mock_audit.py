@@ -26,16 +26,11 @@ sys.path.insert(0, os.path.normpath(os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..")))
 from tests._mock_audit_scanner import (
     MULTILINE_PATCH_BASELINE,
-    WEB_BEETS_MOCK_BASELINE,
-    WEB_HARNESS_MOCK_BASELINE,
-    count_beets_mock_overrides,
-    count_harness_overrides,
     find_multiline_patch_targets,
     iter_scan_paths,
     scan_multiline_patch_targets,
+    scan_source,
     scan_tree,
-    scan_web_beets_overrides,
-    scan_web_harness_overrides,
 )
 
 
@@ -63,6 +58,51 @@ class TestStatefulMockAudit(unittest.TestCase):
             "or real-input call.\n\n"
             + "\n".join(lines)
         )
+
+    def test_direct_web_mock_rules_catch_known_bad_shapes(self) -> None:
+        cases = [
+            ("dotted pipeline mock", "self.mock_db.get_log()", True,
+             {"web_mock_db": 1}),
+            ("aliased pipeline mock", "m = self.mock_db", True,
+             {"web_mock_db": 1}),
+            ("reflected pipeline mock", "getattr(self.mock_db, name)", True,
+             {"web_mock_db": 1}),
+            ("passed pipeline mock", "helper(self.mock_db, x)", True,
+             {"web_mock_db": 1}),
+            ("two pipeline mocks",
+             "mock_db.a.return_value = 1; mock_db.b.side_effect = e", True,
+             {"web_mock_db": 2}),
+            ("pipeline substring", "my_mock_database = 1", True, {}),
+            ("pipeline mock outside web", "self.mock_db.get_log()", False, {}),
+            ("retired harness inside web", "_pipeline_db_test_harness()",
+             True, {"retired_pipeline_db_harness": 1}),
+            ("retired harness outside web", "_pipeline_db_test_harness()",
+             False, {"retired_pipeline_db_harness": 1}),
+            ("dotted beets mock",
+             "self._beets.album_exists.return_value = True", True,
+             {"web_beets_mock": 1}),
+            ("bare beets mock", "mock_beets = MagicMock()", True,
+             {"web_beets_mock": 1}),
+            ("suffixed beets mock", "mock_beets_cls: MagicMock", True,
+             {"web_beets_mock": 1}),
+            ("library beets mock", "self.beets.get_recent.return_value", True,
+             {"web_beets_mock": 1}),
+            ("injected beets mock", "srv._beets = self.beets", True,
+             {"web_beets_mock": 1}),
+            ("two beets mocks", "self._beets = mock_beets", True,
+             {"web_beets_mock": 2}),
+            ("beets mock outside web", "self._beets = mock_beets", False, {}),
+            ("production beets attribute", "self._orig_beets = srv._beets",
+             True, {}),
+            ("real BeetsDB fixture", "cls._beets = BeetsDB(path)", True, {}),
+            ("fake beets name", "self.beets_db = FakeBeetsDB()", True, {}),
+        ]
+        for desc, source, web_file, expected in cases:
+            with self.subTest(desc=desc):
+                self.assertEqual(
+                    scan_source(source, web_file=web_file),
+                    expected,
+                )
 
     def test_multiline_patch_scanner_catches_known_bad_shape(self) -> None:
         source = '''
@@ -195,133 +235,6 @@ class TestSysPathAudit(unittest.TestCase):
             "#95 dual-load class). Only the repo root may be inserted; "
             "tests/ dirs may only be appended:\n" + "\n".join(offenders),
         )
-
-
-class TestWebHarnessMockRatchet(unittest.TestCase):
-    """Ratchet for the #430 MagicMock → FakePipelineDB harness migration.
-
-    Per-file counts of remaining MagicMock-harness usage in ``tests/web``
-    must match ``WEB_HARNESS_MOCK_BASELINE`` exactly: growth means a new
-    test leaned on mock shapes instead of FakePipelineDB state; shrink
-    means a migration landed and the baseline entry must drop with it.
-    """
-
-    def test_counter_pins_evasion_shapes(self) -> None:
-        """Document exactly what the ratchet counts — occurrences, not
-        lines, including alias/bare-reference shapes that a dotted-only
-        regex would miss (the r1 adversarial-review evasion vectors)."""
-        cases = [
-            ("dotted config", "self.mock_db.get_log.return_value = []", 1),
-            ("alias assignment", "m = self.mock_db", 1),
-            ("getattr reflection", "getattr(self.mock_db, name)", 1),
-            ("bare positional arg", "helper(self.mock_db, x)", 1),
-            ("two occurrences one line",
-             "mock_db.a.return_value = 1; mock_db.b.side_effect = e", 2),
-            ("substring does not count", "my_mock_database = 1", 0),
-            ("harness ctor", "db = _pipeline_db_test_harness()", 1),
-        ]
-        for desc, line, expected in cases:
-            with self.subTest(desc=desc):
-                self.assertEqual(
-                    count_harness_overrides(line, web_file=True), expected)
-        # mock_db is only meaningful inside tests/web; the transitional
-        # wrapped-MagicMock constructor is counted EVERYWHERE so it
-        # cannot leak outside tests/web unseen.
-        self.assertEqual(count_harness_overrides(
-            "self.mock_db.get_log()", web_file=False), 0)
-        self.assertEqual(count_harness_overrides(
-            "db = _pipeline_db_test_harness()", web_file=False), 1)
-
-    def test_counts_match_baseline_exactly(self) -> None:
-        current = scan_web_harness_overrides()
-        problems: list[str] = []
-        for rel in sorted(set(current) | set(WEB_HARNESS_MOCK_BASELINE)):
-            cur = current.get(rel, 0)
-            base = WEB_HARNESS_MOCK_BASELINE.get(rel, 0)
-            if cur > base:
-                problems.append(
-                    f"  - {rel}: {base} → {cur} MagicMock-harness occurrences. "
-                    "New tests must seed FakePipelineDB state (see "
-                    "tests/fakes.py), not configure mock_db returns."
-                )
-            elif cur < base:
-                problems.append(
-                    f"  - {rel}: {base} → {cur} MagicMock-harness occurrences. "
-                    "Migration progress — shrink WEB_HARNESS_MOCK_BASELINE "
-                    "in tests/_mock_audit_scanner.py to match"
-                    + (" (delete the entry)." if cur == 0 else ".")
-                )
-        if problems:
-            self.fail(
-                "Web-harness MagicMock ratchet (#430) out of sync with "
-                "WEB_HARNESS_MOCK_BASELINE:\n" + "\n".join(problems)
-            )
-
-
-class TestWebBeetsMockRatchet(unittest.TestCase):
-    """Ratchet for the #445 beets-MagicMock → FakeBeetsDB migration.
-
-    Per-file counts of remaining beets-mock variable-name occurrences in
-    ``tests/web`` must match ``WEB_BEETS_MOCK_BASELINE`` exactly: growth
-    means a new test configured beets mock shapes instead of seeding
-    ``FakeBeetsDB`` state; shrink means a migration landed and the
-    baseline entry must drop with it.
-    """
-
-    def test_counter_pins_evasion_shapes(self) -> None:
-        """Document exactly what the ratchet counts — occurrences of the
-        beets-mock variable names, including alias / suffixed / dotted
-        shapes, while leaving the production ``web.server._beets``
-        attribute and real-BeetsDB class fixtures uncounted."""
-        cases = [
-            ("dotted config",
-             "self._beets.album_exists.return_value = True", 1),
-            ("bare assignment", "mock_beets = MagicMock()", 1),
-            ("suffixed patch arg", "mock_beets_cls: MagicMock,", 1),
-            ("alias assignment", "b = self._beets", 1),
-            ("library dotted form", "self.beets.get_recent.return_value", 1),
-            ("injection counts the mock side only",
-             "srv._beets = self.beets", 1),
-            ("two occurrences one line",
-             "srv._beets = self._beets; m = mock_beets", 2),
-            ("production attr alone does not count",
-             "self._orig_beets = srv._beets", 0),
-            ("real-BeetsDB class fixture does not count",
-             "cls._beets = BeetsDB(cls._db_path)", 0),
-            ("beets_db var name does not count (general audit owns it)",
-             "self.beets_db = FakeBeetsDB()", 0),
-        ]
-        for desc, line, expected in cases:
-            with self.subTest(desc=desc):
-                self.assertEqual(count_beets_mock_overrides(line), expected)
-
-    def test_counts_match_baseline_exactly(self) -> None:
-        current = scan_web_beets_overrides()
-        problems: list[str] = []
-        for rel in sorted(set(current) | set(WEB_BEETS_MOCK_BASELINE)):
-            cur = current.get(rel, 0)
-            base = WEB_BEETS_MOCK_BASELINE.get(rel, 0)
-            if cur > base:
-                problems.append(
-                    f"  - {rel}: {base} → {cur} beets-mock occurrences. "
-                    "New tests must seed FakeBeetsDB state (see "
-                    "tests/fakes.py), not configure beets mock returns."
-                )
-            elif cur < base:
-                problems.append(
-                    f"  - {rel}: {base} → {cur} beets-mock occurrences. "
-                    "Migration progress — shrink WEB_BEETS_MOCK_BASELINE "
-                    "in tests/_mock_audit_scanner.py to match"
-                    + (" (delete the entry)." if cur == 0 else ".")
-                    + " Only shrink if the mocks were replaced with "
-                    "FakeBeetsDB seeding — aliasing the mock away is "
-                    "an evasion, not progress."
-                )
-        if problems:
-            self.fail(
-                "Web beets-MagicMock ratchet (#445) out of sync with "
-                "WEB_BEETS_MOCK_BASELINE:\n" + "\n".join(problems)
-            )
 
 
 if __name__ == "__main__":

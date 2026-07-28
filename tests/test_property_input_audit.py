@@ -156,9 +156,8 @@ _UNALIASABLE_IMPORTS = PROPERTY_DECORATORS | {"invariant"}
 
 _IMPLICIT_FIRST_PARAMETERS = frozenset({"self", "cls"})
 
-# EMPTY, and armed — the same ratchet shape as
-# ``WEB_HARNESS_MOCK_BASELINE`` in ``tests/_mock_audit_scanner.py``. The one
-# property that used to flag (the planted-bad-decider self-test in
+# EMPTY, and armed. The one property that used to flag (the
+# planted-bad-decider self-test in
 # ``tests/test_quality_generated.py``) now passes its world to a decider that
 # ignores it, which models the planted defect more faithfully than discarding
 # the world did. If an entry ever becomes necessary, key it
