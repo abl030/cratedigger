@@ -49,6 +49,15 @@ without exposing the Postgres port to the laptop. The proxy forwards `Range`
 headers, so Wrong Matches audio playback and scrubbing still work through the
 tunnel.
 
+When a `prod-api` backend requires Basic authentication, its
+`WWW-Authenticate` challenge is relayed to the browser. The proxy then forwards
+only the browser's per-request Basic `Authorization` header on read-only API
+GETs. It has no credential flag or credential store, does not log the header,
+and does not forward cookies or other authorization schemes. Keep this server
+bound to loopback as shown above; use an SSH tunnel rather than exposing a
+credential-relaying dev server on the network. Responses remain same-origin
+and publish no CORS headers.
+
 `--beets-db` is optional in this flow and must be paired with
 `--beets-directory` when supplied. Wrong Matches does not need either option; only
 beets-backed library badges and lookups do.

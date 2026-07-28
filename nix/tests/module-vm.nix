@@ -11,8 +11,9 @@
 # config.ini (api keys as *File paths, [Beets] runtime keys, api_base
 # defaults, socket DSN with no credentials) AND rendered beets config.yaml
 # (duplicate_keys nesting, fixed plugin list, public-MB, included token);
-# service and operator load the same full plugin set; the web UI is reachable
-# only through the module-owned Basic-auth gateway and Unix socket;
+# service and operator load the same full plugin set; the web UI boots behind
+# the module-owned Basic-auth gateway and Unix socket, then transitions through
+# explicit insecure mode and back without weakening the remaining perimeter;
 # youtube-ingest + unfindable units structurally sound.
 #
 # Does NOT exercise: slskd interaction, real downloads, real imports —
@@ -471,6 +472,17 @@ pkgs.testers.nixosTest {
         onUnitInactiveSec = "1d";
       };
       healthCheck.enable = false;
+    };
+
+    # A real activation target for the authentication-mode lifecycle below.
+    # The ordinary system remains Basic; the specialisation changes only the
+    # explicitly selected mode so switch-to-configuration exercises the same
+    # nginx and web-service transition as a deployment.
+    specialisation.cratedigger-insecure.configuration = {
+      services.cratedigger.web = {
+        basicAuthFile = lib.mkForce null;
+        enableInsecure = lib.mkForce true;
+      };
     };
 
     environment.systemPackages = [deployHoldTool metadataGateTool];
@@ -2005,6 +2017,398 @@ pkgs.testers.nixosTest {
         "| sed -n 's/^ExecStart=//p' | tail -n1); "
         "test -n \"$fixture\"; grep -F 'test-password' \"$fixture\""
     )
+
+    # Exercise the real activation lifecycle, not just the Basic rendering
+    # above: Basic -> explicit insecure -> Basic. The specialisation changes
+    # only the selected authentication mode; all other perimeter invariants
+    # must survive both switches.
+    insecure_warning = (
+        "Authentication is disabled for this Cratedigger instance."
+    )
+    basic_system = machine.succeed(
+        "readlink -f /run/current-system"
+    ).strip()
+    insecure_system = machine.succeed(
+        "readlink -f "
+        "/run/current-system/specialisation/cratedigger-insecure"
+    ).strip()
+    machine.succeed(f"test -x {basic_system}/bin/switch-to-configuration")
+    machine.succeed(f"test -x {insecure_system}/bin/switch-to-configuration")
+
+    def _print_web_transition_diagnostics(label):
+        print(f"web transition diagnostics: {label}")
+        print(machine.succeed(
+            "systemctl status --no-pager nginx.service "
+            "cratedigger-web.socket cratedigger-web.service || true"
+        ))
+        print(machine.succeed(
+            "journalctl -u nginx.service -u cratedigger-web.service "
+            "--no-pager -n 80 || true"
+        ))
+        print(machine.succeed(
+            "${pkgs.nginx}/bin/nginx -T "
+            "-c /etc/nginx/nginx.conf 2>&1 || true"
+        ))
+
+    def _switch_web_system(system_path, label):
+        status, output = machine.execute(
+            f"${pkgs.coreutils}/bin/timeout 120s "
+            f"{system_path}/bin/switch-to-configuration test"
+        )
+        if status != 0:
+            print(output)
+            _print_web_transition_diagnostics(label)
+        assert status == 0, (
+            f"{label} switch failed with status {status}: {output}"
+        )
+        ready_status, ready_output = machine.execute(
+            "${pkgs.coreutils}/bin/timeout 30s "
+            "${pkgs.bash}/bin/bash -c '"
+            "until systemctl is-active --quiet nginx.service "
+            "&& systemctl is-active --quiet cratedigger-web.socket "
+            "&& test \"$(curl --max-time 2 -sS -o /dev/null "
+            "-w %{http_code} -H Host:music.vm.test "
+            "http://127.0.0.1:18086/healthz)\" = 204 "
+            "&& systemctl is-active --quiet cratedigger-web.service; "
+            "do sleep 0.1; done'"
+        )
+        if ready_status != 0:
+            print(ready_output)
+            _print_web_transition_diagnostics(label)
+        assert ready_status == 0, (
+            f"{label} web services did not become ready: {ready_output}"
+        )
+
+    def _web_invocation_log():
+        invocation = machine.succeed(
+            "systemctl show cratedigger-web.service "
+            "--property=InvocationID --value"
+        ).strip()
+        assert re.fullmatch(r"[0-9a-f]{32}", invocation), invocation
+        return machine.succeed(
+            f"journalctl --invocation={invocation} "
+            "--output=cat --no-pager"
+        )
+
+    def _assert_loopback_socket_boundary():
+        machine.succeed(
+            "actual=$(ss -H -ltn 'sport = :18086' "
+            "| awk '{print $4}' | sort); "
+            "expected=$(printf '%s\\n' "
+            "'127.0.0.1:18086' '[::1]:18086' | sort); "
+            "test \"$actual\" = \"$expected\""
+        )
+        machine.fail("ss -H -ltn 'sport = :8085' | grep -q .")
+        machine.succeed(
+            "pid=$(systemctl show cratedigger-web.service "
+            "-p MainPID --value); "
+            "test \"$pid\" -gt 1; "
+            "! ss -H -ltnp | grep -E \"pid=$pid([,)])\""
+        )
+        machine.succeed(
+            "test \"$(stat -c %U:%G:%a /run/cratedigger-web)\" "
+            "= root:cratedigger-web:750; "
+            "test \"$(stat -c %U:%G:%a "
+            "/run/cratedigger-web/web.sock)\" "
+            "= root:cratedigger-web:660"
+        )
+        for identity in ("nginx", "beets-operator"):
+            machine.succeed(
+                f"runuser -u {identity} -- curl --max-time 5 -sS "
+                "--unix-socket /run/cratedigger-web/web.sock "
+                "-o /dev/null -w '%{http_code}' "
+                "http://cratedigger.internal/healthz | grep -Fx 204"
+            )
+        machine.fail(
+            "runuser -u unrelated-user -- curl --max-time 5 -sS "
+            "--unix-socket /run/cratedigger-web/web.sock "
+            "http://cratedigger.internal/healthz"
+        )
+
+    def _assert_exact_insecure_health():
+        for index, method_flag in enumerate(("", "--head")):
+            header_path = f"/tmp/insecure-health-{index}.headers"
+            body_path = f"/tmp/insecure-health-{index}.body"
+            status = machine.succeed(
+                f"curl --max-time 5 -sS {method_flag} "
+                f"-D {header_path} -o {body_path} -w '%{{http_code}}' "
+                "-H 'Host: music.vm.test' "
+                "http://127.0.0.1:18086/healthz"
+            ).strip()
+            assert status == "204", (method_flag, status)
+            machine.succeed(f"test ! -s {body_path}")
+            raw_headers = machine.succeed(f"cat {header_path}")
+            assert raw_headers.splitlines()[0].startswith("HTTP/1.1 204"), (
+                method_flag, raw_headers,
+            )
+        machine.succeed(
+            "test \"$(curl --max-time 5 -sS -o /dev/null "
+            "-w '%{http_code}' -H 'Host: music.vm.test' "
+            "'http://127.0.0.1:18086/healthz?probe=1')\" = 404"
+        )
+        machine.succeed(
+            "test \"$(curl --max-time 5 -sS -o /dev/null "
+            "-w '%{http_code}' -H 'Host: music.vm.test' "
+            "http://127.0.0.1:18086/healthz/)\" = 404"
+        )
+        machine.succeed(
+            "test \"$(curl --max-time 5 -sS -o /dev/null "
+            "-w '%{http_code}' -X POST -H 'Host: music.vm.test' "
+            "http://127.0.0.1:18086/healthz)\" = 403"
+        )
+
+    def _assert_resource_headers(credential_args):
+        for index, path in enumerate((
+            "/",
+            "/js/main.js",
+            "/api/_index",
+            "/api/wrong-matches/audio",
+        )):
+            headers_path = f"/tmp/insecure-resource-{index}.headers"
+            machine.succeed(
+                f"curl --max-time 5 -sS -D {headers_path} "
+                f"-o /dev/null {credential_args} "
+                "-H 'Host: music.vm.test' "
+                f"http://127.0.0.1:18086{path}"
+            )
+            raw_headers = machine.succeed(f"cat {headers_path}")
+            _assert_exact_response_header(
+                raw_headers,
+                "Content-Security-Policy",
+                "frame-ancestors 'none'",
+            )
+            _assert_exact_response_header(
+                raw_headers, "X-Frame-Options", "DENY",
+            )
+            _assert_exact_response_header(
+                raw_headers,
+                "Cross-Origin-Resource-Policy",
+                "same-origin",
+            )
+            for cors_name in (
+                "Access-Control-Allow-Origin",
+                "Access-Control-Allow-Credentials",
+                "Access-Control-Allow-Methods",
+                "Access-Control-Allow-Headers",
+            ):
+                _assert_absent_response_header(raw_headers, cors_name)
+
+    # Pin the starting side of the transition explicitly. Basic challenges are
+    # the only mode behavior here; the insecure flag, warning, and footer are
+    # absent.
+    _assert_basic_auth_matrix()
+    machine.succeed(
+        "pid=$(systemctl show cratedigger-web.service -p MainPID --value); "
+        "! tr '\\0' '\\n' < /proc/$pid/cmdline "
+        "| grep -Fx -- '--insecure-mode'"
+    )
+    basic_body = machine.succeed(
+        "curl --max-time 5 -sS --user test-operator:test-password "
+        "-H 'Host: music.vm.test' http://127.0.0.1:18086/"
+    )
+    assert basic_body.count(insecure_warning) == 0
+    assert insecure_warning not in _web_invocation_log()
+
+    _switch_web_system(insecure_system, "explicit insecure")
+    machine.succeed(
+        f"test \"$(readlink -f /run/current-system)\" = {insecure_system}"
+    )
+
+    # Basic alone disappears: anonymous and deliberately wrong Basic
+    # credentials both reach the app, while the generated nginx config has no
+    # Basic directive or credential path.
+    for credential_args in ("", "--user test-operator:wrong"):
+        machine.succeed(
+            "test \"$(curl --max-time 5 -sS -o /dev/null "
+            f"-w '%{{http_code}}' {credential_args} "
+            "-H 'Host: music.vm.test' "
+            "http://127.0.0.1:18086/)\" = 200"
+        )
+    insecure_nginx = machine.succeed(
+        "${pkgs.nginx}/bin/nginx -T "
+        "-c /etc/nginx/nginx.conf 2>&1"
+    )
+    assert "auth_basic_user_file" not in insecure_nginx, insecure_nginx
+    assert re.search(
+        r"(?m)^[ \t]*auth_basic[ \t]+", insecure_nginx,
+    ) is None, insecure_nginx
+    assert (
+        "/run/cratedigger-test-auth/basic.htpasswd" not in insecure_nginx
+    ), insecure_nginx
+    machine.succeed(
+        "pid=$(systemctl show cratedigger-web.service -p MainPID --value); "
+        "tr '\\0' '\\n' < /proc/$pid/cmdline "
+        "| grep -Fx -- '--insecure-mode'; "
+        "tr '\\0' '\\n' < /proc/$pid/cmdline "
+        "| grep -A1 -Fx -- '--canonical-origin' "
+        "| tail -n1 | grep -Fx 'https://music.vm.test'"
+    )
+    insecure_log = _web_invocation_log()
+    warning_lines = [
+        line for line in insecure_log.splitlines()
+        if insecure_warning in line
+    ]
+    assert len(warning_lines) == 1, insecure_log
+    assert re.search(
+        r"\[CRITICAL\] "
+        + re.escape(insecure_warning)
+        + r"$",
+        warning_lines[0],
+    ), warning_lines
+    insecure_body = machine.succeed(
+        "curl --max-time 5 -sS -H 'Host: music.vm.test' "
+        "http://127.0.0.1:18086/"
+    )
+    assert insecure_body.count(insecure_warning) == 1, insecure_body
+    assert insecure_body.count(
+        '<footer class="insecure-auth-footer">'
+    ) == 1, insecure_body
+
+    # The canonical Host/origin envelope remains active without Basic. Valid
+    # provenance reaches route-local validation; missing, mismatched, or
+    # channel-spoofed provenance is rejected before dispatch. None of these
+    # bounded probes can mutate the database.
+    rows_before_insecure = machine.succeed(
+        "sudo -u postgres psql cratedigger -At "
+        "-c 'SELECT count(*) FROM album_requests'"
+    ).strip()
+    insecure_provenance_cases = (
+        ("-H 'Origin: https://music.vm.test'", 400),
+        ("", 403),
+        ("-H 'Origin: https://attacker.invalid'", 403),
+        ("-H 'X-Cratedigger-Request-Channel: cli'", 403),
+    )
+    for provenance_headers, expected_status in insecure_provenance_cases:
+        status = machine.succeed(
+            "curl --max-time 5 -sS -o /dev/null -w '%{http_code}' "
+            "-H 'Host: music.vm.test' "
+            "-H 'Content-Type: application/json' "
+            f"{provenance_headers} -d '{{}}' "
+            "http://127.0.0.1:18086/api/pipeline/add"
+        ).strip()
+        assert status == str(expected_status), (
+            provenance_headers, status,
+        )
+    rows_after_insecure = machine.succeed(
+        "sudo -u postgres psql cratedigger -At "
+        "-c 'SELECT count(*) FROM album_requests'"
+    ).strip()
+    assert rows_after_insecure == rows_before_insecure, (
+        rows_before_insecure, rows_after_insecure,
+    )
+    machine.succeed(
+        "test \"$(curl --max-time 5 -s -o /dev/null "
+        "-w '%{http_code}' -H 'Host: attacker.invalid' "
+        "http://127.0.0.1:18086/healthz || true)\" = 000"
+    )
+    _assert_exact_insecure_health()
+    _assert_loopback_socket_boundary()
+    _assert_resource_headers("")
+
+    # Reuse the real socket-activated service with a recorder only long enough
+    # to observe the insecure gateway's backend request. The canonical Host
+    # and browser channel are injected; identity, credential, forwarding, and
+    # client-selected channel headers are stripped.
+    machine.succeed("systemctl stop cratedigger-web.service")
+    machine.succeed(
+        "install -d -m 0755 "
+        "/run/systemd/system/cratedigger-web.service.d"
+    )
+    machine.succeed(
+        "printf '%s\\n' '[Service]' 'ExecStart=' "
+        "'ExecStart=${pkgs.python3}/bin/python3 ${headerRecorder}' "
+        "> /run/systemd/system/"
+        "cratedigger-web.service.d/header-recorder.conf"
+    )
+    machine.succeed(
+        "rm -f /var/lib/cratedigger/test-header-recorder.jsonl; "
+        "systemctl daemon-reload; "
+        "systemctl start cratedigger-web.service"
+    )
+    machine.succeed(
+        "test \"$(curl --max-time 5 -sS -o /dev/null "
+        "-w '%{http_code}' -H 'Host: music.vm.test' "
+        "-H 'Accept: application/json' "
+        "-H 'Range: bytes=0-7' "
+        "-H 'Content-Type: application/json' "
+        "-H 'Origin: https://music.vm.test' "
+        "-H 'Referer: https://music.vm.test/transition' "
+        "-H 'Authorization: Bearer attacker-secret' "
+        "-H 'Cookie: session=attacker-secret' "
+        "-H 'X-Forwarded-Host: attacker.invalid' "
+        "-H 'X-Forwarded-User: attacker' "
+        "-H 'X-Cratedigger-Request-Channel: cli' "
+        "--data-binary '{\"x\":1}' "
+        "http://127.0.0.1:18086/transition/headers)\" = 200"
+    )
+    machine.succeed(
+        "test \"$(wc -l < "
+        "/var/lib/cratedigger/test-header-recorder.jsonl)\" = 1"
+    )
+    insecure_recorder_rows = machine.succeed(
+        "cat /var/lib/cratedigger/test-header-recorder.jsonl"
+    ).splitlines()
+    assert len(insecure_recorder_rows) == 1, insecure_recorder_rows
+    insecure_recorder_row = json.loads(insecure_recorder_rows[0])
+    assert insecure_recorder_row["headers"] == {
+        "accept": ["application/json"],
+        "content-length": ["7"],
+        "content-type": ["application/json"],
+        "host": ["music.vm.test"],
+        "origin": ["https://music.vm.test"],
+        "range": ["bytes=0-7"],
+        "referer": ["https://music.vm.test/transition"],
+        "x-cratedigger-request-channel": ["browser"],
+    }, insecure_recorder_row
+    assert {
+        "authorization",
+        "cookie",
+        "x-forwarded-host",
+        "x-forwarded-user",
+    }.isdisjoint(insecure_recorder_row["headers"]), insecure_recorder_row
+    machine.succeed(
+        "systemctl stop cratedigger-web.service; "
+        "rm -r /run/systemd/system/cratedigger-web.service.d; "
+        "rm -f /var/lib/cratedigger/test-header-recorder.jsonl; "
+        "systemctl daemon-reload; "
+        "systemctl start cratedigger-web.service"
+    )
+    machine.succeed(
+        "pid=$(systemctl show cratedigger-web.service -p MainPID --value); "
+        "tr '\\0' '\\n' < /proc/$pid/cmdline "
+        "| grep -Fx -- '--insecure-mode'"
+    )
+
+    _switch_web_system(basic_system, "return to Basic")
+    machine.succeed(
+        f"test \"$(readlink -f /run/current-system)\" = {basic_system}"
+    )
+    _assert_basic_auth_matrix()
+    restored_nginx = machine.succeed(
+        "${pkgs.nginx}/bin/nginx -T "
+        "-c /etc/nginx/nginx.conf 2>&1"
+    )
+    assert (
+        "auth_basic_user_file "
+        "/run/cratedigger-test-auth/basic.htpasswd;"
+        in restored_nginx
+    ), restored_nginx
+    machine.succeed(
+        "pid=$(systemctl show cratedigger-web.service -p MainPID --value); "
+        "! tr '\\0' '\\n' < /proc/$pid/cmdline "
+        "| grep -Fx -- '--insecure-mode'; "
+        "tr '\\0' '\\n' < /proc/$pid/cmdline "
+        "| grep -A1 -Fx -- '--canonical-origin' "
+        "| tail -n1 | grep -Fx 'https://music.vm.test'"
+    )
+    restored_body = machine.succeed(
+        "curl --max-time 5 -sS --user test-operator:test-password "
+        "-H 'Host: music.vm.test' http://127.0.0.1:18086/"
+    )
+    assert restored_body.count(insecure_warning) == 0, restored_body
+    assert insecure_warning not in _web_invocation_log()
+    _assert_loopback_socket_boundary()
+    _assert_resource_headers("--user test-operator:test-password")
 
     # U13: cratedigger-unfindable.service + .timer exist and are
     # ordered correctly. Structural assertions only — we do NOT fire

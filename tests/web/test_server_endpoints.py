@@ -320,14 +320,12 @@ class TestServerEndpoints(_FakeDbWebServerCase):
             return self._current_index_bytes()
 
     def test_secure_index_omits_insecure_footer_byte_for_byte(self) -> None:
-        from web import server as web_server
-
         secure = self._index_bytes(insecure=False)
         insecure = self._index_bytes(insecure=True)
-        footer_start = insecure.index(web_server.INSECURE_FOOTER_START)
+        footer_start = insecure.index(INSECURE_FOOTER_START)
         footer_end = (
-            insecure.index(web_server.INSECURE_FOOTER_END)
-            + len(web_server.INSECURE_FOOTER_END)
+            insecure.index(INSECURE_FOOTER_END)
+            + len(INSECURE_FOOTER_END)
         )
 
         self.assertEqual(
@@ -346,7 +344,7 @@ class TestServerEndpoints(_FakeDbWebServerCase):
     def test_index_rendering_property_tracks_only_explicit_mode(
         self, insecure: bool,
     ) -> None:
-        from web.server import render_index_document
+        from web.index_document import render_index_document
 
         body = render_index_document(
             INDEX_TEMPLATE.read_bytes(), insecure=insecure,
@@ -359,17 +357,17 @@ class TestServerEndpoints(_FakeDbWebServerCase):
         )
 
     def test_index_renderer_rejects_duplicate_footer_marker(self) -> None:
-        from web import server as web_server
+        from web.index_document import render_index_document
 
         template = INDEX_TEMPLATE.read_bytes()
         malformed = template.replace(
-            web_server.INSECURE_FOOTER_START,
-            web_server.INSECURE_FOOTER_START * 2,
+            INSECURE_FOOTER_START,
+            INSECURE_FOOTER_START * 2,
         )
         with self.assertRaisesRegex(
             RuntimeError, "exactly one insecure footer block",
         ):
-            web_server.render_index_document(malformed, insecure=True)
+            render_index_document(malformed, insecure=True)
 
     def test_footer_contract_checker_rejects_duplicate_warning(self) -> None:
         body = self._index_bytes(insecure=True)
@@ -457,11 +455,13 @@ class TestServerEndpoints(_FakeDbWebServerCase):
     def test_insecure_startup_emits_one_critical_warning(self) -> None:
         from web import server as web_server
 
-        with patch.object(web_server, "insecure_mode", False):
-            with self.assertLogs(
+        with (
+            patch.object(web_server, "insecure_mode", False),
+            self.assertLogs(
                 "cratedigger-web", level="CRITICAL",
-            ) as captured:
-                web_server.configure_insecure_mode(True)
+            ) as captured,
+        ):
+            web_server.configure_insecure_mode(True)
 
         self.assertEqual(len(captured.records), 1)
         self.assertEqual(captured.records[0].levelno, logging.CRITICAL)
@@ -473,9 +473,11 @@ class TestServerEndpoints(_FakeDbWebServerCase):
     def test_secure_startup_emits_no_insecure_warning(self) -> None:
         from web import server as web_server
 
-        with patch.object(web_server, "insecure_mode", True):
-            with self.assertNoLogs("cratedigger-web", level="CRITICAL"):
-                web_server.configure_insecure_mode(False)
+        with (
+            patch.object(web_server, "insecure_mode", True),
+            self.assertNoLogs("cratedigger-web", level="CRITICAL"),
+        ):
+            web_server.configure_insecure_mode(False)
 
     def test_insecure_configuration_composes_with_http_rendering(self) -> None:
         from web import server as web_server

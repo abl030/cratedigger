@@ -18,8 +18,10 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from email.message import Message
+from http.client import HTTPMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import IO
 from urllib.parse import ParseResult, parse_qs, urlparse
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -29,6 +31,9 @@ PROD_BASE_URL = "https://music.ablz.au"
 
 sys.path.insert(0, str(REPO_ROOT))
 
+from web.index_document import (
+    render_index_document,
+)
 
 FALLBACK_FIXTURES: dict[str, dict[str, object]] = {
     "/api/pipeline/all": {
@@ -84,6 +89,37 @@ class DevConfig:
         if self.data == "prod-api":
             return "DEV prod-api readonly"
         return "DEV live-db readonly"
+
+
+def _http_origin(url: str) -> tuple[str, str, int | None]:
+    parsed = urlparse(url)
+    scheme = parsed.scheme.lower()
+    default_port = {"http": 80, "https": 443}.get(scheme)
+    port = parsed.port if parsed.port is not None else default_port
+    return scheme, (parsed.hostname or "").lower(), port
+
+
+class _CredentialSafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Keep Basic credentials on the configured origin only."""
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: HTTPMessage,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        redirected = super().redirect_request(
+            req, fp, code, msg, headers, newurl,
+        )
+        if (
+            redirected is not None
+            and _http_origin(req.full_url) != _http_origin(redirected.full_url)
+        ):
+            redirected.remove_header("Authorization")
+        return redirected
 
 
 class DevHTTPServer(ThreadingHTTPServer):
@@ -173,8 +209,6 @@ class DevHandler(BaseHTTPRequestHandler):
             return
 
         if target.name == "index.html":
-            from web.server import render_index_document
-
             body = render_index_document(
                 target.read_bytes(),
                 insecure=self.server.config.preview_insecure_warning,
@@ -239,13 +273,27 @@ class DevHandler(BaseHTTPRequestHandler):
         range_header = self.headers.get("Range")
         if range_header:
             headers["Range"] = range_header
+        # This is a per-request browser bridge, not credential configuration:
+        # keep only Basic in memory long enough to perform this read-only GET.
+        authorization = self.headers.get("Authorization")
+        if authorization:
+            scheme, separator, credential = authorization.partition(" ")
+            if separator and credential and scheme.lower() == "basic":
+                headers["Authorization"] = authorization
         req = urllib.request.Request(
             url,
             headers=headers,
             method="GET",
         )
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            if "Authorization" in headers:
+                opener = urllib.request.build_opener(
+                    _CredentialSafeRedirectHandler(),
+                )
+                response = opener.open(req, timeout=30)
+            else:
+                response = urllib.request.urlopen(req, timeout=30)
+            with response as resp:
                 body = resp.read()
                 self._proxy_response(body, resp.headers, status=resp.status)
         except urllib.error.HTTPError as exc:
@@ -255,8 +303,10 @@ class DevHandler(BaseHTTPRequestHandler):
             # msgspec/JSON boundary involved, just a stdlib stub gap out of
             # this migration's scope) that recovers the concrete
             # ``Message[str, str]`` shape ``_proxy_response`` expects.
-            exc_headers: Message[str, str] = exc.headers
-            self._proxy_response(exc.read(), exc_headers, status=exc.code)
+            with exc:
+                exc_headers: Message[str, str] = exc.headers
+                body = exc.read()
+            self._proxy_response(body, exc_headers, status=exc.code)
         except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             self._json({"error": str(exc), "upstream": url}, status=502)
 
@@ -266,7 +316,13 @@ class DevHandler(BaseHTTPRequestHandler):
         content_type = headers.get("Content-Type", "application/json")
         self.send_response(status)
         self.send_header("Content-Type", content_type)
-        for name in ("Content-Length", "Cache-Control", "Accept-Ranges", "Content-Range"):
+        for name in (
+            "Content-Length",
+            "Cache-Control",
+            "Accept-Ranges",
+            "Content-Range",
+            "WWW-Authenticate",
+        ):
             value = headers.get(name)
             if value:
                 self.send_header(name, value)

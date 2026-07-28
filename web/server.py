@@ -31,6 +31,7 @@ sys.path[:] = [
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import argparse
+import functools
 import json
 import logging
 import re
@@ -52,8 +53,6 @@ MAX_POST_BODY_BYTES = 1024 * 1024
 INSECURE_AUTH_WARNING = (
     "Authentication is disabled for this Cratedigger instance."
 )
-INSECURE_FOOTER_START = b"<!-- CRATEDIGGER_INSECURE_FOOTER_START -->"
-INSECURE_FOOTER_END = b"<!-- CRATEDIGGER_INSECURE_FOOTER_END -->"
 
 # Ensure this module is importable as 'web.server' even when run as __main__,
 # so route modules can `from web import server` and get the same instance.
@@ -67,6 +66,7 @@ from web import cache
 from web import discogs as _discogs
 from web import mb as mb_api
 from web import overlay as _overlay
+from web.index_document import render_index_document
 from web.request_security import (
     CHANNEL_HEADER,
     RequestSecurityError,
@@ -153,27 +153,6 @@ delete_notify_fn = None
 _thread_state = threading.local()
 
 
-def render_index_document(template: bytes, *, insecure: bool) -> bytes:
-    """Select the one static insecure footer block from the index template."""
-    if (
-        template.count(INSECURE_FOOTER_START) != 1
-        or template.count(INSECURE_FOOTER_END) != 1
-    ):
-        raise RuntimeError(
-            "index template must contain exactly one insecure footer block"
-        )
-    footer_start = template.index(INSECURE_FOOTER_START)
-    footer_end = template.index(INSECURE_FOOTER_END)
-    if footer_end < footer_start:
-        raise RuntimeError(
-            "index template must contain exactly one insecure footer block"
-        )
-    block_end = footer_end + len(INSECURE_FOOTER_END)
-    if insecure:
-        return template
-    return template[:footer_start] + template[block_end:]
-
-
 def configure_insecure_mode(enabled: bool) -> None:
     """Select insecure presentation and log the explicit startup decision."""
     global insecure_mode
@@ -181,6 +160,14 @@ def configure_insecure_mode(enabled: bool) -> None:
     insecure_mode = enabled
     if enabled:
         log.critical(INSECURE_AUTH_WARNING)
+
+
+@functools.cache
+def _rendered_index_document(insecure: bool) -> bytes:
+    """Read and validate the immutable production index once per auth mode."""
+    html_path = os.path.join(os.path.dirname(__file__), "index.html")
+    with open(html_path, "rb") as handle:
+        return render_index_document(handle.read(), insecure=insecure)
 
 
 class ThreadingUnixHTTPServer(
@@ -482,11 +469,12 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _html(self, path: str) -> None:
-        html_path = os.path.join(os.path.dirname(__file__), path)
-        with open(html_path, "rb") as f:
-            body = f.read()
         if path == "index.html":
-            body = render_index_document(body, insecure=insecure_mode)
+            body = _rendered_index_document(insecure_mode)
+        else:
+            html_path = os.path.join(os.path.dirname(__file__), path)
+            with open(html_path, "rb") as f:
+                body = f.read()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))

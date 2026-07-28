@@ -8,8 +8,10 @@ import re
 import sys
 import threading
 import unittest
+from contextlib import redirect_stdout
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import StringIO
 from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.parse import urlparse
@@ -385,6 +387,181 @@ class WebDevServerProxyTest(unittest.TestCase):
         self.assertEqual(resp.headers.get("Accept-Ranges"), "bytes")
         self.assertIsNone(resp.headers.get("Access-Control-Allow-Origin"))
         self.assertEqual(body, b"bcd")
+
+
+_BASIC_CHALLENGE = 'Basic realm="Cratedigger dev upstream"'
+_BASIC_CREDENTIAL = "Basic ZGV2OnNlY3JldA=="
+
+
+class _BasicAuthUpstream(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self) -> None:
+        super().__init__(("127.0.0.1", 0), _BasicAuthUpstreamHandler)
+        self.authorizations: list[str | None] = []
+        self.redirect_target: str | None = None
+
+    @property
+    def origin(self) -> str:
+        return f"http://127.0.0.1:{self.server_port}"
+
+
+class _BasicAuthUpstreamHandler(BaseHTTPRequestHandler):
+    server: _BasicAuthUpstream  # pyright: ignore[reportIncompatibleVariableOverride]
+
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+    def do_GET(self) -> None:
+        authorization = self.headers.get("Authorization")
+        self.server.authorizations.append(authorization)
+        if self.path == "/api/redirect":
+            assert self.server.redirect_target is not None
+            self.send_response(302)
+            self.send_header("Location", self.server.redirect_target)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if authorization != _BASIC_CREDENTIAL:
+            body = b'{"error":"authentication required"}'
+            self.send_response(401)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("WWW-Authenticate", _BASIC_CHALLENGE)
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        body = b'{"authenticated":true}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class WebDevServerBasicAuthProxyIntegrationTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.upstream = _BasicAuthUpstream()
+        self.upstream_thread = threading.Thread(
+            target=self.upstream.serve_forever,
+            daemon=True,
+        )
+        self.upstream_thread.start()
+        config = DevConfig(
+            data="prod-api",
+            scenario="peers",
+            prod_base_url=self.upstream.origin,
+            dsn=None,
+            beets_db=None,
+            mb_api=None,
+            discogs_api=None,
+            redis_host=None,
+            redis_port=6379,
+        )
+        self.proxy = DevHTTPServer(("127.0.0.1", 0), DevHandler, config)
+        self.proxy_thread = threading.Thread(
+            target=self.proxy.serve_forever,
+            daemon=True,
+        )
+        self.proxy_thread.start()
+        self.base = f"http://127.0.0.1:{self.proxy.server_port}"
+
+    def tearDown(self) -> None:
+        self.proxy.shutdown()
+        self.proxy.server_close()
+        self.proxy_thread.join(timeout=2)
+        self.upstream.shutdown()
+        self.upstream.server_close()
+        self.upstream_thread.join(timeout=2)
+
+    def test_relays_basic_challenge_then_forwards_browser_credential(self) -> None:
+        with self.assertRaises(HTTPError) as raised:
+            urlopen(f"{self.base}/api/protected")
+        with raised.exception as response:
+            self.assertEqual(response.code, 401)
+            self.assertEqual(
+                response.headers.get("WWW-Authenticate"),
+                _BASIC_CHALLENGE,
+            )
+            self.assertIsNone(
+                response.headers.get("Access-Control-Allow-Origin")
+            )
+            response.read()
+
+        request = Request(
+            f"{self.base}/api/protected",
+            headers={"Authorization": _BASIC_CREDENTIAL},
+        )
+        output = StringIO()
+        with redirect_stdout(output), urlopen(request) as response:
+            body = json.loads(response.read())
+            self.assertEqual(response.status, 200)
+            self.assertIsNone(
+                response.headers.get("Access-Control-Allow-Origin")
+            )
+
+        self.assertEqual(
+            self.upstream.authorizations,
+            [None, _BASIC_CREDENTIAL],
+        )
+        self.assertEqual(body, {"authenticated": True})
+        self.assertNotIn(_BASIC_CREDENTIAL, output.getvalue())
+
+    def test_does_not_forward_non_basic_authorization(self) -> None:
+        credential = "Bearer runtime-secret"
+        request = Request(
+            f"{self.base}/api/protected",
+            headers={"Authorization": credential},
+        )
+        output = StringIO()
+        with redirect_stdout(output), self.assertRaises(HTTPError) as raised:
+            urlopen(request)
+        with raised.exception as response:
+            self.assertEqual(response.code, 401)
+            self.assertEqual(
+                response.headers.get("WWW-Authenticate"),
+                _BASIC_CHALLENGE,
+            )
+            self.assertIsNone(
+                response.headers.get("Access-Control-Allow-Origin")
+            )
+            response.read()
+
+        self.assertEqual(self.upstream.authorizations, [None])
+        self.assertNotIn(credential, output.getvalue())
+
+    def test_strips_basic_credential_from_cross_origin_redirect(self) -> None:
+        redirected = _BasicAuthUpstream()
+        redirected_thread = threading.Thread(
+            target=redirected.serve_forever,
+            daemon=True,
+        )
+        redirected_thread.start()
+        self.addCleanup(redirected_thread.join, 2)
+        self.addCleanup(redirected.server_close)
+        self.addCleanup(redirected.shutdown)
+        self.upstream.redirect_target = f"{redirected.origin}/api/protected"
+
+        request = Request(
+            f"{self.base}/api/redirect",
+            headers={"Authorization": _BASIC_CREDENTIAL},
+        )
+        with self.assertRaises(HTTPError) as raised:
+            urlopen(request)
+        with raised.exception as response:
+            self.assertEqual(response.code, 401)
+            self.assertEqual(
+                response.headers.get("WWW-Authenticate"),
+                _BASIC_CHALLENGE,
+            )
+            self.assertIsNone(
+                response.headers.get("Access-Control-Allow-Origin")
+            )
+            response.read()
+
+        self.assertEqual(self.upstream.authorizations, [_BASIC_CREDENTIAL])
+        self.assertEqual(redirected.authorizations, [None])
 
 
 class WebDevServerLiveDbErrorMappingTest(unittest.TestCase):

@@ -227,6 +227,43 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
                 accessGroup = "nginx";
               };
             };
+            rootAccessGroup = evaluate {
+              services.cratedigger = {
+                user = "cratedigger";
+                group = "cratedigger";
+                web = {
+                  hostName = "music.example.test";
+                  enableInsecure = true;
+                  accessGroup = "root";
+                };
+              };
+            };
+            wheelAccessGroup = evaluate {
+              services.cratedigger = {
+                user = "cratedigger";
+                group = "cratedigger";
+                web = {
+                  hostName = "music.example.test";
+                  enableInsecure = true;
+                  accessGroup = "wheel";
+                };
+              };
+            };
+            explicitOperatorGroup = evaluate {
+              services.cratedigger = {
+                user = "cratedigger";
+                group = "cratedigger";
+                web = {
+                  hostName = "music.example.test";
+                  enableInsecure = true;
+                  accessGroup = "music-operators";
+                };
+              };
+              users.users.operator = {
+                isNormalUser = true;
+                extraGroups = [ "music-operators" ];
+              };
+            };
             secretGroupOverlap = evaluate {
               services.cratedigger = {
                 beets.package = {
@@ -343,6 +380,15 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
                 any("must be dedicated" in message for message in worlds[world]),
                 (world, worlds[world]),
             )
+        for world in ("rootAccessGroup", "wheelAccessGroup"):
+            self.assertTrue(
+                any(
+                    "forbidden authority group" in message
+                    for message in worlds[world]
+                ),
+                (world, worlds[world]),
+            )
+        self.assertEqual(worlds["explicitOperatorGroup"], [])
         self.assertTrue(
             any(
                 "forbids nginx account/service membership" in message

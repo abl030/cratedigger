@@ -409,7 +409,9 @@
     }
 
     check_ancestors "$configured_path"
-    check_ancestors "$resolved_path"
+    if ${pkgs.coreutils}/bin/test "$resolved_path" != "$configured_path"; then
+      check_ancestors "$resolved_path"
+    fi
   '';
   webNginxUserExtraGroups =
     config.users.users.${config.services.nginx.user}.extraGroups or [];
@@ -427,9 +429,14 @@
     ++ webNginxServiceSupplementaryGroups
     ++ webNginxReverseMemberGroups
   );
-  webNginxForbiddenAuthorityGroups = lib.unique (
+  # Known high-authority groups must never double as the web socket boundary.
+  # Arbitrary group purpose cannot be inferred from its name, so consumers
+  # still own keeping any other configured accessGroup dedicated.
+  webForbiddenAuthorityGroups = lib.unique (
     [
       cfg.group
+      "root"
+      "wheel"
       "cratedigger-ops"
       "users"
     ]
@@ -438,13 +445,13 @@
       cfg.beets.package.discogsOperatorGroup
   );
   webNginxForbiddenGroupOverlap = lib.intersectLists
-    webNginxForbiddenAuthorityGroups
+    webForbiddenAuthorityGroups
     webNginxDeclaredSupplementaryGroups;
   webNginxPrimaryGroupIsSafe =
-    config.services.nginx.group != cfg.group
-    && !lib.elem
-      config.services.nginx.group
-      (lib.remove cfg.group webNginxForbiddenAuthorityGroups);
+    !lib.elem config.services.nginx.group webForbiddenAuthorityGroups;
+  webAccessGroupIsSafe =
+    cfg.web.accessGroup != config.services.nginx.group
+    && !lib.elem cfg.web.accessGroup webForbiddenAuthorityGroups;
 
   # CD-SEC-04: these are the only long-running units that accept untrusted
   # network/media input. Keep the systemd hardening literal and shared; each
@@ -1355,6 +1362,10 @@ in {
         description = ''
           Dedicated group authorized to connect to the web backend Unix
           socket. Add only trusted local pipeline-cli operators explicitly.
+          It must not reuse root, wheel, the Cratedigger service/media group,
+          nginx's primary group, cratedigger-ops, users, or the configured
+          Discogs operator group. The module cannot infer the purpose of
+          arbitrary other groups, which remain the consumer's responsibility.
         '';
       };
       basicAuthFile = mkOption {
@@ -1751,15 +1762,8 @@ in {
         message = "services.cratedigger.web.accessGroup must be a valid dedicated Linux group name.";
       }
       {
-        assertion = !cfg.web.enable || (
-          cfg.web.accessGroup != cfg.group
-          && cfg.web.accessGroup != config.services.nginx.group
-          && (
-            cfg.beets.package.discogsOperatorGroup == null
-            || cfg.web.accessGroup != cfg.beets.package.discogsOperatorGroup
-          )
-        );
-        message = "services.cratedigger.web.accessGroup must be dedicated: it must differ from the service, nginx, and Discogs-secret groups.";
+        assertion = !cfg.web.enable || webAccessGroupIsSafe;
+        message = "services.cratedigger.web.accessGroup must be dedicated: it must differ from nginx's primary group and must not reuse a forbidden authority group (root, wheel, the Cratedigger service/media group, cratedigger-ops, users, or discogsOperatorGroup).";
       }
       {
         assertion = !cfg.web.enable || cfg.user != config.services.nginx.user;
@@ -1771,7 +1775,7 @@ in {
       }
       {
         assertion = !cfg.web.enable || webNginxForbiddenGroupOverlap == [];
-        message = "services.cratedigger.web forbids nginx account/service membership in cfg.group, discogsOperatorGroup, cratedigger-ops, or users.";
+        message = "services.cratedigger.web forbids nginx account/service membership in root, wheel, cfg.group, discogsOperatorGroup, cratedigger-ops, or users.";
       }
       {
         assertion = !cfg.web.enable || !webBasicEnabled || webBasicAuthPathIsValid;

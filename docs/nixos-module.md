@@ -45,7 +45,7 @@ The flake export is a wrapper that pins the module's package set to **cratedigge
 | `web.enable` | `false` | Enable the Unix-only web backend and module-owned loopback nginx gateway. Exactly one of `basicAuthFile` or `enableInsecure = true` is then required. |
 | `web.hostName` | `null` | Lowercase canonical public DNS hostname. Required when web is enabled; it defines the fixed `https://` browser origin and exact gateway vhost. IP literals are rejected. |
 | `web.gatewayPort` | `8086` | Loopback-only nginx gateway port. The public HTTPS reverse proxy forwards here; this is not a Python application listener. |
-| `web.accessGroup` | `"cratedigger-web"` | Dedicated group authorized to connect to the web backend Unix socket. This grants complete HTTP/API authority, not Basic-password-file access or unrelated CLI authority. |
+| `web.accessGroup` | `"cratedigger-web"` | Dedicated group authorized to connect to the web backend Unix socket. This grants complete HTTP/API authority, not Basic-password-file access or unrelated CLI authority. Known privileged or overlapping authority groups are rejected. |
 | `web.basicAuthFile` | `null` | Absolute runtime `htpasswd` file outside `/nix/store`. Basic mode requires a root-owned, non-empty `root:<nginx-group>` `0440` target readable by nginx and denied to the application/non-nginx socket users. |
 | `web.enableInsecure` | `false` | Explicitly disable browser authentication while retaining the gateway, Unix socket, canonical-origin checks, and all other request-security controls. Mutually exclusive with `basicAuthFile`. |
 | `web.redis.{host,port}` | shared app Redis | Web metadata-cache connection; follows `services.cratedigger.redis` unless explicitly overridden. |
@@ -251,6 +251,13 @@ program non-executable does not protect it: store objects are ordinarily
 readable and can be invoked through an interpreter. Enforce authority at the
 socket, database, filesystem, Beets, and secret resources.
 
+The module rejects `root`, `wheel`, the Cratedigger service/media group,
+nginx's primary group, `cratedigger-ops`, `users`, and the configured Discogs
+operator group as `web.accessGroup`. It cannot infer that an arbitrary
+differently named existing group carries unrelated authority. Keep the default
+dedicated group or choose a newly dedicated group, then add each trusted
+operator explicitly with `users.users.<name>.extraGroups`.
+
 ### Troubleshooting and rollback
 
 - A module assertion about “exactly one authentication mode” means neither or
@@ -260,9 +267,11 @@ socket, database, filesystem, Beets, and secret resources.
   non-nginx-denial failure. Fix the secret deployment; do not weaken the mode.
 - `Permission denied` from an installed API-backed CLI command means the caller
   lacks membership in `web.accessGroup` (a new login/session is normally
-  required after adding the group). Do not add nginx or operators to
-  `cratedigger-ops`, `users`, or another unrelated authority group as a
-  shortcut.
+  required after adding the group). Add the operator to the dedicated
+  `web.accessGroup`; do not substitute `root`, `wheel`, `cratedigger-ops`,
+  `users`, or another group that already carries unrelated authority. The
+  module rejects its known authority groups, but an arbitrary local group name
+  still requires operator review.
 - A browser mutation rejected for provenance must use the configured HTTPS
   hostname and send same-origin `Origin` or `Referer`; do not derive trust from
   request headers or relax the canonical origin.
