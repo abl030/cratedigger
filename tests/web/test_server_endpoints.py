@@ -29,6 +29,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 from tests.web._harness import _FakeDbWebServerCase
+from web.request_security import BROWSER_CHANNEL, CHANNEL_HEADER
+
+CANONICAL_ORIGIN = "https://music.ablz.au"
 
 
 class _UnreadableBody(BytesIO):
@@ -125,6 +128,8 @@ def _unmatched_post_observation(
     request = (
         f"POST {path} HTTP/1.1\r\n".encode()
         + b"Host: 127.0.0.1\r\n"
+        + f"{CHANNEL_HEADER}: {BROWSER_CHANNEL}\r\n".encode()
+        + f"Origin: {CANONICAL_ORIGIN}\r\n".encode()
         + f"Content-Length: {len(body)}\r\n\r\n".encode()
         + body
     )
@@ -194,7 +199,11 @@ class TestServerEndpoints(_FakeDbWebServerCase):
     # --- GET endpoints ---
 
     def test_index_returns_html(self):
-        with urlopen(f"{self.base}/") as resp:
+        request = Request(
+            f"{self.base}/",
+            headers={CHANNEL_HEADER: BROWSER_CHANNEL},
+        )
+        with urlopen(request) as resp:
             self.assertEqual(resp.status, 200)
             self.assertIn("text/html", resp.headers.get("Content-Type", ""))
 
@@ -534,7 +543,9 @@ class TestServerEndpoints(_FakeDbWebServerCase):
         request = (
             b"POST /api/nonexistent HTTP/1.1\r\n"
             b"Host: 127.0.0.1\r\n"
-            b"Content-Type: application/json\r\n"
+            + f"{CHANNEL_HEADER}: {BROWSER_CHANNEL}\r\n".encode()
+            + f"Origin: {CANONICAL_ORIGIN}\r\n".encode()
+            + b"Content-Type: application/json\r\n"
             + f"Content-Length: {len(body)}\r\n\r\n".encode()
             + body
             + b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
@@ -870,7 +881,15 @@ class TestClientDisconnectHandling(_FakeDbWebServerCase):
         server-side observable state, not on the client response."""
         url = f"{self.base}{path}"
         data = json.dumps(body).encode()
-        req = Request(url, data=data, headers={"Content-Type": "application/json"})
+        req = Request(
+            url,
+            data=data,
+            headers={
+                "Content-Type": "application/json",
+                CHANNEL_HEADER: BROWSER_CHANNEL,
+                "Origin": CANONICAL_ORIGIN,
+            },
+        )
         try:
             with urlopen(req, timeout=2) as resp:
                 return resp.status, json.loads(resp.read())

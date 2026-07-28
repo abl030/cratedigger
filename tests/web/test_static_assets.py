@@ -1,9 +1,10 @@
 """Browser icon assets are served, not 404 noise (#161)."""
 import unittest
 from typing import ClassVar
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 from tests.web._harness import _FakeDbWebServerCase
+from web.request_security import BROWSER_CHANNEL, CHANNEL_HEADER
 
 
 class TestStaticIconAssets(_FakeDbWebServerCase):
@@ -17,7 +18,11 @@ class TestStaticIconAssets(_FakeDbWebServerCase):
     def test_icon_assets_serve_with_correct_type(self):
         for path, content_type, magic in self.CASES:
             with self.subTest(path=path):
-                with urlopen(f"{self.base}{path}") as resp:
+                request = Request(
+                    f"{self.base}{path}",
+                    headers={CHANNEL_HEADER: BROWSER_CHANNEL},
+                )
+                with urlopen(request) as resp:
                     body = resp.read()
                     self.assertEqual(resp.status, 200)
                     self.assertEqual(

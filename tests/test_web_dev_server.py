@@ -54,11 +54,13 @@ class WebDevServerTest(unittest.TestCase):
     def get_json(self, path: str) -> dict:
         with urlopen(f"{self.base}{path}") as resp:
             self.assertEqual(resp.status, 200)
+            self.assertIsNone(resp.headers.get("Access-Control-Allow-Origin"))
             return json.loads(resp.read())
 
     def test_serves_index_with_dev_badge_and_reload_hook(self):
         with urlopen(f"{self.base}/") as resp:
             body = resp.read().decode()
+            self.assertIsNone(resp.headers.get("Access-Control-Allow-Origin"))
 
         self.assertIn("DEV fixture:peers", body)
         self.assertIn("new EventSource('/__dev/events')", body)
@@ -75,6 +77,9 @@ class WebDevServerTest(unittest.TestCase):
             urlopen(f"{self.base}/api/not-real")
 
         self.assertEqual(raised.exception.code, 404)
+        self.assertIsNone(
+            raised.exception.headers.get("Access-Control-Allow-Origin")
+        )
         payload = json.loads(raised.exception.read())
         self.assertEqual(payload["path"], "/api/not-real")
 
@@ -89,8 +94,26 @@ class WebDevServerTest(unittest.TestCase):
             urlopen(req)
 
         self.assertEqual(raised.exception.code, 405)
+        self.assertIsNone(
+            raised.exception.headers.get("Access-Control-Allow-Origin")
+        )
         payload = json.loads(raised.exception.read())
         self.assertIn("blocked", payload["error"])
+
+    def test_options_publishes_no_cors_contract(self):
+        request = Request(f"{self.base}/", method="OPTIONS")
+        with urlopen(request) as response:
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.headers.get("Content-Length"), "0")
+            self.assertIsNone(
+                response.headers.get("Access-Control-Allow-Origin")
+            )
+            self.assertIsNone(
+                response.headers.get("Access-Control-Allow-Methods")
+            )
+            self.assertIsNone(
+                response.headers.get("Access-Control-Allow-Headers")
+            )
 
 
 class _FakeUpstreamResponse:
@@ -169,6 +192,7 @@ class WebDevServerProxyTest(unittest.TestCase):
         self.assertEqual(resp.status, 206)
         self.assertEqual(resp.headers.get("Content-Range"), "bytes 1-3/6")
         self.assertEqual(resp.headers.get("Accept-Ranges"), "bytes")
+        self.assertIsNone(resp.headers.get("Access-Control-Allow-Origin"))
         self.assertEqual(body, b"bcd")
 
 

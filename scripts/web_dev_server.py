@@ -156,9 +156,7 @@ class DevHandler(BaseHTTPRequestHandler):
 
     def do_OPTIONS(self) -> None:
         self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Content-Length", "0")
         self.end_headers()
 
     def _serve_static(self, path: str) -> None:
@@ -262,7 +260,6 @@ class DevHandler(BaseHTTPRequestHandler):
         content_type = headers.get("Content-Type", "application/json")
         self.send_response(status)
         self.send_header("Content-Type", content_type)
-        self.send_header("Access-Control-Allow-Origin", "*")
         for name in ("Content-Length", "Cache-Control", "Accept-Ranges", "Content-Range"):
             value = headers.get(name)
             if value:
@@ -369,7 +366,6 @@ class DevHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
         if cache_control:
             self.send_header("Cache-Control", cache_control)
         self.end_headers()

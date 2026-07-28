@@ -3,7 +3,8 @@
 Browse MusicBrainz, add releases to the pipeline DB, view status.
 
 Usage:
-    python3 web/server.py --port 8085 --dsn postgresql://cratedigger@10.20.0.11/cratedigger
+    python3 web/server.py --canonical-origin https://music.example \
+        --port 8085 --dsn postgresql://cratedigger@10.20.0.11/cratedigger
 """
 import os
 import sys
@@ -59,6 +60,13 @@ from web import cache
 from web import discogs as _discogs
 from web import mb as mb_api
 from web import overlay as _overlay
+from web.request_security import (
+    CHANNEL_HEADER,
+    RequestSecurityError,
+    authorize_request,
+    is_exact_liveness_request,
+    validate_canonical_origin,
+)
 from web.routes import api_index as _api_index_routes
 from web.routes import beets_distance as _beets_distance_routes
 from web.routes import browse as _browse_routes
@@ -108,6 +116,7 @@ ALL_ROUTES: list[RouteRegistration] = merge_registries(
 )
 
 _db_dsn = None
+canonical_origin: str | None = None
 
 # Globals set in main() / injected by the test harness and dev server.
 # With `_db_dsn` set (production), request threads NEVER touch these —
@@ -332,12 +341,42 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         log.info(format % args)
 
+    def parse_request(self) -> bool:
+        """Apply the channel/origin boundary before method dispatch."""
+        if not super().parse_request():
+            return False
+        request_line_parts = self.requestline.split()
+        raw_request_target = (
+            request_line_parts[1] if len(request_line_parts) >= 2 else ""
+        )
+        self._security_request_target = raw_request_target
+        if is_exact_liveness_request(self.command, raw_request_target):
+            return True
+        if canonical_origin is None:
+            self.close_connection = True
+            self._error("Request rejected", 403)
+            return False
+        try:
+            authorize_request(
+                method=self.command,
+                channel_values=self.headers.get_all(CHANNEL_HEADER, []),
+                origin_values=self.headers.get_all("Origin", []),
+                referer_values=self.headers.get_all("Referer", []),
+                canonical_origin=canonical_origin,
+            )
+        except RequestSecurityError:
+            # A rejected request may carry an unread body. Closing guarantees
+            # those bytes cannot be reparsed as another HTTP request.
+            self.close_connection = True
+            self._error("Request rejected", 403)
+            return False
+        return True
+
     def _json(self, data: object, status: int = 200) -> None:
         body = json.dumps(data).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(body)
 
@@ -440,6 +479,12 @@ class Handler(BaseHTTPRequestHandler):
     # (no `web:` keys exist).
 
     def do_GET(self):
+        request_target = getattr(
+            self, "_security_request_target", self.path,
+        )
+        if is_exact_liveness_request(self.command, request_target):
+            self._healthz()
+            return
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
         params = parse_qs(parsed.query)
@@ -566,11 +611,17 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             _close_thread_handles()
 
+    def do_HEAD(self) -> None:
+        request_target = getattr(
+            self, "_security_request_target", self.path,
+        )
+        if is_exact_liveness_request(self.command, request_target):
+            self._healthz()
+            return
+        self.send_error(501, "Unsupported method")
+
     def do_OPTIONS(self):
         self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
         # HTTP/1.1 keep-alive: a bodyless response must still declare
         # its (zero) length or the client waits for a body forever.
         self.send_header("Content-Length", "0")
@@ -578,16 +629,29 @@ class Handler(BaseHTTPRequestHandler):
 
     # ── GET handlers ─────────────────────────────────────────────────
 
+    def _healthz(self) -> None:
+        """Serve the constant application liveness response."""
+        self.send_response_only(204)
+        self.end_headers()
+
     def _get_index(self, params: dict[str, list[str]]) -> None:
         self._html("index.html")
 
 
 def main():
-    global beets_db_path, beets_library_root
+    global beets_db_path, beets_library_root, canonical_origin
 
     parser = argparse.ArgumentParser(description="Cratedigger Web UI")
     parser.add_argument("--port", type=int, default=8085)
     parser.add_argument("--dsn", default=os.environ.get("PIPELINE_DB_DSN", "postgresql://cratedigger@localhost/cratedigger"))
+    parser.add_argument(
+        "--canonical-origin",
+        default=os.environ.get("CRATEDIGGER_CANONICAL_ORIGIN"),
+        help=(
+            "Exact public HTTP(S) origin used for browser mutation "
+            "provenance. Required."
+        ),
+    )
     parser.add_argument(
         "--beets-db",
         default=None,
@@ -615,6 +679,13 @@ def main():
     parser.add_argument("--redis-host", default=None, help="Redis host for caching (optional)")
     parser.add_argument("--redis-port", type=int, default=6379)
     args = parser.parse_args()
+    if args.canonical_origin is None:
+        parser.error("--canonical-origin is required")
+    try:
+        validate_canonical_origin(args.canonical_origin)
+    except RequestSecurityError as exc:
+        parser.error(f"invalid --canonical-origin: {exc}")
+    canonical_origin = args.canonical_origin
     if (args.beets_db is None) != (args.beets_directory is None):
         parser.error(
             "--beets-db and --beets-directory must be supplied together"

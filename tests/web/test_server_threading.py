@@ -30,6 +30,7 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 import conftest  # noqa: F401 — sets TEST_DB_DSN for the per-thread test
 
 from tests.web._harness import _WebServerCase
+from web.request_security import BROWSER_CHANNEL, CHANNEL_HEADER
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
 
@@ -192,6 +193,7 @@ class TestConcurrentRequests(_WebServerCase):
                     (
                         f"GET {path} HTTP/1.1\r\n"
                         f"Host: 127.0.0.1:{self.port}\r\n"
+                        f"{CHANNEL_HEADER}: {BROWSER_CHANNEL}\r\n"
                         "Connection: close\r\n\r\n"
                     ).encode()
                 )
@@ -236,7 +238,8 @@ class TestKeepAlive(_WebServerCase):
     def test_two_requests_reuse_one_connection(self):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
         try:
-            conn.request("GET", "/api/_index")
+            headers = {CHANNEL_HEADER: BROWSER_CHANNEL}
+            conn.request("GET", "/api/_index", headers=headers)
             r1 = conn.getresponse()
             body1 = r1.read()
             self.assertEqual(r1.status, 200)
@@ -244,7 +247,7 @@ class TestKeepAlive(_WebServerCase):
             # Same socket: a second request only works if the server
             # honoured keep-alive (it would have closed an HTTP/1.0
             # connection after the first response).
-            conn.request("GET", "/api/_index")
+            conn.request("GET", "/api/_index", headers=headers)
             r2 = conn.getresponse()
             self.assertEqual(r2.status, 200)
             self.assertTrue(r2.read())
@@ -254,7 +257,11 @@ class TestKeepAlive(_WebServerCase):
     def test_options_declares_zero_content_length(self):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
         try:
-            conn.request("OPTIONS", "/api/_index")
+            conn.request(
+                "OPTIONS",
+                "/api/_index",
+                headers={CHANNEL_HEADER: BROWSER_CHANNEL},
+            )
             resp = conn.getresponse()
             self.assertEqual(resp.status, 200)
             self.assertEqual(resp.getheader("Content-Length"), "0")
@@ -477,6 +484,8 @@ class TestPerThreadBeetsHandles(unittest.TestCase):
             "argv",
             [
                 "server.py",
+                "--canonical-origin",
+                "https://music.ablz.au",
                 "--dsn",
                 str(TEST_DSN),
                 "--beets-db",
