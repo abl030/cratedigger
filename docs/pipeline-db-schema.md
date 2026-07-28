@@ -194,7 +194,21 @@ that audit trail.
 - `last_download_spectral_bitrate INTEGER` — estimated bitrate from the most recent download's spectral analysis.
 - `current_spectral_grade TEXT`, `current_spectral_bitrate INTEGER` — point-in-time request stamps for history/rendering. Active decisions read the linked evidence row's atomic spectral fact; these scalars never seed or override evidence.
 - `current_lossless_source_v0_probe_min_bitrate INTEGER`, `current_lossless_source_v0_probe_avg_bitrate INTEGER`, `current_lossless_source_v0_probe_median_bitrate INTEGER` — point-in-time request stamps for history/rendering. The comparable source anchor used by policy is the linked evidence row's `v0_metric` with `subject='source'`.
-- `active_download_state JSONB` — persisted download state for async polling (filetype, enqueued_at, per-file username/filename/size). Set by `set_downloading()`, cleared on completion/timeout.
+- `active_download_state JSONB` — persisted download state for async polling
+  (filetype, `enqueued_at`, per-file username/filename/size). Set by
+  `set_downloading()`, cleared on completion/timeout. While the request remains
+  `downloading`, the exact stored `enqueued_at` text is the immutable
+  incarnation witness for whole-state rewrites: initial enqueue ownership,
+  slskd event stamping, pre-purge terminal-evidence harvest, and poll reduction
+  update only when status is still `downloading`, the stored witness equals
+  the caller's expected text, and the outgoing state retains that same text.
+  Paths and transfer keys are evidence within an attempt, never its identity.
+  Event classification additionally requires a parseable current witness and a
+  completion occurrence at or after it; post-event polling admits only exact
+  `(request_id, enqueued_at)` pairs captured before the transfer snapshot.
+  Ownership of downstream processing, filesystem actions, importer work, and
+  terminal side effects is deliberately not granted by this PR1 witness and
+  remains issue #898 PR2.
 
 ## `download_log` — quality-tracking fields
 

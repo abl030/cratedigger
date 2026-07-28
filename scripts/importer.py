@@ -386,9 +386,14 @@ def _build_runtime_context(db: PipelineDB):
     from album_source import DatabaseSource
     from lib.config import read_runtime_config
     from lib.context import CratediggerContext
+    from web.api_bases import mb_ws2_base
 
     cfg = read_runtime_config()
-    source = DatabaseSource(db.dsn)
+    source = DatabaseSource(
+        db.dsn,
+        musicbrainz_ws2_base=mb_ws2_base(cfg.musicbrainz_api_base),
+        discogs_api_base=cfg.discogs_api_base,
+    )
     return CratediggerContext(cfg=cfg, slskd=None, pipeline_db_source=source)
 
 

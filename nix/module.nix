@@ -1293,12 +1293,12 @@ in {
         example = "http://192.168.1.35:5200";
         description = ''
           MusicBrainz API origin (scheme://host[:port], no path) — ONE value
-          threaded to all three consumers (tier-2 plan U6/KTD6): web/mb.py
+          threaded to all consumers (tier-2 plan U6/KTD6): web/mb.py
           (via config.ini [MusicBrainz] api_base, read at cratedigger-web
           startup by configure_api_bases_from_runtime_config()), pipeline-cli
-          release lookups, and the rendered beets
-          musicbrainz.{host,https,ratelimit}. Public MB default is functional
-          but rate-limited (~1 req/s); point at a local mirror for
+          release lookups, DatabaseSource track population, and the rendered
+          beets musicbrainz.{host,https,ratelimit}. Public MB default is
+          functional but rate-limited (~1 req/s); point at a local mirror for
           production-speed matching.
         '';
       };
@@ -1310,13 +1310,13 @@ in {
         default = null;
         example = "https://discogs.ablz.au";
         description = ''
-          Discogs mirror origin. Mirror-REQUIRED (R13): web/discogs.py
-          speaks the Rust mirror's endpoint shape, which public
-          api.discogs.com does not serve — there is no public fallback.
-          Null = Discogs browse off (clear 503 mirror-required message);
-          MusicBrainz browse is unaffected. The beets discogs plugin's own
-          public-Discogs path (used by imports) is separate — see
-          beets.package.discogsMirrorUrl for its mirror knob.
+          Discogs mirror origin for web browse and DatabaseSource track
+          population. Mirror-REQUIRED (R13): the Rust mirror's endpoint shape
+          is not served by public api.discogs.com, so there is no public
+          fallback. Null = Discogs browse off (clear 503 mirror-required
+          message); MusicBrainz browse is unaffected. The beets discogs
+          plugin's own path is separate — see beets.package.discogsMirrorUrl
+          for its mirror knob.
         '';
       };
     };

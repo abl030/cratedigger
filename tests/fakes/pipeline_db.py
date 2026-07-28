@@ -385,6 +385,8 @@ class _FakeReadOnlyQueryCursor:
         return self._query_cursor
 
 
+def _reject_nonstandard_json_constant(value: str) -> None:
+    raise ValueError(f"nonstandard JSON constant: {value}")
 
 
 class FakePipelineDB:
@@ -2307,15 +2309,46 @@ class FakePipelineDB:
         self,
         request_id: int,
         state_json: str,
+        *,
+        expected_enqueued_at: str,
     ) -> bool:
         row = self._requests.get(request_id)
+        self.update_download_state_calls.append((request_id, state_json))
+        injected = self._update_download_state_errors.get(request_id)
+        if injected is not None:
+            raise injected
+        try:
+            outgoing_state = json.loads(
+                state_json,
+                parse_constant=_reject_nonstandard_json_constant,
+            )
+        except ValueError as exc:
+            import psycopg2.errors
+            raise psycopg2.errors.InvalidTextRepresentation(
+                "invalid input syntax for type json",
+            ) from exc
+        if not isinstance(outgoing_state, dict):
+            return False
         if row is None or row["status"] != "downloading":
             return False
-        return self.update_download_state(
-            request_id,
-            state_json,
-            expected_status="downloading",
-        )
+        stored_state = row.get("active_download_state")
+        if isinstance(stored_state, str):
+            try:
+                stored_state = json.loads(
+                    stored_state,
+                    parse_constant=_reject_nonstandard_json_constant,
+                )
+            except ValueError:
+                return False
+        if not isinstance(stored_state, dict):
+            return False
+        if stored_state.get("enqueued_at") != expected_enqueued_at:
+            return False
+        if outgoing_state.get("enqueued_at") != expected_enqueued_at:
+            return False
+        row["active_download_state"] = outgoing_state
+        row["updated_at"] = _utcnow()
+        return True
 
     def update_download_state_current_path(
         self,

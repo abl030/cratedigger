@@ -17,9 +17,9 @@ without it, and how the operator's instances are stood up.
 ## Public-MusicBrainz degraded mode (supported)
 
 The stranger default (`musicbrainz.apiBase = "https://musicbrainz.org"`)
-threads through all three consumers: `web/mb.py` (browse), `pipeline-cli`
-lookups, and the rendered beets `musicbrainz.host/https/ratelimit`
-(public ⇒ ratelimit 1).
+threads through every consumer: `web/mb.py` (browse), `pipeline-cli` lookups,
+pipeline track population, and the rendered beets
+`musicbrainz.host/https/ratelimit` (public ⇒ ratelimit 1).
 
 The math to know: public MB allows ~1 request/second. A beets validation
 of one album is a handful of requests; browsing is interactive-tolerable;
@@ -67,7 +67,8 @@ nspawn container on doc2, served at `https://discogs.ablz.au`).
 **Follow-up plan:** packaging it as a flake + generic NixOS module (the
 same pattern as this repo's tier-2 work) lives in the discogs-api repo.
 
-Wire it up: `services.cratedigger.discogs.apiBase` (browse) and
+Wire it up: `services.cratedigger.discogs.apiBase` (browse and pipeline track
+population) and
 `services.cratedigger.beets.package.discogsMirrorUrl` (build-time patch of the
 beets discogs plugin, so *imports* also hit the mirror). The beets
 plugin additionally wants a Discogs user token via

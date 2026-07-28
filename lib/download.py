@@ -12,7 +12,7 @@ lib/slskd_events.py.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from typing import (
@@ -76,6 +76,7 @@ from lib.quality import (
     reduce_poll_cycle,
 )
 from lib.slskd_client import DownloadUser
+from lib.slskd_events import _parse_event_timestamp
 from lib.slskd_transfers import (
     _get_all_downloads_snapshot,
     cancel_and_delete,
@@ -127,7 +128,11 @@ class DownloadDB(transitions.TransitionsDB, Protocol):
     ) -> bool: ...
 
     def update_download_state_if_downloading(
-        self, request_id: int, state_json: str,
+        self,
+        request_id: int,
+        state_json: str,
+        *,
+        expected_enqueued_at: str,
     ) -> bool: ...
 
     def update_download_state_current_path(
@@ -558,12 +563,13 @@ def harvest_terminal_transfer_evidence(ctx: CratediggerContext) -> None:
     the remaining rows, because the purge runs immediately after and an
     aborted loop would destroy the un-harvested rows' evidence (the I1b
     failure mode). The purge always still runs regardless (the
-    pre-existing behavior). The write goes through the status-guarded
-    ``update_download_state_if_downloading`` — mirroring the poll path's
-    fresh-status guard — so a row a concurrent operator action just
-    flipped out of ``downloading`` is never rewritten. MUST be called
-    before ``purge_completed_transfers``; that ordering is owned by the
-    end-of-cycle registry in ``lib/convergence.py::CONVERGENCE_STEPS``.
+    pre-existing behavior). The write goes through the status-and-attempt-
+    guarded ``update_download_state_if_downloading`` — mirroring the poll
+    path's ownership guard — so a row a concurrent action moved out of
+    ``downloading`` or replaced with a newer attempt is never rewritten.
+    MUST be called before ``purge_completed_transfers``; that ordering is
+    owned by the end-of-cycle registry in
+    ``lib/convergence.py::CONVERGENCE_STEPS``.
     """
     db = ctx.pipeline_db_source._get_db()
     downloading = db.get_downloading()
@@ -585,6 +591,13 @@ def harvest_terminal_transfer_evidence(ctx: CratediggerContext) -> None:
             state = ActiveDownloadState.from_raw(raw_state)
             if state.processing_started_at is not None:
                 continue
+            if _parse_event_timestamp(state.enqueued_at) is None:
+                logger.warning(
+                    "HARVEST: request %s has invalid enqueued_at witness "
+                    "— excluding terminal transfer evidence",
+                    request_id,
+                )
+                continue
 
             dirty = False
             for f in state.files:
@@ -602,7 +615,9 @@ def harvest_terminal_transfer_evidence(ctx: CratediggerContext) -> None:
                 dirty = True
 
             if dirty and db.update_download_state_if_downloading(
-                    request_id, state.to_json()):
+                    request_id,
+                    state.to_json(),
+                    expected_enqueued_at=state.enqueued_at):
                 harvested += 1
         except Exception:
             logger.warning(
@@ -1029,6 +1044,86 @@ def _processing_path_ready_for_importer(
     return False
 
 
+def _decode_valid_download_incarnations(
+    rows: Sequence[AlbumRequestRow],
+    *,
+    phase: str,
+) -> list[tuple[AlbumRequestRow, ActiveDownloadState]]:
+    """Decode rows with valid enqueue witnesses, preserving DB order."""
+    valid: list[tuple[AlbumRequestRow, ActiveDownloadState]] = []
+    for row in rows:
+        request_id = row["id"]
+        raw_state = row.get("active_download_state")
+        if raw_state is None:
+            logger.warning(
+                "POLL ADMISSION: request %s has no active_download_state "
+                "during %s — excluding without reset",
+                request_id,
+                phase,
+            )
+            continue
+        try:
+            state = ActiveDownloadState.from_raw(raw_state)
+        except Exception:
+            logger.warning(
+                "POLL ADMISSION: request %s has malformed "
+                "active_download_state during %s — excluding without reset",
+                request_id,
+                phase,
+                exc_info=True,
+            )
+            continue
+        witness = state.enqueued_at
+        if not witness:
+            logger.warning(
+                "POLL ADMISSION: request %s has an empty enqueued_at witness "
+                "during %s — excluding without reset",
+                request_id,
+                phase,
+            )
+            continue
+        if _parse_event_timestamp(witness) is None:
+            logger.warning(
+                "POLL ADMISSION: request %s has invalid enqueued_at witness "
+                "%r during %s — excluding without reset",
+                request_id,
+                witness,
+                phase,
+            )
+            continue
+        valid.append((row, state))
+    return valid
+
+
+def _admit_download_incarnations(
+    pre_snapshot: Sequence[tuple[AlbumRequestRow, ActiveDownloadState]],
+    refreshed_rows: Sequence[AlbumRequestRow],
+    *,
+    refreshed_phase: str = "post-ingest refresh",
+) -> list[tuple[AlbumRequestRow, ActiveDownloadState]]:
+    """Admit only exact refreshed incarnations witnessed before the snapshot."""
+    pre_snapshot_pairs = {
+        (row["id"], state.enqueued_at)
+        for row, state in pre_snapshot
+    }
+    admitted: list[tuple[AlbumRequestRow, ActiveDownloadState]] = []
+    for row, state in _decode_valid_download_incarnations(
+        refreshed_rows,
+        phase=refreshed_phase,
+    ):
+        pair = (row["id"], state.enqueued_at)
+        if pair not in pre_snapshot_pairs:
+            logger.info(
+                "POLL ADMISSION: request %s incarnation %r was not present "
+                "before the transfer snapshot — excluding this cycle",
+                row["id"],
+                state.enqueued_at,
+            )
+            continue
+        admitted.append((row, state))
+    return admitted
+
+
 def poll_active_downloads(ctx: CratediggerContext) -> None:
     """Poll slskd for status of all downloading albums.
 
@@ -1042,7 +1137,11 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
     7. If errors → retry individual files (persisted, max 5 retries per file)
     """
     db = ctx.pipeline_db_source._get_db()
-    downloading = db.get_downloading()
+    downloading_before_snapshot = db.get_downloading()
+    pre_snapshot_incarnations = _decode_valid_download_incarnations(
+        downloading_before_snapshot,
+        phase="pre-snapshot read",
+    )
 
     # One bulk snapshot for the entire poll cycle — avoids per-file API
     # calls. Fetched BEFORE event ingestion, deliberately: a transfer the
@@ -1052,7 +1151,7 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
     # left a cycle-length race where same-cycle completions processed
     # unstamped.
     cycle_snapshot = None
-    if downloading:
+    if pre_snapshot_incarnations:
         cycle_snapshot = _get_all_downloads_snapshot(
             ctx.slskd, purpose="poll cycle snapshot")
 
@@ -1063,22 +1162,29 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
     # materialize grace window — and never blocks polling.
     try:
         from lib.slskd_events import ingest_download_file_events
-        ingest_result = ingest_download_file_events(db, ctx.slskd, downloading)
+        ingest_result = ingest_download_file_events(db, ctx.slskd)
         logger.info(ingest_result.to_log_line())
-        if ingest_result.files_stamped:
-            # Re-read ONLY the rows we already hold: a row that turned
-            # 'downloading' after the snapshot above (Phase 2 enqueues
-            # concurrently) must not be polled against a snapshot that
-            # predates its transfers.
-            known_ids = {row["id"] for row in downloading}
-            downloading = [
-                row for row in db.get_downloading()
-                if row["id"] in known_ids
-            ]
     except Exception:
         logger.exception(
             "SLSKD EVENTS: ingest failed — nothing stamped this cycle; "
             "completions ride the materialize grace window")
+
+    # Refresh after EVERY ingest outcome, including a raised ingest error.
+    # Admission is the exact (request_id, enqueued_at text) pair that existed
+    # before the transfer snapshot. Request ID alone would let a same-row B
+    # attempt consume A's snapshot.
+    try:
+        refreshed = db.get_downloading()
+    except Exception:
+        logger.exception(
+            "POLL ADMISSION: downloading-row refresh failed after event "
+            "ingest — skipping all polling this cycle",
+        )
+        return
+    downloading = _admit_download_incarnations(
+        pre_snapshot_incarnations,
+        refreshed,
+    )
 
     if not downloading:
         return
@@ -1089,10 +1195,10 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
         logger.warning("Failed to get download snapshot — skipping poll cycle")
         return
 
-    for row in downloading:
+    for row, state in downloading:
         request_id = row["id"]
         try:
-            _poll_one_active_download(row, db, ctx, cycle_snapshot)
+            _poll_one_active_download(row, state, db, ctx, cycle_snapshot)
         except Exception:
             # A single bad row (overlong canonical path, missing slskd
             # files raising past our inner guards, etc.) must never
@@ -1105,25 +1211,19 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
 
 
 def _poll_one_active_download(
-    row: Mapping[str, Any],
+    row: AlbumRequestRow,
+    state: ActiveDownloadState,
     db: DownloadDB,
     ctx: CratediggerContext,
     cycle_snapshot: list[DownloadUser],
 ) -> None:
     """Build poll facts, persist one reduced state, then dispatch one effect."""
     request_id = row["id"]
-    raw_state = row.get("active_download_state")
-    state = ActiveDownloadState.from_raw(raw_state) if raw_state else None
-    active_import_job = (
-        _active_import_job_for_request(db, request_id)
-        if state is not None
-        else None
-    )
+    active_import_job = _active_import_job_for_request(db, request_id)
 
     recovery_decision = None
     if (
-        state is not None
-        and state.processing_started_at is not None
+        state.processing_started_at is not None
         and active_import_job is None
     ):
         recovery_decision = reconcile_processing_current_path(
@@ -1143,8 +1243,7 @@ def _poll_one_active_download(
     file_snapshots: list[PollFileSnapshot] = []
     completion_current_path = None
     if (
-        state is not None
-        and state.processing_started_at is None
+        state.processing_started_at is None
         and active_import_job is None
     ):
         initial_entry = _reconstruct_grab_list_entry(row, state)
@@ -1202,31 +1301,24 @@ def _poll_one_active_download(
     )
 
     # The reducer returns the whole observation state, so every valid row
-    # persists unconditionally here while this worker still owns a
-    # downloading row. Losing that guard means a concurrent transition won;
-    # its state and every downstream side effect take precedence.
-    if (
-        result.state is not None
-        and not db.update_download_state_if_downloading(
+    # persists unconditionally here while this worker still owns the same
+    # downloading incarnation. Losing that guard means a concurrent status
+    # transition or newer attempt won; its state and every downstream side
+    # effect take precedence.
+    reduced_state = result.state
+    assert reduced_state is not None
+    if not db.update_download_state_if_downloading(
             request_id,
-            result.state.to_json(),
-        )
-    ):
+            reduced_state.to_json(),
+            expected_enqueued_at=state.enqueued_at,
+        ):
         return
 
     verdict = result.verdict
     if verdict.decision == PollCycleDecision.reset_missing_state:
-        logger.error(f"Downloading album {request_id} has no active_download_state — "
-                     f"resetting to wanted")
-        transitions.require_transition_applied(transitions.finalize_request(
-            db,
-            request_id,
-            transitions.RequestTransition.to_wanted(
-                from_status="downloading",
-            ),
-        ))
-        return
-
+        raise AssertionError(
+            "admitted poll incarnation unexpectedly reduced as missing state",
+        )
     if verdict.decision == PollCycleDecision.wait_import_job:
         logger.info(
             "Request %s is waiting on importer job %s (%s)",
@@ -1263,15 +1355,14 @@ def _poll_one_active_download(
                 request_id,
                 row["artist_name"],
                 row["album_title"],
-                result.state.current_path if result.state is not None else None,
+                reduced_state.current_path,
                 recovery_decision.canonical_path,
                 recovery_decision.legacy_shared_path,
             )
             return
         raise AssertionError(f"unknown processing recovery block: {verdict.reason}")
 
-    state = result.state
-    assert state is not None
+    state = reduced_state
     transfer_ids = {
         (file.username, file.filename): observation.transfer_id
         for file, observation in zip(state.files, snapshot.files, strict=False)

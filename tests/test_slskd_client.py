@@ -221,6 +221,14 @@ class TestEventsEndpoint(SlskdClientTestCase):
 
         payload = decode_download_file_complete(page.events[0])
 
+        # Captured slskd 0.24.5 provenance contract: the envelope occurrence
+        # timestamp is the completed transfer's EndedAt, not client receipt
+        # time. Event ingestion relies on this causal timestamp.
+        transfer = EVENT_FILE_COMPLETE_DATA["transfer"]
+        assert isinstance(transfer, dict)
+        ended_at = transfer["endedAt"]
+        assert isinstance(ended_at, str)
+        self.assertEqual(page.events[0].timestamp, ended_at)
         self.assertIsInstance(payload, SlskdDownloadFileCompleteEvent)
         self.assertEqual(
             payload.local_filename,

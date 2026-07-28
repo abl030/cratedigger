@@ -1431,7 +1431,12 @@ def main():
             sys.exit(1)
 
         from album_source import DatabaseSource
-        pipeline_db_source = DatabaseSource(cfg.pipeline_db_dsn)
+        from web.api_bases import mb_ws2_base
+        pipeline_db_source = DatabaseSource(
+            cfg.pipeline_db_dsn,
+            musicbrainz_ws2_base=mb_ws2_base(cfg.musicbrainz_api_base),
+            discogs_api_base=cfg.discogs_api_base,
+        )
         logger.info(f"Pipeline DB: {cfg.pipeline_db_dsn}")
 
         slskd = _create_slskd_client(cfg)
@@ -1482,7 +1487,11 @@ def main():
 
         def _run_phase1():
             """Run Phase 1 in a background thread with its own DB connection."""
-            phase1_source = DatabaseSource(main_cfg.pipeline_db_dsn)
+            phase1_source = DatabaseSource(
+                main_cfg.pipeline_db_dsn,
+                musicbrainz_ws2_base=mb_ws2_base(main_cfg.musicbrainz_api_base),
+                discogs_api_base=main_cfg.discogs_api_base,
+            )
             phase1_ctx = CratediggerContext(
                 cfg=main_cfg,
                 slskd=main_slskd,
