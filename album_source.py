@@ -25,9 +25,6 @@ logger = logging.getLogger("cratedigger")
 
 from lib.release_identity import detect_release_source
 
-MB_API_BASE = "http://192.168.1.35:5200/ws/2"
-DISCOGS_API_BASE = "https://discogs.ablz.au"
-
 
 class _MBRecordingJSON(TypedDict, total=False):
     """Slice of a MusicBrainz ``recording`` object this module reads."""
@@ -207,8 +204,16 @@ class AlbumRecord:
 class DatabaseSource:
     """Fetch wanted albums from pipeline.db."""
 
-    def __init__(self, dsn: str) -> None:
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        musicbrainz_ws2_base: str,
+        discogs_api_base: str,
+    ) -> None:
         self.dsn = dsn
+        self.musicbrainz_ws2_base = musicbrainz_ws2_base.rstrip("/")
+        self.discogs_api_base = discogs_api_base.rstrip("/")
         self._db: PipelineDB | None = None
 
     def _get_db(self) -> PipelineDB:
@@ -445,7 +450,10 @@ class DatabaseSource:
     ) -> list[dict[str, object]]:
         """Fetch tracks from the MusicBrainz API."""
         try:
-            url = f"{MB_API_BASE}/release/{quote(mb_id, safe='')}?inc=recordings&fmt=json"
+            url = (
+                f"{self.musicbrainz_ws2_base}/release/{quote(mb_id, safe='')}"
+                "?inc=recordings&fmt=json"
+            )
             req = urllib.request.Request(url)
             req.add_header("User-Agent", "cratedigger-db/1.0")
             with urllib.request.urlopen(req, timeout=15) as resp:
@@ -483,7 +491,7 @@ class DatabaseSource:
         """Fetch tracks from the Discogs mirror API."""
         import re
         try:
-            url = f"{DISCOGS_API_BASE}/api/releases/{discogs_id}"
+            url = f"{self.discogs_api_base}/api/releases/{discogs_id}"
             req = urllib.request.Request(url)
             req.add_header("User-Agent", "cratedigger-db/1.0")
             with urllib.request.urlopen(req, timeout=15) as resp:

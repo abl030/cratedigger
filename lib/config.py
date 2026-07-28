@@ -147,12 +147,14 @@ class CratediggerConfig:
     beets_config_dir: str = ""
     beets_python: str = ""
 
-    # One MB value, three consumers (tier-2 plan U6 / KTD6): web/mb.py,
-    # pipeline-cli lookups, and the rendered beets musicbrainz.* block all
-    # derive from this origin (scheme://host[:port], no path). Public MB
-    # default = functional-but-slow stranger posture.
+    # One MB value for every consumer (tier-2 plan U6 / KTD6): web/mb.py,
+    # pipeline-cli lookups, DatabaseSource track population, and the rendered
+    # beets musicbrainz.* block all derive from this origin
+    # (scheme://host[:port], no path). Public MB default = functional-but-slow
+    # stranger posture.
     musicbrainz_api_base: str = "https://musicbrainz.org"
-    # Discogs is mirror-REQUIRED (R13): empty = Discogs browse off.
+    # Discogs is mirror-REQUIRED (R13): browse and DatabaseSource track
+    # population share this origin; empty = Discogs browse off.
     discogs_api_base: str = ""
 
     # --- Quality Ranks (codec-aware comparison model, issue #60) ---
