@@ -33,7 +33,7 @@ When implementing or reviewing changes that involve either kind of boundary, for
 
 - For external adapter fakes: the failure-case fake must raise the same exception class the real adapter raises, not return `None` or a synthetic stand-in. If you find yourself writing `lambda m: None` to simulate a mirror miss, that is a smell — check what the real adapter does. `web/mb.py::get_release` raises `urllib.error.HTTPError`; `web/discogs.py::get_release` does similar; `ytmusicapi.YTMusic` has its own taxonomy (`YTMusicServerError` / `requests.Timeout`).
 
-Codified as `.claude/rules/test-fidelity.md`. Stronger enforcement layers (Struct-typed write interface, audit tests, adapter contract tests) are documented as future work in the same file.
+Codified as `.claude/rules/test-fidelity.md`. The write-coverage, column-contract, mirror-contract, and lambda-audit guards now provide the executable layers; the rule file records their semantic boundary.
 
 Related: [[feedback-finish-the-job]] — the meta-frame is the same, "fix is incomplete unless production observes it." The test-fidelity rules are the boundary-specific enforcement of that principle.
 

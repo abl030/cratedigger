@@ -156,10 +156,8 @@ Schema lives in `migrations/NNN_name.sql`; the migrate oneshot runs them on ever
 
 ## Running tests
 
-During implementation, run the smallest relevant test module or JavaScript
-test file while converging. After the final tree is reviewed and committed,
-run the whole-repository Pyright check and the full suite exactly once before
-the first branch push:
+Use the smallest relevant test module while converging. After review and
+commit, run both final gates exactly once before the first branch push:
 
 ```bash
 nix-shell --run "python3 -m unittest tests.test_X -v"  # focused iteration
@@ -167,25 +165,22 @@ nix-shell --run "pyright --threads 4"                   # final whole repo
 nix-shell --run "bash scripts/run_tests.sh"             # final full suite
 ```
 
-Both final commands must pass on the exact tree that will be pushed. If either
-finds a problem, fix it, run focused tests while reconverging, commit and review
-the new tree, then restart the final sequence. Do not repeat the final suite for
-an unchanged tree after pushing or merging. **ALWAYS `nix-shell --run` for
-Python** (`.claude/rules/nix-shell.md`). The suite gates JS syntax + JS tests,
-the production strict gate (`pyright -p pyrightconfig.production.json` —
-full `typeCheckingMode: strict` over production code, #784),
-the pinned repository-wide Ruff gate, the production-only aggregate Vulture
-sweep, then unittest discovery — which includes `tests/test_docs_audit.py`, so the
-suite **fails if a new beets plugin, module option, or `pipeline-cli` subcommand
-ships undocumented** (or a doc link goes dead); docs are part of "done".
-`.claude/rules/code-quality.md` covers the test taxonomy, shared
-fakes/builders, the new-work checklist, and the docs-freshness rule.
+Both must pass on the exact pushed tree. A failure restarts convergence,
+review, commit, and the final sequence; never replay the suite for an unchanged
+tree after push or merge. **Always use `nix-shell --run` for Python**
+(`.claude/rules/nix-shell.md`). `run_tests.sh` already gates JavaScript,
+production-strict Pyright, Ruff, Vulture, unittest discovery, and structural
+docs freshness. `.claude/rules/code-quality.md` owns the testing conventions
+that those gates cannot infer.
 
 **Generated (property-based) tests** (`tests/test_*_generated.py`, Hypothesis) run deterministically in the suite; after changing quality policy, run the randomized fuzz burst: `nix-shell --run "bash scripts/fuzz_burst.sh"` (one process per generated module, parallelised to the host's cores — Hypothesis is single-threaded, so never run the burst serially). Failures shrink to minimal worlds — promote them to named `@example` pins or album-test-set scenarios, never JSON artifacts. **New features start by writing their invariants down, and every invariant ships as a PAIR — deterministic pin + generated property — in the same PR, with known-bad self-tests** (`.claude/rules/code-quality.md` § Red/Green TDD). When in doubt that the harness constrains anything, qualify it by fault injection. `docs/generated-testing.md`.
 
 ### Skipped tests are an anti-pattern
 
-**A test either runs or it doesn't exist.** No skip decorators, no env-gated tests, no "fixtures must be generated first" — every test runs on every `run_tests.sh` in a fresh dev shell. A skipped test is either irrelevant (delete it) or mis-designed (make it run: Nix-provided binaries, synthetic fixtures in `setUp`, or fakes). `tests/test_skip_audit.py` fails the suite on any skip; there is no allowlist. (History: the suite once said `OK (skipped=56)` for months while 56 tests had never executed once.)
+**A test either runs or it doesn't exist.** `tests/test_skip_audit.py` rejects
+known unittest skip markers without an allowlist; the same policy forbids
+environment gates. Supply dependencies through Nix, construct synthetic
+fixtures, use fakes, or remove the test.
 
 ### Hooks
 
