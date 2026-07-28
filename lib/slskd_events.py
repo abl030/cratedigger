@@ -155,20 +155,9 @@ class _EventCompletionInfo:
     occurred_at: datetime | None
 
 
-@dataclass(frozen=True)
-class _EventCompletionProjection:
-    """Separate active-incarnation and transfer-ledger event projections."""
-
-    active_candidates: dict[
-        tuple[str, str],
-        list[_EventCompletionInfo],
-    ]
-    ledger_newest: dict[tuple[str, str], _EventCompletionInfo]
-
-
 def _completion_info_from_events(
     events: list[SlskdRawEvent],
-) -> _EventCompletionProjection:
+) -> dict[tuple[str, str], list[_EventCompletionInfo]]:
     """Decode completion candidates without conflating their consumers.
 
     Active-state classification retains every newest-first candidate so a
@@ -180,7 +169,6 @@ def _completion_info_from_events(
         tuple[str, str],
         list[_EventCompletionInfo],
     ] = {}
-    ledger_newest: dict[tuple[str, str], _EventCompletionInfo] = {}
     for event in events:
         if event.type != DOWNLOAD_FILE_COMPLETE:
             continue
@@ -203,11 +191,7 @@ def _completion_info_from_events(
             occurred_at=_parse_event_timestamp(event.timestamp),
         )
         active_candidates.setdefault(key, []).append(completion)
-        ledger_newest.setdefault(key, completion)
-    return _EventCompletionProjection(
-        active_candidates=active_candidates,
-        ledger_newest=ledger_newest,
-    )
+    return active_candidates
 
 
 @dataclass(frozen=True)
@@ -368,18 +352,14 @@ def recent_completion_paths(slskd: Any) -> RecentCompletionPaths:
 def ingest_download_file_events(
     db: Any,
     slskd: Any,
-    downloading: Sequence[Mapping[str, Any]],
 ) -> EventIngestResult:
     """One ingestion pass: page new events, stamp local paths, advance cursor.
 
-    ``downloading`` remains in the call contract for the poll-cycle snapshot,
-    but carries no event-classification authority. Current downloading
-    incarnations are read after the event window is collected. Runs even when
-    the prefetched list is empty so the cursor keeps tracking the feed during
-    idle stretches instead of accumulating a 10k-event backlog for the next
-    active cycle.
+    Current downloading incarnations are read after the event window is
+    collected. Runs even when there are no downloading rows so the cursor keeps
+    tracking the feed during idle stretches instead of accumulating a
+    10k-event backlog for the next active cycle.
     """
-    del downloading
     cursor = db.get_slskd_event_cursor()
     if cursor is None:
         # Bootstrap: seed from the newest event without backfilling the
@@ -402,22 +382,26 @@ def ingest_download_file_events(
     if not new_events:
         return EventIngestResult(outcome="no_new_events", cursor_gap=cursor_gap)
 
-    completion_projection = _completion_info_from_events(new_events)
+    completion_candidates = _completion_info_from_events(new_events)
     stamp_result = (
         _stamp_local_paths(
             db,
             db.get_downloading(),
-            completion_projection.active_candidates,
+            completion_candidates,
         )
-        if completion_projection.active_candidates
+        if completion_candidates
         else _StampLocalPathsResult()
     )
     # T2 (issue #571): same pass and decoded events, but a deliberately
     # separate newest-event projection. Active incarnation qualification
     # grants no transfer-ledger authority.
+    ledger_newest = {
+        key: candidates[0]
+        for key, candidates in completion_candidates.items()
+    }
     transfers_stamped = (
-        _stamp_transfer_ledger(db, completion_projection.ledger_newest)
-        if completion_projection.ledger_newest
+        _stamp_transfer_ledger(db, ledger_newest)
+        if ledger_newest
         else 0
     )
 

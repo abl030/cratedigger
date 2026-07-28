@@ -1196,7 +1196,7 @@ class TestTransferLedgerWriteAheadOrdering(unittest.TestCase):
             ),
         ])
 
-        ingest = ingest_download_file_events(db, slskd, [])
+        ingest = ingest_download_file_events(db, slskd)
 
         self.assertEqual(ingest.transfers_stamped, 0)
         pending = next(iter(db._transfer_ledger.values()))

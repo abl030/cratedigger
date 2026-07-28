@@ -1510,40 +1510,31 @@ def try_multi_enqueue(
                     f"Exception enqueueing download to slskd for "
                     f"{artist_name} - {album_name} from {username}"
                 )
-                if len(all_downloads) > 0:
-                    if claim.claimed:
+                if claim.claimed:
+                    if all_downloads:
                         _copy_download_observations(
                             claim.entry.files,
                             all_downloads,
                         )
-                        recovery = _leave_claim_for_poll_recovery(
-                            claim,
-                            ctx,
-                            reason="multi-disc enqueue raised after ownership claim",
+                    reason = (
+                        "multi-disc enqueue raised after ownership claim"
+                        if all_downloads
+                        else "slskd enqueue raised after ownership claim"
+                    )
+                    recovery = _leave_claim_for_poll_recovery(
+                        claim,
+                        ctx,
+                        reason=reason,
+                    )
+                    if recovery.status == "poll_recovery":
+                        return EnqueueAttempt(
+                            matched=True,
+                            downloads=recovery.downloads,
+                            candidates=tuple(accumulated),
+                            pre_filter_skip_count=pre_filter_skips[0],
                         )
-                        if recovery.status == "poll_recovery":
-                            return EnqueueAttempt(
-                                matched=True,
-                                downloads=recovery.downloads,
-                                candidates=tuple(accumulated),
-                                pre_filter_skip_count=pre_filter_skips[0],
-                            )
-                    if not claim.claimed:
-                        cancel_and_delete(all_downloads, ctx)
-                else:
-                    if claim.claimed:
-                        recovery = _leave_claim_for_poll_recovery(
-                            claim,
-                            ctx,
-                            reason="slskd enqueue raised after ownership claim",
-                        )
-                        if recovery.status == "poll_recovery":
-                            return EnqueueAttempt(
-                                matched=True,
-                                downloads=recovery.downloads,
-                                candidates=tuple(accumulated),
-                                pre_filter_skip_count=pre_filter_skips[0],
-                            )
+                elif all_downloads:
+                    cancel_and_delete(all_downloads, ctx)
                 return EnqueueAttempt(
                     matched=False,
                     enqueue_failed=True,

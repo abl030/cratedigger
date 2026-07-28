@@ -293,10 +293,40 @@ def _seed_current_b(
     ))
 
 
+def _execute_witnessed_write_and_check(
+    db: FakePipelineDB,
+    outgoing_state: ActiveDownloadState,
+    *,
+    expected_witness: str,
+) -> None:
+    """Capture one row, execute its witnessed write, and check the result."""
+    before = copy.deepcopy(db.request(1))
+    applied = db.update_download_state_if_downloading(
+        1,
+        outgoing_state.to_json(),
+        expected_enqueued_at=expected_witness,
+    )
+    after = copy.deepcopy(db.request(1))
+    assert_witnessed_write_contract(
+        before_row=before,
+        outgoing_state=outgoing_state,
+        expected_witness=expected_witness,
+        applied=applied,
+        after_row=after,
+    )
+
+
 def _exercise_transcript(world: TranscriptWorld) -> None:
+    if (
+        len(world.operation_order) != len(_PAYLOAD_FAMILIES)
+        or set(world.operation_order) != set(_PAYLOAD_FAMILIES)
+    ):
+        raise AssertionError(
+            f"operation alphabet drifted outside PR1: {world.operation_order!r}"
+        )
+
     db = FakePipelineDB()
     _seed_current_b(db, world)
-    executed: list[PayloadFamily] = []
 
     for family in world.operation_order:
         stale_a = _payload_state(
@@ -304,19 +334,10 @@ def _exercise_transcript(world: TranscriptWorld) -> None:
             witness=world.witness_a,
             family=family,
         )
-        before_a = copy.deepcopy(db.request(1))
-        applied_a = db.update_download_state_if_downloading(
-            1,
-            stale_a.to_json(),
-            expected_enqueued_at=world.witness_a,
-        )
-        after_a = copy.deepcopy(db.request(1))
-        assert_witnessed_write_contract(
-            before_row=before_a,
+        _execute_witnessed_write_and_check(
+            db,
             outgoing_state=stale_a,
             expected_witness=world.witness_a,
-            applied=applied_a,
-            after_row=after_a,
         )
 
         current_b = _payload_state(
@@ -324,27 +345,10 @@ def _exercise_transcript(world: TranscriptWorld) -> None:
             witness=world.witness_b,
             family=family,
         )
-        before_b = copy.deepcopy(db.request(1))
-        applied_b = db.update_download_state_if_downloading(
-            1,
-            current_b.to_json(),
-            expected_enqueued_at=world.witness_b,
-        )
-        after_b = copy.deepcopy(db.request(1))
-        assert_witnessed_write_contract(
-            before_row=before_b,
+        _execute_witnessed_write_and_check(
+            db,
             outgoing_state=current_b,
             expected_witness=world.witness_b,
-            applied=applied_b,
-            after_row=after_b,
-        )
-        executed.append(family)
-
-    if tuple(executed) != world.operation_order:
-        raise AssertionError("not every generated operation was executed")
-    if set(executed) != set(_PAYLOAD_FAMILIES):
-        raise AssertionError(
-            f"operation alphabet drifted outside PR1: {executed!r}"
         )
 
     # Make the other two predicates independently decisive against the real
@@ -358,19 +362,10 @@ def _exercise_transcript(world: TranscriptWorld) -> None:
             witness=world.witness_b,
             family=family,
         )
-        before = copy.deepcopy(status_db.request(1))
-        applied = status_db.update_download_state_if_downloading(
-            1,
-            matching_b.to_json(),
-            expected_enqueued_at=world.witness_b,
-        )
-        after = copy.deepcopy(status_db.request(1))
-        assert_witnessed_write_contract(
-            before_row=before,
+        _execute_witnessed_write_and_check(
+            status_db,
             outgoing_state=matching_b,
             expected_witness=world.witness_b,
-            applied=applied,
-            after_row=after,
         )
 
     outgoing_db = FakePipelineDB()
@@ -381,19 +376,10 @@ def _exercise_transcript(world: TranscriptWorld) -> None:
             witness=world.witness_a,
             family=family,
         )
-        before = copy.deepcopy(outgoing_db.request(1))
-        applied = outgoing_db.update_download_state_if_downloading(
-            1,
-            mismatched_outgoing_a.to_json(),
-            expected_enqueued_at=world.witness_b,
-        )
-        after = copy.deepcopy(outgoing_db.request(1))
-        assert_witnessed_write_contract(
-            before_row=before,
+        _execute_witnessed_write_and_check(
+            outgoing_db,
             outgoing_state=mismatched_outgoing_a,
             expected_witness=world.witness_b,
-            applied=applied,
-            after_row=after,
         )
 
 

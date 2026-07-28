@@ -13,12 +13,13 @@ Four properties over generated feed histories:
    with exactly the newest decodable DownloadFileComplete event for its
    ``(username, remote filename)`` key inside the new-events window — and
    nothing else: no invented paths, no stamps from behind the cursor, no
-   writes to rows that left ``downloading`` mid-ingest. The SAME test
-   also covers T2 (issue #571): a subset of world keys are pre-ledgered
-   (``slskd_transfer_ledger`` rows, migration 045) and must be stamped
-   with the SAME newest-event oracle, in the SAME pass — regardless of
-   whether the owning request left 'downloading' mid-ingest (the ledger
-   stamp is independent of active_download_state's request-status gate).
+   writes to rows that left ``downloading`` before fresh classification.
+   The SAME test also covers T2 (issue #571): a subset of world keys are
+   pre-ledgered (``slskd_transfer_ledger`` rows, migration 045) and must be
+   stamped with the SAME newest-event oracle, in the SAME pass — regardless
+   of whether the owning request left ``downloading`` before fresh
+   classification (the ledger stamp is independent of
+   active_download_state's request-status gate).
 2. **Totality + exactly-once** — for arbitrary worlds (duplicate event
    ids, garbage timestamps, undecodable payloads, pruned cursors,
    bootstrap): ingestion never raises, every stamped path (both
@@ -28,10 +29,10 @@ Four properties over generated feed histories:
 3. **Duplicate-id invariance** — a feed with duplicated events (the
    mid-pagination offset-shift shape) produces exactly the same outcome
    as the same feed deduplicated.
-4. **Incarnation classification + replay** — stale prefetched A rows cannot
-   classify B's event window; before/at/after-B occurrence times, shared and
-   changed keys, candidate shadowing, replacement-before-write, and replay
-   preserve the current path, cursor commit marker, and idempotent ledger.
+4. **Incarnation classification + replay** — fresh current B rows classify
+   the event window; before/at/after-B occurrence times, shared and changed
+   keys, candidate shadowing, replacement-before-write, and replay preserve
+   the current path, cursor commit marker, and idempotent ledger.
 
 Multi-page scans and the page-cap ``cursor_gap`` path stay pinned by the
 hand tests in tests/test_slskd_events.py (they need >500-event feeds).
@@ -100,7 +101,7 @@ class FeedEvent:
 class RequestWorld:
     request_id: int
     file_keys: tuple[tuple[str, str], ...]  # (username, remote filename)
-    leaves_mid_ingest: bool
+    leaves_before_classification: bool
 
 
 @dataclass(frozen=True)
@@ -222,7 +223,7 @@ def _rows(draw) -> tuple[RequestWorld, ...]:
         rows.append(RequestWorld(
             request_id=rid,
             file_keys=tuple(keys),
-            leaves_mid_ingest=draw(st.booleans()),
+            leaves_before_classification=draw(st.booleans()),
         ))
     return tuple(rows)
 
@@ -331,8 +332,8 @@ def incarnation_event_worlds(draw) -> IncarnationEventWorld:
     )
 
 
-def _build_harness(world: EventWorld) -> tuple[FakePipelineDB, FakeSlskdAPI, list]:
-    """Seed fakes from the world; returns (db, slskd, prefetched rows)."""
+def _build_harness(world: EventWorld) -> tuple[FakePipelineDB, FakeSlskdAPI]:
+    """Seed fakes from the generated event world."""
     db = FakePipelineDB()
     slskd = FakeSlskdAPI()
 
@@ -381,16 +382,15 @@ def _build_harness(world: EventWorld) -> tuple[FakePipelineDB, FakeSlskdAPI, lis
                 else "2026-07-08T09:00:00.0000000Z")
             db.upsert_slskd_event_cursor("ev-absent", cursor_ts)
 
-    downloading = db.get_downloading()
     for row in world.rows:
-        if row.leaves_mid_ingest:
+        if row.leaves_before_classification:
             db.reset_downloading_to_wanted(
                 row.request_id,
                 expected_status="downloading",
             )
 
     # T2 (issue #571): seed one open ledger row per pre-ledgered key,
-    # AFTER the leaves_mid_ingest flip above -- the ledger stamp must
+    # AFTER the leaves-before-classification flip above -- the ledger stamp must
     # apply regardless of the owning request's CURRENT status.
     for username, filename in world.ledgered_keys:
         owner = _owning_request_id(world, (username, filename))
@@ -399,7 +399,7 @@ def _build_harness(world: EventWorld) -> tuple[FakePipelineDB, FakeSlskdAPI, lis
                 request_id=owner, username=username, filename=filename),
         ])
         db.confirm_transfer_enqueue(username, filename)
-    return db, slskd, downloading
+    return db, slskd
 
 
 def _owning_request_id(world: EventWorld, key: tuple[str, str]) -> int:
@@ -454,15 +454,18 @@ def expected_oracle_stamps(world: EventWorld) -> dict:
     for row in world.rows:
         for key in row.file_keys:
             expected[(row.request_id, key)] = (
-                None if row.leaves_mid_ingest else newest_per_key.get(key))
+                None
+                if row.leaves_before_classification
+                else newest_per_key.get(key)
+            )
     return expected
 
 
 def expected_ledger_stamps(world: EventWorld) -> dict[tuple[str, str], str | None]:
     """T2 invariant: every pre-ledgered key gets the SAME newest-event
-    oracle value, regardless of the owning request's leaves_mid_ingest
-    status -- the ledger stamp is independent of
-    active_download_state's request-status gate."""
+    oracle value, regardless of the owning request's current status
+    -- the ledger stamp is independent of active_download_state's
+    request-status gate."""
     newest_per_key = _newest_event_per_key(world)
     return {key: newest_per_key.get(key) for key in world.ledgered_keys}
 
@@ -535,7 +538,6 @@ def _build_incarnation_harness(
 ) -> tuple[
     _BeforeStateWriteDB,
     FakeSlskdAPI,
-    list,
     tuple[str, str],
 ]:
     db = _BeforeStateWriteDB()
@@ -554,7 +556,6 @@ def _build_incarnation_harness(
         key=attempt_a_key,
         enqueued_at=_event_timestamp(event_reference - timedelta(hours=3)),
     )
-    stale_attempt_a = db.get_downloading()
     _seed_incarnation(
         db,
         key=attempt_b_key,
@@ -594,7 +595,7 @@ def _build_incarnation_harness(
         ),
     ])
     db.confirm_transfer_enqueue(*attempt_b_key)
-    return db, slskd, stale_attempt_a, attempt_b_key
+    return db, slskd, attempt_b_key
 
 
 def assert_stamps_match(expected: dict, actual: dict) -> None:
@@ -676,15 +677,15 @@ class TestGeneratedEventStamping(unittest.TestCase):
 
     @given(world=oracle_worlds())
     def test_stamps_match_newest_decodable_event_in_window(self, world):
-        db, slskd, downloading = _build_harness(world)
-        result = ingest_download_file_events(db, slskd, downloading)
+        db, slskd = _build_harness(world)
+        result = ingest_download_file_events(db, slskd)
 
         assert_result_well_formed(result)
         expected = expected_oracle_stamps(world)
         assert_stamps_match(expected, _stamped_paths(db, world))
 
         # T2 (issue #571): ledgered keys follow the SAME oracle,
-        # independent of leaves_mid_ingest.
+        # independent of whether the owner left downloading.
         expected_ledger = expected_ledger_stamps(world)
         assert_ledger_stamps_match(expected_ledger, _owned_local_paths(db, world))
         self.assertEqual(
@@ -705,7 +706,7 @@ class TestGeneratedEventStamping(unittest.TestCase):
             result.requests_updated,
             sum(
                 1 for row in world.rows
-                if not row.leaves_mid_ingest and any(
+                if not row.leaves_before_classification and any(
                     expected[(row.request_id, key)] is not None
                     for key in row.file_keys)
             ))
@@ -760,7 +761,7 @@ class TestGeneratedIncarnationEventStamping(unittest.TestCase):
         self,
         world: IncarnationEventWorld,
     ) -> None:
-        db, slskd, stale_attempt_a, attempt_b_key = (
+        db, slskd, attempt_b_key = (
             _build_incarnation_harness(world)
         )
         witness_instant = _parse_witness_oracle(world.witness_text)
@@ -791,10 +792,9 @@ class TestGeneratedIncarnationEventStamping(unittest.TestCase):
         if loses_dirty_write or not valid_witness:
             with self.assertLogs("cratedigger", level="WARNING"):
                 first = ingest_download_file_events(
-                    db, slskd, stale_attempt_a)
+                    db, slskd)
         else:
-            first = ingest_download_file_events(
-                db, slskd, stale_attempt_a)
+            first = ingest_download_file_events(db, slskd)
 
         assert_result_well_formed(first)
         expected_first_path = (
@@ -824,8 +824,7 @@ class TestGeneratedIncarnationEventStamping(unittest.TestCase):
             "/downloads/incarnation/0",
         )
 
-        second = ingest_download_file_events(
-            db, slskd, db.get_downloading())
+        second = ingest_download_file_events(db, slskd)
 
         assert_result_well_formed(second)
         self.assertEqual(second.transfers_stamped, 0)
@@ -876,12 +875,12 @@ class TestGeneratedEventIngestTotality(unittest.TestCase):
 
     @given(world=wild_worlds())
     def test_ingest_never_crashes_and_second_pass_is_noop(self, world):
-        db, slskd, downloading = _build_harness(world)
+        db, slskd = _build_harness(world)
         generated_paths = {
             e.local_filename for e in world.events
             if e.local_filename is not None}
 
-        first = ingest_download_file_events(db, slskd, downloading)
+        first = ingest_download_file_events(db, slskd)
         assert_result_well_formed(first)
 
         stamped_after_first = _stamped_paths(db, world)
@@ -899,8 +898,7 @@ class TestGeneratedEventIngestTotality(unittest.TestCase):
                     "from the feed")
         cursor_after_first = db.get_slskd_event_cursor()
 
-        second = ingest_download_file_events(
-            db, slskd, db.get_downloading())
+        second = ingest_download_file_events(db, slskd)
         assert_result_well_formed(second)
         self.assertIn(second.outcome, ("no_new_events", "empty_feed"))
         self.assertEqual(stamped_after_first, _stamped_paths(db, world))
@@ -935,12 +933,11 @@ class TestGeneratedEventDuplicateInvariance(unittest.TestCase):
             rows=world.rows, events=tuple(events),
             cursor_index=new_cursor_index, ledgered_keys=world.ledgered_keys)
 
-        base_db, base_slskd, base_rows = _build_harness(world)
-        base_result = ingest_download_file_events(
-            base_db, base_slskd, base_rows)
+        base_db, base_slskd = _build_harness(world)
+        base_result = ingest_download_file_events(base_db, base_slskd)
 
-        dup_db, dup_slskd, dup_rows = _build_harness(dup_world)
-        dup_result = ingest_download_file_events(dup_db, dup_slskd, dup_rows)
+        dup_db, dup_slskd = _build_harness(dup_world)
+        dup_result = ingest_download_file_events(dup_db, dup_slskd)
 
         self.assertEqual(
             _stamped_paths(base_db, world), _stamped_paths(dup_db, dup_world))
@@ -989,7 +986,7 @@ class TestEventCheckersTripOnViolations(unittest.TestCase):
             assert_result_well_formed(
                 EventIngestResult(outcome="ingested", transfers_stamped=-1))
 
-    def test_incarnation_checker_trips_on_prefetched_attempt_stamp(self):
+    def test_incarnation_checker_trips_on_stale_attempt_stamp(self):
         with self.assertRaises(AssertionError):
             assert_incarnation_window(
                 expected_path="/downloads/current-b",

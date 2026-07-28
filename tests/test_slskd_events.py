@@ -110,8 +110,7 @@ class SlskdEventIngestCase(unittest.TestCase):
             id=id, timestamp=timestamp, type=type, data=data)
 
     def ingest(self):
-        return ingest_download_file_events(
-            self.db, self.slskd, self.db.get_downloading())
+        return ingest_download_file_events(self.db, self.slskd)
 
     def file_local_path(self, request_id: int = 1, index: int = 0) -> str | None:
         state = ActiveDownloadState.from_dict(
@@ -329,7 +328,7 @@ class TestIngestStamping(SlskdEventIngestCase):
                 id="ev-cursor", timestamp="2026-07-01T00:00:00.0000000Z"),
         ])
 
-        result = ingest_download_file_events(self.db, self.slskd, [])
+        result = ingest_download_file_events(self.db, self.slskd)
 
         self.assertEqual(result.requests_updated, 0)
         self.assertIsNone(self.file_local_path())
@@ -449,12 +448,11 @@ class TestIncarnationAwareStamping(SlskdEventIngestCase):
 
         self.assertEqual(self.file_local_path(), "/dl/eligible.flac")
 
-    def test_fresh_different_key_incarnation_ignores_prefetched_attempt(self):
+    def test_fresh_different_key_incarnation_uses_current_attempt(self):
         self.seed_downloading(
             files=[_file_state(username="peer-a", filename="A\\01.flac")],
             enqueued_at="2026-07-01T08:00:00+00:00",
         )
-        stale_attempt_a = self.db.get_downloading()
         self.seed_downloading(
             files=[_file_state(username="peer-b", filename="B\\01.flac")],
             enqueued_at="2026-07-01T10:00:00+00:00",
@@ -470,8 +468,7 @@ class TestIncarnationAwareStamping(SlskdEventIngestCase):
             self._cursor_event(),
         ])
 
-        result = ingest_download_file_events(
-            self.db, self.slskd, stale_attempt_a)
+        result = ingest_download_file_events(self.db, self.slskd)
 
         self.assertEqual(result.files_stamped, 1)
         self.assertEqual(self.file_local_path(), "/dl/B/01.flac")
@@ -481,7 +478,6 @@ class TestIncarnationAwareStamping(SlskdEventIngestCase):
             files=[_file_state(username="peer-a", filename="A\\01.flac")],
             enqueued_at="2026-07-01T08:00:00+00:00",
         )
-        stale_attempt_a = self.db.get_downloading()
         self.seed_downloading(
             files=[_file_state(username="peer-b", filename="B\\01.flac")],
             enqueued_at="2026-07-01T10:00:00+00:00",
@@ -497,8 +493,7 @@ class TestIncarnationAwareStamping(SlskdEventIngestCase):
             self._cursor_event(),
         ])
 
-        result = ingest_download_file_events(
-            self.db, self.slskd, stale_attempt_a)
+        result = ingest_download_file_events(self.db, self.slskd)
 
         self.assertEqual(result.files_stamped, 0)
         self.assertIsNone(self.file_local_path())

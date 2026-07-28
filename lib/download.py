@@ -1162,11 +1162,7 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
     # materialize grace window — and never blocks polling.
     try:
         from lib.slskd_events import ingest_download_file_events
-        ingest_result = ingest_download_file_events(
-            db,
-            ctx.slskd,
-            downloading_before_snapshot,
-        )
+        ingest_result = ingest_download_file_events(db, ctx.slskd)
         logger.info(ingest_result.to_log_line())
     except Exception:
         logger.exception(
