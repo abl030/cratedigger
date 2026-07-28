@@ -425,7 +425,11 @@ def _run_rejection_writer(
         return db
 
     if writer == "database_source":
-        source = DatabaseSource("unused-generated-dsn")
+        source = DatabaseSource(
+            "unused-generated-dsn",
+            musicbrainz_ws2_base="http://musicbrainz-mirror.test/ws/2",
+            discogs_api_base="http://discogs-mirror.test",
+        )
         cast(Any, source)._db = db
         album = make_grab_list_entry(
             artist="Generated Artist",

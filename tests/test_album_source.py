@@ -17,13 +17,15 @@ import conftest  # noqa: F401
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
-from album_source import MB_API_BASE, AlbumRecord, DatabaseSource
+from album_source import AlbumRecord, DatabaseSource
 from lib.grab_list import GrabListEntry
 from lib.quality import DownloadInfo, ValidationResult
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
+TEST_MB_WS2_BASE = "http://musicbrainz-mirror.test:5200/ws/2"
+TEST_DISCOGS_BASE = "http://discogs-mirror.test:8086"
 
 
 def _make_record(**overrides):
@@ -60,7 +62,11 @@ SAMPLE_TRACKS = [
 
 def _fallback_mb_request_url(mb_id: str) -> str:
     """Exercise the real MB fallback up to its outbound request boundary."""
-    source = DatabaseSource.__new__(DatabaseSource)
+    source = DatabaseSource(
+        "unused-dsn",
+        musicbrainz_ws2_base=TEST_MB_WS2_BASE,
+        discogs_api_base=TEST_DISCOGS_BASE,
+    )
     response = MagicMock()
     response.__enter__.return_value.read.return_value = b'{"media": []}'
     with patch("album_source.urllib.request.urlopen", return_value=response) as urlopen:
@@ -71,11 +77,41 @@ def _fallback_mb_request_url(mb_id: str) -> str:
     return urlopen.call_args.args[0].full_url
 
 
+def _fallback_discogs_request_url(discogs_id: str) -> str:
+    """Exercise the real Discogs fallback up to its outbound request boundary."""
+    source = DatabaseSource(
+        "unused-dsn",
+        musicbrainz_ws2_base=TEST_MB_WS2_BASE,
+        discogs_api_base=TEST_DISCOGS_BASE,
+    )
+    response = MagicMock()
+    response.__enter__.return_value.read.return_value = b'{"tracks": []}'
+    with patch("album_source.urllib.request.urlopen", return_value=response) as urlopen:
+        tracks = source._populate_tracks_discogs({"id": 42}, discogs_id)
+
+    if tracks:
+        raise AssertionError(f"empty Discogs response unexpectedly made tracks: {tracks!r}")
+    return urlopen.call_args.args[0].full_url
+
+
 def assert_mb_fallback_url_quotes_one_release_component(mb_id: str, url: str) -> None:
     """The DB-owned identifier is exactly one escaped path component."""
-    expected = f"{MB_API_BASE}/release/{quote(mb_id, safe='')}?inc=recordings&fmt=json"
+    expected = (
+        f"{TEST_MB_WS2_BASE}/release/{quote(mb_id, safe='')}"
+        "?inc=recordings&fmt=json"
+    )
     if url != expected:
         raise AssertionError(f"fallback URL did not quote one release component: {url!r}")
+
+
+def assert_discogs_fallback_uses_configured_origin(
+    discogs_id: str,
+    url: str,
+) -> None:
+    """Track population must use the configured Discogs mirror origin."""
+    expected = f"{TEST_DISCOGS_BASE}/api/releases/{discogs_id}"
+    if url != expected:
+        raise AssertionError(f"fallback URL ignored configured Discogs origin: {url!r}")
 
 
 class TestAlbumRecordFromDbRow(unittest.TestCase):
@@ -123,7 +159,7 @@ class TestDatabaseSourceMusicBrainzFallbackUrl(unittest.TestCase):
 
         self.assertEqual(
             _fallback_mb_request_url(mb_id),
-            "http://192.168.1.35:5200/ws/2/release/"
+            "http://musicbrainz-mirror.test:5200/ws/2/release/"
             "44438bf9-26d9-4460-9b4f-1a1b015e37a1?inc=recordings&fmt=json",
         )
 
@@ -144,10 +180,36 @@ class TestDatabaseSourceMusicBrainzFallbackUrl(unittest.TestCase):
 
     def test_fallback_url_oracle_rejects_an_unquoted_path_mutant(self) -> None:
         mb_id = "release/with?query"
-        raw_url = f"{MB_API_BASE}/release/{mb_id}?inc=recordings&fmt=json"
+        raw_url = f"{TEST_MB_WS2_BASE}/release/{mb_id}?inc=recordings&fmt=json"
 
         with self.assertRaisesRegex(AssertionError, "did not quote"):
             assert_mb_fallback_url_quotes_one_release_component(mb_id, raw_url)
+
+
+class TestDatabaseSourceDiscogsFallbackUrl(unittest.TestCase):
+    def test_fallback_uses_configured_discogs_origin(self) -> None:
+        self.assertEqual(
+            _fallback_discogs_request_url("83182"),
+            "http://discogs-mirror.test:8086/api/releases/83182",
+        )
+
+    @given(st.integers(min_value=1, max_value=2_000_000_000))
+    def test_fallback_uses_configured_origin_for_release_ids(
+        self,
+        discogs_id: int,
+    ) -> None:
+        release_id = str(discogs_id)
+        assert_discogs_fallback_uses_configured_origin(
+            release_id,
+            _fallback_discogs_request_url(release_id),
+        )
+
+    def test_fallback_url_oracle_rejects_hardcoded_origin_mutant(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "ignored configured"):
+            assert_discogs_fallback_uses_configured_origin(
+                "83182",
+                "https://discogs.ablz.au/api/releases/83182",
+            )
 
 
 class TestDatabaseSourceRejectAndRequeueSeam(unittest.TestCase):
@@ -227,7 +289,11 @@ class TestDatabaseSource(unittest.TestCase):
         for table in ["source_denylist", "download_log", "album_tracks", "album_requests"]:
             db._execute(f"TRUNCATE {table} CASCADE")
         db.conn.commit()
-        source = DatabaseSource(TEST_DSN)
+        source = DatabaseSource(
+            TEST_DSN,
+            musicbrainz_ws2_base=TEST_MB_WS2_BASE,
+            discogs_api_base=TEST_DISCOGS_BASE,
+        )
         source._db = db
         return source, db
 
