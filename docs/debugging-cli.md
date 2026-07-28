@@ -20,6 +20,30 @@ operator, not root. `routes` needs no database credential:
 ssh doc2 'pipeline-cli routes --json'
 ```
 
+The installed wrapper has two independent authority shapes:
+
+- `pipeline-delete`, `set-quality`, `upgrade`, `wrong-match-converge`, and
+  `resolve-rg` connect to `/run/cratedigger-web/web.sock`. The caller must be a
+  member of `services.cratedigger.web.accessGroup` (default
+  `cratedigger-web`). That membership grants complete local HTTP/API authority,
+  not merely permission to execute those five subcommands.
+- Every other command retains its existing resource-specific boundary:
+  PostgreSQL credentials/peer identity for database work, filesystem and Beets
+  access for media/quarantine operations, and the relevant secret-file groups
+  for commands that consume secrets. Web access group membership does not
+  grant any of those resources.
+
+Add only explicit trusted operator/agent identities to the web access group,
+then start a fresh login/session so the supplementary group is present. nginx
+and the non-root Cratedigger service identity are added by the module; nginx is
+deliberately not added to `cratedigger-ops`, `users`, the Discogs secret group,
+or another media/secret authority group.
+
+Changing an installed Nix-store wrapper's executable mode is not an
+authorization boundary: store programs are normally readable and can be
+invoked through their interpreter. Protect the socket, database, filesystem,
+Beets, and secret resources instead.
+
 For SQL, pass multi-line input through stdin rather than argv; this preserves
 dollar-quoted SQL and avoids shell expansion:
 
@@ -96,18 +120,33 @@ remains after a purge failure.
 ## API-backed mutation commands
 
 `pipeline-delete`, `set-quality`, `upgrade`, `wrong-match-converge`, and
-`resolve-rg` call the canonical web route. The Nix wrapper supplies the
-configured trusted-loopback origin; standalone/dev defaults to
-`http://127.0.0.1:8085`, overridden globally with `--api-base ORIGIN`. Valid
-JSON HTTP responses, including 5xx responses, are relayed on stdout. Any 2xx
-exits 0; 404 exits 2; 400/422 exits 3; 409 exits 4; other statuses exit 5.
-Locally generated transport/protocol failures (including malformed origins or
-non-object JSON responses) exit 5 with a structured error on stderr.
+`resolve-rg` call the canonical web route over the module-owned Unix socket.
+The installed Nix wrapper selects that socket while constructing the parser:
+it accepts no `--api-base`, carries no Basic username/password, and has no TCP,
+direct-database, or duplicate-service fallback. In the installed production
+nginx/Unix topology, the socket permission establishes local authority; the CLI
+then writes the trusted `cli` request channel, while nginx overwrites any
+browser-supplied marker. A forged channel header does not bypass that installed
+path because the backend has no production TCP listener.
+
+The standalone source/development entry point still defaults to
+`http://127.0.0.1:8085` and exposes global `--api-base ORIGIN` for deliberate
+TCP adapter testing. A directly started `web/server.py` listener using
+`--dev-port` trusts `X-Cratedigger-Request-Channel: cli` without a Unix
+permission boundary;
+it is deliberately insecure, must remain loopback-only, and exists only for
+adapter development/tests. Never expose it or use it as a production escape
+hatch. The installed wrapper does not expose `--api-base`.
+
+Valid JSON route responses, including 5xx responses, are relayed on stdout.
+Any 2xx exits 0; 404 exits 2; 400/422 exits 3; 409 exits 4; other statuses exit
+5. Locally generated transport/protocol failures (including a missing or
+unreachable socket, malformed development origins, redirects, or non-object
+JSON responses) exit 5 with a structured error on stderr and never fall back.
 `pipeline-delete ID --confirm DELETE` and
 `wrong-match-converge ID THRESHOLD_MILLI --apply` make no HTTP call when the
-local intent gate is missing. Future CD-SEC-02 perimeter work must provide CLI
-credentials/authorization or explicitly retain the trusted-loopback contract;
-these adapters do not bypass authentication.
+local intent gate is missing. Those words/flags are intent checks layered
+inside socket authorization, never credentials.
 
 ## Command capability surface
 

@@ -25,7 +25,9 @@ misrepresented as remotely exploitable vulnerabilities.
   (secrets, SSRF/deserialization, dependency, nix-module) were completed
   in-session by the orchestrator after the fable credit pool was exhausted, at
   the same rigor.
-- **Nothing in this audit was auto-fixed.** It is a report only.
+- **Nothing in the original audit was auto-fixed.** Later disposition notes
+  record remediation work separately; an implemented candidate is not marked
+  closed until its required live proof exists.
 
 ## Threat model (load-bearing)
 
@@ -39,20 +41,28 @@ secret leak / stored-XSS via peer or API data matters a lot.
 
 ### Deployment reality (why several severities are lower than they first look)
 
-The verification pass established that the web UI is **not internet-reachable**:
+The original verification pass established that the web UI was **not
+internet-reachable**:
 `music.ablz.au` is a Cloudflare **DNS-only** record resolving to a private LAN
 IP, doc2's host firewall opens only 80/443, and the nginx reverse proxy in
-front of the app adds no authentication. So the practical attacker position is
+front of the app added no authentication. So the practical attacker position
+for the finding was
 **"a device on the LAN/tailnet, or the operator's own browser being used as a
 CSRF relay"** — not an anonymous internet client. The findings below are rated
 against that reality, not against a hypothetical public exposure.
+
+As of the 2026-07-28 U6A update, the Basic/insecure perimeter is implemented in
+the candidate Cratedigger tree but has not completed the downstream cutover,
+live route/socket/header proof, natural successor cycle, or required
+sops-backed credential rotation. CD-SEC-02 therefore remains visibly pending
+live proof rather than closed.
 
 ## Severity summary
 
 | ID | Severity | Title | Primary location |
 |----|----------|-------|------------------|
 | CD-SEC-01 | High | Historical credentials committed to a public repo | deleted notifier docs, git history |
-| CD-SEC-02 | High | No auth + wildcard CORS on file-destructive endpoints | `web/server.py` |
+| CD-SEC-02 | High | Implemented candidate: fail-closed Basic/insecure web perimeter; pending live proof | `nix/module.nix`, `web/server.py` |
 | CD-SEC-03 | Medium | Remediated: HTTP import-preview is path-free and snapshots authorized DB paths | `web/routes/imports.py`, `lib/import_preview.py` |
 | CD-SEC-04 | Medium | Module hardening added for services that process attacker-controlled bytes; pending merge/deploy proof | `nix/module.nix` |
 | CD-SEC-05 | Low | Internal exception strings reflected in HTTP 500 bodies | `web/server.py` |
@@ -113,35 +123,61 @@ token, not a current credential.
   the current tree, leaving no live service or API target for either historical
   credential. History rewrite is optional for this single-operator repo.
 
-### CD-SEC-02 — No auth + wildcard CORS on file-destructive endpoints (High)
+### CD-SEC-02 — Web authentication perimeter (High; implemented, pending live proof)
 
-`web/server.py`'s `do_GET`/`do_POST` dispatch every route with **no** identity,
-session, token, or origin check, and every JSON response sends
-`Access-Control-Allow-Origin: *` with a permissive `do_OPTIONS`. `do_POST` also
-parses the body with `json.loads` regardless of `Content-Type`, so even a
-preflight-free `text/plain` "simple request" reaches handlers. Destructive sinks
-reachable with no credential include `/api/beets/delete` (removes library
-files), `/api/pipeline/ban-source` (routes through the typed destructive service
-and pinned exact-album child), `/api/pipeline/delete`, and the `/api/wrong-matches/*`
-family. The `confirm: "DELETE"` fields are input validation, not authorization —
-an attacker simply supplies the constant.
+The original finding was confirmed: `web/server.py` dispatched the complete
+site with no credential or origin boundary, emitted wildcard CORS, and allowed
+preflight-free cross-origin POSTs to reach destructive handlers. On the actual
+LAN/tailnet deployment, either another reachable device or a malicious page in
+the operator's browser could exercise the archival mutations. Confirmation
+words such as `DELETE` were intent validation, not authorization.
 
-- **Attack path (given the LAN/tailnet deployment):** any device on the trusted
-  network issues the POST directly with `curl`; or the operator visits any
-  malicious web page whose JavaScript `fetch()`es the internal API and
-  permanently deletes archival albums — the exact irreversible action the
-  archivist invariants reserve for the operator.
-- **Verification note:** the raw auditor framing ("any internet client") was
-  refuted — the service is LAN/tailnet-only. The surviving, confirmed path is
-  the CSRF/drive-by from the operator's browser plus any device already on the
-  trusted network.
-- **Remediation:** drop `Access-Control-Allow-Origin: *` entirely (this is a
-  same-origin SPA — it does not need CORS), validate `Origin`/`Referer` on all
-  mutating POSTs, and add an application-layer auth check (a shared secret the
-  reverse proxy injects and the handler verifies, or a session). Destructive
-  routes should be treated as privileged operations, not confirm-string-gated
-  ones. This is a design decision (auth mechanism) and is intentionally left for
-  the operator rather than auto-fixed.
+**Implemented candidate disposition (2026-07-28):**
+
+The following describes the candidate contract and post-U6B target. It is not a
+claim that doc2 currently runs this chain:
+
+- The NixOS module accepts exactly two mutually exclusive enabled-web modes:
+  whole-site Basic authentication or explicit `web.enableInsecure = true`.
+  Missing, conflicting, incomplete, store-backed, or authority-overlapping
+  configurations fail closed. No external-auth/OIDC option or fallback is
+  exposed; it is deferred pending a provider-neutral external-session
+  credential bridge.
+- U6B must preserve the existing public HTTPS proxy while changing its
+  Cratedigger upstream to the module-owned loopback nginx gateway for the
+  configured canonical hostname. In that target chain, the Python server has
+  no production TCP listener and adopts only the systemd-owned permissioned
+  Unix socket. Direct backend access is then OS-group authority, not a trusted
+  loopback convention.
+- Basic covers the SPA, static/audio resources, read APIs, route discovery, and
+  mutations. Its sole anonymous exception is exact GET/HEAD `/healthz` without
+  a query: a bare dependency-free `204`. The runtime `htpasswd` target must
+  remain outside `/nix/store`, exactly `root:<nginx-group> 0440`, readable by
+  nginx and denied to the application and non-nginx socket identities.
+- nginx disables wholesale request-header forwarding and reconstructs the
+  reviewed application request. Basic credentials, cookies, bearer/session
+  tokens, forwarded identity/roles/groups, connection/framing headers, and
+  client-supplied internal markers are not propagated.
+- Wildcard CORS is removed. Documents deny framing, resources are same-origin,
+  and every unsafe browser request validates all supplied `Origin`/`Referer`
+  signals against the fixed canonical HTTPS origin before body read or route
+  dispatch. Insecure mode bypasses only Basic; the same provenance and
+  transport controls remain, with a `CRITICAL` startup warning and persistent
+  footer.
+- The five API-backed `pipeline-cli` mutations use the same canonical routes
+  over the Unix socket with web access group authority and no Basic credential,
+  TCP override, direct-DB fallback, or duplicate service path. Other CLI
+  families retain their PostgreSQL, filesystem, Beets, and secret-specific
+  authority boundaries.
+
+**Why this is not closed yet:** U6B must still produce the signed downstream
+edge-close/cutover and pin receipts, exact active source, fresh web
+InvocationID, public Basic and anonymous-health probes, application
+credential/header non-observation, Unix listener/permission/unauthorized-user
+proof, browser same-origin proof, insecure-mode absence on doc2, a natural
+successor pipeline cycle, and a separate atomic sops-backed bcrypt credential
+rotation proving the replacement succeeds while the old credential is denied.
+Only the post-live audit update may mark CD-SEC-02 complete.
 
 ### CD-SEC-14 — Destructive routes do not bind identifiers to one release (Critical)
 
@@ -657,8 +693,9 @@ Operator actions (not code):
 
 - [x] **CD-SEC-01** — retire the unused credential-bearing integrations and
       remove their runtime, configuration, test, and documentation surfaces.
-- [ ] **CD-SEC-02** — decide the web-UI auth mechanism (proxy-injected shared
-      secret vs session) before wiring it.
+- [ ] **CD-SEC-02** — Basic/insecure perimeter is implemented in the candidate
+      tree; retain pending state until U6B's signed cutover, live boundary
+      probes, successor cycle, and separate sops-backed bcrypt rotation receipt.
 
 Priority data-loss / audit-integrity work:
 
@@ -697,7 +734,8 @@ Safe hardening fixes (candidate single PR):
 
 Auth, dependency and quality follow-through:
 
-- [ ] CD-SEC-02 — drop wildcard CORS + add auth layer.
+- [ ] CD-SEC-02 — implementation complete; downstream deployment, exact live
+      proof, and post-cutover credential rotation remain before closure.
 - [ ] CD-SEC-12 — update the flake, verify fixed Python closure versions, and
       consider moving local-only gates into CI.
 - [ ] CD-QUAL-01 — add missing CLI/API twins while extracting the shared
