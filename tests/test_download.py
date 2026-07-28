@@ -25,7 +25,7 @@ from lib.download_materialization import (
     MaterializeGuarded,
 )
 from lib.download_recovery import ProcessingPathKind, ProcessingPathLocation
-from lib.pipeline_db import TransferLedgerRow
+from lib.pipeline_db import AlbumRequestRow, TransferLedgerRow
 from lib.slskd_client import TransferSnapshot
 from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
 from tests.helpers import (
@@ -1010,6 +1010,39 @@ class TestSlskdEnqueueWithOutcome(unittest.TestCase):
         self.assertEqual(outcome.downloads[0].id, "current-errored")
 
 
+class TestDownloadOwnershipWriterFence(unittest.TestCase):
+    def test_expected_witness_is_independent_of_outgoing_state(self):
+        from lib.download_ownership import DownloadOwnershipWriter
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={
+                "filetype": "flac",
+                "enqueued_at": "attempt-a",
+                "files": [],
+            },
+        ))
+        writer = DownloadOwnershipWriter(db_factory=lambda: db)
+
+        applied = writer.update_state_if_downloading(
+            42,
+            '{"filetype":"mp3","enqueued_at":"attempt-b","files":[]}',
+            expected_enqueued_at="attempt-a",
+        )
+
+        self.assertFalse(applied)
+        self.assertEqual(
+            db.request(42)["active_download_state"],
+            {
+                "filetype": "flac",
+                "enqueued_at": "attempt-a",
+                "files": [],
+            },
+        )
+
+
 class TestTransferLedgerWriteAheadOrdering(unittest.TestCase):
     """T1 pin (issue #571): slskd_enqueue_with_outcome -- the ONE
     production call site of ctx.slskd.transfers.enqueue -- ledgers every
@@ -1163,7 +1196,7 @@ class TestTransferLedgerWriteAheadOrdering(unittest.TestCase):
             ),
         ])
 
-        ingest = ingest_download_file_events(db, slskd, [])
+        ingest = ingest_download_file_events(db, slskd)
 
         self.assertEqual(ingest.transfers_stamped, 0)
         pending = next(iter(db._transfer_ledger.values()))
@@ -3725,6 +3758,7 @@ class TestHarvestTerminalTransferEvidence(unittest.TestCase):
                     "state": "Completed, Errored",
                     "bytesTransferred": 0,
                     "exception": "Read error: Connection reset by peer",
+                    "requestedAt": row1["active_download_state"]["enqueued_at"],
                 }]}],
             },
             {
@@ -3776,6 +3810,7 @@ class TestHarvestTerminalTransferEvidence(unittest.TestCase):
                 "state": "Completed, Rejected",
                 "bytesTransferred": 0,
                 "exception": "Transfer rejected: Banned",
+                "requestedAt": row["active_download_state"]["enqueued_at"],
             }]}],
         }]
         ctx, fake_db = self._ctx([row], slskd_downloads)
@@ -3798,6 +3833,134 @@ class TestHarvestTerminalTransferEvidence(unittest.TestCase):
         state = fake_db.request(1)["active_download_state"]
         self.assertEqual(state["files"][0]["last_state"], "InProgress")
         self.assertNotIn("last_exception", state["files"][0])
+
+    def test_same_status_new_incarnation_rejects_stale_harvest_and_continues(self):
+        """A same-row A→B replacement cannot receive A's terminal evidence."""
+        from lib.download import harvest_terminal_transfer_evidence
+
+        first = self._row(1, files=[{
+            "username": "user1",
+            "filename": "user1\\Music\\01.flac",
+            "file_dir": "user1\\Music",
+            "size": 1000,
+            "last_state": "InProgress",
+        }])
+        second = self._row(2, files=[{
+            "username": "user2",
+            "filename": "user2\\Music\\02.flac",
+            "file_dir": "user2\\Music",
+            "size": 2000,
+            "last_state": "InProgress",
+        }])
+        first["active_download_state"]["current_path"] = "/same/path"
+        first_enqueued_at = first["active_download_state"]["enqueued_at"]
+        second_enqueued_at = second["active_download_state"]["enqueued_at"]
+        replacement_enqueued_at = (
+            datetime.now(UTC) + timedelta(seconds=1)
+        ).isoformat()
+        replacement_state = {
+            **first["active_download_state"],
+            "enqueued_at": replacement_enqueued_at,
+            "last_progress_at": replacement_enqueued_at,
+        }
+        installed_b_rows = []
+        downloads = [
+            {
+                "username": "user1",
+                "directories": [{"directory": "user1\\Music", "files": [{
+                    "filename": "user1\\Music\\01.flac",
+                    "id": "tid-1",
+                    "state": "Completed, Rejected",
+                    "bytesTransferred": 0,
+                    "exception": "stale A failure",
+                    "requestedAt": first_enqueued_at,
+                }]}],
+            },
+            {
+                "username": "user2",
+                "directories": [{"directory": "user2\\Music", "files": [{
+                    "filename": "user2\\Music\\02.flac",
+                    "id": "tid-2",
+                    "state": "Completed, Errored",
+                    "bytesTransferred": 0,
+                    "exception": "current row failure",
+                    "requestedAt": second_enqueued_at,
+                }]}],
+            },
+        ]
+
+        class ReplaceFirstIncarnationDB(FakePipelineDB):
+            def update_download_state_if_downloading(
+                self,
+                request_id: int,
+                state_json: str,
+                *,
+                expected_enqueued_at: str,
+            ) -> bool:
+                if request_id == 1:
+                    self._requests[1]["active_download_state"] = replacement_state
+                    installed_b_rows.append(self.get_request(1))
+                return super().update_download_state_if_downloading(
+                    request_id,
+                    state_json,
+                    expected_enqueued_at=expected_enqueued_at,
+                )
+
+        db = ReplaceFirstIncarnationDB()
+        for row in (first, second):
+            db.seed_request(row)
+        ctx = make_ctx_with_fake_db(
+            db,
+            slskd=FakeSlskdAPI(downloads=downloads),
+        )
+
+        with self.assertLogs("cratedigger", level=logging.INFO) as captured:
+            harvest_terminal_transfer_evidence(ctx)
+
+        self.assertEqual(db.request(1), installed_b_rows[0])
+        harvested_second = db.request(2)["active_download_state"]["files"][0]
+        self.assertEqual(harvested_second["last_state"], "Completed, Errored")
+        self.assertEqual(
+            harvested_second["last_exception"], "current row failure",
+        )
+        self.assertIn(
+            "1 downloading row(s)",
+            "\n".join(captured.output),
+        )
+
+    def test_invalid_enqueue_witness_cannot_match_terminal_history(self):
+        """Malformed attempt time is exclusion, never datetime.min authority."""
+        from lib.download import harvest_terminal_transfer_evidence
+
+        row = self._row(1, files=[{
+            "username": "user1",
+            "filename": "user1\\Music\\01.flac",
+            "file_dir": "user1\\Music",
+            "size": 1000,
+            "last_state": "InProgress",
+        }])
+        row["active_download_state"]["enqueued_at"] = "not-a-timestamp"
+        downloads = [{
+            "username": "user1",
+            "directories": [{"directory": "user1\\Music", "files": [{
+                "filename": "user1\\Music\\01.flac",
+                "id": "tid-old",
+                "state": "Completed, Succeeded",
+                "bytesTransferred": 1000,
+                "requestedAt": "2020-01-01T00:00:00+00:00",
+            }]}],
+        }]
+        ctx, fake_db = self._ctx([row], downloads)
+
+        harvest_terminal_transfer_evidence(ctx)
+
+        self.assertEqual(fake_db.update_download_state_calls, [])
+        self.assertEqual(
+            fake_db.request(1)["active_download_state"]["files"][0][
+                "last_state"
+            ],
+            "InProgress",
+        )
 
     def test_no_downloading_rows_is_a_noop(self):
         ctx, fake_db = self._ctx([], slskd_downloads=[])
@@ -3943,6 +4106,40 @@ class TestHarvestTerminalTransferEvidence(unittest.TestCase):
 class TestPollActiveDownloads(unittest.TestCase):
     """Test poll_active_downloads() — core polling function."""
 
+    INVALID_ACTIVE_STATES: ClassVar[list[tuple[str, object]]] = [
+        ("none", None),
+        ("malformed_json", "{not-json"),
+        ("malformed_shape", {"garbage": True}),
+        ("missing_witness", {"filetype": "flac", "files": []}),
+        ("empty_witness", {
+            "filetype": "flac", "enqueued_at": "", "files": [],
+        }),
+        ("invalid_witness", {
+            "filetype": "flac",
+            "enqueued_at": "not-a-timestamp",
+            "files": [],
+        }),
+    ]
+
+    def _assert_no_poll_effects(
+        self,
+        db: FakePipelineDB,
+        slskd: FakeSlskdAPI,
+        *,
+        expected_state_updates: int = 0,
+        local_path: str | None = None,
+    ) -> None:
+        self.assertEqual(len(db.update_download_state_calls), expected_state_updates)
+        self.assertEqual(db.status_history, [])
+        self.assertEqual(db.download_logs, [])
+        self.assertEqual(db.list_import_jobs(request_id=1), [])
+        self.assertEqual(db.cooldowns_applied, [])
+        self.assertEqual(db.denylist, [])
+        self.assertEqual(slskd.transfers.enqueue_calls, [])
+        self.assertEqual(slskd.transfers.cancel_download_calls, [])
+        if local_path is not None:
+            self.assertTrue(os.path.isfile(local_path))
+
     def _assert_pre_enqueue_failure_event(
         self,
         db: FakePipelineDB,
@@ -4073,24 +4270,43 @@ class TestPollActiveDownloads(unittest.TestCase):
         return ctx, fake_db
 
     def test_poll_lost_ownership_stops_before_every_verdict_effect(self):
-        """A concurrent transition wins before stale state or effects land."""
+        """A same-status A→B replacement wins before stale effects land."""
         from lib.download import poll_active_downloads
         from lib.quality import ActiveDownloadState
 
-        class LoseOwnershipOnPersistDB(FakePipelineDB):
+        row = self._make_downloading_row()
+        original_state = row["active_download_state"]
+        original_state["current_path"] = "/same/path"
+        original_enqueued_at = original_state["enqueued_at"]
+        replacement_enqueued_at = (
+            datetime.now(UTC) + timedelta(seconds=1)
+        ).isoformat()
+        replacement_state = {
+            **original_state,
+            "enqueued_at": replacement_enqueued_at,
+            "last_progress_at": replacement_enqueued_at,
+        }
+        installed_b_rows = []
+
+        class ReplaceIncarnationOnPersistDB(FakePipelineDB):
             def update_download_state_if_downloading(
                 self,
                 request_id: int,
                 state_json: str,
+                *,
+                expected_enqueued_at: str,
             ) -> bool:
-                self._requests[request_id]["status"] = "replaced"
+                self._requests[request_id][
+                    "active_download_state"
+                ] = replacement_state
+                installed_b_rows.append(self.get_request(request_id))
                 return super().update_download_state_if_downloading(
                     request_id,
                     state_json,
+                    expected_enqueued_at=expected_enqueued_at,
                 )
 
-        row = self._make_downloading_row()
-        losing_db = LoseOwnershipOnPersistDB()
+        losing_db = ReplaceIncarnationOnPersistDB()
         ctx, fake_db = self._make_poll_ctx(
             downloading_rows=[row],
             slskd_downloads=[{
@@ -4100,28 +4316,38 @@ class TestPollActiveDownloads(unittest.TestCase):
                     "id": "tid-1",
                     "state": "Completed, Succeeded",
                     "bytesTransferred": 30000000,
+                    "requestedAt": original_enqueued_at,
                 }]}],
             }],
             fake_db=losing_db,
         )
-        original_state = fake_db.request(1)["active_download_state"]
-        assert isinstance(original_state, dict)
-        original_state_json = ActiveDownloadState.from_dict(
-            original_state,
+        seeded_state = fake_db.request(1)["active_download_state"]
+        assert isinstance(seeded_state, dict)
+        local_path = seeded_state["files"][0]["local_path"]
+        replacement_state["files"][0]["local_path"] = local_path
+        replacement_state_json = ActiveDownloadState.from_dict(
+            replacement_state,
         ).to_json()
-        local_path = original_state["files"][0]["local_path"]
 
         poll_active_downloads(ctx)
 
         current = fake_db.request(1)
-        self.assertEqual(current["status"], "replaced")
+        self.assertEqual(current["status"], "downloading")
+        self.assertEqual(current, installed_b_rows[0])
         self.assertEqual(
             ActiveDownloadState.from_dict(current["active_download_state"]).to_json(),
-            original_state_json,
+            replacement_state_json,
         )
-        self.assertEqual(fake_db.update_download_state_calls, [])
+        self.assertEqual(
+            [request_id for request_id, _state_json
+             in fake_db.update_download_state_calls],
+            [1],
+        )
         self.assertEqual(fake_db.list_import_jobs(request_id=1), [])
         self.assertEqual(fake_db.download_logs, [])
+        self.assertEqual(fake_db.status_history, [])
+        self.assertEqual(fake_db.cooldowns_applied, [])
+        self.assertEqual(fake_db.denylist, [])
         slskd = cast(FakeSlskdAPI, ctx.slskd)
         self.assertEqual(slskd.transfers.enqueue_calls, [])
         self.assertEqual(slskd.transfers.cancel_download_calls, [])
@@ -4139,13 +4365,18 @@ class TestPollActiveDownloads(unittest.TestCase):
 
         from lib.download import poll_active_downloads
         row = self._make_downloading_row()
+        event_timestamp = (
+            datetime.fromisoformat(
+                row["active_download_state"]["enqueued_at"],
+            ) + timedelta(seconds=1)
+        ).isoformat()
         ctx, fake_db = self._make_poll_ctx(downloading_rows=[row])
         fake_db.upsert_slskd_event_cursor(
             "ev-cursor", "2026-07-01T00:00:00.0000000Z")
         slskd = cast(Any, ctx.slskd)
         slskd.events.set_events([
             slskd.events.make_event(
-                id="ev-1", timestamp="2026-07-01T10:00:00.0000000Z",
+                id="ev-1", timestamp=event_timestamp,
                 type="DownloadFileComplete",
                 data=_json.dumps({
                     "version": 0,
@@ -4188,6 +4419,559 @@ class TestPollActiveDownloads(unittest.TestCase):
         self.assertLess(
             call_log.index("transfers.get_all_downloads"),
             call_log.index("events.list"))
+
+    def test_real_ingest_outcomes_refresh_and_exclude_b(self):
+        """Normal, no-op, and raised ingestion all refresh away snapshot B."""
+        from lib.download import poll_active_downloads
+        from tests.fakes.slskd import FakeSlskdEvents
+
+        def make_installing_events(
+            slskd_api: FakeSlskdAPI,
+            database: FakePipelineDB,
+            replacement: dict[str, object],
+            installed: list[AlbumRequestRow | None],
+            ingest_outcome: str,
+        ) -> FakeSlskdEvents:
+            class InstallBOnEventList(FakeSlskdEvents):
+                installed = False
+
+                def list(self, *, limit=500, offset=0):
+                    if not self.installed:
+                        self.installed = True
+                        database._requests[1][
+                            "active_download_state"
+                        ] = replacement
+                        installed.append(database.get_request(1))
+                    if ingest_outcome == "raised":
+                        raise RuntimeError("events down")
+                    return super().list(limit=limit, offset=offset)
+
+            return InstallBOnEventList(slskd_api)
+
+        for outcome in ("ingested", "no_new_events", "raised"):
+            with self.subTest(outcome=outcome):
+                now = datetime.now(UTC)
+                a_enqueued_at = (now - timedelta(seconds=2)).isoformat()
+                b_enqueued_at = (now - timedelta(seconds=1)).isoformat()
+                row = self._make_downloading_row(state_dict={
+                    "filetype": "flac",
+                    "enqueued_at": a_enqueued_at,
+                    "files": [{
+                        "username": "user1",
+                        "filename": "user1\\Music\\01.flac",
+                        "file_dir": "user1\\Music",
+                        "size": 30000000,
+                    }],
+                })
+                snapshot = [{
+                    "username": "user1",
+                    "directories": [{
+                        "directory": "user1\\Music",
+                        "files": [{
+                            "filename": "user1\\Music\\01.flac",
+                            "id": "tid-a",
+                            "state": "InProgress",
+                            "bytesTransferred": 1,
+                            "requestedAt": a_enqueued_at,
+                        }],
+                    }],
+                }]
+                replacement_state = {
+                    **row["active_download_state"],
+                    "enqueued_at": b_enqueued_at,
+                    "last_progress_at": b_enqueued_at,
+                    "files": [
+                        dict(file_state)
+                        for file_state in row["active_download_state"]["files"]
+                    ],
+                }
+                installed_rows: list[AlbumRequestRow | None] = []
+                slskd = FakeSlskdAPI(downloads=snapshot)
+                ctx, fake_db = self._make_poll_ctx(
+                    downloading_rows=[row],
+                    slskd_downloads=snapshot,
+                    slskd=slskd,
+                )
+
+                slskd.events = make_installing_events(
+                    slskd,
+                    fake_db,
+                    replacement_state,
+                    installed_rows,
+                    outcome,
+                )
+                fake_db.upsert_slskd_event_cursor(
+                    "ev-cursor", (now - timedelta(minutes=1)).isoformat(),
+                )
+                events = [slskd.events.make_event(
+                    id="ev-cursor",
+                    timestamp=(now - timedelta(minutes=1)).isoformat(),
+                    type="Noise",
+                    data="{}",
+                )]
+                if outcome == "ingested":
+                    events.insert(0, slskd.events.make_event(
+                        id="ev-new",
+                        timestamp=now.isoformat(),
+                        type="Noise",
+                        data="{}",
+                    ))
+                slskd.events.set_events(events)
+
+                poll_active_downloads(ctx)
+
+                self.assertEqual(fake_db.request(1), installed_rows[0])
+                self._assert_no_poll_effects(fake_db, slskd)
+
+    def test_poll_refresh_failure_skips_every_row(self):
+        """Without the post-ingest refresh, no prefetched row may poll."""
+        from lib.download import poll_active_downloads
+
+        class FailRefreshDB(FakePipelineDB):
+            get_downloading_call_count = 0
+
+            def get_downloading(self):
+                self.get_downloading_call_count += 1
+                if self.get_downloading_call_count == 2:
+                    raise RuntimeError("refresh failed")
+                return super().get_downloading()
+
+        row = self._make_downloading_row()
+        db = FailRefreshDB()
+        slskd = FakeSlskdAPI()
+        ctx, fake_db = self._make_poll_ctx(
+            downloading_rows=[row],
+            fake_db=db,
+            slskd=slskd,
+        )
+        fake_db.upsert_slskd_event_cursor(
+            "ev-cursor", "2026-07-01T00:00:00+00:00",
+        )
+        slskd.events.set_events([slskd.events.make_event(
+            id="ev-cursor",
+            timestamp="2026-07-01T00:00:00+00:00",
+            type="Noise",
+            data="{}",
+        )])
+
+        poll_active_downloads(ctx)
+
+        self.assertEqual(db.get_downloading_call_count, 2)
+        self._assert_no_poll_effects(fake_db, slskd)
+
+    def test_invalid_initial_incarnations_are_excluded_without_reset(self):
+        """Missing, malformed, empty, and invalid witnesses own no snapshot."""
+        from lib.download import poll_active_downloads
+
+        for name, invalid_state in self.INVALID_ACTIVE_STATES:
+            with self.subTest(state=name):
+                row = self._make_downloading_row()
+                row["active_download_state"] = invalid_state
+                slskd = FakeSlskdAPI()
+                ctx, fake_db = self._make_poll_ctx(
+                    downloading_rows=[row],
+                    slskd=slskd,
+                )
+                poll_active_downloads(ctx)
+
+                self.assertEqual(
+                    slskd.transfers.get_all_downloads_calls,
+                    [],
+                )
+                self._assert_no_poll_effects(fake_db, slskd)
+
+    def test_invalid_only_cycle_still_ingests_event_feed(self):
+        """Invalid poll admission cannot stop cursor maintenance."""
+        from lib.download import poll_active_downloads
+
+        row = self._make_downloading_row()
+        row["active_download_state"] = None
+        slskd = FakeSlskdAPI()
+        ctx, fake_db = self._make_poll_ctx(
+            downloading_rows=[row],
+            slskd=slskd,
+        )
+
+        poll_active_downloads(ctx)
+
+        self.assertEqual(slskd.events.list_calls, [(1, 0)])
+        self.assertEqual(slskd.transfers.get_all_downloads_calls, [])
+        self.assertEqual(fake_db.status_history, [])
+        self.assertEqual(fake_db.update_download_state_calls, [])
+
+    def test_invalid_refreshed_incarnations_are_excluded_without_reset(self):
+        """A valid pre-snapshot A cannot carry an invalid refreshed row."""
+        from lib.download import poll_active_downloads
+        from tests.fakes.slskd import FakeSlskdEvents
+
+        def make_invalidating_events(
+            slskd_api: FakeSlskdAPI,
+            database: FakePipelineDB,
+            invalid: object,
+        ) -> FakeSlskdEvents:
+            class InstallInvalidOnEventList(FakeSlskdEvents):
+                installed = False
+
+                def list(self, *, limit=500, offset=0):
+                    if not self.installed:
+                        self.installed = True
+                        database._requests[1][
+                            "active_download_state"
+                        ] = invalid
+                    return super().list(limit=limit, offset=offset)
+
+            return InstallInvalidOnEventList(slskd_api)
+
+        for name, invalid_state in self.INVALID_ACTIVE_STATES:
+            with self.subTest(state=name):
+                row = self._make_downloading_row()
+                slskd = FakeSlskdAPI()
+                ctx, fake_db = self._make_poll_ctx(
+                    downloading_rows=[row],
+                    slskd=slskd,
+                )
+
+                slskd.events = make_invalidating_events(
+                    slskd,
+                    fake_db,
+                    invalid_state,
+                )
+                fake_db.upsert_slskd_event_cursor(
+                    "ev-cursor", "2026-07-01T00:00:00+00:00",
+                )
+                slskd.events.set_events([slskd.events.make_event(
+                    id="ev-cursor",
+                    timestamp="2026-07-01T00:00:00+00:00",
+                    type="Noise",
+                    data="{}",
+                )])
+
+                poll_active_downloads(ctx)
+
+                self.assertEqual(
+                    len(slskd.transfers.get_all_downloads_calls),
+                    1,
+                )
+                self._assert_no_poll_effects(fake_db, slskd)
+
+    def test_real_event_ingest_stamps_b_but_poll_admission_excludes_it(self):
+        """Real U3 stamps refreshed B; U4 still requires pre-snapshot B."""
+        import json as _json
+
+        from lib.download import poll_active_downloads
+        from tests.fakes.slskd import FakeSlskdEvents
+
+        a_enqueued_at = "2026-07-01T09:00:00+00:00"
+        b_enqueued_at = "2026-07-01T10:00:00+00:00"
+        a_filename = "user-a\\Album\\01.flac"
+        b_filename = "user-b\\Album\\01.flac"
+        row = self._make_downloading_row(state_dict={
+            "filetype": "flac",
+            "enqueued_at": a_enqueued_at,
+            "files": [{
+                "username": "user-a",
+                "filename": a_filename,
+                "file_dir": "user-a\\Album",
+                "size": 30000000,
+            }],
+        })
+        transfer_snapshot = [{
+            "username": "user-a",
+            "directories": [{"directory": "user-a\\Album", "files": [{
+                "filename": a_filename,
+                "id": "tid-a",
+                "state": "InProgress",
+                "bytesTransferred": 1,
+                "requestedAt": a_enqueued_at,
+            }]}],
+        }]
+        b_state = {
+            "filetype": "flac",
+            "enqueued_at": b_enqueued_at,
+            "files": [{
+                "username": "user-b",
+                "filename": b_filename,
+                "file_dir": "user-b\\Album",
+                "size": 30000000,
+            }],
+        }
+
+        slskd = FakeSlskdAPI(downloads=transfer_snapshot)
+        db = FakePipelineDB()
+        ctx, fake_db = self._make_poll_ctx(
+            downloading_rows=[row],
+            slskd_downloads=transfer_snapshot,
+            fake_db=db,
+            slskd=slskd,
+        )
+
+        class InstallBOnEventList(FakeSlskdEvents):
+            installed = False
+
+            def list(self, *, limit=500, offset=0):
+                if not self.installed:
+                    self.installed = True
+                    fake_db._requests[1]["active_download_state"] = b_state
+                return super().list(limit=limit, offset=offset)
+
+        slskd.events = InstallBOnEventList(slskd)
+        fake_db.upsert_slskd_event_cursor(
+            "ev-cursor", "2026-07-01T00:00:00+00:00",
+        )
+        slskd.events.set_events([
+            slskd.events.make_event(
+                id="ev-b",
+                timestamp="2026-07-01T10:01:00+00:00",
+                type="DownloadFileComplete",
+                data=_json.dumps({
+                    "version": 0,
+                    "localFilename": "/dl/user-b/Album/01.flac",
+                    "remoteFilename": b_filename,
+                    "transfer": {
+                        "id": "tid-b",
+                        "username": "user-b",
+                        "filename": b_filename,
+                        "size": 30000000,
+                    },
+                }),
+            ),
+            slskd.events.make_event(
+                id="ev-cursor",
+                timestamp="2026-07-01T00:00:00+00:00",
+                type="Noise",
+                data="{}",
+            ),
+        ])
+        poll_active_downloads(ctx)
+
+        persisted = fake_db.request(1)["active_download_state"]
+        self.assertEqual(
+            persisted["files"][0]["local_path"],
+            "/dl/user-b/Album/01.flac",
+        )
+        self.assertEqual(persisted["enqueued_at"], b_enqueued_at)
+        self._assert_no_poll_effects(
+            fake_db,
+            slskd,
+            expected_state_updates=1,
+        )
+        self.assertLess(
+            slskd.call_log.index("transfers.get_all_downloads"),
+            slskd.call_log.index("events.list"),
+        )
+
+    def test_real_ingest_lost_cas_excludes_b_with_and_without_cursor_gap(self):
+        """Both U3 lost-CAS outcomes keep B off A's transfer snapshot."""
+        import json as _json
+
+        from lib.download import poll_active_downloads
+        from lib.slskd_events import EVENT_PAGE_LIMIT, MAX_EVENT_PAGES
+
+        def make_lost_stamp_db(
+            replacement: dict[str, object],
+            installed: list[AlbumRequestRow | None],
+        ) -> FakePipelineDB:
+            class LoseStampToBDB(FakePipelineDB):
+                lost_once = False
+
+                def update_download_state_if_downloading(
+                    self,
+                    request_id: int,
+                    state_json: str,
+                    *,
+                    expected_enqueued_at: str,
+                ) -> bool:
+                    if not self.lost_once:
+                        self.lost_once = True
+                        self._requests[request_id][
+                            "active_download_state"
+                        ] = replacement
+                        installed.append(self.get_request(request_id))
+                    return super().update_download_state_if_downloading(
+                        request_id,
+                        state_json,
+                        expected_enqueued_at=expected_enqueued_at,
+                    )
+
+            return LoseStampToBDB()
+
+        for cursor_gap in (False, True):
+            with self.subTest(cursor_gap=cursor_gap):
+                now = datetime.now(UTC)
+                a_enqueued_at = (now - timedelta(seconds=2)).isoformat()
+                b_enqueued_at = now.isoformat()
+                filename = "user1\\Music\\01.flac"
+                row = self._make_downloading_row(state_dict={
+                    "filetype": "flac",
+                    "enqueued_at": a_enqueued_at,
+                    "current_path": "/same/path",
+                    "files": [{
+                        "username": "user1",
+                        "filename": filename,
+                        "file_dir": "user1\\Music",
+                        "size": 30000000,
+                    }],
+                })
+                b_state = {
+                    **row["active_download_state"],
+                    "enqueued_at": b_enqueued_at,
+                    "last_progress_at": b_enqueued_at,
+                    "files": [
+                        dict(file_state)
+                        for file_state in row["active_download_state"]["files"]
+                    ],
+                }
+                installed_b_rows: list[AlbumRequestRow | None] = []
+
+                snapshot = [{
+                    "username": "user1",
+                    "directories": [{
+                        "directory": "user1\\Music",
+                        "files": [{
+                            "filename": filename,
+                            "id": "tid-a",
+                            "state": "Completed, Succeeded",
+                            "bytesTransferred": 30000000,
+                            "requestedAt": a_enqueued_at,
+                        }],
+                    }],
+                }]
+                slskd = FakeSlskdAPI(downloads=snapshot)
+                db = make_lost_stamp_db(b_state, installed_b_rows)
+                ctx, fake_db = self._make_poll_ctx(
+                    downloading_rows=[row],
+                    slskd_downloads=snapshot,
+                    fake_db=db,
+                    slskd=slskd,
+                )
+                initial = fake_db.request(1)["active_download_state"]
+                local_path = initial["files"][0]["local_path"]
+                cursor_timestamp = (now - timedelta(minutes=1)).isoformat()
+                event_timestamp = (now - timedelta(seconds=1)).isoformat()
+                fake_db.upsert_slskd_event_cursor(
+                    "ev-cursor",
+                    cursor_timestamp,
+                )
+                completion = slskd.events.make_event(
+                    id="ev-a",
+                    timestamp=event_timestamp,
+                    type="DownloadFileComplete",
+                    data=_json.dumps({
+                        "version": 0,
+                        "localFilename": "/dl/user1/Music/01.flac",
+                        "remoteFilename": filename,
+                        "transfer": {
+                            "id": "tid-a",
+                            "username": "user1",
+                            "filename": filename,
+                            "size": 30000000,
+                        },
+                    }),
+                )
+                if cursor_gap:
+                    events = [completion]
+                    events.extend(
+                        slskd.events.make_event(
+                            id=f"noise-{index}",
+                            timestamp=event_timestamp,
+                            type="Noise",
+                            data="{}",
+                        )
+                        for index in range(EVENT_PAGE_LIMIT * MAX_EVENT_PAGES)
+                    )
+                else:
+                    events = [
+                        completion,
+                        slskd.events.make_event(
+                            id="ev-cursor",
+                            timestamp=cursor_timestamp,
+                            type="Noise",
+                            data="{}",
+                        ),
+                    ]
+                slskd.events.set_events(events)
+
+                poll_active_downloads(ctx)
+
+                self.assertEqual(fake_db.request(1), installed_b_rows[0])
+                cursor = fake_db.get_slskd_event_cursor()
+                assert cursor is not None
+                self.assertEqual(
+                    cursor["last_event_id"],
+                    "ev-a" if cursor_gap else "ev-cursor",
+                )
+                self._assert_no_poll_effects(
+                    fake_db,
+                    slskd,
+                    expected_state_updates=1,
+                    local_path=local_path,
+                )
+
+    def test_exact_admission_preserves_refreshed_order_and_decoded_witness(self):
+        """Admission returns only exact pairs in refreshed DB order."""
+        from lib.download import (
+            _admit_download_incarnations,
+            _decode_valid_download_incarnations,
+        )
+
+        first = self._make_downloading_row(
+            request_id=1,
+            state_dict={
+                "filetype": "flac",
+                "enqueued_at": "2026-07-01T10:00:00Z",
+                "files": [],
+            },
+        )
+        invalid = self._make_downloading_row(
+            request_id=2,
+            state_dict={
+                "filetype": "flac",
+                "enqueued_at": "invalid",
+                "files": [],
+            },
+        )
+        third = self._make_downloading_row(
+            request_id=3,
+            state_dict={
+                "filetype": "flac",
+                "enqueued_at": "2026-07-01T12:00:00+00:00",
+                "files": [],
+            },
+        )
+
+        pre_db = FakePipelineDB()
+        for row in (first, third):
+            pre_db.seed_request(row)
+        pre_snapshot = _decode_valid_download_incarnations(
+            pre_db.get_downloading(),
+            phase="test pre-snapshot",
+        )
+        replacement = self._make_downloading_row(
+            request_id=1,
+            state_dict={
+                "filetype": "flac",
+                "enqueued_at": "2026-07-01T10:00:01Z",
+                "files": [],
+            },
+        )
+        refreshed_db = FakePipelineDB()
+        for row in (invalid, third, replacement):
+            refreshed_db.seed_request(row)
+        admitted = _admit_download_incarnations(
+            pre_snapshot,
+            refreshed_db.get_downloading(),
+            refreshed_phase="test refresh",
+        )
+
+        self.assertEqual(
+            [
+                (row["id"], state.enqueued_at)
+                for row, state in admitted
+            ],
+            [
+                (3, "2026-07-01T12:00:00+00:00"),
+            ],
+        )
 
     def test_poll_survives_events_api_failure(self):
         """Events API outage stamps nothing this cycle — polling continues."""
@@ -5187,7 +5971,7 @@ class TestPollActiveDownloads(unittest.TestCase):
         self.assertEqual(len(fake_db.list_import_jobs(request_id=1)), 1)
 
     def test_poll_crash_recovery_no_state(self):
-        """Downloading album with no active_download_state → reset to wanted."""
+        """Missing attempt witness is excluded without an inferred reset."""
         from lib.download import poll_active_downloads
         row = self._make_downloading_row()
         row["active_download_state"] = None  # Simulates crash
@@ -5195,9 +5979,11 @@ class TestPollActiveDownloads(unittest.TestCase):
 
         poll_active_downloads(ctx)
 
-        # apply_transition calls reset_to_wanted for downloading→wanted
-        self.assertEqual(fake_db.request(1)["status"], "wanted")
-        self.assertEqual(fake_db.status_history, [(1, "wanted")])
+        self.assertEqual(fake_db.request(1)["status"], "downloading")
+        self.assertEqual(fake_db.status_history, [])
+        self.assertEqual(fake_db.update_download_state_calls, [])
+        self.assertEqual(fake_db.download_logs, [])
+        self.assertEqual(fake_db.list_import_jobs(request_id=1), [])
 
     def test_poll_active_all_errors(self):
         """All files errored → timeout the album.

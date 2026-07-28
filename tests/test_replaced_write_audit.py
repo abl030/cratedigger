@@ -151,25 +151,30 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "`_shared.py`, while issue #762 removed the obsolete request path cache; "
         "same encoder, same output, no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 1336, "890d0f2e35ffd73c"): (
+    ("lib/pipeline_db/requests.py", 1352, "890d0f2e35ffd73c"): (
         "optional LIMIT is normalized through int before interpolation "
         "(issue #765: return type retyped to list[AlbumRequestRow], no SQL "
         "change; issue #784: `limit` parameter annotated `int | None`, "
         "changing the enclosing-scope fingerprint; issues #784 and #762 shifted "
-        "the final merged line; no SQL change)"
+        "the final merged line; issue #898 expanded "
+        "`update_download_state_if_downloading` above by +16 lines; no SQL "
+        "shape change)"
     ),
-    ("lib/pipeline_db/requests.py", 1357, "042a7becce5f90f7"): (
+    ("lib/pipeline_db/requests.py", 1373, "042a7becce5f90f7"): (
         "ORDER is selected from two literals and LIMIT remains a value placeholder "
         "(issue #765: return type retyped to list[AlbumRequestRow], no SQL change; "
         "issue #784: `status`/`limit`/`newest_first` parameters annotated, "
         "changing the enclosing-scope fingerprint; issues #784 and #762 shifted "
-        "the final merged line; no SQL change)"
+        "the final merged line; issue #898 expanded "
+        "`update_download_state_if_downloading` above by +16 lines; no SQL "
+        "shape change)"
     ),
-    ("lib/pipeline_db/requests.py", 1542, "541767de225f28a3"): (
+    ("lib/pipeline_db/requests.py", 1558, "541767de225f28a3"): (
         "attempt kind is validated against the fixed retry-counter vocabulary "
-        "(issues #784 and #762 shifted this line without changing the hash; "
+        "(issues #784 and #762 shifted this line without changing the hash; issue "
+        "#898 expanded `update_download_state_if_downloading` above by +16 lines; "
         "this statement is a plain string constant, not scope-bound, so no SQL "
-        "change)"
+        "shape change)"
     ),
 }
 

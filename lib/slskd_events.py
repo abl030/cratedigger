@@ -10,9 +10,9 @@ event is consumed exactly once across cycles.
 Matching key is ``(username, remote filename)`` — slskd transfer ids are
 NOT persisted in ``active_download_state`` and are re-issued when a file
 is retried, while the remote path is the durable identity both sides
-share. Newest event wins when the same file completed more than once
-(a re-download after retry): the feed is newest-first, so the first
-occurrence seen is kept.
+share. Active-state stamping reads current downloading incarnations after
+collecting the event window and chooses the first newest-first completion
+whose occurrence is not before that incarnation's enqueue witness.
 
 Phase 3 is active: the stamped ``local_path`` is the ONLY source of
 file locations. ``process_completed_album`` hard-fails an unstamped
@@ -71,13 +71,18 @@ class EventIngestResult:
     # request that has since left 'downloading' too.
     transfers_stamped: int = 0
     cursor_gap: bool = False
+    cursor_advanced: bool = False
+    cursor_hold_reason: str | None = None
 
     def to_log_line(self) -> str:
         return (
             f"SLSKD EVENTS: outcome={self.outcome} events_seen={self.events_seen} "
             f"file_events={self.file_events} files_stamped={self.files_stamped} "
             f"requests_updated={self.requests_updated} "
-            f"transfers_stamped={self.transfers_stamped} cursor_gap={self.cursor_gap}"
+            f"transfers_stamped={self.transfers_stamped} "
+            f"cursor_gap={self.cursor_gap} "
+            f"cursor_advanced={self.cursor_advanced} "
+            f"cursor_hold_reason={self.cursor_hold_reason}"
         )
 
 
@@ -89,7 +94,9 @@ def _parse_event_timestamp(value: str) -> datetime | None:
     event would silently terminate the scan and strand everything
     behind it.
     """
-    text = str(value).replace("Z", "+00:00")
+    if not value:
+        return None
+    text = value.replace("Z", "+00:00")
     try:
         parsed = datetime.fromisoformat(text)
     except ValueError:
@@ -145,22 +152,26 @@ class _EventCompletionInfo:
     both ``active_download_state`` and the transfer ledger."""
 
     local_path: str
+    occurred_at: datetime | None
 
 
 def _completion_info_from_events(
     events: list[SlskdRawEvent],
-) -> dict[tuple[str, str], _EventCompletionInfo]:
-    """Map ``(username, remote filename)`` → the newest decodable
-    DownloadFileComplete event's local path.
+) -> dict[tuple[str, str], list[_EventCompletionInfo]]:
+    """Decode completion candidates without conflating their consumers.
 
-    ``events`` is newest-first; the first occurrence of a key wins.
+    Active-state classification retains every newest-first candidate so a
+    pre-incarnation entry cannot shadow an older eligible entry. The transfer
+    ledger intentionally preserves its existing newest-decoded projection and
+    authority, independent of occurrence-time qualification.
     """
-    info: dict[tuple[str, str], _EventCompletionInfo] = {}
-    file_events = 0
+    active_candidates: dict[
+        tuple[str, str],
+        list[_EventCompletionInfo],
+    ] = {}
     for event in events:
         if event.type != DOWNLOAD_FILE_COMPLETE:
             continue
-        file_events += 1
         try:
             payload = decode_download_file_complete(event)
         except msgspec.DecodeError:
@@ -171,23 +182,44 @@ def _completion_info_from_events(
                 "(event id=%s) — skipping", event.id, exc_info=True)
             continue
         key = (payload.transfer.username, payload.transfer.filename)
-        info.setdefault(key, _EventCompletionInfo(
+        # slskd 0.24.5 authors the DownloadFileComplete envelope timestamp
+        # from the nested transfer's EndedAt before inserting the event. It is
+        # therefore occurrence evidence; receipt time and feed position are
+        # not substitutes for this causal bound.
+        completion = _EventCompletionInfo(
             local_path=payload.local_filename,
-        ))
-    return info
+            occurred_at=_parse_event_timestamp(event.timestamp),
+        )
+        active_candidates.setdefault(key, []).append(completion)
+    return active_candidates
+
+
+@dataclass(frozen=True)
+class _StampLocalPathsResult:
+    """Persistence outcome, including valid dirty writes that lost CAS."""
+
+    files_stamped: int = 0
+    requests_updated: int = 0
+    lost_current_incarnation_writes: int = 0
 
 
 def _stamp_local_paths(
     db: Any,
     downloading: Sequence[Mapping[str, Any]],
-    completion_info: dict[tuple[str, str], _EventCompletionInfo],
-) -> tuple[int, int]:
+    completion_candidates: dict[
+        tuple[str, str],
+        list[_EventCompletionInfo],
+    ],
+) -> _StampLocalPathsResult:
     """Write matched local paths into each request's persisted state.
 
-    Returns ``(files_stamped, requests_updated)``.
+    A row is dirty only when a completion has a provable occurrence at or
+    after its valid enqueue witness. A rejected CAS is distinct from a clean
+    no-op: a complete event window must retain its cursor for replay.
     """
     files_stamped = 0
     requests_updated = 0
+    lost_current_incarnation_writes = 0
     for row in downloading:
         raw_state = row.get("active_download_state")
         if not raw_state:
@@ -199,20 +231,48 @@ def _stamp_local_paths(
                 "SLSKD EVENTS: unparseable active_download_state for "
                 "request %s — skipping", row.get("id"), exc_info=True)
             continue
+        enqueued_at = _parse_event_timestamp(state.enqueued_at)
+        if enqueued_at is None:
+            logger.warning(
+                "SLSKD EVENTS: invalid enqueued_at witness for request %s "
+                "— excluding active completion classification",
+                row.get("id"),
+            )
+            continue
         row_stamped = 0
         for file_state in state.files:
-            info = completion_info.get(
-                (file_state.username, file_state.filename))
+            candidates = completion_candidates.get(
+                (file_state.username, file_state.filename),
+                (),
+            )
+            info = next(
+                (
+                    candidate
+                    for candidate in candidates
+                    if candidate.occurred_at is not None
+                    and candidate.occurred_at >= enqueued_at
+                ),
+                None,
+            )
             if info is not None and file_state.local_path != info.local_path:
                 file_state.local_path = info.local_path
                 row_stamped += 1
         if row_stamped and db.update_download_state_if_downloading(
-                row["id"], state.to_json()):
+                row["id"],
+                state.to_json(),
+                expected_enqueued_at=state.enqueued_at):
             # Count only what actually persisted — a row that left
-            # 'downloading' mid-ingest contributes nothing.
+            # 'downloading' or gained a newer incarnation mid-ingest
+            # contributes nothing.
             requests_updated += 1
             files_stamped += row_stamped
-    return files_stamped, requests_updated
+        elif row_stamped:
+            lost_current_incarnation_writes += 1
+    return _StampLocalPathsResult(
+        files_stamped=files_stamped,
+        requests_updated=requests_updated,
+        lost_current_incarnation_writes=lost_current_incarnation_writes,
+    )
 
 
 def _stamp_transfer_ledger(
@@ -292,14 +352,13 @@ def recent_completion_paths(slskd: Any) -> RecentCompletionPaths:
 def ingest_download_file_events(
     db: Any,
     slskd: Any,
-    downloading: Sequence[Mapping[str, Any]],
 ) -> EventIngestResult:
     """One ingestion pass: page new events, stamp local paths, advance cursor.
 
-    ``downloading`` is the row list Phase 1 already fetched — passed in so
-    the poll cycle doesn't query it twice. Runs even when it is empty so
-    the cursor keeps tracking the feed during idle stretches instead of
-    accumulating a 10k-event backlog for the next active cycle.
+    Current downloading incarnations are read after the event window is
+    collected. Runs even when there are no downloading rows so the cursor keeps
+    tracking the feed during idle stretches instead of accumulating a
+    10k-event backlog for the next active cycle.
     """
     cursor = db.get_slskd_event_cursor()
     if cursor is None:
@@ -310,7 +369,10 @@ def ingest_download_file_events(
             return EventIngestResult(outcome="empty_feed")
         newest = page.events[0]
         db.upsert_slskd_event_cursor(newest.id, newest.timestamp)
-        return EventIngestResult(outcome="bootstrapped")
+        return EventIngestResult(
+            outcome="bootstrapped",
+            cursor_advanced=True,
+        )
 
     new_events, cursor_gap = _collect_new_events(
         slskd,
@@ -320,29 +382,58 @@ def ingest_download_file_events(
     if not new_events:
         return EventIngestResult(outcome="no_new_events", cursor_gap=cursor_gap)
 
-    completion_info = _completion_info_from_events(new_events)
-    files_stamped, requests_updated = (
-        _stamp_local_paths(db, downloading, completion_info)
-        if completion_info
-        else (0, 0)
+    completion_candidates = _completion_info_from_events(new_events)
+    stamp_result = (
+        _stamp_local_paths(
+            db,
+            db.get_downloading(),
+            completion_candidates,
+        )
+        if completion_candidates
+        else _StampLocalPathsResult()
     )
-    # T2 (issue #571): same pass, same completion_info map — no second
-    # cursor and no separate scan.
+    # T2 (issue #571): same pass and decoded events, but a deliberately
+    # separate newest-event projection. Active incarnation qualification
+    # grants no transfer-ledger authority.
+    ledger_newest = {
+        key: candidates[0]
+        for key, candidates in completion_candidates.items()
+    }
     transfers_stamped = (
-        _stamp_transfer_ledger(db, completion_info)
-        if completion_info
+        _stamp_transfer_ledger(db, ledger_newest)
+        if ledger_newest
         else 0
     )
 
     newest = new_events[0]
-    db.upsert_slskd_event_cursor(newest.id, newest.timestamp)
+    cursor_hold_reason: str | None = None
+    if stamp_result.lost_current_incarnation_writes and not cursor_gap:
+        cursor_hold_reason = "lost_current_incarnation_write"
+        logger.warning(
+            "SLSKD EVENTS: holding complete event window for replay after "
+            "%d current-incarnation write(s) lost their witness",
+            stamp_result.lost_current_incarnation_writes,
+        )
+    else:
+        if stamp_result.lost_current_incarnation_writes:
+            logger.warning(
+                "SLSKD EVENTS: cursor-gap fail-open after %d "
+                "current-incarnation write(s) lost their witness; advancing "
+                "to the newest collected event and relying on materialization "
+                "self-heal for omitted history",
+                stamp_result.lost_current_incarnation_writes,
+            )
+        db.upsert_slskd_event_cursor(newest.id, newest.timestamp)
+
     return EventIngestResult(
         outcome="ingested",
         events_seen=len(new_events),
         file_events=sum(
             1 for e in new_events if e.type == DOWNLOAD_FILE_COMPLETE),
-        files_stamped=files_stamped,
-        requests_updated=requests_updated,
+        files_stamped=stamp_result.files_stamped,
+        requests_updated=stamp_result.requests_updated,
         transfers_stamped=transfers_stamped,
         cursor_gap=cursor_gap,
+        cursor_advanced=cursor_hold_reason is None,
+        cursor_hold_reason=cursor_hold_reason,
     )

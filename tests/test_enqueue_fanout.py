@@ -27,6 +27,8 @@ from dataclasses import replace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
+import msgspec
+
 from cratedigger import TrackRecord
 from lib.browse import BrowseManyResult
 from lib.config import CratediggerConfig
@@ -41,12 +43,14 @@ from lib.enqueue import (
 )
 from lib.grab_list import DownloadFile
 from lib.matching import MatchResult
+from lib.quality import ActiveDownloadState
 from lib.slskd_transfers import SlskdEnqueueOutcome
 from tests.fakes import (
     DenylistEntry,
     FakePipelineDB,
     FakePipelineDBSource,
     FakeSlskdAPI,
+    FakeSlskdTransfers,
 )
 from tests.helpers import make_request_row
 
@@ -129,9 +133,105 @@ def _ctx_with_download_ownership(
 ) -> CratediggerContext:
     ctx = _make_ctx(cfg, user_upload_speed={"u00": 10_000, "u01": 9_999})
     ctx.slskd = slskd if slskd is not None else FakeSlskdAPI()
+    ctx.pipeline_db_source = FakePipelineDBSource(db)
     ctx.current_album_cache[1] = _album_with_request(1)
     ctx.download_ownership = DownloadOwnershipWriter(db_factory=lambda: db)
     return ctx
+
+
+def _request_active_state(db: FakePipelineDB) -> ActiveDownloadState:
+    raw = db.request(1)["active_download_state"]
+    if isinstance(raw, str):
+        return ActiveDownloadState.from_json(raw)
+    return msgspec.convert(raw, type=ActiveDownloadState)
+
+
+def _install_same_path_attempt_b(
+    db: FakePipelineDB,
+    *,
+    enqueued_at: str = "attempt-b",
+) -> ActiveDownloadState:
+    """Replace attempt A with same-path attempt B and return B's exact state."""
+    replacement = ActiveDownloadState.from_json(
+        _request_active_state(db).to_json(),
+    )
+    replacement.enqueued_at = enqueued_at
+    replacement.last_progress_at = enqueued_at
+    for file in replacement.files:
+        file.last_state = "attempt-b-owned"
+    db.request(1)["active_download_state"] = msgspec.to_builtins(replacement)
+    return replacement
+
+
+class _AttemptReplacingPipelineDB(FakePipelineDB):
+    """Install attempt B immediately before one witnessed state write."""
+
+    def __init__(self, *, replace_on_state_write: int = 1) -> None:
+        super().__init__()
+        self.replace_on_state_write = replace_on_state_write
+        self.state_witnesses: list[tuple[str, str]] = []
+        self.attempt_b: ActiveDownloadState | None = None
+
+    def update_download_state_if_downloading(
+        self,
+        request_id: int,
+        state_json: str,
+        *,
+        expected_enqueued_at: str,
+    ) -> bool:
+        outgoing = ActiveDownloadState.from_json(state_json)
+        self.state_witnesses.append(
+            (expected_enqueued_at, outgoing.enqueued_at),
+        )
+        if len(self.state_witnesses) == self.replace_on_state_write:
+            self.attempt_b = _install_same_path_attempt_b(self)
+        return super().update_download_state_if_downloading(
+            request_id,
+            state_json,
+            expected_enqueued_at=expected_enqueued_at,
+        )
+
+
+class _ObservingCancelTransfers(FakeSlskdTransfers):
+    """Record persisted state at cancel and optionally install attempt B."""
+
+    def __init__(
+        self,
+        api: FakeSlskdAPI,
+        db: FakePipelineDB,
+        *,
+        replace_with_attempt_b: bool = False,
+    ) -> None:
+        super().__init__(api)
+        self.db = db
+        self.replace_with_attempt_b = replace_with_attempt_b
+        self.observed_before_cancel: list[ActiveDownloadState] = []
+        self.writes_before_cancel: list[int] = []
+        self.attempt_b: ActiveDownloadState | None = None
+
+    def cancel_download(
+        self,
+        username: str,
+        id: str,
+        remove: bool = False,
+    ) -> bool:
+        self.observed_before_cancel.append(_request_active_state(self.db))
+        self.writes_before_cancel.append(
+            len(self.db.update_download_state_calls),
+        )
+        if self.replace_with_attempt_b:
+            self.attempt_b = _install_same_path_attempt_b(self.db)
+        return super().cancel_download(username=username, id=id, remove=remove)
+
+
+def _enqueue_file_identity(
+    files: Sequence[dict[str, object]],
+) -> tuple[str, int]:
+    filename = files[0]["filename"]
+    size = files[0]["size"]
+    assert isinstance(filename, str)
+    assert isinstance(size, int)
+    return filename, size
 
 
 def _ranked_users(n: int) -> list[str]:
@@ -794,6 +894,193 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
         self.assertIsNotNone(observed["not_before"])
         self.assertEqual(observed["not_before"], observed["state_enqueued_at"])
 
+    def test_single_same_path_attempt_a_outcomes_do_not_escape_after_b_replaces_a(
+        self,
+    ):
+        """A/EA outcomes are stale after same-path B/EB replaces the claim."""
+        cases: list[tuple[str, SlskdEnqueueOutcome | Exception, bool]] = [
+            (
+                "accepted",
+                SlskdEnqueueOutcome(
+                    status="accepted",
+                    downloads=[DownloadFile(
+                        filename="Music\\u00\\Album\\01.flac",
+                        id="attempt-a-transfer",
+                        file_dir="Music\\u00\\Album",
+                        username="u00",
+                        size=123,
+                    )],
+                ),
+                False,
+            ),
+            (
+                "ambiguous",
+                SlskdEnqueueOutcome(
+                    status="unknown",
+                    reason="attempt A response was uncertain",
+                ),
+                False,
+            ),
+            (
+                "rejected_fallback_persistence",
+                SlskdEnqueueOutcome(
+                    status="rejected",
+                    reason="attempt A was rejected",
+                ),
+                True,
+            ),
+            ("post_runtime_error", RuntimeError("attempt A POST failed"), False),
+        ]
+
+        for name, outcome_or_error, snapshot_fails in cases:
+            with self.subTest(name=name):
+                cfg = _make_cfg(browse_top_k=20)
+                db = _AttemptReplacingPipelineDB()
+                db.seed_request(make_request_row(id=1, status="wanted"))
+                slskd = FakeSlskdAPI()
+                if snapshot_fails:
+                    slskd.transfers.get_all_downloads_error = RuntimeError(
+                        "snapshot unavailable",
+                    )
+                ctx = _ctx_with_download_ownership(
+                    cfg=cfg,
+                    db=db,
+                    slskd=slskd,
+                )
+
+                enqueue_side_effect = (
+                    outcome_or_error
+                    if isinstance(outcome_or_error, Exception)
+                    else None
+                )
+                enqueue_return = (
+                    outcome_or_error
+                    if isinstance(outcome_or_error, SlskdEnqueueOutcome)
+                    else None
+                )
+                with patch(
+                    "lib.enqueue._fanout_browse_users",
+                    return_value=set(),
+                ), patch(
+                    "lib.enqueue.slskd_enqueue_with_outcome",
+                    return_value=enqueue_return,
+                    side_effect=enqueue_side_effect,
+                ):
+                    attempt = try_enqueue(
+                        _make_tracks(),
+                        _make_results(["u00"]),
+                        "flac",
+                        ctx,
+                        match_fn=_const_match(_match_for(
+                            "u00",
+                            "Music\\u00\\Album",
+                        )),
+                    )
+
+                self.assertTrue(db.state_witnesses)
+                expected_attempt_a = db.state_witnesses[0][0]
+                self.assertNotEqual(expected_attempt_a, "attempt-b")
+                self.assertEqual(
+                    db.state_witnesses,
+                    [(expected_attempt_a, expected_attempt_a)],
+                )
+                self.assertIsNotNone(db.attempt_b)
+                self.assertEqual(
+                    _request_active_state(db),
+                    db.attempt_b,
+                )
+                self.assertEqual(db.request(1)["status"], "downloading")
+                self.assertFalse(attempt.matched)
+                self.assertTrue(attempt.enqueue_failed)
+                self.assertIsNone(attempt.downloads)
+                self.assertEqual(db.download_logs, [])
+                self.assertEqual(slskd.transfers.cancel_download_calls, [])
+
+    def test_multi_same_path_attempt_a_outcomes_do_not_escape_after_b_replaces_a(
+        self,
+    ):
+        """Whole-album A/EA results stay internal once B/EB owns the row."""
+        for outcome_name in (
+            "fully_accepted",
+            "later_ambiguous",
+            "later_exception",
+        ):
+            with self.subTest(outcome_name=outcome_name):
+                cfg = _make_cfg(browse_top_k=20)
+                db = _AttemptReplacingPipelineDB()
+                db.seed_request(make_request_row(id=1, status="wanted"))
+                slskd = FakeSlskdAPI()
+                ctx = _ctx_with_download_ownership(
+                    cfg=cfg,
+                    db=db,
+                    slskd=slskd,
+                )
+                enqueue_calls = 0
+
+                def fake_enqueue(
+                    *,
+                    username: str,
+                    files: list[dict[str, object]],
+                    file_dir: str,
+                    _outcome_name: str = outcome_name,
+                    **_kwargs: object,
+                ) -> SlskdEnqueueOutcome:
+                    nonlocal enqueue_calls
+                    enqueue_calls += 1
+                    if enqueue_calls == 2:
+                        if _outcome_name == "later_ambiguous":
+                            return SlskdEnqueueOutcome(
+                                status="unknown",
+                                reason="attempt A response was uncertain",
+                            )
+                        if _outcome_name == "later_exception":
+                            raise RuntimeError("attempt A POST failed")
+                    filename, size = _enqueue_file_identity(files)
+                    return SlskdEnqueueOutcome(
+                        status="accepted",
+                        downloads=[DownloadFile(
+                            filename=filename,
+                            id=f"attempt-a-transfer-{enqueue_calls}",
+                            file_dir=file_dir,
+                            username=username,
+                            size=size,
+                        )],
+                    )
+
+                release, tracks = self._two_disc_release_and_tracks()
+                with patch(
+                    "lib.enqueue._fanout_browse_users",
+                    return_value=set(),
+                ), patch(
+                    "lib.enqueue.slskd_enqueue_with_outcome",
+                    side_effect=fake_enqueue,
+                ):
+                    attempt = try_multi_enqueue(
+                        release,
+                        tracks,
+                        _make_results(["u00", "u01"]),
+                        "flac",
+                        ctx,
+                        match_fn=self._match_two_discs,
+                    )
+
+                self.assertTrue(db.state_witnesses)
+                expected_attempt_a = db.state_witnesses[0][0]
+                self.assertEqual(
+                    db.state_witnesses,
+                    [(expected_attempt_a, expected_attempt_a)],
+                )
+                self.assertIsNotNone(db.attempt_b)
+                self.assertEqual(
+                    _request_active_state(db),
+                    db.attempt_b,
+                )
+                self.assertEqual(db.request(1)["status"], "downloading")
+                self.assertFalse(attempt.matched)
+                self.assertTrue(attempt.enqueue_failed)
+                self.assertIsNone(attempt.downloads)
+                self.assertEqual(slskd.transfers.cancel_download_calls, [])
+
     def test_process_death_after_claim_leaves_planned_state_owned(self):
         cfg = _make_cfg(browse_top_k=20)
         db = FakePipelineDB()
@@ -1438,11 +1725,181 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
             [f"enqueue failed: {reason}"] * 2,
         )
 
+    def test_partial_same_path_b_before_recovery_write_blocks_a_cancellation(
+        self,
+    ):
+        """B/EB replacing A/EA before the recovery write makes A stale."""
+        cfg = _make_cfg(browse_top_k=20)
+        db = _AttemptReplacingPipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        slskd = FakeSlskdAPI()
+        slskd.transfers.cancel_download_result = False
+        ctx = _ctx_with_download_ownership(cfg=cfg, db=db, slskd=slskd)
+        release, tracks = self._two_disc_release_and_tracks()
+        enqueue_calls = 0
+
+        def fake_enqueue(
+            *,
+            username: str,
+            files: list[dict[str, object]],
+            file_dir: str,
+            **_kwargs: object,
+        ) -> SlskdEnqueueOutcome:
+            nonlocal enqueue_calls
+            enqueue_calls += 1
+            if enqueue_calls == 2:
+                return SlskdEnqueueOutcome(status="rejected")
+            filename, size = _enqueue_file_identity(files)
+            slskd.add_transfer(
+                username=username,
+                directory=file_dir,
+                filename=filename,
+                id="attempt-a-transfer-1",
+            )
+            return SlskdEnqueueOutcome(
+                status="accepted",
+                downloads=[DownloadFile(
+                    filename=filename,
+                    id="attempt-a-transfer-1",
+                    file_dir=file_dir,
+                    username=username,
+                    size=size,
+                    last_state="attempt-a-accepted",
+                )],
+            )
+
+        with patch(
+            "lib.enqueue._fanout_browse_users",
+            return_value=set(),
+        ), patch(
+            "lib.enqueue.slskd_enqueue_with_outcome",
+            side_effect=fake_enqueue,
+        ):
+            attempt = try_multi_enqueue(
+                release,
+                tracks,
+                _make_results(["u00", "u01"]),
+                "flac",
+                ctx,
+                match_fn=self._match_two_discs,
+            )
+
+        self.assertIsNotNone(db.attempt_b)
+        self.assertEqual(_request_active_state(db), db.attempt_b)
+        self.assertEqual(len(db.update_download_state_calls), 1)
+        self.assertFalse(attempt.matched)
+        self.assertTrue(attempt.enqueue_failed)
+        self.assertIsNone(attempt.downloads)
+        self.assertEqual(slskd.transfers.cancel_download_calls, [])
+
+    def test_partial_post_cancel_stale_write_suppresses_attempt_a_recovery(
+        self,
+    ):
+        """A recovery is persisted before cancel; a later B wins exactly."""
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        slskd = FakeSlskdAPI()
+        cancel_transfers = _ObservingCancelTransfers(
+            slskd,
+            db,
+            replace_with_attempt_b=True,
+        )
+        cancel_transfers.cancel_download_result = False
+        slskd.transfers = cancel_transfers
+        ctx = _ctx_with_download_ownership(cfg=cfg, db=db, slskd=slskd)
+        release, tracks = self._two_disc_release_and_tracks()
+        enqueue_calls = 0
+
+        def fake_enqueue(
+            *,
+            username: str,
+            files: list[dict[str, object]],
+            file_dir: str,
+            **_kwargs: object,
+        ) -> SlskdEnqueueOutcome:
+            nonlocal enqueue_calls
+            enqueue_calls += 1
+            if enqueue_calls == 2:
+                return SlskdEnqueueOutcome(status="rejected")
+            filename, size = _enqueue_file_identity(files)
+            slskd.add_transfer(
+                username=username,
+                directory=file_dir,
+                filename=filename,
+                id="attempt-a-transfer-1",
+            )
+            return SlskdEnqueueOutcome(
+                status="accepted",
+                downloads=[DownloadFile(
+                    filename=filename,
+                    id="attempt-a-transfer-1",
+                    file_dir=file_dir,
+                    username=username,
+                    size=size,
+                    last_state="attempt-a-accepted",
+                    bytes_transferred=71,
+                    retry=3,
+                    last_exception="attempt-a-observed-error",
+                )],
+            )
+
+        with patch(
+            "lib.enqueue._fanout_browse_users",
+            return_value=set(),
+        ), patch(
+            "lib.enqueue.slskd_enqueue_with_outcome",
+            side_effect=fake_enqueue,
+        ):
+            attempt = try_multi_enqueue(
+                release,
+                tracks,
+                _make_results(["u00", "u01"]),
+                "flac",
+                ctx,
+                match_fn=self._match_two_discs,
+            )
+
+        self.assertEqual(len(cancel_transfers.observed_before_cancel), 1)
+        self.assertEqual(cancel_transfers.writes_before_cancel, [1])
+        observed_file = cancel_transfers.observed_before_cancel[0].files[0]
+        self.assertEqual(
+            (
+                observed_file.last_state,
+                observed_file.bytes_transferred,
+                observed_file.retry_count,
+                observed_file.last_exception,
+            ),
+            (
+                "attempt-a-accepted",
+                71,
+                3,
+                "attempt-a-observed-error",
+            ),
+        )
+        attempt_b = cancel_transfers.attempt_b
+        self.assertIsNotNone(attempt_b)
+        assert attempt_b is not None
+        self.assertNotEqual(
+            cancel_transfers.observed_before_cancel[0].enqueued_at,
+            attempt_b.enqueued_at,
+        )
+        self.assertEqual(
+            _request_active_state(db),
+            attempt_b,
+        )
+        self.assertEqual(len(db.update_download_state_calls), 2)
+        self.assertFalse(attempt.matched)
+        self.assertTrue(attempt.enqueue_failed)
+        self.assertIsNone(attempt.downloads)
+
     def test_multi_disc_partial_failure_resets_after_verified_cancel(self):
         cfg = _make_cfg(browse_top_k=20)
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=1, status="wanted"))
         slskd = FakeSlskdAPI()
+        cancel_transfers = _ObservingCancelTransfers(slskd, db)
+        slskd.transfers = cancel_transfers
         ctx = _ctx_with_download_ownership(cfg=cfg, db=db, slskd=slskd)
         users = ["u00", "u01"]
         results = _make_results(users)
@@ -1502,6 +1959,10 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
                     file_dir=file_dir,
                     username=username,
                     size=files[0]["size"],
+                    last_state="accepted-before-cancel",
+                    bytes_transferred=83,
+                    retry=4,
+                    last_exception="accepted-observed-error",
                 ),
             ])
 
@@ -1518,6 +1979,23 @@ class TestDownloadOwnershipPreclaim(unittest.TestCase):
         self.assertEqual(
             [(call.username, call.id) for call in slskd.transfers.cancel_download_calls],
             [("u00", "transfer-1")],
+        )
+        self.assertEqual(len(cancel_transfers.observed_before_cancel), 1)
+        self.assertEqual(cancel_transfers.writes_before_cancel, [1])
+        observed_file = cancel_transfers.observed_before_cancel[0].files[0]
+        self.assertEqual(
+            (
+                observed_file.last_state,
+                observed_file.bytes_transferred,
+                observed_file.retry_count,
+                observed_file.last_exception,
+            ),
+            (
+                "accepted-before-cancel",
+                83,
+                4,
+                "accepted-observed-error",
+            ),
         )
 
     def test_multi_disc_first_rejected_with_visible_transfer_stays_owned(self):

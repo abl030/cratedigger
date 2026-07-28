@@ -1240,16 +1240,32 @@ class _RequestsMixin(_PipelineDBBase):
         self,
         request_id: int,
         state_json: str,
+        *,
+        expected_enqueued_at: str,
     ) -> bool:
-        """Rewrite active_download_state only while the request is downloading."""
+        """CAS whole download state against its exact attempt witness."""
         now = datetime.now(UTC)
         cur = self._execute("""
-            UPDATE album_requests
-            SET active_download_state = %s::jsonb,
+            WITH outgoing AS (
+                SELECT %s::jsonb AS state
+            )
+            UPDATE album_requests AS request
+            SET active_download_state = outgoing.state,
                 updated_at = %s
-            WHERE id = %s
-              AND status = 'downloading'
-        """, (state_json, now, request_id))
+            FROM outgoing
+            WHERE request.id = %s
+              AND request.status = 'downloading'
+              AND request.active_download_state -> 'enqueued_at'
+                  = to_jsonb(%s::text)
+              AND outgoing.state -> 'enqueued_at'
+                  = to_jsonb(%s::text)
+        """, (
+            state_json,
+            now,
+            request_id,
+            expected_enqueued_at,
+            expected_enqueued_at,
+        ))
         self.conn.commit()
         return cur.rowcount > 0
 
