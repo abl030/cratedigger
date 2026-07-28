@@ -71,91 +71,42 @@ Call the full pipeline.
 
 # PYRIGHT CLEAN ALWAYS
 
-**Never scope the final Pyright check to just the files you touched.** Run
-`nix-shell --run "pyright --threads 4"` on the full repo before the first branch
-push. Pre-existing errors are not someone else's problem — they accumulate as
-drift the moment you decide they're not yours to fix. Fixing each one is cheap;
-the expensive part is re-discovering them later and arguing about ownership.
-Triaging "is this mine or pre-existing?" via `git checkout` costs more tokens
-than just fixing it. **The repo is either 0-errors or it is not. Make it
-0-errors.**
+The final pre-push type gate is whole-repository
+`nix-shell --run "pyright --threads 4"` with zero errors; focused file checks
+are iteration aids only. `scripts/run_tests.sh` separately enforces production
+strict mode through `pyrightconfig.production.json`. Never accept a
+"pre-existing" error or narrow either final contract.
 
-- All new dataclasses, functions, and module-level code must pass pyright with 0 errors
 - Use typed dataclasses (not dicts) for structured data crossing module boundaries
 - **No dual-interface types.** Never add `__getitem__`, `.get()`, or `isinstance(x, dict)` dispatch to a dataclass. If a function receives both dicts and dataclasses, that is a type error — fix the callers, not the receiver. Temporary bridges become permanent bugs.
 - If a function parameter is untyped and accepts multiple representations (dict or dataclass), type it and fix all callers to pass the correct type
 - Inner data structures must also be typed — no `list[dict]` when a dataclass exists
-- For focused feedback during implementation, use
-  `pyright --threads 4 <files>`; the final check still covers the whole repo
 
-### Production typing escape-hatch ratchet (issue #765)
+### Typing enforcement
 
-Production code (every production `.py` outside `tests/`; the generated
-vulture whitelist is excluded) is migrating to pyright strict. Explicit `Any`, `cast(...)`, `# type: ignore`, and bare
-`# pyright: ignore` are banned there — the scoped `# pyright: ignore[rule]`
-form is the single sanctioned escape hatch (and
-`reportUnnecessaryTypeIgnoreComment` flags it the moment it goes stale).
-Existing debt is held in `tests/_typing_ratchet_baseline.py`, which
-`tests/test_typing_ratchet.py` requires to match the live scan EXACTLY:
-new escape hatches fail the suite, and a PR that removes some must tighten
-the baseline in the same PR
-(`nix-shell --run "python3 -m tests._typing_ratchet_scanner" >
-tests/_typing_ratchet_baseline.py`). Counting is lexical (stdlib
-tokenizer) — mentions inside strings and docstrings don't count, and the
-scanner is deliberately not a semantic analyzer.
+Production passes Pyright strict, enforced by `scripts/run_tests.sh`.
+`reportPrivateUsage`, `reportUnusedFunction`, and `reportUnusedClass` stay off
+because cross-module private imports are the house convention (PR #775).
+Tests remain on the whole-repo standard config because their deliberate
+protocol-conformance checks conflict with production strict rules.
 
-**Production code passes pyright `strict` (issue #784, complete).**
-`pyrightconfig.production.json` sets `typeCheckingMode: "strict"` over all
-production code (`tests/` excluded) and is gated in `scripts/run_tests.sh`
-— a new strict error in production fails the suite. Three strict-preset
-rules are turned OFF with recorded authority: `reportPrivateUsage`,
-`reportUnusedFunction`, `reportUnusedClass` — all incompatible with the
-cross-module private-import convention (the phase-5 finding, PR #775).
-(`reportUninitializedInstanceVariable`, `reportCallInDefaultInitializer`,
-`reportImplicitOverride` are not in pyright's strict preset, so they never
-needed disabling.) The former strict-count ratchet
-(`test_strict_ratchet.py` / `_strict_ratchet_baseline.py` /
-`pyrightconfig.strict-production.json`) drove the 5,239→0 campaign and was
-deleted at the flip — the strict config IS the enforcement now. The strict
-rules are deliberately NOT in the main
-`pyrightconfig.json`: tests carry intentional protocol-conformance
-`issubclass` pins (the #430 parity-gate pattern) that the isinstance rule
-would flag, and a tests `executionEnvironments` split doesn't work here
-(`tests/web/` shadows the production `web` package once `tests` becomes an
-import root). For exhaustive result-union handling under these rules, use
-a `match` with class patterns and `assert_never(result)` (or the
-equivalent `raise AssertionError`) AFTER the match — a final
-`isinstance`/`case _` arm on a fully-narrowed subject trips the rules.
+`tests/test_typing_ratchet.py` separately requires explicit `Any`, `cast(...)`,
+`# type: ignore`, and bare `# pyright: ignore` debt to match the production and
+tests baselines exactly and only decrease. Scoped
+`# pyright: ignore[rule]` is the sanctioned form. When a baseline reaches zero,
+delete its generated baseline/regeneration path and retain a direct
+zero-tolerance check; delete the scanner only when a configured tool enforces
+the same syntax.
 
 ## HTTP request bodies — use `pydantic.BaseModel`
 
-Inbound HTTP request bodies in `web/routes/*.py` go through `pydantic.BaseModel` (v2) at the handler entry. Pydantic stops at the route layer; internal types stay `msgspec.Struct` / `@dataclass` per the next section. Enforced by `tests/test_pydantic_route_audit.py` — any `post_*` handler that reads the raw `body` dict instead of going through `parse_body` fails the audit (small allowlist with a rationale per entry).
-
-Why Pydantic at this seam: `ValidationError.errors()` gives structured field-path errors the frontend renders directly, and the `*Request` model declared above the handler is the operator-facing contract.
-
-Pattern (canonical: `PipelineAddRequest` + `post_pipeline_add` in `web/routes/pipeline.py`):
-
-```python
-from pydantic import BaseModel, model_validator
-from web.routes._pydantic import parse_body
-
-class MyRouteRequest(BaseModel):
-    foo: str
-    bar: int | None = None
-
-def post_my_route(h, body: dict) -> None:
-    req = parse_body(h, body, MyRouteRequest)
-    if req is None:
-        return
-    # req.foo / req.bar are typed; use them directly
-```
-
-`parse_body` (in `web/routes/_pydantic.py`) is the single adapter that turns `ValidationError → 400` with `{"error": "<field>: <msg>", "errors": [...]}`. Use it; do not catch `ValidationError` inline.
-
-Scope:
-- HTTP request bodies → Pydantic.
-- Query strings, response shapes, internal types → unchanged.
-- Pydantic v2's lax mode coerces `"true"`/`"false"` strings to bool; use `Field(strict=True)` when the route's contract is JSON-bool only.
+Inbound HTTP bodies use a route-local `pydantic.BaseModel` and the shared
+`web/routes/_pydantic.py::parse_body` adapter; the canonical example is
+`PipelineAddRequest` in `web/routes/pipeline.py`. The adapter owns structured
+`ValidationError → 400` responses, and `tests/test_pydantic_route_audit.py`
+rejects direct body reads. Pydantic stops at the route: query strings,
+responses, and internal types keep their existing contracts. Use
+`Field(strict=True)` where JSON booleans must not be coerced.
 
 ## Wire-boundary types — use `msgspec.Struct`, not `@dataclass`
 Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blob written to or read from the DB, a subprocess's stdout — is a `msgspec.Struct`. **Same policy both directions:** encode via `msgspec.json.encode` (or `msgspec.to_builtins` when a dict is needed), decode via `msgspec.convert`. The declared Struct is the single contract that validates type drift at the boundary. Pyright does not see inside `dict.get()` — only runtime validation catches int-vs-str drift, mis-typed fields, or missing required data. This is the lesson of issue #99 / PR #98 (every Discogs validation silently logged `mbid_not_found` because a dataclass said `str` but the wire carried `int`) and the pre-#141 asymmetry (the old "dataclass if re-encoded, Struct if decoded only" split let docstrings lie about which side was strict).
@@ -291,12 +242,12 @@ semantic source scanner.
 
 ## API Contract Tests
 - Every API endpoint consumed by the frontend must have a contract test in `tests/web/` — one `test_*.py` per `web/routes/*.py` module (e.g. `tests/web/test_routes_pipeline.py` for `web/routes/pipeline.py`)
-- Contract tests use the real `_FakeDbWebServerCase` harness (HTTPServer on a random port + a fresh bare `FakePipelineDB` installed as `web.server.db` per test) — see existing `TestPipelineRouteContracts`, `TestBrowseRouteContracts`, etc. as reference patterns. Seed state (`self.db.seed_request(...)`, `self.db.log_download(...)`) and assert against the fake's real query semantics — never configure mock returns (#430; the `WEB_HARNESS_MOCK_BASELINE` ratchet in `tests/_mock_audit_scanner.py` is permanently empty and bans `mock_db` references in tests/web outright)
-- Define a `REQUIRED_FIELDS` set per endpoint — the fields the frontend JS relies on
-- Assert every returned dict includes all required fields via `_assert_required_fields(self, payload, REQUIRED_FIELDS, "label")`
-- When adding a field the frontend needs, add it to `REQUIRED_FIELDS` first (RED), then fix the backend (GREEN)
-- **Every new route MUST be declared `classified=True` on its `RouteRegistration`** — the `route(...)`/`pattern_route(...)` entry in the module's `ROUTES` list. Since #496 there is NO hand-maintained `CLASSIFIED_ROUTES` set: `TestRouteContractAudit` (`tests/web/test_route_audit.py`) introspects the merged `web.server.ALL_ROUTES` and fails, by name, on any route missing `classified=True`. The audit makes contract coverage self-enforcing — you cannot ship a route without classifying it, and there's no second list to drift because the classification lives on the route declaration itself.
-- The harness in `tests/web/_harness.py` exposes `self._get(path)` and `self._post(path, body)` helpers that hit the real server. Reuse these (subclass `_FakeDbWebServerCase`; set `DB_FACTORY` to a typed `FakePipelineDB` subclass for failure injection) instead of building your own harness — standalone per-class harness copies are exactly the drift #408 removed.
+- Use `_FakeDbWebServerCase` and its `_get`/`_post` helpers with seeded
+  `FakePipelineDB` state; never configure DB mock returns or copy the harness.
+- Define the frontend-consumed fields in `REQUIRED_FIELDS` and assert them with
+  `_assert_required_fields`; add a needed field to the contract first (RED).
+- Declare every route `classified=True`; `tests/web/test_route_audit.py`
+  enforces the registry directly.
 - **Mock data must mirror production row shape — synthetic int/str dicts are NOT acceptable.** When a contract test mocks a DB-row producer (any `PipelineDB`/`BeetsDB`/`psycopg2.extras.DictRow` source), at least one scenario must populate rows with production-shaped values: `datetime.datetime` for timestamps, `uuid.UUID` for UUIDs, the typed dataclass/`msgspec.Struct` for JSONB columns. Synthetic dicts of `str`/`int` values pass Pyright (`Dict[str, Any]` is permissive) and pass the contract test (mock matches assertion shape) but 500 on the first real call when the JSON encoder hits an unserializable type. This rule has bitten more than once — see `docs/solutions/testing/contract-test-mocks-must-mirror-production-shape.md` (search-plan-history datetime 500) and `docs/solutions/testing/mocked-contract-tests-miss-helper-mirror-integration-bugs.md` (search-by-id MB drift). The escape hatch when row-shape mocking is impractical: pair the contract test with an integration slice in `tests/test_integration_slices.py` that round-trips through real serialization. Every contract test that returns DB rows owes either a production-shaped mock OR a slice — never neither.
 
 ## Logging & Auditability
@@ -523,23 +474,17 @@ Always use these instead of inventing parallel scaffolding:
 
 ### General test rules
 
-# MOCKS: LEAF-SEAM ONLY
+#### Mocks: leaf-seam only
 
-`MagicMock` and `patch(...)` are for the **outermost edge** of the test — where our code calls something external we don't own. They are forbidden as a substitute for our own stateful types or our own pure-logic functions. Zero-tolerance: enforced by `tests/test_mock_audit.py` against the allowlist in `tests/_mock_audit_scanner.py`.
+Use `MagicMock` and `patch(...)` only at external process, network, filesystem,
+time, or third-party edges. Stateful collaborators use the repository's
+`FakePipelineDB`, `FakeBeetsDB`, and `FakeSlskdAPI`; pure decisions run with
+real inputs. `tests/test_mock_audit.py` rejects the bounded syntax it can
+identify, while review owns semantically equivalent evasions.
 
-**Forbidden:**
-- `MagicMock()` assigned to a variable named `db`, `mock_db`, `failing_db`, `pdb`, `ctx`, `context`, `beets`, `beets_db`, `source`, `pipeline_db`, `slskd`, `fake_db`. Use `FakePipelineDB` / `FakeBeetsDB` / `FakeSlskdAPI` from `tests/fakes/`.
-- `patch("lib.X.our_function")` for any target not on the allowlist. If you're mocking your own logic, you're testing the mock.
-- `patch("lib.beets_db.BeetsDB.<method>")`. The class constructor is allowlisted; per-method stubbing isn't — use `FakeBeetsDB`.
-- Allowlisting a pure decision function. Drive the test with real inputs that produce the branch you care about — fixtures usually already exist in the decision's own coverage.
-
-**Allowed leaf seams (mock freely, never tripped by the audit):**
-Subprocess, urllib/requests, third-party libs (`music_tag`, `redis`), `os.path.*`, `shutil.*`, `time.sleep`, threading/signal primitives, fire-and-forget notifier helpers (`lib.util.trigger_*_scan`), module-level `logger` objects, and ergonomic envelopes (`args = MagicMock()` for parsed argparse args, `proc = MagicMock()` for subprocess return-value structs).
-
-**Allowed thin seam-wrappers (allowlisted in `_mock_audit_scanner.py`):**
-A function in `lib/` is a legitimate seam-wrapper iff its body is **≤10 lines AND mostly forwards to a process / network / filesystem boundary**. Fatter than that means pure logic with a side effect — drive it with a fake, not a patch.
-
-When adding a wrapper to the allowlist, include a one-line rationale next to the regex. The list is the contract.
+A repository wrapper is allowlistable only when it is at most ten lines and
+mostly forwards to an external edge. Give every allowlist entry a one-line
+rationale; never allowlist a pure decision.
 
 **Picking a strategy when you'd otherwise want to patch our own code:**
 
@@ -548,11 +493,6 @@ When adding a wrapper to the allowlist, include a one-line rationale next to the
    **Definition-time defaults are injected, never patched.** When a dependency is captured in a function default, tests must pass the replacement explicitly (for example, `try_enqueue(..., match_fn=recorder)`) and assert the fake or recorder's call contract. Patching the module binding later does not replace Python's captured default and is forbidden. Enforce this in review and concrete behavior tests; do not add a structural AST or dataflow audit that tries to reproduce Python binding or execution semantics.
 3. **Module-local DI seam (only for URL or argparse dispatchers).** When the entry point can't take a kwarg, bind the dependency at the calling module's top: `finalize_request = transitions.finalize_request`. Tests patch the module attribute. Allowlist the binding. Canonical examples: `web.routes.pipeline_mutations.finalize_request`, `scripts.pipeline_cli.album_requests.finalize_request` (and its twin `scripts.pipeline_cli.quality.finalize_request` — the #495 CLI package split the single binding into one per command-family module that calls it), `scripts.repair._collect_issues`.
 4. **Allowlist (last resort).** Only if the target is a thin wrapper around an external boundary.
-
-**Adding a new `PipelineDB` / `BeetsDB` / `SlskdAPI` method:**
-1. Add a state-respecting implementation to the corresponding `Fake*` in `tests/fakes/`.
-2. Add a self-test in `tests/test_fakes.py`.
-3. Tests consume the fake; they do NOT do `mock_db.new_method.return_value = ...`.
 
 **Other test rules:**
 - **Equivalence proof when removing a test.** Note in the commit message what behaviour was covered, where it's covered now, what branch is still protected.

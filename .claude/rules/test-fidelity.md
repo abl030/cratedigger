@@ -248,51 +248,15 @@ rather than a surprise in production.
 rounds; each render is one command; the diff is instant. Writing the
 harness was the expensive part and it is already written.
 
-## Stronger enforcement (future work)
+## Executable coverage and its boundary
 
-The four rules above are guidance. Three layers of stronger enforcement, in order of ROI:
+Rule A coverage is enforced by `tests/test_pipeline_db_write_audit.py` plus
+real-PostgreSQL round trips; typed write payloads also have table-column
+contracts in `tests/test_pipeline_db_column_contract.py`. Rule B's narrow
+adapter-fake pattern is guarded by `tests/test_mirror_contracts.py` and
+`tests/test_lambda_audit.py`. Rule C's producer audits name an unproducible
+literal; Rule D remains a PR-time live-corpus procedure because no test can
+decide which derived text is operator-facing.
 
-### 1. Struct-typed write interface (high ROI, moderate effort)
-
-Make `PipelineDB.upsert_*` methods accept typed `msgspec.Struct` instances instead of `list[dict]`. The Struct's field names become the canonical write contract. Add an init-time assertion (or migration test) that the Struct's field names are a subset of the table's columns via `information_schema.columns`. Then:
-- Adding a field to the Struct without a corresponding migration fails at write time, not silently
-- The IDE / pyright sees the type and prevents dict typos
-- The fake can no longer "store anything" — it has to type-check too
-
-The album_title bug becomes impossible to express.
-
-### 2. `tests/test_pipeline_db_write_audit.py` (medium ROI, low effort)
-
-A test that:
-- Introspects `PipelineDB` via `inspect` for every `upsert_*` / `add_*` / `update_*` method
-- Asserts each has at least one matching real-PG test in `TestX::test_upsert_round_trip_preserves_every_field` shape
-- Fails CI if a write method ships without a round-trip guard
-
-Doesn't catch the bug directly, but forces every new write method to have the round-trip test from Rule A.
-
-### 3. Adapter contract tests + forbidden-pattern audit (medium ROI, low effort)
-
-For each external dependency, a "contract test" that documents what the real adapter raises:
-
-```python
-# tests/test_mirror_contracts.py
-def test_web_mb_get_release_raises_HTTPError_on_404():
-    with self.assertRaises(urllib.error.HTTPError):
-        web.mb.get_release("00000000-0000-0000-0000-000000000000")
-```
-
-Plus a `tests/_lambda_audit.py` scanner that grep's for `mb_get_release=lambda` / `discogs_get_release=lambda` patterns in test files and fails on any not in the allowlist. Same pattern as the existing `_mock_audit_scanner.py`.
-
-When a new mirror adapter is added, the contract test forces the author to document the exception types; the lambda-audit forces tests to use the canonical fake instead of raw lambdas.
-
-## Why these matter
-
-Both bugs from rounds 1 and 2 shipped with passing tests, passing pyright, passing vulture, and a clean review pass. They were only caught by adversarial / api-contract / correctness reviewers reading the code by hand against the migration SQL. That's not a sustainable detection method — the next bug of the same shape will ship.
-
-These rules don't replace review; they make the smell harder to introduce in the first place. If a future PR violates Rule A, the real-PG test will fail at PR time. If a future PR violates Rule B, the fake won't compile against the production exception contract. If a future PR violates Rule C, the producer audit names the literal and the module that cannot emit it. Rule D is the one that does not fail at PR time on its own — nothing can decide for you which text is operator-facing — so it is a review question every copy PR must answer with numbers.
-
-## Related memory
-
-- [[feedback-test-fidelity-meta-pattern]] — the meta-pattern the rules codify
-- See also: `docs/solutions/testing/contract-test-mocks-must-mirror-production-shape.md` — the original lesson that captured part of Rule A
-- See also: `docs/solutions/testing/mocked-contract-tests-miss-helper-mirror-integration-bugs.md` — the original lesson that captured part of Rule B
+These gates enforce their declared shapes, not every semantic equivalent. The
+rules above retain the judgement the executable checks cannot supply.
