@@ -25,7 +25,7 @@ from lib.download_materialization import (
     MaterializeGuarded,
 )
 from lib.download_recovery import ProcessingPathKind, ProcessingPathLocation
-from lib.pipeline_db import TransferLedgerRow
+from lib.pipeline_db import AlbumRequestRow, TransferLedgerRow
 from lib.slskd_client import TransferSnapshot
 from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
 from tests.helpers import (
@@ -4425,6 +4425,29 @@ class TestPollActiveDownloads(unittest.TestCase):
         from lib.download import poll_active_downloads
         from tests.fakes.slskd import FakeSlskdEvents
 
+        def make_installing_events(
+            slskd_api: FakeSlskdAPI,
+            database: FakePipelineDB,
+            replacement: dict[str, object],
+            installed: list[AlbumRequestRow | None],
+            ingest_outcome: str,
+        ) -> FakeSlskdEvents:
+            class InstallBOnEventList(FakeSlskdEvents):
+                installed = False
+
+                def list(self, *, limit=500, offset=0):
+                    if not self.installed:
+                        self.installed = True
+                        database._requests[1][
+                            "active_download_state"
+                        ] = replacement
+                        installed.append(database.get_request(1))
+                    if ingest_outcome == "raised":
+                        raise RuntimeError("events down")
+                    return super().list(limit=limit, offset=offset)
+
+            return InstallBOnEventList(slskd_api)
+
         for outcome in ("ingested", "no_new_events", "raised"):
             with self.subTest(outcome=outcome):
                 now = datetime.now(UTC)
@@ -4462,7 +4485,7 @@ class TestPollActiveDownloads(unittest.TestCase):
                         for file_state in row["active_download_state"]["files"]
                     ],
                 }
-                installed_rows = []
+                installed_rows: list[AlbumRequestRow | None] = []
                 slskd = FakeSlskdAPI(downloads=snapshot)
                 ctx, fake_db = self._make_poll_ctx(
                     downloading_rows=[row],
@@ -4470,21 +4493,13 @@ class TestPollActiveDownloads(unittest.TestCase):
                     slskd=slskd,
                 )
 
-                class InstallBOnEventList(FakeSlskdEvents):
-                    installed = False
-
-                    def list(self, *, limit=500, offset=0):
-                        if not self.installed:
-                            self.installed = True
-                            fake_db._requests[1][
-                                "active_download_state"
-                            ] = replacement_state
-                            installed_rows.append(fake_db.get_request(1))
-                        if outcome == "raised":
-                            raise RuntimeError("events down")
-                        return super().list(limit=limit, offset=offset)
-
-                slskd.events = InstallBOnEventList(slskd)
+                slskd.events = make_installing_events(
+                    slskd,
+                    fake_db,
+                    replacement_state,
+                    installed_rows,
+                    outcome,
+                )
                 fake_db.upsert_slskd_event_cursor(
                     "ev-cursor", (now - timedelta(minutes=1)).isoformat(),
                 )
@@ -4589,6 +4604,24 @@ class TestPollActiveDownloads(unittest.TestCase):
         from lib.download import poll_active_downloads
         from tests.fakes.slskd import FakeSlskdEvents
 
+        def make_invalidating_events(
+            slskd_api: FakeSlskdAPI,
+            database: FakePipelineDB,
+            invalid: object,
+        ) -> FakeSlskdEvents:
+            class InstallInvalidOnEventList(FakeSlskdEvents):
+                installed = False
+
+                def list(self, *, limit=500, offset=0):
+                    if not self.installed:
+                        self.installed = True
+                        database._requests[1][
+                            "active_download_state"
+                        ] = invalid
+                    return super().list(limit=limit, offset=offset)
+
+            return InstallInvalidOnEventList(slskd_api)
+
         for name, invalid_state in self.INVALID_ACTIVE_STATES:
             with self.subTest(state=name):
                 row = self._make_downloading_row()
@@ -4598,18 +4631,11 @@ class TestPollActiveDownloads(unittest.TestCase):
                     slskd=slskd,
                 )
 
-                class InstallInvalidOnEventList(FakeSlskdEvents):
-                    installed = False
-
-                    def list(self, *, limit=500, offset=0):
-                        if not self.installed:
-                            self.installed = True
-                            fake_db._requests[1][
-                                "active_download_state"
-                            ] = invalid_state
-                        return super().list(limit=limit, offset=offset)
-
-                slskd.events = InstallInvalidOnEventList(slskd)
+                slskd.events = make_invalidating_events(
+                    slskd,
+                    fake_db,
+                    invalid_state,
+                )
                 fake_db.upsert_slskd_event_cursor(
                     "ev-cursor", "2026-07-01T00:00:00+00:00",
                 )
@@ -4741,6 +4767,34 @@ class TestPollActiveDownloads(unittest.TestCase):
         from lib.download import poll_active_downloads
         from lib.slskd_events import EVENT_PAGE_LIMIT, MAX_EVENT_PAGES
 
+        def make_lost_stamp_db(
+            replacement: dict[str, object],
+            installed: list[AlbumRequestRow | None],
+        ) -> FakePipelineDB:
+            class LoseStampToBDB(FakePipelineDB):
+                lost_once = False
+
+                def update_download_state_if_downloading(
+                    self,
+                    request_id: int,
+                    state_json: str,
+                    *,
+                    expected_enqueued_at: str,
+                ) -> bool:
+                    if not self.lost_once:
+                        self.lost_once = True
+                        self._requests[request_id][
+                            "active_download_state"
+                        ] = replacement
+                        installed.append(self.get_request(request_id))
+                    return super().update_download_state_if_downloading(
+                        request_id,
+                        state_json,
+                        expected_enqueued_at=expected_enqueued_at,
+                    )
+
+            return LoseStampToBDB()
+
         for cursor_gap in (False, True):
             with self.subTest(cursor_gap=cursor_gap):
                 now = datetime.now(UTC)
@@ -4767,29 +4821,7 @@ class TestPollActiveDownloads(unittest.TestCase):
                         for file_state in row["active_download_state"]["files"]
                     ],
                 }
-                installed_b_rows = []
-
-                class LoseStampToBDB(FakePipelineDB):
-                    lost_once = False
-
-                    def update_download_state_if_downloading(
-                        self,
-                        request_id: int,
-                        state_json: str,
-                        *,
-                        expected_enqueued_at: str,
-                    ) -> bool:
-                        if not self.lost_once:
-                            self.lost_once = True
-                            self._requests[request_id][
-                                "active_download_state"
-                            ] = b_state
-                            installed_b_rows.append(self.get_request(request_id))
-                        return super().update_download_state_if_downloading(
-                            request_id,
-                            state_json,
-                            expected_enqueued_at=expected_enqueued_at,
-                        )
+                installed_b_rows: list[AlbumRequestRow | None] = []
 
                 snapshot = [{
                     "username": "user1",
@@ -4805,7 +4837,7 @@ class TestPollActiveDownloads(unittest.TestCase):
                     }],
                 }]
                 slskd = FakeSlskdAPI(downloads=snapshot)
-                db = LoseStampToBDB()
+                db = make_lost_stamp_db(b_state, installed_b_rows)
                 ctx, fake_db = self._make_poll_ctx(
                     downloading_rows=[row],
                     slskd_downloads=snapshot,

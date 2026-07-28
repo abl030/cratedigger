@@ -6785,7 +6785,7 @@ class TestDownloadingStatus(unittest.TestCase):
         blocker_handle = PipelineDB(TEST_DSN)
         stale_thread: threading.Thread | None = None
         stale_results: list[bool] = []
-        stale_errors: list[BaseException] = []
+        stale_errors: list[psycopg2.Error] = []
 
         def backend_pid(db: PipelineDB) -> int:
             row = db._execute(
@@ -6803,7 +6803,7 @@ class TestDownloadingStatus(unittest.TestCase):
                         expected_enqueued_at=witness_a,
                     )
                 )
-            except BaseException as exc:
+            except psycopg2.Error as exc:
                 stale_errors.append(exc)
 
         try:
