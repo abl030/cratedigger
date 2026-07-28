@@ -6755,6 +6755,7 @@ class TestDownloadingStatus(unittest.TestCase):
 
         witness_a = "2026-04-03T12:00:00+00:00"
         witness_b = "2026-04-03T12:01:00+00:00"
+        b_updated_at = datetime(2026, 4, 3, 12, 1, tzinfo=UTC)
         shared_file = {
             "username": "user",
             "filename": "Album\\01.flac",
@@ -6781,6 +6782,30 @@ class TestDownloadingStatus(unittest.TestCase):
         )
         self.assertTrue(self.db.set_downloading(req_id, state(witness_a, 0)))
         stale_handle = PipelineDB(TEST_DSN)
+        blocker_handle = PipelineDB(TEST_DSN)
+        stale_thread: threading.Thread | None = None
+        stale_results: list[bool] = []
+        stale_errors: list[BaseException] = []
+
+        def backend_pid(db: PipelineDB) -> int:
+            row = db._execute(
+                "SELECT pg_backend_pid() AS pid"
+            ).fetchone()
+            assert row is not None
+            return int(row["pid"])
+
+        def write_stale_state() -> None:
+            try:
+                stale_results.append(
+                    stale_handle.update_download_state_if_downloading(
+                        req_id,
+                        state(witness_a, 20),
+                        expected_enqueued_at=witness_a,
+                    )
+                )
+            except BaseException as exc:
+                stale_errors.append(exc)
+
         try:
             stale_row = stale_handle.get_request(req_id)
             assert stale_row is not None
@@ -6791,22 +6816,75 @@ class TestDownloadingStatus(unittest.TestCase):
                 witness_a,
             )
 
-            self.assertTrue(self.db.update_download_state(
-                req_id,
-                state(witness_b, 10),
-            ))
-            newer_row = self.db.get_request(req_id)
-            assert newer_row is not None
-
-            applied = stale_handle.update_download_state_if_downloading(
-                req_id,
-                state(witness_a, 20),
-                expected_enqueued_at=witness_a,
+            expected_b_row = copy.deepcopy(self.db.get_request(req_id))
+            assert expected_b_row is not None
+            expected_b_row["active_download_state"] = json.loads(
+                state(witness_b, 10)
             )
+            expected_b_row["updated_at"] = b_updated_at
 
-            self.assertFalse(applied)
-            self.assertEqual(self.db.get_request(req_id), newer_row)
+            blocker_pid = backend_pid(blocker_handle)
+            stale_pid = backend_pid(stale_handle)
+            with blocker_handle._atomic():
+                blocker_handle._execute(
+                    """
+                    UPDATE album_requests
+                    SET active_download_state = %s::jsonb,
+                        updated_at = %s
+                    WHERE id = %s
+                    """,
+                    (
+                        state(witness_b, 10),
+                        b_updated_at,
+                        req_id,
+                    ),
+                )
+                stale_thread = threading.Thread(
+                    target=write_stale_state,
+                    daemon=True,
+                )
+                stale_thread.start()
+
+                deadline = time.monotonic() + 5
+                observed_blocker = False
+                while time.monotonic() < deadline:
+                    row = self.db._execute(
+                        """
+                        SELECT pg_blocking_pids(%s) AS blockers
+                        """,
+                        (stale_pid,),
+                    ).fetchone()
+                    assert row is not None
+                    blockers = row["blockers"]
+                    if blocker_pid in blockers:
+                        observed_blocker = True
+                        break
+                    time.sleep(0.01)
+                self.assertTrue(
+                    observed_blocker,
+                    "stale writer never blocked behind the B row lock",
+                )
+                blocker_handle.conn.commit()
+
+            stale_thread.join(timeout=5)
+            self.assertFalse(
+                stale_thread.is_alive(),
+                "stale writer did not finish after the B commit",
+            )
+            self.assertEqual(stale_errors, [])
+            self.assertEqual(stale_results, [False])
+            self.assertEqual(self.db.get_request(req_id), expected_b_row)
         finally:
+            blocker_handle.close()
+            if stale_thread is not None:
+                stale_thread.join(timeout=5)
+                if stale_thread.is_alive():
+                    stale_handle.conn.cancel()
+                    stale_thread.join(timeout=5)
+                self.assertFalse(
+                    stale_thread.is_alive(),
+                    "stale writer survived connection cancellation",
+                )
             stale_handle.close()
 
     def test_known_bad_split_read_check_write_loses_new_incarnation(self):
