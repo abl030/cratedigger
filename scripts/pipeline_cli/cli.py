@@ -62,8 +62,8 @@ from scripts.pipeline_cli.wrong_match import (
 from scripts.pipeline_cli.youtube import cmd_youtube_album, cmd_youtube_rescue
 
 
-def main():
-    parser, p_sp, p_triage_op = _build_parser()
+def main(*, api_socket: str | None = None):
+    parser, p_sp, p_triage_op = _build_parser(api_socket=api_socket)
     args = parser.parse_args()
     if not args.command:
         parser.print_help()

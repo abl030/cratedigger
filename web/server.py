@@ -4,9 +4,11 @@ Browse MusicBrainz, add releases to the pipeline DB, view status.
 
 Usage:
     python3 web/server.py --canonical-origin https://music.example \
-        --port 8085 --dsn postgresql://cratedigger@10.20.0.11/cratedigger
+        --dev-port 8085 --dsn postgresql://cratedigger@10.20.0.11/cratedigger
 """
 import os
+import socket
+import socketserver
 import sys
 from typing import ClassVar
 
@@ -33,7 +35,7 @@ import json
 import logging
 import re
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -120,7 +122,7 @@ canonical_origin: str | None = None
 
 # Globals set in main() / injected by the test harness and dev server.
 # With `_db_dsn` set (production), request threads NEVER touch these —
-# each `ThreadingHTTPServer` worker gets its own handles via
+# each threaded HTTP worker gets its own handles via
 # `_thread_state` below, because neither psycopg2 connections nor
 # sqlite3 handles are safe to share across threads. With `_db_dsn`
 # unset (tests, web_dev_server live-db mode), `db` is the injected
@@ -143,6 +145,69 @@ delete_notify_fn = None
 # One-shot clients (curl, the importer's notify hooks) cost one
 # connect/teardown each — fine at single-operator scale.
 _thread_state = threading.local()
+
+
+class ThreadingUnixHTTPServer(
+    socketserver.ThreadingMixIn,
+    socketserver.UnixStreamServer,
+):
+    """Thread-per-connection HTTP server over one adopted Unix listener."""
+
+    daemon_threads = True
+    server_name: str
+    server_port: int
+
+    def __init__(
+        self,
+        listener: socket.socket,
+        handler_class: type[BaseHTTPRequestHandler],
+    ) -> None:
+        # The socket is already bound/listening under systemd ownership.
+        # BaseServer initializes shutdown/threading state without creating,
+        # binding, or activating a second listener.
+        socketserver.BaseServer.__init__(
+            self,
+            listener.getsockname(),
+            handler_class,
+        )
+        self.socket = listener
+        self.server_name = "cratedigger.internal"
+        self.server_port = 0
+
+
+def _take_systemd_unix_listener(
+    *,
+    environ: Mapping[str, str] | None = None,
+    inherited_fd: int = 3,
+) -> socket.socket:
+    """Adopt systemd's sole listening AF_UNIX stream fd or fail closed."""
+    source = os.environ if environ is None else environ
+    if source.get("LISTEN_FDS") != "1":
+        raise RuntimeError("production requires exactly one inherited socket")
+    if source.get("LISTEN_PID") != str(os.getpid()):
+        raise RuntimeError("inherited socket does not belong to current process")
+    try:
+        listener = socket.socket(fileno=inherited_fd)
+    except OSError as exc:
+        raise RuntimeError("could not adopt inherited socket") from exc
+    try:
+        if listener.family != socket.AF_UNIX:
+            raise RuntimeError("inherited socket must use AF_UNIX")
+        if (
+            listener.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE)
+            != socket.SOCK_STREAM
+        ):
+            raise RuntimeError("inherited AF_UNIX socket must be a stream")
+        if not listener.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN):
+            raise RuntimeError("inherited AF_UNIX stream must be listening")
+        # systemd passes activation fds across this exec. The web process
+        # spawns helpers on some routes, so close the listener at every later
+        # exec boundary rather than leaking backend authority into children.
+        listener.set_inheritable(False)
+    except (OSError, RuntimeError):
+        listener.close()
+        raise
+    return listener
 
 
 def _try_reconnect_db():
@@ -233,7 +298,7 @@ def _configure_beets_library_root_from_runtime_config() -> None:
 def _close_thread_handles() -> None:
     """Close and drop this thread's DB handles.
 
-    Called from ``Handler.finish()`` — under ``ThreadingHTTPServer``
+    Called from ``Handler.finish()`` — under either threaded HTTP server
     one thread serves one connection, so connection-close IS
     thread-death and this releases the psycopg2/sqlite handles
     deterministically instead of waiting on GC (#435). Injected shared
@@ -605,7 +670,7 @@ class Handler(BaseHTTPRequestHandler):
         """Connection teardown: release this thread's DB handles.
 
         Runs once per connection (after the keep-alive loop ends), which
-        under ThreadingHTTPServer is the moment the worker thread dies."""
+        under the threaded server is the moment the worker thread dies."""
         try:
             super().finish()
         finally:
@@ -642,7 +707,15 @@ def main():
     global beets_db_path, beets_library_root, canonical_origin
 
     parser = argparse.ArgumentParser(description="Cratedigger Web UI")
-    parser.add_argument("--port", type=int, default=8085)
+    parser.add_argument(
+        "--dev-port",
+        type=int,
+        default=None,
+        help=(
+            "INSECURE DEVELOPMENT ONLY: listen on IPv4 loopback TCP instead "
+            "of requiring one systemd-provided Unix socket."
+        ),
+    )
     parser.add_argument("--dsn", default=os.environ.get("PIPELINE_DB_DSN", "postgresql://cratedigger@localhost/cratedigger"))
     parser.add_argument(
         "--canonical-origin",
@@ -690,6 +763,12 @@ def main():
         parser.error(
             "--beets-db and --beets-directory must be supplied together"
         )
+    inherited_listener: socket.socket | None = None
+    if args.dev_port is None:
+        try:
+            inherited_listener = _take_systemd_unix_listener()
+        except RuntimeError as exc:
+            parser.error(str(exc))
 
     if args.redis_host:
         cache.init(args.redis_host, args.redis_port)
@@ -735,8 +814,20 @@ def main():
     if beets_db_path is not None and not os.path.exists(beets_db_path):
         log.warning("Beets DB not found at %s; library routes degrade", beets_db_path)
 
-    server = ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
-    print(f"Cratedigger Web UI listening on http://0.0.0.0:{args.port}")
+    if inherited_listener is None:
+        dev_port = args.dev_port
+        if not isinstance(dev_port, int):
+            raise RuntimeError("development listener port was not selected")
+        log.critical(
+            "INSECURE DEVELOPMENT TCP listener enabled on 127.0.0.1:%s",
+            dev_port,
+        )
+        server = ThreadingHTTPServer(("127.0.0.1", dev_port), Handler)
+        listener_display = f"http://127.0.0.1:{dev_port}"
+    else:
+        server = ThreadingUnixHTTPServer(inherited_listener, Handler)
+        listener_display = f"unix:{inherited_listener.getsockname()}"
+    print(f"Cratedigger Web UI listening on {listener_display}")
     print(f"  Pipeline DB: {args.dsn}")
     if beets_db_path is not None:
         beets_display = f"{beets_db_path} (dev/test override)"
