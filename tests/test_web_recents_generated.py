@@ -280,11 +280,26 @@ def assert_only_explicit_source_receives_materialized_output(
         raise AssertionError("unrelated same-release row received inferred output")
 
 
-def assert_verified_lossless_upgrade_copy_is_concise(verdict: str) -> None:
-    if "Equivalent:" in verdict or "both transparent" in verdict:
-        raise AssertionError("internal comparison trace leaked into upgrade copy")
-    if not verdict.startswith("Upgrade: "):
-        raise AssertionError("verified-lossless import lost upgrade grammar")
+def assert_verified_lossless_proof_upgrade_names_basis(
+    verdict: str,
+    basis: QualityComparisonBasis,
+) -> None:
+    if not verdict.startswith("Proof upgrade: equivalent quality — "):
+        raise AssertionError("verified-lossless import lost proof-upgrade grammar")
+    if basis.new_format is None or basis.existing_format is None:
+        raise AssertionError("proof-upgrade basis is missing a format")
+    new_format = basis.new_format.upper()
+    existing_format = basis.existing_format.upper()
+    if f"{new_format} vs {existing_format}" not in verdict:
+        raise AssertionError("proof upgrade lost the persisted format comparison")
+    if (
+        "MP3" in verdict
+        and not any(
+            "MP3" in format_name
+            for format_name in (new_format, existing_format)
+        )
+    ):
+        raise AssertionError("proof upgrade invented MP3 outside the basis")
     if "verified lossless" not in verdict:
         raise AssertionError("verified-lossless reason disappeared")
 
@@ -1020,62 +1035,94 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
                 expected_format="Opus",
             )
 
-    def test_verified_lossless_copy_checker_rejects_internal_trace(self) -> None:
-        with self.assertRaisesRegex(AssertionError, "internal comparison trace"):
-            assert_verified_lossless_upgrade_copy_is_concise(
-                "Equivalent: OPUS 128 vs MP3 — both transparent — "
-                "imported: verified lossless",
+    def test_verified_lossless_copy_checker_rejects_hardcoded_mp3_legacy_copy(
+        self,
+    ) -> None:
+        basis = msgspec.convert({
+            "verdict": "equivalent",
+            "branch": "label_contract_same_rank",
+            "new_rank": "transparent",
+            "existing_rank": "transparent",
+            "new_metric": "contract",
+            "existing_metric": "avg",
+            "new_value_kbps": 128,
+            "existing_value_kbps": 141,
+            "new_format": "opus 128",
+            "existing_format": "opus",
+            "spectral_clamped": False,
+            "tolerance_kbps": None,
+            "verified_lossless_bypass": True,
+        }, type=QualityComparisonBasis)
+        with self.assertRaisesRegex(AssertionError, "persisted format comparison"):
+            assert_verified_lossless_proof_upgrade_names_basis(
+                "Proof upgrade: equivalent quality — OPUS 128 vs MP3, "
+                "from FLAC, verified lossless",
+                basis,
             )
 
     @given(
-        existing_min=st.integers(min_value=1, max_value=2_000),
-        output_min=st.integers(min_value=1, max_value=2_000),
-        existing_avg=st.integers(min_value=1, max_value=2_000),
-        target=st.sampled_from(("opus 128", "mp3 v0")),
+        target=st.sampled_from((
+            ("opus 128", 141),
+            ("mp3 v0", 250),
+        )),
+        existing=st.sampled_from((
+            ("opus", 141, 129),
+            ("mp3", 250, 230),
+            ("aac", 256, 240),
+        )),
     )
     @example(
-        existing_min=320,
-        output_min=127,
-        existing_avg=320,
-        target="opus 128",
+        target=("opus 128", 141),
+        existing=("opus", 141, 129),
     )
-    def test_verified_lossless_bypass_uses_concise_upgrade_copy(
+    def test_verified_lossless_bypass_uses_persisted_existing_codec(
         self,
-        existing_min: int,
-        output_min: int,
-        existing_avg: int,
-        target: str,
+        target: tuple[str, int],
+        existing: tuple[str, int, int],
     ) -> None:
-        actual_format = "opus" if target == "opus 128" else "mp3"
+        from lib.quality import (
+            AudioQualityMeasurement,
+            QualityRankConfig,
+            import_quality_decision,
+        )
+
+        target_format, target_avg = target
+        existing_format, existing_avg, existing_min = existing
+        decision = import_quality_decision(
+            AudioQualityMeasurement(
+                avg_bitrate_kbps=target_avg,
+                format=target_format,
+            ),
+            AudioQualityMeasurement(
+                min_bitrate_kbps=existing_min,
+                avg_bitrate_kbps=existing_avg,
+                format=existing_format,
+            ),
+            cfg=QualityRankConfig.defaults(),
+            verified_lossless_proof=True,
+        )
+        self.assertEqual(decision.decision, "import")
+        self.assertIsNotNone(decision.basis)
+        assert decision.basis is not None
+        self.assertTrue(decision.basis.verified_lossless_bypass)
+
+        actual_format = "opus" if target_format == "opus 128" else "mp3"
         result = classify_log_entry(_entry(
             outcome="success",
             was_converted=True,
             original_filetype="flac",
             actual_filetype=actual_format,
-            actual_min_bitrate=output_min,
+            actual_min_bitrate=target_avg,
             existing_min_bitrate=existing_min,
             spectral_grade="genuine",
             import_result={
                 "version": 2,
                 "decision": "import",
-                "comparison_basis": {
-                    "verdict": "equivalent",
-                    "branch": "cross_family_same_rank",
-                    "new_rank": "transparent",
-                    "existing_rank": "transparent",
-                    "new_metric": "contract",
-                    "existing_metric": "avg",
-                    "new_value_kbps": 128,
-                    "existing_value_kbps": existing_avg,
-                    "new_format": target,
-                    "existing_format": "mp3",
-                    "spectral_clamped": False,
-                    "tolerance_kbps": None,
-                    "verified_lossless_bypass": True,
-                },
+                "comparison_basis": msgspec.to_builtins(decision.basis),
             },
         ))
-        assert_verified_lossless_upgrade_copy_is_concise(result.verdict)
+        assert_verified_lossless_proof_upgrade_names_basis(
+            result.verdict, decision.basis)
 
     @given(
         source_id=st.integers(min_value=1, max_value=1_000),

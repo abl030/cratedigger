@@ -2253,7 +2253,40 @@ class TestClassifyComparisonBasis(unittest.TestCase):
         c = classify_log_entry(entry)
         self.assertEqual(
             c.verdict,
-            "Upgrade: MP3 V0 to MP3 V0, verified lossless")
+            "Proof upgrade: equivalent quality — MP3 vs MP3, "
+            "verified lossless")
+
+    def test_ep1_proof_upgrade_names_opus_have_from_persisted_basis(self):
+        """Live issue #911 world: equivalent Opus replaced only for proof."""
+        basis = self._bypass_basis_dict(
+            {"avg_bitrate_kbps": 141, "format": "opus 128"},
+            {"min_bitrate_kbps": 129, "avg_bitrate_kbps": 141,
+             "format": "opus"},
+        )
+        self.assertEqual(basis["verdict"], "equivalent")
+        self.assertEqual(basis["existing_format"], "opus")
+        entry = _entry(
+            outcome="success",
+            was_converted=True,
+            original_filetype="flac",
+            actual_filetype="opus",
+            actual_min_bitrate=129,
+            existing_min_bitrate=129,
+            spectral_grade="likely_transcode",
+            import_result={
+                "version": 2,
+                "decision": "import",
+                "comparison_basis": basis,
+            },
+        )
+        result = classify_log_entry(entry)
+        self.assertEqual(result.badge, "Upgraded")
+        self.assertEqual(
+            result.verdict,
+            "Proof upgrade: equivalent quality — OPUS 128 vs OPUS, "
+            "from FLAC, verified lossless",
+        )
+        self.assertNotIn("MP3", result.verdict)
 
     def test_schmotime_verified_lossless_upgrade_restores_concise_copy(self):
         entry = _entry(
@@ -2289,7 +2322,8 @@ class TestClassifyComparisonBasis(unittest.TestCase):
         self.assertEqual(result.badge, "Upgraded")
         self.assertEqual(
             result.summary,
-            "Upgrade: MP3 320 to OPUS 127k, from FLAC, verified lossless"
+            "Proof upgrade: equivalent quality — OPUS 128 vs MP3, "
+            "from FLAC, verified lossless"
             " · trelospatrinos",
         )
 
