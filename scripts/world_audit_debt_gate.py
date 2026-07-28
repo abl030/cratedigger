@@ -7,7 +7,7 @@ import argparse
 import fcntl
 import os
 import sys
-from collections.abc import Iterator, Sequence
+from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import BinaryIO, TextIO
@@ -47,7 +47,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 @contextmanager
-def _state_lock(state_path: Path) -> Iterator[None]:
+def _state_lock(state_path: Path) -> Generator[None]:
     lock_path = state_path.with_name(f"{state_path.name}.lock")
     try:
         descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
