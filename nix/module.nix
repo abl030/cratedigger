@@ -2039,7 +2039,7 @@ in {
           if (''$request ~ "^[^ ]+ +[A-Za-z][A-Za-z0-9+.-]*://") {
             return 400;
           }
-        '';
+        '' + webProxyRequestConfig + webResourceIsolationConfig;
         locations."= /healthz" = {
           proxyPass = "http://unix:${webSocketPath}:/healthz";
           recommendedProxySettings = false;
@@ -2056,7 +2056,6 @@ in {
         locations."/" = {
           proxyPass = "http://unix:${webSocketPath}:";
           recommendedProxySettings = false;
-          extraConfig = webProxyRequestConfig + webResourceIsolationConfig;
         };
       };
       cratedigger-auth-reject = {

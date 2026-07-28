@@ -598,7 +598,6 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
                 mergedBasicAuthFile =
                   gateway.locations."/merged-probe".basicAuthFile;
                 proxyPass = gateway.locations."/".proxyPass;
-                proxyExtra = gateway.locations."/".extraConfig;
                 healthProxy = gateway.locations."= /healthz".proxyPass;
                 healthExtra = gateway.locations."= /healthz".extraConfig;
                 rejectDefault = reject.default;
@@ -686,7 +685,26 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
         self.assertEqual(
             dual["proxyPass"], "http://unix:/run/cratedigger-web/web.sock:"
         )
-        self.assertIn("proxy_read_timeout 300s;", dual["proxyExtra"])
+        self.assertIn("proxy_read_timeout 300s;", dual["gatewayExtra"])
+        self.assertIn(
+            "proxy_pass_request_headers off;", dual["gatewayExtra"]
+        )
+        self.assertIn(
+            "proxy_set_header X-Cratedigger-Request-Channel browser;",
+            dual["gatewayExtra"],
+        )
+        self.assertIn(
+            'add_header Content-Security-Policy "frame-ancestors \'none\'" always;',
+            dual["gatewayExtra"],
+        )
+        self.assertIn(
+            'add_header X-Frame-Options "DENY" always;',
+            dual["gatewayExtra"],
+        )
+        self.assertIn(
+            'add_header Cross-Origin-Resource-Policy "same-origin" always;',
+            dual["gatewayExtra"],
+        )
         self.assertEqual(
             dual["healthProxy"],
             "http://unix:/run/cratedigger-web/web.sock:/healthz",

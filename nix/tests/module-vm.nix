@@ -330,6 +330,16 @@ pkgs.testers.nixosTest {
     configHoldGate = pkgs.writeShellScript "cratedigger-test-config-hold" ''
       test ! -e /run/cratedigger-test-config-hold
     '';
+    heldApplicationServiceNames = [
+      "cratedigger"
+      "cratedigger-unfindable"
+      "cratedigger-importer"
+      "cratedigger-import-preview-worker"
+      "cratedigger-youtube-ingest"
+      "cratedigger-web"
+    ];
+    heldApplicationUnits = map (name: "${name}.service")
+      heldApplicationServiceNames;
     importerSandboxProbe = pkgs.writeShellScript "cratedigger-importer-sandbox-probe" ''
       set -euo pipefail
       probe_dir=/var/lib/cratedigger/processing/sandbox-probe
@@ -635,20 +645,33 @@ pkgs.testers.nixosTest {
       "d /var/lib/cratedigger-music/unrelated 0777 root root -"
       "d /var/lib/cratedigger-downloads 0770 slskd-writer slskd-writer -"
       "d /var/lib/cratedigger-world-writable 0777 root root -"
-      "f /run/cratedigger-test-config-hold 0644 root root - held"
     ];
     systemd.services = lib.mkMerge [
-      (lib.genAttrs [
-        "cratedigger"
-        "cratedigger-unfindable"
-        "cratedigger-importer"
-        "cratedigger-import-preview-worker"
-        "cratedigger-youtube-ingest"
-        "cratedigger-web"
-      ] (_: {
+      (lib.genAttrs heldApplicationServiceNames (_: {
+        after = ["cratedigger-test-config-hold.service"];
+        requires = ["cratedigger-test-config-hold.service"];
         serviceConfig.ExecCondition = [configHoldGate];
       }))
       {
+        # Create the downstream-gate fixture once at boot. Keep this oneshot
+        # active and unchanged across specialisation switches so activation
+        # cannot recreate the marker after the test deliberately removes it.
+        cratedigger-test-config-hold = {
+          description = "Hold Cratedigger application units on first boot";
+          wantedBy = ["multi-user.target"];
+          before = heldApplicationUnits;
+          restartIfChanged = false;
+          script = ''
+            ${pkgs.coreutils}/bin/install -m 0644 /dev/null \
+              /run/cratedigger-test-config-hold
+            ${pkgs.coreutils}/bin/printf 'held\n' \
+              > /run/cratedigger-test-config-hold
+          '';
+          serviceConfig = {
+            Type = "oneshot";
+            RemainAfterExit = true;
+          };
+        };
         # Test-only runtime secret provisioning. The bcrypt hash is generated
         # in the VM, so neither the active file nor its resolved target is a
         # Nix-store path and the hash cannot be embedded in generated config.
@@ -800,6 +823,8 @@ pkgs.testers.nixosTest {
     # application unit. Downstream consumers can intentionally gate those
     # units with ExecCondition; systemd evaluates that before ExecStartPre, so
     # an app-owned renderer leaves stale mutable config throughout an outage.
+    machine.wait_for_unit("cratedigger-test-config-hold.service")
+    machine.succeed("test -f /run/cratedigger-test-config-hold")
     machine.wait_for_unit("cratedigger-config-render.service")
     state = machine.succeed("systemctl is-active cratedigger-config-render.service").strip()
     assert state == "active", f"config renderer unit not active: {state}"
@@ -1341,10 +1366,36 @@ pkgs.testers.nixosTest {
         "https://music.vm.test:18443/inherited-basic)\" = 401"
     )
     machine.succeed(
-        "test \"$(curl -sS -o /dev/null -w '%{http_code}' "
+        "test \"$(curl -sS -D /tmp/inherited-basic-headers "
+        "-o /dev/null -w '%{http_code}' "
         "--user test-operator:test-password -H 'Host: music.vm.test' "
         "https://music.vm.test:18443/inherited-basic)\" = 404"
     )
+    inherited_basic_headers = machine.succeed(
+        "cat /tmp/inherited-basic-headers"
+    )
+    _assert_exact_response_header(
+        inherited_basic_headers,
+        "Content-Security-Policy",
+        "frame-ancestors 'none'",
+    )
+    _assert_exact_response_header(
+        inherited_basic_headers,
+        "X-Frame-Options",
+        "DENY",
+    )
+    _assert_exact_response_header(
+        inherited_basic_headers,
+        "Cross-Origin-Resource-Policy",
+        "same-origin",
+    )
+    machine.succeed(
+        "test \"$(curl -sS -o /dev/null -w '%{http_code}' -X POST "
+        "--user test-operator:test-password -H 'Host: music.vm.test' "
+        "-H 'X-Cratedigger-Request-Channel: cli' "
+        "https://music.vm.test:18443/inherited-basic)\" = 403"
+    )
+    machine.succeed("rm /tmp/inherited-basic-headers")
 
     # The test bcrypt credential is generated at runtime. Its configured and
     # resolved paths stay outside the store; nginx alone can read it. Neither
@@ -2134,9 +2185,29 @@ pkgs.testers.nixosTest {
         assert status == "204", (method, status)
         machine.succeed(f"test ! -s {body_path}")
         raw_headers = machine.succeed(f"cat {header_path}")
-        assert raw_headers.splitlines()[0].startswith("HTTP/1.1 204"), (
-            method, raw_headers,
+        _assert_exact_response_header(
+            raw_headers,
+            "Content-Security-Policy",
+            "frame-ancestors 'none'",
         )
+        _assert_exact_response_header(
+            raw_headers,
+            "X-Frame-Options",
+            "DENY",
+        )
+        _assert_exact_response_header(
+            raw_headers,
+            "Cross-Origin-Resource-Policy",
+            "same-origin",
+        )
+        _assert_absent_response_header(raw_headers, "WWW-Authenticate")
+        for cors_name in (
+            "Access-Control-Allow-Origin",
+            "Access-Control-Allow-Credentials",
+            "Access-Control-Allow-Methods",
+            "Access-Control-Allow-Headers",
+        ):
+            _assert_absent_response_header(raw_headers, cors_name)
 
     # Same-origin provenance through real nginx. Valid Origin, Referer
     # fallback, and matching-both reach route validation (400 for the
@@ -2585,8 +2656,9 @@ pkgs.testers.nixosTest {
     )
 
     # Basic alone disappears: anonymous and deliberately wrong Basic
-    # credentials both reach the app, while the generated nginx config has no
-    # Basic directive or credential path.
+    # credentials both reach the app. The generated nginx config retains only
+    # the exact health exception's explicit off-directive, with no challenge
+    # or credential path.
     for credential_args in ("", "--user test-operator:wrong"):
         machine.succeed(
             "test \"$(curl --max-time 5 -sS -o /dev/null "
@@ -2599,9 +2671,15 @@ pkgs.testers.nixosTest {
         "-c /etc/nginx/nginx.conf 2>&1"
     )
     assert "auth_basic_user_file" not in insecure_nginx, insecure_nginx
-    assert re.search(
-        r"(?m)^[ \t]*auth_basic[ \t]+", insecure_nginx,
-    ) is None, insecure_nginx
+    insecure_basic_directives = [
+        line.strip()
+        for line in insecure_nginx.splitlines()
+        if re.match(r"^[ \t]*auth_basic[ \t]+", line)
+    ]
+    assert insecure_basic_directives == ["auth_basic off;"], (
+        insecure_basic_directives,
+        insecure_nginx,
+    )
     assert (
         "/run/cratedigger-test-auth/basic.htpasswd" not in insecure_nginx
     ), insecure_nginx
