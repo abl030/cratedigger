@@ -35,7 +35,11 @@ class DownloadOwnershipDB(transitions.TransitionsDB, Protocol):
     ) -> bool: ...
 
     def update_download_state_if_downloading(
-        self, request_id: int, state_json: str,
+        self,
+        request_id: int,
+        state_json: str,
+        *,
+        expected_enqueued_at: str,
     ) -> bool: ...
 
     def record_transfer_enqueue(self, rows: list[TransferLedgerRow]) -> None: ...
@@ -159,12 +163,18 @@ class DownloadOwnershipWriter:
         self,
         request_id: int,
         state_json: str,
+        *,
+        expected_enqueued_at: str,
     ) -> bool:
-        """Guard active_download_state enrichment after slskd returns IDs."""
+        """Guard state enrichment with an independently held attempt witness."""
         db = self._open_db()
         try:
             return bool(
-                db.update_download_state_if_downloading(request_id, state_json)
+                db.update_download_state_if_downloading(
+                    request_id,
+                    state_json,
+                    expected_enqueued_at=expected_enqueued_at,
+                )
             )
         finally:
             self._close_db(db)

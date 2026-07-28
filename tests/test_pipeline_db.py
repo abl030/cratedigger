@@ -5,6 +5,7 @@ Requires a PostgreSQL server. Set TEST_DB_DSN env var to run, e.g.:
 
 Tests create/drop tables in the target database — use a dedicated test DB.
 """
+import copy
 import dataclasses
 import json
 import os
@@ -46,7 +47,7 @@ from lib.quality import (
     legacy_unrecorded_audio_validation_report,
 )
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_album_quality_evidence
+from tests.helpers import make_album_quality_evidence, make_request_row
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
 
@@ -6518,17 +6519,19 @@ class TestDownloadingStatus(unittest.TestCase):
             req_id,
             json.dumps({
                 "filetype": "mp3 v0",
-                "enqueued_at": "2026-04-03T12:01:00+00:00",
+                "enqueued_at": "2026-04-03T12:00:00+00:00",
                 "files": [],
             }),
+            expected_enqueued_at="2026-04-03T12:00:00+00:00",
         )
         blocked = self.db.update_download_state_if_downloading(
             blocked_id,
             json.dumps({
                 "filetype": "mp3 320",
-                "enqueued_at": "2026-04-03T12:02:00+00:00",
+                "enqueued_at": "2026-04-03T12:00:00+00:00",
                 "files": [],
             }),
+            expected_enqueued_at="2026-04-03T12:00:00+00:00",
         )
 
         self.assertTrue(updated)
@@ -6540,6 +6543,338 @@ class TestDownloadingStatus(unittest.TestCase):
         ads: Any = req["active_download_state"]
         self.assertEqual(ads["filetype"], "mp3 v0")
         self.assertIsNone(blocked_req["active_download_state"])
+
+    def test_update_download_state_fence_real_and_fake_case_parity(self):
+        witness = "2026-04-03T12:00:00+00:00"
+        other_witness = "2026-04-03T12:01:00+00:00"
+
+        def state(
+            enqueued_at: str | None,
+            *,
+            filetype: str = "flac",
+        ) -> dict[str, object]:
+            result: dict[str, object] = {
+                "filetype": filetype,
+                "files": [],
+            }
+            if enqueued_at is not None:
+                result["enqueued_at"] = enqueued_at
+            return result
+
+        cases = (
+            (
+                "matching witness",
+                "downloading",
+                state(witness),
+                json.dumps(state(witness, filetype="mp3 v0")),
+                True,
+                None,
+            ),
+            (
+                "non-downloading status",
+                "wanted",
+                state(witness),
+                json.dumps(state(witness, filetype="mp3 v0")),
+                False,
+                None,
+            ),
+            (
+                "changed stored witness",
+                "downloading",
+                state(other_witness),
+                json.dumps(state(witness, filetype="mp3 v0")),
+                False,
+                None,
+            ),
+            (
+                "equivalent timestamp with different text",
+                "downloading",
+                state("2026-04-03T12:00:00Z"),
+                json.dumps(state(witness, filetype="mp3 v0")),
+                False,
+                None,
+            ),
+            (
+                "changed outgoing witness",
+                "downloading",
+                state(witness),
+                json.dumps(state(other_witness, filetype="mp3 v0")),
+                False,
+                None,
+            ),
+            (
+                "missing stored witness",
+                "downloading",
+                state(None),
+                json.dumps(state(witness, filetype="mp3 v0")),
+                False,
+                None,
+            ),
+            (
+                "missing outgoing witness",
+                "downloading",
+                state(witness),
+                json.dumps(state(None, filetype="mp3 v0")),
+                False,
+                None,
+            ),
+            (
+                "missing stored state",
+                "downloading",
+                None,
+                json.dumps(state(witness, filetype="mp3 v0")),
+                False,
+                None,
+            ),
+            (
+                "valid non-object outgoing state",
+                "downloading",
+                state(witness),
+                "[]",
+                False,
+                None,
+            ),
+            (
+                "malformed outgoing JSON",
+                "downloading",
+                state(witness),
+                '{"enqueued_at":',
+                None,
+                psycopg2.errors.InvalidTextRepresentation,
+            ),
+            (
+                "nonstandard JSON constant",
+                "downloading",
+                state(witness),
+                (
+                    '{"filetype":"flac",'
+                    f'"enqueued_at":"{witness}",'
+                    '"files":[],"x":NaN}'
+                ),
+                None,
+                psycopg2.errors.InvalidTextRepresentation,
+            ),
+        )
+
+        for ordinal, (
+            description,
+            status,
+            stored_state,
+            outgoing_json,
+            expected_result,
+            expected_error,
+        ) in enumerate(cases, start=1):
+            with self.subTest(description=description):
+                req_id = self.db.add_request(
+                    mb_release_id=f"udsifd-parity-{ordinal}",
+                    artist_name="A",
+                    album_title="B",
+                    source="request",
+                )
+                self.assertTrue(self.db.set_downloading(
+                    req_id,
+                    json.dumps(state(witness)),
+                ))
+                self.db._execute(
+                    """
+                    UPDATE album_requests
+                    SET status = %s,
+                        active_download_state = %s::jsonb
+                    WHERE id = %s
+                    """,
+                    (
+                        status,
+                        (
+                            json.dumps(stored_state)
+                            if stored_state is not None
+                            else None
+                        ),
+                        req_id,
+                    ),
+                )
+                self.db.conn.commit()
+
+                fake = FakePipelineDB()
+                fake.seed_request(make_request_row(
+                    id=req_id,
+                    mb_release_id=f"udsifd-parity-{ordinal}",
+                    status=status,
+                    active_download_state=stored_state,
+                ))
+                real_before = self.db.get_request(req_id)
+                fake_before = copy.deepcopy(fake.request(req_id))
+                assert real_before is not None
+
+                real_error: type[psycopg2.Error] | None = None
+                fake_error: type[psycopg2.Error] | None = None
+                real_result: bool | None = None
+                fake_result: bool | None = None
+                try:
+                    real_result = (
+                        self.db.update_download_state_if_downloading(
+                            req_id,
+                            outgoing_json,
+                            expected_enqueued_at=witness,
+                        )
+                    )
+                except psycopg2.Error as exc:
+                    real_error = type(exc)
+                try:
+                    fake_result = fake.update_download_state_if_downloading(
+                        req_id,
+                        outgoing_json,
+                        expected_enqueued_at=witness,
+                    )
+                except psycopg2.Error as exc:
+                    fake_error = type(exc)
+
+                self.assertIs(real_error, expected_error)
+                self.assertIs(fake_error, expected_error)
+                self.assertEqual(real_result, expected_result)
+                self.assertEqual(fake_result, expected_result)
+
+                real_after = self.db.get_request(req_id)
+                fake_after = fake.request(req_id)
+                assert real_after is not None
+                if expected_result:
+                    expected_state = json.loads(outgoing_json)
+                    self.assertEqual(
+                        real_after["active_download_state"],
+                        expected_state,
+                    )
+                    self.assertEqual(
+                        fake_after["active_download_state"],
+                        expected_state,
+                    )
+                else:
+                    self.assertEqual(real_after, real_before)
+                    self.assertEqual(fake_after, fake_before)
+
+    def test_stale_two_handle_write_preserves_new_incarnation_and_metadata(self):
+        from lib.pipeline_db import PipelineDB
+
+        witness_a = "2026-04-03T12:00:00+00:00"
+        witness_b = "2026-04-03T12:01:00+00:00"
+        shared_file = {
+            "username": "user",
+            "filename": "Album\\01.flac",
+            "file_dir": "Album",
+            "size": 123,
+        }
+
+        def state(enqueued_at: str, bytes_transferred: int) -> str:
+            return json.dumps({
+                "filetype": "flac",
+                "enqueued_at": enqueued_at,
+                "current_path": "/same/path",
+                "files": [{
+                    **shared_file,
+                    "bytes_transferred": bytes_transferred,
+                }],
+            })
+
+        req_id = self.db.add_request(
+            mb_release_id="udsifd-two-handle",
+            artist_name="A",
+            album_title="B",
+            source="request",
+        )
+        self.assertTrue(self.db.set_downloading(req_id, state(witness_a, 0)))
+        stale_handle = PipelineDB(TEST_DSN)
+        try:
+            stale_row = stale_handle.get_request(req_id)
+            assert stale_row is not None
+            stale_state = stale_row["active_download_state"]
+            assert stale_state is not None
+            self.assertEqual(
+                stale_state["enqueued_at"],
+                witness_a,
+            )
+
+            self.assertTrue(self.db.update_download_state(
+                req_id,
+                state(witness_b, 10),
+            ))
+            newer_row = self.db.get_request(req_id)
+            assert newer_row is not None
+
+            applied = stale_handle.update_download_state_if_downloading(
+                req_id,
+                state(witness_a, 20),
+                expected_enqueued_at=witness_a,
+            )
+
+            self.assertFalse(applied)
+            self.assertEqual(self.db.get_request(req_id), newer_row)
+        finally:
+            stale_handle.close()
+
+    def test_known_bad_split_read_check_write_loses_new_incarnation(self):
+        from lib.pipeline_db import PipelineDB
+
+        witness_a = "2026-04-03T12:00:00+00:00"
+        witness_b = "2026-04-03T12:01:00+00:00"
+
+        def state(enqueued_at: str, bytes_transferred: int) -> str:
+            return json.dumps({
+                "filetype": "flac",
+                "enqueued_at": enqueued_at,
+                "current_path": "/same/path",
+                "files": [{
+                    "username": "user",
+                    "filename": "Album\\01.flac",
+                    "file_dir": "Album",
+                    "size": 123,
+                    "bytes_transferred": bytes_transferred,
+                }],
+            })
+
+        req_id = self.db.add_request(
+            mb_release_id="udsifd-known-bad-split",
+            artist_name="A",
+            album_title="B",
+            source="request",
+        )
+        self.assertTrue(self.db.set_downloading(
+            req_id,
+            state(witness_a, 0),
+        ))
+        stale_handle = PipelineDB(TEST_DSN)
+        try:
+            checked = stale_handle.get_request(req_id)
+            assert checked is not None
+            checked_state = checked["active_download_state"]
+            assert checked_state is not None
+            self.assertEqual(
+                checked_state["enqueued_at"],
+                witness_a,
+            )
+
+            self.assertTrue(self.db.update_download_state(
+                req_id,
+                state(witness_b, 10),
+            ))
+            self.assertTrue(stale_handle.update_download_state(
+                req_id,
+                state(witness_a, 20),
+            ))
+
+            final = self.db.get_request(req_id)
+            assert final is not None
+            final_state = final["active_download_state"]
+            assert final_state is not None
+            files = final_state["files"]
+            assert isinstance(files, list)
+            self.assertEqual(
+                json_dict(files[0])["bytes_transferred"],
+                20,
+            )
+            self.assertNotEqual(
+                final_state["enqueued_at"],
+                witness_b,
+            )
+        finally:
+            stale_handle.close()
 
     def test_reset_downloading_to_wanted_success_and_guard(self):
         req_id = self.db.add_request(

@@ -1010,6 +1010,39 @@ class TestSlskdEnqueueWithOutcome(unittest.TestCase):
         self.assertEqual(outcome.downloads[0].id, "current-errored")
 
 
+class TestDownloadOwnershipWriterFence(unittest.TestCase):
+    def test_expected_witness_is_independent_of_outgoing_state(self):
+        from lib.download_ownership import DownloadOwnershipWriter
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={
+                "filetype": "flac",
+                "enqueued_at": "attempt-a",
+                "files": [],
+            },
+        ))
+        writer = DownloadOwnershipWriter(db_factory=lambda: db)
+
+        applied = writer.update_state_if_downloading(
+            42,
+            '{"filetype":"mp3","enqueued_at":"attempt-b","files":[]}',
+            expected_enqueued_at="attempt-a",
+        )
+
+        self.assertFalse(applied)
+        self.assertEqual(
+            db.request(42)["active_download_state"],
+            {
+                "filetype": "flac",
+                "enqueued_at": "attempt-a",
+                "files": [],
+            },
+        )
+
+
 class TestTransferLedgerWriteAheadOrdering(unittest.TestCase):
     """T1 pin (issue #571): slskd_enqueue_with_outcome -- the ONE
     production call site of ctx.slskd.transfers.enqueue -- ledgers every
@@ -4082,11 +4115,14 @@ class TestPollActiveDownloads(unittest.TestCase):
                 self,
                 request_id: int,
                 state_json: str,
+                *,
+                expected_enqueued_at: str,
             ) -> bool:
                 self._requests[request_id]["status"] = "replaced"
                 return super().update_download_state_if_downloading(
                     request_id,
                     state_json,
+                    expected_enqueued_at=expected_enqueued_at,
                 )
 
         row = self._make_downloading_row()
@@ -4119,7 +4155,11 @@ class TestPollActiveDownloads(unittest.TestCase):
             ActiveDownloadState.from_dict(current["active_download_state"]).to_json(),
             original_state_json,
         )
-        self.assertEqual(fake_db.update_download_state_calls, [])
+        self.assertEqual(
+            [request_id for request_id, _state_json
+             in fake_db.update_download_state_calls],
+            [1],
+        )
         self.assertEqual(fake_db.list_import_jobs(request_id=1), [])
         self.assertEqual(fake_db.download_logs, [])
         slskd = cast(FakeSlskdAPI, ctx.slskd)

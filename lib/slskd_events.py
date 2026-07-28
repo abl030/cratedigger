@@ -207,9 +207,12 @@ def _stamp_local_paths(
                 file_state.local_path = info.local_path
                 row_stamped += 1
         if row_stamped and db.update_download_state_if_downloading(
-                row["id"], state.to_json()):
+                row["id"],
+                state.to_json(),
+                expected_enqueued_at=state.enqueued_at):
             # Count only what actually persisted — a row that left
-            # 'downloading' mid-ingest contributes nothing.
+            # 'downloading' or gained a newer incarnation mid-ingest
+            # contributes nothing.
             requests_updated += 1
             files_stamped += row_stamped
     return files_stamped, requests_updated

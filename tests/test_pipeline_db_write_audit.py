@@ -85,7 +85,9 @@ ALLOWLIST: dict[str, str] = {
     "update_download_state_current_path":
         "single-column path update",
     "update_download_state_if_downloading":
-        "single-column status update",
+        "real-PG whole-state round-trip and rejection parity in "
+        "TestDownloadingStatus::"
+        "test_update_download_state_fence_real_and_fake_case_parity",
     "update_status":
         "single-column status update",
     "set_download_log_candidate_evidence":

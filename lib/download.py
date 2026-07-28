@@ -127,7 +127,11 @@ class DownloadDB(transitions.TransitionsDB, Protocol):
     ) -> bool: ...
 
     def update_download_state_if_downloading(
-        self, request_id: int, state_json: str,
+        self,
+        request_id: int,
+        state_json: str,
+        *,
+        expected_enqueued_at: str,
     ) -> bool: ...
 
     def update_download_state_current_path(
@@ -558,12 +562,13 @@ def harvest_terminal_transfer_evidence(ctx: CratediggerContext) -> None:
     the remaining rows, because the purge runs immediately after and an
     aborted loop would destroy the un-harvested rows' evidence (the I1b
     failure mode). The purge always still runs regardless (the
-    pre-existing behavior). The write goes through the status-guarded
-    ``update_download_state_if_downloading`` — mirroring the poll path's
-    fresh-status guard — so a row a concurrent operator action just
-    flipped out of ``downloading`` is never rewritten. MUST be called
-    before ``purge_completed_transfers``; that ordering is owned by the
-    end-of-cycle registry in ``lib/convergence.py::CONVERGENCE_STEPS``.
+    pre-existing behavior). The write goes through the status-and-attempt-
+    guarded ``update_download_state_if_downloading`` — mirroring the poll
+    path's ownership guard — so a row a concurrent action moved out of
+    ``downloading`` or replaced with a newer attempt is never rewritten.
+    MUST be called before ``purge_completed_transfers``; that ordering is
+    owned by the end-of-cycle registry in
+    ``lib/convergence.py::CONVERGENCE_STEPS``.
     """
     db = ctx.pipeline_db_source._get_db()
     downloading = db.get_downloading()
@@ -602,7 +607,9 @@ def harvest_terminal_transfer_evidence(ctx: CratediggerContext) -> None:
                 dirty = True
 
             if dirty and db.update_download_state_if_downloading(
-                    request_id, state.to_json()):
+                    request_id,
+                    state.to_json(),
+                    expected_enqueued_at=state.enqueued_at):
                 harvested += 1
         except Exception:
             logger.warning(
@@ -1202,14 +1209,17 @@ def _poll_one_active_download(
     )
 
     # The reducer returns the whole observation state, so every valid row
-    # persists unconditionally here while this worker still owns a
-    # downloading row. Losing that guard means a concurrent transition won;
-    # its state and every downstream side effect take precedence.
+    # persists unconditionally here while this worker still owns the same
+    # downloading incarnation. Losing that guard means a concurrent status
+    # transition or newer attempt won; its state and every downstream side
+    # effect take precedence.
     if (
         result.state is not None
+        and state is not None
         and not db.update_download_state_if_downloading(
             request_id,
             result.state.to_json(),
+            expected_enqueued_at=state.enqueued_at,
         )
     ):
         return

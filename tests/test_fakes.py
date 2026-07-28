@@ -847,26 +847,76 @@ class TestFakePipelineDB(unittest.TestCase):
 
     def test_update_download_state_if_downloading_guards_status(self):
         db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={
+                "filetype": "old",
+                "enqueued_at": "attempt-a",
+                "files": [],
+            },
+        ))
         db.seed_request(make_request_row(
             id=43,
             status="wanted",
-            active_download_state={"filetype": "old"},
+            active_download_state={
+                "filetype": "old",
+                "enqueued_at": "attempt-a",
+                "files": [],
+            },
         ))
 
         updated = db.update_download_state_if_downloading(
             42,
-            '{"filetype":"flac"}',
+            '{"filetype":"flac","enqueued_at":"attempt-a","files":[]}',
+            expected_enqueued_at="attempt-a",
         )
         blocked = db.update_download_state_if_downloading(
             43,
-            '{"filetype":"mp3"}',
+            '{"filetype":"mp3","enqueued_at":"attempt-a","files":[]}',
+            expected_enqueued_at="attempt-a",
         )
 
         self.assertTrue(updated)
         self.assertFalse(blocked)
-        self.assertEqual(db.request(42)["active_download_state"], {"filetype": "flac"})
-        self.assertEqual(db.request(43)["active_download_state"], {"filetype": "old"})
+        self.assertEqual(
+            db.request(42)["active_download_state"],
+            {
+                "filetype": "flac",
+                "enqueued_at": "attempt-a",
+                "files": [],
+            },
+        )
+        self.assertEqual(
+            db.request(43)["active_download_state"],
+            {
+                "filetype": "old",
+                "enqueued_at": "attempt-a",
+                "files": [],
+            },
+        )
+
+    def test_update_download_state_if_downloading_rejects_stale_witness_unchanged(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={
+                "filetype": "flac",
+                "enqueued_at": "attempt-b",
+                "files": [],
+            },
+        ))
+        before = copy.deepcopy(db.request(42))
+
+        updated = db.update_download_state_if_downloading(
+            42,
+            '{"filetype":"mp3","enqueued_at":"attempt-a","files":[]}',
+            expected_enqueued_at="attempt-a",
+        )
+
+        self.assertFalse(updated)
+        self.assertEqual(db.request(42), before)
 
     def test_reset_downloading_to_wanted_guards_status_and_preserves_counters(self):
         db = FakePipelineDB()
@@ -1313,26 +1363,58 @@ class TestFakePipelineDB(unittest.TestCase):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=1, status="downloading",
-            active_download_state={"original": True}))
+            active_download_state={
+                "filetype": "flac",
+                "enqueued_at": "attempt-a",
+                "files": [],
+            }))
         db.seed_request(make_request_row(
-            id=2, status="downloading", mb_release_id="mbid-2"))
+            id=2,
+            status="downloading",
+            mb_release_id="mbid-2",
+            active_download_state={
+                "filetype": "flac",
+                "enqueued_at": "attempt-b",
+                "files": [],
+            },
+        ))
         boom = RuntimeError("UPDATE failed")
         db.set_update_download_state_error(1, boom)
 
         with self.assertRaises(RuntimeError):
             db.update_download_state(1, '{"mutated": true}')
         with self.assertRaises(RuntimeError):
-            db.update_download_state_if_downloading(1, '{"mutated": true}')
+            db.update_download_state_if_downloading(
+                1,
+                '{"filetype":"mp3","enqueued_at":"attempt-a","files":[]}',
+                expected_enqueued_at="attempt-a",
+            )
 
         # Row 1 untouched; both attempts recorded.
         self.assertEqual(
-            db.request(1)["active_download_state"], {"original": True})
+            db.request(1)["active_download_state"],
+            {
+                "filetype": "flac",
+                "enqueued_at": "attempt-a",
+                "files": [],
+            },
+        )
         self.assertEqual(len(db.update_download_state_calls), 2)
         # Other requests still write normally.
         self.assertTrue(
-            db.update_download_state_if_downloading(2, '{"ok": true}'))
+            db.update_download_state_if_downloading(
+                2,
+                '{"filetype":"mp3","enqueued_at":"attempt-b","files":[]}',
+                expected_enqueued_at="attempt-b",
+            ))
         self.assertEqual(
-            db.request(2)["active_download_state"], {"ok": True})
+            db.request(2)["active_download_state"],
+            {
+                "filetype": "mp3",
+                "enqueued_at": "attempt-b",
+                "files": [],
+            },
+        )
 
     def test_log_download_records_transfer_detail(self):
         """Issue #564 C7: transfer_detail is a first-class field on

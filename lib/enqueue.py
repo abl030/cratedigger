@@ -609,10 +609,12 @@ def _persist_claimed_download_state(
     writer = getattr(ctx, "download_ownership", None)
     if writer is None:
         return True
+    assert claim.enqueued_at is not None
     entry = _entry_with_files(claim.entry, files)
     updated = bool(writer.update_state_if_downloading(
         claim.request_id,
         _state_json_for_entry(entry, enqueued_at=claim.enqueued_at),
+        expected_enqueued_at=claim.enqueued_at,
     ))
     if not updated:
         logger.warning(
@@ -634,6 +636,7 @@ def _reset_claim_after_verified_no_acceptance(
     writer = getattr(ctx, "download_ownership", None)
     if writer is None:
         return None
+    assert claim.enqueued_at is not None
 
     snapshot_ok, visible = _visible_claim_transfers(claim, ctx)
     if snapshot_ok and not visible:
@@ -643,6 +646,7 @@ def _reset_claim_after_verified_no_acceptance(
     writer.update_state_if_downloading(
         claim.request_id,
         _state_json_for_entry(claim.entry, enqueued_at=claim.enqueued_at),
+        expected_enqueued_at=claim.enqueued_at,
     )
     logger.warning(
         "%s for request %s could not prove no slskd transfer exists; "
@@ -680,9 +684,11 @@ def _leave_claim_for_poll_recovery(
         return None
     writer = getattr(ctx, "download_ownership", None)
     if writer is not None:
+        assert claim.enqueued_at is not None
         writer.update_state_if_downloading(
             claim.request_id,
             _state_json_for_entry(claim.entry, enqueued_at=claim.enqueued_at),
+            expected_enqueued_at=claim.enqueued_at,
         )
 
     logger.warning(
@@ -704,6 +710,7 @@ def _handle_claimed_partial_failure(
     writer = getattr(ctx, "download_ownership", None)
     if writer is None:
         return None
+    assert claim.enqueued_at is not None
 
     _copy_download_observations(claim.entry.files, accepted)
     _visible_claim_transfers(claim, ctx)
@@ -719,6 +726,7 @@ def _handle_claimed_partial_failure(
         writer.update_state_if_downloading(
             claim.request_id,
             _state_json_for_entry(claim.entry, enqueued_at=claim.enqueued_at),
+            expected_enqueued_at=claim.enqueued_at,
         )
         logger.warning(
             "Partial multi-disc enqueue for request %s could not be verified "
@@ -737,6 +745,7 @@ def _handle_claimed_partial_failure(
     writer.update_state_if_downloading(
         claim.request_id,
         _state_json_for_entry(claim.entry, enqueued_at=claim.enqueued_at),
+        expected_enqueued_at=claim.enqueued_at,
     )
     logger.warning(
         "Partial multi-disc enqueue for request %s could not be verified as "
