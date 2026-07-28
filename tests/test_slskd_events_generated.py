@@ -28,6 +28,10 @@ Four properties over generated feed histories:
 3. **Duplicate-id invariance** — a feed with duplicated events (the
    mid-pagination offset-shift shape) produces exactly the same outcome
    as the same feed deduplicated.
+4. **Incarnation classification + replay** — stale prefetched A rows cannot
+   classify B's event window; before/at/after-B occurrence times, shared and
+   changed keys, candidate shadowing, replacement-before-write, and replay
+   preserve the current path, cursor commit marker, and idempotent ledger.
 
 Multi-page scans and the page-cap ``cursor_gap`` path stay pinned by the
 hand tests in tests/test_slskd_events.py (they need >500-event feeds).
@@ -42,11 +46,13 @@ import json
 import os
 import sys
 import unittest
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from hypothesis import given
+from hypothesis import example, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
@@ -112,6 +118,46 @@ class EventWorld:
     # ingestion runs. Drawn from the same row_keys pool so every key here
     # is also reachable through expected_oracle_stamps' newest-event map.
     ledgered_keys: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True)
+class IncarnationEventWorld:
+    """One stale-A/fresh-B event window with relative occurrence times."""
+
+    shared_attempt_key: bool
+    # -1 = before B, 0 = exactly B, 1 = after B. Tuple order is feed
+    # order (newest position first), deliberately independent of time so a
+    # newer ineligible entry can precede an older eligible one.
+    event_relations: tuple[int, ...]
+    replace_before_write: bool
+    witness_text: str
+
+
+class _BeforeStateWriteDB(FakePipelineDB):
+    """One-shot replacement seam for generated CAS interleavings."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.before_state_write: Callable[[], None] | None = None
+        self.expected_enqueued_at_calls: list[str] = []
+
+    def update_download_state_if_downloading(
+        self,
+        request_id: int,
+        state_json: str,
+        *,
+        expected_enqueued_at: str,
+    ) -> bool:
+        self.expected_enqueued_at_calls.append(expected_enqueued_at)
+        before_state_write = self.before_state_write
+        self.before_state_write = None
+        if before_state_write is not None:
+            before_state_write()
+        return super().update_download_state_if_downloading(
+            request_id,
+            state_json,
+            expected_enqueued_at=expected_enqueued_at,
+        )
 
 
 def _timestamp_for(index: int, garbage: bool) -> str:
@@ -225,6 +271,63 @@ def wild_worlds(draw) -> EventWorld:
         rows=rows, events=events, cursor_index=cursor_index,
         garbage_cursor_timestamp=draw(st.booleans()),
         ledgered_keys=ledgered_keys,
+    )
+
+
+@st.composite
+def incarnation_event_worlds(draw) -> IncarnationEventWorld:
+    witness_instant = datetime(
+        2026,
+        7,
+        8,
+        10,
+        0,
+        second=draw(st.sampled_from((0, 1, 30))),
+        microsecond=draw(st.sampled_from((0, 125000, 123456))),
+        tzinfo=UTC,
+    )
+    witness_style = draw(st.sampled_from((
+        "canonical_offset",
+        "z",
+        "positive_offset",
+        "negative_offset",
+        "fractional_z",
+        "fractional_offset",
+        "malformed",
+    )))
+    if witness_style == "canonical_offset":
+        witness_text = witness_instant.isoformat(timespec="seconds")
+    elif witness_style == "z":
+        witness_text = (
+            witness_instant.isoformat(timespec="seconds")
+            .replace("+00:00", "Z")
+        )
+    elif witness_style == "positive_offset":
+        witness_text = witness_instant.astimezone(
+            timezone(timedelta(hours=8)),
+        ).isoformat(timespec="microseconds")
+    elif witness_style == "negative_offset":
+        witness_text = witness_instant.astimezone(
+            timezone(-timedelta(hours=5, minutes=30)),
+        ).isoformat(timespec="microseconds")
+    elif witness_style == "fractional_z":
+        witness_text = (
+            witness_instant.strftime("%Y-%m-%dT%H:%M:%S.")
+            + f"{witness_instant.microsecond:06d}0Z"
+        )
+    elif witness_style == "fractional_offset":
+        witness_text = witness_instant.isoformat(timespec="microseconds")
+    else:
+        witness_text = "not-an-iso-witness"
+    return IncarnationEventWorld(
+        shared_attempt_key=draw(st.booleans()),
+        event_relations=tuple(draw(st.lists(
+            st.sampled_from((-1, 0, 1)),
+            min_size=1,
+            max_size=4,
+        ))),
+        replace_before_write=draw(st.booleans()),
+        witness_text=witness_text,
     )
 
 
@@ -374,6 +477,126 @@ def _owned_local_paths(db: FakePipelineDB, world: EventWorld) -> dict[tuple[str,
     return actual
 
 
+def _seed_incarnation(
+    db: FakePipelineDB,
+    *,
+    key: tuple[str, str],
+    enqueued_at: str,
+) -> None:
+    db.seed_request({
+        "id": 1,
+        "status": "downloading",
+        "artist_name": "Artist",
+        "album_title": "Album",
+        "active_download_state": json.loads(ActiveDownloadState(
+            filetype="flac",
+            enqueued_at=enqueued_at,
+            files=[make_active_download_file_state(
+                username=key[0],
+                filename=key[1],
+            )],
+        ).to_json()),
+    })
+
+
+def _current_local_path(db: FakePipelineDB) -> str | None:
+    state = ActiveDownloadState.from_dict(
+        db.request(1)["active_download_state"])
+    return state.files[0].local_path
+
+
+def _current_witness(db: FakePipelineDB) -> str:
+    state = ActiveDownloadState.from_dict(
+        db.request(1)["active_download_state"])
+    return state.enqueued_at
+
+
+def _parse_witness_oracle(value: str) -> datetime | None:
+    """Independent ISO parser for generated expected worlds."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _event_timestamp(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat(
+        timespec="microseconds",
+    ).replace("+00:00", "Z")
+
+
+def _build_incarnation_harness(
+    world: IncarnationEventWorld,
+) -> tuple[
+    _BeforeStateWriteDB,
+    FakeSlskdAPI,
+    list,
+    tuple[str, str],
+]:
+    db = _BeforeStateWriteDB()
+    slskd = FakeSlskdAPI()
+    attempt_a_key = ("peer-a", "A\\01.flac")
+    attempt_b_key = (
+        attempt_a_key
+        if world.shared_attempt_key
+        else ("peer-b", "B\\01.flac")
+    )
+    witness_instant = _parse_witness_oracle(world.witness_text)
+    event_reference = witness_instant or datetime(
+        2026, 7, 8, 10, 0, tzinfo=UTC)
+    _seed_incarnation(
+        db,
+        key=attempt_a_key,
+        enqueued_at=_event_timestamp(event_reference - timedelta(hours=3)),
+    )
+    stale_attempt_a = db.get_downloading()
+    _seed_incarnation(
+        db,
+        key=attempt_b_key,
+        enqueued_at=world.witness_text,
+    )
+    cursor_timestamp = _event_timestamp(
+        event_reference - timedelta(hours=2))
+    db.upsert_slskd_event_cursor(
+        "ev-cursor", cursor_timestamp)
+    events = [
+        slskd.events.make_event(
+            id=f"ev-{index}",
+            timestamp=_event_timestamp(
+                event_reference + timedelta(hours=relation)),
+            type=_FILE_COMPLETE,
+            data=make_file_complete_event_data(
+                username=attempt_b_key[0],
+                filename=attempt_b_key[1],
+                local_filename=f"/downloads/incarnation/{index}",
+            ),
+        )
+        for index, relation in enumerate(world.event_relations)
+    ]
+    events.append(slskd.events.make_event(
+        id="ev-cursor",
+        timestamp=cursor_timestamp,
+        type="Noise",
+        data="{}",
+    ))
+    slskd.events.set_events(events)
+
+    db.record_transfer_enqueue([
+        TransferLedgerRow(
+            request_id=1,
+            username=attempt_b_key[0],
+            filename=attempt_b_key[1],
+        ),
+    ])
+    db.confirm_transfer_enqueue(*attempt_b_key)
+    return db, slskd, stale_attempt_a, attempt_b_key
+
+
 def assert_stamps_match(expected: dict, actual: dict) -> None:
     """Stamping-oracle checker (module-level for the known-bad self-test)."""
     if expected.keys() != actual.keys():
@@ -411,6 +634,41 @@ def assert_result_well_formed(result: EventIngestResult) -> None:
                   "requests_updated", "transfers_stamped"):
         if getattr(result, field) < 0:
             raise AssertionError(f"negative counter {field}: {result!r}")
+    if result.cursor_advanced and result.cursor_hold_reason is not None:
+        raise AssertionError(
+            f"advanced cursor cannot also report a hold: {result!r}")
+    if result.cursor_hold_reason is not None and result.cursor_gap:
+        raise AssertionError(
+            f"cursor-gap fail-open cannot claim a replay hold: {result!r}")
+
+
+def assert_incarnation_window(
+    *,
+    expected_path: str | None,
+    actual_path: str | None,
+    expected_cursor_advanced: bool,
+    result: EventIngestResult,
+) -> None:
+    """Issue #898 U3 oracle checker, kept independent of production logic."""
+    if actual_path != expected_path:
+        raise AssertionError(
+            "current-incarnation stamp diverged: "
+            f"expected={expected_path!r} actual={actual_path!r}")
+    if result.cursor_advanced != expected_cursor_advanced:
+        raise AssertionError(
+            "cursor commit-marker divergence: "
+            f"expected={expected_cursor_advanced!r} "
+            f"actual={result.cursor_advanced!r}")
+    if expected_cursor_advanced and result.cursor_hold_reason is not None:
+        raise AssertionError(
+            f"advanced cursor unexpectedly held: {result.cursor_hold_reason!r}")
+    if (
+        not expected_cursor_advanced
+        and result.cursor_hold_reason != "lost_current_incarnation_write"
+    ):
+        raise AssertionError(
+            "lost dirty write lacked the safe hold reason: "
+            f"{result.cursor_hold_reason!r}")
 
 
 class TestGeneratedEventStamping(unittest.TestCase):
@@ -456,6 +714,161 @@ class TestGeneratedEventStamping(unittest.TestCase):
         assert cursor is not None
         if window:
             self.assertEqual(cursor["last_event_id"], world.events[0].id)
+
+
+class TestGeneratedIncarnationEventStamping(unittest.TestCase):
+    """Issue #898 U3: time-qualified fresh classification and replay."""
+
+    @given(world=incarnation_event_worlds())
+    @example(world=IncarnationEventWorld(
+        shared_attempt_key=True,
+        event_relations=(-1, 0),
+        replace_before_write=False,
+        witness_text="2026-07-08T18:00:00+08:00",
+    ))
+    @example(world=IncarnationEventWorld(
+        shared_attempt_key=False,
+        event_relations=(0,),
+        replace_before_write=False,
+        witness_text="2026-07-08T10:00:00.0000000Z",
+    ))
+    @example(world=IncarnationEventWorld(
+        shared_attempt_key=False,
+        event_relations=(0,),
+        replace_before_write=False,
+        witness_text="2026-07-08T10:00:00+00:00",
+    ))
+    @example(world=IncarnationEventWorld(
+        shared_attempt_key=True,
+        event_relations=(1,),
+        replace_before_write=False,
+        witness_text="2026-07-08T10:00:00Z",
+    ))
+    @example(world=IncarnationEventWorld(
+        shared_attempt_key=True,
+        event_relations=(1,),
+        replace_before_write=True,
+        witness_text="2026-07-08T04:30:00-05:30",
+    ))
+    @example(world=IncarnationEventWorld(
+        shared_attempt_key=False,
+        event_relations=(0, 1),
+        replace_before_write=True,
+        witness_text="not-an-iso-witness",
+    ))
+    def test_current_incarnation_oracle_and_replay(
+        self,
+        world: IncarnationEventWorld,
+    ) -> None:
+        db, slskd, stale_attempt_a, attempt_b_key = (
+            _build_incarnation_harness(world)
+        )
+        witness_instant = _parse_witness_oracle(world.witness_text)
+        valid_witness = witness_instant is not None
+        self.assertEqual(_current_witness(db), world.witness_text)
+        first_eligible_b = next(
+            (
+                index
+                for index, relation in enumerate(world.event_relations)
+                if valid_witness and relation >= 0
+            ),
+            None,
+        )
+        loses_dirty_write = (
+            world.replace_before_write and first_eligible_b is not None
+        )
+        replacement_witness: str | None = None
+        if loses_dirty_write:
+            assert witness_instant is not None
+            replacement_witness = _event_timestamp(
+                witness_instant + timedelta(minutes=30))
+            db.before_state_write = lambda: _seed_incarnation(
+                db,
+                key=attempt_b_key,
+                enqueued_at=replacement_witness,
+            )
+
+        if loses_dirty_write or not valid_witness:
+            with self.assertLogs("cratedigger", level="WARNING"):
+                first = ingest_download_file_events(
+                    db, slskd, stale_attempt_a)
+        else:
+            first = ingest_download_file_events(
+                db, slskd, stale_attempt_a)
+
+        assert_result_well_formed(first)
+        expected_first_path = (
+            None
+            if first_eligible_b is None or loses_dirty_write
+            else f"/downloads/incarnation/{first_eligible_b}"
+        )
+        assert_incarnation_window(
+            expected_path=expected_first_path,
+            actual_path=_current_local_path(db),
+            expected_cursor_advanced=not loses_dirty_write,
+            result=first,
+        )
+        self.assertEqual(
+            db.expected_enqueued_at_calls,
+            [world.witness_text] if first_eligible_b is not None else [],
+        )
+        self.assertEqual(
+            _current_witness(db),
+            replacement_witness if loses_dirty_write else world.witness_text,
+        )
+        self.assertEqual(first.transfers_stamped, 1)
+        ledger_rows = list(db._transfer_ledger.values())
+        self.assertEqual(len(ledger_rows), 1)
+        self.assertEqual(
+            ledger_rows[0].local_path,
+            "/downloads/incarnation/0",
+        )
+
+        second = ingest_download_file_events(
+            db, slskd, db.get_downloading())
+
+        assert_result_well_formed(second)
+        self.assertEqual(second.transfers_stamped, 0)
+        if loses_dirty_write:
+            assert replacement_witness is not None
+            first_eligible_c = next(
+                (
+                    index
+                    for index, relation in enumerate(world.event_relations)
+                    if relation > 0
+                ),
+                None,
+            )
+            expected_replay_path = (
+                None
+                if first_eligible_c is None
+                else f"/downloads/incarnation/{first_eligible_c}"
+            )
+            assert_incarnation_window(
+                expected_path=expected_replay_path,
+                actual_path=_current_local_path(db),
+                expected_cursor_advanced=True,
+                result=second,
+            )
+            expected_calls = [world.witness_text]
+            if first_eligible_c is not None:
+                expected_calls.append(replacement_witness)
+            self.assertEqual(
+                db.expected_enqueued_at_calls,
+                expected_calls,
+            )
+            self.assertEqual(
+                _current_witness(db),
+                replacement_witness,
+            )
+        else:
+            self.assertEqual(second.outcome, "no_new_events")
+            self.assertEqual(_current_local_path(db), expected_first_path)
+            self.assertEqual(_current_witness(db), world.witness_text)
+        self.assertEqual(
+            ledger_rows[0].local_path,
+            "/downloads/incarnation/0",
+        )
 
 
 class TestGeneratedEventIngestTotality(unittest.TestCase):
@@ -575,6 +988,38 @@ class TestEventCheckersTripOnViolations(unittest.TestCase):
         with self.assertRaises(AssertionError):
             assert_result_well_formed(
                 EventIngestResult(outcome="ingested", transfers_stamped=-1))
+
+    def test_incarnation_checker_trips_on_prefetched_attempt_stamp(self):
+        with self.assertRaises(AssertionError):
+            assert_incarnation_window(
+                expected_path="/downloads/current-b",
+                actual_path="/downloads/stale-a",
+                expected_cursor_advanced=True,
+                result=EventIngestResult(
+                    outcome="ingested",
+                    cursor_advanced=True,
+                ),
+            )
+
+    def test_incarnation_checker_trips_on_unconditional_cursor_advance(self):
+        with self.assertRaises(AssertionError):
+            assert_incarnation_window(
+                expected_path=None,
+                actual_path=None,
+                expected_cursor_advanced=False,
+                result=EventIngestResult(
+                    outcome="ingested",
+                    cursor_advanced=True,
+                ),
+            )
+
+    def test_result_checker_trips_on_advance_and_hold(self):
+        with self.assertRaises(AssertionError):
+            assert_result_well_formed(EventIngestResult(
+                outcome="ingested",
+                cursor_advanced=True,
+                cursor_hold_reason="lost_current_incarnation_write",
+            ))
 
 
 if __name__ == "__main__":
