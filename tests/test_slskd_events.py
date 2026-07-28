@@ -79,6 +79,28 @@ class _LedgerStampFailureDB(FakePipelineDB):
         )
 
 
+class _CursorUpsertFailureDB(FakePipelineDB):
+    """Fail the first post-bootstrap cursor commit, after earlier effects."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.cursor_upsert_calls = 0
+        self.fail_cursor_upsert_call: int | None = 2
+
+    def upsert_slskd_event_cursor(
+        self,
+        last_event_id: str,
+        last_event_timestamp: str,
+    ) -> None:
+        self.cursor_upsert_calls += 1
+        if self.cursor_upsert_calls == self.fail_cursor_upsert_call:
+            raise RuntimeError("injected final cursor upsert failure")
+        super().upsert_slskd_event_cursor(
+            last_event_id,
+            last_event_timestamp,
+        )
+
+
 class SlskdEventIngestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.db = FakePipelineDB()
@@ -697,6 +719,74 @@ class TestIncarnationAwareStamping(SlskdEventIngestCase):
             cursor["last_event_timestamp"],
             "2026-07-01T10:00:00.0000000Z",
         )
+
+    def test_cursor_upsert_failure_replays_pre_cursor_effects_idempotently(self):
+        self.db = _CursorUpsertFailureDB()
+        self.db.upsert_slskd_event_cursor(
+            "ev-cursor", "2026-07-01T00:00:00.0000000Z")
+        key = ("peer1", "music\\Artist\\Album\\01 track.flac")
+        self.seed_downloading(enqueued_at="2026-07-01T09:00:00+00:00")
+        self.db.record_transfer_enqueue([
+            TransferLedgerRow(
+                request_id=1,
+                username=key[0],
+                filename=key[1],
+            ),
+        ])
+        self.db.confirm_transfer_enqueue(*key)
+        self.slskd.events.set_events([
+            self._file_event(
+                event_id="ev-complete",
+                timestamp="2026-07-01T10:00:00.0000000Z",
+            ),
+            self._cursor_event(),
+        ])
+        cursor_before = self.db.get_slskd_event_cursor()
+        assert cursor_before is not None
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "final cursor upsert failure",
+        ):
+            self.ingest()
+
+        state_after_failure = copy.deepcopy(
+            self.db.request(1)["active_download_state"])
+        self.assertEqual(self.file_local_path(), "/dl/current.flac")
+        self.assertEqual(
+            state_after_failure["enqueued_at"],
+            "2026-07-01T09:00:00+00:00",
+        )
+        self.assertEqual(self.db.get_slskd_event_cursor(), cursor_before)
+        ledger_rows = list(self.db._transfer_ledger.values())
+        self.assertEqual(len(ledger_rows), 1)
+        self.assertEqual(ledger_rows[0].local_path, "/dl/current.flac")
+
+        replay = self.ingest()
+
+        self.assertEqual(replay.files_stamped, 0)
+        self.assertEqual(replay.requests_updated, 0)
+        self.assertEqual(replay.transfers_stamped, 0)
+        self.assertTrue(replay.cursor_advanced)
+        self.assertIsNone(replay.cursor_hold_reason)
+        self.assertEqual(
+            self.db.request(1)["active_download_state"],
+            state_after_failure,
+        )
+        replay_ledger_rows = list(self.db._transfer_ledger.values())
+        self.assertEqual(len(replay_ledger_rows), 1)
+        self.assertEqual(
+            replay_ledger_rows[0].local_path,
+            "/dl/current.flac",
+        )
+        cursor = self.db.get_slskd_event_cursor()
+        assert cursor is not None
+        self.assertEqual(cursor["last_event_id"], "ev-complete")
+        self.assertEqual(
+            cursor["last_event_timestamp"],
+            "2026-07-01T10:00:00.0000000Z",
+        )
+        self.assertEqual(self.db.cursor_upsert_calls, 3)
 
     def test_malformed_occurrence_is_ledger_only_and_does_not_hold_cursor(self):
         key = ("peer1", "music\\Artist\\Album\\01 track.flac")
