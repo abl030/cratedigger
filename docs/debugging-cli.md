@@ -166,6 +166,39 @@ whether an earlier operation respected a proof lock, and whether an earlier
 operation widened a lossless-only search tier. Those properties remain owned
 by the stateful world model; a clean live audit does not claim to prove them.
 
+The strict audit stays strict in unattended checks: it reports every current
+violation and exits nonzero whenever any exist. The separate
+`cratedigger-world-audit-debt-gate` automation binary can classify that exact
+JSON report against an explicitly initialized, root-owned known-debt state:
+
+```bash
+pipeline-cli audit world --json |
+  cratedigger-world-audit-debt-gate --state /path/to/known-debt.json
+```
+
+The state contains schema-versioned member digests and aggregate code counts,
+not request IDs, release IDs, paths, or violation text. An exact stable cohort
+passes as `tracked_debt`; an exact subset passes and atomically removes the
+converged members. A new member, a changed violation for a known identity,
+growth, duplicate input, or unavailable/invalid state fails closed without
+changing the authority state. Initialization is deliberately separate and
+exclusive:
+
+```bash
+pipeline-cli audit world --json |
+  cratedigger-world-audit-debt-gate \
+    --state /path/to/known-debt.json --initialize
+```
+
+Initialization never replaces an existing state and is a controlled rollout
+action, not a recovery path for a red gate. The downstream service owns the
+production state path, root permissions, strict-audit capture, and aggregate
+notification.
+
+Authority: "A stable or shrinking known cohort should be reported as tracked
+debt rather than making an otherwise successful daily run fail." —
+<https://github.com/abl030/cratedigger/issues/910>
+
 ## Live-corpus render differential
 
 `.claude/rules/test-fidelity.md` § "Rule D" requires a PR that changes

@@ -41,9 +41,12 @@ pkgs.symlinkJoin {
     # the __main__.py entry shim, same script-path invocation style.
     (mkCliTool "pipeline-cli" "scripts/pipeline_cli/__main__.py")
     (mkCliTool "pipeline-migrate" "scripts/migrate_db.py")
+    (mkCliTool
+      "cratedigger-world-audit-debt-gate"
+      "scripts/world_audit_debt_gate.py")
   ];
   meta = {
-    description = "Cratedigger operator CLI (pipeline-cli, pipeline-migrate)";
+    description = "Cratedigger operator and audit automation CLI tools";
     mainProgram = "pipeline-cli";
   };
 }

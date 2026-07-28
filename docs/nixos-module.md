@@ -258,7 +258,7 @@ If you don't use sops or have one key per encrypted file, skip the splitter and 
 
 ```
 github:abl030/cratedigger
-├── packages.<system>.default          ← operator CLI bundle (pipeline-cli, pipeline-migrate) — `nix run .#pipeline-cli`
+├── packages.<system>.default          ← operator/automation CLI bundle (pipeline-cli, pipeline-migrate, world-audit debt gate) — `nix run .#pipeline-cli`
 ├── apps.<system>.pipeline-cli         ← `nix run github:abl030/cratedigger#pipeline-cli -- --help`
 ├── nixosModules.default              ← upstream NixOS module (pins packageSet to this flake's lock)
 ├── devShells.<system>.default         ← test/dev environment (same pinned nixpkgs)
