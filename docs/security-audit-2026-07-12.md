@@ -568,9 +568,8 @@ yt-dlp and ffmpeg still deserve particular attention because both parse
 attacker-controlled input/streams.
 
 Separately, CI runs only GitGuardian, so a green PR check is not a green suite.
-The repository's agent instructions require focused checks during development,
-then whole-repo threaded Pyright and one full-suite run on the final committed
-tree before its first branch push.
+The repository's agent instructions therefore remain the authority for
+agent-owned local validation and final pre-push confirmation.
 
 - **Remediation:** update the flake and re-run the real-beets/full-suite gates;
   confirm urllib3 >= 2.7.0, idna >= 3.15, lxml >= 6.1.0, msgpack >= 1.2.1,

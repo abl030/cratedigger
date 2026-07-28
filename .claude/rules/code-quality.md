@@ -71,11 +71,11 @@ Call the full pipeline.
 
 # PYRIGHT CLEAN ALWAYS
 
-The final pre-push type gate is whole-repository
-`nix-shell --run "pyright --threads 4"` with zero errors; focused file checks
-are iteration aids only. `scripts/run_tests.sh` separately enforces production
-strict mode through `pyrightconfig.production.json`. Never accept a
-"pre-existing" error or narrow either final contract.
+`nix-shell --run "pyright --threads 4"` checks the whole repository and must
+have zero errors. Focused file checks provide narrower feedback but never narrow
+that whole-repository contract. `scripts/run_tests.sh` separately enforces
+production strict mode through `pyrightconfig.production.json`. Never accept a
+"pre-existing" error or narrow either contract.
 
 - Use typed dataclasses (not dicts) for structured data crossing module boundaries
 - **No dual-interface types.** Never add `__getitem__`, `.get()`, or `isinstance(x, dict)` dispatch to a dataclass. If a function receives both dicts and dataclasses, that is a type error — fix the callers, not the receiver. Temporary bridges become permanent bugs.
@@ -177,15 +177,6 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
   operator/agent one-shot — never committed (`scope.md`); record the kill
   matrix in the issue/PR. Canonical run: issue #548, 2026-07-08 — 13
   mutants, incl. reverting fix `6cf26a4`, led to PR #555.
-- During implementation, run focused modules:
-  `nix-shell --run "python3 -m unittest tests.<module> -v"`
-- After the final tree is reviewed and committed, run
-  `nix-shell --run "pyright --threads 4"` and then
-  `nix-shell --run "bash scripts/run_tests.sh"` exactly once before the first
-  branch push. Both must pass on the pushed tree.
-- If final validation finds a problem, fix it, reconverge with focused tests,
-  commit and review the new tree, then restart the final sequence. Do not replay
-  the final suite for an unchanged tree after push or merge.
 
 ## Authority for exceptions and bypasses
 
@@ -508,9 +499,6 @@ rationale; never allowlist a pure decision.
 
 ## Commits & PRs
 - One logical change per commit
-- Use focused tests while implementing. Review and commit the final tree, then
-  run whole-repo threaded Pyright and the full suite once immediately before
-  the first branch push.
 - Non-trivial work goes on a feature branch with a PR (e.g. `feat/cooldowns`, `fix/spectral-race`)
 - PRs are merged via GitHub **Create a merge commit** (not Rebase-and-merge, not Squash-and-merge). This keeps the PR attached to mainline history while preserving the individual commits, so write them well.
 - Deploy and verify live after merging

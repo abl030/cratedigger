@@ -31,19 +31,17 @@ merge decisions, deployment, and live proof even when work is delegated.
 
 ## Converge efficiently
 
-Batch implementation failures, test failures, and review findings. During
-development, use focused tests and relevant generated or world-model fuzzing,
-let useful runs reveal the failure set, and fix related problems together.
+Batch implementation failures, validation failures, and review findings. Apply
+`CLAUDE.md`'s judgment-based development policy, including every mandatory
+surface-specific contract, and fix related problems together. Treat failures
+from direct whole-tree runs as ordinary convergence feedback.
 
-Do not stop for a fresh review or full-suite replay after every small test fix.
-Get the implementation and focused checks to a coherent state, then review the
-meaningful converged tree as a whole. Review again only when corrections
+Review the meaningful converged tree as a whole. Review again when corrections
 materially change behavior or risk.
 
 Integrate current `main` at sensible boundaries rather than continuously
-chasing it. Once the tree is stable and reviewed, run the repository-required
-whole-tree gates on the final tree. If they find problems, reconverge with
-focused checks and repeat final validation only for the changed tree.
+chasing it. When the change is ready for its first push, invoke the `check`
+skill; it owns the final clean committed-tree receipt mechanics.
 
 Review should challenge the issue contract and real production path, not just
 confirm that tests are green. Stop when the issue is covered, required checks
