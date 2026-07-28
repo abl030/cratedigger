@@ -541,6 +541,7 @@ pkgs.testers.nixosTest {
     services.nginx.virtualHosts = {
       cratedigger-test-public = {
         serverName = "music.vm.test";
+        onlySSL = true;
         listen = [
           {
             addr = "0.0.0.0";
@@ -574,6 +575,7 @@ pkgs.testers.nixosTest {
       cratedigger-test-public-reject = {
         default = true;
         serverName = "_";
+        onlySSL = true;
         listen = [
           {
             addr = "0.0.0.0";
