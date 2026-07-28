@@ -1142,17 +1142,10 @@ def _classify(
                 return _classify_search_filetype_override(entry, is_verified_lossless)
             basis = _entry_comparison_basis(entry)
             if basis is not None and basis.verified_lossless_bypass:
-                # The evidence rows already carry the exact comparison. Keep
-                # the collapsed footer on the older concise upgrade grammar;
-                # the basis trace ("Equivalent ... both transparent") is an
-                # internal decision explanation, not a useful success label.
-                verdict = _upgrade_verdict(
-                    entry.existing_min_bitrate,
-                    _downloaded_min_bitrate_kbps(entry),
+                verdict = _proof_upgrade_verdict_from_basis(
+                    basis,
                     entry.was_converted,
                     entry.original_filetype,
-                    True,
-                    actual_filetype=entry.actual_filetype,
                 )
             elif basis is not None:
                 verdict = _upgrade_verdict_from_basis(
@@ -1309,6 +1302,26 @@ def _upgrade_verdict_from_basis(
         parts.append(f"from {original_ft.upper()}")
     if is_verified_lossless and not basis.verified_lossless_bypass:
         parts.append("verified lossless")
+    return ", ".join(parts)
+
+
+def _proof_upgrade_verdict_from_basis(
+    basis: QualityComparisonBasis,
+    was_converted: bool,
+    original_ft: str | None,
+) -> str:
+    """Describe an equivalent-quality replacement made only to gain proof."""
+    new_format = (basis.new_format or "?").upper()
+    existing_format = (basis.existing_format or "?").upper()
+    parts = [
+        (
+            f"Proof upgrade: {basis.verdict} quality — "
+            f"{new_format} vs {existing_format}"
+        ),
+    ]
+    if was_converted and original_ft:
+        parts.append(f"from {original_ft.upper()}")
+    parts.append("verified lossless")
     return ", ".join(parts)
 
 
