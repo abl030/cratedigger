@@ -16,11 +16,11 @@ release-group/master-level), the resolver:
    addressed reuse, and returns the typed
    ``YoutubeAlbumResolverResult``.
 
-The service is pure of HTTP / CLI concerns — wrappers in
-``web/routes/youtube.py`` (U8) and ``scripts/pipeline_cli.py`` (U7) map
-``result.outcome`` to status / exit codes via the
-``OUTCOME_HTTP_STATUS`` / ``OUTCOME_EXIT_CODE`` dicts exported below
-(one source of truth, per the PR #381 lesson).
+The service is pure of HTTP / CLI concerns. ``web/routes/youtube.py`` (U8)
+maps ``result.outcome`` to HTTP status via ``OUTCOME_HTTP_STATUS``; the
+route-backed CLI adapter in ``scripts/pipeline_cli/youtube.py`` (U7) decodes
+the typed result and maps its outcome via ``OUTCOME_EXIT_CODE``. Those tables
+remain the one source of truth (per the PR #381 lesson).
 
 Every collaborator is injected so the service is testable without
 network IO. Tests pass ``FakeYTMusic`` + ``FakePipelineDB`` + small
@@ -61,6 +61,7 @@ from lib.json_narrow import (
 )
 from lib.pipeline_db import PersistedDistance, PersistedTrack, PersistedYoutubeRow
 from lib.release_identity import detect_release_source, normalize_release_id
+from lib.youtube_album_limits import YOUTUBE_RESOLVER_DEADLINE_SECONDS
 
 # Exception classes that the MB / Discogs adapters in ``web/mb.py`` and
 # ``web/discogs.py`` raise on miss / mirror outage.
@@ -131,6 +132,7 @@ def _cached_search(
     limit: int,
     *,
     refresh: bool = False,
+    deadline_check: Callable[[str], None],
 ) -> list[dict[str, Any]]:
     """Wrap ``yt_client.search(...)`` with cache-check-then-store.
 
@@ -144,15 +146,26 @@ def _cached_search(
     refill", not "bust and forget".
     """
     if cache is not None and not refresh:
+        deadline_check("before the YT search cache read")
         key = f"youtube:search:{query}:{filter_str}:{limit}"
         blob = cache.get(key)
+        deadline_check("after the YT search cache read")
         if blob is not None:
             try:
-                return msgspec.json.decode(blob)
-            except msgspec.DecodeError:
+                return msgspec.json.decode(
+                    blob,
+                    type=list[dict[str, Any]],
+                )
+            except (msgspec.DecodeError, msgspec.ValidationError):
                 pass
-    results = yt_client.search(query, filter=filter_str, limit=limit)
+    deadline_check("before YT search")
+    results = msgspec.convert(
+        yt_client.search(query, filter=filter_str, limit=limit),
+        type=list[dict[str, Any]],
+    )
+    deadline_check("after YT search")
     if cache is not None:
+        deadline_check("before the YT search cache write")
         try:
             cache.set(
                 f"youtube:search:{query}:{filter_str}:{limit}",
@@ -161,6 +174,7 @@ def _cached_search(
             )
         except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
             pass
+        deadline_check("after the YT search cache write")
     return results
 
 
@@ -170,6 +184,7 @@ def _cached_get_album(
     browse_id: str,
     *,
     refresh: bool = False,
+    deadline_check: Callable[[str], None],
 ) -> dict[str, Any]:
     """Wrap ``yt_client.get_album(browse_id)`` with cache-check-then-store.
 
@@ -179,15 +194,26 @@ def _cached_get_album(
     still updates it with the fresh response.
     """
     if cache is not None and not refresh:
+        deadline_check("before the YT album cache read")
         key = f"youtube:album:{browse_id}"
         blob = cache.get(key)
+        deadline_check("after the YT album cache read")
         if blob is not None:
             try:
-                return msgspec.json.decode(blob)
-            except msgspec.DecodeError:
+                return msgspec.json.decode(
+                    blob,
+                    type=dict[str, Any],
+                )
+            except (msgspec.DecodeError, msgspec.ValidationError):
                 pass
-    album = yt_client.get_album(browse_id)
+    deadline_check("before a YT album fetch")
+    album = msgspec.convert(
+        yt_client.get_album(browse_id),
+        type=dict[str, Any],
+    )
+    deadline_check("after a YT album fetch")
     if cache is not None:
+        deadline_check("before the YT album cache write")
         try:
             cache.set(
                 f"youtube:album:{browse_id}",
@@ -196,6 +222,7 @@ def _cached_get_album(
             )
         except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
             pass
+        deadline_check("after the YT album cache write")
     return album
 
 
@@ -414,7 +441,8 @@ def resolve_youtube_album(
     sleep_fn: Callable[[float], None] = _default_jitter_sleep_fn,
     jitter_range: tuple[float, float] = (
         _JITTER_MIN_SECONDS_DEFAULT, _JITTER_MAX_SECONDS_DEFAULT),
-    deadline_seconds: int = 60,
+    deadline_seconds: float = YOUTUBE_RESOLVER_DEADLINE_SECONDS,
+    monotonic_fn: Callable[[], float] | None = None,
 ) -> YoutubeAlbumResolverResult:
     """Resolve a release identifier to the YT Music distance matrix.
 
@@ -427,14 +455,18 @@ def resolve_youtube_album(
     pass ``lambda _: None`` so they don't pay the 1-3s pause per
     sibling.
 
-    ``deadline_seconds`` is a soft deadline. After each external call
-    we check ``time.monotonic() - started`` against this budget; on
-    breach the service returns the partial matrix collected so far with
-    ``outcome="ok"`` and an ``error_message`` describing the breach.
-    The deadline is "best effort" — we never abort a call mid-flight,
-    only skip the next one.
+    ``deadline_seconds`` is a cooperative deadline checked before and
+    after every opaque collaborator. A call already in flight retains
+    its own transport timeout; once its return exposes a breach, the
+    resolver starts no further collaborator and never persists a
+    partial matrix. ``monotonic_fn`` is the deterministic test seam.
     """
-    started = time.monotonic()
+    clock = monotonic_fn or time.monotonic
+    started = clock()
+
+    def _deadline_breached() -> bool:
+        return (clock() - started) >= float(deadline_seconds)
+
     identifier = normalize_release_id(identifier)
 
     source_label = _classify_source(identifier)
@@ -444,6 +476,7 @@ def resolve_youtube_album(
             error_message=f"identifier {identifier!r} is neither an MB UUID "
                           f"nor a Discogs ID",
             started=started,
+            monotonic_fn=clock,
         )
 
     # Step 0.5: speculative cache lookup before auto-widen.
@@ -470,6 +503,13 @@ def resolve_youtube_album(
     # documented and tested below; the cost is one extra mirror call on
     # cold-cache Discogs resolves.
     if not refresh and source_label == "mb":
+        if _deadline_breached():
+            return _final(
+                outcome="unresolved_timeout",
+                error_message="resolver deadline exceeded before cache lookup",
+                started=started,
+                monotonic_fn=clock,
+            )
         speculative = pdb.get_youtube_album_mapping(identifier, source_label)
         if speculative is not None:
             return _final(
@@ -479,6 +519,14 @@ def resolve_youtube_album(
                 from_cache=True,
                 youtube_releases=_rows_to_youtube_releases(speculative),
                 started=started,
+                monotonic_fn=clock,
+            )
+        if _deadline_breached():
+            return _final(
+                outcome="unresolved_timeout",
+                error_message="resolver deadline exceeded after cache lookup",
+                started=started,
+                monotonic_fn=clock,
             )
 
     # Step 1+2: auto-widen via leaf-then-group fallback.
@@ -491,17 +539,25 @@ def resolve_youtube_album(
     try:
         if source_label == "mb":
             widen = _resolve_mb_group(
-                identifier, mb_get_release, mb_get_release_group_releases)
+                identifier,
+                mb_get_release,
+                mb_get_release_group_releases,
+                deadline_breached=_deadline_breached,
+            )
         else:
             widen = _resolve_discogs_group(
-                identifier, discogs_get_release,
-                discogs_get_master_releases)
+                identifier,
+                discogs_get_release,
+                discogs_get_master_releases,
+                deadline_breached=_deadline_breached,
+            )
     except (requests.Timeout, TimeoutError) as exc:
         return _final(
             outcome="unresolved_timeout",
             error_message=f"mirror timeout while widening "
                           f"{identifier!r}: {exc}",
             started=started,
+            monotonic_fn=clock,
         )
     except (urllib.error.HTTPError, urllib.error.URLError,
             requests.RequestException) as exc:
@@ -510,14 +566,24 @@ def resolve_youtube_album(
             error_message=f"mirror unavailable while widening "
                           f"{identifier!r}: {exc}",
             started=started,
+            monotonic_fn=clock,
         )
 
     if widen.rg_id is None:
+        failure_outcome = widen.failure_outcome or "not_found"
+        failure_message = (
+            f"resolver deadline exceeded while widening {identifier!r}"
+            if failure_outcome == "unresolved_timeout"
+            else (
+                f"could not resolve identifier {identifier!r} to a "
+                f"release group"
+            )
+        )
         return _final(
-            outcome=widen.failure_outcome or "not_found",
-            error_message=f"could not resolve identifier {identifier!r} to a "
-                          f"release group",
+            outcome=failure_outcome,
+            error_message=failure_message,
             started=started,
+            monotonic_fn=clock,
         )
     rg_id = widen.rg_id
     sibling_summaries = widen.sibling_summaries
@@ -537,7 +603,46 @@ def resolve_youtube_album(
     # checked and there's nothing there — don't re-poll YT". Without
     # this, an empty-search release group would re-fetch YT on every
     # resolve, defeating R14.
+    if _deadline_breached():
+        return _final(
+            outcome="unresolved_timeout",
+            release_group_identifier=rg_id,
+            source=source_label,
+            error_message="resolver deadline exceeded before cache lookup",
+            started=started,
+            monotonic_fn=clock,
+        )
     cached_rows = pdb.get_youtube_album_mapping(rg_id, source_label)
+
+    def _failure_result(
+        outcome: str,
+        message: str,
+    ) -> YoutubeAlbumResolverResult:
+        if cached_rows is not None:
+            return _final(
+                outcome="ok",
+                release_group_identifier=rg_id,
+                source=source_label,
+                from_cache=True,
+                youtube_releases=_rows_to_youtube_releases(cached_rows),
+                error_message=(
+                    f"{outcome}: serving from cache ({message})"
+                ),
+                started=started,
+                monotonic_fn=clock,
+            )
+        return _final(
+            outcome=outcome,
+            release_group_identifier=rg_id,
+            source=source_label,
+            error_message=message,
+            started=started,
+            monotonic_fn=clock,
+        )
+
+    def _timeout_result(message: str) -> YoutubeAlbumResolverResult:
+        return _failure_result("unresolved_timeout", message)
+
     if not refresh and cached_rows is not None:
         return _final(
             outcome="ok",
@@ -546,7 +651,10 @@ def resolve_youtube_album(
             from_cache=True,
             youtube_releases=_rows_to_youtube_releases(cached_rows),
             started=started,
+            monotonic_fn=clock,
         )
+    if _deadline_breached():
+        return _timeout_result("resolver deadline exceeded after cache lookup")
 
     # Step 4: collect the full set of sibling MBIDs (every entry in the
     # group), plus a fetched-record subset for seed-picking. Per R17,
@@ -561,12 +669,19 @@ def resolve_youtube_album(
             source=source_label,
             error_message="release group resolved but carries no sibling IDs",
             started=started,
+            monotonic_fn=clock,
         )
 
-    fetched_siblings = _fetch_mb_siblings(
+    sibling_fetch = _fetch_mb_siblings(
         sibling_summaries, source_label,
         mb_get_release, discogs_get_release,
+        deadline_breached=_deadline_breached,
     )
+    if not sibling_fetch.complete:
+        return _timeout_result(
+            "resolver deadline exceeded while fetching release siblings"
+        )
+    fetched_siblings = sibling_fetch.records
     if not fetched_siblings:
         # We have IDs but couldn't fetch any record — can't pick a seed
         # query without an artist + title. Surface as not_found rather
@@ -578,6 +693,7 @@ def resolve_youtube_album(
             error_message="release group resolved but no sibling records "
                           "could be fetched for seed selection",
             started=started,
+            monotonic_fn=clock,
         )
 
     seed_release = _pick_mb_seed(fetched_siblings)
@@ -595,15 +711,32 @@ def resolve_youtube_album(
     cumulative_jitter_seconds = 0.0
     jitter_min, jitter_max = jitter_range
 
-    def _deadline_breached() -> bool:
-        return (time.monotonic() - started) > float(deadline_seconds)
+    def _raise_if_deadline(stage: str) -> None:
+        if _deadline_breached():
+            raise _ResolverDeadlineExceeded(
+                f"resolver deadline exceeded {stage}"
+            )
 
     try:
+        _raise_if_deadline("before YT search")
         search_results = _cached_search(
-            yt_client, cache, query, "albums", 10, refresh=refresh)
+            yt_client,
+            cache,
+            query,
+            "albums",
+            10,
+            refresh=refresh,
+            deadline_check=_raise_if_deadline,
+        )
+        _raise_if_deadline("after YT search")
         seed_browse_id = _pick_yt_seed(search_results, seed_release)
         if seed_browse_id is None:
+            if search_results:
+                raise ValueError(
+                    "YT search returned album rows without a usable browseId"
+                )
             # AE2: search returned empty → ok + empty matrix.
+            _raise_if_deadline("before persisting the empty YT matrix")
             pdb.upsert_youtube_album_mapping(rg_id, source_label, [])
             return _final(
                 outcome="ok",
@@ -612,20 +745,20 @@ def resolve_youtube_album(
                 from_cache=False,
                 youtube_releases=[],
                 started=started,
+                monotonic_fn=clock,
             )
+        _raise_if_deadline("before the seed YT album fetch")
         seed_album = _cached_get_album(
-            yt_client, cache, seed_browse_id, refresh=refresh)
+            yt_client,
+            cache,
+            seed_browse_id,
+            refresh=refresh,
+            deadline_check=_raise_if_deadline,
+        )
+        _raise_if_deadline("after the seed YT album fetch")
         yt_album_responses[seed_browse_id] = seed_album
         for other_raw in _json_list(seed_album.get("other_versions")):
-            if _deadline_breached():
-                deadline_message = (
-                    f"deadline exceeded after "
-                    f"{len(yt_album_responses)} YT siblings; "
-                    f"returning partial matrix"
-                )
-                log.warning(
-                    "youtube_album_service: %s", deadline_message)
-                break
+            _raise_if_deadline("before expanding YT album siblings")
             other = _json_dict(other_raw)
             other_browse_id = other.get("browseId")
             if (
@@ -644,95 +777,105 @@ def resolve_youtube_album(
                 min_seconds=jitter_min,
                 max_seconds=jitter_max,
             )
-            # Per-sibling get_album failures don't abort the whole resolve;
-            # exclude the broken sibling instead.
+            _raise_if_deadline("after YT sibling jitter")
+            # A missing YT sibling makes the collection incomplete. Stop at
+            # the first failure and preserve any complete durable mapping;
+            # persisting only the successful subset would turn a transient
+            # upstream failure into indefinite loss.
             try:
                 yt_album_responses[other_browse_id] = _cached_get_album(
-                    yt_client, cache, other_browse_id, refresh=refresh)
+                    yt_client,
+                    cache,
+                    other_browse_id,
+                    refresh=refresh,
+                    deadline_check=_raise_if_deadline,
+                )
+                _raise_if_deadline("after a YT sibling album fetch")
             except (YTMusicServerError, YTMusicUserError, YTMusicError,
                     requests.Timeout, requests.ConnectionError,
-                    KeyError, IndexError) as exc:
+                    KeyError, IndexError, ValueError, TypeError,
+                    msgspec.ValidationError) as exc:
+                _raise_if_deadline("after a failed YT sibling album fetch")
+                yt_failure = _classify_yt_failure(
+                    exc,
+                    context=f"YT sibling {other_browse_id}",
+                )
                 log.warning(
                     "youtube_album_service: sibling get_album(%s) failed: %s",
                     other_browse_id, exc,
                 )
-                continue
-    except requests.Timeout as exc:
-        yt_failure = ("unresolved_timeout", f"YT timeout: {exc}")
-    except requests.ConnectionError as exc:
-        yt_failure = ("unresolved_timeout", f"YT connection error: {exc}")
-    except YTMusicUserError as exc:
-        yt_failure = ("unresolved_4xx_client", f"YT user error: {exc}")
-    except YTMusicServerError as exc:
-        yt_failure = (_classify_server_error(exc), f"YT server error: {exc}")
-    except YTMusicError as exc:
-        yt_failure = ("unresolved_mirror_unavailable", f"YT error: {exc}")
-    except (KeyError, IndexError, ValueError, TypeError) as exc:
-        # ``ValueError`` and ``TypeError`` cover residual int/str coercion
-        # failures from within the YT response — e.g. an unexpected
-        # ``None`` slipping past ``_safe_int`` because we missed a code
-        # path. Treating these as parse failures (not 500s) keeps the
-        # resolver resilient to schema drift in ytmusicapi outputs.
-        yt_failure = ("youtube_parse_failed", f"YT parse failed: {exc}")
+                break
+    except _ResolverDeadlineExceeded as exc:
+        yt_failure = ("unresolved_timeout", str(exc))
+    except (
+        requests.Timeout,
+        requests.ConnectionError,
+        YTMusicUserError,
+        YTMusicServerError,
+        YTMusicError,
+        KeyError,
+        IndexError,
+        ValueError,
+        TypeError,
+        msgspec.ValidationError,
+    ) as exc:
+        yt_failure = _classify_yt_failure(exc, context="YT")
 
     if yt_failure is not None:
         failure_outcome, failure_msg = yt_failure
-        if cached_rows:
-            # Cache fallback: outcome stays ok, but flag the upstream failure.
-            return _final(
-                outcome="ok",
-                release_group_identifier=rg_id,
-                source=source_label,
-                from_cache=True,
-                youtube_releases=_rows_to_youtube_releases(cached_rows),
-                error_message=f"{failure_outcome}: serving from cache "
-                              f"({failure_msg})",
-                started=started,
-            )
-        return _final(
-            outcome=failure_outcome,
-            release_group_identifier=rg_id,
-            source=source_label,
-            youtube_releases=[],
-            error_message=failure_msg,
-            started=started,
-        )
-
-    # If we exited the YT loop because of a deadline breach but with
-    # at least the seed in hand, fall through and synthesize the
-    # partial matrix; the deadline message is attached at the final
-    # return below.
+        return _failure_result(failure_outcome, failure_msg)
 
     # Step 9-10: synthesize items per YT sibling and score N×M.
     #
     # Round 2 P1-3: the deadline check fires not just between YT
     # ``get_album`` calls but also between scoring iterations. Previously
     # one slow ``distance_fn`` call could overshoot the budget; now we
-    # break early and persist the partial matrix we have. Deadline
-    # status is attached to ``error_message`` at the final return below.
+    # stop after it returns and preserve any partial matrix only in the
+    # response. Incomplete work never replaces the durable cache.
     youtube_releases: list[ResolvedYoutubeRelease] = []
     persistable_rows: list[PersistedYoutubeRow] = []
+    matrix_complete = True
+    matrix_failure_outcome: str | None = None
 
     for browse_id, album_resp in yt_album_responses.items():
         if _deadline_breached():
-            if deadline_message is None:
-                deadline_message = (
-                    f"deadline exceeded after "
-                    f"{len(youtube_releases)} YT siblings scored; "
-                    f"returning partial matrix"
-                )
-                log.warning("youtube_album_service: %s", deadline_message)
+            matrix_complete = False
+            matrix_failure_outcome = "unresolved_timeout"
+            deadline_message = (
+                f"resolver deadline exceeded after "
+                f"{len(youtube_releases)} YT siblings were scored; "
+                "incomplete matrix was not persisted"
+            )
+            log.warning("youtube_album_service: %s", deadline_message)
             break
         synth_items = _synthesize_items(album_resp)
         if not synth_items:
-            # An empty track list defeats scoring; skip the sibling so the
-            # matrix doesn't carry a row with no data to compare against.
+            # An empty track list defeats scoring. Preserve any other usable
+            # rows for this response, but never persist a matrix that silently
+            # drops an unscoreable YT album.
+            matrix_complete = False
+            matrix_failure_outcome = "youtube_parse_failed"
+            deadline_message = (
+                f"YT sibling {browse_id} has no synthesizable tracks; "
+                "incomplete matrix was not persisted"
+            )
             continue
-        distances = _score_against_siblings(
+        scoring = _score_against_siblings(
             synth_items, sibling_ids, distance_rg_id, distance_fn, pdb,
             mb_get_release if source_label == "mb" else discogs_get_release,
             deadline_breached=_deadline_breached,
         )
+        distances = scoring.distances
+        if not scoring.complete:
+            matrix_complete = False
+            matrix_failure_outcome = "unresolved_timeout"
+            deadline_message = (
+                f"resolver deadline exceeded while scoring YT sibling "
+                f"{browse_id}; incomplete matrix was not persisted"
+            )
+            log.warning("youtube_album_service: %s", deadline_message)
+            if not distances:
+                break
         yt_url = _compose_url(browse_id, album_resp.get("audioPlaylistId"))
         year = _parse_year(album_resp.get("year"))
         album_title = str(album_resp.get("title") or "")
@@ -804,9 +947,8 @@ def resolve_youtube_album(
                 for d in distances
             ],
         ))
-
-    # Step 11: persist + return.
-    pdb.upsert_youtube_album_mapping(rg_id, source_label, persistable_rows)
+        if not scoring.complete:
+            break
 
     # Round 2 P2-4: log + surface the cumulative jitter so operators
     # can see how much of the resolve's wall-clock was anti-throttle
@@ -825,6 +967,27 @@ def resolve_youtube_album(
         else:
             final_error_message = f"{final_error_message}; {jitter_note}"
 
+    # Step 11: persist and expose only a complete matrix. Rescue submission
+    # authorizes browse IDs from this durable mapping, so returning unpersisted
+    # partial rows as ``ok`` would offer targets that necessarily fail at the
+    # next step. Incomplete work therefore uses the typed failure/cache
+    # fallback path and never replaces complete durable truth.
+    if _deadline_breached() and matrix_complete:
+        matrix_complete = False
+        matrix_failure_outcome = "unresolved_timeout"
+        final_error_message = (
+            "resolver deadline exceeded before matrix persistence; "
+            "incomplete matrix was not persisted"
+        )
+    if not matrix_complete:
+        return _failure_result(
+            matrix_failure_outcome or "transient",
+            final_error_message
+            or "resolver did not produce a complete matrix"
+        )
+    else:
+        pdb.upsert_youtube_album_mapping(rg_id, source_label, persistable_rows)
+
     return _final(
         outcome="ok",
         release_group_identifier=rg_id,
@@ -833,6 +996,7 @@ def resolve_youtube_album(
         youtube_releases=youtube_releases,
         error_message=final_error_message,
         started=started,
+        monotonic_fn=clock,
     )
 
 
@@ -882,6 +1046,24 @@ class _GroupResolution(msgspec.Struct, kw_only=True):
     )
     failure_outcome: str | None = None
     is_orphan: bool = False
+
+
+class _SiblingFetchResult(msgspec.Struct, frozen=True):
+    """Fetched seed candidates plus whether every sibling was attempted."""
+
+    records: list[dict[str, object]]
+    complete: bool
+
+
+class _ScoringResult(msgspec.Struct, frozen=True):
+    """One distance slice plus whether every sibling was scored."""
+
+    distances: list[ResolvedDistance]
+    complete: bool
+
+
+class _ResolverDeadlineExceeded(Exception):
+    """Internal control flow for a deadline observed between collaborators."""
 
 
 def _safe_leaf_lookup(
@@ -938,6 +1120,8 @@ def _resolve_mb_group(
     identifier: str,
     mb_get_release: MBLookup,
     mb_get_release_group_releases: MBRGReleases,
+    *,
+    deadline_breached: Callable[[], bool],
 ) -> _GroupResolution:
     """Resolve an MB identifier to a typed group result.
 
@@ -951,7 +1135,11 @@ def _resolve_mb_group(
     will 404 because RG MBIDs aren't releases, and we want to fall
     through to the group path rather than 500.
     """
+    if deadline_breached():
+        return _GroupResolution(failure_outcome="unresolved_timeout")
     leaf = _safe_leaf_lookup(mb_get_release, identifier)
+    if deadline_breached():
+        return _GroupResolution(failure_outcome="unresolved_timeout")
     if leaf:
         rg_id = leaf.get("release_group_id")
         if not isinstance(rg_id, str) or not rg_id:
@@ -965,6 +1153,8 @@ def _resolve_mb_group(
                 is_orphan=True,
             )
         group = _safe_group_lookup(mb_get_release_group_releases, rg_id)
+        if deadline_breached():
+            return _GroupResolution(failure_outcome="unresolved_timeout")
         if not group:
             return _GroupResolution(failure_outcome="not_found")
         return _GroupResolution(
@@ -974,6 +1164,8 @@ def _resolve_mb_group(
 
     # Leaf miss → treat identifier as RG MBID.
     group = _safe_group_lookup(mb_get_release_group_releases, identifier)
+    if deadline_breached():
+        return _GroupResolution(failure_outcome="unresolved_timeout")
     if not group:
         return _GroupResolution(failure_outcome="not_found")
     return _GroupResolution(
@@ -986,6 +1178,8 @@ def _resolve_discogs_group(
     identifier: str,
     discogs_get_release: DiscogsLookup,
     discogs_get_master_releases: DiscogsMasterReleases,
+    *,
+    deadline_breached: Callable[[], bool],
 ) -> _GroupResolution:
     """Resolve a Discogs identifier to a typed group result.
 
@@ -995,7 +1189,11 @@ def _resolve_discogs_group(
     via ``is_orphan=True``. The long-tail archival case these were
     built for explicitly includes orphan pressings.
     """
+    if deadline_breached():
+        return _GroupResolution(failure_outcome="unresolved_timeout")
     leaf = _safe_leaf_lookup(discogs_get_release, identifier)
+    if deadline_breached():
+        return _GroupResolution(failure_outcome="unresolved_timeout")
     if leaf:
         master_id = leaf.get("release_group_id")
         if not isinstance(master_id, str) or not master_id:
@@ -1008,6 +1206,8 @@ def _resolve_discogs_group(
                 is_orphan=True,
             )
         group = _safe_group_lookup(discogs_get_master_releases, master_id)
+        if deadline_breached():
+            return _GroupResolution(failure_outcome="unresolved_timeout")
         if not group:
             return _GroupResolution(failure_outcome="not_found")
         return _GroupResolution(
@@ -1016,6 +1216,8 @@ def _resolve_discogs_group(
         )
 
     group = _safe_group_lookup(discogs_get_master_releases, identifier)
+    if deadline_breached():
+        return _GroupResolution(failure_outcome="unresolved_timeout")
     if not group:
         return _GroupResolution(failure_outcome="not_found")
     return _GroupResolution(
@@ -1046,7 +1248,9 @@ def _fetch_mb_siblings(
     source_label: str,
     mb_get_release: MBLookup,
     discogs_get_release: DiscogsLookup,
-) -> list[dict[str, object]]:
+    *,
+    deadline_breached: Callable[[], bool],
+) -> _SiblingFetchResult:
     """Resolve each sibling-summary into a full release record.
 
     Misses (mirror 404 / network error) are skipped silently — the
@@ -1058,6 +1262,8 @@ def _fetch_mb_siblings(
     out: list[dict[str, object]] = []
     fetcher = mb_get_release if source_label == "mb" else discogs_get_release
     for summary_raw in summaries:
+        if deadline_breached():
+            return _SiblingFetchResult(records=out, complete=False)
         # ``_json_dict`` already returns ``{}`` for a non-dict entry, so
         # a preceding ``isinstance`` gate would be redundant.
         sid = _json_dict(summary_raw).get("id")
@@ -1069,11 +1275,17 @@ def _fetch_mb_siblings(
             log.warning(
                 "youtube_album_service: %s sibling fetch failed for %s: %s",
                 source_label, sid, exc)
+            if deadline_breached():
+                return _SiblingFetchResult(records=out, complete=False)
             continue
         if not full:
+            if deadline_breached():
+                return _SiblingFetchResult(records=out, complete=False)
             continue
         out.append(full)
-    return out
+        if deadline_breached():
+            return _SiblingFetchResult(records=out, complete=False)
+    return _SiblingFetchResult(records=out, complete=True)
 
 
 def _pick_mb_seed(siblings: list[dict[str, object]]) -> dict[str, object]:
@@ -1292,8 +1504,9 @@ def _score_against_siblings(
     distance_fn: DistanceFn,
     pdb: YoutubeResolverDB,
     mb_fetcher: _ReleaseOrGroupLookup,
-    deadline_breached: Callable[[], bool] | None = None,
-) -> list[ResolvedDistance]:
+    *,
+    deadline_breached: Callable[[], bool],
+) -> _ScoringResult:
     """Run ``distance_fn`` for every sibling MBID and collect typed results.
 
     Each call passes ``items_override=synth`` and the caller-supplied
@@ -1304,22 +1517,19 @@ def _score_against_siblings(
     outcome rather than aborting the matrix — including
     ``mb_lookup_failed`` for siblings the local mirror doesn't carry.
 
-    Round 2 P1-3: an optional ``deadline_breached`` callback breaks the
-    scoring loop early when the resolver's soft deadline is exhausted,
-    so one slow ``distance_fn`` call can't overshoot the budget.
-    Remaining unscored siblings are NOT inserted as placeholders — the
-    caller sees the partial matrix and the deadline message in
-    ``YoutubeAlbumResolverResult.error_message``.
+    ``complete`` is false when the deadline prevents every sibling from
+    being scored. Remaining unscored siblings are not inserted as
+    placeholders, and the caller must not persist the partial slice.
     """
     out: list[ResolvedDistance] = []
     for mbid in sibling_mbids:
-        if deadline_breached is not None and deadline_breached():
+        if deadline_breached():
             log.warning(
                 "youtube_album_service: deadline breached after %d/%d "
                 "siblings scored; returning partial distance row",
                 len(out), len(sibling_mbids),
             )
-            break
+            return _ScoringResult(distances=out, complete=False)
         if not mbid:
             continue
         try:
@@ -1340,6 +1550,8 @@ def _score_against_siblings(
                 outcome="distance_failed",
                 error_message=f"distance_fn raised: {exc}",
             ))
+            if deadline_breached():
+                return _ScoringResult(distances=out, complete=False)
             continue
         out.append(ResolvedDistance(
             mbid=mbid,
@@ -1353,7 +1565,9 @@ def _score_against_siblings(
             extra_mb_tracks=r.extra_mb_tracks,
             error_message=r.error_message,
         ))
-    return out
+        if deadline_breached():
+            return _ScoringResult(distances=out, complete=False)
+    return _ScoringResult(distances=out, complete=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1398,6 +1612,24 @@ def _classify_server_error(exc: Exception) -> str:
     if 500 <= code < 600:
         return "unresolved_mirror_unavailable"
     return "unresolved_mirror_unavailable"
+
+
+def _classify_yt_failure(
+    exc: Exception,
+    *,
+    context: str,
+) -> tuple[str, str]:
+    """Map every YT collaborator exception to the service vocabulary."""
+    if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
+        return "unresolved_timeout", f"{context} transport failure: {exc}"
+    if isinstance(exc, YTMusicUserError):
+        return "unresolved_4xx_client", f"{context} user error: {exc}"
+    if isinstance(exc, YTMusicServerError):
+        return _classify_server_error(exc), f"{context} server error: {exc}"
+    if isinstance(exc, YTMusicError):
+        return "unresolved_mirror_unavailable", f"{context} error: {exc}"
+    # Key/index/type/value failures represent upstream response schema drift.
+    return "youtube_parse_failed", f"{context} parse failed: {exc}"
 
 
 def _rows_to_youtube_releases(
@@ -1492,7 +1724,9 @@ def _final(
     youtube_releases: list[ResolvedYoutubeRelease] | None = None,
     error_message: str | None = None,
     started: float,
+    monotonic_fn: Callable[[], float] | None = None,
 ) -> YoutubeAlbumResolverResult:
+    clock = monotonic_fn or time.monotonic
     return YoutubeAlbumResolverResult(
         outcome=outcome,
         release_group_identifier=release_group_identifier,
@@ -1500,5 +1734,5 @@ def _final(
         from_cache=from_cache,
         youtube_releases=youtube_releases or [],
         error_message=error_message,
-        duration_ms=int((time.monotonic() - started) * 1000),
+        duration_ms=int((clock() - started) * 1000),
     )

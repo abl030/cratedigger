@@ -81,14 +81,27 @@ class TestPythonPathCarriesOnlyRepoRoot(unittest.TestCase):
 class TestPipelineCliWrapperContract(unittest.TestCase):
     """API-backed CLI commands use the module-owned Unix listener."""
 
-    def test_wrapper_selects_non_overridable_unix_socket(self) -> None:
+    def _wrapper(self) -> str:
         text = MODULE_NIX.read_text(encoding="utf-8")
         wrapper_start = text.index('writeShellScriptBin "pipeline-cli"')
         wrapper_end = text.index('writeShellScriptBin "pipeline-migrate"')
-        wrapper = text[wrapper_start:wrapper_end]
+        return text[wrapper_start:wrapper_end]
+
+    def test_wrapper_selects_non_overridable_unix_socket(self) -> None:
+        wrapper = self._wrapper()
         self.assertIn('main(api_socket="${webSocketPath}")', wrapper)
         self.assertNotIn("--api-base", wrapper)
         self.assertNotIn("127.0.0.1", wrapper)
+
+    def test_wrapper_uses_safe_path_with_trusted_source_first(self) -> None:
+        wrapper = self._wrapper()
+        trusted_path = (
+            'export PYTHONPATH="${src}\'\'${PYTHONPATH:+:$PYTHONPATH}"'
+        )
+        safe_exec = "exec ${pythonEnv}/bin/python -P -c"
+        self.assertIn(trusted_path, wrapper)
+        self.assertIn(safe_exec, wrapper)
+        self.assertLess(wrapper.index(trusted_path), wrapper.index(safe_exec))
 
 
 class TestWebAuthenticationModuleContract(unittest.TestCase):
@@ -320,6 +333,43 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
               };
               services.nginx.group = "cratedigger";
             };
+            webServiceCredentialGroup = evaluate {
+              services.cratedigger = {
+                user = "cratedigger";
+                group = "cratedigger";
+                web = {
+                  hostName = "music.example.test";
+                  basicAuthFile = "/run/secrets/cratedigger.htpasswd";
+                };
+              };
+              systemd.services.cratedigger-web.serviceConfig.SupplementaryGroups = [
+                "nginx"
+              ];
+            };
+            webServiceRootOverride = evaluate {
+              services.cratedigger = {
+                user = "cratedigger";
+                group = "cratedigger";
+                web = {
+                  hostName = "music.example.test";
+                  basicAuthFile = "/run/secrets/cratedigger.htpasswd";
+                };
+              };
+              systemd.services.cratedigger-web.serviceConfig.User =
+                lib.mkForce "root";
+            };
+            webServiceNginxGroupOverride = evaluate {
+              services.cratedigger = {
+                user = "cratedigger";
+                group = "cratedigger";
+                web = {
+                  hostName = "music.example.test";
+                  basicAuthFile = "/run/secrets/cratedigger.htpasswd";
+                };
+              };
+              systemd.services.cratedigger-web.serviceConfig.Group =
+                lib.mkForce "nginx";
+            };
             nginxReverseUnrelatedGroup = evaluate {
               services.cratedigger.web = {
                 hostName = "music.example.test";
@@ -424,6 +474,24 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
             ),
             worlds["nginxPrimaryServiceGroup"],
         )
+        self.assertTrue(
+            any(
+                "cratedigger-web.service SupplementaryGroups" in message
+                for message in worlds["webServiceCredentialGroup"]
+            ),
+            worlds["webServiceCredentialGroup"],
+        )
+        for world in (
+            "webServiceRootOverride",
+            "webServiceNginxGroupOverride",
+        ):
+            self.assertTrue(
+                any(
+                    "final cratedigger-web.service User and Group" in message
+                    for message in worlds[world]
+                ),
+                (world, worlds[world]),
+            )
         self.assertEqual(worlds["nginxReverseUnrelatedGroup"], [])
 
     def test_injected_basic_path_cannot_render_toplevel(self) -> None:
@@ -470,7 +538,7 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
           let
             f = builtins.getFlake (toString ./.);
             lib = f.inputs.nixpkgs.lib;
-            render = enableIPv6:
+            render = enableIPv6: basicAuthFile:
               let
                 system = lib.nixosSystem {
                   system = builtins.currentSystem;
@@ -486,13 +554,20 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
                         slskd.apiKeyFile = "/run/secrets/slskd-key";
                         slskd.downloadDir = "/srv/slskd";
                         pipelineDb.createLocally = true;
-                        web = {
+                        web = ({
                           enable = true;
                           hostName = "music.example.test";
-                          basicAuthFile =
-                            "/run/secrets/cratedigger.htpasswd";
-                        };
+                          enableInsecure = basicAuthFile == null;
+                        } // lib.optionalAttrs (basicAuthFile != null) {
+                          inherit basicAuthFile;
+                        });
                       };
+                      services.nginx.virtualHosts.cratedigger-auth-gateway
+                        .locations."/merged-probe" = {
+                          proxyPass =
+                            "http://unix:/run/cratedigger-web/web.sock:";
+                          recommendedProxySettings = false;
+                        };
                     })
                   ];
                 };
@@ -517,7 +592,11 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
                   inherit (item) addr port;
                 }) gateway.listen;
                 hostName = gateway.serverName;
-                basicAuthFile = gateway.locations."/".basicAuthFile;
+                gatewayExtra = gateway.extraConfig;
+                basicAuthFile = gateway.basicAuthFile;
+                rootBasicAuthFile = gateway.locations."/".basicAuthFile;
+                mergedBasicAuthFile =
+                  gateway.locations."/merged-probe".basicAuthFile;
                 proxyPass = gateway.locations."/".proxyPass;
                 proxyExtra = gateway.locations."/".extraConfig;
                 healthProxy = gateway.locations."= /healthz".proxyPass;
@@ -530,6 +609,9 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
                 webAfter = webService.after;
                 webRequires = webService.requires;
                 webGroups = webService.serviceConfig.SupplementaryGroups;
+                webUser = webService.serviceConfig.User;
+                webGroup = webService.serviceConfig.Group;
+                webStartPre = webService.serviceConfig.ExecStartPre;
                 nginxGroups = nginxService.serviceConfig.SupplementaryGroups;
                 nginxUserGroups =
                   system.config.users.users.${system.config.services.nginx.user}.extraGroups;
@@ -539,8 +621,13 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
                 reload = nginxService.serviceConfig.ExecReload;
               };
           in {
-            dualStack = render true;
-            ipv4Only = render false;
+            dualStack =
+              render true "/run/secrets/cratedigger.htpasswd";
+            ipv4Only =
+              render false "/run/secrets/cratedigger.htpasswd";
+            insecureRecovery = render false null;
+            alternateBasic =
+              render false "/run/secrets/cratedigger-alternate.htpasswd";
           }
         '''
         result = subprocess.run(
@@ -554,8 +641,12 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
         worlds = json.loads(result.stdout)
         dual = worlds["dualStack"]
         ipv4 = worlds["ipv4Only"]
+        insecure = worlds["insecureRecovery"]
+        alternate = worlds["alternateBasic"]
         self.assertEqual(dual["failures"], [])
         self.assertEqual(ipv4["failures"], [])
+        self.assertEqual(insecure["failures"], [])
+        self.assertEqual(alternate["failures"], [])
         self.assertEqual(
             dual["listen"],
             [
@@ -567,18 +658,49 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
             ipv4["listen"], [{"addr": "127.0.0.1", "port": 8086}]
         )
         self.assertEqual(dual["hostName"], "music.example.test")
+        marker_pattern = re.compile(
+            r"if \(!-f "
+            r"(/run/cratedigger-web/gateway-policy-[0-9a-f]{64})\)"
+        )
+        basic_marker = marker_pattern.search(dual["gatewayExtra"])
+        ipv4_marker = marker_pattern.search(ipv4["gatewayExtra"])
+        insecure_marker = marker_pattern.search(insecure["gatewayExtra"])
+        alternate_marker = marker_pattern.search(alternate["gatewayExtra"])
+        self.assertIsNotNone(basic_marker)
+        self.assertIsNotNone(ipv4_marker)
+        self.assertIsNotNone(insecure_marker)
+        self.assertIsNotNone(alternate_marker)
+        assert basic_marker is not None
+        assert ipv4_marker is not None
+        assert insecure_marker is not None
+        assert alternate_marker is not None
+        self.assertEqual(basic_marker.group(1), ipv4_marker.group(1))
+        self.assertNotEqual(basic_marker.group(1), insecure_marker.group(1))
+        self.assertNotEqual(basic_marker.group(1), alternate_marker.group(1))
+        self.assertNotEqual(insecure_marker.group(1), alternate_marker.group(1))
         self.assertEqual(
             dual["basicAuthFile"], "/run/secrets/cratedigger.htpasswd"
         )
+        self.assertEqual(dual["rootBasicAuthFile"], None)
+        self.assertEqual(dual["mergedBasicAuthFile"], None)
         self.assertEqual(
             dual["proxyPass"], "http://unix:/run/cratedigger-web/web.sock:"
         )
+        self.assertIn("proxy_read_timeout 300s;", dual["proxyExtra"])
         self.assertEqual(
             dual["healthProxy"],
             "http://unix:/run/cratedigger-web/web.sock:/healthz",
         )
         self.assertIn('if ($request_uri != "/healthz")', dual["healthExtra"])
         self.assertIn("limit_except GET", dual["healthExtra"])
+        self.assertIn("auth_basic off;", dual["healthExtra"])
+        self.assertIn("proxy_http_version 1.0;", dual["healthExtra"])
+        self.assertIn("proxy_pass_request_body off;", dual["healthExtra"])
+        self.assertIn('proxy_set_header Connection close;', dual["healthExtra"])
+        self.assertIn('proxy_set_header Content-Length "";', dual["healthExtra"])
+        self.assertIn(
+            'proxy_set_header Transfer-Encoding "";', dual["healthExtra"]
+        )
         self.assertTrue(dual["rejectDefault"])
         self.assertEqual(dual["rejectConfig"], "return 444;")
         self.assertEqual(
@@ -593,23 +715,53 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
             self.assertIn(dependency, dual["webAfter"])
             self.assertIn(dependency, dual["webRequires"])
         self.assertEqual(dual["webGroups"], ["cratedigger-web"])
+        self.assertEqual(dual["webUser"], "cratedigger")
+        self.assertEqual(dual["webGroup"], "cratedigger")
+        self.assertTrue(dual["webStartPre"][0].startswith("+"))
+        self.assertIn(
+            "cratedigger-web-basic-auth-validate", dual["webStartPre"][0]
+        )
+        self.assertIn(
+            "cratedigger-web-basic-auth-app-isolation",
+            dual["webStartPre"][1],
+        )
+        self.assertFalse(dual["webStartPre"][1].startswith("+"))
+        self.assertIn("cratedigger-render-config", dual["webStartPre"][2])
+        self.assertEqual(len(insecure["webStartPre"]), 1)
+        self.assertIn(
+            "cratedigger-render-config", insecure["webStartPre"][0]
+        )
         self.assertEqual(dual["nginxGroups"], ["cratedigger-web"])
         self.assertIn("cratedigger-web", dual["nginxUserGroups"])
         self.assertIn("cratedigger-web", dual["applicationUserGroups"])
         self.assertTrue(dual["startPre"][0].startswith("+"))
-        self.assertIn(
-            "cratedigger-web-basic-auth-validate", dual["startPre"][0]
-        )
+        self.assertIn("cratedigger-web-gateway-start", dual["startPre"][0])
         self.assertIn("nginx-pre-start", dual["startPre"][1])
         self.assertTrue(dual["reload"][0].startswith("+"))
-        self.assertIn(
-            "cratedigger-web-basic-auth-validate", dual["reload"][0]
-        )
+        self.assertIn("cratedigger-web-gateway-prepare-reload", dual["reload"][0])
         self.assertIn("nginx", dual["reload"][1])
+        self.assertIn("kill", dual["reload"][2])
+        self.assertTrue(dual["reload"][3].startswith("+"))
+        self.assertIn("cratedigger-web-gateway-finish-reload", dual["reload"][3])
+        self.assertEqual(insecure["basicAuthFile"], None)
+        self.assertIn("cratedigger-web-gateway-start", insecure["startPre"][0])
+        self.assertIn(
+            "cratedigger-web-gateway-prepare-reload", insecure["reload"][0]
+        )
+        self.assertIn(
+            "cratedigger-web-gateway-finish-reload", insecure["reload"][3]
+        )
 
     def test_socket_activation_and_access_group_are_explicit(self) -> None:
         text = MODULE_NIX.read_text(encoding="utf-8")
-        self.assertIn('webSocketPath = "/run/cratedigger-web/web.sock";', text)
+        self.assertIn(
+            'webRuntimeDirectory = "/run/cratedigger-web";',
+            text,
+        )
+        self.assertIn(
+            'webSocketPath = "${webRuntimeDirectory}/web.sock";',
+            text,
+        )
         self.assertIn("systemd.sockets.cratedigger-web", text)
         self.assertIn("listenStreams = [webSocketPath];", text)
         self.assertIn('SocketMode = "0660";', text)
@@ -696,9 +848,69 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
         self.assertIn(
             'writeShellScript "cratedigger-web-basic-auth-validate"', text
         )
+        self.assertIn(
+            '"cratedigger-web-basic-auth-app-isolation"', text
+        )
+        self.assertIn(
+            "the web application can read its gateway credential", text
+        )
         self.assertIn("systemd.services.nginx = mkIf cfg.web.enable", text)
         self.assertIn("ExecStartPre = lib.mkBefore", text)
         self.assertIn("ExecReload = lib.mkBefore", text)
+        self.assertIn("ExecReload = lib.mkAfter", text)
+        marker_helpers = text[
+            text.index("webGatewayClearMarkers =") :
+            text.index('writeShellScript "cratedigger-web-gateway-start"')
+        ]
+        start_script = text[
+            text.index('writeShellScript "cratedigger-web-gateway-start"') :
+            text.index(
+                'writeShellScript "cratedigger-web-gateway-prepare-reload"'
+            )
+        ]
+        reload_prepare = text[
+            text.index(
+                'writeShellScript "cratedigger-web-gateway-prepare-reload"'
+            ) :
+            text.index(
+                'writeShellScript "cratedigger-web-gateway-finish-reload"'
+            )
+        ]
+        reload_finish = text[
+            text.index(
+                'writeShellScript "cratedigger-web-gateway-finish-reload"'
+            ) :
+            text.index("webNginxUserExtraGroups")
+        ]
+        self.assertLess(
+            start_script.index("${webBasicAuthValidationScript}"),
+            start_script.index("${webGatewayPublishMarker}"),
+        )
+        self.assertLess(
+            reload_prepare.index("${webGatewayClearMarkers}"),
+            reload_prepare.index("${webBasicAuthValidationScript}"),
+        )
+        self.assertNotIn("${webGatewayPublishMarker}", reload_prepare)
+        self.assertIn("${webGatewayPublishMarker}", reload_finish)
+        self.assertNotIn("webGatewayPendingMarker", text)
+        self.assertNotIn("webGatewayStageMarker", text)
+        self.assertIn("${pkgs.findutils}/bin/find", marker_helpers)
+        self.assertIn(
+            "${lib.escapeShellArg webRuntimeDirectory}", marker_helpers
+        )
+        self.assertIn("-maxdepth 1", marker_helpers)
+        self.assertIn(
+            '-name ${lib.escapeShellArg "gateway-*"}', marker_helpers
+        )
+        self.assertIn("-delete", marker_helpers)
+        self.assertIn("-m 0440", marker_helpers)
+        self.assertIn("-o root", marker_helpers)
+        self.assertIn(
+            "-g ${lib.escapeShellArg cfg.web.accessGroup}", marker_helpers
+        )
+        self.assertIn(
+            "${lib.escapeShellArg webGatewayActiveMarker}", marker_helpers
+        )
         self.assertIn("realpath -e", text)
         self.assertIn("runuser -u", text)
         self.assertIn("${pkgs.acl}/bin/getfacl", text)

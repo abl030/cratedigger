@@ -316,8 +316,14 @@ class TestServerEndpoints(_FakeDbWebServerCase):
             return body
 
     def _index_bytes(self, *, insecure: bool) -> bytes:
-        with patch("web.server.insecure_mode", insecure):
+        from web import server as web_server
+
+        previous_mode = web_server.insecure_mode
+        try:
+            web_server.configure_insecure_mode(insecure)
             return self._current_index_bytes()
+        finally:
+            web_server.configure_insecure_mode(previous_mode)
 
     def test_secure_index_omits_insecure_footer_byte_for_byte(self) -> None:
         secure = self._index_bytes(insecure=False)

@@ -9,6 +9,7 @@ import threading
 import unittest
 from http.server import ThreadingHTTPServer
 from typing import override
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -289,6 +290,42 @@ class TestRequestSecurityHTTP(_WebServerCase):
         self.assertEqual(OrderingHandler.post_dispatches, 0)
         self.assertEqual(route_calls, [])
 
+    def test_youtube_resolver_rejects_bad_provenance_before_resolver_or_db(
+        self,
+    ) -> None:
+        """The cache-writing resolver cannot cross the browser guard."""
+        from web import server as srv
+
+        class _ForbiddenDB:
+            def __getattribute__(self, name: str) -> object:
+                raise AssertionError(
+                    f"rejected resolver request touched DB attribute {name}"
+                )
+
+        cases = (
+            ("missing", {}),
+            ("mismatched", {"Origin": "https://evil.example"}),
+        )
+        for label, provenance_headers in cases:
+            headers = {
+                CHANNEL_HEADER: BROWSER_CHANNEL,
+                "Content-Type": "application/json",
+                **provenance_headers,
+            }
+            with self.subTest(label=label), patch.object(
+                srv, "db", _ForbiddenDB(),
+            ), patch(
+                "web.routes.youtube.resolve_youtube_album",
+            ) as resolver:
+                status, _body, _response_headers = self._raw_request(
+                    "POST",
+                    "/api/youtube-album",
+                    headers=headers,
+                    body=b'{"identifier":"release-id","refresh":false}',
+                )
+            self.assertEqual(status, 403)
+            resolver.assert_not_called()
+
     def test_missing_and_unknown_channels_reject_before_get_dispatch(self) -> None:
         cases = (
             ("missing", {}),
@@ -305,24 +342,33 @@ class TestRequestSecurityHTTP(_WebServerCase):
         cases = (
             (
                 "duplicate channel fields",
-                f"{CHANNEL_HEADER}: browser\r\n{CHANNEL_HEADER}: cli\r\n"
-                f"Origin: {CANONICAL_ORIGIN}\r\n",
+                (
+                    f"{CHANNEL_HEADER}: browser\r\n"
+                    f"{CHANNEL_HEADER}: cli\r\n"
+                    f"Origin: {CANONICAL_ORIGIN}\r\n"
+                ),
             ),
             (
                 "serialized channel values",
-                f"{CHANNEL_HEADER}: browser, cli\r\n"
-                f"Origin: {CANONICAL_ORIGIN}\r\n",
+                (
+                    f"{CHANNEL_HEADER}: browser, cli\r\n"
+                    f"Origin: {CANONICAL_ORIGIN}\r\n"
+                ),
             ),
             (
                 "duplicate Origin fields",
-                f"{CHANNEL_HEADER}: browser\r\n"
-                f"Origin: {CANONICAL_ORIGIN}\r\n"
-                "Origin: https://evil.example\r\n",
+                (
+                    f"{CHANNEL_HEADER}: browser\r\n"
+                    f"Origin: {CANONICAL_ORIGIN}\r\n"
+                    "Origin: https://evil.example\r\n"
+                ),
             ),
             (
                 "serialized Origin values",
-                f"{CHANNEL_HEADER}: browser\r\n"
-                f"Origin: {CANONICAL_ORIGIN} https://evil.example\r\n",
+                (
+                    f"{CHANNEL_HEADER}: browser\r\n"
+                    f"Origin: {CANONICAL_ORIGIN} https://evil.example\r\n"
+                ),
             ),
         )
         for label, security_headers in cases:

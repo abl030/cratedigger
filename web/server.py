@@ -78,6 +78,7 @@ from web.routes import api_index as _api_index_routes
 from web.routes import beets_distance as _beets_distance_routes
 from web.routes import browse as _browse_routes
 from web.routes import disk_coverage as _disk_coverage_routes
+from web.routes import health as _health_routes
 from web.routes import imports as _imports_routes
 from web.routes import labels as _labels_routes
 from web.routes import library as _library_routes
@@ -574,7 +575,7 @@ class Handler(BaseHTTPRequestHandler):
             self, "_security_request_target", self.path,
         )
         if is_exact_liveness_request(self.command, request_target):
-            self._healthz()
+            _health_routes.serve_healthz(self)
             return
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
@@ -707,7 +708,7 @@ class Handler(BaseHTTPRequestHandler):
             self, "_security_request_target", self.path,
         )
         if is_exact_liveness_request(self.command, request_target):
-            self._healthz()
+            _health_routes.serve_healthz(self)
             return
         self.send_error(501, "Unsupported method")
 
@@ -719,11 +720,6 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     # ── GET handlers ─────────────────────────────────────────────────
-
-    def _healthz(self) -> None:
-        """Serve the constant application liveness response."""
-        self.send_response_only(204)
-        self.end_headers()
 
     def _get_index(self, params: dict[str, list[str]]) -> None:
         self._html("index.html")

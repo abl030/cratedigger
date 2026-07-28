@@ -1,7 +1,8 @@
 """YouTube Music album resolver — HTTP route module (U8).
 
-Single GET endpoint, ``/api/youtube-album?identifier=<id>&refresh=<bool>``,
-that wraps ``lib.youtube_album_service.resolve_youtube_album``. The CLI
+Single POST endpoint, ``/api/youtube-album``, with ``identifier`` and
+``refresh`` in its JSON body. It wraps
+``lib.youtube_album_service.resolve_youtube_album``. The CLI
 counterpart (U7) lives at ``scripts/pipeline_cli/youtube.py::cmd_youtube_album``;
 both surfaces share the same service + outcome vocabulary per
 ``CLAUDE.md`` § "CLI ⇄ API surface symmetry".
@@ -22,8 +23,14 @@ import logging
 from typing import Any
 
 import msgspec
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from lib.youtube_album_limits import (
+    YOUTUBE_HTTP_CONNECT_TIMEOUT_SECONDS,
+    YOUTUBE_HTTP_READ_TIMEOUT_SECONDS,
+    YOUTUBE_HTTP_RETRY_DELAY_CAP_SECONDS,
+    YOUTUBE_HTTP_RETRY_TOTAL,
+)
 from lib.youtube_album_service import (
     OUTCOME_HTTP_STATUS,
     resolve_youtube_album,
@@ -57,9 +64,10 @@ __all__ = [
     "OUTCOME_HTTP_STATUS",
     "ROUTES",
     "YOUTUBE_INGEST_HTTP_STATUS",
+    "YoutubeAlbumRequest",
     "YoutubeRescueRequest",
-    "get_youtube_album",
     "post_pipeline_youtube_rescue",
+    "post_youtube_album",
 ]
 
 
@@ -136,14 +144,12 @@ def _build_youtube_client():
     from ytmusicapi import YTMusic
 
     # Bind a default (connect, read) timeout so unresponsive remotes don't
-    # pin the worker forever. Per-call ``timeout=`` kwargs still override.
+    # pin the worker forever. Finite per-call ``timeout=`` kwargs still
+    # override the default.
     #
-    # ``_UNSET`` (rather than a plain ``None`` default) preserves the
-    # original ``kwargs.setdefault("timeout", ...)`` semantics exactly:
-    # a caller that never passes ``timeout=`` gets the default, but a
-    # caller that explicitly passes ``timeout=None`` (requests' spelling
-    # for "wait forever") still gets ``None`` through untouched. A plain
-    # ``= None`` default would conflate the two.
+    # Treat both omission and explicit ``None`` as the default: requests
+    # spells "wait forever" as ``timeout=None``, which is not safe at this
+    # external HTTP boundary.
     #
     # The remaining keyword params (params/data/headers/.../json) are
     # typed ``Any`` — requests.Session.request's stub types them via
@@ -176,8 +182,11 @@ def _build_youtube_client():
             cert: Any = None,
             json: Any = None,
         ) -> requests.Response:
-            if timeout is _UNSET:
-                timeout = (5, 30)
+            if timeout is _UNSET or timeout is None:
+                timeout = (
+                    YOUTUBE_HTTP_CONNECT_TIMEOUT_SECONDS,
+                    YOUTUBE_HTTP_READ_TIMEOUT_SECONDS,
+                )
             # The current Session.request stubs require ``str`` while the
             # base override accepts ``str | bytes``. Requests' own request
             # preparation uppercases strings later; this boundary only
@@ -198,8 +207,10 @@ def _build_youtube_client():
 
     session = _DefaultTimeoutSession()
     retry = Retry(
-        total=3,
+        total=YOUTUBE_HTTP_RETRY_TOTAL,
         backoff_factor=1.5,
+        backoff_max=YOUTUBE_HTTP_RETRY_DELAY_CAP_SECONDS,
+        retry_after_max=YOUTUBE_HTTP_RETRY_DELAY_CAP_SECONDS,
         status_forcelist=(429, 500, 502, 503, 504),
         allowed_methods=frozenset(["GET", "POST"]),
     )
@@ -216,20 +227,18 @@ def _build_youtube_client():
     return YTMusic(requests_session=session, language="en"), session
 
 
-def _parse_bool(raw: str | None) -> bool:
-    """Strict boolean parse for query params.
+class YoutubeAlbumRequest(BaseModel):
+    """Cache-writing resolver request body."""
 
-    ``"true"`` and ``"1"`` (case-insensitive) → True; anything else
-    (including ``None``, empty string, ``"false"``, ``"0"``) → False.
-    Same shape the CLI's ``--refresh`` flag produces.
-    """
-    if raw is None:
-        return False
-    return raw.strip().lower() in ("true", "1")
+    identifier: str
+    refresh: bool = Field(default=False, strict=True)
 
 
-def get_youtube_album(h: RouteHandler, params: dict[str, list[str]]) -> None:
-    """``GET /api/youtube-album?identifier=<id>&refresh=<true|false>``.
+def post_youtube_album(
+    h: RouteHandler,
+    body: dict[str, object],
+) -> None:
+    """``POST /api/youtube-album``.
 
     Resolves any MB / Discogs release-or-group identifier into the
     YouTube Music distance matrix. Counterpart of ``pipeline-cli
@@ -240,7 +249,7 @@ def get_youtube_album(h: RouteHandler, params: dict[str, list[str]]) -> None:
 
     Status mapping (from ``OUTCOME_HTTP_STATUS``):
       * 200 — ``ok``
-      * 400 — missing / empty ``identifier`` query parameter
+      * 400 — invalid JSON body or missing / empty ``identifier``
       * 404 — ``not_found``
       * 503 — ``unresolved_4xx_client`` / ``unresolved_mirror_unavailable``
               / ``unresolved_timeout`` / ``youtube_parse_failed`` /
@@ -252,13 +261,13 @@ def get_youtube_album(h: RouteHandler, params: dict[str, list[str]]) -> None:
     the upstream YT failure), the route still returns 200 — the matrix
     is real, the cache served, the caller got a useful result.
     """
-    identifier_raw = params.get("identifier", [""])[0]
-    identifier = (identifier_raw or "").strip()
-    if not identifier:
-        h._error("identifier query parameter is required", 400)
+    req = parse_body(h, body, YoutubeAlbumRequest)
+    if req is None:
         return
-
-    refresh = _parse_bool(params.get("refresh", [None])[0])
+    identifier = req.identifier.strip()
+    if not identifier:
+        h._error("identifier is required", 400)
+        return
 
     yt, session = _build_youtube_client()
     cache = _RedisYoutubeCache()
@@ -282,7 +291,7 @@ def get_youtube_album(h: RouteHandler, params: dict[str, list[str]]) -> None:
             yt_client=yt,
             distance_fn=compute_beets_distance,
             cache=cache,
-            refresh=refresh,
+            refresh=req.refresh,
         )
     finally:
         # Close the requests.Session to release its connection pool.
@@ -376,11 +385,12 @@ def post_pipeline_youtube_rescue(
 
 ROUTES: list[RouteRegistration] = [
     route(
-        "GET", "/api/youtube-album", get_youtube_album,
+        "POST", "/api/youtube-album", post_youtube_album,
         "YouTube Music album resolver — given an MB or Discogs "
         "release-or-group identifier, returns the typed "
-        "(yt_release × mb_release) distance matrix. "
-        "?refresh=true bypasses BOTH the durable cache "
+        "(yt_release × mb_release) distance matrix. Body: "
+        "{\"identifier\": \"<release-or-group-id>\", \"refresh\": "
+        "false}. refresh=true bypasses BOTH the durable cache "
         "(youtube_album_mappings) and the in-process Redis HTTP "
         "accelerator, forcing a fresh YT Music fetch; the fresh "
         "response is then written back to both layers.",

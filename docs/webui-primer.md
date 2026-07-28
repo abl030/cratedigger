@@ -90,6 +90,7 @@ operation.
 | `/api/pipeline/status` | GET | Pipeline DB status counts + wanted list |
 | `/api/pipeline/<id>` | GET | Single request details |
 | `/api/pipeline/force-import` | POST | Queue force-import for a rejected download `{"download_log_id": N}`; returns `202` + job id |
+| `/api/youtube-album` | POST | Resolve an MB/Discogs release or group to the cache-writing YouTube Music matrix; body `{"identifier": "...", "refresh": false}` |
 | `/api/wrong-matches` | GET | Group rejected downloads by release for triage |
 | `/api/wrong-matches/explorer` | GET | List files for one wrong-match candidate, including extracted tags and audio-preview URLs |
 | `/api/wrong-matches/audio` | GET | Stream an individual wrong-match audio file with byte-range support |

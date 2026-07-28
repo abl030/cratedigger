@@ -31,13 +31,13 @@
  *      sibling pressings here too, not a doomed MB lookup).
  *   5. YouTube matrix  ← the four-state shell. Defaults to `never_run`
  *      with a "Check YouTube" button (U5 wires the actual resolver call —
- *      U4 must NOT auto-call the slow, side-effectful resolver GET).
+ *      U4 must NOT auto-call the slow, side-effectful resolver POST).
  *
  * U5: the two-step YouTube rescue flow.
  *
  *   1. "Check YouTube" (`checkYoutube`) — replaces U4's placeholder. Calls
- *      the SLOW, SIDE-EFFECTFUL resolver GET
- *      (`GET /api/youtube-album?identifier=<mb_release_id>`), disables the
+ *      the SLOW, SIDE-EFFECTFUL resolver POST
+ *      (`POST /api/youtube-album {identifier, refresh}`), disables the
  *      button + shows in-progress, GUARDS double-fire
  *      (`consoleCanStart(consoleStates, id, 'resolve')` — a second click
  *      while outstanding fires nothing), and STAMPS the fetch with a per-row
@@ -768,7 +768,7 @@ export function youtubeRescueTargets(result) {
  * (R9 / R10 — nothing to pick). `never_run` / `resolver_failed` render the
  * "Check YouTube" / retry button wired to `window.checkYoutube(id)` (U5's
  * real resolver handler, replacing U4's placeholder). The console must NOT
- * auto-call the slow, side-effectful resolver GET — the panel opens in
+ * auto-call the slow, side-effectful resolver POST — the panel opens in
  * `never_run` until the operator clicks.
  *
  * @param {{outcome?: string, youtube_releases?: Array<Object>|null, from_cache?: boolean, error_message?: string|null}|null} result
@@ -893,7 +893,7 @@ function renderConsoleShell(row, ytResult) {
   const siblingsPanel = renderPanel(
     'siblings', id, 'Sibling pressings', renderPanelLoading('siblings'), false);
   // The YouTube panel opens in `never_run` — no fetch (U4 must not
-  // auto-call the side-effectful resolver GET) — unless this row already
+  // auto-call the side-effectful resolver POST) — unless this row already
   // resolved this session, in which case the cached result renders so a
   // console restore doesn't discard the operator's matrix.
   const youtubePanel = renderPanel(
@@ -1167,7 +1167,7 @@ export function restoreLongTailConsoles() {
 
 // --- Console rescue flow (U5) ----------------------------------------
 //
-// Two steps: "Check YouTube" runs the slow side-effectful resolver GET and
+// Two steps: "Check YouTube" runs the slow side-effectful resolver POST and
 // re-renders the YouTube panel with pickable rescue targets; picking a
 // target opens a confirm overlay and submits the rescue. Both steps are
 // double-fire-guarded (a module-scoped Set keyed by request id). The
@@ -1288,7 +1288,7 @@ function patchYoutubePanel(id, token, result) {
 
 /**
  * "Check YouTube" handler (U5) — replaces U4's placeholder toast. Runs the
- * slow, side-effectful resolver GET for the row's `mb_release_id`, then
+ * slow, side-effectful resolver POST for the row's `mb_release_id`, then
  * re-renders the YouTube panel with the fresh classification.
  *
  * Guards:
@@ -1308,7 +1308,7 @@ function patchYoutubePanel(id, token, result) {
  *
  * The resolver identifier is the request's `mb_release_id` (an MB release
  * MBID or a Discogs release id) — the same id the resolver's
- * `?identifier=` query takes. A row without one cannot be resolved; the
+ * `identifier` body field takes. A row without one cannot be resolved; the
  * panel shows that explicitly rather than firing a doomed fetch. That
  * check runs BEFORE the double-fire guard, and deliberately never touches
  * `consoleStates` — a row lacking `mb_release_id` must not leave behind a
@@ -1338,8 +1338,11 @@ export async function checkYoutube(id) {
   const currentToken = () => consoleToken(consoleStates, id);
   setYoutubeChecking(id);
   try {
-    const r = await fetch(
-      `${API}/api/youtube-album?identifier=${encodeURIComponent(identifier)}`);
+    const r = await fetch(`${API}/api/youtube-album`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ identifier, refresh: false }),
+    });
     // 404/503 still carry a typed body; the classifier maps any non-`ok`
     // outcome to `resolver_failed`, so we read the body regardless of
     // status and only fall back to a synthetic failure if the body is
@@ -1361,7 +1364,7 @@ export async function checkYoutube(id) {
 }
 
 /**
- * Swap the YouTube panel into an in-progress state while the resolver GET
+ * Swap the YouTube panel into an in-progress state while the resolver POST
  * is outstanding (disabled button + spinner copy). DOM-side; no-op when the
  * panel isn't mounted (Node tests / collapsed console).
  *

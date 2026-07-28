@@ -1,8 +1,7 @@
 """pipeline-cli YouTube resolver + rescue-ingest commands (#495 carve).
 
-``youtube-album`` — resolve an MB/Discogs identifier into the YT Music
-distance matrix. ``youtube-rescue`` — submit a rescue ingest for one
-request. Both wrap the U7/U4 service layer (CLI ⇄ API surface symmetry).
+``youtube-album`` — call the canonical cache-writing web resolver.
+``youtube-rescue`` — submit a rescue ingest for one request.
 """
 # ruff: noqa: UP037 - quoted Any annotation is part of the typing ratchet
 
@@ -15,12 +14,14 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import msgspec
 
-# CLI ⇄ API symmetry: import the service entrypoint + outcome → exit-code
-# mapping directly so the test, the CLI, and the U8 route share one
-# source of truth (PR #381 lesson). Do NOT redefine the mapping here.
+from lib.youtube_album_limits import YOUTUBE_ALBUM_API_TIMEOUT_SECONDS
+
+# Typed resolver responses retain the service's explicit outcome-to-exit
+# authority. Route-level error objects fall back to the shared HTTP status
+# mapping in api_mutations.
 from lib.youtube_album_service import (
     OUTCOME_EXIT_CODE,
-    resolve_youtube_album,
+    YoutubeAlbumResolverResult,
 )
 
 # U4 / CLI ⇄ API symmetry: import the YT-rescue ingest service's outcome
@@ -34,10 +35,10 @@ from lib.youtube_ingest_service import (
 from lib.youtube_ingest_service import (
     default_youtube_ingest_service_factory,
 )
+from scripts.pipeline_cli.api_mutations import _ApiMutation, _relay_decoded
 
 if TYPE_CHECKING:
     from lib.pipeline_db.rows import AlbumRequestRow, DownloadLogWithEvidenceRow
-    from lib.youtube_album_service import YoutubeResolverDB
     from lib.youtube_ingest_service import SubmitResult
 
 
@@ -127,198 +128,113 @@ class _SubmitsYoutubeRescue(Protocol):
     ) -> SubmitResult: ...
 
 
-class _RedisYoutubeCache:
-    """Adapt ``web/cache.py``'s Redis client to the ``BeetsDistanceCache``
-    protocol.
-
-    The service-side keys already carry the ``youtube:album:`` /
-    ``youtube:search:`` namespace; this adapter does NOT prefix them
-    again (review finding #17 — the old ``_NAMESPACE`` wrapper produced
-    ``youtube:album:youtube:album:<browse_id>`` keys).
-
-    Mirrors ``_RedisFingerprintCache`` in ``web/routes/beets_distance.py`` —
-    bytes get/set with a long sentinel TTL (cache lives forever absent
-    explicit refresh per Key Technical Decisions). Falls back to a
-    no-op when Redis isn't available so the CLI works without the
-    in-process accelerator.
-    """
-
-    def __init__(self) -> None:
-        try:
-            from web import cache as _cache_mod
-            self._redis = getattr(_cache_mod, "_redis", None)
-        except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
-            self._redis = None
-
-    def get(self, key: str):
-        if self._redis is None:
-            return None
-        try:
-            raw = self._redis.get(key)
-        except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
-            return None
-        if raw is None:
-            return None
-        # web/cache.py initialises Redis with ``decode_responses=True``,
-        # so ``get`` returns str. Encode to bytes for the protocol.
-        if isinstance(raw, str):
-            return raw.encode("utf-8")
-        return raw
-
-    def set(self, key: str, value: bytes, ttl_seconds: int) -> None:
-        if self._redis is None:
-            return
-        try:
-            self._redis.setex(
-                key, ttl_seconds, value)
-        except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
-            pass
+type _YoutubeAlbumApiResponse = YoutubeAlbumResolverResult | dict[str, object]
 
 
-def _build_youtube_client():
-    """Construct a ``YTMusic`` client with retry + jittered desktop
-    headers per the Key Technical Decisions (R5 / external research).
-
-    Lazy-imports ``requests``, ``urllib3``, and ``ytmusicapi`` so the
-    CLI's startup cost stays low and the rest of the script doesn't
-    pay for unused HTTP machinery.
-
-    Returns ``(yt_client, session)`` so the caller can close the
-    session in a ``finally`` block — without that, every CLI
-    invocation leaks the requests Session's connection pool. Round 2
-    P2-2: the web-route side already paired finding #18's close in a
-    ``finally``; this brings the CLI surface into parity per the
-    CLI ⇄ API symmetry rule.
-
-    The session binds a default ``(connect, read)`` timeout of
-    ``(5, 30)`` so an unresponsive YT endpoint can't pin the CLI
-    invocation forever (finding #4). ``requests`` exposes no
-    Session-level timeout config; a ``Session`` subclass defaulting
-    the ``request`` timeout kwarg is the established pattern.
-    """
-    import requests
-    from requests.adapters import HTTPAdapter
-    from urllib3.util.retry import Retry
-    from ytmusicapi import YTMusic
-
-    # Bind a default (connect, read) timeout so unresponsive remotes don't
-    # pin the worker forever. Per-call ``timeout=`` kwargs still override.
-    class _DefaultTimeoutSession(requests.Session):
-        def request(self, *args: Any, **kwargs: Any):
-            kwargs.setdefault("timeout", (5, 30))
-            return super().request(*args, **kwargs)
-
-    session = _DefaultTimeoutSession()
-    retry = Retry(
-        total=3,
-        backoff_factor=1.5,
-        status_forcelist=(429, 500, 502, 503, 504),
-        allowed_methods=frozenset(["GET", "POST"]),
-    )
-    adapter = HTTPAdapter(max_retries=retry)
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
-    session.headers.update({
-        "User-Agent": (
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Accept-Language": "en-US,en;q=0.9",
-    })
-    return YTMusic(requests_session=session, language="en"), session
+def _decode_youtube_album_response(
+    status: int,
+    body: bytes,
+) -> _YoutubeAlbumApiResponse:
+    """Decode service results while preserving route-level error objects."""
+    if status in (200, 404, 503):
+        return msgspec.json.decode(body, type=YoutubeAlbumResolverResult)
+    return msgspec.json.decode(body, type=dict[str, object])
 
 
-def cmd_youtube_album(db: YoutubeResolverDB, args: argparse.Namespace) -> int:
-    """``pipeline-cli youtube-album <identifier> [--refresh] [--json]``.
+def _render_youtube_album_response(
+    identifier: str,
+    response: _YoutubeAlbumApiResponse,
+    *,
+    json_output: bool,
+) -> str:
+    """Render the route response using youtube-album's stable CLI contract."""
+    if json_output or isinstance(response, dict):
+        return msgspec.json.encode(response).decode()
 
-    Resolves any MB / Discogs release-or-group identifier into the
-    YouTube Music distance matrix. Counterpart of ``GET
-    /api/youtube-album`` (U8). Both surfaces wrap
-    ``lib.youtube_album_service.resolve_youtube_album`` — keep them in
-    sync (see ``CLAUDE.md`` § "CLI ⇄ API surface symmetry"). The
-    outcome → exit-code mapping is imported directly from the service
-    module (``OUTCOME_EXIT_CODE``) to keep a single source of truth.
-
-    Exit codes (from ``lib.youtube_album_service.OUTCOME_EXIT_CODE``):
-      * 0 — ``ok``
-      * 2 — ``not_found``
-      * 5 — ``unresolved_4xx_client`` / ``unresolved_mirror_unavailable``
-            / ``unresolved_timeout`` / ``youtube_parse_failed`` /
-            ``transient``
-      * 1 — unknown outcome (safety net)
-    """
-    from lib.beets_distance import compute_beets_distance
-    from web import discogs as discogs_api
-    from web import mb as mb_api
-
-    yt, session = _build_youtube_client()
-    cache = _RedisYoutubeCache()
-
-    try:
-        result = resolve_youtube_album(
-            args.identifier,
-            pdb=db,
-            mb_get_release=lambda m: mb_api.get_release(m, fresh=False),
-            mb_get_release_group_releases=mb_api.get_release_group_releases,
-            discogs_get_release=lambda d: discogs_api.get_release(
-                int(d), fresh=False),
-            discogs_get_master_releases=lambda m: discogs_api.get_master_releases(
-                int(m)),
-            yt_client=yt,
-            distance_fn=compute_beets_distance,
-            cache=cache,
-            refresh=bool(getattr(args, "refresh", False)),
+    lines = [
+        f"  identifier:             {identifier}",
+        f"  outcome:                {response.outcome}",
+    ]
+    if response.release_group_identifier:
+        lines.append(
+            "  release group:          "
+            f"{response.release_group_identifier} ({response.source})",
         )
-    finally:
-        # Close the requests Session even when the resolver raises so
-        # the connection pool doesn't leak. Mirrors the web-route side
-        # (finding #18). Round 2 P2-2 — closes the CLI ⇄ API symmetry
-        # gap.
-        try:
-            session.close()
-        except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
-            pass
-
-    if getattr(args, "json", False):
-        print(msgspec.json.encode(result).decode())
+    lines.append(f"  from cache:             {response.from_cache}")
+    if response.error_message:
+        lines.append(f"  error:                  {response.error_message}")
+    if response.duration_ms is not None:
+        lines.append(f"  latency:                {response.duration_ms} ms")
+    if response.youtube_releases:
+        lines.append(
+            f"  matrix ({len(response.youtube_releases)} YT release(s)):",
+        )
+        for yt_release in response.youtube_releases:
+            year = yt_release.year if yt_release.year is not None else "—"
+            lines.append(
+                f"    - {yt_release.yt_browse_id}  "
+                f"year={year}  tracks={yt_release.track_count}",
+            )
+            lines.append(f"      url: {yt_release.yt_url}")
+            for distance in yt_release.distances:
+                distance_label = (
+                    f"{distance.distance:.4f}"
+                    if distance.distance is not None
+                    else "n/a"
+                )
+                suffix = ""
+                if (
+                    distance.matched_tracks is not None
+                    and distance.total_mb_tracks is not None
+                ):
+                    suffix = (
+                        f"  matched={distance.matched_tracks}/"
+                        f"{distance.total_mb_tracks}"
+                    )
+                error_suffix = (
+                    f"  err={distance.error_message}"
+                    if distance.error_message
+                    else ""
+                )
+                lines.append(
+                    f"      · {distance.mbid}  outcome={distance.outcome}  "
+                    f"dist={distance_label}{suffix}{error_suffix}",
+                )
     else:
-        print(f"  identifier:             {args.identifier}")
-        print(f"  outcome:                {result.outcome}")
-        if result.release_group_identifier:
-            print(f"  release group:          "
-                  f"{result.release_group_identifier} ({result.source})")
-        print(f"  from cache:             {result.from_cache}")
-        if result.error_message:
-            print(f"  error:                  {result.error_message}")
-        if result.duration_ms is not None:
-            print(f"  latency:                {result.duration_ms} ms")
-        if result.youtube_releases:
-            print(f"  matrix ({len(result.youtube_releases)} YT release(s)):")
-            for yt_rel in result.youtube_releases:
-                year = yt_rel.year if yt_rel.year is not None else "—"
-                print(f"    - {yt_rel.yt_browse_id}  "
-                      f"year={year}  tracks={yt_rel.track_count}")
-                print(f"      url: {yt_rel.yt_url}")
-                for d in yt_rel.distances:
-                    if d.distance is not None:
-                        dist_label = f"{d.distance:.4f}"
-                    else:
-                        dist_label = "n/a"
-                    suffix = ""
-                    if d.matched_tracks is not None \
-                            and d.total_mb_tracks is not None:
-                        suffix = (
-                            f"  matched={d.matched_tracks}/"
-                            f"{d.total_mb_tracks}")
-                    err_suffix = (
-                        f"  err={d.error_message}" if d.error_message else "")
-                    print(f"      · {d.mbid}  outcome={d.outcome}  "
-                          f"dist={dist_label}{suffix}{err_suffix}")
-        else:
-            # AE2 / R11 — empty matrix is a normal response, not an error.
-            print("  matrix:                 (empty)")
+        lines.append("  matrix:                 (empty)")
+    return "\n".join(lines)
 
-    return OUTCOME_EXIT_CODE.get(result.outcome, 1)
+
+def _youtube_album_exit_code(
+    _status: int,
+    response: _YoutubeAlbumApiResponse,
+) -> int | None:
+    """Use service outcomes for resolver results; defer route errors to HTTP."""
+    if isinstance(response, dict):
+        return None
+    return OUTCOME_EXIT_CODE.get(response.outcome, 1)
+
+
+def cmd_youtube_album(_db: object, args: argparse.Namespace) -> int:
+    """Resolve through the route while preserving service outcome exit codes."""
+    return _relay_decoded(
+        args.api_endpoint,
+        _ApiMutation(
+            path="/api/youtube-album",
+            body={
+                "identifier": args.identifier,
+                "refresh": bool(args.refresh),
+            },
+        ),
+        decoder=_decode_youtube_album_response,
+        renderer=lambda response: _render_youtube_album_response(
+            args.identifier,
+            response,
+            json_output=bool(args.json),
+        ),
+        exit_code_for=_youtube_album_exit_code,
+        timeout_seconds=YOUTUBE_ALBUM_API_TIMEOUT_SECONDS,
+    )
 
 
 def cmd_youtube_rescue(
@@ -380,7 +296,7 @@ def add_youtube_subparsers(
     """Add ``youtube-album`` / ``youtube-rescue`` (#521 carve out of
     ``routes_meta._build_parser``, verbatim argument definitions)."""
     # youtube-album (U7): MBID/Discogs ID → YT Music album matrix.
-    # Counterpart of ``GET /api/youtube-album`` (U8).
+    # Counterpart of ``POST /api/youtube-album`` (U8).
     p_ya = sub.add_parser(
         "youtube-album",
         help="Resolve MBID/Discogs ID → YouTube Music album matrix "
@@ -401,9 +317,9 @@ def add_youtube_subparsers(
     )
     p_ya.add_argument(
         "--json", action="store_true",
-        help="Print structured JSON instead of human-readable matrix",
+        help="Print the full resolver response as structured JSON "
+             "instead of the human-readable distance matrix.",
     )
-
     # youtube-rescue (U4): submit a YouTube Music rescue ingest for one
     # request. Counterpart of ``POST /api/pipeline/<id>/youtube-rescue``
     # (U5). Both surfaces wrap ``YoutubeIngestService.submit``.

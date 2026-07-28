@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 from dataclasses import dataclass
+from unittest.mock import patch
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 from hypothesis import example, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
+from tests.web._harness import _WebServerCase
 from web.request_security import (
     BROWSER_CHANNEL,
+    CHANNEL_HEADER,
     CLI_CHANNEL,
     RequestSecurityError,
     authorize_request,
@@ -36,6 +42,20 @@ def assert_request_authorization(
         raise AssertionError(
             "request authorization drifted: "
             f"{world=!r}, {actual_allowed=!r}"
+        )
+
+
+def assert_youtube_dispatch_blocked(
+    *,
+    status: int,
+    resolver_calls: int,
+    db_touches: int,
+) -> None:
+    """Reject worlds before either cache-writing resolver dependency."""
+    if status != 403 or resolver_calls != 0 or db_touches != 0:
+        raise AssertionError(
+            "browser provenance rejection crossed the resolver boundary: "
+            f"{status=}, {resolver_calls=}, {db_touches=}"
         )
 
 
@@ -246,6 +266,93 @@ class TestWebRequestSecurityGenerated(unittest.TestCase):
         )
         with self.assertRaises(AssertionError):
             assert_request_authorization(world, True)
+
+
+_INVALID_BROWSER_PROVENANCE = st.sampled_from((
+    (),
+    (("Origin", "https://evil.example"),),
+    (("Origin", "http://music.ablz.au"),),
+    (("Origin", "https://music.ablz.au:444"),),
+    (("Referer", "https://evil.example/path"),),
+    (
+        ("Origin", "https://music.ablz.au"),
+        ("Referer", "https://evil.example/path"),
+    ),
+))
+
+
+class TestYoutubeResolverProvenanceGenerated(_WebServerCase):
+    @given(provenance=_INVALID_BROWSER_PROVENANCE)
+    @example(provenance=())
+    @example(provenance=(("Origin", "https://evil.example"),))
+    def test_invalid_browser_provenance_never_reaches_resolver_or_db(
+        self,
+        provenance: tuple[tuple[str, str], ...],
+    ) -> None:
+        from web import server as srv
+
+        class _ForbiddenDB:
+            touches = 0
+
+            def __getattribute__(self, name: str) -> object:
+                if name == "touches":
+                    return object.__getattribute__(self, name)
+                object.__setattr__(
+                    self,
+                    "touches",
+                    object.__getattribute__(self, "touches") + 1,
+                )
+                raise AssertionError(
+                    f"rejected resolver request touched DB attribute {name}"
+                )
+
+        forbidden_db = _ForbiddenDB()
+        headers = {
+            CHANNEL_HEADER: BROWSER_CHANNEL,
+            "Content-Type": "application/json",
+            **dict(provenance),
+        }
+        request = Request(
+            f"{self.base}/api/youtube-album",
+            data=json.dumps({
+                "identifier": "release-id",
+                "refresh": False,
+            }).encode(),
+            headers=headers,
+            method="POST",
+        )
+        with patch.object(srv, "db", forbidden_db), patch(
+            "web.routes.youtube.resolve_youtube_album",
+        ) as resolver:
+            try:
+                with urlopen(request, timeout=5) as response:
+                    status = response.status
+                    response.read()
+            except HTTPError as exc:
+                with exc:
+                    status = exc.code
+                    exc.read()
+        assert_youtube_dispatch_blocked(
+            status=status,
+            resolver_calls=resolver.call_count,
+            db_touches=forbidden_db.touches,
+        )
+
+    def test_dispatch_checker_rejects_resolver_call_mutant(self) -> None:
+        with self.assertRaises(AssertionError):
+            assert_youtube_dispatch_blocked(
+                status=403,
+                resolver_calls=1,
+                db_touches=0,
+            )
+
+    def test_dispatch_checker_rejects_db_touch_mutant(self) -> None:
+        with self.assertRaises(AssertionError):
+            assert_youtube_dispatch_blocked(
+                status=403,
+                resolver_calls=0,
+                db_touches=1,
+            )
 
 
 if __name__ == "__main__":

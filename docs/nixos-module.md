@@ -172,7 +172,11 @@ the target must be non-empty, root-owned, exactly `root:<nginx-group> 0440`,
 have no extended ACL, and live beneath root-owned ancestors that are not
 group/other writable. nginx must be able to read it. The application user and
 every non-nginx web access group member must not. Web access group membership
-therefore authorizes the socket, not the password file.
+therefore authorizes the socket, not the password file. The web unit repeats
+the root validation before each start, then runs a separate unreadability
+preflight under its final merged systemd `User`, `Group`, and supplementary
+groups; a downstream identity override that gains credential access fails the
+application start instead of creating a Basic-auth bypass.
 
 Rotate atomically; never edit the live runtime file in place:
 

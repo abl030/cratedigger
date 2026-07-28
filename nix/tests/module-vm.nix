@@ -26,6 +26,29 @@ let
   # the fixed plugin list with musicbrainz present (zero-candidates guard),
   # public-MB defaults and the explicit included-token shape.
   pyWithYaml = pkgs.python3.withPackages (ps: [ ps.pyyaml ]);
+  publicTlsCertificateText = ''
+    -----BEGIN CERTIFICATE-----
+    MIIBojCCAUegAwIBAgIUWTppiZzhKayj0JQqRwVqqu5q/fgwCgYIKoZIzj0EAwIw
+    GDEWMBQGA1UEAwwNbXVzaWMudm0udGVzdDAgFw0yNjA3MjgxNDI0MjVaGA8yMTI2
+    MDcwNDE0MjQyNVowGDEWMBQGA1UEAwwNbXVzaWMudm0udGVzdDBZMBMGByqGSM49
+    AgEGCCqGSM49AwEHA0IABF3yVQvMewXvlk7lhfV6vr8LSKC1W2YInYY5inIH1sUu
+    p2UVM/ToOPnyzRLkun/3L2pk/XeZMri8kZEat7BthK6jbTBrMB0GA1UdDgQWBBRK
+    91ZSJFVOJEjSBnYAjp0TGk3oAjAfBgNVHSMEGDAWgBRK91ZSJFVOJEjSBnYAjp0T
+    Gk3oAjAPBgNVHRMBAf8EBTADAQH/MBgGA1UdEQQRMA+CDW11c2ljLnZtLnRlc3Qw
+    CgYIKoZIzj0EAwIDSQAwRgIhANwinehxYN2uR0Kjo9nLpBO4NPM/wBF3kjv4aLGm
+    mMzxAiEAolZjeWZAgVJKkAZ+EjoGyKvjqcCJJnaKpv2yarsQMT0=
+    -----END CERTIFICATE-----
+  '';
+  publicTlsCertificate =
+    pkgs.writeText "cratedigger-module-vm-public.crt"
+      publicTlsCertificateText;
+  publicTlsPrivateKey = pkgs.writeText "cratedigger-module-vm-public.key" ''
+    -----BEGIN PRIVATE KEY-----
+    MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcyiXXt35KxE1uMho
+    9gMyIPuC8xqKegFmY3zmv4aqaWShRANCAARd8lULzHsF75ZO5YX1er6/C0igtVtm
+    CJ2GOYpyB9bFLqdlFTP06Dj58s0S5Lp/9y9qZP13mTK4vJGRGrewbYSu
+    -----END PRIVATE KEY-----
+  '';
   checkRenderedBeetsConfig = pkgs.writeText "check-rendered-beets-config.py" ''
     import yaml
 
@@ -133,6 +156,7 @@ let
     import os
     import socket
     import socketserver
+    import time
 
     RECORD_PATH = "/var/lib/cratedigger/test-header-recorder.jsonl"
 
@@ -148,7 +172,10 @@ let
                 for name in names
             }
             raw_length = self.headers.get("Content-Length")
-            if raw_length is not None:
+            # Deliberately reproduce the old health-handler shape: leave any
+            # declared body unread so a missing nginx bodyless/close boundary
+            # would parse it as a second request.
+            if raw_length is not None and self.path != "/healthz":
                 self.rfile.read(int(raw_length))
             row = {
                 "method": self.command,
@@ -166,7 +193,9 @@ let
                     json.dumps(row, separators=(",", ":"), sort_keys=True)
                     + "\n"
                 )
-            self.send_response(200)
+            if self.path == "/recorder/slow":
+                time.sleep(2)
+            self.send_response(204 if self.path == "/healthz" else 200)
             self.send_header("Content-Type", "text/plain")
             self.send_header("Content-Length", "0")
             self.end_headers()
@@ -204,13 +233,29 @@ let
     import base64
     import json
     import socket
+    import ssl
     import sys
 
     request = base64.b64decode(sys.stdin.buffer.read(), validate=True)
+    target = sys.argv[1]
+    if target == "gateway":
+        port = 18086
+    elif target == "public":
+        port = 18443
+    else:
+        raise AssertionError(target)
     response = bytearray()
     reached_eof = False
     timed_out = False
-    with socket.create_connection(("127.0.0.1", 18086), timeout=2.0) as client:
+    transport = socket.create_connection(("127.0.0.1", port), timeout=2.0)
+    if target == "public":
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        client = context.wrap_socket(transport, server_hostname="music.vm.test")
+    else:
+        client = transport
+    with client:
         client.settimeout(2.0)
         client.sendall(request)
         while True:
@@ -371,6 +416,12 @@ pkgs.testers.nixosTest {
         /run/cratedigger-test-auth/basic.htpasswd
       ${pkgs.coreutils}/bin/chmod \
         0440 /run/cratedigger-test-auth/basic.htpasswd
+      ${pkgs.coreutils}/bin/install \
+        -o root \
+        -g ${config.services.nginx.group} \
+        -m 0440 \
+        /run/cratedigger-test-auth/basic.htpasswd \
+        /run/cratedigger-test-auth/basic-alternate.htpasswd
     '';
   in {
     imports = [ cratediggerModule ];
@@ -402,6 +453,11 @@ pkgs.testers.nixosTest {
     # The service can consume event-stamped source bytes but never grants
     # the writer any authority over its processing root.
     users.users.cratedigger.extraGroups = [ "slskd-writer" ];
+    networking.hosts."127.0.0.1" = [
+      "music.vm.test"
+      "unrelated.vm.test"
+    ];
+    security.pki.certificates = [publicTlsCertificateText];
 
     # Stub beets library DB so cratedigger-web can open it read-only.
     environment.etc."cratedigger/beets.db" = {
@@ -474,6 +530,78 @@ pkgs.testers.nixosTest {
       healthCheck.enable = false;
     };
 
+    # Mirror the downstream localProxy topology: a public TLS listener owns
+    # the canonical hostname and forwards only to the module's loopback
+    # gateway with the public scheme/port envelope. A separate default vhost
+    # rejects non-canonical Host values before they can be canonicalised.
+    # Make inherited timeouts deliberately too short. Both Cratedigger proxy
+    # hops must override this with their 300s resolver envelope; the 2s
+    # recorder probe below fault-qualifies either missing override quickly.
+    services.nginx.appendHttpConfig = "proxy_read_timeout 1s;";
+    services.nginx.virtualHosts = {
+      cratedigger-test-public = {
+        serverName = "music.vm.test";
+        listen = [
+          {
+            addr = "0.0.0.0";
+            port = 18443;
+            ssl = true;
+          }
+          {
+            addr = "[::]";
+            port = 18443;
+            ssl = true;
+          }
+        ];
+        sslCertificate = publicTlsCertificate;
+        sslCertificateKey = publicTlsPrivateKey;
+        locations."/".extraConfig = ''
+          proxy_http_version 1.1;
+          proxy_read_timeout 300s;
+          proxy_pass http://127.0.0.1:18086;
+          proxy_set_header Host music.vm.test;
+          proxy_set_header X-Forwarded-Proto https;
+          proxy_set_header X-Forwarded-Port 443;
+          proxy_set_header Connection "";
+        '';
+      };
+      # A downstream-added application location inherits server-scope Basic.
+      # It intentionally declares no location-level auth setting.
+      cratedigger-auth-gateway.locations."/inherited-basic" = {
+        proxyPass = "http://unix:/run/cratedigger-web/web.sock:";
+        recommendedProxySettings = false;
+      };
+      cratedigger-test-public-reject = {
+        default = true;
+        serverName = "_";
+        listen = [
+          {
+            addr = "0.0.0.0";
+            port = 18443;
+            ssl = true;
+          }
+          {
+            addr = "[::]";
+            port = 18443;
+            ssl = true;
+          }
+        ];
+        sslCertificate = publicTlsCertificate;
+        sslCertificateKey = publicTlsPrivateKey;
+        locations."/".extraConfig = "return 444;";
+      };
+      cratedigger-test-unrelated = {
+        serverName = "unrelated.vm.test";
+        listen = [
+          {
+            addr = "127.0.0.1";
+            port = 18087;
+          }
+        ];
+        locations."/".extraConfig = "return 204;";
+      };
+    };
+
     # A real activation target for the authentication-mode lifecycle below.
     # The ordinary system remains Basic; the specialisation changes only the
     # explicitly selected mode so switch-to-configuration exercises the same
@@ -482,6 +610,13 @@ pkgs.testers.nixosTest {
       services.cratedigger.web = {
         basicAuthFile = lib.mkForce null;
         enableInsecure = lib.mkForce true;
+      };
+    };
+    specialisation.cratedigger-basic-alternate.configuration = {
+      services.cratedigger.web = {
+        basicAuthFile = lib.mkForce
+          "/run/cratedigger-test-auth/basic-alternate.htpasswd";
+        enableInsecure = lib.mkForce false;
       };
     };
 
@@ -596,11 +731,11 @@ pkgs.testers.nixosTest {
         values = _response_header_values(raw_headers, name)
         assert values == [], (name, values, raw_headers)
 
-    def _raw_gateway(request):
+    def _raw_http(request, target):
         encoded = base64.b64encode(request).decode("ascii")
         result = json.loads(machine.succeed(
             "printf '%s' '" + encoded + "' "
-            "| ${pkgs.python3}/bin/python3 ${rawHttpProbe}"
+            f"| ${pkgs.python3}/bin/python3 ${rawHttpProbe} {target}"
         ))
         response = base64.b64decode(result["response"])
         status = None
@@ -612,6 +747,28 @@ pkgs.testers.nixosTest {
         assert result["timed_out"] is False, (request, response, result)
         assert result["reached_eof"] is True, (request, response, result)
         return status, response
+
+    def _raw_gateway(request):
+        return _raw_http(request, "gateway")
+
+    def _raw_public(request):
+        return _raw_http(request, "public")
+
+    def _print_gateway_diagnostics(label):
+        print(f"gateway diagnostics: {label}")
+        print(machine.succeed(
+            "systemctl status --no-pager nginx.service "
+            "cratedigger-web.socket cratedigger-web.service || true"
+        ))
+        print(machine.succeed(
+            "journalctl -u nginx.service -u cratedigger-web.service "
+            "--no-pager -n 80 || true"
+        ))
+        print(machine.succeed(
+            "ls -la /run/cratedigger-web || true; "
+            "${pkgs.nginx}/bin/nginx -T "
+            "-c /etc/nginx/nginx.conf 2>&1 || true"
+        ))
 
     # Qualify the response-header checker itself: prefixed/suffixed decoy names
     # and duplicate exact names must not satisfy an exact singleton contract.
@@ -1059,6 +1216,24 @@ pkgs.testers.nixosTest {
 
     # pipeline-cli on PATH and connects (over the peer-auth socket)
     machine.succeed("sudo -u cratedigger pipeline-cli list wanted")
+    # The installed launcher must not import a same-named package from an
+    # operator-controlled working directory. The hostile package would leave a
+    # sentinel before aborting if Python's -c current-directory entry won.
+    machine.succeed(
+        "install -d -o cratedigger -g beets-library "
+        "/tmp/cratedigger-hostile-cwd/scripts/pipeline_cli; "
+        "touch /tmp/cratedigger-hostile-cwd/scripts/__init__.py "
+        "/tmp/cratedigger-hostile-cwd/scripts/pipeline_cli/__init__.py; "
+        "printf '%s\\n' "
+        "'from pathlib import Path' "
+        "'Path(\"/tmp/cratedigger-hostile-imported\").write_text(\"shadow\")' "
+        "'raise RuntimeError(\"hostile pipeline-cli shadow executed\")' "
+        "> /tmp/cratedigger-hostile-cwd/scripts/pipeline_cli/cli.py; "
+        "chown -R cratedigger:beets-library /tmp/cratedigger-hostile-cwd; "
+        "runuser -u cratedigger -- sh -c "
+        "'cd /tmp/cratedigger-hostile-cwd && pipeline-cli list wanted'; "
+        "test ! -e /tmp/cratedigger-hostile-imported"
+    )
 
     # #663 U4 (Basic slice): the Python application owns only the inherited
     # Unix listener. Nginx owns the distinct loopback gateway, with no legacy
@@ -1066,6 +1241,39 @@ pkgs.testers.nixosTest {
     machine.wait_for_unit("cratedigger-web.service")
     machine.wait_for_unit("nginx.service")
     machine.wait_for_open_port(18086)
+    machine.wait_for_open_port(18443)
+    machine.wait_for_open_port(18087)
+    machine.succeed(
+        "markers=$(find /run/cratedigger-web -maxdepth 1 -type f "
+        "-name 'gateway-*'); "
+        "test \"$(printf '%s\\n' \"$markers\" | grep -c .)\" = 1; "
+        "printf '%s\\n' \"$markers\" "
+        "| grep -Eq '^/run/cratedigger-web/"
+        "gateway-policy-[0-9a-f]{64}$'"
+    )
+    machine.succeed(
+        "${pkgs.nginx}/bin/nginx -T -c /etc/nginx/nginx.conf "
+        "> /tmp/nginx-public-proxy 2>&1; "
+        "grep -F 'listen 0.0.0.0:18443 ssl' /tmp/nginx-public-proxy; "
+        "grep -F 'proxy_pass http://127.0.0.1:18086' "
+        "/tmp/nginx-public-proxy; "
+        "grep -F 'proxy_set_header Host music.vm.test' "
+        "/tmp/nginx-public-proxy; "
+        "grep -F 'proxy_set_header X-Forwarded-Proto https' "
+        "/tmp/nginx-public-proxy; "
+        "grep -F 'proxy_set_header X-Forwarded-Port 443' "
+        "/tmp/nginx-public-proxy; "
+        "test \"$(grep -Fc 'proxy_read_timeout 300s' "
+        "/tmp/nginx-public-proxy)\" -ge 2; "
+        "grep -F 'auth_basic off' /tmp/nginx-public-proxy; "
+        "grep -F 'proxy_pass_request_body off' /tmp/nginx-public-proxy; "
+        "grep -F 'proxy_set_header Connection close' /tmp/nginx-public-proxy"
+    )
+    machine.succeed(
+        "actual=$(ss -H -ltn 'sport = :18443' | awk '{print $4}' | sort); "
+        "expected=$(printf '%s\\n' '0.0.0.0:18443' '[::]:18443' | sort); "
+        "test \"$actual\" = \"$expected\""
+    )
     machine.succeed(
         "actual=$(ss -H -ltn 'sport = :18086' | awk '{print $4}' | sort); "
         "expected=$(printf '%s\\n' '127.0.0.1:18086' '[::1]:18086' | sort); "
@@ -1076,6 +1284,16 @@ pkgs.testers.nixosTest {
         "pid=$(systemctl show cratedigger-web.service -p MainPID --value); "
         "test \"$pid\" -gt 1; "
         "! ss -H -ltnp | grep -E \"pid=$pid([,)])\""
+    )
+    machine.succeed(
+        "test \"$(systemctl show cratedigger-web.service "
+        "-p User --value)\" = cratedigger; "
+        "test \"$(systemctl show cratedigger-web.service "
+        "-p Group --value)\" = beets-library; "
+        "systemctl show cratedigger-web.service -p ExecStartPre --value "
+        "| grep -F cratedigger-web-basic-auth-validate; "
+        "systemctl show cratedigger-web.service -p ExecStartPre --value "
+        "| grep -F cratedigger-web-basic-auth-app-isolation"
     )
     machine.succeed(
         "pid=$(systemctl show cratedigger-web.service -p MainPID --value); "
@@ -1115,6 +1333,16 @@ pkgs.testers.nixosTest {
         "runuser -u unrelated-user -- curl -sS --unix-socket "
         "/run/cratedigger-web/web.sock http://cratedigger.internal/healthz"
     )
+    machine.succeed(
+        "test \"$(curl -sS -o /dev/null -w '%{http_code}' "
+        "-H 'Host: music.vm.test' "
+        "https://music.vm.test:18443/inherited-basic)\" = 401"
+    )
+    machine.succeed(
+        "test \"$(curl -sS -o /dev/null -w '%{http_code}' "
+        "--user test-operator:test-password -H 'Host: music.vm.test' "
+        "https://music.vm.test:18443/inherited-basic)\" = 404"
+    )
 
     # The test bcrypt credential is generated at runtime. Its configured and
     # resolved paths stay outside the store; nginx alone can read it. Neither
@@ -1144,8 +1372,24 @@ pkgs.testers.nixosTest {
         "runuser -u beets-operator -- test -r "
         "/run/cratedigger-test-auth/basic.htpasswd"
     )
+    # Fault-qualify the module-owned application-identity preflight itself:
+    # it succeeds for the real web user, but rejects both the credential
+    # group and root identities that downstream unit overrides could select.
+    machine.succeed(
+        "isolation=$(systemctl cat cratedigger-web.service "
+        "| sed -n 's|^ExecStartPre=\\([^ ]*"
+        "cratedigger-web-basic-auth-app-isolation[^ ]*\\)$|\\1|p'); "
+        "test -x \"$isolation\"; "
+        "runuser -u cratedigger -- \"$isolation\"; "
+        "! runuser -u nginx -- \"$isolation\"; "
+        "! \"$isolation\""
+    )
     machine.succeed(
         "pid=$(systemctl show cratedigger-web.service -p MainPID --value); "
+        "nginx_gid=$(getent group nginx | cut -d: -f3); "
+        "! awk -v gid=\"$nginx_gid\" "
+        "'/^Groups:/ { for (i = 2; i <= NF; i++) if ($i == gid) found = 1 } "
+        "END { exit found ? 0 : 1 }' /proc/$pid/status; "
         "hash=$(cut -d: -f2 /run/cratedigger-test-auth/basic.htpasswd); "
         "! tr '\\0' '\\n' < /proc/$pid/environ | grep -F -- \"$hash\"; "
         "! tr '\\0' '\\n' < /proc/$pid/cmdline | grep -F -- \"$hash\""
@@ -1164,35 +1408,34 @@ pkgs.testers.nixosTest {
     for path in protected_read_paths:
         machine.succeed(
             f"test \"$(curl -sS -o /dev/null -w '%{{http_code}}' "
-            f"-H 'Host: music.vm.test' http://127.0.0.1:18086{path})\" = 401"
+            f"https://music.vm.test:18443{path})\" = 401"
         )
     for path in protected_read_paths:
         machine.succeed(
             f"test \"$(curl -sS -o /dev/null -w '%{{http_code}}' "
             f"--user test-operator:wrong "
-            f"-H 'Host: music.vm.test' http://127.0.0.1:18086{path})\" = 401"
+            f"https://music.vm.test:18443{path})\" = 401"
         )
     for credential_args in ("", "--user test-operator:wrong"):
         machine.succeed(
             f"test \"$(curl -sS -o /dev/null -w '%{{http_code}}' "
             f"{credential_args} "
-            "-H 'Host: music.vm.test' "
             "-H 'Content-Type: application/json' "
             "-H 'Origin: https://music.vm.test' -d '{}' "
-            "http://127.0.0.1:18086/api/pipeline/add)\" = 401"
+            "https://music.vm.test:18443/api/pipeline/add)\" = 401"
         )
     for path in protected_read_paths:
         machine.succeed(
             f"test \"$(curl -sS -o /dev/null -w '%{{http_code}}' "
             f"--user test-operator:test-password "
-            f"-H 'Host: music.vm.test' http://127.0.0.1:18086{path})\" = 200"
+            f"https://music.vm.test:18443{path})\" = 200"
         )
     machine.succeed(
         "test \"$(curl -sS -o /dev/null -w '%{http_code}' "
         "--user test-operator:test-password "
-        "-H 'Host: music.vm.test' -H 'Content-Type: application/json' "
+        "-H 'Content-Type: application/json' "
         "-H 'Origin: https://music.vm.test' -d '{}' "
-        "http://127.0.0.1:18086/api/pipeline/add)\" = 400"
+        "https://music.vm.test:18443/api/pipeline/add)\" = 400"
     )
     # A caller-supplied internal channel cannot turn a browser request into a
     # CLI request: nginx replaces it with the browser marker, so missing
@@ -1200,10 +1443,9 @@ pkgs.testers.nixosTest {
     machine.succeed(
         "test \"$(curl -sS -o /dev/null -w '%{http_code}' "
         "--user test-operator:test-password "
-        "-H 'Host: music.vm.test' "
         "-H 'X-Cratedigger-Request-Channel: cli' "
         "-H 'Content-Type: application/json' -d '{}' "
-        "http://127.0.0.1:18086/api/pipeline/add)\" = 403"
+        "https://music.vm.test:18443/api/pipeline/add)\" = 403"
     )
 
     # Only the exact anonymous GET/HEAD liveness target is exempt. Query,
@@ -1211,23 +1453,20 @@ pkgs.testers.nixosTest {
     for method_flag in ("", "--head"):
         machine.succeed(
             f"test \"$(curl -sS -o /dev/null -w '%{{http_code}}' "
-            f"{method_flag} -H 'Host: music.vm.test' "
-            "http://127.0.0.1:18086/healthz)\" = 204"
+            f"{method_flag} "
+            "https://music.vm.test:18443/healthz)\" = 204"
         )
     machine.succeed(
         "test \"$(curl -sS -o /dev/null -w '%{http_code}' "
-        "-H 'Host: music.vm.test' "
-        "'http://127.0.0.1:18086/healthz?probe=1')\" = 404"
+        "'https://music.vm.test:18443/healthz?probe=1')\" = 404"
     )
     machine.succeed(
         "test \"$(curl -sS -o /dev/null -w '%{http_code}' "
-        "-H 'Host: music.vm.test' "
-        "http://127.0.0.1:18086/healthz/)\" = 401"
+        "https://music.vm.test:18443/healthz/)\" = 401"
     )
     machine.succeed(
         "test \"$(curl -sS -o /dev/null -w '%{http_code}' -X POST "
-        "-H 'Host: music.vm.test' "
-        "http://127.0.0.1:18086/healthz)\" = 403"
+        "https://music.vm.test:18443/healthz)\" = 403"
     )
 
     # The exact-host vhost wins only for the canonical public Host. Attacker
@@ -1237,7 +1476,7 @@ pkgs.testers.nixosTest {
         machine.succeed(
             f"test \"$(curl -s -o /dev/null -w '%{{http_code}}' "
             f"-H 'Host: {supplied_host}' "
-            "http://127.0.0.1:18086/healthz || true)\" = 000"
+            "https://music.vm.test:18443/healthz || true)\" = 000"
         )
 
     # Gateway responses carry the frame/resource isolation policy on
@@ -1252,8 +1491,7 @@ pkgs.testers.nixosTest {
         machine.succeed(
             f"curl -sS -D {headers} -o /dev/null "
             "--user test-operator:test-password "
-            "-H 'Host: music.vm.test' "
-            f"http://127.0.0.1:18086{path}"
+            f"https://music.vm.test:18443{path}"
         )
         raw_headers = machine.succeed(f"cat {headers}")
         _assert_exact_response_header(
@@ -1278,48 +1516,101 @@ pkgs.testers.nixosTest {
     def _assert_basic_auth_matrix():
         machine.succeed(
             "test \"$(curl -sS -o /dev/null -w '%{http_code}' "
-            "-H 'Host: music.vm.test' http://127.0.0.1:18086/)\" = 401"
+            "https://music.vm.test:18443/)\" = 401"
         )
         machine.succeed(
             "test \"$(curl -sS -o /dev/null -w '%{http_code}' "
             "--user test-operator:wrong "
-            "-H 'Host: music.vm.test' http://127.0.0.1:18086/)\" = 401"
+            "https://music.vm.test:18443/)\" = 401"
         )
         machine.succeed(
             "test \"$(curl -sS -o /dev/null -w '%{http_code}' "
             "--user test-operator:test-password "
-            "-H 'Host: music.vm.test' http://127.0.0.1:18086/)\" = 200"
+            "https://music.vm.test:18443/)\" = 200"
         )
 
-    # The runtime validator fails both reload and cold start on a
-    # representative unsafe rotation while leaving a recoverable path. Restore
-    # the known-good file before continuing and prove authentication again.
+    def _gateway_markers():
+        output = machine.succeed(
+            "find /run/cratedigger-web -maxdepth 1 -type f "
+            "-name 'gateway-*' -printf '%p\\n' | sort"
+        )
+        return [line for line in output.splitlines() if line]
+
+    def _assert_gateway_marker(active):
+        markers = _gateway_markers()
+        if active:
+            assert len(markers) == 1, markers
+            marker = markers[0]
+            assert re.fullmatch(
+                r"/run/cratedigger-web/gateway-policy-[0-9a-f]{64}",
+                marker,
+            ), marker
+            machine.succeed(
+                f"test \"$(stat -c %U:%G:%a {marker})\" "
+                "= root:cratedigger-web:440"
+            )
+            return marker
+        else:
+            assert markers == [], markers
+            return None
+
+    def _assert_cratedigger_fail_closed(label):
+        _assert_gateway_marker(False)
+        machine.succeed("systemctl is-active --quiet nginx.service")
+        for index, url in enumerate((
+            "https://music.vm.test:18443/",
+            "https://music.vm.test:18443/healthz",
+            "http://127.0.0.1:18086/",
+            "http://127.0.0.1:18086/healthz",
+        )):
+            headers = f"/tmp/fail-closed-{index}.headers"
+            status = machine.succeed(
+                f"curl --max-time 5 -sS -D {headers} -o /dev/null "
+                "-H 'Host: music.vm.test' "
+                f"-w '%{{http_code}}' {url}"
+            ).strip()
+            if status != "503":
+                _print_gateway_diagnostics(label)
+            assert status == "503", (label, url, status)
+            raw_headers = machine.succeed(f"cat {headers}")
+            _assert_absent_response_header(raw_headers, "Location")
+        machine.succeed(
+            "test \"$(curl --max-time 5 -sS -o /dev/null "
+            "-w '%{http_code}' -H 'Host: unrelated.vm.test' "
+            "http://127.0.0.1:18087/)\" = 204"
+        )
+
+    def _reload_nginx(expect_success, label):
+        status, output = machine.execute(
+            "${pkgs.coreutils}/bin/timeout 30s "
+            "systemctl reload nginx.service"
+        )
+        succeeded = status == 0
+        if succeeded != expect_success:
+            print(output)
+            _print_gateway_diagnostics(label)
+        assert succeeded == expect_success, (label, status, output)
+
+    # The empty-file branch fails a real reload closed, then a restored
+    # credential can publish readiness only after nginx has accepted the new
+    # policy.
     machine.succeed(
         "cp -a /run/cratedigger-test-auth/basic.htpasswd "
         "/run/cratedigger-test-auth/basic.htpasswd.good"
     )
-    machine.succeed("chmod 0644 /run/cratedigger-test-auth/basic.htpasswd")
-    machine.fail("systemctl reload nginx.service")
-    machine.succeed("systemctl is-active --quiet nginx.service")
-    _assert_basic_auth_matrix()
+    machine.succeed(
+        "install -o root -g nginx -m 0440 /dev/null "
+        "/run/cratedigger-test-auth/basic.htpasswd"
+    )
+    _reload_nginx(False, "empty Basic credential reload")
+    _assert_cratedigger_fail_closed("empty Basic credential reload")
     machine.succeed(
         "install -o root -g nginx -m 0440 "
         "/run/cratedigger-test-auth/basic.htpasswd.good "
         "/run/cratedigger-test-auth/basic.htpasswd"
     )
-    machine.succeed("systemctl reload nginx.service")
-    _assert_basic_auth_matrix()
-    machine.succeed("systemctl stop nginx.service")
-    machine.succeed("chmod 0644 /run/cratedigger-test-auth/basic.htpasswd")
-    machine.fail("systemctl start nginx.service")
-    machine.succeed(
-        "install -o root -g nginx -m 0440 "
-        "/run/cratedigger-test-auth/basic.htpasswd.good "
-        "/run/cratedigger-test-auth/basic.htpasswd"
-    )
-    machine.succeed("systemctl reset-failed nginx.service")
-    machine.succeed("systemctl start nginx.service")
-    machine.wait_for_open_port(18086)
+    _reload_nginx(True, "restore Basic after empty credential")
+    _assert_gateway_marker(True)
     _assert_basic_auth_matrix()
 
     # Test-only header recorder: temporarily replace only ExecStart while
@@ -1377,6 +1668,50 @@ pkgs.testers.nixosTest {
         "| grep -F '${headerRecorder}'"
     )
 
+    # The test http block defaults proxy reads to 1s. This 2s backend response
+    # succeeds only when both the public TLS proxy and module gateway carry
+    # their explicit 300s resolver envelope.
+    machine.succeed(
+        "test \"$(curl --max-time 5 -sS -o /dev/null -w '%{http_code}' "
+        "--user test-operator:test-password -H 'Host: music.vm.test' "
+        "https://music.vm.test:18443/recorder/slow)\" = 200"
+    )
+    machine.succeed(
+        "rm -f /var/lib/cratedigger/test-header-recorder.jsonl"
+    )
+
+    # Fault-qualify the anonymous health boundary with a backend that
+    # deliberately leaves the declared body unread. The embedded CLI-channel
+    # request must never become a second upstream request.
+    smuggled_health_body = (
+        b"POST /recorder/smuggled HTTP/1.1\r\n"
+        b"Host: music.vm.test\r\n"
+        b"X-Cratedigger-Request-Channel: cli\r\n"
+        b"Content-Length: 0\r\n"
+        b"Connection: close\r\n\r\n"
+    )
+    smuggled_health_request = (
+        b"GET /healthz HTTP/1.1\r\n"
+        b"Host: music.vm.test\r\n"
+        + f"Content-Length: {len(smuggled_health_body)}\r\n".encode()
+        + b"Connection: close\r\n\r\n"
+        + smuggled_health_body
+    )
+    health_status, _health_response = _raw_public(smuggled_health_request)
+    assert health_status == 204, health_status
+    machine.wait_until_succeeds(
+        "test \"$(wc -l < "
+        "/var/lib/cratedigger/test-header-recorder.jsonl)\" = 1"
+    )
+    smuggled_health_rows = machine.succeed(
+        "cat /var/lib/cratedigger/test-header-recorder.jsonl"
+    ).splitlines()
+    assert len(smuggled_health_rows) == 1, smuggled_health_rows
+    assert json.loads(smuggled_health_rows[0])["path"] == "/healthz"
+    machine.succeed(
+        "rm -f /var/lib/cratedigger/test-header-recorder.jsonl"
+    )
+
     machine.succeed(
         "test \"$(curl -sS -o /dev/null -w '%{http_code}' "
         "--user test-operator:test-password "
@@ -1403,7 +1738,7 @@ pkgs.testers.nixosTest {
         "-H 'X-Smuggled: hop-by-hop-sentinel' "
         "-H 'X-Cratedigger-Request-Channel: cli' "
         "--data-binary '{\"x\":1}' "
-        "http://127.0.0.1:18086/recorder/probe?view=raw)\" = 200"
+        "https://music.vm.test:18443/recorder/probe?view=raw)\" = 200"
     )
     machine.wait_until_succeeds(
         "test \"$(wc -l < "
@@ -1454,6 +1789,10 @@ pkgs.testers.nixosTest {
 
     def _assert_raw_gateway_rejection(request, expected_status):
         status, response = _raw_gateway(request)
+        assert status == expected_status, (request, status, response)
+
+    def _assert_raw_public_rejection(request, expected_status):
+        status, response = _raw_public(request)
         assert status == expected_status, (request, status, response)
 
     basic_authorization = (
@@ -1528,8 +1867,12 @@ pkgs.testers.nixosTest {
         ),
     )
     for request, expected_status in raw_framing_rejections:
-        _assert_raw_gateway_rejection(request, expected_status)
+        _assert_raw_public_rejection(request, expected_status)
 
+    # These request-target variants deliberately probe the module-owned gateway
+    # directly. An ordinary outer reverse proxy may normalise the request target
+    # while constructing its upstream request; the public exact-health contract
+    # is separately exercised above through TLS.
     raw_health_rejections = (
         (b"GET /healthz?probe=1 HTTP/1.1\r\n", 404),
         (b"GET /healthz%3fprobe HTTP/1.1\r\n", 401),
@@ -1563,23 +1906,23 @@ pkgs.testers.nixosTest {
     machine.succeed(
         "test \"$(curl -sS -o /dev/null -w '%{http_code}' "
         "-H 'Host: music.vm.test' "
-        "'http://127.0.0.1:18086/healthz?probe=1')\" = 404"
+        "'https://music.vm.test:18443/healthz?probe=1')\" = 404"
     )
     machine.succeed(
         "test \"$(curl -sS -o /dev/null -w '%{http_code}' -X POST "
         "-H 'Host: music.vm.test' "
-        "http://127.0.0.1:18086/healthz)\" = 403"
+        "https://music.vm.test:18443/healthz)\" = 403"
     )
     machine.succeed(
         "test \"$(curl -s -o /dev/null -w '%{http_code}' "
         "-H 'Host: attacker.invalid' "
-        "http://127.0.0.1:18086/recorder/rejected || true)\" = 000"
+        "https://music.vm.test:18443/recorder/rejected || true)\" = 000"
     )
     machine.succeed(
         "test \"$(curl -sS -o /dev/null -w '%{http_code}' "
         "--user test-operator:wrong "
         "-H 'Host: music.vm.test' "
-        "http://127.0.0.1:18086/recorder/rejected)\" = 401"
+        "https://music.vm.test:18443/recorder/rejected)\" = 401"
     )
     machine.succeed(
         "test \"$(wc -l < "
@@ -1609,7 +1952,7 @@ pkgs.testers.nixosTest {
         "test \"$(curl -sS -o /dev/null -w '%{http_code}' "
         "--user test-operator:test-password "
         "-H 'Host: music.vm.test' "
-        "http://127.0.0.1:18086/api/_index)\" = 200"
+        "https://music.vm.test:18443/api/_index)\" = 200"
     )
 
     # Prove the production Unix-socket server itself can make progress while
@@ -1665,7 +2008,7 @@ pkgs.testers.nixosTest {
         "-sS -o /dev/null -w '%{http_code}' "
         "--user test-operator:test-password "
         "-H 'Host: music.vm.test' "
-        "http://127.0.0.1:18086/api/_index); "
+        "https://music.vm.test:18443/api/_index); "
         "status=$?; "
         "if test \"$status\" -ne 0 || test \"$code\" != 200; then "
         "touch /tmp/cratedigger-production-web-concurrency.release; "
@@ -1723,7 +2066,7 @@ pkgs.testers.nixosTest {
     # hand-listed or silently skipped.
     route_rows = json.loads(machine.succeed(
         "curl -sS --user test-operator:test-password "
-        "-H 'Host: music.vm.test' http://127.0.0.1:18086/api/_index"
+        "https://music.vm.test:18443/api/_index"
     ))
     assert len(route_rows) > 50, len(route_rows)
 
@@ -1759,7 +2102,7 @@ pkgs.testers.nixosTest {
             command = (
                 "curl -sS -o /dev/null -w '%{http_code}' "
                 "-H 'Host: music.vm.test' "
-                f"http://127.0.0.1:18086{path}"
+                f"https://music.vm.test:18443{path}"
             )
         else:
             assert method == "POST", route_row
@@ -1767,7 +2110,7 @@ pkgs.testers.nixosTest {
                 "curl -sS -o /dev/null -w '%{http_code}' -X POST "
                 "-H 'Host: music.vm.test' "
                 "-H 'Content-Type: application/json' -d '{}' "
-                f"http://127.0.0.1:18086{path}"
+                f"https://music.vm.test:18443{path}"
             )
         status = machine.succeed(command).strip()
         assert status == "401", (route_row, path, status)
@@ -1784,7 +2127,7 @@ pkgs.testers.nixosTest {
         status = machine.succeed(
             f"curl -sS -X {method} -D {header_path} -o {body_path} "
             "-w '%{http_code}' -H 'Host: music.vm.test' "
-            "http://127.0.0.1:18086/healthz"
+            "https://music.vm.test:18443/healthz"
         ).strip()
         assert status == "204", (method, status)
         machine.succeed(f"test ! -s {body_path}")
@@ -1820,7 +2163,7 @@ pkgs.testers.nixosTest {
             "-H 'Host: music.vm.test' "
             "-H 'Content-Type: application/json' "
             f"{provenance_headers} -d '{{}}' "
-            "http://127.0.0.1:18086/api/pipeline/add"
+            "https://music.vm.test:18443/api/pipeline/add"
         ).strip()
         assert status == "400", (provenance_headers, status)
     rejected_provenance_headers = (
@@ -1841,7 +2184,7 @@ pkgs.testers.nixosTest {
             "-H 'Host: music.vm.test' "
             "-H 'Content-Type: application/json' "
             f"{provenance_headers} -d '{{}}' "
-            "http://127.0.0.1:18086/api/pipeline/add"
+            "https://music.vm.test:18443/api/pipeline/add"
         ).strip()
         assert status == "403", (provenance_headers, status)
 
@@ -1856,7 +2199,7 @@ pkgs.testers.nixosTest {
         ),
     )
     for duplicate_headers in duplicate_provenance_requests:
-        status, response = _raw_gateway(
+        status, response = _raw_public(
             b"POST /api/pipeline/delete HTTP/1.1\r\n"
             b"Host: music.vm.test\r\n"
             + basic_authorization
@@ -1879,7 +2222,7 @@ pkgs.testers.nixosTest {
         "-H 'Content-Type: application/json' "
         "-H 'Origin: https://music.vm.test' "
         "--data-binary '{\"id\":999999}' "
-        "http://127.0.0.1:18086/api/pipeline/delete)\" = 404"
+        "https://music.vm.test:18443/api/pipeline/delete)\" = 404"
     )
     machine.succeed("systemctl is-active --quiet cratedigger-web.service")
     rows_after_provenance = machine.succeed(
@@ -1970,7 +2313,7 @@ pkgs.testers.nixosTest {
     machine.succeed(
         "test \"$(curl -sS -o /dev/null -w '%{http_code}' "
         "--user test-operator:test-password "
-        "-H 'Host: music.vm.test' http://127.0.0.1:18086/)\" = 200"
+        "https://music.vm.test:18443/)\" = 200"
     )
     machine.succeed("systemctl is-active --quiet cratedigger-web.service")
     machine.succeed("systemctl restart cratedigger-web.service")
@@ -1983,7 +2326,7 @@ pkgs.testers.nixosTest {
         "test \"$(curl -sS -o /dev/null -w \"%{http_code}\" "
         "--user test-operator:test-password "
         "-H \"Host: music.vm.test\" "
-        "http://127.0.0.1:18086/api/_index)\" = 200'"
+        "https://music.vm.test:18443/api/_index)\" = 200'"
     )
 
     # Runtime-secret inspection, scoped honestly. The bcrypt hash is generated
@@ -2019,9 +2362,9 @@ pkgs.testers.nixosTest {
     )
 
     # Exercise the real activation lifecycle, not just the Basic rendering
-    # above: Basic -> explicit insecure -> Basic. The specialisation changes
-    # only the selected authentication mode; all other perimeter invariants
-    # must survive both switches.
+    # above: Basic -> explicit insecure -> alternate-path Basic -> Basic.
+    # The specialisations change only the selected authentication policy; all
+    # other perimeter invariants must survive every switch.
     insecure_warning = (
         "Authentication is disabled for this Cratedigger instance."
     )
@@ -2032,8 +2375,15 @@ pkgs.testers.nixosTest {
         "readlink -f "
         "/run/current-system/specialisation/cratedigger-insecure"
     ).strip()
+    alternate_basic_system = machine.succeed(
+        "readlink -f "
+        "/run/current-system/specialisation/cratedigger-basic-alternate"
+    ).strip()
     machine.succeed(f"test -x {basic_system}/bin/switch-to-configuration")
     machine.succeed(f"test -x {insecure_system}/bin/switch-to-configuration")
+    machine.succeed(
+        f"test -x {alternate_basic_system}/bin/switch-to-configuration"
+    )
 
     def _print_web_transition_diagnostics(label):
         print(f"web transition diagnostics: {label}")
@@ -2068,7 +2418,7 @@ pkgs.testers.nixosTest {
             "&& systemctl is-active --quiet cratedigger-web.socket "
             "&& test \"$(curl --max-time 2 -sS -o /dev/null "
             "-w %{http_code} -H Host:music.vm.test "
-            "http://127.0.0.1:18086/healthz)\" = 204 "
+            "https://music.vm.test:18443/healthz)\" = 204 "
             "&& systemctl is-active --quiet cratedigger-web.service; "
             "do sleep 0.1; done'"
         )
@@ -2078,6 +2428,18 @@ pkgs.testers.nixosTest {
         assert ready_status == 0, (
             f"{label} web services did not become ready: {ready_output}"
         )
+        _assert_gateway_marker(True)
+
+    def _switch_web_system_expect_failure(system_path, label):
+        status, output = machine.execute(
+            f"${pkgs.coreutils}/bin/timeout 120s "
+            f"{system_path}/bin/switch-to-configuration test"
+        )
+        if status == 0:
+            print(output)
+            _print_web_transition_diagnostics(label)
+        assert status != 0, f"{label} unexpectedly succeeded: {output}"
+        _assert_cratedigger_fail_closed(label)
 
     def _web_invocation_log():
         invocation = machine.succeed(
@@ -2133,7 +2495,7 @@ pkgs.testers.nixosTest {
                 f"curl --max-time 5 -sS {method_flag} "
                 f"-D {header_path} -o {body_path} -w '%{{http_code}}' "
                 "-H 'Host: music.vm.test' "
-                "http://127.0.0.1:18086/healthz"
+                "https://music.vm.test:18443/healthz"
             ).strip()
             assert status == "204", (method_flag, status)
             machine.succeed(f"test ! -s {body_path}")
@@ -2144,17 +2506,17 @@ pkgs.testers.nixosTest {
         machine.succeed(
             "test \"$(curl --max-time 5 -sS -o /dev/null "
             "-w '%{http_code}' -H 'Host: music.vm.test' "
-            "'http://127.0.0.1:18086/healthz?probe=1')\" = 404"
+            "'https://music.vm.test:18443/healthz?probe=1')\" = 404"
         )
         machine.succeed(
             "test \"$(curl --max-time 5 -sS -o /dev/null "
             "-w '%{http_code}' -H 'Host: music.vm.test' "
-            "http://127.0.0.1:18086/healthz/)\" = 404"
+            "https://music.vm.test:18443/healthz/)\" = 404"
         )
         machine.succeed(
             "test \"$(curl --max-time 5 -sS -o /dev/null "
             "-w '%{http_code}' -X POST -H 'Host: music.vm.test' "
-            "http://127.0.0.1:18086/healthz)\" = 403"
+            "https://music.vm.test:18443/healthz)\" = 403"
         )
 
     def _assert_resource_headers(credential_args):
@@ -2169,7 +2531,7 @@ pkgs.testers.nixosTest {
                 f"curl --max-time 5 -sS -D {headers_path} "
                 f"-o /dev/null {credential_args} "
                 "-H 'Host: music.vm.test' "
-                f"http://127.0.0.1:18086{path}"
+                f"https://music.vm.test:18443{path}"
             )
             raw_headers = machine.succeed(f"cat {headers_path}")
             _assert_exact_response_header(
@@ -2197,6 +2559,7 @@ pkgs.testers.nixosTest {
     # the only mode behavior here; the insecure flag, warning, and footer are
     # absent.
     _assert_basic_auth_matrix()
+    basic_policy_marker = _assert_gateway_marker(True)
     machine.succeed(
         "pid=$(systemctl show cratedigger-web.service -p MainPID --value); "
         "! tr '\\0' '\\n' < /proc/$pid/cmdline "
@@ -2204,7 +2567,7 @@ pkgs.testers.nixosTest {
     )
     basic_body = machine.succeed(
         "curl --max-time 5 -sS --user test-operator:test-password "
-        "-H 'Host: music.vm.test' http://127.0.0.1:18086/"
+        "https://music.vm.test:18443/"
     )
     assert basic_body.count(insecure_warning) == 0
     assert insecure_warning not in _web_invocation_log()
@@ -2212,6 +2575,11 @@ pkgs.testers.nixosTest {
     _switch_web_system(insecure_system, "explicit insecure")
     machine.succeed(
         f"test \"$(readlink -f /run/current-system)\" = {insecure_system}"
+    )
+    insecure_policy_marker = _assert_gateway_marker(True)
+    assert insecure_policy_marker != basic_policy_marker, (
+        basic_policy_marker,
+        insecure_policy_marker,
     )
 
     # Basic alone disappears: anonymous and deliberately wrong Basic
@@ -2222,7 +2590,7 @@ pkgs.testers.nixosTest {
             "test \"$(curl --max-time 5 -sS -o /dev/null "
             f"-w '%{{http_code}}' {credential_args} "
             "-H 'Host: music.vm.test' "
-            "http://127.0.0.1:18086/)\" = 200"
+            "https://music.vm.test:18443/)\" = 200"
         )
     insecure_nginx = machine.succeed(
         "${pkgs.nginx}/bin/nginx -T "
@@ -2257,7 +2625,7 @@ pkgs.testers.nixosTest {
     ), warning_lines
     insecure_body = machine.succeed(
         "curl --max-time 5 -sS -H 'Host: music.vm.test' "
-        "http://127.0.0.1:18086/"
+        "https://music.vm.test:18443/"
     )
     assert insecure_body.count(insecure_warning) == 1, insecure_body
     assert insecure_body.count(
@@ -2284,7 +2652,7 @@ pkgs.testers.nixosTest {
             "-H 'Host: music.vm.test' "
             "-H 'Content-Type: application/json' "
             f"{provenance_headers} -d '{{}}' "
-            "http://127.0.0.1:18086/api/pipeline/add"
+            "https://music.vm.test:18443/api/pipeline/add"
         ).strip()
         assert status == str(expected_status), (
             provenance_headers, status,
@@ -2299,7 +2667,7 @@ pkgs.testers.nixosTest {
     machine.succeed(
         "test \"$(curl --max-time 5 -s -o /dev/null "
         "-w '%{http_code}' -H 'Host: attacker.invalid' "
-        "http://127.0.0.1:18086/healthz || true)\" = 000"
+        "https://music.vm.test:18443/healthz || true)\" = 000"
     )
     _assert_exact_insecure_health()
     _assert_loopback_socket_boundary()
@@ -2339,7 +2707,7 @@ pkgs.testers.nixosTest {
         "-H 'X-Forwarded-User: attacker' "
         "-H 'X-Cratedigger-Request-Channel: cli' "
         "--data-binary '{\"x\":1}' "
-        "http://127.0.0.1:18086/transition/headers)\" = 200"
+        "https://music.vm.test:18443/transition/headers)\" = 200"
     )
     machine.succeed(
         "test \"$(wc -l < "
@@ -2379,9 +2747,67 @@ pkgs.testers.nixosTest {
         "| grep -Fx -- '--insecure-mode'"
     )
 
+    # A failed insecure -> Basic deployment must not leave the old anonymous
+    # nginx workers serving. Corrupt the runtime credential before activating
+    # the Basic system: reload preparation removes readiness first, validation
+    # aborts before policy-marker publication, and both public TLS and direct
+    # gateway routes (including exact health) become a non-redirecting 503.
+    # The unrelated vhost remains healthy in the same nginx process.
+    machine.succeed("chmod 0644 /run/cratedigger-test-auth/basic.htpasswd")
+    _switch_web_system_expect_failure(
+        basic_system,
+        "insecure to Basic with invalid credential",
+    )
+
+    # Explicit insecure recovery is still possible while the Basic credential
+    # remains invalid because that selected mode does not consume the file.
+    _switch_web_system(insecure_system, "recover explicit insecure")
+    machine.succeed(
+        "test \"$(curl --max-time 5 -sS -o /dev/null "
+        "-w '%{http_code}' https://music.vm.test:18443/)\" = 200"
+    )
+
+    machine.succeed(
+        "install -o root -g nginx -m 0440 "
+        "/run/cratedigger-test-auth/basic.htpasswd.good "
+        "/run/cratedigger-test-auth/basic.htpasswd"
+    )
+    _switch_web_system(
+        alternate_basic_system,
+        "switch to alternate-path Basic",
+    )
+    machine.succeed(
+        "test \"$(readlink -f /run/current-system)\" "
+        f"= {alternate_basic_system}"
+    )
+    alternate_basic_policy_marker = _assert_gateway_marker(True)
+    assert alternate_basic_policy_marker not in {
+        basic_policy_marker,
+        insecure_policy_marker,
+    }, (
+        basic_policy_marker,
+        insecure_policy_marker,
+        alternate_basic_policy_marker,
+    )
+    _assert_basic_auth_matrix()
+    alternate_nginx = machine.succeed(
+        "${pkgs.nginx}/bin/nginx -T "
+        "-c /etc/nginx/nginx.conf 2>&1"
+    )
+    assert (
+        "auth_basic_user_file "
+        "/run/cratedigger-test-auth/basic-alternate.htpasswd;"
+        in alternate_nginx
+    ), alternate_nginx
+
     _switch_web_system(basic_system, "return to Basic")
     machine.succeed(
         f"test \"$(readlink -f /run/current-system)\" = {basic_system}"
+    )
+    restored_basic_policy_marker = _assert_gateway_marker(True)
+    assert restored_basic_policy_marker == basic_policy_marker, (
+        basic_policy_marker,
+        restored_basic_policy_marker,
     )
     _assert_basic_auth_matrix()
     restored_nginx = machine.succeed(
@@ -2403,12 +2829,79 @@ pkgs.testers.nixosTest {
     )
     restored_body = machine.succeed(
         "curl --max-time 5 -sS --user test-operator:test-password "
-        "-H 'Host: music.vm.test' http://127.0.0.1:18086/"
+        "https://music.vm.test:18443/"
     )
     assert restored_body.count(insecure_warning) == 0, restored_body
     assert insecure_warning not in _web_invocation_log()
     _assert_loopback_socket_boundary()
     _assert_resource_headers("--user test-operator:test-password")
+
+    # Exercise independent credential-validator branches through the real
+    # nginx reload/start hooks. Each reload failure removes readiness only for
+    # Cratedigger and is recoverable; the non-regular resolved-target branch
+    # additionally proves a cold start cannot publish any listener or marker.
+    machine.succeed(
+        "${pkgs.acl}/bin/setfacl -m u:unrelated-user:--- "
+        "/run/cratedigger-test-auth/basic.htpasswd"
+    )
+    _reload_nginx(False, "extended Basic credential ACL")
+    _assert_cratedigger_fail_closed("extended Basic credential ACL")
+    machine.succeed(
+        "${pkgs.acl}/bin/setfacl -b "
+        "/run/cratedigger-test-auth/basic.htpasswd; "
+        "chown root:nginx /run/cratedigger-test-auth/basic.htpasswd; "
+        "chmod 0440 /run/cratedigger-test-auth/basic.htpasswd"
+    )
+    _reload_nginx(True, "restore Basic after extended ACL")
+    _assert_gateway_marker(True)
+    _assert_basic_auth_matrix()
+
+    machine.succeed("chmod 0770 /run/cratedigger-test-auth")
+    _reload_nginx(False, "group-writable Basic credential ancestor")
+    _assert_cratedigger_fail_closed(
+        "group-writable Basic credential ancestor"
+    )
+    machine.succeed("chmod 0750 /run/cratedigger-test-auth")
+    _reload_nginx(True, "restore Basic after writable ancestor")
+    _assert_gateway_marker(True)
+    _assert_basic_auth_matrix()
+
+    machine.succeed(
+        "systemctl stop nginx.service; "
+        "rm /run/cratedigger-test-auth/basic.htpasswd; "
+        "install -d -o root -g nginx -m 0750 "
+        "/run/cratedigger-test-auth/non-regular-target; "
+        "ln -s /run/cratedigger-test-auth/non-regular-target "
+        "/run/cratedigger-test-auth/basic.htpasswd"
+    )
+    cold_status, cold_output = machine.execute(
+        "${pkgs.coreutils}/bin/timeout 30s systemctl start nginx.service"
+    )
+    if cold_status == 0:
+        print(cold_output)
+        _print_gateway_diagnostics("non-regular Basic target cold start")
+    assert cold_status != 0, cold_output
+    _assert_gateway_marker(False)
+    machine.fail("ss -H -ltn 'sport = :18086' | grep -q .")
+    machine.fail("ss -H -ltn 'sport = :18443' | grep -q .")
+    machine.succeed(
+        "rm /run/cratedigger-test-auth/basic.htpasswd; "
+        "rmdir /run/cratedigger-test-auth/non-regular-target; "
+        "install -o root -g nginx -m 0440 "
+        "/run/cratedigger-test-auth/basic.htpasswd.good "
+        "/run/cratedigger-test-auth/basic.htpasswd; "
+        "systemctl reset-failed nginx.service; "
+        "systemctl start nginx.service"
+    )
+    machine.wait_for_open_port(18086)
+    machine.wait_for_open_port(18443)
+    _assert_gateway_marker(True)
+    _assert_basic_auth_matrix()
+    machine.succeed(
+        "test \"$(curl --max-time 5 -sS -o /dev/null "
+        "-w '%{http_code}' -H 'Host: unrelated.vm.test' "
+        "http://127.0.0.1:18087/)\" = 204"
+    )
 
     # U13: cratedigger-unfindable.service + .timer exist and are
     # ordered correctly. Structural assertions only — we do NOT fire

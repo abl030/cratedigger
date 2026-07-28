@@ -218,7 +218,8 @@
     pkgs.sox
   ];
   redisServiceUnits = optional cfg.redis.enable "redis-cratedigger.service";
-  webSocketPath = "/run/cratedigger-web/web.sock";
+  webRuntimeDirectory = "/run/cratedigger-web";
+  webSocketPath = "${webRuntimeDirectory}/web.sock";
   webHostName =
     if cfg.web.hostName != null
     then cfg.web.hostName
@@ -245,6 +246,14 @@
     if cfg.web.basicAuthFile != null
     then cfg.web.basicAuthFile
     else "/invalid/cratedigger.htpasswd";
+  webGatewayPolicyIdentity =
+    if webBasicEnabled
+    then "basic:${webBasicAuthConfiguredPath}"
+    else "insecure";
+  webGatewayPolicyFingerprint =
+    builtins.hashString "sha256" webGatewayPolicyIdentity;
+  webGatewayActiveMarker =
+    "${webRuntimeDirectory}/gateway-policy-${webGatewayPolicyFingerprint}";
   webBasicAuthPathSegments =
     lib.drop 1 (lib.splitString "/" webBasicAuthConfiguredPath);
   webBasicAuthPathIsValid =
@@ -272,6 +281,10 @@
     };
   webProxyRequestConfig = ''
     proxy_http_version 1.1;
+    # POST /api/youtube-album has a configured 240s response envelope. Keep
+    # the authenticated browser proxy above that bound so nginx cannot return
+    # 504 while the resolver continues and later persists behind the client.
+    proxy_read_timeout 300s;
     proxy_pass_request_headers off;
     proxy_set_header Host ${webHostName};
     proxy_set_header Connection "";
@@ -282,6 +295,18 @@
     proxy_set_header Origin ''$http_origin;
     proxy_set_header Referer ''$http_referer;
     proxy_set_header X-Cratedigger-Request-Channel browser;
+  '';
+  webHealthProxyRequestConfig = ''
+    # The anonymous exception is bodyless and single-request by construction.
+    # Do not let a health request body become a second request on the upstream
+    # BaseHTTPRequestHandler connection.
+    proxy_http_version 1.0;
+    proxy_pass_request_headers off;
+    proxy_pass_request_body off;
+    proxy_set_header Host ${webHostName};
+    proxy_set_header Connection close;
+    proxy_set_header Content-Length "";
+    proxy_set_header Transfer-Encoding "";
   '';
   webResourceIsolationConfig = ''
     add_header Content-Security-Policy "frame-ancestors 'none'" always;
@@ -413,10 +438,79 @@
       check_ancestors "$resolved_path"
     fi
   '';
+  webApplicationCredentialIsolationScript = pkgs.writeShellScript
+    "cratedigger-web-basic-auth-app-isolation"
+    ''
+      set -euo pipefail
+
+      # This command deliberately runs without systemd's "+" privilege
+      # prefix, under the final User/Group/SupplementaryGroups merged onto
+      # cratedigger-web.service. It therefore catches downstream identity
+      # overrides and numeric supplementary GIDs that a Nix name comparison
+      # cannot reliably model.
+      if ${pkgs.coreutils}/bin/test \
+        -r ${lib.escapeShellArg webBasicAuthConfiguredPath}; then
+        echo "Cratedigger Basic authentication isolation failed: " \
+          "the web application can read its gateway credential" >&2
+        exit 1
+      fi
+    '';
+  webGatewayClearMarkers = ''
+    ${pkgs.findutils}/bin/find \
+      ${lib.escapeShellArg webRuntimeDirectory} \
+      -maxdepth 1 \
+      -type f \
+      -name ${lib.escapeShellArg "gateway-*"} \
+      -delete
+  '';
+  webGatewayPublishMarker = ''
+    ${pkgs.coreutils}/bin/install \
+      -m 0440 \
+      -o root \
+      -g ${lib.escapeShellArg cfg.web.accessGroup} \
+      /dev/null \
+      ${lib.escapeShellArg webGatewayActiveMarker}
+  '';
+  webGatewayStartScript = pkgs.writeShellScript "cratedigger-web-gateway-start" ''
+    set -euo pipefail
+
+    ${webGatewayClearMarkers}
+    ${optionalString webBasicEnabled ''
+      ${webBasicAuthValidationScript}
+    ''}
+    ${webGatewayPublishMarker}
+  '';
+  webGatewayReloadPrepareScript = pkgs.writeShellScript "cratedigger-web-gateway-prepare-reload" ''
+    set -euo pipefail
+
+    # Remove every Cratedigger gateway policy marker before validating. Old
+    # workers keep checking their own policy-specific marker, so publishing
+    # the new policy after HUP cannot reopen a stale authentication policy.
+    ${webGatewayClearMarkers}
+    ${optionalString webBasicEnabled ''
+      ${webBasicAuthValidationScript}
+    ''}
+  '';
+  webGatewayReloadFinishScript = pkgs.writeShellScript "cratedigger-web-gateway-finish-reload" ''
+    set -euo pipefail
+
+    # systemd runs this only after nginx's config test and HUP both succeed.
+    # Publish only this generation's policy-specific marker. An invalid
+    # credential or nginx reload leaves every policy marker absent, while
+    # stale workers cannot observe the new generation's marker.
+    ${webGatewayPublishMarker}
+  '';
   webNginxUserExtraGroups =
     config.users.users.${config.services.nginx.user}.extraGroups or [];
   webNginxServiceSupplementaryGroups =
     config.systemd.services.nginx.serviceConfig.SupplementaryGroups or [];
+  webApplicationServiceSupplementaryGroups =
+    config.systemd.services.cratedigger-web.serviceConfig.SupplementaryGroups
+      or [];
+  webApplicationServiceUser =
+    config.systemd.services.cratedigger-web.serviceConfig.User or null;
+  webApplicationServiceGroup =
+    config.systemd.services.cratedigger-web.serviceConfig.Group or null;
   webNginxReverseMemberGroups = lib.mapAttrsToList
     (name: group: group.name or name)
     (
@@ -452,6 +546,13 @@
   webAccessGroupIsSafe =
     cfg.web.accessGroup != config.services.nginx.group
     && !lib.elem cfg.web.accessGroup webForbiddenAuthorityGroups;
+  webApplicationCredentialGroupIsSafe =
+    !lib.elem
+      config.services.nginx.group
+      webApplicationServiceSupplementaryGroups;
+  webApplicationServiceIdentityIsModuleOwned =
+    webApplicationServiceUser == cfg.user
+    && webApplicationServiceGroup == cfg.group;
 
   # CD-SEC-04: these are the only long-running units that accept untrusted
   # network/media input. Keep the systemd hardening literal and shared; each
@@ -514,14 +615,14 @@
   # crashes it with ModuleNotFoundError. All internal imports use
   # `from lib.X import Y` / `from web.X import Y` against the repo root
   # already, so the flat entries are both unnecessary and harmful.
-  # pipeline-cli is a package (scripts/pipeline_cli/, issue #495) — exec
-  # the __main__.py entry shim, which bootstraps sys.path the same way
-  # the old flat file did (one extra ".." for the extra directory level)
-  # before importing anything package-local.
+  # pipeline-cli is a package (scripts/pipeline_cli/, issue #495). Python's
+  # -c mode normally prepends the current directory to sys.path; -P removes
+  # that hostile shadow-package input. The trusted Nix source remains first
+  # in PYTHONPATH ahead of any explicitly inherited operator additions.
   pipelineCli = pkgs.writeShellScriptBin "pipeline-cli" ''
     export PATH="${runtimePath}:$PATH"
     export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
-    exec ${pythonEnv}/bin/python -c \
+    exec ${pythonEnv}/bin/python -P -c \
       'from scripts.pipeline_cli.cli import main; main(api_socket="${webSocketPath}")' \
       --dsn "${pipelineDsn}" \
       "$@"
@@ -1793,6 +1894,20 @@ in {
         assertion = !cfg.web.enable || !webBasicEnabled || cfg.group != config.services.nginx.group;
         message = "services.cratedigger.web Basic authentication requires the application group to differ from the nginx credential-file group.";
       }
+      {
+        assertion =
+          !cfg.web.enable
+          || !webBasicEnabled
+          || webApplicationCredentialGroupIsSafe;
+        message = "services.cratedigger.web Basic authentication forbids the nginx credential-file group in cratedigger-web.service SupplementaryGroups.";
+      }
+      {
+        assertion =
+          !cfg.web.enable
+          || !webBasicEnabled
+          || webApplicationServiceIdentityIsModuleOwned;
+        message = "services.cratedigger.web Basic authentication requires the final cratedigger-web.service User and Group to remain module-owned (services.cratedigger.user and services.cratedigger.group).";
+      }
     ];
 
     environment.systemPackages = [pipelineCli pipelineMigrate importerPkg previewWorkerPkg youtubeIngestWorkerPkg cratediggerBeet pkgs.postgresql];
@@ -1904,10 +2019,23 @@ in {
       cratedigger-auth-gateway = {
         serverName = webHostName;
         listen = webGatewayListen;
+        # Own Basic at server scope so any downstream-added application
+        # location inherits it. The sole anonymous exception disables the
+        # inherited policy explicitly in the exact health location below.
+        basicAuthFile =
+          if webBasicEnabled
+          then cfg.web.basicAuthFile
+          else null;
         # Nginx normalizes an absolute-form request target before exposing
         # $request_uri. Reject it from the untouched request line so it cannot
         # acquire the exact origin-form /healthz exemption or reach the app.
         extraConfig = ''
+          # Reload preparation removes this marker before validating a new
+          # authentication policy. Keep the gate at server scope so health
+          # and application routes both fail closed while policy is uncertain.
+          if (!-f ${webGatewayActiveMarker}) {
+            return 503;
+          }
           if (''$request ~ "^[^ ]+ +[A-Za-z][A-Za-z0-9+.-]*://") {
             return 400;
           }
@@ -1916,21 +2044,18 @@ in {
           proxyPass = "http://unix:${webSocketPath}:/healthz";
           recommendedProxySettings = false;
           extraConfig = ''
+            auth_basic off;
             if (''$request_uri != "/healthz") {
               return 404;
             }
             limit_except GET {
               deny all;
             }
-          '' + webProxyRequestConfig;
+          '' + webHealthProxyRequestConfig;
         };
         locations."/" = {
           proxyPass = "http://unix:${webSocketPath}:";
           recommendedProxySettings = false;
-          basicAuthFile =
-            if webBasicEnabled
-            then cfg.web.basicAuthFile
-            else null;
           extraConfig = webProxyRequestConfig + webResourceIsolationConfig;
         };
       };
@@ -1944,19 +2069,27 @@ in {
 
     # The worker needs only the new socket group. In particular it does not
     # receive cfg.group, cratedigger-ops, or any other Cratedigger secret/media
-    # group. Basic-file metadata is checked separately before nginx starts.
+    # group. Basic-file metadata and gateway readiness are checked separately
+    # around nginx start/reload.
     systemd.services.nginx = mkIf cfg.web.enable {
       after = ["cratedigger-web.socket"];
       requires = ["cratedigger-web.socket"];
-      serviceConfig = {
-        SupplementaryGroups = [cfg.web.accessGroup];
-        ExecStartPre = lib.mkBefore (
-          optional webBasicEnabled "+${webBasicAuthValidationScript}"
-        );
-        ExecReload = lib.mkBefore (
-          optional webBasicEnabled "+${webBasicAuthValidationScript}"
-        );
-      };
+      serviceConfig = lib.mkMerge [
+        {
+          SupplementaryGroups = [cfg.web.accessGroup];
+          ExecStartPre = lib.mkBefore ["+${webGatewayStartScript}"];
+        }
+        {
+          ExecReload = lib.mkBefore [
+            "+${webGatewayReloadPrepareScript}"
+          ];
+        }
+        {
+          ExecReload = lib.mkAfter [
+            "+${webGatewayReloadFinishScript}"
+          ];
+        }
+      ];
     };
 
     systemd.sockets.cratedigger-web = mkIf cfg.web.enable {
@@ -2249,7 +2382,12 @@ in {
         User = cfg.user;
         Group = cfg.group;
         SupplementaryGroups = [cfg.web.accessGroup];
-        ExecStartPre = [renderConfigScript];
+        ExecStartPre =
+          optional webBasicEnabled "+${webBasicAuthValidationScript}"
+          ++ optional
+            webBasicEnabled
+            webApplicationCredentialIsolationScript
+          ++ [renderConfigScript];
         ExecStart = "${webPkg}/bin/cratedigger-web";
         Restart = "on-failure";
         RestartSec = 5;
