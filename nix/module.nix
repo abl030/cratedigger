@@ -218,6 +218,233 @@
     pkgs.sox
   ];
   redisServiceUnits = optional cfg.redis.enable "redis-cratedigger.service";
+  webSocketPath = "/run/cratedigger-web/web.sock";
+  webHostName =
+    if cfg.web.hostName != null
+    then cfg.web.hostName
+    else "invalid.invalid";
+  webHostLabels = lib.splitString "." webHostName;
+  webHostLabelIsValid = label: let
+    length = builtins.stringLength label;
+  in
+    length >= 1
+    && length <= 63
+    && builtins.match "([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]*[A-Za-z0-9])" label != null;
+  webHostNameIsValid =
+    cfg.web.hostName != null
+    && webHostName == lib.toLower webHostName
+    && builtins.stringLength webHostName <= 253
+    && lib.all webHostLabelIsValid webHostLabels
+    && builtins.match "[0-9.]+" webHostName == null;
+  webBasicEnabled = cfg.web.basicAuthFile != null;
+  webModeCount = lib.count (enabled: enabled) [
+    webBasicEnabled
+    cfg.web.enableInsecure
+  ];
+  webBasicAuthConfiguredPath =
+    if cfg.web.basicAuthFile != null
+    then cfg.web.basicAuthFile
+    else "/invalid/cratedigger.htpasswd";
+  webBasicAuthPathSegments =
+    lib.drop 1 (lib.splitString "/" webBasicAuthConfiguredPath);
+  webBasicAuthPathIsValid =
+    cfg.web.basicAuthFile != null
+    && lib.hasPrefix "/" cfg.web.basicAuthFile
+    && !lib.hasSuffix "/" cfg.web.basicAuthFile
+    && lib.all
+      (segment:
+        segment != "."
+        && segment != ".."
+        && builtins.match "[A-Za-z0-9._+-]+" segment != null)
+      webBasicAuthPathSegments
+    && cfg.web.basicAuthFile != "/nix/store"
+    && !lib.hasPrefix "/nix/store/" cfg.web.basicAuthFile;
+  webGatewayListen =
+    [
+      {
+        addr = "127.0.0.1";
+        port = cfg.web.gatewayPort;
+      }
+    ]
+    ++ optional config.networking.enableIPv6 {
+      addr = "[::1]";
+      port = cfg.web.gatewayPort;
+    };
+  webProxyRequestConfig = ''
+    proxy_http_version 1.1;
+    proxy_pass_request_headers off;
+    proxy_set_header Host ${webHostName};
+    proxy_set_header Connection "";
+    proxy_set_header Content-Length ''$content_length;
+    proxy_set_header Content-Type ''$content_type;
+    proxy_set_header Accept ''$http_accept;
+    proxy_set_header Range ''$http_range;
+    proxy_set_header Origin ''$http_origin;
+    proxy_set_header Referer ''$http_referer;
+    proxy_set_header X-Cratedigger-Request-Channel browser;
+  '';
+  webResourceIsolationConfig = ''
+    add_header Content-Security-Policy "frame-ancestors 'none'" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Cross-Origin-Resource-Policy "same-origin" always;
+  '';
+  webBasicAuthValidationScript = pkgs.writeShellScript "cratedigger-web-basic-auth-validate" ''
+    set -euo pipefail
+    set -f
+
+    configured_path=${lib.escapeShellArg webBasicAuthConfiguredPath}
+    nginx_user=${lib.escapeShellArg config.services.nginx.user}
+    nginx_group=${lib.escapeShellArg config.services.nginx.group}
+    application_user=${lib.escapeShellArg cfg.user}
+    access_group=${lib.escapeShellArg cfg.web.accessGroup}
+
+    fail() {
+      echo "Cratedigger Basic authentication validation failed: $*" >&2
+      exit 1
+    }
+
+    resolved_path="$(${pkgs.coreutils}/bin/realpath -e -- "$configured_path")" \
+      || fail "configured credential path does not resolve"
+    case "$resolved_path" in
+      /nix/store|/nix/store/*)
+        fail "resolved credential target is inside /nix/store"
+        ;;
+    esac
+
+    ${pkgs.coreutils}/bin/test -f "$resolved_path" \
+      || fail "resolved credential target is not a regular file"
+    ${pkgs.coreutils}/bin/test -s "$resolved_path" \
+      || fail "resolved credential target is empty"
+    auth_metadata="$(${pkgs.coreutils}/bin/stat -Lc '%u:%G:%a' -- "$resolved_path")"
+    ${pkgs.coreutils}/bin/test "$auth_metadata" = "0:$nginx_group:440" \
+      || fail "resolved credential target must be root:$nginx_group mode 0440"
+    target_acl="$(${pkgs.acl}/bin/getfacl -cp -- "$resolved_path")" \
+      || fail "cannot inspect resolved credential ACL"
+    expected_target_acl=$'user::r--\ngroup::r--\nother::---'
+    ${pkgs.coreutils}/bin/test "$target_acl" = "$expected_target_acl" \
+      || fail "resolved credential target must have only the base 0440 ACL"
+
+    run_as() {
+      local user="$1"
+      shift
+      ${pkgs.util-linux}/bin/runuser -u "$user" -- "$@"
+    }
+
+    run_as "$nginx_user" ${pkgs.coreutils}/bin/test -r "$configured_path" \
+      || fail "nginx cannot read the configured credential path"
+
+    group_record="$(${pkgs.getent}/bin/getent group "$access_group")" \
+      || fail "socket access group does not exist"
+    IFS=: read -r _ _ access_gid supplementary_members <<< "$group_record"
+    ${pkgs.coreutils}/bin/test -n "$access_gid" \
+      || fail "socket access group has no gid"
+
+    restricted_users="$application_user"
+    old_ifs="$IFS"
+    IFS=,
+    for member in $supplementary_members; do
+      if ${pkgs.coreutils}/bin/test -n "$member" \
+        && ${pkgs.coreutils}/bin/test "$member" != "$nginx_user"; then
+        restricted_users="$restricted_users $member"
+      fi
+    done
+    IFS="$old_ifs"
+    while IFS=: read -r candidate _ _ primary_gid _; do
+      if ${pkgs.coreutils}/bin/test "$primary_gid" = "$access_gid" \
+        && ${pkgs.coreutils}/bin/test "$candidate" != "$nginx_user"; then
+        restricted_users="$restricted_users $candidate"
+      fi
+    done < <(${pkgs.getent}/bin/getent passwd)
+
+    for user in $restricted_users; do
+      ${pkgs.getent}/bin/getent passwd "$user" >/dev/null \
+        || fail "socket-authorized identity does not exist"
+      if run_as "$user" ${pkgs.coreutils}/bin/test -r "$configured_path"; then
+        fail "application or non-nginx socket identity can read the credential"
+      fi
+    done
+
+    check_ancestors() {
+      local path="$1"
+      local directory
+      local directory_acl
+      local directory_acl_lines
+      local directory_mode
+      local owner_uid
+      directory="$(${pkgs.coreutils}/bin/dirname -- "$path")"
+      while true; do
+        owner_uid="$(${pkgs.coreutils}/bin/stat -Lc '%u' -- "$directory")" \
+          || fail "credential ancestor is unavailable"
+        ${pkgs.coreutils}/bin/test "$owner_uid" = "0" \
+          || fail "credential ancestors must be root-owned"
+        directory_mode="$(${pkgs.coreutils}/bin/stat -Lc '%a' -- "$directory")"
+        if (( (8#$directory_mode & 0022) != 0 )); then
+          fail "credential ancestors must not be group/other writable"
+        fi
+        directory_acl="$(${pkgs.acl}/bin/getfacl -cp -- "$directory")" \
+          || fail "cannot inspect credential ancestor ACL"
+        directory_acl_lines="$(
+          ${pkgs.coreutils}/bin/printf '%s\n' "$directory_acl" \
+            | ${pkgs.gnugrep}/bin/grep -c '^'
+        )"
+        ${pkgs.coreutils}/bin/test "$directory_acl_lines" = "3" \
+          || fail "credential ancestors must not have extended/default ACLs"
+        ${pkgs.coreutils}/bin/printf '%s\n' "$directory_acl" \
+          | ${pkgs.gnugrep}/bin/grep -Eq '^user::[r-][w-][x-]$' \
+          || fail "credential ancestor owner ACL is malformed"
+        ${pkgs.coreutils}/bin/printf '%s\n' "$directory_acl" \
+          | ${pkgs.gnugrep}/bin/grep -Eq '^group::[r-][w-][x-]$' \
+          || fail "credential ancestor group ACL is malformed"
+        ${pkgs.coreutils}/bin/printf '%s\n' "$directory_acl" \
+          | ${pkgs.gnugrep}/bin/grep -Eq '^other::[r-][w-][x-]$' \
+          || fail "credential ancestor other ACL is malformed"
+        for user in "$nginx_user" $restricted_users; do
+          if run_as "$user" ${pkgs.coreutils}/bin/test -w "$directory"; then
+            fail "credential ancestor is writable by a credential consumer"
+          fi
+        done
+        ${pkgs.coreutils}/bin/test "$directory" = "/" && break
+        directory="$(${pkgs.coreutils}/bin/dirname -- "$directory")"
+      done
+    }
+
+    check_ancestors "$configured_path"
+    check_ancestors "$resolved_path"
+  '';
+  webNginxUserExtraGroups =
+    config.users.users.${config.services.nginx.user}.extraGroups or [];
+  webNginxServiceSupplementaryGroups =
+    config.systemd.services.nginx.serviceConfig.SupplementaryGroups or [];
+  webNginxReverseMemberGroups = lib.mapAttrsToList
+    (name: group: group.name or name)
+    (
+      lib.filterAttrs
+        (_: group: lib.elem config.services.nginx.user (group.members or []))
+        config.users.groups
+    );
+  webNginxDeclaredSupplementaryGroups = lib.unique (
+    webNginxUserExtraGroups
+    ++ webNginxServiceSupplementaryGroups
+    ++ webNginxReverseMemberGroups
+  );
+  webNginxForbiddenAuthorityGroups = lib.unique (
+    [
+      cfg.group
+      "cratedigger-ops"
+      "users"
+    ]
+    ++ optional
+      (cfg.beets.package.discogsOperatorGroup != null)
+      cfg.beets.package.discogsOperatorGroup
+  );
+  webNginxForbiddenGroupOverlap = lib.intersectLists
+    webNginxForbiddenAuthorityGroups
+    webNginxDeclaredSupplementaryGroups;
+  webNginxPrimaryGroupIsSafe =
+    config.services.nginx.group != cfg.group
+    && !lib.elem
+      config.services.nginx.group
+      (lib.remove cfg.group webNginxForbiddenAuthorityGroups);
 
   # CD-SEC-04: these are the only long-running units that accept untrusted
   # network/media input. Keep the systemd hardening literal and shared; each
@@ -287,9 +514,10 @@
   pipelineCli = pkgs.writeShellScriptBin "pipeline-cli" ''
     export PATH="${runtimePath}:$PATH"
     export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
-    exec ${pythonEnv}/bin/python ${src}/scripts/pipeline_cli/__main__.py \
+    exec ${pythonEnv}/bin/python -c \
+      'from scripts.pipeline_cli.cli import main; main(api_socket="${webSocketPath}")' \
       --dsn "${pipelineDsn}" \
-      --api-base "http://127.0.0.1:${toString cfg.web.port}" "$@"
+      "$@"
   '';
 
   pipelineMigrate = pkgs.writeShellScriptBin "pipeline-migrate" ''
@@ -330,7 +558,7 @@
     # deliberately stops passing them so there is no second path to keep
     # in sync with config.ini.
     exec ${pyRunner} ${src}/web/server.py \
-      --port ${toString cfg.web.port} \
+      --canonical-origin "https://${webHostName}" \
       --dsn "${pipelineDsn}" \
       --redis-host "${cfg.web.redis.host}" \
       --redis-port ${toString cfg.web.redis.port} \
@@ -1097,11 +1325,57 @@ in {
       enable = mkOption {
         type = types.bool;
         default = false;
-        description = "Run the web UI (album request manager).";
+        description = ''
+          Run the web UI behind the module-owned loopback authentication
+          gateway and permissioned Unix backend socket.
+        '';
       };
-      port = mkOption {
+      hostName = mkOption {
+        type = types.nullOr types.nonEmptyStr;
+        default = null;
+        example = "music.example.net";
+        description = ''
+          Lowercase canonical public DNS hostname for browser Host and
+          same-origin validation. IP literals are rejected. Required when
+          the web UI is enabled.
+        '';
+      };
+      gatewayPort = mkOption {
         type = types.port;
-        default = 8085;
+        default = 8086;
+        description = ''
+          Loopback-only port for the module-owned nginx authentication
+          gateway. The public TLS reverse proxy should forward to this port.
+        '';
+      };
+      accessGroup = mkOption {
+        type = types.nonEmptyStr;
+        default = "cratedigger-web";
+        description = ''
+          Dedicated group authorized to connect to the web backend Unix
+          socket. Add only trusted local pipeline-cli operators explicitly.
+        '';
+      };
+      basicAuthFile = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "/run/secrets/cratedigger.htpasswd";
+        description = ''
+          Runtime htpasswd file used by the module-owned nginx gateway.
+          The configured and resolved paths must remain outside the Nix store
+          under root-owned, non-writable ancestors. The target must be
+          root-owned, non-empty, mode root:nginx 0440, readable by nginx, and
+          unreadable by the application and non-nginx socket users.
+        '';
+      };
+      enableInsecure = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Deliberately run the web gateway without browser authentication.
+          This is mutually exclusive with basicAuthFile; the Unix socket,
+          request provenance checks, and other security boundaries remain.
+        '';
       };
       redis = {
         host = mkOption {
@@ -1455,25 +1729,91 @@ in {
         assertion = cfg.searchSettings.numberOfAlbumsToGrab >= 2;
         message = "services.cratedigger.searchSettings.numberOfAlbumsToGrab must be at least 2";
       }
+      {
+        assertion = !cfg.web.enable || webModeCount == 1;
+        message = "services.cratedigger.web requires exactly one authentication mode: set basicAuthFile or explicitly set enableInsecure = true.";
+      }
+      {
+        assertion = !cfg.web.enable || !(webBasicEnabled && cfg.web.enableInsecure);
+        message = "services.cratedigger.web basicAuthFile and enableInsecure are mutually exclusive.";
+      }
+      {
+        assertion = !cfg.web.enable || webHostNameIsValid;
+        message = "services.cratedigger.web.hostName must be a lowercase canonical DNS hostname, not an IP literal.";
+      }
+      {
+        assertion = !cfg.web.enable || cfg.web.gatewayPort != 8085;
+        message = "services.cratedigger.web.gatewayPort must not reuse the retired Python TCP port 8085.";
+      }
+      {
+        assertion = !cfg.web.enable || builtins.match "[a-z_][a-z0-9_-]*" cfg.web.accessGroup != null;
+        message = "services.cratedigger.web.accessGroup must be a valid dedicated Linux group name.";
+      }
+      {
+        assertion = !cfg.web.enable || (
+          cfg.web.accessGroup != cfg.group
+          && cfg.web.accessGroup != config.services.nginx.group
+          && (
+            cfg.beets.package.discogsOperatorGroup == null
+            || cfg.web.accessGroup != cfg.beets.package.discogsOperatorGroup
+          )
+        );
+        message = "services.cratedigger.web.accessGroup must be dedicated: it must differ from the service, nginx, and Discogs-secret groups.";
+      }
+      {
+        assertion = !cfg.web.enable || cfg.user != config.services.nginx.user;
+        message = "services.cratedigger.web requires distinct application and nginx service users.";
+      }
+      {
+        assertion = !cfg.web.enable || webNginxPrimaryGroupIsSafe;
+        message = "services.cratedigger.web requires nginx's primary group to differ from Cratedigger secret/media authority groups.";
+      }
+      {
+        assertion = !cfg.web.enable || webNginxForbiddenGroupOverlap == [];
+        message = "services.cratedigger.web forbids nginx account/service membership in cfg.group, discogsOperatorGroup, cratedigger-ops, or users.";
+      }
+      {
+        assertion = !cfg.web.enable || !webBasicEnabled || webBasicAuthPathIsValid;
+        message = "services.cratedigger.web.basicAuthFile must be a normalized absolute runtime path with nginx-token-safe segments outside /nix/store.";
+      }
+      {
+        assertion = cfg.web.enable || (!webBasicEnabled && !cfg.web.enableInsecure);
+        message = "services.cratedigger.web authentication settings are inactive-mode residue while web.enable is false.";
+      }
+      {
+        assertion = !cfg.web.enable || !webBasicEnabled || cfg.user != "root";
+        message = "services.cratedigger.web Basic authentication requires a non-root application user so the application cannot read the root:nginx credential file.";
+      }
+      {
+        assertion = !cfg.web.enable || !webBasicEnabled || cfg.group != config.services.nginx.group;
+        message = "services.cratedigger.web Basic authentication requires the application group to differ from the nginx credential-file group.";
+      }
     ];
 
     environment.systemPackages = [pipelineCli pipelineMigrate importerPkg previewWorkerPkg youtubeIngestWorkerPkg cratediggerBeet pkgs.postgresql];
 
-    users.users = mkIf (cfg.user != "root") {
-      ${cfg.user} = {
-        isSystemUser = true;
-        group = cfg.group;
-        extraGroups = optional
-          (cfg.beets.package.discogsOperatorGroup != null)
-          cfg.beets.package.discogsOperatorGroup;
-        description = "Cratedigger service user";
-      };
-    };
+    users.users = lib.mkMerge [
+      (mkIf (cfg.user != "root") {
+        ${cfg.user} = {
+          isSystemUser = true;
+          group = cfg.group;
+          extraGroups = optional
+            (cfg.beets.package.discogsOperatorGroup != null)
+            cfg.beets.package.discogsOperatorGroup
+            ++ optional cfg.web.enable cfg.web.accessGroup;
+          description = "Cratedigger service user";
+        };
+      })
+      (mkIf cfg.web.enable {
+        ${config.services.nginx.user}.extraGroups = [cfg.web.accessGroup];
+      })
+    ];
     users.groups = lib.mkMerge [
       (mkIf (cfg.group != "root") { ${cfg.group} = {}; })
       (mkIf (cfg.beets.package.discogsOperatorGroup != null) {
         ${cfg.beets.package.discogsOperatorGroup} = {};
       })
+      (mkIf cfg.web.enable { ${cfg.web.accessGroup} = {}; })
     ];
 
     # Since config.ini no longer embeds plaintext secrets (issue #117), the
@@ -1501,6 +1841,11 @@ in {
         # authority and its parent must be provisioned by the operator.
         "d ${defaultBeetsDbDir} 2775 ${cfg.user} ${cfg.group} -"
       ]
+      # Parent traversal and socket access are separate boundaries: tmpfiles
+      # owns root:<accessGroup> 0750 here, while the socket unit owns the
+      # root:<accessGroup> 0660 node below it.
+      ++ optional cfg.web.enable
+        "d /run/cratedigger-web 0750 root ${cfg.web.accessGroup} -"
       ++ optional cfg.youtubeIngest.enable
         "d ${cfg.youtubeIngest.tempDir} 0755 ${cfg.user} ${cfg.group} -";
 
@@ -1546,6 +1891,71 @@ in {
       settings = {
         maxmemory = cfg.redis.maxmemory;
         "maxmemory-policy" = "allkeys-lru";
+      };
+    };
+
+    services.nginx.enable = mkIf cfg.web.enable true;
+    services.nginx.virtualHosts = mkIf cfg.web.enable {
+      cratedigger-auth-gateway = {
+        serverName = webHostName;
+        listen = webGatewayListen;
+        locations."= /healthz" = {
+          proxyPass = "http://unix:${webSocketPath}:/healthz";
+          recommendedProxySettings = false;
+          extraConfig = ''
+            if (''$request_uri != "/healthz") {
+              return 404;
+            }
+            limit_except GET {
+              deny all;
+            }
+          '' + webProxyRequestConfig;
+        };
+        locations."/" = {
+          proxyPass = "http://unix:${webSocketPath}:";
+          recommendedProxySettings = false;
+          basicAuthFile =
+            if webBasicEnabled
+            then cfg.web.basicAuthFile
+            else null;
+          extraConfig = webProxyRequestConfig + webResourceIsolationConfig;
+        };
+      };
+      cratedigger-auth-reject = {
+        default = true;
+        serverName = "_";
+        listen = webGatewayListen;
+        locations."/".extraConfig = "return 444;";
+      };
+    };
+
+    # The worker needs only the new socket group. In particular it does not
+    # receive cfg.group, cratedigger-ops, or any other Cratedigger secret/media
+    # group. Basic-file metadata is checked separately before nginx starts.
+    systemd.services.nginx = mkIf cfg.web.enable {
+      after = ["cratedigger-web.socket"];
+      requires = ["cratedigger-web.socket"];
+      serviceConfig = {
+        SupplementaryGroups = [cfg.web.accessGroup];
+        ExecStartPre = lib.mkBefore (
+          optional webBasicEnabled "+${webBasicAuthValidationScript}"
+        );
+        ExecReload = lib.mkBefore (
+          optional webBasicEnabled "+${webBasicAuthValidationScript}"
+        );
+      };
+    };
+
+    systemd.sockets.cratedigger-web = mkIf cfg.web.enable {
+      description = "Cratedigger web backend socket";
+      wantedBy = ["sockets.target"];
+      listenStreams = [webSocketPath];
+      socketConfig = {
+        SocketUser = "root";
+        SocketGroup = cfg.web.accessGroup;
+        SocketMode = "0660";
+        DirectoryMode = "0750";
+        RemoveOnStop = true;
       };
     };
 
@@ -1811,14 +2221,21 @@ in {
 
     systemd.services.cratedigger-web = mkIf cfg.web.enable {
       description = "Cratedigger web UI";
-      after = ["cratedigger-db-migrate.service"] ++ redisServiceUnits;
+      after = [
+        "cratedigger-db-migrate.service"
+        "cratedigger-web.socket"
+      ] ++ redisServiceUnits;
       wants = redisServiceUnits;
-      requires = ["cratedigger-db-migrate.service"];
+      requires = [
+        "cratedigger-db-migrate.service"
+        "cratedigger-web.socket"
+      ];
       wantedBy = ["multi-user.target"];
       serviceConfig = (untrustedInputSandbox webSandboxWritePaths) // {
         Type = "simple";
         User = cfg.user;
         Group = cfg.group;
+        SupplementaryGroups = [cfg.web.accessGroup];
         ExecStartPre = [renderConfigScript];
         ExecStart = "${webPkg}/bin/cratedigger-web";
         Restart = "on-failure";

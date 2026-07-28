@@ -26,6 +26,7 @@ failure depends on Nix option assertion evaluation.
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import unittest
@@ -78,16 +79,573 @@ class TestPythonPathCarriesOnlyRepoRoot(unittest.TestCase):
 
 
 class TestPipelineCliWrapperContract(unittest.TestCase):
-    """API-backed CLI commands must follow the configured web listener."""
+    """API-backed CLI commands use the module-owned Unix listener."""
 
-    def test_wrapper_passes_configured_loopback_api_origin(self) -> None:
+    def test_wrapper_selects_non_overridable_unix_socket(self) -> None:
         text = MODULE_NIX.read_text(encoding="utf-8")
         wrapper_start = text.index('writeShellScriptBin "pipeline-cli"')
         wrapper_end = text.index('writeShellScriptBin "pipeline-migrate"')
         wrapper = text[wrapper_start:wrapper_end]
-        self.assertIn(
-            '--api-base "http://127.0.0.1:${toString cfg.web.port}"', wrapper,
+        self.assertIn('main(api_socket="${webSocketPath}")', wrapper)
+        self.assertNotIn("--api-base", wrapper)
+        self.assertNotIn("127.0.0.1", wrapper)
+
+
+class TestWebAuthenticationModuleContract(unittest.TestCase):
+    """The enabled web surface has one fail-closed module-owned perimeter."""
+
+    def test_basic_and_insecure_mode_matrix_is_evaluated(self) -> None:
+        expression = r'''
+          let
+            f = builtins.getFlake (toString ./.);
+            lib = f.inputs.nixpkgs.lib;
+            evaluate = extra:
+              let
+                system = lib.nixosSystem {
+                  system = builtins.currentSystem;
+                  modules = [
+                    f.nixosModules.default
+                    ({ ... }: {
+                      services.cratedigger = {
+                        enable = true;
+                        src = ./.;
+                        slskd.apiKeyFile = "/run/secrets/slskd-key";
+                        slskd.downloadDir = "/srv/slskd";
+                        pipelineDb.createLocally = true;
+                        web.enable = true;
+                      };
+                    })
+                    extra
+                  ];
+                };
+              in map (assertion: assertion.message)
+                (builtins.filter
+                  (assertion:
+                    !assertion.assertion
+                    && lib.hasPrefix "services.cratedigger.web" assertion.message)
+                  system.config.assertions);
+          in {
+            missing = evaluate {
+              services.cratedigger.web.hostName = "music.example.test";
+            };
+            basic = evaluate {
+              services.cratedigger = {
+                user = "cratedigger";
+                group = "cratedigger";
+                web = {
+                  hostName = "music.example.test";
+                  basicAuthFile = "/run/secrets/cratedigger.htpasswd";
+                };
+              };
+            };
+            insecure = evaluate {
+              services.cratedigger.web = {
+                hostName = "music.example.test";
+                enableInsecure = true;
+              };
+            };
+            conflict = evaluate {
+              services.cratedigger = {
+                user = "cratedigger";
+                group = "cratedigger";
+                web = {
+                  hostName = "music.example.test";
+                  basicAuthFile = "/run/secrets/cratedigger.htpasswd";
+                  enableInsecure = true;
+                };
+              };
+            };
+            storeBasic = evaluate {
+              services.cratedigger = {
+                user = "cratedigger";
+                group = "cratedigger";
+                web = {
+                  hostName = "music.example.test";
+                  basicAuthFile = "/nix/store/fake-cratedigger.htpasswd";
+                };
+              };
+            };
+            badHost = evaluate {
+              services.cratedigger.web = {
+                hostName = "music.example.test;\nreturn 200";
+                enableInsecure = true;
+              };
+            };
+            uppercaseHost = evaluate {
+              services.cratedigger.web = {
+                hostName = "Music.example.test";
+                enableInsecure = true;
+              };
+            };
+            ipHost = evaluate {
+              services.cratedigger.web = {
+                hostName = "127.0.0.1";
+                enableInsecure = true;
+              };
+            };
+            injectedBasic = evaluate {
+              services.cratedigger = {
+                user = "cratedigger";
+                group = "cratedigger";
+                web = {
+                  hostName = "music.example.test";
+                  basicAuthFile =
+                    "/run/secrets/file; satisfy any; allow all; #";
+                };
+              };
+            };
+            disabled = evaluate {
+              services.cratedigger.web.enable = lib.mkForce false;
+            };
+            disabledBasic = evaluate {
+              services.cratedigger.web = {
+                enable = lib.mkForce false;
+                basicAuthFile = "/run/secrets/cratedigger.htpasswd";
+              };
+            };
+            disabledInsecure = evaluate {
+              services.cratedigger.web = {
+                enable = lib.mkForce false;
+                enableInsecure = true;
+              };
+            };
+            serviceGroupOverlap = evaluate {
+              services.cratedigger = {
+                user = "cratedigger";
+                group = "cratedigger";
+                web = {
+                  hostName = "music.example.test";
+                  enableInsecure = true;
+                  accessGroup = "cratedigger";
+                };
+              };
+            };
+            nginxGroupOverlap = evaluate {
+              services.cratedigger.web = {
+                hostName = "music.example.test";
+                enableInsecure = true;
+                accessGroup = "nginx";
+              };
+            };
+            secretGroupOverlap = evaluate {
+              services.cratedigger = {
+                beets.package = {
+                  discogsTokenFile = "/run/secrets/discogs-token";
+                  discogsOperatorGroup = "cratedigger-web";
+                };
+                web = {
+                  hostName = "music.example.test";
+                  enableInsecure = true;
+                };
+              };
+            };
+            nginxAccountSecretGroup = evaluate {
+              services.cratedigger.web = {
+                hostName = "music.example.test";
+                enableInsecure = true;
+              };
+              users.users.nginx.extraGroups = [ "cratedigger-ops" ];
+            };
+            nginxReverseSecretGroup = evaluate {
+              services.cratedigger.web = {
+                hostName = "music.example.test";
+                enableInsecure = true;
+              };
+              users.groups.cratedigger-ops.members = [ "nginx" ];
+            };
+            nginxAliasedReverseSecretGroup = evaluate {
+              services.cratedigger.web = {
+                hostName = "music.example.test";
+                enableInsecure = true;
+              };
+              users.groups.hiddenSecret = {
+                name = "cratedigger-ops";
+                members = [ "nginx" ];
+              };
+            };
+            nginxServiceMediaGroup = evaluate {
+              services.cratedigger.web = {
+                hostName = "music.example.test";
+                enableInsecure = true;
+              };
+              systemd.services.nginx.serviceConfig.SupplementaryGroups = [
+                "users"
+              ];
+            };
+            nginxPrimaryServiceGroup = evaluate {
+              services.cratedigger = {
+                user = "cratedigger";
+                group = "cratedigger";
+                web = {
+                  hostName = "music.example.test";
+                  enableInsecure = true;
+                };
+              };
+              services.nginx.group = "cratedigger";
+            };
+            nginxReverseUnrelatedGroup = evaluate {
+              services.cratedigger.web = {
+                hostName = "music.example.test";
+                enableInsecure = true;
+              };
+              users.groups.smokeping.members = [ "nginx" ];
+            };
+          }
+        '''
+        result = subprocess.run(
+            ["nix", "eval", "--impure", "--json", "--expr", expression],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            check=False,
+            text=True,
         )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        worlds = json.loads(result.stdout)
+        self.assertTrue(
+            any("exactly one" in message for message in worlds["missing"])
+        )
+        self.assertEqual(worlds["basic"], [])
+        self.assertEqual(worlds["insecure"], [])
+        self.assertTrue(
+            any("mutually exclusive" in message for message in worlds["conflict"])
+        )
+        self.assertTrue(
+            any("outside /nix/store" in message for message in worlds["storeBasic"])
+        )
+        self.assertTrue(
+            any("canonical DNS hostname" in message for message in worlds["badHost"])
+        )
+        self.assertTrue(
+            any("lowercase canonical" in message for message in worlds["uppercaseHost"])
+        )
+        self.assertTrue(
+            any("not an IP literal" in message for message in worlds["ipHost"])
+        )
+        self.assertTrue(
+            any("nginx-token-safe" in message for message in worlds["injectedBasic"])
+        )
+        self.assertEqual(worlds["disabled"], [])
+        self.assertTrue(
+            any("inactive-mode residue" in message for message in worlds["disabledBasic"])
+        )
+        self.assertTrue(
+            any(
+                "inactive-mode residue" in message
+                for message in worlds["disabledInsecure"]
+            )
+        )
+        for world in (
+            "serviceGroupOverlap",
+            "nginxGroupOverlap",
+            "secretGroupOverlap",
+        ):
+            self.assertTrue(
+                any("must be dedicated" in message for message in worlds[world]),
+                (world, worlds[world]),
+            )
+        self.assertTrue(
+            any(
+                "forbids nginx account/service membership" in message
+                for message in worlds["nginxAccountSecretGroup"]
+            ),
+            worlds["nginxAccountSecretGroup"],
+        )
+        self.assertTrue(
+            any(
+                "forbids nginx account/service membership" in message
+                for message in worlds["nginxReverseSecretGroup"]
+            ),
+            worlds["nginxReverseSecretGroup"],
+        )
+        self.assertTrue(
+            any(
+                "forbids nginx account/service membership" in message
+                for message in worlds["nginxAliasedReverseSecretGroup"]
+            ),
+            worlds["nginxAliasedReverseSecretGroup"],
+        )
+        self.assertTrue(
+            any(
+                "forbids nginx account/service membership" in message
+                for message in worlds["nginxServiceMediaGroup"]
+            ),
+            worlds["nginxServiceMediaGroup"],
+        )
+        self.assertTrue(
+            any(
+                "primary group" in message
+                for message in worlds["nginxPrimaryServiceGroup"]
+            ),
+            worlds["nginxPrimaryServiceGroup"],
+        )
+        self.assertEqual(worlds["nginxReverseUnrelatedGroup"], [])
+
+    def test_injected_basic_path_cannot_render_toplevel(self) -> None:
+        expression = r'''
+          let
+            f = builtins.getFlake (toString ./.);
+            system = f.inputs.nixpkgs.lib.nixosSystem {
+              system = builtins.currentSystem;
+              modules = [
+                f.nixosModules.default
+                ({ ... }: {
+                  services.cratedigger = {
+                    enable = true;
+                    src = ./.;
+                    user = "cratedigger";
+                    group = "cratedigger";
+                    slskd.apiKeyFile = "/run/secrets/slskd-key";
+                    slskd.downloadDir = "/srv/slskd";
+                    pipelineDb.createLocally = true;
+                    web = {
+                      enable = true;
+                      hostName = "music.example.test";
+                      basicAuthFile =
+                        "/run/secrets/file; satisfy any; allow all; #";
+                    };
+                  };
+                })
+              ];
+            };
+          in system.config.system.build.toplevel.drvPath
+        '''
+        result = subprocess.run(
+            ["nix", "eval", "--impure", "--expr", expression],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("nginx-token-safe segments", result.stderr)
+
+    def test_merged_basic_gateway_values_are_exact(self) -> None:
+        expression = r'''
+          let
+            f = builtins.getFlake (toString ./.);
+            lib = f.inputs.nixpkgs.lib;
+            render = enableIPv6:
+              let
+                system = lib.nixosSystem {
+                  system = builtins.currentSystem;
+                  modules = [
+                    f.nixosModules.default
+                    ({ ... }: {
+                      networking.enableIPv6 = enableIPv6;
+                      services.cratedigger = {
+                        enable = true;
+                        src = ./.;
+                        user = "cratedigger";
+                        group = "cratedigger";
+                        slskd.apiKeyFile = "/run/secrets/slskd-key";
+                        slskd.downloadDir = "/srv/slskd";
+                        pipelineDb.createLocally = true;
+                        web = {
+                          enable = true;
+                          hostName = "music.example.test";
+                          basicAuthFile =
+                            "/run/secrets/cratedigger.htpasswd";
+                        };
+                      };
+                    })
+                  ];
+                };
+                gateway =
+                  system.config.services.nginx.virtualHosts.cratedigger-auth-gateway;
+                reject =
+                  system.config.services.nginx.virtualHosts.cratedigger-auth-reject;
+                socket = system.config.systemd.sockets.cratedigger-web;
+                webService =
+                  system.config.systemd.services.cratedigger-web;
+                nginxService = system.config.systemd.services.nginx;
+              in {
+                failures = map (assertion: assertion.message)
+                  (builtins.filter
+                    (assertion:
+                      !assertion.assertion
+                      && lib.hasPrefix
+                        "services.cratedigger.web"
+                        assertion.message)
+                    system.config.assertions);
+                listen = map (item: {
+                  inherit (item) addr port;
+                }) gateway.listen;
+                hostName = gateway.serverName;
+                basicAuthFile = gateway.locations."/".basicAuthFile;
+                proxyPass = gateway.locations."/".proxyPass;
+                proxyExtra = gateway.locations."/".extraConfig;
+                healthProxy = gateway.locations."= /healthz".proxyPass;
+                healthExtra = gateway.locations."= /healthz".extraConfig;
+                rejectDefault = reject.default;
+                rejectConfig = reject.locations."/".extraConfig;
+                socketListen = socket.listenStreams;
+                socketGroup = socket.socketConfig.SocketGroup;
+                socketMode = socket.socketConfig.SocketMode;
+                webAfter = webService.after;
+                webRequires = webService.requires;
+                webGroups = webService.serviceConfig.SupplementaryGroups;
+                nginxGroups = nginxService.serviceConfig.SupplementaryGroups;
+                nginxUserGroups =
+                  system.config.users.users.${system.config.services.nginx.user}.extraGroups;
+                applicationUserGroups =
+                  system.config.users.users.cratedigger.extraGroups;
+                startPre = nginxService.serviceConfig.ExecStartPre;
+                reload = nginxService.serviceConfig.ExecReload;
+              };
+          in {
+            dualStack = render true;
+            ipv4Only = render false;
+          }
+        '''
+        result = subprocess.run(
+            ["nix", "eval", "--impure", "--json", "--expr", expression],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        worlds = json.loads(result.stdout)
+        dual = worlds["dualStack"]
+        ipv4 = worlds["ipv4Only"]
+        self.assertEqual(dual["failures"], [])
+        self.assertEqual(ipv4["failures"], [])
+        self.assertEqual(
+            dual["listen"],
+            [
+                {"addr": "127.0.0.1", "port": 8086},
+                {"addr": "[::1]", "port": 8086},
+            ],
+        )
+        self.assertEqual(
+            ipv4["listen"], [{"addr": "127.0.0.1", "port": 8086}]
+        )
+        self.assertEqual(dual["hostName"], "music.example.test")
+        self.assertEqual(
+            dual["basicAuthFile"], "/run/secrets/cratedigger.htpasswd"
+        )
+        self.assertEqual(
+            dual["proxyPass"], "http://unix:/run/cratedigger-web/web.sock:"
+        )
+        self.assertEqual(
+            dual["healthProxy"],
+            "http://unix:/run/cratedigger-web/web.sock:/healthz",
+        )
+        self.assertIn('if ($request_uri != "/healthz")', dual["healthExtra"])
+        self.assertIn("limit_except GET", dual["healthExtra"])
+        self.assertTrue(dual["rejectDefault"])
+        self.assertEqual(dual["rejectConfig"], "return 444;")
+        self.assertEqual(
+            dual["socketListen"], ["/run/cratedigger-web/web.sock"]
+        )
+        self.assertEqual(dual["socketGroup"], "cratedigger-web")
+        self.assertEqual(dual["socketMode"], "0660")
+        for dependency in (
+            "cratedigger-db-migrate.service",
+            "cratedigger-web.socket",
+        ):
+            self.assertIn(dependency, dual["webAfter"])
+            self.assertIn(dependency, dual["webRequires"])
+        self.assertEqual(dual["webGroups"], ["cratedigger-web"])
+        self.assertEqual(dual["nginxGroups"], ["cratedigger-web"])
+        self.assertIn("cratedigger-web", dual["nginxUserGroups"])
+        self.assertIn("cratedigger-web", dual["applicationUserGroups"])
+        self.assertTrue(dual["startPre"][0].startswith("+"))
+        self.assertIn(
+            "cratedigger-web-basic-auth-validate", dual["startPre"][0]
+        )
+        self.assertIn("nginx-pre-start", dual["startPre"][1])
+        self.assertTrue(dual["reload"][0].startswith("+"))
+        self.assertIn(
+            "cratedigger-web-basic-auth-validate", dual["reload"][0]
+        )
+        self.assertIn("nginx", dual["reload"][1])
+
+    def test_socket_activation_and_access_group_are_explicit(self) -> None:
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        self.assertIn('webSocketPath = "/run/cratedigger-web/web.sock";', text)
+        self.assertIn("systemd.sockets.cratedigger-web", text)
+        self.assertIn("listenStreams = [webSocketPath];", text)
+        self.assertIn('SocketMode = "0660";', text)
+        self.assertIn("SocketGroup = cfg.web.accessGroup;", text)
+        self.assertIn(
+            '"d /run/cratedigger-web 0750 root ${cfg.web.accessGroup} -"', text
+        )
+        self.assertIn('"cratedigger-web.socket"', text)
+        self.assertIn(
+            "${config.services.nginx.user}.extraGroups = "
+            "[cfg.web.accessGroup];",
+            text,
+        )
+
+    def test_gateway_is_exact_host_loopback_and_default_reject(self) -> None:
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        self.assertNotIn("cfg.web.port", text)
+        self.assertIn("services.nginx.virtualHosts", text)
+        self.assertIn('addr = "127.0.0.1";', text)
+        self.assertIn('addr = "[::1]";', text)
+        self.assertIn("port = cfg.web.gatewayPort;", text)
+        self.assertIn("serverName = webHostName;", text)
+        self.assertIn("default = true;", text)
+        self.assertIn("return 444;", text)
+        self.assertIn('locations."= /healthz"', text)
+        self.assertIn(':/healthz";', text)
+        self.assertIn('if (\'\'$request_uri != "/healthz")', text)
+        self.assertIn("limit_except GET", text)
+
+    def test_gateway_reconstructs_only_reviewed_backend_headers(self) -> None:
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        self.assertIn("proxy_pass_request_headers off;", text)
+        self.assertIn("proxy_set_header Host ${webHostName};", text)
+        self.assertIn(
+            "proxy_set_header X-Cratedigger-Request-Channel browser;", text
+        )
+        self.assertIn("proxy_set_header Content-Length ''$content_length;", text)
+        self.assertIn("proxy_set_header Content-Type ''$content_type;", text)
+        self.assertIn("proxy_set_header Accept ''$http_accept;", text)
+        self.assertIn("proxy_set_header Range ''$http_range;", text)
+        self.assertIn("proxy_set_header Origin ''$http_origin;", text)
+        self.assertIn("proxy_set_header Referer ''$http_referer;", text)
+        self.assertNotIn("proxy_set_header Authorization", text)
+        self.assertNotIn("proxy_set_header Cookie", text)
+        self.assertIn("Content-Security-Policy", text)
+        self.assertIn("frame-ancestors 'none'", text)
+        self.assertIn("X-Frame-Options", text)
+        self.assertIn("Cross-Origin-Resource-Policy", text)
+
+    def test_web_wrapper_uses_exact_canonical_https_origin(self) -> None:
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        web_start = text.index('writeShellScriptBin "cratedigger-web"')
+        web_end = text.index(
+            'writeShellScriptBin "cratedigger-youtube-ingest"', web_start
+        )
+        wrapper = text[web_start:web_end]
+        self.assertIn(
+            '--canonical-origin "https://${webHostName}"',
+            wrapper,
+        )
+
+    def test_basic_secret_is_runtime_only_and_checked_before_nginx_start(
+        self,
+    ) -> None:
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        self.assertIn("basicAuthFile = mkOption", text)
+        self.assertNotIn("basicAuth = ", text)
+        self.assertIn(
+            'writeShellScript "cratedigger-web-basic-auth-validate"', text
+        )
+        self.assertIn("systemd.services.nginx = mkIf cfg.web.enable", text)
+        self.assertIn("ExecStartPre = lib.mkBefore", text)
+        self.assertIn("ExecReload = lib.mkBefore", text)
+        self.assertIn("realpath -e", text)
+        self.assertIn("runuser -u", text)
+        self.assertIn("${pkgs.acl}/bin/getfacl", text)
+        self.assertIn("expected_target_acl", text)
+        self.assertIn("only the base 0440 ACL", text)
+        self.assertIn("must not be group/other writable", text)
+        self.assertIn("must not have extended/default ACLs", text)
+        self.assertIn("check_ancestors", text)
+        self.assertIn("resolved credential target is inside /nix/store", text)
 
 
 class TestImporterServiceContract(unittest.TestCase):

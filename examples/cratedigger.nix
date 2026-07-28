@@ -83,8 +83,16 @@
     # --- Web UI (album browser + request manager) ---------------------
     web = {
       enable = true;
-      port = 8085;
+      hostName = "music.example.net";
+      gatewayPort = 8086;
+      # Provision this at runtime (for example with sops-nix) as a non-empty
+      # bcrypt htpasswd file owned root:nginx with mode 0440. Never commit
+      # the hash through a Nix path value.
+      basicAuthFile = "/run/secrets/cratedigger.htpasswd";
     };
+    # Local pipeline-cli operators bypass browser authentication through the
+    # permissioned Unix socket. Grant that complete API authority explicitly:
+    # users.users.your-operator.extraGroups = [ "cratedigger-web" ];
 
     # --- Mirrors: all optional ----------------------------------------
     # Without any of this, MusicBrainz browse/matching uses public
