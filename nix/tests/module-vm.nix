@@ -199,6 +199,83 @@ let
     listener.set_inheritable(False)
     RecorderServer(listener).serve_forever()
   '';
+  rawHttpProbe = pkgs.writeText "cratedigger-test-raw-http.py" ''
+    import base64
+    import json
+    import socket
+    import sys
+
+    request = base64.b64decode(sys.stdin.buffer.read(), validate=True)
+    response = bytearray()
+    reached_eof = False
+    timed_out = False
+    with socket.create_connection(("127.0.0.1", 18086), timeout=2.0) as client:
+        client.settimeout(2.0)
+        client.sendall(request)
+        while True:
+            try:
+                chunk = client.recv(65536)
+            except TimeoutError:
+                timed_out = True
+                break
+            if not chunk:
+                reached_eof = True
+                break
+            response.extend(chunk)
+    print(json.dumps({
+        "response": base64.b64encode(response).decode("ascii"),
+        "reached_eof": reached_eof,
+        "timed_out": timed_out,
+    }, separators=(",", ":"), sort_keys=True))
+  '';
+  productionWebConcurrencyProbe =
+    pkgs.writeText "cratedigger-test-production-web-concurrency.py" ''
+      import os
+      import socket
+      import time
+
+      BLOCKED_PATH = "/tmp/cratedigger-production-web-concurrency.blocked"
+      RELEASE_PATH = "/tmp/cratedigger-production-web-concurrency.release"
+      SOCKET_PATH = "/run/cratedigger-web/web.sock"
+
+      response = bytearray()
+      with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+          client.settimeout(12)
+          client.connect(SOCKET_PATH)
+          client.sendall(
+              b"GET /api/_index HTTP/1.1\r\n"
+              b"Host: music.vm.test\r\n"
+              b"X-Cratedigger-Request-Channel: browser\r\n"
+              b"X-Concurrency-Probe: held"
+          )
+          marker_fd = os.open(
+              BLOCKED_PATH,
+              os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+              0o600,
+          )
+          with os.fdopen(marker_fd, "w", encoding="utf-8") as marker:
+              marker.write("blocked\n")
+
+          deadline = time.monotonic() + 10
+          while not os.path.exists(RELEASE_PATH):
+              if time.monotonic() >= deadline:
+                  raise TimeoutError("production web release marker timed out")
+              time.sleep(0.01)
+
+          client.sendall(b"\r\nConnection: close\r\n\r\n")
+          while True:
+              chunk = client.recv(65536)
+              if not chunk:
+                  break
+              response.extend(chunk)
+
+      status_line = bytes(response).split(b"\r\n", 1)[0]
+      status_parts = status_line.split()
+      if len(status_parts) < 2 or status_parts[1] != b"200":
+          raise AssertionError(
+              f"production web probe returned {status_line!r}"
+          )
+    '';
 in
 pkgs.testers.nixosTest {
   name = "cratedigger-module-vm";
@@ -485,7 +562,9 @@ pkgs.testers.nixosTest {
   };
 
   testScript = ''
+    import base64
     import json
+    import re
 
     def _response_header_values(raw_headers, expected_name):
         values = []
@@ -504,6 +583,23 @@ pkgs.testers.nixosTest {
     def _assert_absent_response_header(raw_headers, name):
         values = _response_header_values(raw_headers, name)
         assert values == [], (name, values, raw_headers)
+
+    def _raw_gateway(request):
+        encoded = base64.b64encode(request).decode("ascii")
+        result = json.loads(machine.succeed(
+            "printf '%s' '" + encoded + "' "
+            "| ${pkgs.python3}/bin/python3 ${rawHttpProbe}"
+        ))
+        response = base64.b64decode(result["response"])
+        status = None
+        if response:
+            first_line = response.split(b"\r\n", 1)[0]
+            match = re.fullmatch(rb"HTTP/1\.[01] ([0-9]{3}) .+", first_line)
+            assert match is not None, (request, response, result)
+            status = int(match.group(1))
+        assert result["timed_out"] is False, (request, response, result)
+        assert result["reached_eof"] is True, (request, response, result)
+        return status, response
 
     # Qualify the response-header checker itself: prefixed/suffixed decoy names
     # and duplicate exact names must not satisfy an exact singleton contract.
@@ -1291,6 +1387,8 @@ pkgs.testers.nixosTest {
         "-H 'X-Identity: administrator' "
         "-H 'X-Role: administrator' "
         "-H 'X-Groups: administrators' "
+        "-H 'Connection: keep-alive, X-Smuggled' "
+        "-H 'X-Smuggled: hop-by-hop-sentinel' "
         "-H 'X-Cratedigger-Request-Channel: cli' "
         "--data-binary '{\"x\":1}' "
         "http://127.0.0.1:18086/recorder/probe?view=raw)\" = 200"
@@ -1334,11 +1432,119 @@ pkgs.testers.nixosTest {
         "x-identity",
         "x-role",
         "x-groups",
+        "connection",
+        "x-smuggled",
         "user-agent",
     }
     assert banned_backend_headers.isdisjoint(
         recorder_row["headers"],
     ), recorder_row
+
+    def _assert_raw_gateway_rejection(request, expected_status):
+        status, response = _raw_gateway(request)
+        assert status == expected_status, (request, status, response)
+
+    basic_authorization = (
+        b"Authorization: Basic "
+        b"dGVzdC1vcGVyYXRvcjp0ZXN0LXBhc3N3b3Jk\r\n"
+    )
+    raw_framing_rejections = (
+        (
+            b"GET /recorder/rejected HTTP/1.1\r\n"
+            b"Host: music.vm.test\r\n"
+            b"Host: attacker.invalid\r\n"
+            b"Connection: close\r\n\r\n",
+            400,
+        ),
+        (
+            b"GET /recorder/rejected HTTP/1.1\r\n"
+            b"Connection: close\r\n\r\n",
+            400,
+        ),
+        (
+            b"POST /recorder/rejected HTTP/1.1\r\n"
+            b"Host: music.vm.test\r\n"
+            + basic_authorization
+            + b"Content-Type: application/json\r\n"
+            b"Content-Length: 2\r\n"
+            b"Content-Length: 3\r\n"
+            b"Connection: close\r\n\r\n{}",
+            400,
+        ),
+        (
+            b"POST /recorder/rejected HTTP/1.1\r\n"
+            b"Host: music.vm.test\r\n"
+            + basic_authorization
+            + b"Content-Type: application/json\r\n"
+            b"Content-Length: 2\r\n"
+            b"Transfer-Encoding: chunked\r\n"
+            b"Connection: close\r\n\r\n"
+            b"2\r\n{}\r\n0\r\n\r\n",
+            400,
+        ),
+        (
+            b"POST /recorder/rejected HTTP/1.1\r\n"
+            b"Host: music.vm.test\r\n"
+            + basic_authorization
+            + b"Content-Type: application/json\r\n"
+            b"Transfer-Encoding: chunked\r\n"
+            b"Connection: close\r\n\r\n"
+            b"ZZ\r\n{}\r\n0\r\n\r\n",
+            400,
+        ),
+        (
+            b"POST /recorder/rejected HTTP/1.1\r\n"
+            b"Host: music.vm.test\r\n"
+            + basic_authorization
+            + b"Transfer-Encoding: gzip\r\n"
+            b"Connection: close\r\n\r\n",
+            501,
+        ),
+        (
+            b"POST /recorder/rejected HTTP/1.1\r\n"
+            b"Host: music.vm.test\r\n"
+            + basic_authorization
+            + b"Content-Type: application/json\r\n"
+            b"Content-Length: 2\r\n"
+            b"Content-Length: 3\r\n"
+            b"Connection: keep-alive\r\n\r\n{}"
+            b"GET /recorder/pipelined-valid HTTP/1.1\r\n"
+            b"Host: music.vm.test\r\n"
+            + basic_authorization
+            + b"Connection: close\r\n\r\n",
+            400,
+        ),
+    )
+    for request, expected_status in raw_framing_rejections:
+        _assert_raw_gateway_rejection(request, expected_status)
+
+    raw_health_rejections = (
+        (b"GET /healthz?probe=1 HTTP/1.1\r\n", 404),
+        (b"GET /healthz%3fprobe HTTP/1.1\r\n", 401),
+        (b"GET /alpha/../healthz HTTP/1.1\r\n", 404),
+        (b"GET /alpha/%2e%2e/healthz HTTP/1.1\r\n", 404),
+        (b"GET //healthz HTTP/1.1\r\n", 404),
+        (b"GET /healthz%2f HTTP/1.1\r\n", 401),
+        (b"OPTIONS /healthz HTTP/1.1\r\n", 403),
+        (
+            b"GET http://music.vm.test/healthz HTTP/1.1\r\n",
+            400,
+        ),
+        (
+            b"GET  http://music.vm.test/healthz HTTP/1.1\r\n",
+            400,
+        ),
+        (
+            b"GET      http://music.vm.test/healthz HTTP/1.1\r\n",
+            400,
+        ),
+    )
+    for request_line, expected_status in raw_health_rejections:
+        _assert_raw_gateway_rejection(
+            request_line
+            + b"Host: music.vm.test\r\nConnection: close\r\n\r\n",
+            expected_status,
+        )
 
     # Rejections owned by nginx must leave the recorder's dispatch count
     # unchanged: query/method liveness variants, wrong Host, and failed Basic.
@@ -1392,6 +1598,412 @@ pkgs.testers.nixosTest {
         "--user test-operator:test-password "
         "-H 'Host: music.vm.test' "
         "http://127.0.0.1:18086/api/_index)\" = 200"
+    )
+
+    # Prove the production Unix-socket server itself can make progress while
+    # another connection is blocked mid-header. The authorized local operator
+    # holds an incomplete request open; the extra production worker must become
+    # observable before an independent authenticated gateway request is given
+    # a deliberately short deadline. A serial server times out here.
+    machine.succeed(
+        "rm -f "
+        "/tmp/cratedigger-production-web-concurrency.blocked "
+        "/tmp/cratedigger-production-web-concurrency.release "
+        "/tmp/cratedigger-production-web-concurrency.threads; "
+        "pid=$(systemctl show cratedigger-web.service -p MainPID --value); "
+        "ps -o nlwp= -p \"$pid\" | tr -d ' ' "
+        "> /tmp/cratedigger-production-web-concurrency.threads"
+    )
+    machine.succeed(
+        "systemd-run --quiet "
+        "--unit=cratedigger-production-web-concurrency "
+        "--service-type=exec --uid=beets-operator "
+        "--property=RuntimeMaxSec=15s "
+        "${pkgs.python3}/bin/python3 ${productionWebConcurrencyProbe}"
+    )
+    machine.succeed(
+        "${pkgs.coreutils}/bin/timeout 10s ${pkgs.bash}/bin/bash -c '"
+        "baseline=$(cat "
+        "/tmp/cratedigger-production-web-concurrency.threads); "
+        "until test -f "
+        "/tmp/cratedigger-production-web-concurrency.blocked && "
+        "pid=$(systemctl show cratedigger-web.service "
+        "-p MainPID --value) && "
+        "current=$(ps -o nlwp= -p \"$pid\" | tr -d \" \") && "
+        "test \"$current\" -gt \"$baseline\"; do "
+        "systemctl is-active --quiet "
+        "cratedigger-production-web-concurrency.service || exit 42; "
+        "sleep 0.05; "
+        "done' || { "
+        "status=$?; "
+        "systemctl status --no-pager "
+        "cratedigger-production-web-concurrency.service "
+        "cratedigger-web.service || true; "
+        "journalctl -u cratedigger-production-web-concurrency.service "
+        "-u cratedigger-web.service --no-pager -n 30 || true; "
+        "exit \"$status\"; "
+        "}"
+    )
+    machine.succeed(
+        "systemctl is-active --quiet "
+        "cratedigger-production-web-concurrency.service"
+    )
+    machine.succeed(
+        "code=$(${pkgs.curl}/bin/curl --max-time 2 "
+        "-sS -o /dev/null -w '%{http_code}' "
+        "--user test-operator:test-password "
+        "-H 'Host: music.vm.test' "
+        "http://127.0.0.1:18086/api/_index); "
+        "status=$?; "
+        "if test \"$status\" -ne 0 || test \"$code\" != 200; then "
+        "touch /tmp/cratedigger-production-web-concurrency.release; "
+        "echo \"parallel gateway status=$status code=$code\" >&2; "
+        "systemctl status --no-pager "
+        "cratedigger-production-web-concurrency.service "
+        "cratedigger-web.service || true; "
+        "journalctl -u cratedigger-production-web-concurrency.service "
+        "-u cratedigger-web.service --no-pager -n 30 || true; "
+        "exit 1; "
+        "fi"
+    )
+    machine.succeed(
+        "systemctl is-active --quiet "
+        "cratedigger-production-web-concurrency.service"
+    )
+    machine.succeed(
+        "touch /tmp/cratedigger-production-web-concurrency.release"
+    )
+    machine.succeed(
+        "${pkgs.coreutils}/bin/timeout 15s ${pkgs.bash}/bin/bash -c '"
+        "until state=$(systemctl show "
+        "cratedigger-production-web-concurrency.service "
+        "-p ActiveState --value) && "
+        "{ test \"$state\" = inactive || test \"$state\" = failed; }; do "
+        "sleep 0.05; "
+        "done' || { "
+        "status=$?; "
+        "systemctl status --no-pager "
+        "cratedigger-production-web-concurrency.service "
+        "cratedigger-web.service || true; "
+        "journalctl -u cratedigger-production-web-concurrency.service "
+        "-u cratedigger-web.service --no-pager -n 30 || true; "
+        "exit \"$status\"; "
+        "}; "
+        "test \"$(systemctl show "
+        "cratedigger-production-web-concurrency.service "
+        "-p ActiveState --value)\" = inactive && "
+        "test \"$(systemctl show "
+        "cratedigger-production-web-concurrency.service "
+        "-p Result --value)\" = success || { "
+        "status=$?; "
+        "systemctl status --no-pager "
+        "cratedigger-production-web-concurrency.service "
+        "cratedigger-web.service || true; "
+        "journalctl -u cratedigger-production-web-concurrency.service "
+        "-u cratedigger-web.service --no-pager -n 30 || true; "
+        "exit \"$status\"; "
+        "}"
+    )
+
+    # Derive the whole anonymous route sweep from the application's own
+    # authenticated route registry. Regex registrations are materialised with
+    # values that match their declared production pattern; nothing is
+    # hand-listed or silently skipped.
+    route_rows = json.loads(machine.succeed(
+        "curl -sS --user test-operator:test-password "
+        "-H 'Host: music.vm.test' http://127.0.0.1:18086/api/_index"
+    ))
+    assert len(route_rows) > 50, len(route_rows)
+
+    def _materialize_registered_path(pattern):
+        if not pattern.startswith("^"):
+            return pattern
+        path = pattern.removeprefix("^").removesuffix("$")
+        path = path.replace(
+            r"([a-f0-9-]{36}|\d+)",
+            "999999",
+        )
+        path = path.replace(
+            r"([a-f0-9-]{36})",
+            "00000000-0000-0000-0000-000000000000",
+        )
+        path = path.replace(r"([a-f0-9-]+)", "deadbeef")
+        path = path.replace(r"(\d+)", "999999")
+        assert not re.search(r"[\^\$\(\)\[\]\\]", path), (pattern, path)
+        return path
+
+    swept_routes = set()
+    for route_row in route_rows:
+        method = route_row["method"]
+        path = _materialize_registered_path(route_row["path"])
+        if route_row["path"].startswith("^"):
+            assert re.fullmatch(route_row["path"], path) is not None, (
+                route_row, path,
+            )
+        else:
+            assert path == route_row["path"], (route_row, path)
+        swept_routes.add((method, route_row["path"], path))
+        if method == "GET":
+            command = (
+                "curl -sS -o /dev/null -w '%{http_code}' "
+                "-H 'Host: music.vm.test' "
+                f"http://127.0.0.1:18086{path}"
+            )
+        else:
+            assert method == "POST", route_row
+            command = (
+                "curl -sS -o /dev/null -w '%{http_code}' -X POST "
+                "-H 'Host: music.vm.test' "
+                "-H 'Content-Type: application/json' -d '{}' "
+                f"http://127.0.0.1:18086{path}"
+            )
+        status = machine.succeed(command).strip()
+        assert status == "401", (route_row, path, status)
+    assert len(swept_routes) == len(route_rows), (
+        len(swept_routes), len(route_rows),
+    )
+
+    # Liveness is the only anonymous exception and is a constant empty 204 for
+    # both exact methods. Keep header and body captures separate so curl cannot
+    # turn a HEAD response's headers into a false body assertion.
+    for index, method in enumerate(("GET", "HEAD")):
+        header_path = f"/tmp/health-exact-{index}.headers"
+        body_path = f"/tmp/health-exact-{index}.body"
+        status = machine.succeed(
+            f"curl -sS -X {method} -D {header_path} -o {body_path} "
+            "-w '%{http_code}' -H 'Host: music.vm.test' "
+            "http://127.0.0.1:18086/healthz"
+        ).strip()
+        assert status == "204", (method, status)
+        machine.succeed(f"test ! -s {body_path}")
+        raw_headers = machine.succeed(f"cat {header_path}")
+        assert raw_headers.splitlines()[0].startswith("HTTP/1.1 204"), (
+            method, raw_headers,
+        )
+
+    # Same-origin provenance through real nginx. Valid Origin, Referer
+    # fallback, and matching-both reach route validation (400 for the
+    # deliberately incomplete body); every malformed/missing/mismatched world
+    # is rejected by request security (403) with no pipeline state change.
+    rows_before_provenance = machine.succeed(
+        "sudo -u postgres psql cratedigger -At "
+        "-c 'SELECT count(*) FROM album_requests'"
+    ).strip()
+    missing_delete_rows_before = machine.succeed(
+        "sudo -u postgres psql cratedigger -At "
+        "-c 'SELECT count(*) FROM album_requests WHERE id = 999999'"
+    ).strip()
+    valid_provenance_headers = (
+        "-H 'Origin: https://music.vm.test'",
+        "-H 'Referer: https://music.vm.test/some/page'",
+        (
+            "-H 'Origin: https://music.vm.test' "
+            "-H 'Referer: https://music.vm.test/some/page'"
+        ),
+    )
+    for provenance_headers in valid_provenance_headers:
+        status = machine.succeed(
+            "curl -sS -o /dev/null -w '%{http_code}' "
+            "--user test-operator:test-password "
+            "-H 'Host: music.vm.test' "
+            "-H 'Content-Type: application/json' "
+            f"{provenance_headers} -d '{{}}' "
+            "http://127.0.0.1:18086/api/pipeline/add"
+        ).strip()
+        assert status == "400", (provenance_headers, status)
+    rejected_provenance_headers = (
+        "",
+        "-H 'Origin: null'",
+        "-H 'Origin: https://attacker.invalid'",
+        "-H 'Origin: https://music.vm.test,https://attacker.invalid'",
+        (
+            "-H 'Origin: https://music.vm.test' "
+            "-H 'Referer: https://attacker.invalid/path'"
+        ),
+        "-H 'Referer: https://attacker.invalid/path'",
+    )
+    for provenance_headers in rejected_provenance_headers:
+        status = machine.succeed(
+            "curl -sS -o /dev/null -w '%{http_code}' "
+            "--user test-operator:test-password "
+            "-H 'Host: music.vm.test' "
+            "-H 'Content-Type: application/json' "
+            f"{provenance_headers} -d '{{}}' "
+            "http://127.0.0.1:18086/api/pipeline/add"
+        ).strip()
+        assert status == "403", (provenance_headers, status)
+
+    duplicate_provenance_requests = (
+        (
+            b"Origin: https://music.vm.test\r\n"
+            b"Origin: https://attacker.invalid\r\n"
+        ),
+        (
+            b"Referer: https://music.vm.test/page\r\n"
+            b"Referer: https://attacker.invalid/page\r\n"
+        ),
+    )
+    for duplicate_headers in duplicate_provenance_requests:
+        status, response = _raw_gateway(
+            b"POST /api/pipeline/delete HTTP/1.1\r\n"
+            b"Host: music.vm.test\r\n"
+            + basic_authorization
+            + b"Content-Type: application/json\r\n"
+            b"Content-Length: 13\r\n"
+            + duplicate_headers
+            + b"Connection: close\r\n\r\n"
+            b'{"id":999999}'
+        )
+        assert status == 403, (duplicate_headers, status, response)
+        machine.succeed(
+            "systemctl is-active --quiet cratedigger-web.service"
+        )
+    # The same canonical route remains healthy immediately afterward and
+    # reaches its harmless not-found result with one valid provenance header.
+    machine.succeed(
+        "test \"$(curl -sS -o /dev/null -w '%{http_code}' "
+        "--user test-operator:test-password "
+        "-H 'Host: music.vm.test' "
+        "-H 'Content-Type: application/json' "
+        "-H 'Origin: https://music.vm.test' "
+        "--data-binary '{\"id\":999999}' "
+        "http://127.0.0.1:18086/api/pipeline/delete)\" = 404"
+    )
+    machine.succeed("systemctl is-active --quiet cratedigger-web.service")
+    rows_after_provenance = machine.succeed(
+        "sudo -u postgres psql cratedigger -At "
+        "-c 'SELECT count(*) FROM album_requests'"
+    ).strip()
+    assert rows_after_provenance == rows_before_provenance, (
+        rows_before_provenance, rows_after_provenance,
+    )
+    missing_delete_rows_after = machine.succeed(
+        "sudo -u postgres psql cratedigger -At "
+        "-c 'SELECT count(*) FROM album_requests WHERE id = 999999'"
+    ).strip()
+    assert missing_delete_rows_after == missing_delete_rows_before == "0", (
+        missing_delete_rows_before, missing_delete_rows_after,
+    )
+
+    # Every installed API-backed mutation reaches the canonical application
+    # route over the fixed Unix socket as the authorized operator. Harmless
+    # impossible identifiers produce the route's JSON 404/exit-2 contract;
+    # upgrade uses whitespace so its route-local normalization returns the
+    # canonical validation 400/exit-3 without a mirror call.
+    api_cli_commands = (
+        ("pipeline-delete 999999 --confirm DELETE", 2),
+        ("set-quality not-a-real-release --status wanted", 2),
+        ("upgrade ' '", 3),
+        ("wrong-match-converge 999999 150 --apply", 2),
+        ("resolve-rg 999999", 2),
+    )
+    for index, (command, expected_exit) in enumerate(api_cli_commands):
+        stdout_path = f"/tmp/api-cli-{index}.stdout"
+        stderr_path = f"/tmp/api-cli-{index}.stderr"
+        machine.succeed(
+            "set +e; "
+            f"runuser -u beets-operator -- pipeline-cli {command} "
+            f"> {stdout_path} 2> {stderr_path}; "
+            f"rc=$?; set -e; test \"$rc\" = {expected_exit}; "
+            f"test -s {stdout_path}; "
+            f"! grep -Eq 'api_(unavailable|protocol_error)' "
+            f"{stdout_path} {stderr_path}"
+        )
+        cli_payload = json.loads(machine.succeed(f"cat {stdout_path}"))
+        assert isinstance(cli_payload, dict), (command, cli_payload)
+
+    # An unrelated user fails at Unix parent traversal. The structured
+    # unavailable result cannot be a TCP or direct-DB fallback: the production
+    # wrapper has selected the fixed socket and the Python process has no TCP
+    # listener (both pinned above).
+    machine.succeed(
+        "set +e; "
+        "runuser -u unrelated-user -- pipeline-cli upgrade "
+        "not-a-real-release "
+        "> /tmp/api-cli-unrelated.stdout "
+        "2> /tmp/api-cli-unrelated.stderr; "
+        "rc=$?; set -e; test \"$rc\" = 5; "
+        "grep -q '\"error\": \"api_unavailable\"' "
+        "/tmp/api-cli-unrelated.stderr; "
+        "grep -Eqi 'permission denied|\\[Errno 13\\]' "
+        "/tmp/api-cli-unrelated.stderr"
+    )
+    machine.fail("test -s /tmp/api-cli-unrelated.stdout")
+
+    # Qualify socket lifecycle rather than only its steady state: stale node
+    # replacement, direct service start activating its required socket, nginx
+    # driving socket activation, representative restarts, and concurrent
+    # threaded serving.
+    machine.succeed(
+        "systemctl stop nginx.service cratedigger-web.service "
+        "cratedigger-web.socket"
+    )
+    machine.fail("test -e /run/cratedigger-web/web.sock")
+    machine.succeed(
+        "install -o root -g cratedigger-web -m 0660 /dev/null "
+        "/run/cratedigger-web/web.sock"
+    )
+    machine.succeed("test -f /run/cratedigger-web/web.sock")
+    machine.succeed("systemctl start cratedigger-web.service")
+    machine.succeed("systemctl is-active --quiet cratedigger-web.socket")
+    machine.succeed("systemctl is-active --quiet cratedigger-web.service")
+    machine.succeed("test -S /run/cratedigger-web/web.sock")
+    machine.succeed(
+        "test \"$(stat -c %U:%G:%a /run/cratedigger-web/web.sock)\" "
+        "= root:cratedigger-web:660"
+    )
+    machine.succeed("systemctl stop cratedigger-web.service")
+    machine.succeed("systemctl start nginx.service")
+    machine.wait_for_open_port(18086)
+    machine.succeed(
+        "test \"$(curl -sS -o /dev/null -w '%{http_code}' "
+        "--user test-operator:test-password "
+        "-H 'Host: music.vm.test' http://127.0.0.1:18086/)\" = 200"
+    )
+    machine.succeed("systemctl is-active --quiet cratedigger-web.service")
+    machine.succeed("systemctl restart cratedigger-web.service")
+    _assert_basic_auth_matrix()
+    machine.succeed("systemctl restart nginx.service")
+    machine.wait_for_open_port(18086)
+    _assert_basic_auth_matrix()
+    machine.succeed(
+        "seq 1 16 | xargs -P8 -I@ sh -c '"
+        "test \"$(curl -sS -o /dev/null -w \"%{http_code}\" "
+        "--user test-operator:test-password "
+        "-H \"Host: music.vm.test\" "
+        "http://127.0.0.1:18086/api/_index)\" = 200'"
+    )
+
+    # Runtime-secret inspection, scoped honestly. The bcrypt hash is generated
+    # after boot and is absent from generated nginx/unit configuration, the
+    # application process, and its open descriptors. The TEST password itself
+    # is intentionally present in the store-built fixture script; this is not
+    # presented as a production plaintext-secret proof.
+    machine.succeed(
+        "hash=$(cut -d: -f2 /run/cratedigger-test-auth/basic.htpasswd); "
+        "! grep -R -a -F -- \"$hash\" /etc/nginx /etc/systemd/system; "
+        "pid=$(systemctl show cratedigger-web.service -p MainPID --value); "
+        "! tr '\\0' '\\n' < /proc/$pid/environ | grep -F -- \"$hash\"; "
+        "! tr '\\0' '\\n' < /proc/$pid/cmdline | grep -F -- \"$hash\"; "
+        "! find /proc/$pid/fd -maxdepth 1 -type l -exec readlink {} \\; "
+        "| grep -F '/run/cratedigger-test-auth/basic.htpasswd'"
+    )
+    machine.succeed(
+        "${pkgs.nginx}/bin/nginx -T -c /etc/nginx/nginx.conf "
+        "> /tmp/nginx-generated-config 2>&1; "
+        "grep -F 'auth_basic_user_file "
+        "/run/cratedigger-test-auth/basic.htpasswd' "
+        "/tmp/nginx-generated-config; "
+        "hash=$(cut -d: -f2 /run/cratedigger-test-auth/basic.htpasswd); "
+        "! grep -F -- \"$hash\" /tmp/nginx-generated-config"
+    )
+    machine.succeed(
+        "nix-store -qR /run/current-system > /tmp/system-closure-paths; "
+        "! grep -F '/run/cratedigger-test-auth/basic.htpasswd' "
+        "/tmp/system-closure-paths; "
+        "fixture=$(systemctl cat cratedigger-test-basic-auth.service "
+        "| sed -n 's/^ExecStart=//p' | tail -n1); "
+        "test -n \"$fixture\"; grep -F 'test-password' \"$fixture\""
     )
 
     # U13: cratedigger-unfindable.service + .timer exist and are

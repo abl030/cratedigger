@@ -75,6 +75,7 @@ class DevConfig:
     redis_host: str | None
     redis_port: int
     beets_directory: str | None = None
+    preview_insecure_warning: bool = False
 
     @property
     def badge_text(self) -> str:
@@ -172,7 +173,12 @@ class DevHandler(BaseHTTPRequestHandler):
             return
 
         if target.name == "index.html":
-            body = target.read_text(encoding="utf-8")
+            from web.server import render_index_document
+
+            body = render_index_document(
+                target.read_bytes(),
+                insecure=self.server.config.preview_insecure_warning,
+            ).decode("utf-8")
             body = body.replace("</body>", f"{self._dev_injection()}</body>")
             self._send_bytes(
                 body.encode("utf-8"),
@@ -320,12 +326,20 @@ class DevHandler(BaseHTTPRequestHandler):
 
     def _dev_injection(self) -> str:
         label = html.escape(self.server.config.badge_text)
+        if self.server.config.preview_insecure_warning:
+            badge_layout = """\
+  position: static;
+  width: fit-content;
+  margin: 10px 0 0 auto;"""
+        else:
+            badge_layout = """\
+  position: fixed;
+  right: 10px;
+  bottom: 10px;"""
         return f"""
 <style>
 #cratedigger-dev-badge {{
-  position: fixed;
-  right: 10px;
-  bottom: 10px;
+{badge_layout}
   z-index: 99999;
   padding: 5px 8px;
   border: 1px solid #6a9;
@@ -443,6 +457,9 @@ def build_config(args: argparse.Namespace) -> DevConfig:
         redis_host=args.redis_host,
         redis_port=args.redis_port,
         beets_directory=getattr(args, "beets_directory", None),
+        preview_insecure_warning=getattr(
+            args, "preview_insecure_warning", False,
+        ),
     )
 
 
@@ -452,7 +469,8 @@ def create_server(host: str, port: int, config: DevConfig) -> DevHTTPServer:
     return DevHTTPServer((host, port), DevHandler, config)
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
+    """Build the development server's command-line contract."""
     parser = argparse.ArgumentParser(description="Cratedigger frontend dev server")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8096)
@@ -496,6 +514,19 @@ def main() -> None:
     )
     parser.add_argument("--redis-host", default=None)
     parser.add_argument("--redis-port", type=int, default=6379)
+    parser.add_argument(
+        "--preview-insecure-warning",
+        action="store_true",
+        help=(
+            "Preview the insecure-authentication footer. The dev server "
+            "remains read-only."
+        ),
+    )
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
     args = parser.parse_args()
     if (args.beets_db is None) != (args.beets_directory is None):
         parser.error(
@@ -522,6 +553,8 @@ def main() -> None:
         else:
             print("  Discogs metadata: NOT CONFIGURED (compare returns HTTP 503)")
     print("  mutating API requests: blocked")
+    if config.preview_insecure_warning:
+        print("  insecure-authentication footer: preview enabled")
     print("  live reload: web/index.html, web/js/*.js, active fixtures")
     try:
         server.serve_forever()

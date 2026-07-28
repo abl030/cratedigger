@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import threading
 import unittest
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -20,9 +22,58 @@ from scripts.web_dev_server import (
     DevConfig,
     DevHandler,
     DevHTTPServer,
+    build_config,
+    build_parser,
     create_server,
 )
 from tests.test_web_cache import FakeRedis
+
+INSECURE_AUTH_WARNING = (
+    "Authentication is disabled for this Cratedigger instance."
+)
+
+
+def assert_preview_badge_in_normal_flow(body: str) -> None:
+    """Assert the preview badge cannot overlap the preceding footer."""
+    style = re.search(
+        r"#cratedigger-dev-badge \{(?P<rules>[^}]*)\}",
+        body,
+        re.DOTALL,
+    )
+    if style is None:
+        raise AssertionError("development badge style is missing")
+    if body.count("#cratedigger-dev-badge") != 1:
+        raise AssertionError(
+            "development badge must have one effective ID selector"
+        )
+    rules = style.group("rules")
+    if "position: static;" not in rules:
+        raise AssertionError(
+            "preview badge must remain in normal document flow"
+        )
+    if any(
+        property_name in rules
+        for property_name in (
+            "position: fixed;",
+            "position: absolute;",
+            "position: sticky;",
+            "transform:",
+        )
+    ):
+        raise AssertionError("preview badge uses overlapping geometry")
+    if body.index("</footer>") > body.index(
+        '<div id="cratedigger-dev-badge">'
+    ):
+        raise AssertionError("preview badge must follow the insecure footer")
+    style_end = body.index("</style>", style.end())
+    if body[style.end():style_end].strip():
+        raise AssertionError(
+            "development badge style must be the final effective rule"
+        )
+    if "<style" in body[style_end + len("</style>"):]:
+        raise AssertionError(
+            "development badge style must be the final style block"
+        )
 
 
 class WebDevServerTest(unittest.TestCase):
@@ -65,6 +116,146 @@ class WebDevServerTest(unittest.TestCase):
         self.assertIn("DEV fixture:peers", body)
         self.assertIn("new EventSource('/__dev/events')", body)
         self.assertIn('type="module" src="/js/main.js"', body)
+        self.assertNotIn(INSECURE_AUTH_WARNING, body)
+        badge_style = re.search(
+            r"#cratedigger-dev-badge \{(?P<rules>[^}]*)\}",
+            body,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(badge_style)
+        assert badge_style is not None
+        self.assertIn("position: fixed;", badge_style.group("rules"))
+
+    def test_explicit_insecure_warning_preview_keeps_read_only_dev_badge(
+        self,
+    ) -> None:
+        config = replace(
+            self.server.config,
+            preview_insecure_warning=True,
+        )
+        server = DevHTTPServer(("127.0.0.1", 0), DevHandler, config)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+
+        with urlopen(f"{base}/") as response:
+            body = response.read().decode()
+        self.assertEqual(body.count(INSECURE_AUTH_WARNING), 1)
+        self.assertEqual(body.count("<footer "), 1)
+        self.assertIn("DEV fixture:peers", body)
+        self.assertIn("new EventSource('/__dev/events')", body)
+        assert_preview_badge_in_normal_flow(body)
+
+        request = Request(
+            f"{base}/api/pipeline/delete",
+            data=b'{"id":1}',
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with self.assertRaises(HTTPError) as raised:
+            urlopen(request)
+        with raised.exception:
+            self.assertEqual(raised.exception.code, 405)
+            raised.exception.read()
+
+    def test_preview_badge_geometry_checker_rejects_fixed_position(self) -> None:
+        config = replace(
+            self.server.config,
+            preview_insecure_warning=True,
+        )
+        server = DevHTTPServer(("127.0.0.1", 0), DevHandler, config)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        with urlopen(f"{base}/") as response:
+            body = response.read().decode()
+
+        malformed = body.replace(
+            (
+                "#cratedigger-dev-badge {\n"
+                "  position: static;"
+            ),
+            (
+                "#cratedigger-dev-badge {\n"
+                "  position: fixed;"
+            ),
+            1,
+        )
+        with self.assertRaisesRegex(
+            AssertionError, "normal document flow",
+        ):
+            assert_preview_badge_in_normal_flow(malformed)
+
+    def test_preview_badge_checker_rejects_later_id_override(self) -> None:
+        config = replace(
+            self.server.config,
+            preview_insecure_warning=True,
+        )
+        server = DevHTTPServer(("127.0.0.1", 0), DevHandler, config)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        with urlopen(f"{base}/") as response:
+            body = response.read().decode()
+
+        badge_style = re.search(
+            r"#cratedigger-dev-badge \{(?P<rules>[^}]*)\}",
+            body,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(badge_style)
+        assert badge_style is not None
+        badge_style_end = body.index("</style>", badge_style.end())
+        same_style_block = (
+            body[:badge_style_end]
+            + '[id="cratedigger-dev-badge"] '
+            + "{ position: fixed !important; }\n"
+            + body[badge_style_end:]
+        )
+        with self.assertRaisesRegex(
+            AssertionError, "final effective rule",
+        ):
+            assert_preview_badge_in_normal_flow(same_style_block)
+
+        duplicate_selector = (
+            body
+            + "<style>#cratedigger-dev-badge "
+            + "{ position: fixed !important; }</style>"
+        )
+        with self.assertRaisesRegex(
+            AssertionError, "one effective ID selector",
+        ):
+            assert_preview_badge_in_normal_flow(duplicate_selector)
+
+        later_style_block = (
+            body
+            + '<style>[id="cratedigger-dev-badge"] '
+            + "{ position: fixed !important; }</style>"
+        )
+        with self.assertRaisesRegex(
+            AssertionError, "final style block",
+        ):
+            assert_preview_badge_in_normal_flow(later_style_block)
+
+    def test_insecure_warning_preview_cli_flag_maps_through_config(self) -> None:
+        for argv, expected in (
+            ([], False),
+            (["--preview-insecure-warning"], True),
+        ):
+            with self.subTest(argv=argv):
+                args = build_parser().parse_args(argv)
+                config = build_config(args)
+
+                self.assertIs(config.preview_insecure_warning, expected)
 
     def test_serves_fixture_api_scenario(self):
         payload = self.get_json("/api/pipeline/dashboard")

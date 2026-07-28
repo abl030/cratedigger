@@ -625,6 +625,22 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
             wrapper,
         )
 
+    def test_web_wrapper_passes_insecure_flag_only_for_explicit_mode(
+        self,
+    ) -> None:
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        web_start = text.index('writeShellScriptBin "cratedigger-web"')
+        web_end = text.index(
+            'writeShellScriptBin "cratedigger-youtube-ingest"', web_start
+        )
+        wrapper = text[web_start:web_end]
+
+        self.assertIn(
+            '${optionalString cfg.web.enableInsecure "--insecure-mode"}',
+            wrapper,
+        )
+        self.assertEqual(wrapper.count("--insecure-mode"), 1)
+
     def test_basic_secret_is_runtime_only_and_checked_before_nginx_start(
         self,
     ) -> None:

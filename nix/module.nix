@@ -559,6 +559,7 @@
     # in sync with config.ini.
     exec ${pyRunner} ${src}/web/server.py \
       --canonical-origin "https://${webHostName}" \
+      ${optionalString cfg.web.enableInsecure "--insecure-mode"} \
       --dsn "${pipelineDsn}" \
       --redis-host "${cfg.web.redis.host}" \
       --redis-port ${toString cfg.web.redis.port} \
@@ -1899,6 +1900,14 @@ in {
       cratedigger-auth-gateway = {
         serverName = webHostName;
         listen = webGatewayListen;
+        # Nginx normalizes an absolute-form request target before exposing
+        # $request_uri. Reject it from the untouched request line so it cannot
+        # acquire the exact origin-form /healthz exemption or reach the app.
+        extraConfig = ''
+          if (''$request ~ "^[^ ]+ +[A-Za-z][A-Za-z0-9+.-]*://") {
+            return 400;
+          }
+        '';
         locations."= /healthz" = {
           proxyPass = "http://unix:${webSocketPath}:/healthz";
           recommendedProxySettings = false;

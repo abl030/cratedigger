@@ -49,6 +49,11 @@ logging.basicConfig(
 log = logging.getLogger("cratedigger-web")
 
 MAX_POST_BODY_BYTES = 1024 * 1024
+INSECURE_AUTH_WARNING = (
+    "Authentication is disabled for this Cratedigger instance."
+)
+INSECURE_FOOTER_START = b"<!-- CRATEDIGGER_INSECURE_FOOTER_START -->"
+INSECURE_FOOTER_END = b"<!-- CRATEDIGGER_INSECURE_FOOTER_END -->"
 
 # Ensure this module is importable as 'web.server' even when run as __main__,
 # so route modules can `from web import server` and get the same instance.
@@ -119,6 +124,7 @@ ALL_ROUTES: list[RouteRegistration] = merge_registries(
 
 _db_dsn = None
 canonical_origin: str | None = None
+insecure_mode = False
 
 # Globals set in main() / injected by the test harness and dev server.
 # With `_db_dsn` set (production), request threads NEVER touch these —
@@ -145,6 +151,36 @@ delete_notify_fn = None
 # One-shot clients (curl, the importer's notify hooks) cost one
 # connect/teardown each — fine at single-operator scale.
 _thread_state = threading.local()
+
+
+def render_index_document(template: bytes, *, insecure: bool) -> bytes:
+    """Select the one static insecure footer block from the index template."""
+    if (
+        template.count(INSECURE_FOOTER_START) != 1
+        or template.count(INSECURE_FOOTER_END) != 1
+    ):
+        raise RuntimeError(
+            "index template must contain exactly one insecure footer block"
+        )
+    footer_start = template.index(INSECURE_FOOTER_START)
+    footer_end = template.index(INSECURE_FOOTER_END)
+    if footer_end < footer_start:
+        raise RuntimeError(
+            "index template must contain exactly one insecure footer block"
+        )
+    block_end = footer_end + len(INSECURE_FOOTER_END)
+    if insecure:
+        return template
+    return template[:footer_start] + template[block_end:]
+
+
+def configure_insecure_mode(enabled: bool) -> None:
+    """Select insecure presentation and log the explicit startup decision."""
+    global insecure_mode
+
+    insecure_mode = enabled
+    if enabled:
+        log.critical(INSECURE_AUTH_WARNING)
 
 
 class ThreadingUnixHTTPServer(
@@ -449,6 +485,8 @@ class Handler(BaseHTTPRequestHandler):
         html_path = os.path.join(os.path.dirname(__file__), path)
         with open(html_path, "rb") as f:
             body = f.read()
+        if path == "index.html":
+            body = render_index_document(body, insecure=insecure_mode)
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -726,6 +764,14 @@ def main():
         ),
     )
     parser.add_argument(
+        "--insecure-mode",
+        action="store_true",
+        help=(
+            "Render and log the explicit insecure-authentication warning. "
+            "The request-security envelope remains enforced."
+        ),
+    )
+    parser.add_argument(
         "--beets-db",
         default=None,
         help=(
@@ -759,6 +805,7 @@ def main():
     except RequestSecurityError as exc:
         parser.error(f"invalid --canonical-origin: {exc}")
     canonical_origin = args.canonical_origin
+    configure_insecure_mode(args.insecure_mode)
     if (args.beets_db is None) != (args.beets_directory is None):
         parser.error(
             "--beets-db and --beets-directory must be supplied together"
