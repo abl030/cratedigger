@@ -11,6 +11,4 @@ Always run tests and Python commands via `nix-shell --run "..."` in the cratedig
 **How to apply:** Every `python3 -m unittest`, `python3 -c`, or any Python invocation in this repo should be wrapped in `nix-shell --run "..."`. No exceptions.
 
 For the full test suite, use
-`nix-shell --run "bash scripts/run_tests.sh"`. Run it once on the final reviewed
-and committed tree immediately before the first branch push; use focused test
-modules while iterating.
+`nix-shell --run "bash scripts/run_tests.sh"`.

@@ -1,12 +1,17 @@
 ---
 name: check
-description: Run Cratedigger's final pre-push threaded type check and full test suite after focused implementation checks are complete.
+description: Run Cratedigger's receipt-backed final pre-push threaded type check and full test suite on a clean committed tree.
 ---
 
 # Final Pre-push Quality Check
 
-Use focused test modules while implementing. Invoke this skill only after the
-final tree is reviewed and committed, immediately before its first branch push.
+This skill wraps the single receipt-backed confirmation before the first push.
+The underlying whole-tree checks may also be run directly through Nix-shell
+whenever they are useful during development; direct runs provide feedback but
+do not mint final receipts or satisfy this confirmation.
+
+Invoke this skill after the tree is reviewed, committed, and clean, immediately
+before its first branch push. Both checks must confirm the same committed HEAD.
 
 ## Steps
 
@@ -19,7 +24,7 @@ Must be **0 errors**. Do not proceed if there are new errors
 (psycopg2/slskd_api "could not be resolved" warnings are OK — they're C
 extensions).
 
-2. Run the full test suite exactly once:
+2. Run the receipt-backed full test suite:
 ```bash
 scripts/run_final_gate.sh tests
 ```
@@ -38,18 +43,20 @@ worktree:
 ```bash
 scripts/run_final_gate.sh status /run/user/$UID/cratedigger-final-gate.XXXXXXXX
 ```
-`exact-active` means the receipt's helper and gate PID/start-tick identities still
-match; `pass` and `fail` are terminal; `incomplete` means no terminal result was
-recorded. A matching `pass` receipt prevents rerunning that unchanged gate. Never
-treat `fail` or `incomplete` as green; choose the next action explicitly. Receipts
-are never retried or deleted automatically.
+`exact-active` means the receipt's helper and gate PID/start-tick identities
+still match; recover it rather than launching a duplicate. `pass` and `fail` are
+terminal; `incomplete` means no terminal result was recorded. A matching `pass`
+receipt prevents rerunning that unchanged gate. Never treat `fail` or
+`incomplete` as green; choose the next action explicitly. Receipts are never
+retried or deleted automatically.
 
 The isolated final-gate worktree must remain exclusively owned for the entire
 gate. The receipt rechecks its HEAD and clean state immediately before terminal
 publication, but it is not a snapshot or protection against a concurrent writer
 that changes and perfectly restores that worktree.
 
-4. If both commands pass, push the branch once. If either fails, fix the problem,
-run focused tests while reconverging, commit and review the new tree, then
-restart this final sequence. Do not rerun it for an unchanged tree after push or
-merge.
+4. If both commands pass, push the branch once. If either fails, return the
+problem to ordinary convergence. Any pre-push tree change requires a new clean
+committed HEAD, review in proportion to the correction's risk, and a new pair
+of passing receipts. Do not rerun either passing receipt for an unchanged tree
+after push or merge.

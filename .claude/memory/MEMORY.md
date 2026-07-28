@@ -16,7 +16,7 @@
 - [Test fidelity meta-pattern](feedback_test_fidelity_meta_pattern.md) — "Fix lands in code but production never sees it" smell at DB-write and external-adapter boundaries; force real-PG round-trip + real-exception fakes
 - [No bridge, do backfill](feedback_no_bridge_no_backfill.md) — Don't write compat code for two shapes — widen the producer and backfill old rows so the DB looks uniform
 - [Single-operator, no backfill scripts](feedback_single_operator_no_backfill_scripts.md) — Backfills/one-shots are agent-driven during deploys, never committed scripts. No compat shims, no deprecated-but-kept helpers, no retry-window machinery for one-shots.
-- [Pyright on the full repo](feedback_pyright_full_repo.md) — Final validation uses `nix-shell --run "pyright --threads 4"` on the whole repo; fix pre-existing errors in the same pass
+- [Pyright on the full repo](feedback_pyright_full_repo.md) — Pyright uses `nix-shell --run "pyright --threads 4"` on the whole repo; fix pre-existing errors in the same pass
 - [No skipped tests](feedback_no_skipped_tests.md) — Skipped/gated tests are forbidden; `test_skip_audit.py` enforces it; nix-shell must provide every resource a test needs
 - [Deploy via master worktree](feedback_deploy_via_master_worktree.md) — doc2 deploys from nixosconfig master; if ~/nixosconfig is dirty/on a feature branch, do flake bumps in a throwaway worktree off origin/master
 - [Forgejo cutover deploy flow](project_forgejo_cutover_deploy_flow.md) — 2026-06-10: nixosconfig deploys via Forgejo + fleet-update, GitHub frozen; nixbot token header push; signed commits required
@@ -29,7 +29,6 @@
 - [Plex asciify_paths split](project_plex_asciify_split.md) — 2026-05-18: asciify_paths + beet move split 1,178 Plex albums; fix is Plex merge API, not Empty Trash
 - [Pyright third-party gaps](project_pyright_gaps.md) — 21 remaining pyright errors in cratedigger.py — all at third-party stub boundaries, not our code
 - [Converge is operator-authority](project_converge_operator_authority.md) — Wrong Matches converge button must NOT route deletions through the evidence classifier
-- [Focused iteration, then one final suite](feedback_focused_then_final_suite.md) — Use focused tests while converging, then threaded whole-repo Pyright and one full suite on the final committed tree before its first push
 - [SSH signing agent hang](project_ssh_signing_agent_hang.md) — git commit hangs in ssh-keygen when a wedged forwarded agent socket lingers; ssh-keygen -Y sign asks the agent before the key file; fix: SSH_AUTH_SOCK= git commit
 - [Issue #430 FakePipelineDB migration done](project_430_fakedb_migration_done.md) — 2026-06-12, PRs #440-#444; reuse the ratchet-first + real-PG parity-gate patterns
 - [Issue #445 beets-mock migration done](project_445_beets_mock_migration_done.md) — 2026-06-12, PRs #446-#450; items 1/2/4/5 done (ratchet empty, named DB methods deployed, fakes package); only item 3 (dual-module-load, own session) remains
