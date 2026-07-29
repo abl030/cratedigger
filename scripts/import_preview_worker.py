@@ -108,6 +108,10 @@ FailureHavePrepareFn = Callable[..., str]
 FailureHaveEnrichFn = Callable[..., str]
 
 
+def _noop_header_repair(_path: str) -> None:
+    """Keep force-preview measurement read-only."""
+
+
 class AutomationPreviewTerminalHandoffRequired(RuntimeError):
     """U4 boundary: automation terminal outcomes need one owner bundle."""
 
@@ -756,7 +760,7 @@ def execute_preview_job(
             download_log_id=download_log_id,
             import_job_id=job.id,
             runtime_config=cfg,
-            repair_fn=lambda _path: None,
+            repair_fn=_noop_header_repair,
         )
         return msgspec.structs.replace(result, action_path=action_path)
     preview_input = _preview_input(

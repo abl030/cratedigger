@@ -23,7 +23,6 @@ from lib.pipeline_db._shared import (
 )
 from lib.pipeline_db.cleanup_journal import (
     CleanupJournalConflict,
-    ProcessingCleanupJournalRow,
     _CleanupCursor,
 )
 from lib.pipeline_db.rows import AlbumRequestRow, album_request_row

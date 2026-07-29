@@ -25,7 +25,7 @@ from lib.artist_catalogue import (
 # replace the constants with auto-generated Mock attributes.
 from lib.artist_compare import annotate_in_library, merge_discographies
 from lib.banding import current_library_bitrate
-from lib.json_narrow import is_str_object_dict
+from lib.json_narrow import is_object_list, is_str_object_dict
 from lib.pipeline_db._shared import ProcessingOwnerProjection
 from lib.release_identity import (
     ReleaseIdentity,
@@ -144,12 +144,12 @@ def _catalogue_payload(value: object) -> object:
     payload: object = msgspec.to_builtins(value)
 
     def stamp(node: object) -> None:
-        if isinstance(node, dict):
+        if is_str_object_dict(node):
             if "source" in node and "identity_kind" in node:
                 node.setdefault("processing_owner", None)
             for child in node.values():
                 stamp(child)
-        elif isinstance(node, list):
+        elif is_object_list(node):
             for child in node:
                 stamp(child)
 
@@ -835,7 +835,7 @@ def get_artist_compare(h: RouteHandler, params: dict[str, list[str]]) -> None:
     response = _overlay_compare(skeleton, name, mbid)
     mb_artist, discogs_artist = _canonical_artist_labels(mbid, discogs_id)
     raw_payload = _catalogue_payload(response)
-    if not isinstance(raw_payload, dict):
+    if not is_str_object_dict(raw_payload):
         raise TypeError("artist compare response must serialize to an object")
     raw_payload["mb_artist"] = mb_artist
     raw_payload["discogs_artist"] = discogs_artist
