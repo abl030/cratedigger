@@ -29,6 +29,7 @@ import psycopg2.extras
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401 — sets TEST_DB_DSN env var
 
+from lib.import_queue import AutomationHandoffResult
 from lib.json_narrow import json_dict
 from lib.pipeline_db import (
     JELLYFIN_PIN_STATUSES,
@@ -40,7 +41,6 @@ from lib.pipeline_db import (
     SupersedeRaceError,
     TransferLedgerRow,
 )
-from lib.import_queue import AutomationHandoffResult
 from lib.pipeline_db._shared import REQUEST_METADATA_RESERVED_FIELDS
 from lib.quality import (
     AlbumQualityEvidenceFile,

@@ -10,7 +10,7 @@ from typing import Literal
 from hypothesis import example, given
 from hypothesis import strategies as st
 
-import tests._hypothesis_profiles
+import tests._hypothesis_profiles  # noqa: F401 - loads the active profile
 
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401

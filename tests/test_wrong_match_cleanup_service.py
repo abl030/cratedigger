@@ -17,12 +17,12 @@ from lib.import_evidence import (
     ActionEvidenceProvenance,
     CurrentEvidenceActionResult,
 )
-from lib.import_queue import IMPORT_JOB_FORCE
 from lib.import_preview import (
     PREVIEW_VERDICT_EVIDENCE_READY,
     PREVIEW_VERDICT_MEASUREMENT_FAILED,
     ImportPreviewResult,
 )
+from lib.import_queue import IMPORT_JOB_FORCE
 from lib.quality import (
     AlbumQualityEvidence,
     AlbumQualityEvidenceFile,

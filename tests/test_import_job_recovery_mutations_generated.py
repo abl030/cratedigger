@@ -174,7 +174,7 @@ class TestAutomationRecoveryCASGenerated(unittest.TestCase):
         request, job = _owner_rows()
         state = request["active_download_state"]
         if not isinstance(state, dict):
-            raise AssertionError("fixture active download state must be an object")
+            raise TypeError("fixture active download state must be an object")
         state["current_path"] = "/processing/new-incarnation"
 
         def job_only_mutant(raw: dict[str, object]) -> bool:
