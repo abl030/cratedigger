@@ -232,7 +232,7 @@ def cmd_youtube_album(db: YoutubeResolverDB, args: argparse.Namespace) -> int:
     """``pipeline-cli youtube-album <identifier> [--refresh] [--json]``.
 
     Resolves any MB / Discogs release-or-group identifier into the
-    YouTube Music distance matrix. Counterpart of ``GET
+    YouTube Music distance matrix. Counterpart of ``POST
     /api/youtube-album`` (U8). Both surfaces wrap
     ``lib.youtube_album_service.resolve_youtube_album`` — keep them in
     sync (see ``CLAUDE.md`` § "CLI ⇄ API surface symmetry"). The
@@ -380,7 +380,7 @@ def add_youtube_subparsers(
     """Add ``youtube-album`` / ``youtube-rescue`` (#521 carve out of
     ``routes_meta._build_parser``, verbatim argument definitions)."""
     # youtube-album (U7): MBID/Discogs ID → YT Music album matrix.
-    # Counterpart of ``GET /api/youtube-album`` (U8).
+    # Counterpart of ``POST /api/youtube-album`` (U8).
     p_ya = sub.add_parser(
         "youtube-album",
         help="Resolve MBID/Discogs ID → YouTube Music album matrix "

@@ -3,7 +3,7 @@
 ``web/mb.py`` and ``web/discogs.py`` hold their bases as module globals.
 ``cratedigger-web`` sets them in ``web/server.py::main()`` (flags win over
 config), but they are ALSO imported by headless processes — pipeline-cli
-(add --discogs, youtube-album, distance, Replace, field resolution) and
+(add --discogs, distance, Replace, field resolution) and
 the youtube-ingest worker. Every such entry point must call
 ``configure_api_bases_from_runtime_config()`` at startup, or it silently
 runs against the module defaults (public MB / Discogs-unset) instead of

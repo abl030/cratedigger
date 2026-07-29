@@ -138,6 +138,11 @@ class TestApiIndexRouteContract(_WebServerCase):
             post_models,
             f"PipelineAddRequest not surfaced in post_models: {post_models}",
         )
+        self.assertIn(
+            ("/api/youtube-album", "YoutubeAlbumRequest"),
+            post_models,
+            f"YoutubeAlbumRequest not surfaced in post_models: {post_models}",
+        )
         quarantine_entry = next(
             (
                 entry for entry in data

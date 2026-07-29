@@ -799,7 +799,6 @@ class TestDocLinksResolve(unittest.TestCase):
 OPTIONS_WITHOUT_DESCRIPTION_OK: frozenset[str] = frozenset({
     "slskd.deleteSearches",                       # TODO: document
     "redis.port",                                 # TODO: document
-    "web.port",                                   # TODO: document
     "web.redis.port",                              # TODO: document
     "notifiers.plex.url",                         # TODO: document
     "notifiers.plex.tokenFile",                   # TODO: document

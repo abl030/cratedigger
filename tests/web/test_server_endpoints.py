@@ -7,6 +7,7 @@ tests/web/_harness.py.
 import json
 import logging
 import os
+import re
 import socket
 import string
 import sys
@@ -15,6 +16,7 @@ import unittest
 from contextlib import contextmanager
 from email.message import Message
 from io import BytesIO
+from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -29,6 +31,17 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 from tests.web._harness import _FakeDbWebServerCase
+from web.request_security import BROWSER_CHANNEL, CHANNEL_HEADER
+
+CANONICAL_ORIGIN = "https://music.ablz.au"
+INSECURE_AUTH_WARNING = (
+    b"Authentication is disabled for this Cratedigger instance."
+)
+INSECURE_FOOTER_START = b"<!-- CRATEDIGGER_INSECURE_FOOTER_START -->"
+INSECURE_FOOTER_END = b"<!-- CRATEDIGGER_INSECURE_FOOTER_END -->"
+INDEX_TEMPLATE = (
+    Path(__file__).resolve().parents[2] / "web" / "index.html"
+)
 
 
 class _UnreadableBody(BytesIO):
@@ -116,6 +129,92 @@ def assert_clean_generic_failure(
         raise AssertionError("server logs lost generic failure detail")
 
 
+def assert_insecure_footer_contract(body: bytes) -> None:
+    """Assert the static insecure notice remains semantic and unobtrusive."""
+    if body.count(INSECURE_AUTH_WARNING) != 1:
+        raise AssertionError("insecure warning copy must occur exactly once")
+    if len(re.findall(rb"<footer(?:\s|>)", body)) != 1:
+        raise AssertionError("insecure warning must use exactly one native footer")
+    footer = re.search(
+        rb'<footer class="insecure-auth-footer"(?P<attrs>[^>]*)>'
+        rb"(?P<body>.*?)</footer>",
+        body,
+        re.DOTALL,
+    )
+    if footer is None:
+        raise AssertionError("insecure warning footer is missing")
+    attrs = footer.group("attrs").lower()
+    contents = footer.group("body").lower()
+    if attrs.strip():
+        raise AssertionError(
+            "insecure warning footer must have no inline or live attributes"
+        )
+    if any(
+        token in contents
+        for token in (
+            b"<button",
+            b"<input",
+            b"<a ",
+            b"<script",
+            b"localstorage",
+        )
+    ):
+        raise AssertionError("insecure warning must not expose dismissal controls")
+    style_blocks = re.findall(
+        rb"\.insecure-auth-footer\s*\{(?P<rules>[^}]*)\}",
+        body,
+        re.DOTALL,
+    )
+    if len(style_blocks) != 1:
+        raise AssertionError(
+            "insecure warning must have one effective footer style block"
+        )
+    if body.count(b".insecure-auth-footer") != 1:
+        raise AssertionError(
+            "insecure warning must have one effective footer selector"
+        )
+    style = re.search(
+        rb"\.insecure-auth-footer\s*\{(?P<rules>[^}]*)\}",
+        body,
+        re.DOTALL,
+    )
+    assert style is not None
+    rules = style.group("rules").lower()
+    if rules.count(b"position:") != 1 or b"position: static;" not in rules:
+        raise AssertionError(
+            "insecure warning footer must explicitly remain in normal flow"
+        )
+    if any(
+        property_name in rules
+        for property_name in (
+            b"animation:",
+            b"transition:",
+            b"transform:",
+        )
+    ):
+        raise AssertionError("insecure warning must stay in normal document flow")
+    style_end = body.index(b"</style>", style.end())
+    if body[style.end():style_end].strip():
+        raise AssertionError(
+            "insecure warning footer style must be the final effective rule"
+        )
+    if b"<style" in body[style_end + len(b"</style>"):]:
+        raise AssertionError(
+            "insecure warning footer style must be the final style block"
+        )
+    footer_offset = footer.start()
+    modal = b'<div id="replace-picker-modal" style="display:none;"></div>'
+    modal_end = body.index(modal) + len(modal)
+    script_offset = body.index(b'<script type="module" src="/js/main.js"')
+    if (
+        body[modal_end:footer_offset].strip() != INSECURE_FOOTER_START
+        or body[footer.end():script_offset].strip() != INSECURE_FOOTER_END
+    ):
+        raise AssertionError(
+            "insecure warning must follow the final modal and precede scripts"
+        )
+
+
 def _unmatched_post_observation(
     port: int,
     path: str,
@@ -125,6 +224,8 @@ def _unmatched_post_observation(
     request = (
         f"POST {path} HTTP/1.1\r\n".encode()
         + b"Host: 127.0.0.1\r\n"
+        + f"{CHANNEL_HEADER}: {BROWSER_CHANNEL}\r\n".encode()
+        + f"Origin: {CANONICAL_ORIGIN}\r\n".encode()
         + f"Content-Length: {len(body)}\r\n\r\n".encode()
         + body
     )
@@ -194,9 +295,224 @@ class TestServerEndpoints(_FakeDbWebServerCase):
     # --- GET endpoints ---
 
     def test_index_returns_html(self):
-        with urlopen(f"{self.base}/") as resp:
+        request = Request(
+            f"{self.base}/",
+            headers={CHANNEL_HEADER: BROWSER_CHANNEL},
+        )
+        with urlopen(request) as resp:
             self.assertEqual(resp.status, 200)
             self.assertIn("text/html", resp.headers.get("Content-Type", ""))
+
+    def _current_index_bytes(self) -> bytes:
+        request = Request(
+            f"{self.base}/",
+            headers={CHANNEL_HEADER: BROWSER_CHANNEL},
+        )
+        with urlopen(request) as response:
+            body = response.read()
+            self.assertEqual(
+                response.headers.get("Content-Length"), str(len(body))
+            )
+            return body
+
+    def _index_bytes(self, *, insecure: bool) -> bytes:
+        from web import server as web_server
+
+        previous_mode = web_server.insecure_mode
+        try:
+            web_server.configure_insecure_mode(insecure)
+            return self._current_index_bytes()
+        finally:
+            web_server.configure_insecure_mode(previous_mode)
+
+    def test_secure_index_omits_insecure_footer_byte_for_byte(self) -> None:
+        secure = self._index_bytes(insecure=False)
+        insecure = self._index_bytes(insecure=True)
+        footer_start = insecure.index(INSECURE_FOOTER_START)
+        footer_end = (
+            insecure.index(INSECURE_FOOTER_END)
+            + len(INSECURE_FOOTER_END)
+        )
+
+        self.assertEqual(
+            secure,
+            insecure[:footer_start] + insecure[footer_end:],
+        )
+        self.assertNotIn(INSECURE_AUTH_WARNING, secure)
+        self.assertNotIn(b'<footer class="insecure-auth-footer"', secure)
+
+    def test_insecure_index_has_one_static_semantic_footer(self) -> None:
+        body = self._index_bytes(insecure=True)
+
+        assert_insecure_footer_contract(body)
+
+    @given(insecure=st.booleans())
+    def test_index_rendering_property_tracks_only_explicit_mode(
+        self, insecure: bool,
+    ) -> None:
+        from web.index_document import render_index_document
+
+        body = render_index_document(
+            INDEX_TEMPLATE.read_bytes(), insecure=insecure,
+        )
+
+        self.assertEqual(body.count(INSECURE_AUTH_WARNING), int(insecure))
+        self.assertEqual(
+            body.count(b'<footer class="insecure-auth-footer"'),
+            int(insecure),
+        )
+
+    def test_index_renderer_rejects_duplicate_footer_marker(self) -> None:
+        from web.index_document import render_index_document
+
+        template = INDEX_TEMPLATE.read_bytes()
+        malformed = template.replace(
+            INSECURE_FOOTER_START,
+            INSECURE_FOOTER_START * 2,
+        )
+        with self.assertRaisesRegex(
+            RuntimeError, "exactly one insecure footer block",
+        ):
+            render_index_document(malformed, insecure=True)
+
+    def test_footer_contract_checker_rejects_duplicate_warning(self) -> None:
+        body = self._index_bytes(insecure=True)
+
+        with self.assertRaisesRegex(
+            AssertionError, "warning copy must occur exactly once",
+        ):
+            assert_insecure_footer_contract(
+                body.replace(
+                    INSECURE_AUTH_WARNING,
+                    INSECURE_AUTH_WARNING * 2,
+                )
+            )
+
+    def test_footer_contract_checker_rejects_inline_positioning(self) -> None:
+        body = self._index_bytes(insecure=True)
+        malformed = body.replace(
+            b'<footer class="insecure-auth-footer">',
+            (
+                b'<footer class="insecure-auth-footer" '
+                b'style="position:fixed">'
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            AssertionError, "no inline or live attributes",
+        ):
+            assert_insecure_footer_contract(malformed)
+
+    def test_footer_contract_checker_rejects_later_style_override(self) -> None:
+        body = self._index_bytes(insecure=True)
+        malformed = body.replace(
+            b"</style>",
+            (
+                b".insecure-auth-footer { position: fixed; }\n"
+                b"</style>"
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            AssertionError, "one effective footer style block",
+        ):
+            assert_insecure_footer_contract(malformed)
+
+    def test_footer_contract_checker_rejects_later_style_block(self) -> None:
+        body = self._index_bytes(insecure=True)
+        malformed = body.replace(
+            b"</head>",
+            (
+                b"<style>"
+                b"footer { position: fixed !important; }"
+                b"</style>\n"
+                b"</head>"
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            AssertionError, "final style block",
+        ):
+            assert_insecure_footer_contract(malformed)
+
+    def test_footer_contract_checker_rejects_pre_modal_placement(self) -> None:
+        body = self._index_bytes(insecure=True)
+        block_start = body.index(INSECURE_FOOTER_START)
+        block_end = (
+            body.index(INSECURE_FOOTER_END)
+            + len(INSECURE_FOOTER_END)
+        )
+        footer_block = body[block_start:block_end]
+        without_footer = body[:block_start] + body[block_end:]
+        modal_offset = without_footer.index(
+            b'<div id="replace-picker-modal"'
+        )
+        malformed = (
+            without_footer[:modal_offset]
+            + footer_block
+            + without_footer[modal_offset:]
+        )
+
+        with self.assertRaisesRegex(
+            AssertionError, "follow the final modal",
+        ):
+            assert_insecure_footer_contract(malformed)
+
+    def test_insecure_startup_emits_one_critical_warning(self) -> None:
+        from web import server as web_server
+
+        with (
+            patch.object(web_server, "insecure_mode", False),
+            self.assertLogs(
+                "cratedigger-web", level="CRITICAL",
+            ) as captured,
+        ):
+            web_server.configure_insecure_mode(True)
+
+        self.assertEqual(len(captured.records), 1)
+        self.assertEqual(captured.records[0].levelno, logging.CRITICAL)
+        self.assertIn(
+            INSECURE_AUTH_WARNING.decode(),
+            captured.records[0].getMessage(),
+        )
+
+    def test_secure_startup_emits_no_insecure_warning(self) -> None:
+        from web import server as web_server
+
+        with (
+            patch.object(web_server, "insecure_mode", True),
+            self.assertNoLogs("cratedigger-web", level="CRITICAL"),
+        ):
+            web_server.configure_insecure_mode(False)
+
+    def test_insecure_configuration_composes_with_http_rendering(self) -> None:
+        from web import server as web_server
+
+        previous_mode = web_server.insecure_mode
+        self.addCleanup(
+            setattr, web_server, "insecure_mode", previous_mode,
+        )
+
+        with self.assertLogs(
+            "cratedigger-web", level="CRITICAL",
+        ) as captured:
+            web_server.configure_insecure_mode(True)
+            insecure = self._current_index_bytes()
+
+        self.assertEqual(len(captured.records), 1)
+        self.assertEqual(captured.records[0].levelno, logging.CRITICAL)
+        self.assertIn(
+            INSECURE_AUTH_WARNING.decode(),
+            captured.records[0].getMessage(),
+        )
+        assert_insecure_footer_contract(insecure)
+
+        with self.assertNoLogs("cratedigger-web", level="CRITICAL"):
+            web_server.configure_insecure_mode(False)
+            secure = self._current_index_bytes()
+
+        self.assertNotIn(INSECURE_AUTH_WARNING, secure)
+        self.assertNotIn(b'<footer class="insecure-auth-footer"', secure)
 
     def test_pipeline_log_returns_entries(self):
         status, data = self._get("/api/pipeline/log")
@@ -534,7 +850,9 @@ class TestServerEndpoints(_FakeDbWebServerCase):
         request = (
             b"POST /api/nonexistent HTTP/1.1\r\n"
             b"Host: 127.0.0.1\r\n"
-            b"Content-Type: application/json\r\n"
+            + f"{CHANNEL_HEADER}: {BROWSER_CHANNEL}\r\n".encode()
+            + f"Origin: {CANONICAL_ORIGIN}\r\n".encode()
+            + b"Content-Type: application/json\r\n"
             + f"Content-Length: {len(body)}\r\n\r\n".encode()
             + body
             + b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
@@ -870,7 +1188,15 @@ class TestClientDisconnectHandling(_FakeDbWebServerCase):
         server-side observable state, not on the client response."""
         url = f"{self.base}{path}"
         data = json.dumps(body).encode()
-        req = Request(url, data=data, headers={"Content-Type": "application/json"})
+        req = Request(
+            url,
+            data=data,
+            headers={
+                "Content-Type": "application/json",
+                CHANNEL_HEADER: BROWSER_CHANNEL,
+                "Origin": CANONICAL_ORIGIN,
+            },
+        )
         try:
             with urlopen(req, timeout=2) as resp:
                 return resp.status, json.loads(resp.read())

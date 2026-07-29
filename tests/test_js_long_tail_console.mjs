@@ -283,5 +283,54 @@ console.log('checkYoutube leaves no residual ConsoleState when mb_release_id is 
   state.longTail = { rows: null, band: null, query: '' };
 }
 
+console.log('checkYoutube posts the complete resolver body');
+{
+  const { state } = await import('../web/js/state.js');
+  const {
+    checkYoutube,
+    consoleStates: liveConsoleStates,
+  } = await import('../web/js/long_tail_console.js');
+  const requestId = 434343;
+  const identifier = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+  const fetchCalls = [];
+  const originalFetch = globalThis.fetch;
+  state.longTail = {
+    rows: [{ id: requestId, mb_release_id: identifier }],
+    band: null,
+    query: '',
+  };
+  globalThis.fetch = async (url, options) => {
+    fetchCalls.push({ url, options });
+    return {
+      status: 200,
+      json: async () => ({
+        outcome: 'ok',
+        youtube_releases: [],
+        from_cache: false,
+        error_message: null,
+      }),
+    };
+  };
+  try {
+    await checkYoutube(requestId);
+  } finally {
+    globalThis.fetch = originalFetch;
+    liveConsoleStates.delete(requestId);
+    state.longTail = { rows: null, band: null, query: '' };
+  }
+
+  assertEqual(fetchCalls.length, 1, 'resolver click sends exactly one request');
+  assertEqual(fetchCalls[0].url, '/api/youtube-album',
+    'resolver click targets the canonical route without query parameters');
+  assertEqual(fetchCalls[0].options.method, 'POST',
+    'resolver click uses POST so browser provenance is enforced');
+  assertEqual(fetchCalls[0].options.headers['Content-Type'], 'application/json',
+    'resolver click declares its JSON body');
+  assertEqual(fetchCalls[0].options.body, JSON.stringify({
+    identifier,
+    refresh: false,
+  }), 'resolver click sends identifier and refresh in the JSON body');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

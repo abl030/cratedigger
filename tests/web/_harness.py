@@ -21,6 +21,12 @@ from urllib.request import Request, urlopen
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from tests.fakes import FakePipelineDB
+from web.request_security import (
+    BROWSER_CHANNEL,
+    CHANNEL_HEADER,
+)
+
+CANONICAL_ORIGIN = "https://music.ablz.au"
 
 # Production-shaped ``validation_result`` template for wrong-match
 # seeding (the JSONB blob a rejected download_log row carries). Tests
@@ -76,19 +82,44 @@ class _WebServerCase(unittest.TestCase):
         # ResourceWarning into the suite output (#445 item 5).
         cls.server.server_close()
 
-    def _get(self, path: str) -> tuple[int, dict]:
+    def _get(
+        self,
+        path: str,
+        *,
+        headers: dict[str, str] | None = None,
+        include_security: bool = True,
+    ) -> tuple[int, dict]:
         url = f"{self.base}{path}"
+        request_headers = (
+            {CHANNEL_HEADER: BROWSER_CHANNEL} if include_security else {}
+        )
+        request_headers.update(headers or {})
+        request = Request(url, headers=request_headers)
         try:
-            with urlopen(url) as resp:
+            with urlopen(request) as resp:
                 return resp.status, json.loads(resp.read())
         except HTTPError as e:
             with e:
                 return e.code, json.loads(e.read())
 
-    def _post(self, path: str, body: dict) -> tuple[int, dict]:
+    def _post(
+        self,
+        path: str,
+        body: dict,
+        *,
+        headers: dict[str, str] | None = None,
+        include_security: bool = True,
+    ) -> tuple[int, dict]:
         url = f"{self.base}{path}"
         data = json.dumps(body).encode()
-        req = Request(url, data=data, headers={"Content-Type": "application/json"})
+        request_headers = {"Content-Type": "application/json"}
+        if include_security:
+            request_headers.update({
+                CHANNEL_HEADER: BROWSER_CHANNEL,
+                "Origin": CANONICAL_ORIGIN,
+            })
+        request_headers.update(headers or {})
+        req = Request(url, data=data, headers=request_headers)
         try:
             with urlopen(req) as resp:
                 return resp.status, json.loads(resp.read())
@@ -149,6 +180,7 @@ def _make_server():
 
     srv.db = FakePipelineDB()
     srv.beets_db_path = None  # No beets DB in tests
+    srv.canonical_origin = CANONICAL_ORIGIN
 
     # Mirror production: ThreadingHTTPServer + the same Handler.
     server = ThreadingHTTPServer(("127.0.0.1", 0), srv.Handler)

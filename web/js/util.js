@@ -279,7 +279,7 @@ export function renderForensicBlock(last) {
  * section machine. Pure / DOM-free — the renderer branches on the
  * returned `state`.
  *
- * IMPORTANT: the resolver GET is slow and side-effectful (it runs the
+ * IMPORTANT: the resolver POST is slow and side-effectful (it runs the
  * resolve + caches). U4 must NOT auto-call it; `null` (no result yet)
  * always maps to `never_run` so the console defaults to the "Check
  * YouTube" button. U5 wires the actual fetch and re-classifies the

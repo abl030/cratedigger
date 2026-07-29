@@ -223,11 +223,11 @@ Object.assign(window, {
   openReplacePicker: openReplacePickerAndHandle,
   toggleWrongMatchesReplacedFilter,
   // Long-tail YouTube rescue (U5) — the two-step flow. `checkYoutube` runs
-  // the slow, side-effectful resolver GET (double-fire-guarded, stale-result
+  // the slow, side-effectful resolver POST (double-fire-guarded, stale-result
   // stamped) and re-renders the YouTube panel with pickable rescue targets;
   // `pickYoutubeRescue` opens the confirm overlay for a chosen target and
   // submits the rescue, mapping every ingest outcome to specific console
-  // copy. The resolver GET is NOT auto-called on console open (U4 leaves the
+  // copy. The resolver POST is NOT auto-called on console open (U4 leaves the
   // panel in `never_run` until the operator clicks).
   checkYoutube,
   pickYoutubeRescue,
