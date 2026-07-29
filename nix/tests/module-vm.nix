@@ -756,6 +756,31 @@ pkgs.testers.nixosTest {
         values = _response_header_values(raw_headers, name)
         assert values == [], (name, values, raw_headers)
 
+    def _assert_health_response_headers(raw_headers):
+        _assert_exact_response_header(
+            raw_headers,
+            "Content-Security-Policy",
+            "frame-ancestors 'none'",
+        )
+        _assert_exact_response_header(
+            raw_headers,
+            "X-Frame-Options",
+            "DENY",
+        )
+        _assert_exact_response_header(
+            raw_headers,
+            "Cross-Origin-Resource-Policy",
+            "same-origin",
+        )
+        _assert_absent_response_header(raw_headers, "WWW-Authenticate")
+        for cors_name in (
+            "Access-Control-Allow-Origin",
+            "Access-Control-Allow-Credentials",
+            "Access-Control-Allow-Methods",
+            "Access-Control-Allow-Headers",
+        ):
+            _assert_absent_response_header(raw_headers, cors_name)
+
     def _raw_http(request, target):
         encoded = base64.b64encode(request).decode("ascii")
         result = json.loads(machine.succeed(
@@ -2185,29 +2210,7 @@ pkgs.testers.nixosTest {
         assert status == "204", (method, status)
         machine.succeed(f"test ! -s {body_path}")
         raw_headers = machine.succeed(f"cat {header_path}")
-        _assert_exact_response_header(
-            raw_headers,
-            "Content-Security-Policy",
-            "frame-ancestors 'none'",
-        )
-        _assert_exact_response_header(
-            raw_headers,
-            "X-Frame-Options",
-            "DENY",
-        )
-        _assert_exact_response_header(
-            raw_headers,
-            "Cross-Origin-Resource-Policy",
-            "same-origin",
-        )
-        _assert_absent_response_header(raw_headers, "WWW-Authenticate")
-        for cors_name in (
-            "Access-Control-Allow-Origin",
-            "Access-Control-Allow-Credentials",
-            "Access-Control-Allow-Methods",
-            "Access-Control-Allow-Headers",
-        ):
-            _assert_absent_response_header(raw_headers, cors_name)
+        _assert_health_response_headers(raw_headers)
 
     # Same-origin provenance through real nginx. Valid Origin, Referer
     # fallback, and matching-both reach route validation (400 for the
@@ -2561,21 +2564,19 @@ pkgs.testers.nixosTest {
         )
 
     def _assert_exact_insecure_health():
-        for index, method_flag in enumerate(("", "--head")):
+        for index, method in enumerate(("GET", "HEAD")):
             header_path = f"/tmp/insecure-health-{index}.headers"
             body_path = f"/tmp/insecure-health-{index}.body"
             status = machine.succeed(
-                f"curl --max-time 5 -sS {method_flag} "
+                f"curl --max-time 5 -sS -X {method} "
                 f"-D {header_path} -o {body_path} -w '%{{http_code}}' "
                 "-H 'Host: music.vm.test' "
                 "https://music.vm.test:18443/healthz"
             ).strip()
-            assert status == "204", (method_flag, status)
+            assert status == "204", (method, status)
             machine.succeed(f"test ! -s {body_path}")
             raw_headers = machine.succeed(f"cat {header_path}")
-            assert raw_headers.splitlines()[0].startswith("HTTP/1.1 204"), (
-                method_flag, raw_headers,
-            )
+            _assert_health_response_headers(raw_headers)
         machine.succeed(
             "test \"$(curl --max-time 5 -sS -o /dev/null "
             "-w '%{http_code}' -H 'Host: music.vm.test' "
@@ -2821,10 +2822,11 @@ pkgs.testers.nixosTest {
         "systemctl daemon-reload; "
         "systemctl start cratedigger-web.service"
     )
-    machine.succeed(
+    machine.wait_until_succeeds(
         "pid=$(systemctl show cratedigger-web.service -p MainPID --value); "
         "tr '\\0' '\\n' < /proc/$pid/cmdline "
-        "| grep -Fx -- '--insecure-mode'"
+        "| grep -Fx -- '--insecure-mode'",
+        timeout=10,
     )
 
     # A failed insecure -> Basic deployment must not leave the old anonymous
