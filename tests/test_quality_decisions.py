@@ -977,6 +977,11 @@ EXPECTED_RESULT_KEYS = {
     # The persisted comparison basis (plain builtins) from stage 2's
     # measured decision, None when no existing album was compared.
     "comparison_basis",
+    # AUDIT ONLY (issue #829 Phase 5 PR2d): what Stage 2 would have decided
+    # in the worlds where a Stage-1 spectral reject short-circuits before
+    # Stage 2 runs. Reporting keys — no branch reads them.
+    "stage2_import_if_stage1_deferred",
+    "comparison_basis_if_stage1_deferred",
 }
 
 # Valid values for each stage (None means stage was skipped)

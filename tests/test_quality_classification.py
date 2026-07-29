@@ -16,7 +16,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from datetime import UTC
 
-from lib.quality import CodecFamily, full_pipeline_decision
+from lib.quality import (
+    STAGE2_COUNTERFACTUAL_UNAVAILABLE,
+    CodecFamily,
+    full_pipeline_decision,
+)
 from tests.helpers import (
     build_parity_candidate_evidence,
     build_parity_current_evidence,
@@ -2059,6 +2063,253 @@ class TestPreimportFactRejects(unittest.TestCase):
         self.assertEqual(r["final_status"], "wanted")
         self.assertTrue(r["denylisted"])
         self.assertTrue(r["keep_searching"])
+
+
+class TestStage2CounterfactualAudit(unittest.TestCase):
+    """PAIR (deterministic half) — issue #829 Phase 5 PR2d.
+
+    A Stage-1 spectral reject short-circuits before Stage 2 ever runs, so
+    "Stage 1 rejected this, and Stage 2 would have said X" — the
+    disagreement issue #813 is about, and the single most useful thing an
+    operator can be told about a spectral reject — was computed nowhere.
+    ``full_pipeline_decision`` now computes it and reports it under two
+    audit-only keys.
+
+    The generated twins live in ``tests/test_quality_generated.py``:
+    ``test_the_counterfactual_is_absent_unless_stage1_short_circuits``,
+    ``test_the_stage1_reject_decision_is_unchanged_by_its_audit`` and
+    ``test_the_reported_counterfactual_is_what_stage_2_decides``.
+    """
+
+    @staticmethod
+    def _decide(*, spectral_bitrate: int):
+        """An MP3 CBR pair whose classes are comparable (same codec, both
+        legacy stored buckets, both grades authorizing). The candidate's
+        class is the only variable: strictly lower than the HAVE's 192 is
+        the one shape ``spectral_import_decision`` rejects on. Shared
+        verbatim with the generated half's
+        ``_STAGE1_REJECT_COUNTERFACTUAL_WORLD``.
+        """
+        return full_pipeline_decision(
+            is_flac=False, min_bitrate=256, avg_bitrate=256, is_cbr=True,
+            is_vbr=False, new_format="MP3",
+            spectral_grade="likely_transcode",
+            spectral_bitrate=spectral_bitrate,
+            existing_min_bitrate=256, existing_avg_bitrate=256,
+            existing_format="MP3", existing_is_cbr=True,
+            existing_spectral_grade="likely_transcode",
+            existing_spectral_bitrate=192,
+        )
+
+    @staticmethod
+    def _decide_raising_tail(*, spectral_bitrate: int):
+        """A FLAC-convert world whose Stage-2 tail RAISES.
+
+        ``comparison_format_hint`` passes the bare ``MP3`` label straight
+        through to ``TargetQualityContract.from_explicit_label``, which
+        rejects it because a bare MP3 declares neither CBR nor VBR. That is
+        the one Stage-2 path a Stage-1 reject never used to reach.
+        """
+        return full_pipeline_decision(
+            is_flac=True, min_bitrate=200, is_cbr=True,
+            new_format="MP3", target_format="mp3",
+            existing_min_bitrate=256, existing_format="MP3",
+            existing_is_cbr=True,
+            existing_spectral_grade="likely_transcode",
+            existing_spectral_bitrate=192,
+            converted_count=1, supported_lossless_source=False,
+            spectral_grade="likely_transcode",
+            spectral_bitrate=spectral_bitrate,
+        )
+
+    def test_stage1_reject_reports_what_stage2_would_have_decided(self):
+        r = self._decide(spectral_bitrate=128)
+
+        self.assertEqual(r["stage1_spectral"], "reject")
+        # The counterfactual: Stage 2 would have called this a downgrade,
+        # scoring the candidate "worse" on rank. Nothing in the pipeline
+        # computed that before this audit existed.
+        self.assertEqual(r["stage2_import_if_stage1_deferred"], "downgrade")
+        basis = r["comparison_basis_if_stage1_deferred"]
+        assert isinstance(basis, dict)
+        self.assertEqual(basis["verdict"], "worse")
+        self.assertEqual(basis["branch"], "rank")
+
+    def test_the_audit_changes_no_decision_field(self):
+        """Inertness, field by field: a Stage-1 reject decides exactly what
+        it decided before the counterfactual was computed."""
+        r = self._decide(spectral_bitrate=128)
+
+        self.assertEqual(r["final_status"], "wanted")
+        self.assertTrue(r["keep_searching"])
+        self.assertTrue(r["denylisted"])
+        self.assertFalse(r["imported"])
+        self.assertFalse(r["verified_lossless"])
+        # Stage 2 and Stage 3 never ran for the DECISION, whatever the
+        # counterfactual computed.
+        self.assertIsNone(r["stage2_import"])
+        self.assertIsNone(r["stage3_quality_gate"])
+        self.assertIsNone(r["comparison_basis"])
+        self.assertIsNone(r["target_final_format"])
+
+    def test_a_deferring_world_reports_no_counterfactual(self):
+        """Both keys exist on every result and stay None when Stage 2 really
+        ran — a counterfactual beside a real decision would be a second,
+        contradictory answer."""
+        r = self._decide(spectral_bitrate=192)
+
+        self.assertNotEqual(r["stage1_spectral"], "reject")
+        self.assertIsNotNone(r["stage2_import"])
+        self.assertIsNone(r["stage2_import_if_stage1_deferred"])
+        self.assertIsNone(r["comparison_basis_if_stage1_deferred"])
+
+    def test_a_counterfactual_that_raises_cannot_break_the_decision(self):
+        """The audit may not turn a clean Stage-1 reject into a crash.
+
+        The trigger is PRODUCED, not invented
+        (``.claude/rules/test-fidelity.md`` Rule C): the first half drives
+        the real decider over the deferring twin of this world and shows
+        that Stage 2 really does raise there. See
+        ``_decide_raising_tail`` for which production call raises and why.
+        """
+        with self.assertRaises(ValueError) as raised:
+            self._decide_raising_tail(spectral_bitrate=192)
+        self.assertIn("bare MP3", str(raised.exception))
+
+        r = self._decide_raising_tail(spectral_bitrate=128)
+
+        self.assertEqual(r["stage1_spectral"], "reject")
+        self.assertEqual(r["final_status"], "wanted")
+        self.assertTrue(r["keep_searching"])
+        self.assertTrue(r["denylisted"])
+        self.assertFalse(r["imported"])
+        self.assertIsNone(r["stage2_import"])
+        # Reported, not silent: "the audit could not run" is a different
+        # fact from "Stage 1 never short-circuited" (which is what a None
+        # here means), and the operator is entitled to both.
+        self.assertEqual(
+            r["stage2_import_if_stage1_deferred"],
+            STAGE2_COUNTERFACTUAL_UNAVAILABLE,
+        )
+        self.assertIsNone(r["comparison_basis_if_stage1_deferred"])
+
+    def test_a_lossless_source_candidate_reports_its_own_counterfactual(self):
+        """The counterfactual on a LOSSLESS-SOURCE Stage-2 branch, through
+        the production decider (issue #829 Phase 5 PR2d review S1).
+
+        Every other test here is native-lossy. This is the shape the
+        evidence entrypoint really produces: a proof-bearing candidate whose
+        measurement wears an MP3 label against a lossless target, so
+        ``_lossless_source_from_evidence`` is True and the FLAC-keep branch
+        runs. Its counterfactual always lands in the provisional lane, and
+        that is not a limitation of the test — Stage 1's carve-out
+        (``provisional_source_candidate and has_provisional_probe_input``)
+        spares every lossless-source candidate that HAS probe evidence, so
+        the only ones that short-circuit are the ones with none.
+        """
+        import msgspec
+
+        from lib.quality import (
+            AlbumQualityEvidenceDecisionFacts,
+            VerifiedLosslessProof,
+            full_pipeline_decision_from_evidence,
+        )
+
+        candidate = msgspec.structs.replace(
+            build_parity_candidate_evidence(
+                is_flac=False, min_bitrate=250, avg_bitrate=250, is_cbr=False,
+                spectral_grade="likely_transcode", spectral_bitrate=128,
+            ),
+            verified_lossless_proof=VerifiedLosslessProof(
+                provenance="measured", source="test", classifier="test"),
+        )
+        current = build_parity_current_evidence(
+            min_bitrate=256, avg_bitrate=256, format="MP3", is_cbr=True,
+            spectral_grade="likely_transcode", spectral_bitrate=192,
+        )
+
+        r = full_pipeline_decision_from_evidence(
+            candidate, current,
+            facts=AlbumQualityEvidenceDecisionFacts(target_format="flac"),
+        )
+
+        self.assertEqual(r["stage0_spectral_gate"], "skipped_flac")
+        self.assertEqual(r["stage1_spectral"], "reject")
+        self.assertEqual(
+            r["stage2_import_if_stage1_deferred"],
+            "suspect_lossless_probe_missing",
+        )
+        # No comparison ran in the counterfactual, so no basis — a real
+        # outcome, not a failure to evaluate.
+        self.assertIsNone(r["comparison_basis_if_stage1_deferred"])
+        # ... and the decision itself is the untouched Stage-1 reject.
+        self.assertIsNone(r["stage2_import"])
+        self.assertIsNone(r["stage3_quality_gate"])
+        self.assertIsNone(r["comparison_basis"])
+        self.assertEqual(r["final_status"], "wanted")
+        self.assertTrue(r["keep_searching"])
+        self.assertFalse(r["imported"])
+
+    def test_the_evidence_twin_reports_the_same_counterfactual(self):
+        """The production decider the importer calls carries the audit too —
+        the same parity contract every other scenario in this module owes."""
+        from lib.quality import full_pipeline_decision_from_evidence
+
+        candidate = build_parity_candidate_evidence(
+            is_flac=False, min_bitrate=256, avg_bitrate=256, is_cbr=True,
+            spectral_grade="likely_transcode", spectral_bitrate=128,
+        )
+        current = build_parity_current_evidence(
+            min_bitrate=256, avg_bitrate=256, format="MP3", is_cbr=True,
+            spectral_grade="likely_transcode", spectral_bitrate=192,
+        )
+
+        r = full_pipeline_decision_from_evidence(candidate, current)
+
+        self.assertEqual(r["stage1_spectral"], "reject")
+        self.assertEqual(r["stage2_import_if_stage1_deferred"], "downgrade")
+        self.assertIsNone(r["stage2_import"])
+        self.assertEqual(r["final_status"], "wanted")
+        self.assertTrue(r["keep_searching"])
+
+    def test_early_exit_paths_carry_the_audit_keys_as_none(self):
+        """The two twins share ONE documented dict shape; the evidence
+        decider's hand-written early-exit dicts must not drift from it."""
+        import msgspec
+
+        from lib.quality import (
+            VerifiedLosslessProof,
+            full_pipeline_decision_from_evidence,
+        )
+
+        corrupt = build_parity_candidate_evidence(
+            is_flac=False, min_bitrate=245, is_cbr=False, audio_corrupt=True,
+        )
+        proof_bearing_current = build_parity_current_evidence(
+            min_bitrate=320, avg_bitrate=320, format="MP3", is_cbr=True)
+        assert proof_bearing_current is not None
+        proof_bearing_current = msgspec.structs.replace(
+            proof_bearing_current,
+            verified_lossless_proof=VerifiedLosslessProof(
+                provenance="measured", source="test", classifier="test"),
+        )
+        simulator_keys = set(full_pipeline_decision(
+            is_flac=False, min_bitrate=256, is_cbr=False).keys())
+
+        for name, result in (
+            ("preimport reject",
+             full_pipeline_decision_from_evidence(corrupt, None)),
+            ("verified-lossless lock", full_pipeline_decision_from_evidence(
+                build_parity_candidate_evidence(
+                    is_flac=False, min_bitrate=245, is_cbr=False),
+                proof_bearing_current,
+            )),
+        ):
+            with self.subTest(path=name):
+                self.assertEqual(set(result.keys()), simulator_keys)
+                self.assertIsNone(result["stage2_import_if_stage1_deferred"])
+                self.assertIsNone(
+                    result["comparison_basis_if_stage1_deferred"])
 
 
 if __name__ == "__main__":
