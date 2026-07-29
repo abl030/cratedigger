@@ -3060,6 +3060,75 @@ class TestCmdQualityLiveCandidateReplay(unittest.TestCase):
         self.assertIn("REJECT, denylist", output)
         self.assertIn("stage2_import=downgrade", output)
 
+    def test_a_stage1_reject_shows_what_stage2_would_have_decided(self):
+        """Issue #829 Phase 5 PR2d: a Stage-1 spectral reject short-circuits
+        before Stage 2 runs, so the printed chain stops at
+        ``stage1_spectral=reject`` and says nothing about whether the
+        candidate was actually an upgrade. The decider now reports that
+        counterfactual and the operator surface shows it."""
+        from lib.quality import AlbumQualityEvidenceFile, AudioQualityMeasurement
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=5010, mb_release_id="mbid-stage1-reject", status="wanted",
+            min_bitrate=320, current_spectral_grade="likely_transcode",
+            current_spectral_bitrate=192,
+        ))
+
+        current = make_album_quality_evidence(
+            mb_release_id="mbid-stage1-reject",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=320, avg_bitrate_kbps=320,
+                format="MP3", is_cbr=True,
+                spectral_grade="likely_transcode", spectral_bitrate_kbps=192,
+            ),
+        )
+        db.upsert_album_quality_evidence(current)
+        current_persisted = db.find_album_quality_evidence(
+            mb_release_id=current.mb_release_id,
+            snapshot_fingerprint=current.snapshot_fingerprint,
+        )
+        assert current_persisted is not None and current_persisted.id is not None
+        db.set_request_current_evidence(5010, current_persisted.id)
+
+        log_id = db.log_download(request_id=5010, outcome="rejected")
+        candidate = make_album_quality_evidence(
+            mb_release_id="mbid-stage1-reject",
+            source_path="/tmp/stage1-reject-source",
+            # Evidence is content-addressed by (mb_release_id,
+            # snapshot_fingerprint), and the fingerprint comes from ``files``
+            # — a shared default file list would collapse the candidate and
+            # the installed copy into ONE row.
+            files=[AlbumQualityEvidenceFile(
+                relative_path="01 - candidate.mp3", size_bytes=222,
+                mtime_ns=2, extension="mp3", container="mp3", codec="mp3",
+            )],
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=256, avg_bitrate_kbps=256,
+                format="MP3", is_cbr=True,
+                spectral_grade="likely_transcode", spectral_bitrate_kbps=128,
+            ),
+        )
+        db.upsert_album_quality_evidence(candidate)
+        candidate_persisted = db.find_album_quality_evidence(
+            mb_release_id=candidate.mb_release_id,
+            snapshot_fingerprint=candidate.snapshot_fingerprint,
+        )
+        assert (
+            candidate_persisted is not None
+            and candidate_persisted.id is not None
+        )
+        db.set_download_log_candidate_evidence(log_id, candidate_persisted.id)
+
+        output = self._run(db, 5010)
+
+        self.assertIn("stage1_spectral=reject", output)
+        self.assertIn(
+            "if stage 1 had deferred: stage2=downgrade, scoring the candidate "
+            "worse",
+            output,
+        )
+
     def test_uses_the_newest_candidate_when_several_exist(self):
         from lib.quality import AudioQualityMeasurement
 

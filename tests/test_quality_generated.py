@@ -44,8 +44,8 @@ import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.dispatch.quality_gate import QualityGatePlan, _check_quality_gate_core
 from lib.dispatch.types import QualityGateState
 from lib.quality import (
+    CODEC_FAMILY_MP3,
     COMPARISON_BASIS_BRANCHES,
-    EVIDENCE_PROVENANCE_MEASURED,
     EVIDENCE_SUBJECT_INSTALLED,
     EVIDENCE_SUBJECT_SOURCE,
     QUALITY_UPGRADE_TIERS,
@@ -54,6 +54,7 @@ from lib.quality import (
     AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
+    CodecFamily,
     QualityComparisonBasis,
     QualityRank,
     QualityRankConfig,
@@ -62,17 +63,15 @@ from lib.quality import (
     SpectralEvidenceFacts,
     TargetQualityContract,
     VerifiedLosslessProof,
-    build_existing_quality_measurement,
     classify_full_pipeline_decision,
-    compare_quality,
     compute_effective_override_bitrate,
     decision_class_kbps,
     determine_verified_lossless,
     evidence_decision_name,
     full_pipeline_decision,
     full_pipeline_decision_from_evidence,
-    interpret_measurement,
     interpret_spectral_evidence,
+    ladder_class_kbps,
     legacy_unrecorded_audio_validation_report,
     quality_gate_decision,
     quality_rank,
@@ -440,6 +439,37 @@ class StageParityWorld:
     rather than rescaled. Phase 5 PR2b shipped the refusal
     (``spectral_classes_comparable``); ``inadmissible_spectral_pair_worlds``
     below patrols the domain this world type still excludes.
+
+    **MIXED DERIVATION BASIS IS NOW IN SCOPE (issue #829 Phase 5 PR2d).**
+    ``new_cliff_hz``/``existing_cliff_hz`` carry each side's raw cliff, so a
+    world can pair a cliff-derived class against a legacy stored bucket
+    WITHIN one codec family — the ``mixed_derivation_basis`` refusal, which
+    is same-codec and therefore was never in the cross-codec property's
+    domain either. It is where a Stage-1-ONLY defect can diverge from Stage
+    2 at all: the comparability gate is the only seam that moves Stage 1
+    without moving the shared clamp with it. Measured over 5,000 draws of
+    ``stage_parity_worlds``: the shipped code produces ZERO contradictions
+    while reaching 236 Stage-1 rejects, reverting the gate produces 5 (1 in
+    1,000), the full pre-#829 seam (raw stored buckets AND no gate) 130 (1
+    in 38), and raw stored buckets WITHOUT the gate revert 90 (1 in 55).
+
+    That last figure corrects a claim an earlier draft of this PR made.
+    Raw stored buckets change the class BOTH stages read, so it is tempting
+    to reason that the stages move together and no parity property could
+    ever see it. They do not: the comparability gate keeps Stage 1 on the
+    real interpretation, so the change is asymmetric wherever a grade does
+    not authorize a class, and this property kills it at both tiers. Do not
+    infer from a mutant's inputs which stages it moves — measure.
+
+    The class ≤ own container convention above is load-bearing for those
+    measurements, not decoration. Over 25,000 draws of a probe domain that
+    relaxes ONLY that constraint (a one-shot, not this strategy), the
+    SHIPPED code reports 139 "contradictions" — one per ~180 — and every
+    one is in the unbound / self-inconsistent evidence domain #828 item 1
+    records as deliberately unpatrolled (``docs/quality-verification.md`` §
+    "Stage 1 / Stage 2 parity"). The cliff strategy below therefore derives
+    its bound through ``ladder_class_kbps``, the same function the decider
+    uses.
     """
     grade: str
     new_container: int
@@ -451,76 +481,138 @@ class StageParityWorld:
     existing_is_cbr: bool
     new_format: str
     existing_format: str
+    # Raw per-side cliffs. ``None`` on both sides is the legacy
+    # stored-bucket world every pin below describes.
+    new_cliff_hz: int | None = None
+    existing_cliff_hz: int | None = None
+    # Lossless-source dimensions, drawn only by ``stage1_rejecting_flac_worlds``
+    # (issue #829 Phase 5 PR2d review S1): they select which of
+    # ``full_pipeline_decision``'s three Stage-2 branches the counterfactual
+    # runs, and the no-disagreement property above leaves them at the
+    # native-lossy defaults.
+    is_flac: bool = False
+    target_format: str | None = None
+    supported_lossless_source: bool | None = None
+
+
+def _stage_parity_decision(world: StageParityWorld) -> dict[str, object]:
+    """Drive the REAL decider over one ``StageParityWorld``.
+
+    ``min_bitrate == avg_bitrate == container`` on each side, both spectral
+    estimates carried as the stored bucket the world declares, and no
+    existing-side override (the disarm identity has its own property). Every
+    value the properties below read comes out of this one call.
+
+    ``is_flac``/``target_format``/``supported_lossless_source`` default to
+    the native-lossy shape and are drawn only by
+    ``stage1_rejecting_flac_worlds`` — they choose which Stage-2 branch the
+    counterfactual actually runs.
+    """
+    return full_pipeline_decision(
+        is_flac=world.is_flac,
+        target_format=world.target_format,
+        supported_lossless_source=world.supported_lossless_source,
+        min_bitrate=world.new_container,
+        avg_bitrate=world.new_container,
+        is_cbr=world.new_is_cbr,
+        is_vbr=not world.new_is_cbr,
+        new_format=world.new_format,
+        spectral_grade=world.grade,
+        spectral_bitrate=world.new_spectral,
+        existing_min_bitrate=world.existing_container,
+        existing_avg_bitrate=world.existing_container,
+        existing_format=world.existing_format,
+        existing_is_cbr=world.existing_is_cbr,
+        existing_spectral_grade=world.existing_grade,
+        existing_spectral_bitrate=world.existing_spectral,
+        candidate_spectral_context=SpectralCodecContext(
+            cliff_hz=world.new_cliff_hz),
+        existing_spectral_context=SpectralCodecContext(
+            cliff_hz=world.existing_cliff_hz),
+        override_min_bitrate=None,
+    )
+
+
+def _stage_parity_deferred_decision(
+    world: StageParityWorld,
+) -> dict[str, object]:
+    """The same world, decided with Stage 1's short-circuit lifted.
+
+    The counterfactual reference for
+    ``assert_counterfactual_is_the_deferred_stage2``. It uses production's
+    OWN Stage-1 carve-out — ``provisional_source_candidate and
+    has_provisional_probe_input``, the branch that lets a lossless-source
+    candidate with probe evidence past a Stage-1 spectral reject — rather
+    than a test-only switch. That carve-out is the only lever in
+    ``full_pipeline_decision`` that disables the short-circuit while leaving
+    every Stage-2 input untouched, and "untouched" is CHECKED, not assumed:
+    ``test_the_stage1_carve_out_lever_does_not_move_stage_2`` drives the
+    same pair over worlds where Stage 1 does not reject and requires the
+    Stage-2 outcome to be identical.
+
+    Why the two kwargs leave Stage 2 alone, in the native-lossy branch this
+    world type describes: ``supported_lossless_source`` is read ONLY by
+    ``provisional_source_candidate``, and ``candidate_v0_probe_avg`` only by
+    ``has_provisional_probe_input`` and by the FLAC branches' provisional
+    lane. The native-lossy branch's own lock passes ``candidate_probe=None``
+    unconditionally, and ``is_flac`` — which chooses the branch — is
+    unchanged.
+    """
+    return full_pipeline_decision(
+        is_flac=False,
+        min_bitrate=world.new_container,
+        avg_bitrate=world.new_container,
+        is_cbr=world.new_is_cbr,
+        is_vbr=not world.new_is_cbr,
+        new_format=world.new_format,
+        spectral_grade=world.grade,
+        spectral_bitrate=world.new_spectral,
+        existing_min_bitrate=world.existing_container,
+        existing_avg_bitrate=world.existing_container,
+        existing_format=world.existing_format,
+        existing_is_cbr=world.existing_is_cbr,
+        existing_spectral_grade=world.existing_grade,
+        existing_spectral_bitrate=world.existing_spectral,
+        candidate_spectral_context=SpectralCodecContext(
+            cliff_hz=world.new_cliff_hz),
+        existing_spectral_context=SpectralCodecContext(
+            cliff_hz=world.existing_cliff_hz),
+        override_min_bitrate=None,
+        supported_lossless_source=True,
+        candidate_v0_probe_avg=world.new_container,
+    )
 
 
 def _stage_parity_verdicts(
     world: StageParityWorld,
-) -> tuple[str, QualityComparisonBasis]:
-    """Drive the REAL Stage 1 and Stage 2 deciders over the same evidence.
+) -> tuple[str | None, QualityComparisonBasis]:
+    """Read Stage 1's and Stage 2's verdicts off ONE real decider run.
 
-    Builds the candidate/existing ``AudioQualityMeasurement`` pair exactly
-    the way ``full_pipeline_decision``'s native-lossy branch does before
-    calling ``compare_quality`` — ``AudioQualityMeasurement`` directly for
-    the candidate, ``build_existing_quality_measurement`` (the real
-    production constructor) for the existing side. This does not create a
-    new decision path: both are pure data constructors, and every verdict
-    comes only from ``spectral_import_decision``/``compare_quality``
-    themselves — the two decision surfaces this property patrols.
-
-    **Scope, stated because it is easy to over-read** (issue #829 Phase 5
-    PR2c). This harness reproduces ``full_pipeline_decision``'s Stage-1
-    WIRING inline rather than calling it, because Stage 2's verdict is
-    needed even in the worlds where Stage 1 rejects and short-circuits.
-    The consequence is that a mutant planted in that wiring is invisible
-    here: three separate reverts of the PR2b Stage-1 seam all live in
-    ``lib/quality/pipeline.py``, which this harness never calls, and all
-    three left this property green at both tiers. A fourth mutant, inside
-    ``spectral_classes_comparable`` — which this harness DOES call —
-    survived as well, because the checker only fires on ``reject`` +
-    ``"better"`` and this world type's same-codec ladder domain does not
-    reach that pairing. The seam itself is patrolled by
-    ``test_stage1_never_consumes_an_inadmissible_existing_class``, which
-    drives ``full_pipeline_decision`` directly for exactly that reason and
-    kills all four at both tiers.
+    Both come from ``full_pipeline_decision`` — the seam owner that
+    ``full_pipeline_decision_from_evidence`` delegates to — never from a
+    copy of its wiring (issue #829 Phase 5 PR2d). Stage 1's ``reject``
+    short-circuits before Stage 2 runs, so the decider now reports the
+    counterfactual Stage-2 verdict for exactly those worlds under
+    ``comparison_basis_if_stage1_deferred``; that audit key is what makes
+    this harness possible without a second implementation. Until PR2d it
+    reproduced the decider's Stage-1 wiring inline and was blind by
+    construction to every mutant living in ``lib/quality/pipeline.py``.
     """
-    new_m = AudioQualityMeasurement(
-        min_bitrate_kbps=world.new_container,
-        avg_bitrate_kbps=world.new_container,
-        format=world.new_format,
-        is_cbr=world.new_is_cbr,
-        spectral_grade=world.grade,
-        spectral_bitrate_kbps=world.new_spectral,
-        spectral_subject=EVIDENCE_SUBJECT_SOURCE,
-        spectral_provenance=EVIDENCE_PROVENANCE_MEASURED,
+    decision = _stage_parity_decision(world)
+    stage1 = decision["stage1_spectral"]
+    # ``None`` is a real Stage-1 outcome: the Stage-0 preimport gate did not
+    # fire, so Stage 1 never ran. See the checker's docstring.
+    assert stage1 is None or isinstance(stage1, str), repr(decision)
+    raw_basis = (
+        decision["comparison_basis"]
+        if decision["comparison_basis"] is not None
+        else decision["comparison_basis_if_stage1_deferred"]
     )
-    existing_m = build_existing_quality_measurement(
-        min_bitrate_kbps=world.existing_container,
-        avg_bitrate_kbps=world.existing_container,
-        format=world.existing_format,
-        is_cbr=world.existing_is_cbr,
-        override_min_bitrate=None,
-        spectral_grade=world.existing_grade,
-        spectral_bitrate_kbps=world.existing_spectral,
-    )
-    # world.existing_container is a definite int, so the builder's
-    # min_bitrate_kbps-is-None early return can never fire here.
-    assert existing_m is not None
-    # Stage 1 consumes decision-grade CLASSES gated on comparability, which
-    # is exactly how ``full_pipeline_decision`` wires it (issue #829 Phase 5
-    # PR2b). Feeding it the raw stored numbers here would make the harness
-    # more permissive than the decider it patrols — the mirror lie
-    # ``.claude/rules/test-fidelity.md`` exists to forbid.
-    new_spectral = interpret_measurement(new_m)
-    existing_spectral = interpret_measurement(existing_m)
-    stage1_existing = (
-        decision_class_kbps(existing_spectral)
-        if spectral_classes_comparable(new_spectral, existing_spectral).comparable
-        else None
-    )
-    stage1 = spectral_import_decision(
-        world.grade, decision_class_kbps(new_spectral), stage1_existing or 0)
-    stage2 = compare_quality(new_m, existing_m, QualityRankConfig.defaults())
-    return stage1, stage2
+    # Both sides always carry a container here, so Stage 2 always compares.
+    # A None basis means the world never reached the comparison at all,
+    # which would make the property silently vacuous rather than passing.
+    assert raw_basis is not None, repr(decision)
+    return stage1, msgspec.convert(raw_basis, type=QualityComparisonBasis)
 
 
 #: The three ways ``spectral_classes_comparable`` can refuse a pair whose
@@ -621,14 +713,13 @@ def _inadmissible_pair_stage1(
 ) -> str | None:
     """Drive the REAL Stage-1 seam and return its verdict.
 
-    Deliberately NOT the ``_stage_parity_verdicts`` shape. That harness
-    reproduces ``full_pipeline_decision``'s Stage-1 wiring inline, which is
-    correct for the invariant it patrols (Stage 1 vs Stage 2 as two decision
-    surfaces) but useless here: the wiring IS what this property patrols, so
-    a copy of it in the harness would move with any mutant planted in the
-    seam. ``full_pipeline_decision`` is the seam's owner —
-    ``full_pipeline_decision_from_evidence``, the function the importer
-    calls, delegates to it.
+    Drives ``full_pipeline_decision`` — the seam's owner, which
+    ``full_pipeline_decision_from_evidence`` (the function the importer
+    calls) delegates to. Until issue #829 Phase 5 PR2d this was the only
+    Stage-1 property that did: ``_stage_parity_verdicts`` reproduced the
+    decider's Stage-1 wiring inline and was blind by construction to any
+    mutant planted in it. It now drives the same owner, so the two
+    properties differ in INVARIANT, not in fidelity.
 
     ``withhold_existing_spectral`` removes the installed copy's spectral
     evidence entirely — grade, stored bucket and raw cliff — which is the
@@ -773,7 +864,7 @@ def _inadmissible_pair_comparability(
 
 
 def assert_stage1_never_contradicts_stage2(
-    stage1: str, stage2: QualityComparisonBasis,
+    stage1: str | None, stage2: QualityComparisonBasis,
 ) -> None:
     """Issue #813 Finding 1 — the core no-disagreement parity contract.
 
@@ -789,12 +880,162 @@ def assert_stage1_never_contradicts_stage2(
     Mark DeNardo (#812) and this PR's remaining same-rank-tiebreak bug.
     Stage 1 rejecting while Stage 2 says ``"worse"``/``"equivalent"`` is NOT
     a disagreement: both stages agree the candidate should not be accepted.
+
+    ``stage1 is None`` means the Stage-0 preimport gate never fired for this
+    candidate at all (a non-MP3 codec, or a VBR MP3 whose average is at or
+    above ``cfg.mp3_vbr.excellent``), so Stage 1 has no verdict to
+    contradict with. That case became VISIBLE only in issue #829 Phase 5
+    PR2d: the harness used to reproduce the decider's Stage-1 wiring inline
+    and computed a Stage-1 verdict for worlds where production skips the
+    gate entirely.
     """
     if stage1 == "reject" and stage2.verdict == "better":
         raise AssertionError(
             "Stage 1 rejected a candidate Stage 2 scores as an upgrade: "
             f"stage1={stage1!r} stage2.verdict={stage2.verdict!r} "
             f"stage2.branch={stage2.branch!r}"
+        )
+
+
+#: The decision fields a Stage-1 short-circuit owns, and the exact value each
+#: one must hold. Derived from ``full_pipeline_decision``'s Stage-1 reject
+#: branch, which writes ``final_status``/``keep_searching`` and returns
+#: through ``_finalize_denylist`` without ever entering Stage 2 — so every
+#: Stage-2/Stage-3 output stays at its initialised ``None``.
+_STAGE1_REJECT_DECISION_FIELDS: dict[str, object] = {
+    "stage2_import": None,
+    "stage3_quality_gate": None,
+    "comparison_basis": None,
+    "target_final_format": None,
+    "final_status": "wanted",
+    "keep_searching": True,
+    "imported": False,
+}
+
+#: The audit-only keys. Reporting, never a decision input.
+_STAGE2_COUNTERFACTUAL_KEYS = (
+    "stage2_import_if_stage1_deferred",
+    "comparison_basis_if_stage1_deferred",
+)
+
+
+def assert_stage1_reject_leaks_no_stage2_state(
+    decision: dict[str, object],
+    *,
+    context: str = "",
+) -> None:
+    """Issue #829 Phase 5 PR2d — the audit field is INERT.
+
+    ``full_pipeline_decision`` now runs Stage 2 even when Stage 1
+    short-circuits, so that the operator can be told "Stage 1 rejected
+    this, and Stage 2 would have said X" — the disagreement issue #813 is
+    about, which until PR2d was computed nowhere. The whole safety of that
+    change is that the counterfactual run touches NOTHING except the two
+    ``*_if_stage1_deferred`` keys: it decides on a throwaway result dict
+    and exactly two values are lifted back.
+
+    So on a Stage-1 short-circuit every decision field must still hold
+    exactly what the reject branch writes, with every Stage-2/Stage-3
+    output left at ``None``. A single leaked value — a ``stage2_import``
+    copied across, a ``comparison_basis`` populated, an ``imported`` flipped
+    — is a decision change, whatever the audit keys say.
+    """
+    leaks = [
+        f"{field}={decision.get(field)!r} (expected {expected!r})"
+        for field, expected in _STAGE1_REJECT_DECISION_FIELDS.items()
+        if decision.get(field) != expected
+    ]
+    if leaks:
+        raise AssertionError(
+            "Stage-2 state leaked onto a Stage-1 reject decision: "
+            + "; ".join(leaks)
+            + (f" [{context}]" if context else "")
+        )
+
+
+def assert_counterfactual_is_the_deferred_stage2(
+    short_circuited: dict[str, object],
+    deferred: dict[str, object],
+    *,
+    context: str = "",
+) -> None:
+    """Issue #829 Phase 5 PR2d — the audit field is TRUE, not fabricated.
+
+    The reported counterfactual must be what Stage 2 actually produces for
+    the same world once Stage 1's short-circuit is lifted — not a
+    plausible-looking value computed some other way. ``deferred`` is the
+    same call with production's OWN Stage-1 carve-out engaged (see
+    ``_stage_parity_deferred_decision``), which is the only lever in the
+    function that disables the short-circuit without touching a single
+    Stage-2 input.
+    """
+    mismatches = [
+        f"{audit_key}={short_circuited.get(audit_key)!r} but the deferred run "
+        f"produced {deferred.get(real_key)!r}"
+        for audit_key, real_key in zip(
+            _STAGE2_COUNTERFACTUAL_KEYS,
+            ("stage2_import", "comparison_basis"),
+            strict=True,
+        )
+        if short_circuited.get(audit_key) != deferred.get(real_key)
+    ]
+    if mismatches:
+        raise AssertionError(
+            "the reported Stage-2 counterfactual is not what Stage 2 decides: "
+            + "; ".join(mismatches)
+            + (f" [{context}]" if context else "")
+        )
+
+
+def assert_counterfactual_reported_exactly_when_stage1_short_circuits(
+    decision: dict[str, object],
+    *,
+    context: str = "",
+) -> None:
+    """Issue #829 Phase 5 PR2d — the audit keys exist, and say something
+    exactly where they mean something. BOTH directions.
+
+    * Both keys are part of the documented result shape on EVERY path.
+    * A counterfactual reported next to a REAL ``stage2_import`` would be a
+      second, contradictory answer to the same question.
+    * A short-circuit ALWAYS reports a decision — if only
+      ``STAGE2_COUNTERFACTUAL_UNAVAILABLE``. Without this clause a
+      counterfactual that could not be evaluated is byte-identical to "Stage
+      1 never short-circuited", which is a different fact, and nothing would
+      notice the difference (PR2d review S2). The BASIS is deliberately
+      exempt: it is legitimately ``None`` whenever Stage 2 never reached a
+      comparison (the provisional lane, the lossless-source lock).
+    """
+    missing = [key for key in _STAGE2_COUNTERFACTUAL_KEYS if key not in decision]
+    if missing:
+        raise AssertionError(
+            f"decision dict is missing audit keys {missing}"
+            + (f" [{context}]" if context else "")
+        )
+    if decision.get("stage2_import") is None:
+        # A Stage-1 reject with no real Stage-2 decision IS the
+        # short-circuit — the same condition ``evidence_decision_name``
+        # reads to call the outcome ``spectral_reject``.
+        if decision.get("stage1_spectral") == "reject" and (
+            decision["stage2_import_if_stage1_deferred"] is None
+        ):
+            raise AssertionError(
+                "Stage 1 short-circuited but reported no Stage-2 "
+                "counterfactual at all — 'could not be evaluated' and "
+                "'nothing to report' must not look identical"
+                + (f" [{context}]" if context else "")
+            )
+        return
+    populated = [
+        f"{key}={decision[key]!r}"
+        for key in _STAGE2_COUNTERFACTUAL_KEYS
+        if decision[key] is not None
+    ]
+    if populated:
+        raise AssertionError(
+            "a Stage-2 counterfactual was reported alongside a real Stage-2 "
+            "decision: " + "; ".join(populated)
+            + (f" [{context}]" if context else "")
         )
 
 
@@ -1155,11 +1396,36 @@ _LAME_BUCKET_CLASSES = (96, 112, 128, 160, 192, 224, 256, 320)
 #: ``stage_parity_worlds``.
 _LADDER_FORMATS = ("MP3", "Vorbis")
 
+#: The average bitrate at or above which ``spectral_gate_trigger`` skips a
+#: VBR MP3 — i.e. above which no Stage-1 verdict exists at all. READ from
+#: the production config, exactly as ``full_pipeline_decision`` reads it
+#: (``.claude/rules/test-fidelity.md`` Rule C: the trigger comes from the
+#: producer, never a transcribed literal).
+_PREIMPORT_GATE_VBR_THRESHOLD = QualityRankConfig.defaults().mp3_vbr.excellent
+
 
 def _lame_buckets_at_or_below(container: int) -> st.SearchStrategy[int]:
     """A producible spectral class no higher than its own container."""
     candidates = [b for b in _LAME_BUCKET_CLASSES if b <= container]
     return st.sampled_from(candidates or [_LAME_BUCKET_CLASSES[0]])
+
+
+def _cliffs_classing_at_or_below(
+    codec_family: CodecFamily, container: int,
+) -> st.SearchStrategy[int | None]:
+    """A raw cliff whose DERIVED class stays within its own container.
+
+    The bound is computed by ``ladder_class_kbps`` — the same function the
+    decider uses — never by a transcribed table
+    (``.claude/rules/test-fidelity.md`` Rule C). ``None`` (no cliff, so the
+    class comes from the legacy stored bucket instead) is always offered:
+    it is what makes a MIXED-derivation pair drawable.
+    """
+    usable = [
+        cliff_hz for cliff_hz in _CLIFF_HZ_VALUES
+        if (ladder_class_kbps(codec_family, cliff_hz) or 0) <= container
+    ]
+    return st.sampled_from([None, *usable])
 
 
 @st.composite
@@ -1198,21 +1464,40 @@ def stage_parity_worlds(draw) -> StageParityWorld:
     checker forbids the Stage-1 rejection outright and therefore subsumes
     this checker there.
 
-    **The shared format is drawn from the LADDER families only** (issue
-    #829 Phase 5 PR2b): AAC, Opus and WMA now withhold a class on BOTH
-    sides, so a world drawn from all five families would spend most of its
-    budget where neither stage has anything to compare and the
-    disagreement this property hunts is unreachable by construction. That
-    is not extra safety — it is the same coverage dilution the
-    same-codec-family choice above already rejects, so the family list is
-    narrowed for the same reason. Vorbis is kept: it has an invertible
-    ladder, and a same-Vorbis pair is comparable.
+    **The shared format is MP3, and a VBR candidate's container stays
+    below the preimport gate's threshold** (issue #829 Phase 5 PR2d). Both
+    narrowings are the same coverage argument the paragraphs above already
+    make, applied to facts the harness could not see until it started
+    driving the real decider. ``spectral_gate_trigger`` fires the preimport
+    gate ONLY for an MP3 candidate, and skips a VBR MP3 whose average is at
+    or above ``cfg.mp3_vbr.excellent``; outside that domain
+    ``stage1_spectral`` is ``None`` and the disagreement this property
+    hunts is unreachable by construction — not "safe", *absent*. The old
+    inline harness computed a Stage-1 verdict regardless, which is how
+    Vorbis and high-average VBR worlds looked like coverage while
+    production never ran Stage 1 on them at all: over 5,000 draws of the
+    pre-PR2d strategy, 3,189 (63.8%) were worlds production gate-skips
+    (2,347 uncalibrated-codec, 842 high-average VBR). The strategy below
+    measures 0/5,000. The threshold is READ from the production config,
+    never transcribed (``.claude/rules/test-fidelity.md`` Rule C).
+
+    Vorbis is consequently no longer drawn HERE. Its ladder is still real
+    and a same-Vorbis pair is still comparable at Stage 2 — that is
+    patrolled by the parity property in ``TestGeneratedParity`` and the
+    cross-codec property below; what a Vorbis candidate cannot do is reach
+    Stage 1.
     """
-    new_container = draw(_bitrates(min_value=1, max_value=3000))
+    new_is_cbr = draw(st.booleans())
+    # A VBR MP3 at or above the threshold is gate-skipped, so its Stage-1
+    # verdict does not exist. Draw inside the domain where it does.
+    new_container = draw(_bitrates(
+        min_value=1,
+        max_value=3000 if new_is_cbr else _PREIMPORT_GATE_VBR_THRESHOLD - 1,
+    ))
     new_spectral = draw(_lame_buckets_at_or_below(new_container))
     existing_container = draw(_bitrates(min_value=1, max_value=3000))
     existing_spectral = draw(_lame_buckets_at_or_below(existing_container))
-    shared_format = draw(st.sampled_from(_LADDER_FORMATS))
+    shared_format = "MP3"
     return StageParityWorld(
         grade=draw(st.sampled_from(("suspect", "likely_transcode"))),
         new_container=new_container,
@@ -1221,10 +1506,149 @@ def stage_parity_worlds(draw) -> StageParityWorld:
         existing_spectral=existing_spectral,
         existing_grade=draw(st.sampled_from(
             (None, "genuine", "marginal", "suspect", "likely_transcode"))),
-        new_is_cbr=draw(st.booleans()),
+        new_is_cbr=new_is_cbr,
         existing_is_cbr=draw(st.booleans()),
         new_format=shared_format,
         existing_format=shared_format,
+        new_cliff_hz=draw(_cliffs_classing_at_or_below(CODEC_FAMILY_MP3, new_container)),
+        existing_cliff_hz=draw(
+            _cliffs_classing_at_or_below(CODEC_FAMILY_MP3, existing_container)),
+    )
+
+
+#: Every MP3 class a raw ``cliff_hz`` can actually derive, and the cliffs
+#: that derive it — computed through ``ladder_class_kbps`` rather than
+#: transcribed (``.claude/rules/test-fidelity.md`` Rule C).
+_MP3_CLIFFS_BY_CLASS: dict[int, tuple[int, ...]] = {
+    class_kbps: tuple(
+        cliff_hz for cliff_hz in _CLIFF_HZ_VALUES
+        if ladder_class_kbps(CODEC_FAMILY_MP3, cliff_hz) == class_kbps
+    )
+    for class_kbps in sorted(
+        {
+            derived for derived in (
+                ladder_class_kbps(CODEC_FAMILY_MP3, cliff_hz)
+                for cliff_hz in _CLIFF_HZ_VALUES
+            )
+            if derived is not None
+        }
+    )
+}
+
+
+@st.composite
+def stage1_rejecting_worlds(draw) -> StageParityWorld:
+    """Worlds that reach a Stage-1 spectral REJECT by construction.
+
+    The audit-field properties (issue #829 Phase 5 PR2d) only have anything
+    to check on the short-circuit path, and a Stage-1 reject is a small
+    minority of ``stage_parity_worlds`` — filtering for it would spend the
+    budget on discards. So the four conditions
+    ``spectral_import_decision`` needs are established here instead:
+
+    1. both album verdicts authorize a spectral finding (only ``suspect``
+       and ``likely_transcode`` do, per ``SPECTRAL_TRANSCODE_GRADES``);
+    2. both classes are derived the SAME way — either both from a raw
+       ``cliff_hz`` or both from a legacy stored bucket — so
+       ``spectral_classes_comparable`` admits the pair;
+    3. the candidate's class is strictly lower than the HAVE's;
+    4. the candidate is an MP3 whose preimport gate fires, so a Stage-1
+       verdict exists at all.
+
+    The provisional carve-out that can spare a Stage-1 reject
+    (``provisional_source_candidate and has_provisional_probe_input``) is
+    inactive by construction: these are native-lossy worlds and
+    ``_stage_parity_decision`` passes neither ``supported_lossless_source``
+    nor a candidate probe.
+    """
+    basis = draw(st.sampled_from(("stored_bucket", "cliff_hz")))
+    new_is_cbr = draw(st.booleans())
+    # A VBR MP3 at or above the gate threshold is skipped, so its class must
+    # fit below that threshold too (the class never exceeds its container).
+    class_ceiling = 3000 if new_is_cbr else _PREIMPORT_GATE_VBR_THRESHOLD - 1
+    if basis == "cliff_hz":
+        classes = tuple(_MP3_CLIFFS_BY_CLASS)
+    else:
+        classes = _LAME_BUCKET_CLASSES
+    lower = [c for c in classes if c < max(classes) and c <= class_ceiling]
+    new_class = draw(st.sampled_from(lower))
+    existing_class = draw(st.sampled_from([c for c in classes if c > new_class]))
+
+    new_container = draw(_bitrates(min_value=new_class, max_value=class_ceiling))
+    existing_container = draw(
+        _bitrates(min_value=existing_class, max_value=3000))
+    if basis == "cliff_hz":
+        new_cliff = draw(st.sampled_from(_MP3_CLIFFS_BY_CLASS[new_class]))
+        existing_cliff = draw(
+            st.sampled_from(_MP3_CLIFFS_BY_CLASS[existing_class]))
+        # The stored column is free: a cliffed row often carries a legacy
+        # bucket too, and the cliff wins. Drawing it freely keeps the world
+        # honest rather than quietly agreeing with the cliff.
+        new_stored = draw(_lame_buckets_at_or_below(new_container))
+        existing_stored = draw(_lame_buckets_at_or_below(existing_container))
+    else:
+        new_cliff = existing_cliff = None
+        new_stored, existing_stored = new_class, existing_class
+    return StageParityWorld(
+        grade=draw(st.sampled_from(("suspect", "likely_transcode"))),
+        new_container=new_container,
+        new_spectral=new_stored,
+        existing_container=existing_container,
+        existing_spectral=existing_stored,
+        existing_grade=draw(st.sampled_from(("suspect", "likely_transcode"))),
+        new_is_cbr=new_is_cbr,
+        existing_is_cbr=draw(st.booleans()),
+        new_format="MP3",
+        existing_format="MP3",
+        new_cliff_hz=new_cliff,
+        existing_cliff_hz=existing_cliff,
+    )
+
+
+@st.composite
+def stage1_rejecting_flac_worlds(draw) -> StageParityWorld:
+    """Stage-1-rejecting worlds that run the counterfactual through the two
+    LOSSLESS-SOURCE Stage-2 branches (issue #829 Phase 5 PR2d review S1).
+
+    Every world in ``stage1_rejecting_worlds`` is native-lossy, so the
+    throwaway run only ever exercised ``full_pipeline_decision``'s third
+    branch. These take the other two.
+
+    ``target_format`` selects between them: a lossless target keeps the FLAC
+    on disk, anything else takes the convert-then-decide branch. The
+    candidate keeps an MP3 format label because a lossless container yields
+    NO spectral class (``interpret_spectral_cliff``'s lossless branch never
+    derives kbps), and without a class Stage 1 cannot reject at all — so an
+    ``is_flac`` world with a lossless label is unreachable for this property
+    by construction, not by choice.
+
+    ``supported_lossless_source`` is drawn rather than left implicit, and
+    the two values reach genuinely different code:
+
+    * ``True``/``None`` (i.e. ``is_flac``) is the shape the EVIDENCE
+      entrypoint produces — and there the counterfactual ALWAYS terminates
+      in the provisional lane, because the Stage-1 carve-out
+      (``provisional_source_candidate and has_provisional_probe_input``)
+      spares every lossless-source candidate that has probe evidence, so the
+      only ones that short-circuit are those with none. The deterministic
+      twin ``TestStage2CounterfactualAudit`` pins that live shape through
+      ``full_pipeline_decision_from_evidence``.
+    * ``False`` with ``is_flac=True`` is simulator-only, and it is the ONLY
+      way to drive the throwaway run past the provisional lane into
+      ``measured_import_decision``, the ``TargetQualityContract``
+      construction and the ``verified_proof`` rebind. It is included
+      precisely because those are the lines review S1 found unguarded; the
+      property it feeds is about the AUDIT MECHANISM, which is
+      branch-agnostic, not about album plausibility. Some of these worlds
+      make Stage 2 raise, which is the point — the sentinel path is part of
+      the mechanism.
+    """
+    lossy = draw(stage1_rejecting_worlds())
+    return replace(
+        lossy,
+        is_flac=True,
+        target_format=draw(st.sampled_from((None, "flac", "lossless", "mp3 v0"))),
+        supported_lossless_source=draw(st.sampled_from((None, True, False))),
     )
 
 
@@ -1411,6 +1835,22 @@ _LILY_PERDIDA_WORLD = HaveRepresentationWorld(
     existing_container=320,
     existing_spectral=None,
     existing_cliff_hz=15500,
+)
+
+
+#: A world that reaches a Stage-1 spectral reject, so the two audit-field
+#: properties are never vacuous at their pinned example. Comparable classes
+#: (same codec, both legacy stored buckets, both grades authorizing), the
+#: candidate's strictly lower — the only shape ``spectral_import_decision``
+#: rejects on. Deterministic pin twin:
+#: ``tests/test_quality_classification.py::TestStage2CounterfactualAudit``.
+_STAGE1_REJECT_COUNTERFACTUAL_WORLD = StageParityWorld(
+    grade="likely_transcode",
+    new_container=256, new_spectral=128,
+    existing_container=256, existing_spectral=192,
+    existing_grade="likely_transcode",
+    new_is_cbr=True, existing_is_cbr=True,
+    new_format="MP3", existing_format="MP3",
 )
 
 
@@ -1844,40 +2284,90 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
         )
     )
     @example(  # Shrunk regression: coarse rank band buckets UNEQUAL
-        # spectral (200 vs 230) into the same "good" tier; before the
+        # spectral (96 vs 112) into the same tier; before the
         # spectral_tiebreak fix the fully-unclamped raw metric (1000 vs
         # 235) would launder the worse-spectral candidate in as "better".
+        # Stage 1 rejects and Stage 2 says "worse" — the fix holding.
+        #
+        # RE-DERIVED in issue #829 Phase 5 PR2d. The originally shrunk
+        # world used 200/230, and neither is a ``LAME_LOWPASS`` member, so
+        # under PR2b's stored-bucket allowlist neither side carries a class
+        # at all: the clamp this pin exists for never fired once the
+        # harness started driving the real decider instead of feeding
+        # ``compare_quality`` raw stored numbers. 96/112 are real buckets
+        # that reproduce the same decisive shape (unequal classes bucketed
+        # into one rank, raw metric strongly favouring the worse side).
         world=StageParityWorld(
-            grade="likely_transcode", new_container=1000, new_spectral=200,
-            existing_container=235, existing_spectral=230,
+            grade="likely_transcode", new_container=1000, new_spectral=96,
+            existing_container=235, existing_spectral=112,
             existing_grade="likely_transcode",
             new_is_cbr=True, existing_is_cbr=True,
             new_format="MP3", existing_format="MP3",
         )
     )
-    @example(  # Shrunk regression #2: CBR/VBR band-table mismatch. The
-        # spectral bucket values (LAME_LOWPASS) are calibrated to the CBR
-        # thresholds, not the more generous VBR ones. Before the CBR-forced
-        # classification fix, a VBR-tagged candidate's spectral-bound clamp
-        # (245, VBR "transparent") outranked a CBR-tagged existing's
-        # spectral-bound clamp (300, CBR "excellent") purely from table
-        # choice — despite 245 < 300 (Stage 1 correctly rejects).
+    @example(  # Fault-injection pin (issue #829 Phase 5 PR2d mutation run).
+        # A MIXED-derivation pair inside one codec family: the candidate's
+        # class comes from a legacy stored bucket (112) and the HAVE's from
+        # a raw cliff (18000 Hz -> the 192 class), so
+        # ``spectral_classes_comparable`` refuses the pairing and Stage 1
+        # must see NO existing class. It defers (``import_no_exist``) and
+        # Stage 2 imports on the raw metric (760 vs 598).
+        #
+        # Revert the comparability gate — ``stage1_existing_class =
+        # existing_spectral_class`` — and Stage 1 rejects on 112 < 192
+        # while Stage 2 still scores the candidate ``better``, because the
+        # clamp's own comparability check is unchanged and refuses. That is
+        # the ONE shape where a Stage-1-ONLY defect can diverge from Stage 2
+        # at all. Measured over 5,000 draws of the strategy above: the
+        # shipped code produces 0 contradictions while reaching 236 Stage-1
+        # rejects (so the property is not vacuous), and the gate revert
+        # produces 5 — 1 in 1,000, i.e. roughly a 14% chance of detection
+        # over 150 derandomized examples. Hence the pin: without it the gate
+        # revert survives the suite tier.
         world=StageParityWorld(
-            grade="likely_transcode", new_container=1000, new_spectral=245,
-            existing_container=1000, existing_spectral=300,
+            grade="likely_transcode", new_container=760, new_spectral=112,
+            existing_container=598, existing_spectral=160,
             existing_grade="likely_transcode",
-            new_is_cbr=False, existing_is_cbr=True,
+            new_is_cbr=True, existing_is_cbr=False,
             new_format="MP3", existing_format="MP3",
+            new_cliff_hz=None, existing_cliff_hz=18000,
         )
     )
+    # The CBR/VBR band-table regression (shrunk regression #2) used to be
+    # pinned here as a third ``@example`` and was REMOVED in issue #829
+    # Phase 5 PR2d, because it could no longer fire. Its shrunk world used
+    # spectral 245/300 — neither a ``LAME_LOWPASS`` member, so under PR2b's
+    # stored-bucket allowlist neither side carries a class and the clamp it
+    # exists for never fires; it only ever "worked" because the old harness
+    # fed ``compare_quality`` raw stored numbers. The producible values
+    # (256/320) do fire the clamp, but the CONTRADICTION shape cannot
+    # follow: a VBR MP3 is gate-skipped at or above ``cfg.mp3_vbr.excellent``
+    # and below it no container can exceed a high enough class for the
+    # candidate to be spectral-bound, so Stage 1 has no verdict at all — the
+    # checker returns immediately. An exhaustive sweep of the producible
+    # bucket ladder with the CBR-forcing reverted found ZERO worlds where
+    # Stage 1 rejects and Stage 2 says "better".
+    #
+    # The regression guard for that class is therefore the deterministic
+    # twin, ``tests/test_quality_comparison_basis.py``'s "CBR bands classify
+    # a spectral-bound value even when that side is VBR", which pins the
+    # same 256/320 pair at the ``compare_quality`` boundary where the world
+    # IS constructible. An ``@example`` that provably cannot fire is a
+    # readability hazard, so the pointer stays and the pin does not.
     def test_stage1_never_contradicts_stage2(self, world):
         """PAIR (generated half) — issue #813 Finding 1's core deliverable:
         for every world, Stage 1's verdict never contradicts Stage 2's.
 
-        Drives the REAL ``spectral_import_decision`` (Stage 1) and
-        ``compare_quality`` (Stage 2) over the same evidence. This property
-        found and pins TWO independent Stage2 gaps, both inside the shared
-        spectral clamp:
+        Drives ``full_pipeline_decision`` — the real seam owner — ONCE per
+        world and reads both stages off its result (issue #829 Phase 5
+        PR2d). Before PR2d the harness reproduced the decider's Stage-1
+        wiring inline, because Stage 2's verdict is needed in exactly the
+        worlds where Stage 1 short-circuits; the decider now reports that
+        counterfactual itself, so the copy is gone and a mutant planted in
+        the wiring moves this property.
+
+        This property found and pins TWO independent Stage2 gaps, both
+        inside the shared spectral clamp:
 
         1. Same-rank tiebreak (``spectral_tiebreak`` branch, first
            ``@example``): the coarse rank band can bucket two genuinely
@@ -1897,7 +2387,11 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
            by Hypothesis at either the suite or fuzz tier within a
            reasonable budget — this class needed the deterministic pin to
            be caught reliably) found this at roughly a 1-in-8000 rate over
-           the general world space.
+           the general world space. **That class left this property's
+           reach in PR2d**: the shape needs a spectral-bound VBR MP3
+           candidate, which the preimport gate now provably cannot admit —
+           see that ``@example``'s comment for the sweep and for the
+           deterministic twin that still guards it.
 
         PR #827 review round: both fixes above shipped requiring only ONE
         side spectral-bound to fire, which introduced two NEW flip worlds
@@ -1909,6 +2403,114 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
         """
         stage1, stage2 = _stage_parity_verdicts(world)
         assert_stage1_never_contradicts_stage2(stage1, stage2)
+
+    @given(world=st.one_of(
+        stage_parity_worlds(),
+        stage1_rejecting_worlds(),
+        stage1_rejecting_flac_worlds(),
+    ))
+    @example(world=_STAGE1_REJECT_COUNTERFACTUAL_WORLD)
+    def test_the_counterfactual_is_reported_exactly_when_stage1_short_circuits(
+        self, world,
+    ):
+        """PAIR (generated half) — issue #829 Phase 5 PR2d: the audit keys
+        are on every result, and say something exactly where they mean
+        something.
+
+        A counterfactual reported next to a REAL Stage-2 decision would be a
+        second, contradictory answer to the same question; a missing key
+        would break the documented dict shape both twins share; and a
+        short-circuit that reports nothing at all is indistinguishable from
+        "Stage 1 never fired", which is a different fact (review S2).
+
+        Drawn from all three strategies so the clause is checked on
+        deferring worlds, on short-circuiting native-lossy worlds and on
+        short-circuiting lossless-source worlds — the last of which includes
+        the ones whose Stage 2 cannot be evaluated at all.
+        """
+        assert_counterfactual_reported_exactly_when_stage1_short_circuits(
+            _stage_parity_decision(world), context=repr(world))
+
+    @given(world=st.one_of(
+        stage1_rejecting_worlds(), stage1_rejecting_flac_worlds()))
+    @example(world=_STAGE1_REJECT_COUNTERFACTUAL_WORLD)
+    def test_the_stage1_reject_decision_is_unchanged_by_its_audit(self, world):
+        """PAIR (generated half) — issue #829 Phase 5 PR2d: reporting the
+        Stage-2 counterfactual changes no decision.
+
+        Running Stage 2 on a path that previously returned before it is the
+        entire risk of this change. The counterfactual decides on a
+        throwaway result dict and exactly two ``*_if_stage1_deferred`` keys
+        are lifted back, so every decision field on a Stage-1 short-circuit
+        must still hold what the reject branch alone writes. Deterministic
+        pin twin: ``tests/test_quality_classification.py``'s
+        ``TestStage2CounterfactualAudit``.
+
+        Both world types are drawn (review S1): inertness is a property of
+        the audit MECHANISM, not of one Stage-2 branch, and until PR2d's
+        review nothing drove the throwaway run through either lossless-source
+        branch — including the ``verified_proof`` rebind, the provisional
+        lane, the ``TargetQualityContract`` construction and the paths that
+        make Stage 2 raise.
+        """
+        decision = _stage_parity_decision(world)
+        # The strategies establish the reject by construction, so a
+        # regression in one must be loud rather than silently vacuous.
+        assert decision["stage1_spectral"] == "reject", repr(world)
+        assert_stage1_reject_leaks_no_stage2_state(decision, context=repr(world))
+
+    @given(world=stage1_rejecting_worlds())
+    @example(world=_STAGE1_REJECT_COUNTERFACTUAL_WORLD)
+    def test_the_reported_counterfactual_is_what_stage_2_decides(self, world):
+        """PAIR (generated half) — issue #829 Phase 5 PR2d: the reported
+        counterfactual is TRUE, not a plausible fabrication.
+
+        The audit answers "what would Stage 2 have said?", so it must equal
+        what Stage 2 does say for the same world once the short-circuit is
+        lifted — both the decision and the whole comparison basis. See
+        ``_stage_parity_deferred_decision`` for the lever, and the property
+        below for the check that the lever itself moves nothing.
+
+        Native-lossy worlds ONLY, deliberately: the lever is provably
+        Stage-2-inert only on that branch (on the lossless-source branches
+        both of its kwargs feed ``provisional_lossless_decision``), so
+        widening this property would swap a checked reference for an
+        unchecked one. The lossless-source branches get the inertness half
+        above plus the deterministic evidence-path pin.
+        """
+        decision = _stage_parity_decision(world)
+        assert decision["stage1_spectral"] == "reject", repr(world)
+        assert_counterfactual_is_the_deferred_stage2(
+            decision,
+            _stage_parity_deferred_decision(world),
+            context=repr(world),
+        )
+
+    @given(world=stage_parity_worlds())
+    def test_the_stage1_carve_out_lever_does_not_move_stage_2(self, world):
+        """Qualifies the counterfactual reference above (issue #829 Phase 5
+        PR2d).
+
+        ``_stage_parity_deferred_decision`` claims that engaging
+        production's Stage-1 carve-out leaves every Stage-2 input untouched.
+        That claim is what makes the truthfulness property meaningful, so it
+        is checked rather than asserted in prose: over worlds where Stage 1
+        does not short-circuit anyway, the levered and unlevered runs must
+        reach the same Stage-2 decision and the same basis.
+        """
+        decision = _stage_parity_decision(world)
+        assume(decision["stage1_spectral"] != "reject")
+        levered = _stage_parity_deferred_decision(world)
+        if (
+            decision["stage2_import"] != levered["stage2_import"]
+            or decision["comparison_basis"] != levered["comparison_basis"]
+        ):
+            raise AssertionError(
+                "the Stage-1 carve-out lever moved Stage 2: "
+                f"{decision['stage2_import']!r}/{decision['comparison_basis']!r} "
+                f"vs {levered['stage2_import']!r}/"
+                f"{levered['comparison_basis']!r} [{world!r}]"
+            )
 
     @given(world=inadmissible_spectral_pair_worlds())
     @example(world=_PINNED_INADMISSIBLE_WORLDS[0])
@@ -3048,6 +3650,101 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                 new_rank="transparent", existing_rank="good",
             ),
         )
+        # A gate-skipped world (no Stage-1 verdict at all) is the same.
+        assert_stage1_never_contradicts_stage2(
+            None,
+            QualityComparisonBasis(
+                verdict="better", branch="rank",
+                new_rank="transparent", existing_rank="good",
+            ),
+        )
+
+    def _stage1_reject_decision(self, **overrides: object) -> dict[str, object]:
+        """A real Stage-1 short-circuit result, optionally corrupted.
+
+        The clean baseline comes from the production decider, not a
+        hand-written dict, so a planted leak below is a mutation of a shape
+        production really emits (``.claude/rules/test-fidelity.md`` Rule C).
+        """
+        decision = dict(
+            _stage_parity_decision(_STAGE1_REJECT_COUNTERFACTUAL_WORLD))
+        assert decision["stage1_spectral"] == "reject", repr(decision)
+        decision.update(overrides)
+        return decision
+
+    def test_stage1_reject_inertness_checker_trips_on_each_leaked_field(self):
+        """Issue #829 Phase 5 PR2d known-bad self-test: every decision field
+        the counterfactual could leak into must trip the checker."""
+        clean = self._stage1_reject_decision()
+        assert_stage1_reject_leaks_no_stage2_state(clean)
+        for field, leaked in (
+            ("stage2_import", "import"),
+            ("stage3_quality_gate", "accept"),
+            ("comparison_basis", {"verdict": "better"}),
+            ("target_final_format", "mp3 v0"),
+            ("final_status", "imported"),
+            ("keep_searching", False),
+            ("imported", True),
+        ):
+            with self.subTest(field=field), self.assertRaises(AssertionError):
+                assert_stage1_reject_leaks_no_stage2_state(
+                    self._stage1_reject_decision(**{field: leaked}))
+
+    def test_counterfactual_truth_checker_trips_on_a_fabricated_value(self):
+        """Issue #829 Phase 5 PR2d known-bad self-test: a counterfactual that
+        does not match what Stage 2 decides must trip, in either field."""
+        world = _STAGE1_REJECT_COUNTERFACTUAL_WORLD
+        short_circuited = _stage_parity_decision(world)
+        deferred = _stage_parity_deferred_decision(world)
+        assert_counterfactual_is_the_deferred_stage2(short_circuited, deferred)
+        for field, fabricated in (
+            ("stage2_import_if_stage1_deferred", "import"),
+            ("comparison_basis_if_stage1_deferred", {"verdict": "better"}),
+            # The absent case is a lie too: an audit that reports nothing
+            # where Stage 2 has an answer is not "no opinion", it is wrong.
+            ("stage2_import_if_stage1_deferred", None),
+        ):
+            planted = dict(short_circuited)
+            planted[field] = fabricated
+            with self.subTest(field=field, value=fabricated), \
+                    self.assertRaises(AssertionError):
+                assert_counterfactual_is_the_deferred_stage2(planted, deferred)
+
+    def test_counterfactual_reporting_checker_trips_on_all_three_violations(self):
+        """Issue #829 Phase 5 PR2d known-bad self-test: a missing audit key,
+        a counterfactual reported alongside a real Stage-2 decision, and a
+        short-circuit that reports nothing at all (review S2)."""
+        deferring = _stage_parity_decision(
+            replace(_STAGE1_REJECT_COUNTERFACTUAL_WORLD, new_spectral=192))
+        assert deferring["stage2_import"] is not None, repr(deferring)
+        assert_counterfactual_reported_exactly_when_stage1_short_circuits(
+            deferring)
+
+        dropped = dict(deferring)
+        del dropped["comparison_basis_if_stage1_deferred"]
+        with self.assertRaises(AssertionError):
+            assert_counterfactual_reported_exactly_when_stage1_short_circuits(
+                dropped)
+
+        doubled = dict(deferring)
+        doubled["stage2_import_if_stage1_deferred"] = "downgrade"
+        with self.assertRaises(AssertionError):
+            assert_counterfactual_reported_exactly_when_stage1_short_circuits(
+                doubled)
+
+        # The S2 gap: a real short-circuit whose audit key is None. Before
+        # the sentinel this was byte-identical to "Stage 1 never fired" and
+        # no property could tell them apart.
+        short_circuited = _stage_parity_decision(
+            _STAGE1_REJECT_COUNTERFACTUAL_WORLD)
+        assert short_circuited["stage1_spectral"] == "reject"
+        assert_counterfactual_reported_exactly_when_stage1_short_circuits(
+            short_circuited)
+        silent = dict(short_circuited)
+        silent["stage2_import_if_stage1_deferred"] = None
+        with self.assertRaises(AssertionError):
+            assert_counterfactual_reported_exactly_when_stage1_short_circuits(
+                silent)
 
     def test_have_representation_checker_trips(self):
         """Issue #829 PR2c item 6 known-bad self-test.

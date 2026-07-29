@@ -481,9 +481,16 @@ on that whole domain, which *subsumes* the older no-contradiction checker
 there for every possible Stage 2 — that checker's antecedent can never
 hold. And the property drives `full_pipeline_decision` itself, because the
 Stage-1 seam (which class reaches `spectral_import_decision`) is the thing
-under test; the older property's harness reproduces that wiring inline so
-it can compute Stage 2 even in short-circuiting worlds, and is therefore
-blind to a mutant planted in the seam.
+under test.
+
+Until issue #829 Phase 5 PR2d it was the only Stage-1 property that did.
+The no-contradiction property's harness reproduced that wiring inline —
+forced to, because it needs a Stage-2 verdict in exactly the worlds where
+Stage 1 short-circuits and production never computes one — and was
+therefore blind by construction to every mutant planted in the seam. PR2d
+removed the reason: the decider now reports the Stage-2 counterfactual
+itself (see below), so both properties drive the same owner and differ in
+*invariant*, not in fidelity.
 
 Note for anyone re-reading the older scoping: `cross_family_same_rank`
 returning `"equivalent"` unconditionally is a fact about **that branch**,
@@ -513,6 +520,56 @@ the album's overall grade stays "genuine". Likewise a candidate with no
 existing spectral estimate at all (`spectral_import_decision` returns
 `"import_no_exist"`, deferring by design — absence of a measurement is not
 evidence the installed copy is genuine).
+
+#### The Stage-2 counterfactual (issue #829 Phase 5 PR2d)
+
+"Stage 1 rejected this, and Stage 2 would have said *better*" is the exact
+disagreement issue #813 is about — and until PR2d it was computed nowhere,
+so no operator surface could show it. `full_pipeline_decision` now runs
+Stage 2 on the short-circuit path too and reports the result under two
+audit keys on the decision dict (both twins, every path):
+
+| key | meaning |
+| --- | --- |
+| `stage2_import_if_stage1_deferred` | the Stage-2 decision the same world reaches once Stage 1's short-circuit is lifted |
+| `comparison_basis_if_stage1_deferred` | that run's full `QualityComparisonBasis`, as JSON-plain builtins |
+
+Both are `None` on every other path. **They are reporting, never a decision
+input** — no branch anywhere reads them. The counterfactual decides on a
+throwaway result dict and exactly those two values are lifted back, and the
+early return happens where it always did.
+
+A short-circuit **always** reports a decision, even when Stage 2 cannot be
+evaluated at all: a `ValueError` from the tail is swallowed (a reporting
+field must not be able to turn a clean Stage-1 reject into a crash) and
+reported as `STAGE2_COUNTERFACTUAL_UNAVAILABLE`. That sentinel exists
+because `None` already means "Stage 1 never short-circuited" — "the audit
+could not run" is a different fact and the operator is entitled to both.
+The basis is exempt and stays `None` whenever the counterfactual never
+reached a comparison (the provisional lane, the lossless-source lock),
+which is a real outcome rather than a failure.
+
+On the lossless-source branches the counterfactual reached through the
+evidence entrypoint is *always* the provisional lane, and that is a
+property of the decider rather than of the tests: Stage 1's carve-out
+(`provisional_source_candidate and has_provisional_probe_input`) spares
+every lossless-source candidate that has probe evidence, so the only ones
+that short-circuit are the ones with none.
+
+`pipeline-cli quality <id>` prints an `if stage 1 had deferred:` line under
+the chain, and the values-mode preview API returns the whole decision dict.
+The web forensics card's `stage_chain` rows are unchanged — both producers
+(`lib/import_preview.py::_stage_chain_from_simulation` and
+`lib/wrong_match_cleanup_service.py::_stage_chain_from_decision`) enumerate
+fixed key allowlists, so the new keys cause no persisted-JSONB drift;
+surfacing the counterfactual there is a follow-up.
+
+The invariants ship as pin+property pairs:
+`tests/test_quality_classification.py::TestStage2CounterfactualAudit` and
+the three `TestGeneratedSimulatorInvariants` properties named
+`test_the_counterfactual_is_reported_exactly_when_stage1_short_circuits`,
+`test_the_stage1_reject_decision_is_unchanged_by_its_audit` and
+`test_the_reported_counterfactual_is_what_stage_2_decides`.
 
 Version 4 import results persist five disjoint concerns:
 

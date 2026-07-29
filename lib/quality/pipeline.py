@@ -69,6 +69,14 @@ from lib.quality.spectral_interpretation import (
 # Full pipeline decision — combines all three stages
 # ---------------------------------------------------------------------------
 
+#: Reported in ``stage2_import_if_stage1_deferred`` when the Stage-2
+#: counterfactual could not be evaluated at all (issue #829 Phase 5 PR2d).
+#: Distinct from ``None``, which means Stage 1 never short-circuited and so
+#: there is no counterfactual to report — "the audit could not run" and
+#: "there was nothing to audit" are different facts and the operator is
+#: entitled to both. Deliberately outside the Stage-2 decision vocabulary.
+STAGE2_COUNTERFACTUAL_UNAVAILABLE = "unavailable"
+
 def full_pipeline_decision(
     # File properties
     is_flac: bool,
@@ -159,6 +167,24 @@ def full_pipeline_decision(
                                            # write exactly (issue #813 Finding 2)
             "keep_searching": bool,       # whether the system keeps looking for better
             "comparison_basis": dict | None,  # QualityComparisonBasis builtins from stage 2
+            # AUDIT ONLY (issue #829 Phase 5 PR2d). A Stage-1 spectral
+            # reject short-circuits before Stage 2 ever runs, so "Stage 1
+            # rejected this, and Stage 2 would have said better" — the
+            # disagreement issue #813 is about — used to be computed
+            # nowhere and was invisible to the operator. These two keys
+            # carry that counterfactual: the Stage-2 decision and its
+            # QualityComparisonBasis for the SAME world with Stage 1's
+            # short-circuit lifted. Both are None on every other path, and
+            # NO branch anywhere reads them — they are reporting, never a
+            # decision input.
+            #
+            # A short-circuit ALWAYS reports a decision here, even if only
+            # STAGE2_COUNTERFACTUAL_UNAVAILABLE; None means Stage 1 never
+            # short-circuited. The basis stays None whenever Stage 2 never
+            # reached a comparison (the provisional lane, the lossless-
+            # source lock), which is a real outcome, not a failure.
+            "stage2_import_if_stage1_deferred": str | None,
+            "comparison_basis_if_stage1_deferred": dict | None,
         }
     """
     if cfg is None:
@@ -195,6 +221,10 @@ def full_pipeline_decision(
         # provisional lane, no existing). Consumers that persist it onto
         # ImportResult convert back with msgspec.convert at their boundary.
         "comparison_basis": None,
+        # The Stage-1-reject counterfactual (issue #829 Phase 5 PR2d). Set
+        # only by the ``stage1_short_circuits`` branch below; audit-only.
+        "stage2_import_if_stage1_deferred": None,
+        "comparison_basis_if_stage1_deferred": None,
     }
 
     # A proof-bearing installed HAVE is the absolute acquisition ceiling
@@ -317,406 +347,532 @@ def full_pipeline_decision(
     stage1_existing_class = (
         existing_spectral_class if spectral_classes_govern else None
     )
+    stage1_short_circuits = False
     if spectral_grade and stage0_gates_stage1:
         result["stage1_spectral"] = spectral_import_decision(
             spectral_grade, candidate_spectral_class, stage1_existing_class or 0)
 
-        if (result["stage1_spectral"] == "reject"
-                and not (provisional_source_candidate
-                         and has_provisional_probe_input)):
-            result["final_status"] = "wanted"  # stays wanted, denylist user
-            result["keep_searching"] = True
-            return _finalize_denylist(result)
-
-    # --- Stage 2: Import decision ---
-    # Existing measurement — carries format if the caller provided one,
-    # otherwise defaults to "MP3" so legacy simulator scenarios (which only
-    # carry a min_bitrate) still classify against the MP3 VBR/CBR band
-    # tables. Production always provides a real format via BeetsDB.
-    #
-    # Supplying existing_avg_bitrate matters under the default
-    # cfg.bitrate_metric=AVG policy — otherwise a VBR album with avg=245 but
-    # min=180 gets ranked off min=180 (GOOD instead of TRANSPARENT) and
-    # downstream comparisons misrepresent production. When the caller didn't
-    # measure an avg, nothing is fabricated: metric selection falls back to
-    # min and the persisted basis says "min" (dl 36660 display-lie class).
-    # Symmetric-representation gate (issue #813 Finding 1). The existing-side
-    # spectral-floor ``override_min_bitrate`` represents the installed album by
-    # its real content so a fake-high existing (CBR 320 whose spectral says 96)
-    # cannot block a genuine upgrade. But that override is ONE-SIDED: it floors
-    # only the existing measurement. When the CANDIDATE ALSO carries a spectral
-    # estimate, ``_shared_spectral_bitrates`` already floors BOTH sides
-    # symmetrically for rank — and additionally applying the existing-only
-    # override then poisons the raw ``metric_tiebreak``: the candidate keeps its
-    # inflated container bitrate while the existing is floored to its spectral
-    # estimate, minting a phantom "better" for an identical transcode. That is
-    # the Deerhunter "Rhapsody Original" bug (download_log 37725): a
-    # 256/spectral-192 candidate scored "better" over an identical
-    # 256/spectral-192 installed copy purely because the existing was floored to
-    # 192 and the candidate was not. Skip the one-sided override when the shared
-    # clamp will govern; keep it for the single-sided case (candidate carries no
-    # spectral estimate) it exists to serve. Rank demotion is unchanged either
-    # way — only the same-rank tiebreak now compares true container bitrates.
-    #
-    # The disarm predicate is EXACTLY ``_shared_spectral_bitrates``' firing
-    # condition, and that identity is the whole argument: the override is
-    # only safe to drop because something else then represents the installed
-    # album by its real content. Issue #829 Phase 5 PR2b narrowed the clamp
-    # to comparable CLASSES (a ``cliff_hz`` re-derivation sits one tier above
-    # a legacy stored bucket, so a mixed-basis pair measures derivation, not
-    # content). Disarming on the wider "both sides have a class" would open a
-    # window where NEITHER mechanism fires and a known-fake installed copy
-    # keeps its inflated container — download_log 29525, Clue to Kalo *Lily
-    # Perdida*: a CBR-320 HAVE graded ``likely_transcode`` with a cliff-derived
-    # class of 128 would have blocked a genuinely better VBR 234 candidate.
-    # Deerhunter is unreachable through that window: it is same-codec,
-    # same-basis, i.e. comparable, so the gate still fires there.
-    shared_spectral_clamp_will_fire = spectral_classes_govern
-    effective_existing_override = (
-        None if shared_spectral_clamp_will_fire else override_min_bitrate
-    )
-    existing_m = build_existing_quality_measurement(
-        min_bitrate_kbps=existing_min_bitrate,
-        avg_bitrate_kbps=existing_avg_bitrate,
-        format=effective_existing_format,
-        is_cbr=existing_is_cbr,
-        override_min_bitrate=effective_existing_override,
-        spectral_grade=existing_spectral_grade,
-        spectral_bitrate_kbps=existing_spectral_class,
-        cliff_hz=existing_context.cliff_hz,
-        codec_family=existing_context.codec_family,
-    )
-
-    if is_flac and target_format in ("flac", "lossless"):
-        # FLAC kept on disk (no conversion).
-        stage2_new_format = new_format or "flac"
-        result["target_final_format"] = stage2_new_format
-        candidate_probe_min = candidate_v0_probe_min
-        candidate_probe_full = V0ProbeEvidence(
-            kind=candidate_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
-            avg_bitrate_kbps=candidate_v0_probe_avg,
-            min_bitrate_kbps=candidate_probe_min,
-        ) if candidate_v0_probe_avg is not None else None
-        will_be_verified = determine_verified_lossless(
-            target_format, spectral_grade,
-            converted_count=0, is_transcode=False,
-            v0_probe=candidate_probe_full)
-        v0_verified_override = (
-            spectral_grade in SPECTRAL_TRANSCODE_GRADES
-            and v0_probe_overrides_spectral(candidate_probe_full)
+        stage1_short_circuits = (
+            result["stage1_spectral"] == "reject"
+            and not (provisional_source_candidate
+                     and has_provisional_probe_input)
         )
-        # avg/median stay None — only the min crosses this interface. A
-        # fabricated avg=min makes _selected_bitrate_with_source label a min
-        # value "avg" in the persisted basis (dl 36660: "avg 216k" beside an
-        # honest "V0 255kbps avg" on the same card). None falls back to the
-        # min with the honest "min" label; the classified value is identical.
-        new_m = AudioQualityMeasurement(
-            min_bitrate_kbps=min_bitrate,
-            format=stage2_new_format,
-            spectral_grade=spectral_grade,
-            spectral_bitrate_kbps=candidate_spectral_class,
-            spectral_subject=(
-                EVIDENCE_SUBJECT_SOURCE if spectral_grade is not None else None
-            ),
-            spectral_provenance=(
-                EVIDENCE_PROVENANCE_MEASURED
-                if spectral_grade is not None else None
-            ),
-            # Gated on the grade for the same reason
-            # ``build_existing_quality_measurement`` gates: these facts are
-            # measured in the SAME pass as the grade, so a measurement with
-            # no grade cannot legitimately carry them.
-            cliff_hz=(
-                candidate_context.cliff_hz
-                if spectral_grade is not None else None
-            ),
-            codec_family=(
-                candidate_context.codec_family
-                if spectral_grade is not None else None
-            ))
-        if v0_verified_override:
-            provisional = ProvisionalLosslessDecisionResult()
-        else:
-            provisional = provisional_lossless_decision(
-                ProvisionalLosslessDecisionInput(
-                    candidate_probe=V0ProbeEvidence(
-                        kind=candidate_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
-                        avg_bitrate_kbps=candidate_v0_probe_avg,
-                        min_bitrate_kbps=candidate_probe_min,
-                    ) if candidate_v0_probe_avg is not None else None,
-                    existing_probe=V0ProbeEvidence(
-                        kind=existing_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
-                        avg_bitrate_kbps=existing_v0_probe_avg,
-                    ) if existing_v0_probe_avg is not None else None,
-                    spectral_grade=spectral_grade,
-                    supported_lossless_source=provisional_source_candidate,
-                ),
-                cfg=cfg,
-            )
-        if provisional.decision is not None:
-            result["stage2_import"] = provisional.decision
-            if provisional.confident_reject:
-                result["final_status"] = "wanted"
-                result["keep_searching"] = True
-                return _finalize_denylist(result)
-            search_action = post_import_search_action(provisional.decision)
-            result["imported"] = True
-            result["keep_searching"] = search_action.status == "wanted"
-            result["final_status"] = search_action.status
-            result["target_final_format"] = stage2_new_format
-            return _finalize_denylist(result)
-        measured = measured_import_decision(
-            MeasuredImportDecisionInput(
-                new_m,
-                existing_m,
-                verified_lossless_proof=will_be_verified,
-                source_spectral=candidate_spectral,
-                current_spectral=existing_spectral,
-            ),
-            cfg=cfg,
-        )
-        result["stage2_import"] = measured.decision
-        result["comparison_basis"] = (
-            msgspec.to_builtins(measured.comparison_basis)
-            if measured.comparison_basis is not None else None)
 
-        if result["stage2_import"] == "downgrade":
-            result["final_status"] = "imported"
-            result["keep_searching"] = True
-            return _finalize_denylist(result)
-        result["imported"] = True
+    # Annotations quoted for the same reason the enclosing function's return
+    # type is (see its signature): this module carries a fixed ``Any``
+    # budget for the one ``result: dict[str, Any]`` shape both twins return,
+    # and the lexical escape-hatch scanner counts NAME tokens.
+    def _stage2_onward(result: "dict[str, Any]") -> "dict[str, Any]":
+        """Stage 2 and Stage 3, as a closure over THIS call's own inputs.
 
-        # Genuine FLAC on disk is verified lossless (for quality gate). Route
-        # through determine_verified_lossless so the V0-avg trust override is
-        # consulted and the simulator stays in lockstep with import_one.py.
-        if will_be_verified:
-            candidate_verified_lossless_proof = True
-            result["verified_lossless"] = True
-
-        gate_bitrate = min_bitrate
-        gate_avg_bitrate = min_bitrate  # FLAC: lossless, avg == min is fine
-        gate_cbr = False
-        gate_format = stage2_new_format  # "flac"
-        gate_contract = None
-    elif is_flac:
-        # FLAC path: convert first, then decide
-        is_transcode = transcode_detection(
-            converted_count, spectral_grade=spectral_grade)
-        candidate_probe_min = (
-            candidate_v0_probe_min
-            if candidate_v0_probe_min is not None
-            else post_conversion_min_bitrate
-        )
-        candidate_probe_full = V0ProbeEvidence(
-            kind=candidate_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
-            avg_bitrate_kbps=candidate_v0_probe_avg,
-            min_bitrate_kbps=candidate_probe_min,
-        ) if (
-            candidate_v0_probe_avg is not None
-            or candidate_probe_min is not None
-        ) else None
-        will_be_verified = determine_verified_lossless(
-            target_format, spectral_grade,
-            converted_count=converted_count,
-            is_transcode=is_transcode,
-            v0_probe=candidate_probe_full)
-        v0_verified_override = (
-            is_transcode and v0_probe_overrides_spectral(candidate_probe_full)
-        )
-        policy_is_transcode = is_transcode and not v0_verified_override
-        stage2_new_format = comparison_format_hint(
-            explicit_format=new_format,
-            verified_lossless_target=(
-                verified_lossless_target if will_be_verified else None),
-            converted_count=converted_count,
-            is_transcode=policy_is_transcode,
-        )
-        # avg/median stay None — the flat interface carries only the
-        # post-conversion MIN for this side. See the flac-keep site above:
-        # a fabricated avg=min is how the persisted basis learned to call a
-        # min value "avg" (dl 36660).
-        new_m = AudioQualityMeasurement(
-            min_bitrate_kbps=min_bitrate,
-            format=new_format or "flac",
-            spectral_grade=spectral_grade,
-            spectral_bitrate_kbps=candidate_spectral_class,
-            spectral_subject=(
-                EVIDENCE_SUBJECT_SOURCE if spectral_grade is not None else None
-            ),
-            spectral_provenance=(
-                EVIDENCE_PROVENANCE_MEASURED
-                if spectral_grade is not None else None
-            ),
-            # Gated on the grade for the same reason
-            # ``build_existing_quality_measurement`` gates: these facts are
-            # measured in the SAME pass as the grade, so a measurement with
-            # no grade cannot legitimately carry them.
-            cliff_hz=(
-                candidate_context.cliff_hz
-                if spectral_grade is not None else None
-            ),
-            codec_family=(
-                candidate_context.codec_family
-                if spectral_grade is not None else None
-            ))
-        # The audit target names only an output policy that would actually be
-        # materialized. The temporary V0 comparison proxy and a rejected
-        # transcode are not final targets.
-        result["target_final_format"] = (
-            verified_lossless_target
-            if will_be_verified and verified_lossless_target
-            else None
-        )
-        provisional_probe_avg = (
-            candidate_v0_probe_avg
-            if candidate_v0_probe_avg is not None
-            else post_conversion_min_bitrate
-        )
-        if v0_verified_override:
-            provisional = ProvisionalLosslessDecisionResult()
-        else:
-            provisional = provisional_lossless_decision(
-                ProvisionalLosslessDecisionInput(
-                    candidate_probe=V0ProbeEvidence(
-                        kind=candidate_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
-                        avg_bitrate_kbps=provisional_probe_avg,
-                        min_bitrate_kbps=candidate_probe_min,
-                    ) if provisional_probe_avg is not None else None,
-                    existing_probe=V0ProbeEvidence(
-                        kind=existing_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
-                        avg_bitrate_kbps=existing_v0_probe_avg,
-                    ) if existing_v0_probe_avg is not None else None,
-                    spectral_grade=spectral_grade,
-                    supported_lossless_source=provisional_source_candidate,
-                ),
-                cfg=cfg,
-            )
-        if provisional.decision is not None:
-            result["stage2_import"] = provisional.decision
-            if provisional.confident_reject:
-                result["final_status"] = "wanted"
-                result["keep_searching"] = True
-                return _finalize_denylist(result)
-            search_action = post_import_search_action(provisional.decision)
-            result["imported"] = True
-            result["keep_searching"] = search_action.status == "wanted"
-            result["final_status"] = search_action.status
-            if verified_lossless_target:
-                result["target_final_format"] = verified_lossless_target
-            return _finalize_denylist(result)
-        target_contract = None
-        if stage2_new_format is not None:
-            target_contract = (
-                TargetQualityContract.from_projection(
-                    stage2_new_format,
-                    projected_is_cbr=post_conversion_is_cbr,
-                )
-                if post_conversion_is_cbr is not None
-                else TargetQualityContract.from_explicit_label(
-                    stage2_new_format
-                )
-            )
-        measured = measured_import_decision(
-            MeasuredImportDecisionInput(
-                new_m,
-                existing_m,
-                policy_is_transcode,
-                target_contract,
-                (
-                    V0ProbeEvidence(
-                        kind=(
-                            candidate_v0_probe_kind
-                            or V0_PROBE_LOSSLESS_SOURCE
-                        ),
-                        min_bitrate_kbps=candidate_probe_min,
-                    )
-                    if converted_count > 0
-                    or post_conversion_min_bitrate is not None
-                    else None
-                ),
-                will_be_verified,
-                source_spectral=candidate_spectral,
-                current_spectral=existing_spectral,
-            ),
-            cfg=cfg,
-        )
-        result["stage2_import"] = measured.decision
-        result["comparison_basis"] = (
-            msgspec.to_builtins(measured.comparison_basis)
-            if measured.comparison_basis is not None else None)
-
-        if result["stage2_import"] == "downgrade":
-            result["final_status"] = "imported"  # keeps existing
-            result["keep_searching"] = True
-            return _finalize_denylist(result)
-        elif result["stage2_import"] == "transcode_downgrade":
-            result["final_status"] = "wanted"
-            result["keep_searching"] = True
-            return _finalize_denylist(result)
-        elif result["stage2_import"] in ("transcode_upgrade", "transcode_first"):
-            result["imported"] = True
-            result["keep_searching"] = True
-            # Still runs quality gate after import
-        else:
-            result["imported"] = True
-
-        # Genuine FLAC→V0 sets verified_lossless. Routed through
-        # determine_verified_lossless so the V0-avg trust override (Bill
-        # Hicks shape — spectral=suspect on spoken-word with high V0
-        # evidence) flips False→True consistently with import_one.py.
-        if will_be_verified:
-            candidate_verified_lossless_proof = True
-            result["verified_lossless"] = True
-
-        # Target format conversion: if verified lossless + target configured,
-        # use the target label for the quality gate (e.g. "opus 128") so the
-        # rank model classifies against the actual on-disk contract.
-        if candidate_verified_lossless_proof and verified_lossless_target:
-            result["target_final_format"] = verified_lossless_target
-            gate_format = verified_lossless_target
-        else:
-            gate_format = stage2_new_format
-        gate_contract = None
-        if gate_format is not None:
-            gate_contract = (
-                TargetQualityContract.from_projection(
-                    gate_format,
-                    projected_is_cbr=post_conversion_is_cbr,
-                )
-                if post_conversion_is_cbr is not None
-                else TargetQualityContract.from_explicit_label(gate_format)
-            )
-
-        # Use post-conversion bitrate for quality gate. The simulator
-        # doesn't take a separate post-conversion avg, so avg == min here;
-        # in production the real avg comes from beets after import.
-        gate_bitrate = post_conversion_min_bitrate or min_bitrate
-        gate_avg_bitrate = gate_bitrate
-        gate_cbr = False  # V0 conversion always produces VBR
-    else:
-        # Native lossy path: import directly. The caller must supply the codec
-        # label measured from the actual audio. An absent/unmapped label stays
-        # UNKNOWN; it must never be relabelled as MP3 from bitrate or container
-        # shape.
+        One body, at most one invocation per call. When Stage 1 defers
+        (the ordinary case) it runs on the real ``result`` and its return
+        value IS the decision. When Stage 1 short-circuits it runs on a
+        THROWAWAY dict instead, purely to answer the operator's question
+        'Stage 1 rejected this — what would Stage 2 have said?' (issue
+        #813's disagreement, issue #829 Phase 5 PR2d). A closure rather
+        than a module-level helper because the tail reads ~30 of this
+        function's locals: forwarding them by hand is exactly the kind of
+        drifting parallel wiring this change exists to delete.
+        """
+        # Local rebind, because both FLAC branches ASSIGN to this name and
+        # Python decides local-vs-closure at compile time: a bare
+        # ``candidate_verified_lossless_proof = True`` anywhere in this body
+        # makes every read of that name local, and so unbound on the paths
+        # that never promote (native lossy, and Stage 3 on either FLAC
+        # branch) — an ``UnboundLocalError``, not a leak.
         #
-        # Use the caller-supplied avg_bitrate when present (falls back to
-        # min_bitrate otherwise). Under the default cfg.bitrate_metric=AVG
-        # policy a VBR V0 at min=200/avg=245 must rank on avg=245 — otherwise
-        # the import/downgrade comparison and the post-import gate both see
-        # the wrong tier.
-        stage2_new_format = comparison_format_hint(
-            explicit_format=new_format,
+        # Leaking INTO the real decision is not the hazard here and never
+        # was: the same compile-time rule makes it impossible without a
+        # ``nonlocal``, and there is none. Every other captured name is
+        # read-only, and every captured object is a frozen dataclass or
+        # Struct, so the counterfactual run cannot reach the real result
+        # through a shared mutable either.
+        verified_proof = candidate_verified_lossless_proof
+
+        # --- Stage 2: Import decision ---
+        # Existing measurement — carries format if the caller provided one,
+        # otherwise defaults to "MP3" so legacy simulator scenarios (which only
+        # carry a min_bitrate) still classify against the MP3 VBR/CBR band
+        # tables. Production always provides a real format via BeetsDB.
+        #
+        # Supplying existing_avg_bitrate matters under the default
+        # cfg.bitrate_metric=AVG policy — otherwise a VBR album with avg=245 but
+        # min=180 gets ranked off min=180 (GOOD instead of TRANSPARENT) and
+        # downstream comparisons misrepresent production. When the caller didn't
+        # measure an avg, nothing is fabricated: metric selection falls back to
+        # min and the persisted basis says "min" (dl 36660 display-lie class).
+        # Symmetric-representation gate (issue #813 Finding 1). The existing-side
+        # spectral-floor ``override_min_bitrate`` represents the installed album by
+        # its real content so a fake-high existing (CBR 320 whose spectral says 96)
+        # cannot block a genuine upgrade. But that override is ONE-SIDED: it floors
+        # only the existing measurement. When the CANDIDATE ALSO carries a spectral
+        # estimate, ``_shared_spectral_bitrates`` already floors BOTH sides
+        # symmetrically for rank — and additionally applying the existing-only
+        # override then poisons the raw ``metric_tiebreak``: the candidate keeps its
+        # inflated container bitrate while the existing is floored to its spectral
+        # estimate, minting a phantom "better" for an identical transcode. That is
+        # the Deerhunter "Rhapsody Original" bug (download_log 37725): a
+        # 256/spectral-192 candidate scored "better" over an identical
+        # 256/spectral-192 installed copy purely because the existing was floored to
+        # 192 and the candidate was not. Skip the one-sided override when the shared
+        # clamp will govern; keep it for the single-sided case (candidate carries no
+        # spectral estimate) it exists to serve. Rank demotion is unchanged either
+        # way — only the same-rank tiebreak now compares true container bitrates.
+        #
+        # The disarm predicate is EXACTLY ``_shared_spectral_bitrates``' firing
+        # condition, and that identity is the whole argument: the override is
+        # only safe to drop because something else then represents the installed
+        # album by its real content. Issue #829 Phase 5 PR2b narrowed the clamp
+        # to comparable CLASSES (a ``cliff_hz`` re-derivation sits one tier above
+        # a legacy stored bucket, so a mixed-basis pair measures derivation, not
+        # content). Disarming on the wider "both sides have a class" would open a
+        # window where NEITHER mechanism fires and a known-fake installed copy
+        # keeps its inflated container — download_log 29525, Clue to Kalo *Lily
+        # Perdida*: a CBR-320 HAVE graded ``likely_transcode`` with a cliff-derived
+        # class of 128 would have blocked a genuinely better VBR 234 candidate.
+        # Deerhunter is unreachable through that window: it is same-codec,
+        # same-basis, i.e. comparable, so the gate still fires there.
+        shared_spectral_clamp_will_fire = spectral_classes_govern
+        effective_existing_override = (
+            None if shared_spectral_clamp_will_fire else override_min_bitrate
         )
-        # No fabricated fallbacks: when the caller measured no avg, the
-        # basis metric falls back to (and honestly says) "min". Median is
-        # not part of this interface at all.
-        new_m = AudioQualityMeasurement(
-            min_bitrate_kbps=min_bitrate,
-            avg_bitrate_kbps=avg_bitrate,
-            format=stage2_new_format,
-            is_cbr=is_cbr,
+        existing_m = build_existing_quality_measurement(
+            min_bitrate_kbps=existing_min_bitrate,
+            avg_bitrate_kbps=existing_avg_bitrate,
+            format=effective_existing_format,
+            is_cbr=existing_is_cbr,
+            override_min_bitrate=effective_existing_override,
+            spectral_grade=existing_spectral_grade,
+            spectral_bitrate_kbps=existing_spectral_class,
+            cliff_hz=existing_context.cliff_hz,
+            codec_family=existing_context.codec_family,
+        )
+
+        if is_flac and target_format in ("flac", "lossless"):
+            # FLAC kept on disk (no conversion).
+            stage2_new_format = new_format or "flac"
+            result["target_final_format"] = stage2_new_format
+            candidate_probe_min = candidate_v0_probe_min
+            candidate_probe_full = V0ProbeEvidence(
+                kind=candidate_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
+                avg_bitrate_kbps=candidate_v0_probe_avg,
+                min_bitrate_kbps=candidate_probe_min,
+            ) if candidate_v0_probe_avg is not None else None
+            will_be_verified = determine_verified_lossless(
+                target_format, spectral_grade,
+                converted_count=0, is_transcode=False,
+                v0_probe=candidate_probe_full)
+            v0_verified_override = (
+                spectral_grade in SPECTRAL_TRANSCODE_GRADES
+                and v0_probe_overrides_spectral(candidate_probe_full)
+            )
+            # avg/median stay None — only the min crosses this interface. A
+            # fabricated avg=min makes _selected_bitrate_with_source label a min
+            # value "avg" in the persisted basis (dl 36660: "avg 216k" beside an
+            # honest "V0 255kbps avg" on the same card). None falls back to the
+            # min with the honest "min" label; the classified value is identical.
+            new_m = AudioQualityMeasurement(
+                min_bitrate_kbps=min_bitrate,
+                format=stage2_new_format,
+                spectral_grade=spectral_grade,
+                spectral_bitrate_kbps=candidate_spectral_class,
+                spectral_subject=(
+                    EVIDENCE_SUBJECT_SOURCE if spectral_grade is not None else None
+                ),
+                spectral_provenance=(
+                    EVIDENCE_PROVENANCE_MEASURED
+                    if spectral_grade is not None else None
+                ),
+                # Gated on the grade for the same reason
+                # ``build_existing_quality_measurement`` gates: these facts are
+                # measured in the SAME pass as the grade, so a measurement with
+                # no grade cannot legitimately carry them.
+                cliff_hz=(
+                    candidate_context.cliff_hz
+                    if spectral_grade is not None else None
+                ),
+                codec_family=(
+                    candidate_context.codec_family
+                    if spectral_grade is not None else None
+                ))
+            if v0_verified_override:
+                provisional = ProvisionalLosslessDecisionResult()
+            else:
+                provisional = provisional_lossless_decision(
+                    ProvisionalLosslessDecisionInput(
+                        candidate_probe=V0ProbeEvidence(
+                            kind=candidate_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
+                            avg_bitrate_kbps=candidate_v0_probe_avg,
+                            min_bitrate_kbps=candidate_probe_min,
+                        ) if candidate_v0_probe_avg is not None else None,
+                        existing_probe=V0ProbeEvidence(
+                            kind=existing_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
+                            avg_bitrate_kbps=existing_v0_probe_avg,
+                        ) if existing_v0_probe_avg is not None else None,
+                        spectral_grade=spectral_grade,
+                        supported_lossless_source=provisional_source_candidate,
+                    ),
+                    cfg=cfg,
+                )
+            if provisional.decision is not None:
+                result["stage2_import"] = provisional.decision
+                if provisional.confident_reject:
+                    result["final_status"] = "wanted"
+                    result["keep_searching"] = True
+                    return _finalize_denylist(result)
+                search_action = post_import_search_action(provisional.decision)
+                result["imported"] = True
+                result["keep_searching"] = search_action.status == "wanted"
+                result["final_status"] = search_action.status
+                result["target_final_format"] = stage2_new_format
+                return _finalize_denylist(result)
+            measured = measured_import_decision(
+                MeasuredImportDecisionInput(
+                    new_m,
+                    existing_m,
+                    verified_lossless_proof=will_be_verified,
+                    source_spectral=candidate_spectral,
+                    current_spectral=existing_spectral,
+                ),
+                cfg=cfg,
+            )
+            result["stage2_import"] = measured.decision
+            result["comparison_basis"] = (
+                msgspec.to_builtins(measured.comparison_basis)
+                if measured.comparison_basis is not None else None)
+
+            if result["stage2_import"] == "downgrade":
+                result["final_status"] = "imported"
+                result["keep_searching"] = True
+                return _finalize_denylist(result)
+            result["imported"] = True
+
+            # Genuine FLAC on disk is verified lossless (for quality gate). Route
+            # through determine_verified_lossless so the V0-avg trust override is
+            # consulted and the simulator stays in lockstep with import_one.py.
+            if will_be_verified:
+                verified_proof = True
+                result["verified_lossless"] = True
+
+            gate_bitrate = min_bitrate
+            gate_avg_bitrate = min_bitrate  # FLAC: lossless, avg == min is fine
+            gate_cbr = False
+            gate_format = stage2_new_format  # "flac"
+            gate_contract = None
+        elif is_flac:
+            # FLAC path: convert first, then decide
+            is_transcode = transcode_detection(
+                converted_count, spectral_grade=spectral_grade)
+            candidate_probe_min = (
+                candidate_v0_probe_min
+                if candidate_v0_probe_min is not None
+                else post_conversion_min_bitrate
+            )
+            candidate_probe_full = V0ProbeEvidence(
+                kind=candidate_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
+                avg_bitrate_kbps=candidate_v0_probe_avg,
+                min_bitrate_kbps=candidate_probe_min,
+            ) if (
+                candidate_v0_probe_avg is not None
+                or candidate_probe_min is not None
+            ) else None
+            will_be_verified = determine_verified_lossless(
+                target_format, spectral_grade,
+                converted_count=converted_count,
+                is_transcode=is_transcode,
+                v0_probe=candidate_probe_full)
+            v0_verified_override = (
+                is_transcode and v0_probe_overrides_spectral(candidate_probe_full)
+            )
+            policy_is_transcode = is_transcode and not v0_verified_override
+            stage2_new_format = comparison_format_hint(
+                explicit_format=new_format,
+                verified_lossless_target=(
+                    verified_lossless_target if will_be_verified else None),
+                converted_count=converted_count,
+                is_transcode=policy_is_transcode,
+            )
+            # avg/median stay None — the flat interface carries only the
+            # post-conversion MIN for this side. See the flac-keep site above:
+            # a fabricated avg=min is how the persisted basis learned to call a
+            # min value "avg" (dl 36660).
+            new_m = AudioQualityMeasurement(
+                min_bitrate_kbps=min_bitrate,
+                format=new_format or "flac",
+                spectral_grade=spectral_grade,
+                spectral_bitrate_kbps=candidate_spectral_class,
+                spectral_subject=(
+                    EVIDENCE_SUBJECT_SOURCE if spectral_grade is not None else None
+                ),
+                spectral_provenance=(
+                    EVIDENCE_PROVENANCE_MEASURED
+                    if spectral_grade is not None else None
+                ),
+                # Gated on the grade for the same reason
+                # ``build_existing_quality_measurement`` gates: these facts are
+                # measured in the SAME pass as the grade, so a measurement with
+                # no grade cannot legitimately carry them.
+                cliff_hz=(
+                    candidate_context.cliff_hz
+                    if spectral_grade is not None else None
+                ),
+                codec_family=(
+                    candidate_context.codec_family
+                    if spectral_grade is not None else None
+                ))
+            # The audit target names only an output policy that would actually be
+            # materialized. The temporary V0 comparison proxy and a rejected
+            # transcode are not final targets.
+            result["target_final_format"] = (
+                verified_lossless_target
+                if will_be_verified and verified_lossless_target
+                else None
+            )
+            provisional_probe_avg = (
+                candidate_v0_probe_avg
+                if candidate_v0_probe_avg is not None
+                else post_conversion_min_bitrate
+            )
+            if v0_verified_override:
+                provisional = ProvisionalLosslessDecisionResult()
+            else:
+                provisional = provisional_lossless_decision(
+                    ProvisionalLosslessDecisionInput(
+                        candidate_probe=V0ProbeEvidence(
+                            kind=candidate_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
+                            avg_bitrate_kbps=provisional_probe_avg,
+                            min_bitrate_kbps=candidate_probe_min,
+                        ) if provisional_probe_avg is not None else None,
+                        existing_probe=V0ProbeEvidence(
+                            kind=existing_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
+                            avg_bitrate_kbps=existing_v0_probe_avg,
+                        ) if existing_v0_probe_avg is not None else None,
+                        spectral_grade=spectral_grade,
+                        supported_lossless_source=provisional_source_candidate,
+                    ),
+                    cfg=cfg,
+                )
+            if provisional.decision is not None:
+                result["stage2_import"] = provisional.decision
+                if provisional.confident_reject:
+                    result["final_status"] = "wanted"
+                    result["keep_searching"] = True
+                    return _finalize_denylist(result)
+                search_action = post_import_search_action(provisional.decision)
+                result["imported"] = True
+                result["keep_searching"] = search_action.status == "wanted"
+                result["final_status"] = search_action.status
+                if verified_lossless_target:
+                    result["target_final_format"] = verified_lossless_target
+                return _finalize_denylist(result)
+            target_contract = None
+            if stage2_new_format is not None:
+                target_contract = (
+                    TargetQualityContract.from_projection(
+                        stage2_new_format,
+                        projected_is_cbr=post_conversion_is_cbr,
+                    )
+                    if post_conversion_is_cbr is not None
+                    else TargetQualityContract.from_explicit_label(
+                        stage2_new_format
+                    )
+                )
+            measured = measured_import_decision(
+                MeasuredImportDecisionInput(
+                    new_m,
+                    existing_m,
+                    policy_is_transcode,
+                    target_contract,
+                    (
+                        V0ProbeEvidence(
+                            kind=(
+                                candidate_v0_probe_kind
+                                or V0_PROBE_LOSSLESS_SOURCE
+                            ),
+                            min_bitrate_kbps=candidate_probe_min,
+                        )
+                        if converted_count > 0
+                        or post_conversion_min_bitrate is not None
+                        else None
+                    ),
+                    will_be_verified,
+                    source_spectral=candidate_spectral,
+                    current_spectral=existing_spectral,
+                ),
+                cfg=cfg,
+            )
+            result["stage2_import"] = measured.decision
+            result["comparison_basis"] = (
+                msgspec.to_builtins(measured.comparison_basis)
+                if measured.comparison_basis is not None else None)
+
+            if result["stage2_import"] == "downgrade":
+                result["final_status"] = "imported"  # keeps existing
+                result["keep_searching"] = True
+                return _finalize_denylist(result)
+            elif result["stage2_import"] == "transcode_downgrade":
+                result["final_status"] = "wanted"
+                result["keep_searching"] = True
+                return _finalize_denylist(result)
+            elif result["stage2_import"] in ("transcode_upgrade", "transcode_first"):
+                result["imported"] = True
+                result["keep_searching"] = True
+                # Still runs quality gate after import
+            else:
+                result["imported"] = True
+
+            # Genuine FLAC→V0 sets verified_lossless. Routed through
+            # determine_verified_lossless so the V0-avg trust override (Bill
+            # Hicks shape — spectral=suspect on spoken-word with high V0
+            # evidence) flips False→True consistently with import_one.py.
+            if will_be_verified:
+                verified_proof = True
+                result["verified_lossless"] = True
+
+            # Target format conversion: if verified lossless + target configured,
+            # use the target label for the quality gate (e.g. "opus 128") so the
+            # rank model classifies against the actual on-disk contract.
+            if verified_proof and verified_lossless_target:
+                result["target_final_format"] = verified_lossless_target
+                gate_format = verified_lossless_target
+            else:
+                gate_format = stage2_new_format
+            gate_contract = None
+            if gate_format is not None:
+                gate_contract = (
+                    TargetQualityContract.from_projection(
+                        gate_format,
+                        projected_is_cbr=post_conversion_is_cbr,
+                    )
+                    if post_conversion_is_cbr is not None
+                    else TargetQualityContract.from_explicit_label(gate_format)
+                )
+
+            # Use post-conversion bitrate for quality gate. The simulator
+            # doesn't take a separate post-conversion avg, so avg == min here;
+            # in production the real avg comes from beets after import.
+            gate_bitrate = post_conversion_min_bitrate or min_bitrate
+            gate_avg_bitrate = gate_bitrate
+            gate_cbr = False  # V0 conversion always produces VBR
+        else:
+            # Native lossy path: import directly. The caller must supply the codec
+            # label measured from the actual audio. An absent/unmapped label stays
+            # UNKNOWN; it must never be relabelled as MP3 from bitrate or container
+            # shape.
+            #
+            # Use the caller-supplied avg_bitrate when present (falls back to
+            # min_bitrate otherwise). Under the default cfg.bitrate_metric=AVG
+            # policy a VBR V0 at min=200/avg=245 must rank on avg=245 — otherwise
+            # the import/downgrade comparison and the post-import gate both see
+            # the wrong tier.
+            stage2_new_format = comparison_format_hint(
+                explicit_format=new_format,
+            )
+            # No fabricated fallbacks: when the caller measured no avg, the
+            # basis metric falls back to (and honestly says) "min". Median is
+            # not part of this interface at all.
+            new_m = AudioQualityMeasurement(
+                min_bitrate_kbps=min_bitrate,
+                avg_bitrate_kbps=avg_bitrate,
+                format=stage2_new_format,
+                is_cbr=is_cbr,
+                spectral_grade=spectral_grade,
+                spectral_bitrate_kbps=candidate_spectral_class,
+                spectral_subject=(
+                    EVIDENCE_SUBJECT_SOURCE if spectral_grade is not None else None
+                ),
+                spectral_provenance=(
+                    EVIDENCE_PROVENANCE_MEASURED
+                    if spectral_grade is not None else None
+                ),
+                # Gated on the grade for the same reason
+                # ``build_existing_quality_measurement`` gates: these facts are
+                # measured in the SAME pass as the grade, so a measurement with
+                # no grade cannot legitimately carry them.
+                cliff_hz=(
+                    candidate_context.cliff_hz
+                    if spectral_grade is not None else None
+                ),
+                codec_family=(
+                    candidate_context.codec_family
+                    if spectral_grade is not None else None
+                ))
+            # Lossless-source lock: a recorded existing lossless-source V0 probe
+            # is the truth-of-source anchor. Lossy candidates have no comparable
+            # measurement and are rejected before measured_import_decision can
+            # be misled by an on-disk avg that is just our own transcode floor.
+            lossy_lock = provisional_lossless_decision(
+                ProvisionalLosslessDecisionInput(
+                    candidate_probe=None,
+                    existing_probe=V0ProbeEvidence(
+                        kind=existing_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
+                        avg_bitrate_kbps=existing_v0_probe_avg,
+                    ) if existing_v0_probe_avg is not None else None,
+                    spectral_grade=spectral_grade,
+                    supported_lossless_source=False,
+                ),
+                cfg=cfg,
+            )
+            if lossy_lock.decision == DECISION_LOSSLESS_SOURCE_LOCKED:
+                result["stage2_import"] = lossy_lock.decision
+                result["final_status"] = "wanted"
+                result["keep_searching"] = True
+                return _finalize_denylist(result)
+            measured = measured_import_decision(
+                MeasuredImportDecisionInput(
+                    new_m,
+                    existing_m,
+                    verified_lossless_proof=verified_proof,
+                    source_spectral=candidate_spectral,
+                    current_spectral=existing_spectral,
+                ),
+                cfg=cfg,
+            )
+            result["stage2_import"] = measured.decision
+            result["comparison_basis"] = (
+                msgspec.to_builtins(measured.comparison_basis)
+                if measured.comparison_basis is not None else None)
+
+            if result["stage2_import"] == "downgrade":
+                result["final_status"] = "imported"  # keeps existing
+                result["keep_searching"] = True
+                return _finalize_denylist(result)
+
+            result["imported"] = True
+            gate_bitrate = min_bitrate
+            # Real avg only; the gate's metric selection falls back to min when
+            # avg is unmeasured (same classified value as the old fabricated
+            # fallback — gate_m is internal and never persisted as a basis).
+            gate_avg_bitrate = avg_bitrate
+            gate_cbr = is_cbr
+            gate_format = stage2_new_format
+            gate_contract = None
+
+        # --- Stage 3: Post-import quality gate ---
+        gate_spectral_bitrate = None
+        effective_gate_bitrate = compute_effective_override_bitrate(
+            gate_bitrate, candidate_spectral)
+        # ``gate_bitrate`` is assigned from ``min_bitrate`` (now typed ``int``,
+        # never ``None``) on every branch above, so it is never ``None`` here —
+        # the redundant ``gate_bitrate is not None`` guard is dropped now that
+        # ``min_bitrate: int`` makes that provable rather than merely assumed.
+        if (effective_gate_bitrate is not None
+                and effective_gate_bitrate < gate_bitrate):
+            gate_spectral_bitrate = candidate_spectral_class
+        gate_measurement_format = (
+            gate_contract.format.split()[0]
+            if gate_contract is not None
+            else gate_format
+        )
+        gate_m = AudioQualityMeasurement(
+            min_bitrate_kbps=gate_bitrate,
+            avg_bitrate_kbps=gate_avg_bitrate,
+            median_bitrate_kbps=gate_avg_bitrate,
+            format=gate_measurement_format,
+            is_cbr=gate_cbr,
             spectral_grade=spectral_grade,
-            spectral_bitrate_kbps=candidate_spectral_class,
+            spectral_bitrate_kbps=gate_spectral_bitrate,
             spectral_subject=(
                 EVIDENCE_SUBJECT_SOURCE if spectral_grade is not None else None
             ),
@@ -724,127 +880,73 @@ def full_pipeline_decision(
                 EVIDENCE_PROVENANCE_MEASURED
                 if spectral_grade is not None else None
             ),
-            # Gated on the grade for the same reason
-            # ``build_existing_quality_measurement`` gates: these facts are
-            # measured in the SAME pass as the grade, so a measurement with
-            # no grade cannot legitimately carry them.
+            # The measured codec facts describe the CANDIDATE's bytes. They ride
+            # the gate measurement only when the gate is still looking at those
+            # bytes (native lossy import); after a conversion the gate describes
+            # the output, whose codec family is the target's, not the source's.
+            # Stamping the source's family on an output projection would be the
+            # download-37946 mistake in the other direction.
             cliff_hz=(
                 candidate_context.cliff_hz
-                if spectral_grade is not None else None
+                if gate_measurement_format == candidate_format_label
+                else None
             ),
             codec_family=(
                 candidate_context.codec_family
-                if spectral_grade is not None else None
+                if gate_measurement_format == candidate_format_label
+                else None
             ))
-        # Lossless-source lock: a recorded existing lossless-source V0 probe
-        # is the truth-of-source anchor. Lossy candidates have no comparable
-        # measurement and are rejected before measured_import_decision can
-        # be misled by an on-disk avg that is just our own transcode floor.
-        lossy_lock = provisional_lossless_decision(
-            ProvisionalLosslessDecisionInput(
-                candidate_probe=None,
-                existing_probe=V0ProbeEvidence(
-                    kind=existing_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
-                    avg_bitrate_kbps=existing_v0_probe_avg,
-                ) if existing_v0_probe_avg is not None else None,
-                spectral_grade=spectral_grade,
-                supported_lossless_source=False,
-            ),
+        result["stage3_quality_gate"] = quality_gate_decision(
+            gate_m,
             cfg=cfg,
+            target_contract=gate_contract,
+            verified_lossless_proof=verified_proof,
         )
-        if lossy_lock.decision == DECISION_LOSSLESS_SOURCE_LOCKED:
-            result["stage2_import"] = lossy_lock.decision
-            result["final_status"] = "wanted"
-            result["keep_searching"] = True
-            return _finalize_denylist(result)
-        measured = measured_import_decision(
-            MeasuredImportDecisionInput(
-                new_m,
-                existing_m,
-                verified_lossless_proof=candidate_verified_lossless_proof,
-                source_spectral=candidate_spectral,
-                current_spectral=existing_spectral,
-            ),
-            cfg=cfg,
-        )
-        result["stage2_import"] = measured.decision
-        result["comparison_basis"] = (
-            msgspec.to_builtins(measured.comparison_basis)
-            if measured.comparison_basis is not None else None)
+        search_action = post_import_search_action(result["stage3_quality_gate"])
+        result["final_status"] = search_action.status
+        result["keep_searching"] = search_action.status == "wanted"
 
-        if result["stage2_import"] == "downgrade":
-            result["final_status"] = "imported"  # keeps existing
-            result["keep_searching"] = True
-            return _finalize_denylist(result)
+        return _finalize_denylist(result)
 
-        result["imported"] = True
-        gate_bitrate = min_bitrate
-        # Real avg only; the gate's metric selection falls back to min when
-        # avg is unmeasured (same classified value as the old fabricated
-        # fallback — gate_m is internal and never persisted as a basis).
-        gate_avg_bitrate = avg_bitrate
-        gate_cbr = is_cbr
-        gate_format = stage2_new_format
-        gate_contract = None
+    if stage1_short_circuits:
+        # AUDIT ONLY — never a decision input. Stage 2 runs over a
+        # THROWAWAY copy of the result dict and exactly two values are
+        # lifted back onto the real result, under keys no branch anywhere
+        # reads. Every decision field below is written exactly as it was
+        # before this audit existed, in the same order, from the same
+        # facts. A ``ValueError`` is swallowed for the same reason: a
+        # reporting field must not be able to turn a clean Stage-1 reject
+        # into a crash, and this is the one path that never used to reach
+        # the tail at all (``TargetQualityContract.from_explicit_label``
+        # rejects a bare ``MP3`` target — a world reachable here through
+        # ``comparison_format_hint``). ``ValueError`` is the ONLY exception
+        # type ``lib/quality`` raises by design, and the catch stays that
+        # narrow deliberately: anything else is a real defect and must
+        # still surface. The identical tail runs unguarded on every
+        # deferring path, so nothing real can hide here either.
+        #
+        # ``dict(result)`` is a complete copy only while every value on
+        # ``result`` is still a scalar at this point, which is true because
+        # nothing before Stage 1 writes a container. A future branch that
+        # writes one above here owes a deepcopy — otherwise the throwaway
+        # would share it with the real decision.
+        try:
+            deferred = _stage2_onward(dict(result))
+        except ValueError:
+            # Reported, never silent: an unevaluable counterfactual is NOT
+            # the same fact as "Stage 2 had nothing to say", and leaving
+            # both keys None made the two indistinguishable to the operator
+            # and to the properties.
+            deferred = {"stage2_import": STAGE2_COUNTERFACTUAL_UNAVAILABLE}
+        result["stage2_import_if_stage1_deferred"] = deferred.get(
+            "stage2_import")
+        result["comparison_basis_if_stage1_deferred"] = deferred.get(
+            "comparison_basis")
+        result["final_status"] = "wanted"  # stays wanted, denylist user
+        result["keep_searching"] = True
+        return _finalize_denylist(result)
 
-    # --- Stage 3: Post-import quality gate ---
-    gate_spectral_bitrate = None
-    effective_gate_bitrate = compute_effective_override_bitrate(
-        gate_bitrate, candidate_spectral)
-    # ``gate_bitrate`` is assigned from ``min_bitrate`` (now typed ``int``,
-    # never ``None``) on every branch above, so it is never ``None`` here —
-    # the redundant ``gate_bitrate is not None`` guard is dropped now that
-    # ``min_bitrate: int`` makes that provable rather than merely assumed.
-    if (effective_gate_bitrate is not None
-            and effective_gate_bitrate < gate_bitrate):
-        gate_spectral_bitrate = candidate_spectral_class
-    gate_measurement_format = (
-        gate_contract.format.split()[0]
-        if gate_contract is not None
-        else gate_format
-    )
-    gate_m = AudioQualityMeasurement(
-        min_bitrate_kbps=gate_bitrate,
-        avg_bitrate_kbps=gate_avg_bitrate,
-        median_bitrate_kbps=gate_avg_bitrate,
-        format=gate_measurement_format,
-        is_cbr=gate_cbr,
-        spectral_grade=spectral_grade,
-        spectral_bitrate_kbps=gate_spectral_bitrate,
-        spectral_subject=(
-            EVIDENCE_SUBJECT_SOURCE if spectral_grade is not None else None
-        ),
-        spectral_provenance=(
-            EVIDENCE_PROVENANCE_MEASURED
-            if spectral_grade is not None else None
-        ),
-        # The measured codec facts describe the CANDIDATE's bytes. They ride
-        # the gate measurement only when the gate is still looking at those
-        # bytes (native lossy import); after a conversion the gate describes
-        # the output, whose codec family is the target's, not the source's.
-        # Stamping the source's family on an output projection would be the
-        # download-37946 mistake in the other direction.
-        cliff_hz=(
-            candidate_context.cliff_hz
-            if gate_measurement_format == candidate_format_label
-            else None
-        ),
-        codec_family=(
-            candidate_context.codec_family
-            if gate_measurement_format == candidate_format_label
-            else None
-        ))
-    result["stage3_quality_gate"] = quality_gate_decision(
-        gate_m,
-        cfg=cfg,
-        target_contract=gate_contract,
-        verified_lossless_proof=candidate_verified_lossless_proof,
-    )
-    search_action = post_import_search_action(result["stage3_quality_gate"])
-    result["final_status"] = search_action.status
-    result["keep_searching"] = search_action.status == "wanted"
-
-    return _finalize_denylist(result)
+    return _stage2_onward(result)
 
 
 class AlbumQualityEvidenceDecisionFacts(msgspec.Struct, frozen=True):
@@ -1254,6 +1356,10 @@ def full_pipeline_decision_from_evidence(
             "target_final_format": str | None,
             "verified_lossless": bool,
             "comparison_basis": dict | None,  # QualityComparisonBasis builtins
+            # AUDIT ONLY — the Stage-1-reject counterfactual. See
+            # ``full_pipeline_decision``'s docstring; never a decision input.
+            "stage2_import_if_stage1_deferred": str | None,
+            "comparison_basis_if_stage1_deferred": dict | None,
         }
 
     Folder/audio-integrity facts are read directly off ``candidate`` as
@@ -1308,6 +1414,8 @@ def full_pipeline_decision_from_evidence(
             "target_final_format": None,
             "verified_lossless": candidate.verified_lossless_proof is not None,
             "comparison_basis": None,
+            "stage2_import_if_stage1_deferred": None,
+            "comparison_basis_if_stage1_deferred": None,
         })
 
     # --- U11 folder/audio-integrity early-exit rejects ---
@@ -1350,6 +1458,8 @@ def full_pipeline_decision_from_evidence(
             "target_final_format": None,
             "verified_lossless": False,
             "comparison_basis": None,
+            "stage2_import_if_stage1_deferred": None,
+            "comparison_basis_if_stage1_deferred": None,
         })
 
     if candidate.audio_corrupt:
