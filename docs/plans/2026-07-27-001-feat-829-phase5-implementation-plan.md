@@ -1,12 +1,177 @@
 # Phase 5 — Per-Codec Spectral Model Implementation (issue #829)
 
-**Status**: research COMPLETE and four-arm validated; **no code written yet**.
+**Status (2026-07-29)**: **PR1, PR2a, PR2b, PR2c and PR2d are merged and
+deployed.** The codec-blind defect that opened the issue is fixed and live.
+**PR3 is next**, and its design changed materially — read §1.5 before §3.
 **Issue**: https://github.com/abl030/cratedigger/issues/829
 **Predecessor plan**: `docs/plans/2026-07-22-001-feat-829-spectral-calibration-plan.md` (Phases 0–4)
 
 This document is the durable pick-up point. A new session should be able to
 read this file plus the linked issue comments and start the next PR without
 replaying the research.
+
+| PR | what | state |
+|---|---|---|
+| PR1 | evidence primitive capture (migration 065) | merged, deployed 2026-07-27 |
+| PR2a | per-codec interpretation module | merged (#922) |
+| PR2b | codec-aware decider seam + #911 anti-loop | merged (#927), **deployed + live-verified** |
+| PR2c | #828-item-1 cross-codec parity closure | merged (#931) |
+| PR2d | Stage-2 counterfactual audit; kills the #827 harness's blindness | merged (#934) |
+| — | calibration record committed to the repo | merged (#929) |
+| **PR3** | **proof gate v3** | **next — design revised, see §1.5** |
+| PR4 | tiered verdict persistence + display | not started |
+| PR5 | research tables, docs, teardown | teardown done; docs remain |
+
+The temporary calibration instance is **torn down** (2026-07-29): DB dropped,
+encode matrices and ground-truth FLACs deleted, 1,003 calib-owned slskd files
+swept via its own ledger before the DB went. The measurements survive in
+`docs/research/calibration-data/` — that directory is now the only surviving
+evidence for every constant here.
+
+---
+
+## 1.5 Corrections since this plan was written — READ FIRST
+
+Five claims in the original plan are wrong or overstated. They were found by
+checking the plan against the committed data and the live DB, and each one
+changes PR3.
+
+**a. The un-backfillable cohort is ~40%, not 93%.** §3's "93% of existing
+verified-lossless proofs sit on rows whose source no longer exists" counts
+rows with lossless *lineage*. But when the target is FLAC the conversion
+output IS the lossless file, so the source is not gone. Measured 2026-07-29:
+
+| | rows |
+|---|---:|
+| verified-lossless proofs | 15,547 |
+| source genuinely gone (lossless source → lossy current codec) | **6,273** (40%, 6,251 albums) |
+| still lossless on disk, re-measurable in principle | **8,273** (53%) |
+
+The consequence PR3 must absorb: more than half the proof cohort *could* be
+re-measured. The verified-lossless re-measurement sweep was declined on
+2026-07-27 partly on cost grounds computed against the wrong number. Whether
+to revisit that is an operator decision, not a PR3 default.
+
+**b. Ship the proof gate SINGLE-WINDOW, not multi-window.** The plan
+specifies legs evaluated at offsets 0/60/120/180 and unioned. **Production
+measures one window** — `_ffmpeg_to_wav(trim_seconds=30)`, no offset logic
+anywhere in `lib/spectral_check.py` — so the plan as written is not
+implementable without new capture. Ablation over all four arms
+(re-running the frozen scorer's own logic):
+
+| mode | max leak-free `T` | genuine denied there |
+|---|---:|---:|
+| window-0 only | 61.50 | 28/100 |
+| 0+60 | 62.90 | 31/100 |
+| union 0/60/120/180 | 64.00 | 34/100 |
+
+Window 0 **is** production exactly, and is the *strongest* single window
+(299/300 launders denied vs 296/294/295 for the others). At `T=62` window-0
+leaks exactly one album of 300, by 0.45 dB — a threshold-calibration
+artifact, because the max-over-windows shifts the genuine distribution up as
+much as the launder one. On the leak-vs-cost frontier single-window weakly
+dominates at every operating point.
+
+**Recommended: window 0, `T ≈ 59.5`** — leak-free on all four arms with
+2.05 dB headroom, at 34/100 genuine denials, which is *cheaper* than the
+union config's 36/100. Windows 3 and 4 add zero fraud catches and two extra
+genuine denials. Each extra window costs a full re-decode plus 21 sox
+band-RMS passes per track, on every import.
+
+**c. `apple-256→FLAC` was never run through the proof gate.** It is listed as
+a fraud class in this plan and in the calibration README, but it exists in
+exactly one committed file — `probe_pair.tsv.gz`, the V0/Opus re-encode
+experiment. It is absent from `results*`, `extended*` and `multiwin*`, so it
+was never spectrally measured and never entered the gate evaluation. The
+frozen scorer's `FLAC_FRAUDS` is only mp3-128 / opus-96 / vorbis-q5.
+
+**The gate is validated against three FLAC-container fraud classes on four
+arms, not four.** Residual #1 (Apple CVBR-256 survives the gate) is an
+inference from `.m4a` statistics, not a measurement. Running the gate on
+TRAINING's Apple encodes promotes roughly 19 of 34.
+
+**d. The published safety margin is stale.** "T=62 sits 4.7 dB below the
+tightest observed value" was computed on TRAINING (67.9) and ROUND-2 (66.7).
+ROUND-3 contains launders at 64.04 and 65.94, so the true four-arm margin is
+**2.04 dB**. The margin halved on the arm that passed the blind test.
+
+**e. The SBR object-type gate is not mandatory, and is not a PR3 blocker.**
+Probed every candidate file on doc2: **zero HE-AAC** anywhere (409 AAC-LC and
+39 ALAC in the library, 22 ALAC in slskd). HE-AAC also cannot structurally
+reach the proof gate — `converted_count` only counts files
+`_is_lossless_file` accepts, and HE-AAC probes as plain `aac`. And the
+genuinely dangerous case, HE-AAC laundered into a FLAC container, has no AAC
+object type left to read; that case is what the ultrasonic leg is for.
+`sbr_present` in `lib/quality/spectral_interpretation.py` is currently dead
+plumbing — PR3 should wire it or delete it (`scope.md`); leaning delete.
+
+---
+
+## 1.6 Ground truth is being reacquired
+
+Deleting the corpus at teardown was a mistake: it makes correction (c)
+unclosable without reacquisition, and forecloses any future statistic that
+needs the original audio.
+
+**20 corpus albums were re-seeded into prod on 2026-07-29**, chosen from
+`docs/research/calibration-data/corpus-manifest.json` — calib-proven
+acquirable, not already in prod, spectrum-diverse and including the
+deliberate traps (Loveless, Kind of Blue, the Gould Goldberg Variations,
+Music for Airports). All carry `target_format=lossless` and
+`search_filetype_override=lossless`, so the pipeline retains FLAC rather than
+converting to the default Opus target.
+
+When they land they are the ground truth for closing (c): encode each through
+qaac CVBR-256 → FLAC, measure the ultrasonic extension with the production
+analyzer, run the frozen scorer. Note the qaac VM (nixosconfig#46) may need
+re-standing.
+
+#### These are borrowed rows — remove them when the work is done
+
+**They are not part of the operator's curated collection.** They were seeded
+to serve issue #829 and should be removed once (c) is closed. Recorded here
+because a request id is the only handle that survives this session.
+
+| id | artist — album | MB release id |
+|---|---|---|
+| 8916 | Daft Punk — Random Access Memories | `e69e2f55-a2c0-472e-b30b-f43b565b3fbe` |
+| 8917 | Aphex Twin — Syro | `29625757-3991-4cfa-8d8a-3e1d5bd1f0d5` |
+| 8918 | Autechre — Tri Repetae | `d7838033-55fe-4fa4-949a-7bb96cc88839` |
+| 8919 | Squarepusher — Feed Me Weird Things | `8b8fab44-18b2-45fb-ae0f-d161fd2c6ca1` |
+| 8920 | M83 — Hurry Up, We're Dreaming | `bd6ea0c6-f5cd-4abf-828a-38df69ad1969` |
+| 8921 | Red Hot Chili Peppers — Californication | `ae9e09df-5029-30ec-bf1c-8d4a905f8c02` |
+| 8922 | Metallica — Death Magnetic | `5073f8ac-59a6-4190-8d36-c1a510a84fcf` |
+| 8923 | Converge — Jane Doe | `c0c80905-b460-4385-b84d-b068eb14bf5a` |
+| 8924 | Arvo Pärt — Tabula Rasa | `25edd502-d703-49bb-962f-7a3a679b5dbb` |
+| 8925 | J. S. Bach — The Goldberg Variations | `b304abb5-c039-494f-bc50-37490aca74c5` |
+| 8926 | Miles Davis — Kind of Blue | `e32a3f0b-1c19-3170-bb1c-650893774744` |
+| 8927 | John Coltrane — A Love Supreme | `4fa9c6d8-731e-3870-8b5b-580811b2d4e0` |
+| 8928 | GoGo Penguin — Man Made Object | `9f27f788-6729-42e2-9d42-4d68efa9a0a1` |
+| 8929 | The Velvet Underground — & Nico | `21117289-def5-3149-8346-56eb317a1087` |
+| 8930 | Simon and Garfunkel — Bridge Over Troubled Water | `a32c1775-4378-3a30-a341-41560aa41c2b` |
+| 8931 | Fleetwood Mac — Rumours | `4734e007-0972-30d7-9ffe-d864f08982c9` |
+| 8932 | My Bloody Valentine — Loveless | `cd32c6cf-f979-39e7-a4ec-157d3a560d06` |
+| 8933 | Grouper — Ruins | `aaed190c-fc3a-43c2-acdd-aa06b390b9cf` |
+| 8934 | Duster — Stratosphere | `79acc86e-b12b-4a4a-ad7d-7c9f928438a3` |
+| 8935 | Brian Eno — Ambient 1: Music for Airports | `1496daaf-4b0b-3596-a252-0d3a7068f6e5` |
+
+Contiguous range `8916..8935`, so a census is one query:
+
+```sql
+SELECT id, artist_name, album_title, status, final_format
+FROM album_requests WHERE id BETWEEN 8916 AND 8935 ORDER BY id;
+```
+
+Removal is an operator action through the normal surfaces
+(`pipeline-cli library-delete` for anything imported, `pipeline-delete` for
+the request rows) — **not** a raw SQL delete, and **not** before the Apple
+measurement is done. Check the range against the live library first: if the
+operator has meanwhile decided to keep one, it stops being a borrowed row.
+
+**Do not delete the FLACs again before the measurement.** If a future
+teardown is proposed, the corpus audio is the one artifact that cannot be
+regenerated from anything in the repo — that is the mistake this section
+exists to prevent repeating.
 
 ---
 
@@ -134,23 +299,61 @@ checker owes a known-bad self-test.
   the #813 audit record.
 - **Quality core: fable review, merge held for operator approval.**
 
-### PR3 — Proof gate v3 (ultrasonic leg + deficit re-threshold)
+### PR3 — Proof gate v3 (ultrasonic leg + deficit re-threshold) — NEXT
+
+**§1.5 revises this section. Where they disagree, §1.5 wins.**
 
 - Replace the relative affirmative leg with the level-invariant ultrasonic
-  deficit `U ≥ 62` (§1). Cliff and ceiling legs unchanged.
-- Legs evaluated per measurement window (offsets 0/60/120/180), **unioned** —
-  any window tripping any leg denies promotion.
+  deficit. Cliff and ceiling legs unchanged.
+- **Single window, `T ≈ 59.5`** — NOT `T = 62`, and NOT the multi-window
+  union, which production cannot produce (§1.5b). Production's one window is
+  window 0 of the calibration data, so PR1's capture already supplies
+  everything the legs need. Confirm the exact threshold by re-running the
+  ablation before freezing it.
 - HF-deficit thresholds → 65 / 69.
 - Denial semantics per §2: stays provisional, surfaces in triage, never
-  rejects or accuses.
-- **Quality core: fable review, merge held for operator approval.**
-- Reference implementation: `calibration-tmp/measurements/score_v3.py`
-  (frozen 2026-07-26; its `_window_legs` / `gate` are the shape to port).
+  rejects or accuses. **Withholding proof is not rejecting an album.**
+- Mint `verified_lossless_classifier = 'spectral_verified_lossless_v3'` —
+  reuse the existing column, do NOT add a new one. It is already the
+  "which model proved it" axis, is written at exactly one site
+  (`lib/quality/decisions.py::mint_verified_lossless_proof`), survives proof
+  carry-forward verbatim, and is currently rendered to zero operator
+  surfaces. **Do not use `spectral_measurement_version` for this** — it is a
+  measurement-shape version, and 47 proofs carry `smv=2` while having been
+  proved under the OLD gate; 7 of those are rows v3 denies, so a surface
+  reading it as "v3-proved" would mislabel the seven worst rows in the
+  library.
+- **Never retroactively demote.** Existing stamps remain proofs under the old
+  model per §2's authority. A row whose source is gone cannot be re-proved
+  and must not thereby lose the proof it holds.
+- Display of the proof generation belongs to **PR4**, not here — PR3 writes
+  the discriminator (unreconstructable afterwards), PR4 renders it. Doing the
+  display in PR3 means paying the Rule D 36k-row live-corpus differential for
+  copy PR4 immediately rewrites.
+- **Quality core: fable/opus review, merge held for operator approval.**
+- Reference implementation: `docs/research/calibration-data/score_v3.py.frozen`
+  — its `_window_legs` / `gate` are the shape to port. The `.frozen` suffix
+  keeps it out of Pyright/Ruff/Vulture; it does not type-check and must not
+  be "fixed".
+- Owed before or with PR3: the **live decision differential** (re-decide real
+  evidence pairs through the real decider on both trees, report changed rows
+  by field). It has been prototyped three times in this series and never
+  kept. PR3 changes what mints proofs — the highest blast radius left — so it
+  should be a committed `scripts/` harness with a Rule D-style clause, not a
+  fourth throwaway.
 
-#### PR3 hard constraint — the lossless-derived cohort can never be backfilled
+#### PR3 hard constraint — a large cohort can never be backfilled
 
-**93% of existing verified-lossless proofs sit on rows whose source no longer
-exists.** Measured on prod 2026-07-27:
+> **CORRECTED 2026-07-29 — see §1.5a.** The "93%" below counts lossless
+> *lineage*, which is not the same as a vanished source: when the target is
+> FLAC the conversion output IS the lossless file. The genuinely
+> un-backfillable cohort is **6,273 rows / 6,251 albums (40%)**, and **8,273
+> proofs (53%) still have lossless on disk and are re-measurable in
+> principle**. The constraint below is real but applies to 40% of the
+> cohort, not 93%. The original 2026-07-27 measurement is retained for
+> provenance.
+
+Measured on prod 2026-07-27 (superseded figures):
 
 | | rows | albums |
 |---|---:|---:|
@@ -202,6 +405,21 @@ Consequences PR3 must implement, not discover:
   `likely_transcode` stamps** in operator-facing surfaces.
 - Operator surfaces show the tier: `pipeline-cli quality`, web evidence panel.
 - UI copy must respect the base-rate caveat in §1.
+- **Also PR4's, added 2026-07-29:** render the proof *generation* that PR3
+  mints into `verified_lossless_classifier`, so "verified lossless" stops
+  meaning two different things silently. The surfaces are enumerated in the
+  #829 realignment comment; the badge path needs an evidence join because
+  `album_requests` carries only the bool. This is Rule D territory (36k-row
+  live-corpus differential) and should be done once, here, rather than twice.
+- **Also PR4's:** the web forensics card does not carry PR2d's Stage-2
+  counterfactual — `pipeline-cli quality` does. Leaving the persisted
+  stage-chain builders alone was verified correct (fixed key allowlists, zero
+  JSONB drift), so this is additive display work.
+- **Also PR4's:** the convergence-signal surfacing from the 2026-07-27
+  issue comments — inter-candidate `cliff_hz` constancy as a
+  "the network has converged, stop searching?" triage prompt. `cliff_hz` is
+  the primitive that makes it measurable and it has been accruing since
+  PR1 shipped.
 
 ### PR5 — Research tables, docs, teardown
 
@@ -214,11 +432,19 @@ Consequences PR3 must implement, not discover:
 
 ## 4. Known residuals (ship with these documented, do not chase)
 
-1. **Apple CVBR-256 → FLAC launder** — spectrally invisible, confirmed on all
-   four arms (96–99% no-cliff vs control 99–100%; deficit 45–49 vs 44–48 dB).
-   Survives the v3 gate. Lowest perceptual severity of any fraud class
-   (near-transparent source). 402 paired examples banked for any future
-   discriminator experiment.
+1. **Apple CVBR-256 → FLAC launder** — **CORRECTED 2026-07-29, see §1.5c.**
+   This was never run through the proof gate. `t-apple256-flac` exists only
+   in `probe_pair.tsv.gz` (the V0/Opus experiment) and is absent from
+   `results*`, `extended*` and `multiwin*`; the frozen scorer's `FLAC_FRAUDS`
+   is mp3-128 / opus-96 / vorbis-q5 only. "Survives the v3 gate" is an
+   **inference** from `.m4a` statistics (96–99% no-cliff vs control 99–100%;
+   deficit 45–49 vs 44–48 dB), not a measurement — and running the gate on
+   TRAINING's Apple encodes promotes roughly 19 of 34. The 402 paired
+   examples were deleted with the encode trees.
+   Still the lowest perceptual severity of any fraud class (near-transparent
+   source), but the gate is validated against **three** FLAC-container fraud
+   classes on four arms, not four. Closing this is what §1.6's reacquisition
+   is for.
 2. **Lossy-side band assertions are weak on HF-poor material** — round-3
    surfaced this: `t-aac128-mp3320` exposure fell to 18/24, five of six misses
    on HF-poor albums. Non-blocking (MP3 containers can never receive lossless
@@ -231,9 +457,34 @@ Consequences PR3 must implement, not discover:
 
 ---
 
-## 5. Artifacts and teardown
+## 5. Artifacts and teardown — DONE 2026-07-29
 
-All under `/mnt/virtio/Music/calibration-tmp/` (doc2 + doc1, virtiofs):
+**The calibration instance is torn down.** What follows is the record of what
+was kept, what was destroyed, and the one thing that should not have been.
+
+**Kept, and now the only surviving evidence for every constant in this plan:**
+`docs/research/calibration-data/` (PR #929) — 60,102 measurements across four
+arms, the ultrasonic extension, the per-window sweeps, the ground-truth audit,
+the V0/Opus probe experiment, `score_v3.py.frozen`, and
+`corpus-manifest.json` (115 exact MB release ids). 27 MB of TSV, 2.4 MB
+gzipped.
+
+**Destroyed:** the encode matrices (~584 GB apparent), the 38 GB ground-truth
+FLAC corpus, the calib beets library and state, `cratedigger_calib`, and
+`/var/lib/cratedigger-calib`. 1,003 calib-owned files were swept from the
+shared slskd dir using calib's own transfer ledger **before** the DB was
+dropped — 42.76 GiB, excluding 40 paths prod also claimed and touching no
+protected quarantine tree. That ordering was the load-bearing part and it
+held.
+
+**The mistake:** deleting the ground-truth FLACs. It was proposed on the
+reasoning that the manifest's exact MBIDs make the corpus reacquirable, which
+is true but incomplete — it forecloses closing §1.5c, and any future
+statistic that needs the original audio. §1.6 records the reacquisition.
+Every measurement derived from the corpus survives; the audio did not.
+
+Historical inventory (all paths now gone), under
+`/mnt/virtio/Music/calibration-tmp/`:
 
 | path | contents |
 |---|---|
@@ -256,11 +507,10 @@ All under `/mnt/virtio/Music/calibration-tmp/` (doc2 + doc1, virtiofs):
    via the normal request flow, or archive.
 4. `DROP DATABASE cratedigger_calib`; stop the transient units.
 
-**Calib instance is currently RUNNING** (three `systemd-run` transient units +
-timer, `processing_dir` and `--var-dir` on virtiofs since 2026-07-27 — they
-were on doc2's internal disk and filled it to 91%). Two round-3 stragglers
-(Harold Budd *The Pearl* rid 90, Keith Jarrett *Köln Concert* rid 92) are still
-`wanted` and still searching. Keep the instance alive until PR5.
+The transient units had already been GC'd by an earlier prod deploy
+(`nixos-rebuild switch` → `daemon-reload` kills `systemd-run` units silently),
+so no final calib cycle was possible — the ledger sweep was done directly
+against the DB instead, which is why step 2's ordering mattered so much.
 
 ---
 
