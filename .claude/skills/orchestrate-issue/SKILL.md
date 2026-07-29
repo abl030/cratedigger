@@ -22,9 +22,9 @@ evidence. The format does not matter.
 
 Choose the delivery shape that best fits the work: one PR or several,
 sequential or parallel, direct implementation or delegation. Agents,
-worktrees, exact SHAs, detailed ledgers, and extra validation passes are tools
-to use when they reduce a concrete risk or shorten the critical path. They are
-not required ceremony.
+exact SHAs, detailed ledgers, and extra validation passes are tools to use when
+they reduce a concrete risk or shorten the critical path. They are not required
+ceremony.
 
 The orchestrator retains responsibility for scope, architecture, integration,
 merge decisions, deployment, and live proof even when work is delegated.
