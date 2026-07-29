@@ -186,8 +186,10 @@ reviewed tree is committed and clean; it owns the receipt and unchanged-tree
 no-replay rules.
 
 **Always use `nix-shell --run` for Python** (`.claude/rules/nix-shell.md`).
-`run_tests.sh` already gates JavaScript, production-strict Pyright, Ruff,
-Vulture, unittest discovery, and structural docs freshness.
+`run_tests.sh` exhausts JavaScript, production-strict Pyright, Ruff, Vulture,
+and the complete Python scheduler before returning one aggregate status. Its
+terminal output is a compact complete failure index; the printed private-tmpfs
+bundle contains `summary.json`, `summary.md`, and every complete phase log.
 `.claude/rules/code-quality.md` owns the testing conventions that those gates
 cannot infer.
 

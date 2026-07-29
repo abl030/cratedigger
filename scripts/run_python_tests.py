@@ -27,6 +27,12 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from lib.json_narrow import json_dict, json_list
+from scripts.run_test_suite import (
+    FAILURE_MARKER_PREFIX,
+    METRICS_MARKER_PREFIX,
+    CheckFailureMarker,
+    CheckMetricsMarker,
+)
 
 DEFAULT_MAX_WORKERS = 12
 DEFAULT_DURATIONS = 15
@@ -84,6 +90,7 @@ class TargetRunResult:
     tests_run: int
     elapsed_seconds: float
     output: str
+    failed_test_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -118,6 +125,7 @@ class ChildTargetResult(msgspec.Struct, frozen=True):
     tests_run: int
     test_ids: tuple[str, ...]
     output: str
+    failed_test_ids: tuple[str, ...]
     hypothesis_stats: tuple[HypothesisPropertyStats, ...] = ()
 
 
@@ -739,6 +747,11 @@ def _run_test_target_child(
                 tests_run=result.testsRun,
                 test_ids=tuple(result.test_ids or ()),
                 output=stream.getvalue(),
+                failed_test_ids=tuple(
+                    test.id()
+                    for test, _detail in (*result.failures, *result.errors)
+                )
+                + tuple(test.id() for test in result.unexpectedSuccesses),
                 hypothesis_stats=recorder.records,
             )
         )
@@ -794,6 +807,7 @@ def _run_test_target(target: TestTarget, durations: int) -> TargetRunResult:
         tests_run=child.tests_run,
         elapsed_seconds=time.monotonic() - started_at,
         output=child.output,
+        failed_test_ids=child.failed_test_ids,
     )
 
 
@@ -959,6 +973,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             failed_results,
             key=lambda item: item.target.test_name,
         ):
+            try:
+                owner = str(result.target.module.path.relative_to(top))
+            except ValueError:
+                owner = str(result.target.module.path)
+            print(
+                FAILURE_MARKER_PREFIX
+                + msgspec.json.encode(
+                    CheckFailureMarker(
+                        identity=result.target.test_name,
+                        owner=owner,
+                        detail=f"{len(result.failed_test_ids)} failed test IDs",
+                        test_ids=result.failed_test_ids,
+                    )
+                ).decode()
+            )
             print(
                 f"\n--- FAIL: worker {result.worker_pid}, "
                 f"target {result.target.test_name} ---"
@@ -968,6 +997,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             infrastructure_failures,
             key=lambda item: item.target.test_name,
         ):
+            try:
+                owner = str(failure.target.module.path.relative_to(top))
+            except ValueError:
+                owner = str(failure.target.module.path)
+            print(
+                FAILURE_MARKER_PREFIX
+                + msgspec.json.encode(
+                    CheckFailureMarker(
+                        identity=failure.target.test_name,
+                        owner=owner,
+                        detail=failure.detail,
+                    )
+                ).decode()
+            )
             print(
                 "\n--- FAIL: worker infrastructure, target "
                 f"{failure.target.test_name} ---"
@@ -976,6 +1019,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         known_count = sum(result.tests_run for result in results)
         failed_targets = len(failed_results) + len(infrastructure_failures)
         print(
+            METRICS_MARKER_PREFIX
+            + msgspec.json.encode(
+                CheckMetricsMarker(
+                    tests_run=known_count,
+                    targets_run=len(completed_targets),
+                    scheduled_targets=len(schedule),
+                )
+            ).decode()
+        )
+        print(
             f"\nFAILED: {failed_targets} of {len(schedule)} targets; "
             f"Ran {known_count} reported tests in {wall_seconds:.1f}s"
         )
@@ -983,6 +1036,16 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     total_tests = sum(result.tests_run for result in results)
     actual_workers = len({result.worker_pid for result in results})
+    print(
+        METRICS_MARKER_PREFIX
+        + msgspec.json.encode(
+            CheckMetricsMarker(
+                tests_run=total_tests,
+                targets_run=len(completed_targets),
+                scheduled_targets=len(schedule),
+            )
+        ).decode()
+    )
     print(
         f"\nRan {total_tests} tests across {actual_workers} workers "
         f"in {wall_seconds:.1f}s"
