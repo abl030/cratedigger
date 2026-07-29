@@ -83,8 +83,27 @@
     # --- Web UI (album browser + request manager) ---------------------
     web = {
       enable = true;
-      port = 8085;
+      hostName = "music.example.net";
+      gatewayPort = 8086;
+      accessGroup = "cratedigger-web";
+      # Provision this BEFORE the first switch (for example with sops-nix) as
+      # a non-empty bcrypt htpasswd file owned root:nginx with mode 0440.
+      # Missing/invalid material blocks the first nginx start. A later invalid
+      # reload leaves the shared nginx master and unrelated vhosts running,
+      # while Cratedigger itself returns 503 until a valid reload. Configure
+      # the sops secret with reloadUnits = [ "nginx.service" ] and
+      # restartUnits = [ ]. Never inline the plaintext or verifier, use a Nix
+      # path/store derivation, or substitute enableInsecure in production.
+      basicAuthFile = "/run/secrets/cratedigger.htpasswd";
     };
+    # The only other current mode is deliberate insecure operation: omit
+    # basicAuthFile and set enableInsecure = true. The two modes are exclusive.
+    #
+    # Local API-backed pipeline-cli mutations use the permissioned Unix socket,
+    # not Basic credentials. Grant that complete API authority explicitly:
+    # users.users.your-operator.extraGroups = [ "cratedigger-web" ];
+    # Other pipeline-cli families still need their own PostgreSQL, filesystem,
+    # Beets, and secret-file authority.
 
     # --- Mirrors: all optional ----------------------------------------
     # Without any of this, MusicBrainz browse/matching uses public
@@ -103,6 +122,25 @@
     #   discogsTokenFile = "/var/lib/secrets/discogs-token";
     # };
   };
+
+  # A separate public HTTPS vhost must forward to the LOOPBACK gateway above,
+  # never to a Python port. For example, adapt your TLS/ACME policy and use:
+  #
+  # services.nginx.virtualHosts."music.example.net" = {
+  #   enableACME = true;
+  #   forceSSL = true;
+  #   locations."/" = {
+  #     proxyPass = "http://127.0.0.1:8086";
+  #     recommendedProxySettings = false;
+  #     extraConfig = ''
+  #       proxy_set_header Host music.example.net;
+  #     '';
+  #   };
+  # };
+  #
+  # The module-owned gateway then applies whole-site Basic (except exact
+  # anonymous GET/HEAD /healthz without a query), strips credentials/identity
+  # headers, and forwards through /run/cratedigger-web/web.sock.
 
   # ---------------------------------------------------------------------
   # Non-root media-server filesystem posture

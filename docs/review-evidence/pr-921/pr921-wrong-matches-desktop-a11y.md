@@ -1,0 +1,10 @@
+- generic [active] [ref=e1] [box=240,0,800,260]:
+  - heading "Music Pipeline" [level=1] [ref=e2] [box=256,16,768,26]
+  - generic [ref=e3] [box=256,58,768,34]:
+    - generic [ref=e4] [cursor=pointer] [box=256,58,85,34]: Browse
+    - generic [ref=e5] [cursor=pointer] [box=349,58,90,34]: Recents
+    - generic [ref=e6] [cursor=pointer] [box=447,58,89,34]: Pipeline
+    - generic [ref=e7] [cursor=pointer] [box=543,58,142,34]: Wrong Matches
+  - generic [ref=e13305] [box=256,108,768,43]: No wrong matches in failed_imports.
+  - contentinfo [ref=e22] [box=256,175,768,34]: Authentication is disabled for this Cratedigger instance.
+  - generic [box=891,219,133,25]: DEV live-db readonly

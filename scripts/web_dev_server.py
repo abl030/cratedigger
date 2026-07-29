@@ -18,8 +18,10 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from email.message import Message
+from http.client import HTTPMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import IO
 from urllib.parse import ParseResult, parse_qs, urlparse
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -29,6 +31,9 @@ PROD_BASE_URL = "https://music.ablz.au"
 
 sys.path.insert(0, str(REPO_ROOT))
 
+from web.index_document import (
+    render_index_document,
+)
 
 FALLBACK_FIXTURES: dict[str, dict[str, object]] = {
     "/api/pipeline/all": {
@@ -75,6 +80,7 @@ class DevConfig:
     redis_host: str | None
     redis_port: int
     beets_directory: str | None = None
+    preview_insecure_warning: bool = False
 
     @property
     def badge_text(self) -> str:
@@ -83,6 +89,37 @@ class DevConfig:
         if self.data == "prod-api":
             return "DEV prod-api readonly"
         return "DEV live-db readonly"
+
+
+def _http_origin(url: str) -> tuple[str, str, int | None]:
+    parsed = urlparse(url)
+    scheme = parsed.scheme.lower()
+    default_port = {"http": 80, "https": 443}.get(scheme)
+    port = parsed.port if parsed.port is not None else default_port
+    return scheme, (parsed.hostname or "").lower(), port
+
+
+class _CredentialSafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Keep Basic credentials on the configured origin only."""
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: HTTPMessage,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        redirected = super().redirect_request(
+            req, fp, code, msg, headers, newurl,
+        )
+        if (
+            redirected is not None
+            and _http_origin(req.full_url) != _http_origin(redirected.full_url)
+        ):
+            redirected.remove_header("Authorization")
+        return redirected
 
 
 class DevHTTPServer(ThreadingHTTPServer):
@@ -156,9 +193,7 @@ class DevHandler(BaseHTTPRequestHandler):
 
     def do_OPTIONS(self) -> None:
         self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Content-Length", "0")
         self.end_headers()
 
     def _serve_static(self, path: str) -> None:
@@ -174,7 +209,10 @@ class DevHandler(BaseHTTPRequestHandler):
             return
 
         if target.name == "index.html":
-            body = target.read_text(encoding="utf-8")
+            body = render_index_document(
+                target.read_bytes(),
+                insecure=self.server.config.preview_insecure_warning,
+            ).decode("utf-8")
             body = body.replace("</body>", f"{self._dev_injection()}</body>")
             self._send_bytes(
                 body.encode("utf-8"),
@@ -235,13 +273,27 @@ class DevHandler(BaseHTTPRequestHandler):
         range_header = self.headers.get("Range")
         if range_header:
             headers["Range"] = range_header
+        # This is a per-request browser bridge, not credential configuration:
+        # keep only Basic in memory long enough to perform this read-only GET.
+        authorization = self.headers.get("Authorization")
+        if authorization:
+            scheme, separator, credential = authorization.partition(" ")
+            if separator and credential and scheme.lower() == "basic":
+                headers["Authorization"] = authorization
         req = urllib.request.Request(
             url,
             headers=headers,
             method="GET",
         )
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            if "Authorization" in headers:
+                opener = urllib.request.build_opener(
+                    _CredentialSafeRedirectHandler(),
+                )
+                response = opener.open(req, timeout=30)
+            else:
+                response = urllib.request.urlopen(req, timeout=30)
+            with response as resp:
                 body = resp.read()
                 self._proxy_response(body, resp.headers, status=resp.status)
         except urllib.error.HTTPError as exc:
@@ -251,8 +303,10 @@ class DevHandler(BaseHTTPRequestHandler):
             # msgspec/JSON boundary involved, just a stdlib stub gap out of
             # this migration's scope) that recovers the concrete
             # ``Message[str, str]`` shape ``_proxy_response`` expects.
-            exc_headers: Message[str, str] = exc.headers
-            self._proxy_response(exc.read(), exc_headers, status=exc.code)
+            with exc:
+                exc_headers: Message[str, str] = exc.headers
+                body = exc.read()
+            self._proxy_response(body, exc_headers, status=exc.code)
         except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             self._json({"error": str(exc), "upstream": url}, status=502)
 
@@ -262,8 +316,13 @@ class DevHandler(BaseHTTPRequestHandler):
         content_type = headers.get("Content-Type", "application/json")
         self.send_response(status)
         self.send_header("Content-Type", content_type)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        for name in ("Content-Length", "Cache-Control", "Accept-Ranges", "Content-Range"):
+        for name in (
+            "Content-Length",
+            "Cache-Control",
+            "Accept-Ranges",
+            "Content-Range",
+            "WWW-Authenticate",
+        ):
             value = headers.get(name)
             if value:
                 self.send_header(name, value)
@@ -323,12 +382,20 @@ class DevHandler(BaseHTTPRequestHandler):
 
     def _dev_injection(self) -> str:
         label = html.escape(self.server.config.badge_text)
+        if self.server.config.preview_insecure_warning:
+            badge_layout = """\
+  position: static;
+  width: fit-content;
+  margin: 10px 0 0 auto;"""
+        else:
+            badge_layout = """\
+  position: fixed;
+  right: 10px;
+  bottom: 10px;"""
         return f"""
 <style>
 #cratedigger-dev-badge {{
-  position: fixed;
-  right: 10px;
-  bottom: 10px;
+{badge_layout}
   z-index: 99999;
   padding: 5px 8px;
   border: 1px solid #6a9;
@@ -369,7 +436,6 @@ class DevHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
         if cache_control:
             self.send_header("Cache-Control", cache_control)
         self.end_headers()
@@ -447,6 +513,9 @@ def build_config(args: argparse.Namespace) -> DevConfig:
         redis_host=args.redis_host,
         redis_port=args.redis_port,
         beets_directory=getattr(args, "beets_directory", None),
+        preview_insecure_warning=getattr(
+            args, "preview_insecure_warning", False,
+        ),
     )
 
 
@@ -456,7 +525,8 @@ def create_server(host: str, port: int, config: DevConfig) -> DevHTTPServer:
     return DevHTTPServer((host, port), DevHandler, config)
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
+    """Build the development server's command-line contract."""
     parser = argparse.ArgumentParser(description="Cratedigger frontend dev server")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8096)
@@ -500,6 +570,19 @@ def main() -> None:
     )
     parser.add_argument("--redis-host", default=None)
     parser.add_argument("--redis-port", type=int, default=6379)
+    parser.add_argument(
+        "--preview-insecure-warning",
+        action="store_true",
+        help=(
+            "Preview the insecure-authentication footer. The dev server "
+            "remains read-only."
+        ),
+    )
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
     args = parser.parse_args()
     if (args.beets_db is None) != (args.beets_directory is None):
         parser.error(
@@ -526,6 +609,8 @@ def main() -> None:
         else:
             print("  Discogs metadata: NOT CONFIGURED (compare returns HTTP 503)")
     print("  mutating API requests: blocked")
+    if config.preview_insecure_warning:
+        print("  insecure-authentication footer: preview enabled")
     print("  live reload: web/index.html, web/js/*.js, active fixtures")
     try:
         server.serve_forever()

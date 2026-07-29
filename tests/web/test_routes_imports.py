@@ -13,6 +13,7 @@ from email.message import Message
 from io import BufferedIOBase, BytesIO, IOBase
 from typing import ClassVar
 from unittest.mock import patch
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -25,6 +26,7 @@ from tests.web._harness import (
     _FakeDbWebServerCase,
     _fresh_triage_runner,
 )
+from web.request_security import BROWSER_CHANNEL, CHANNEL_HEADER
 
 
 class TestWrongMatchesContract(_FakeDbWebServerCase):
@@ -746,6 +748,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self.assertEqual(handler.response_headers["Content-Length"], "10")
         self.assertEqual(handler.body.getvalue(), b"abcdef")
         self.assertTrue(handler.close_connection)
+        self.assertNotIn("Access-Control-Allow-Origin", handler.response_headers)
 
     def test_wrong_match_audio_supports_byte_ranges(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -763,18 +766,58 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
             req = Request(
                 f"{self.base}/api/wrong-matches/audio"
                 f"?download_log_id={log_id}&path=01%20-%20Track.mp3",
-                headers={"Range": "bytes=1-3"},
+                headers={
+                    "Range": "bytes=1-3",
+                    CHANNEL_HEADER: BROWSER_CHANNEL,
+                },
             )
             with self._wrong_match_runtime_config(tmpdir), urlopen(req) as resp:
                 body = resp.read()
                 status = resp.status
                 content_range = resp.headers["Content-Range"]
                 accept_ranges = resp.headers["Accept-Ranges"]
+                cors = resp.headers.get("Access-Control-Allow-Origin")
 
         self.assertEqual(status, 206)
         self.assertEqual(body, b"bcd")
         self.assertEqual(content_range, "bytes 1-3/6")
         self.assertEqual(accept_ranges, "bytes")
+        self.assertIsNone(cors)
+
+    def test_wrong_match_audio_range_error_publishes_no_cors_contract(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            failed_dir = os.path.join(tmpdir, "failed_imports", "Test")
+            os.makedirs(failed_dir)
+            track_path = os.path.join(failed_dir, "01 - Track.mp3")
+            with open(track_path, "wb") as handle:
+                handle.write(b"abcdef")
+
+            log_id = self.db.log_download(
+                100,
+                outcome="rejected",
+                validation_result={"failed_path": failed_dir},
+            )
+            req = Request(
+                f"{self.base}/api/wrong-matches/audio"
+                f"?download_log_id={log_id}&path=01%20-%20Track.mp3",
+                headers={
+                    "Range": "bytes=99-100",
+                    CHANNEL_HEADER: BROWSER_CHANNEL,
+                },
+            )
+            with self._wrong_match_runtime_config(tmpdir), self.assertRaises(
+                HTTPError,
+            ) as raised:
+                urlopen(req)
+            with raised.exception:
+                self.assertEqual(raised.exception.code, 416)
+                self.assertEqual(
+                    raised.exception.headers.get("Content-Range"),
+                    "bytes */6",
+                )
+                self.assertIsNone(
+                    raised.exception.headers.get("Access-Control-Allow-Origin")
+                )
 
     def test_entry_evidence_keys_present_when_null(self):
         """Covers AE2 — missing evidence is missing data, not a trigger.

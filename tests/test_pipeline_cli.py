@@ -4183,7 +4183,7 @@ class TestCmdBeetsDistance(unittest.TestCase):
 class TestCmdYoutubeAlbum(unittest.TestCase):
     """``pipeline-cli youtube-album`` wraps
     ``lib.youtube_album_service.resolve_youtube_album``. Counterpart of
-    ``GET /api/youtube-album`` (U8). Service-layer correctness lives in
+    ``POST /api/youtube-album`` (U8). Service-layer correctness lives in
     ``tests.test_youtube_album_service``; here we pin the exit-code
     mapping and the matrix-text output shape per the CLI ⇄ API
     symmetry rule.
@@ -4247,7 +4247,8 @@ class TestCmdYoutubeAlbum(unittest.TestCase):
         ]
 
     def _run(self, *, outcome: Any = None, result: Any = None,
-             refresh: bool = False, json_out: bool = False):
+             refresh: bool = False, json_out: bool = False,
+             resolver_side_effect: Exception | None = None):
         if result is None:
             assert outcome is not None, "must pass outcome= or result="
             result = self._make_result(outcome=outcome)
@@ -4287,6 +4288,7 @@ class TestCmdYoutubeAlbum(unittest.TestCase):
         ), patch(
             "scripts.pipeline_cli.youtube.resolve_youtube_album",
             return_value=result,
+            side_effect=resolver_side_effect,
         ) as mock_resolve:
             rc = pipeline_cli.cmd_youtube_album(
                 FakePipelineDB(), cast(Any, args))
@@ -4414,38 +4416,16 @@ class TestCmdYoutubeAlbum(unittest.TestCase):
         ``finally`` clause still releases the session so the
         connection pool isn't leaked.
         """
-        from tests.fakes import FakePipelineDB
-
-        class _FakeSession:
-            close_calls = 0
-
-            def close(self) -> None:
-                type(self).close_calls += 1
-
-        _FakeSession.close_calls = 0
-
-        args = SimpleNamespace(
-            identifier=self.IDENT, refresh=False, json=False,
-        )
-
-        def _raising_resolver(*_a, **_kw):
-            raise RuntimeError("simulated mid-CLI failure")
-
-        with patch(
-            "scripts.pipeline_cli.youtube._build_youtube_client",
-            return_value=(object(), _FakeSession()),
-        ), patch(
-            "scripts.pipeline_cli.youtube._RedisYoutubeCache",
-            return_value=object(),
-        ), patch(
-            "scripts.pipeline_cli.youtube.resolve_youtube_album",
-            side_effect=_raising_resolver,
-        ), self.assertRaises(RuntimeError):
-            pipeline_cli.cmd_youtube_album(
-                FakePipelineDB(), cast(Any, args))
+        with self.assertRaises(RuntimeError):
+            self._run(
+                outcome="ok",
+                resolver_side_effect=RuntimeError(
+                    "simulated mid-CLI failure",
+                ),
+            )
 
         self.assertEqual(
-            _FakeSession.close_calls, 1,
+            self._last_session_cls.close_calls, 1,
             msg="CLI must close the session even when the resolver "
                 "raises mid-call (round 2 P2-2)",
         )

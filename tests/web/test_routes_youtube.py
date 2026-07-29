@@ -16,6 +16,9 @@ from urllib.request import Request, urlopen
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
+from web.request_security import BROWSER_CHANNEL, CHANNEL_HEADER
+
+CANONICAL_ORIGIN = "https://music.ablz.au"
 
 
 class TestYoutubeClientDefaultTimeoutSession(unittest.TestCase):
@@ -56,7 +59,7 @@ class TestYoutubeClientDefaultTimeoutSession(unittest.TestCase):
 
 
 class TestYoutubeRouteContracts(_FakeDbWebServerCase):
-    """U8 contract for ``GET /api/youtube-album?identifier=<id>``.
+    """U8 contract for ``POST /api/youtube-album``.
 
     Mirrors the CLI surface ``pipeline-cli youtube-album`` (U7); the
     route is the HTTP adapter wrapping
@@ -64,8 +67,8 @@ class TestYoutubeRouteContracts(_FakeDbWebServerCase):
     service-layer behaviour is the authority — these tests pin the
     HTTP-side contract: required response fields, the
     ``OUTCOME_HTTP_STATUS`` mapping (re-exported from the service),
-    400 on missing ``identifier``, and the ``?refresh=true`` query
-    forwarded to the service as ``refresh=True``.
+    400 on a missing ``identifier``, and the strict JSON ``refresh`` boolean
+    forwarded to the service.
 
     The service is patched at the route module's import site
     (``web.routes.youtube.resolve_youtube_album``) with fixture
@@ -234,8 +237,8 @@ class TestYoutubeRouteContracts(_FakeDbWebServerCase):
 
     def test_ok_returns_200_with_required_fields(self):
         with self._patch_service(self._ok_result()):
-            status, data = self._get(
-                f"/api/youtube-album?identifier={self.UUID_A}")
+            status, data = self._post(
+                "/api/youtube-album", {"identifier": self.UUID_A})
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, self.REQUIRED_FIELDS,
                                 "youtube-album ok response")
@@ -263,35 +266,41 @@ class TestYoutubeRouteContracts(_FakeDbWebServerCase):
         with self._patch_service(self._ok_result(
                 from_cache=True,
                 error_message="YT 429 — served from cache")):
-            status, data = self._get(
-                f"/api/youtube-album?identifier={self.UUID_A}")
+            status, data = self._post(
+                "/api/youtube-album", {"identifier": self.UUID_A})
         self.assertEqual(status, 200)
         self.assertTrue(data["from_cache"])
         self.assertEqual(data["error_message"],
                          "YT 429 — served from cache")
 
     def test_missing_identifier_returns_400(self):
-        status, data = self._get("/api/youtube-album")
+        status, data = self._post("/api/youtube-album", {})
         self.assertEqual(status, 400)
-        self.assertEqual(
-            data.get("error"),
-            "identifier query parameter is required",
-        )
+        self.assertIn("identifier", str(data.get("error")))
 
     def test_empty_identifier_returns_400(self):
-        status, data = self._get("/api/youtube-album?identifier=")
+        status, data = self._post(
+            "/api/youtube-album", {"identifier": "  "})
         self.assertEqual(status, 400)
         self.assertEqual(
             data.get("error"),
-            "identifier query parameter is required",
+            "identifier is required",
         )
+
+    def test_get_route_is_absent_and_does_not_dispatch(self):
+        with self._patch_service(self._ok_result()) as mock_resolve:
+            status, data = self._get(
+                f"/api/youtube-album?identifier={self.UUID_A}")
+        self.assertEqual(status, 404)
+        self.assertEqual(data, {"error": "Not found"})
+        mock_resolve.assert_not_called()
 
     def test_not_found_returns_404(self):
         with self._patch_service(self._bare_result(
                 "not_found",
                 error_message="identifier 'nope' is neither MB nor Discogs")):
-            status, data = self._get(
-                "/api/youtube-album?identifier=nope")
+            status, data = self._post(
+                "/api/youtube-album", {"identifier": "nope"})
         self.assertEqual(status, 404)
         self.assertEqual(data["outcome"], "not_found")
 
@@ -299,40 +308,42 @@ class TestYoutubeRouteContracts(_FakeDbWebServerCase):
         with self._patch_service(self._bare_result(
                 "unresolved_4xx_client",
                 error_message="YT 429 throttled")):
-            status, _ = self._get(
-                f"/api/youtube-album?identifier={self.UUID_A}")
+            status, _ = self._post(
+                "/api/youtube-album", {"identifier": self.UUID_A})
         self.assertEqual(status, 503)
 
     def test_unresolved_mirror_unavailable_returns_503(self):
         with self._patch_service(self._bare_result(
                 "unresolved_mirror_unavailable",
                 error_message="YT 503")):
-            status, _ = self._get(
-                f"/api/youtube-album?identifier={self.UUID_A}")
+            status, _ = self._post(
+                "/api/youtube-album", {"identifier": self.UUID_A})
         self.assertEqual(status, 503)
 
     def test_unresolved_timeout_returns_503(self):
         with self._patch_service(self._bare_result(
                 "unresolved_timeout",
                 error_message="requests.Timeout")):
-            status, _ = self._get(
-                f"/api/youtube-album?identifier={self.UUID_A}")
+            status, _ = self._post(
+                "/api/youtube-album", {"identifier": self.UUID_A})
         self.assertEqual(status, 503)
 
     def test_youtube_parse_failed_returns_503(self):
         with self._patch_service(self._bare_result(
                 "youtube_parse_failed",
                 error_message="ytmusicapi parse error")):
-            status, _ = self._get(
-                f"/api/youtube-album?identifier={self.UUID_A}")
+            status, _ = self._post(
+                "/api/youtube-album", {"identifier": self.UUID_A})
         self.assertEqual(status, 503)
 
     def test_refresh_true_is_forwarded_to_service(self):
-        """AE5: ``?refresh=true`` must reach the service as
+        """AE5: JSON ``refresh: true`` must reach the service as
         ``refresh=True`` so the cache bypass actually happens."""
         with self._patch_service(self._ok_result()) as mock_resolve:
-            status, _ = self._get(
-                f"/api/youtube-album?identifier={self.UUID_A}&refresh=true")
+            status, _ = self._post(
+                "/api/youtube-album",
+                {"identifier": self.UUID_A, "refresh": True},
+            )
         self.assertEqual(status, 200)
         self.assertEqual(mock_resolve.call_count, 1)
         kwargs = mock_resolve.call_args.kwargs
@@ -340,24 +351,26 @@ class TestYoutubeRouteContracts(_FakeDbWebServerCase):
 
     def test_refresh_omitted_defaults_to_false(self):
         with self._patch_service(self._ok_result()) as mock_resolve:
-            status, _ = self._get(
-                f"/api/youtube-album?identifier={self.UUID_A}")
+            status, _ = self._post(
+                "/api/youtube-album", {"identifier": self.UUID_A})
         self.assertEqual(status, 200)
         kwargs = mock_resolve.call_args.kwargs
         self.assertIs(kwargs["refresh"], False)
 
-    def test_refresh_false_string_is_not_truthy(self):
+    def test_refresh_must_be_a_json_boolean(self):
         with self._patch_service(self._ok_result()) as mock_resolve:
-            status, _ = self._get(
-                f"/api/youtube-album?identifier={self.UUID_A}&refresh=false")
-        self.assertEqual(status, 200)
-        kwargs = mock_resolve.call_args.kwargs
-        self.assertIs(kwargs["refresh"], False)
+            status, data = self._post(
+                "/api/youtube-album",
+                {"identifier": self.UUID_A, "refresh": "false"},
+            )
+        self.assertEqual(status, 400)
+        self.assertIn("refresh", str(data.get("error")))
+        mock_resolve.assert_not_called()
 
     def test_identifier_is_forwarded_to_service(self):
         with self._patch_service(self._ok_result()) as mock_resolve:
-            status, _ = self._get(
-                f"/api/youtube-album?identifier={self.UUID_A}")
+            status, _ = self._post(
+                "/api/youtube-album", {"identifier": self.UUID_A})
         self.assertEqual(status, 200)
         # First positional arg is the identifier.
         self.assertEqual(mock_resolve.call_args.args[0], self.UUID_A)
@@ -370,8 +383,8 @@ class TestYoutubeRouteContracts(_FakeDbWebServerCase):
         existing test.
         """
         with self._patch_service(self._ok_result()):
-            status, _ = self._get(
-                f"/api/youtube-album?identifier={self.UUID_A}")
+            status, _ = self._post(
+                "/api/youtube-album", {"identifier": self.UUID_A})
         self.assertEqual(status, 200)
         self.assertEqual(
             self._fake_session_cls.close_calls, 1,
@@ -410,7 +423,8 @@ class TestYoutubeRouteContracts(_FakeDbWebServerCase):
             # The route will 500 because the resolver raised; we only
             # care that the session was still closed.
             try:
-                self._get(f"/api/youtube-album?identifier={self.UUID_A}")
+                self._post(
+                    "/api/youtube-album", {"identifier": self.UUID_A})
             except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
                 pass
 
@@ -568,7 +582,11 @@ class TestPipelineYoutubeRescueContract(_FakeDbWebServerCase):
         req = Request(
             f"{self.base}/api/pipeline/100/youtube-rescue",
             data=raw_body,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                CHANNEL_HEADER: BROWSER_CHANNEL,
+                "Origin": CANONICAL_ORIGIN,
+            },
             method="POST",
         )
         with _patch(

@@ -1,6 +1,11 @@
 # NixOS Module
 
-The upstream module lives in this repo at `nix/module.nix`, exposed via `nixosModules.default` in `flake.nix`. It is generic and homelab-agnostic: every secret is a `*File` path, the DB is a `dsn` string, no sops/nspawn/reverse-proxy assumptions.
+The upstream module lives in this repo at `nix/module.nix`, exposed via
+`nixosModules.default` in `flake.nix`. It is generic and homelab-agnostic:
+every secret is a `*File` path, the DB is a `dsn` string, and there are no
+sops/nspawn or site-specific public-proxy assumptions. The module does own its
+loopback nginx authentication gateway; the consumer supplies the public HTTPS
+edge that forwards to it.
 
 The flake export is a wrapper that pins the module's package set to **cratedigger's own flake.lock**: the runtime python env (and beets) is built from the nixpkgs rev cratedigger's test suite ran against, not the consumer's nixpkgs. This costs a second nixpkgs evaluation on the consumer host. The escape hatch is `services.cratedigger.packageSet = pkgs;` (or any package set) — setting it forfeits the tested-closure guarantee: your beets/python may then drift from what the suite and the real-beets contract test verified, which is exactly the dev/prod skew that shipped the 2026-06-29 beets 2.12 import breakage.
 
@@ -37,7 +42,13 @@ The flake export is a wrapper that pins the module's package set to **cratedigge
 | `redis.{enable,host,port,maxmemory}` | enabled, `127.0.0.1:6379`, `2gb` | App-owned local Redis server for the pipeline peer cache and web metadata cache. Uses `allkeys-lru`. |
 | `peerCache.{ttlSeconds,speedTtlSeconds,redisConnectTimeoutMs,redisOperationTimeoutMs}` | 7d, 24h, 200ms, 100ms | Redis TTL and timeout settings rendered into `[Peer Cache]`. |
 | `beets.validation.{enable,distanceThreshold,stagingDir,trackingFile,verifiedLosslessTarget}` | sensible defaults | Beets validation config. |
-| `web.{enable,port,redis.host,redis.port}` | port=8085 | Web UI config. The web process reads the Beets DB/root pair from `beets.config.{library,directory}` through `[Beets]`; `web.redis.*` follows the shared app Redis defaults unless explicitly overridden. |
+| `web.enable` | `false` | Enable the Unix-only web backend and module-owned loopback nginx gateway. Exactly one of `basicAuthFile` or `enableInsecure = true` is then required. |
+| `web.hostName` | `null` | Lowercase canonical public DNS hostname. Required when web is enabled; it defines the fixed `https://` browser origin and exact gateway vhost. IP literals are rejected. |
+| `web.gatewayPort` | `8086` | Loopback-only nginx gateway port. The public HTTPS reverse proxy forwards here; this is not a Python application listener. |
+| `web.accessGroup` | `"cratedigger-web"` | Dedicated group authorized to connect to the web backend Unix socket. This grants complete HTTP/API authority, not Basic-password-file access or unrelated CLI authority. Known privileged or overlapping authority groups are rejected. |
+| `web.basicAuthFile` | `null` | Absolute runtime `htpasswd` file outside `/nix/store`. Basic mode requires a root-owned, non-empty `root:<nginx-group>` `0440` target readable by nginx and denied to the application/non-nginx socket users. |
+| `web.enableInsecure` | `false` | Explicitly disable browser authentication while retaining the gateway, Unix socket, canonical-origin checks, and all other request-security controls. Mutually exclusive with `basicAuthFile`. |
+| `web.redis.{host,port}` | shared app Redis | Web metadata-cache connection; follows `services.cratedigger.redis` unless explicitly overridden. |
 | `notifiers.plex.{enable,url,tokenFile,librarySectionId,pathMap}` | disabled | Plex notifier. |
 | `notifiers.jellyfin.{enable,url,tokenFile,libraryId,pathMap}` | disabled | Jellyfin notifier. Every import reports only its mapped final album path through `POST /Library/Media/Updated`; `pathMap` supplies Jellyfin's view of that path and enables the upgrade DateCreated pin. `libraryId` is only a deletion-observation fallback (issues #574/#697, `docs/jellyfin-primer.md`). |
 | `healthCheck.{enable,onFailureCommand}` | enabled, no recovery | Pre-cycle slskd healthcheck. `onFailureCommand` runs to recover (e.g. `systemctl restart slskd.service`). |
@@ -63,15 +74,254 @@ Three options under `services.cratedigger.searchSettings.*` control the slskd se
 ## What the module does
 
 1. Builds a Python environment with dependencies (`nix/package.nix`: psycopg2, music-tag, beets, msgspec, redis, zstandard) from the pinned `packageSet`. The beets in that env is the cratedigger-owned derivation (`nix/beets.nix`) — one store path serving the python library (`lib/beets_distance.py`), the `cratedigger-beet` wrapper (which pins `BEETSDIR` at `${stateDir}/beets`), and — from U5 — the harness.
-2. Wraps `cratedigger.py` / `pipeline_cli.py` / `migrate_db.py` / `scripts/importer.py` / `scripts/import_preview_worker.py` / `web/server.py` in shell scripts with ffmpeg, sox, mp3val, flac in PATH. The `pipeline-cli` wrapper supplies API-backed mutation commands the configured trusted-loopback origin (`http://127.0.0.1:<web.port>`).
+2. Wraps `cratedigger.py` / `pipeline_cli.py` / `migrate_db.py` / `scripts/importer.py` / `scripts/import_preview_worker.py` / `web/server.py` in shell scripts with ffmpeg, sox, mp3val, flac in PATH. The installed `pipeline-cli` wrapper fixes the five API-backed mutation commands to the permissioned web Unix socket; it exposes no production `--api-base` override. Direct commands such as `youtube-album` retain their database/mirror boundary and do not depend on `web.enable`.
 3. Renders `/var/lib/cratedigger/config.ini` from option values through the dedicated `cratedigger-config-render.service` on boot and whenever the declarative template changes. App units retain the same atomic temp-file-and-rename render as an idempotent fallback. The independent unit ensures a downstream `ExecCondition` cannot leave stale mutable config by skipping every app's `ExecStartPre`; it deliberately does not touch the pipeline singleton lock. Only the main `cratedigger.service` pre-start clears a stale pipeline lock; worker and unfindable starts are render-only.
 3b. Renders the beets `config.yaml` into `${stateDir}/beets/` (BEETSDIR) the same way. `import.duplicate_keys.album: [mb_albumid, discogs_albumid]` (the Palo Santo data-loss invariant), the plugin list, and the path templates are fixed literals — NOT options. Only `beets.config.*` (directory, library, fetchart widths, musicbrainz host/https/ratelimit) is operator-tunable. With `beets.package.discogsTokenFile` set, `secrets.yaml` is materialized next to it and included; `discogsOperatorGroup` changes it from service-only 0400 to explicit group-read 0440 for authorized CLI operators.
 4. Enables `redis-cratedigger.service` by default with bounded memory and `allkeys-lru`.
 5. Pre-start: health-check slskd → render config.ini → start `cratedigger.py`.
 
+## Web authentication perimeter
+
+The production web path has three separate listeners/authorities:
+
+```text
+browser
+  -> https://music.example.net (operator-owned DNS, ACME, and TLS proxy)
+  -> 127.0.0.1:<web.gatewayPort> (module-owned nginx auth gateway)
+  -> /run/cratedigger-web/web.sock (systemd-owned, root:<web.accessGroup> 0660)
+  -> web/server.py (one inherited Unix listener; no production TCP listener)
+
+installed pipeline-cli API-backed mutations
+  -> /run/cratedigger-web/web.sock (web access group authority)
+
+installed pipeline-cli youtube-album
+  -> shared resolver service -> PostgreSQL + configured mirrors
+     (independent of web.enable and the web socket)
+```
+
+The outer HTTPS proxy and the loopback gateway may be server blocks in the
+same nginx process, but they remain distinct listeners. Configure the outer
+proxy to forward only to `127.0.0.1:<web.gatewayPort>`. Do not publish that
+port, expose the Unix socket, or recreate the retired Python port `8085`.
+`web.hostName` is the canonical public hostname in both modes; the application
+uses exactly `https://<web.hostName>` for mutation provenance rather than
+trusting `Host` or any forwarded-host header.
+
+### The two current modes
+
+When `web.enable = true`, module evaluation accepts exactly one mode:
+
+1. **Basic:** set `web.basicAuthFile` and leave `enableInsecure = false`.
+   nginx challenges the complete SPA, static assets, read APIs, route
+   discovery, and mutation APIs.
+2. **Explicit insecure:** set `web.enableInsecure = true` and leave
+   `basicAuthFile = null`. This is a deliberate test/development escape hatch,
+   not a default inferred from localhost or missing configuration.
+
+Missing mode, both modes, a missing/invalid canonical hostname, inactive-mode
+residue, a store-backed Basic path, or overlapping authority groups fail
+closed. Basic additionally requires a non-root application identity distinct
+from nginx. The module exposes no external-auth or OIDC mode. That direction is
+deferred until a provider-neutral external-session credential bridge is
+settled; there is no current option, fallback, or configuration example for it.
+
+### Basic mode and the runtime credential
+
+A safe sops-nix shape is:
+
+```nix
+sops.secrets."cratedigger/htpasswd" = {
+  # The encrypted source is repository data; the decrypted target is runtime
+  # state. Never construct this value with pkgs.writeText/builtins.toFile.
+  sopsFile = ./secrets.yaml;
+  owner = "root";
+  group = config.services.nginx.group;
+  mode = "0440";
+  # Same-path rotations must enter nginx's validation/HUP path without
+  # stopping unrelated virtual hosts.
+  reloadUnits = [ "nginx.service" ];
+  restartUnits = [ ];
+};
+
+services.cratedigger = {
+  user = "cratedigger";
+  group = "users";
+  web = {
+    enable = true;
+    hostName = "music.example.net";
+    gatewayPort = 8086;
+    basicAuthFile = config.sops.secrets."cratedigger/htpasswd".path;
+  };
+};
+
+# Add only identities that need passwordless access to the complete local API.
+users.users.operator.extraGroups = [ "cratedigger-web" ];
+```
+
+Generate a modern bcrypt entry in a private temporary directory. `htpasswd`
+prompts for the password, so it never appears in argv or shell history:
+
+```bash
+umask 077
+auth_work="$(mktemp -d)"
+htpasswd -cB "$auth_work/htpasswd" operator
+```
+
+Import the complete one-line file into the encrypted sops value, then remove
+the temporary directory. Treat the bcrypt verifier as a secret. Never use
+`htpasswd -b`, put a plaintext password or verifier in Nix source, use nginx's
+inline `basicAuth` attribute, or make a Nix path/string derivation containing
+the file. An encrypted sops source may enter the store; the decrypted
+`basicAuthFile` must remain a runtime path outside it.
+
+Before nginx starts or reloads, the module resolves and validates the file:
+the target must be non-empty, root-owned, exactly `root:<nginx-group> 0440`,
+have no extended ACL, and live beneath root-owned ancestors that are not
+group/other writable. nginx must be able to read it. The application user and
+every non-nginx web access group member must not. Web access group membership
+therefore authorizes the socket, not the password file. The web unit repeats
+the root validation before each start, then runs a separate unreadability
+preflight under its final merged systemd `User`, `Group`, and supplementary
+groups; a downstream identity override that gains credential access fails the
+application start instead of creating a Basic-auth bypass.
+
+The module defaults `services.nginx.enableReload = true` and requires both that
+setting and `systemd.services.nginx.restartIfChanged = true`. The first
+authenticated enable or a service-identity change can therefore restart nginx
+to acquire the dedicated socket group. Authentication-policy and same-path
+secret changes keep the rendered `nginx.service` unit stable and run through
+nginx's reload unit instead. Reload preparation clears Cratedigger readiness,
+strictly parses the module-owned policy descriptor, validates the runtime
+credential, and writes a root-only receipt containing the exact descriptor and
+credential fingerprints. Readiness is published after nginx's config test and
+HUP only when the descriptor and credential remain byte-identical to that
+receipt. A failed validation leaves the existing nginx master and unrelated
+virtual hosts running, but every Cratedigger gateway route returns `503` until
+a valid reload republishes readiness.
+
+Rotate atomically; never edit the live runtime file in place:
+
+1. Create a complete replacement bcrypt `htpasswd` file in a private temporary
+   directory, again using the prompting `htpasswd -cB` form.
+2. Replace only the encrypted sops value in one edit, commit the encrypted
+   transaction, and deploy a signed NixOS generation that materializes the new
+   runtime secret and reloads nginx. The module validation must pass before
+   Cratedigger serves with it; the nginx master and unrelated virtual hosts
+   remain running.
+3. Without putting either password in argv, a URL, or logs, use interactive
+   `curl --user operator` requests to prove the replacement receives the
+   expected status and the old credential receives `401`. Retain the signed
+   deployment and active secret-generation receipt.
+4. Delete the private temporary material only after the new credential and
+   denial of the old credential are proven.
+
+If materialization, permissions, validation, or nginx activation fails, stop.
+On a first authenticated start, nginx does not start. On a later policy or
+credential reload, Cratedigger returns `503` while the existing nginx master
+continues serving unrelated virtual hosts. Do not switch to insecure mode to
+finish a Basic deployment.
+
+### Browser, header, and response isolation
+
+The gateway disables wholesale request-header forwarding and reconstructs the
+small application contract. It overwrites the request channel as `browser`,
+sets the canonical Host, and forwards only the reviewed content framing/type,
+`Accept`, `Range`, `Origin`, and `Referer` values. It does not relay Basic
+`Authorization`, cookies, bearer/session tokens, client connection/framing
+headers, forwarded identity, usernames, groups, roles, or a client-supplied
+internal request marker.
+
+Unsafe browser methods must provide at least one valid `Origin` or `Referer`;
+every supplied signal must match the fixed HTTPS canonical origin. This check
+runs before body reads and route dispatch. There is no cross-origin API
+contract: wildcard CORS is absent, documents deny framing, and application
+resources are marked same-origin.
+
+### Anonymous health monitoring
+
+The only anonymous route is exact `GET` or `HEAD` `/healthz` with no query,
+through the canonical hostname. It returns a bare `204` and performs no
+database, Beets, mirror, cache, or configuration read. Query strings, other
+methods, alternate paths, IP-literal/wrong Host requests, and non-canonical
+target shapes do not inherit the exception.
+
+```bash
+curl --silent --show-error --output /dev/null \
+  --write-out '%{http_code}\n' https://music.example.net/healthz
+```
+
+Use that exact target for liveness monitoring. It is not readiness: migration
+and service dependencies may still prevent the web process from starting.
+
+### Explicit insecure mode
+
+Insecure mode removes only nginx's Basic challenge. It keeps the loopback
+gateway, Unix backend, canonical Host/origin, header reconstruction,
+same-origin mutation checks, CORS removal, response isolation, request-channel
+classification, and destructive intent gates. Every application start logs
+`Authentication is disabled for this Cratedigger instance.` at `CRITICAL`, and
+every rendered page shows that exact persistent footer notice. Basic mode logs
+and renders neither warning.
+
+### Web access group versus other CLI authority
+
+`web.accessGroup` grants the ability to connect to the complete Unix HTTP API
+and assert the local `cli` request channel. The installed wrapper uses that
+authority only for the five API-backed mutations; it carries no Basic
+credential and has no TCP fallback. Group membership is therefore
+security-sensitive and must be explicit.
+
+It does **not** authorize the rest of `pipeline-cli`. Database-backed commands
+still need their PostgreSQL connection, quarantine and library operations need
+their filesystem/Beets permissions, and commands that consume secrets still
+need the relevant secret group/file access. Conversely, making a Nix-store
+program non-executable does not protect it: store objects are ordinarily
+readable and can be invoked through an interpreter. Enforce authority at the
+socket, database, filesystem, Beets, and secret resources.
+
+The module rejects `root`, `wheel`, the Cratedigger service/media group,
+nginx's primary group, `cratedigger-ops`, `users`, and the configured Discogs
+operator group as `web.accessGroup`. It cannot infer that an arbitrary
+differently named existing group carries unrelated authority. Keep the default
+dedicated group or choose a newly dedicated group, then add each trusted
+operator explicitly with `users.users.<name>.extraGroups`.
+
+### Troubleshooting and rollback
+
+- A module assertion about “exactly one authentication mode” means neither or
+  both of `basicAuthFile` and `enableInsecure` were selected.
+- `Cratedigger Basic authentication validation failed` in the nginx journal
+  names a runtime path, ownership, ACL, ancestry, nginx-read, or
+  non-nginx-denial failure. Fix the secret deployment; do not weaken the mode.
+- `Permission denied` from an installed API-backed CLI command means the caller
+  lacks membership in `web.accessGroup` (a new login/session is normally
+  required after adding the group). Add the operator to the dedicated
+  `web.accessGroup`; do not substitute `root`, `wheel`, `cratedigger-ops`,
+  `users`, or another group that already carries unrelated authority. The
+  module rejects its known authority groups, but an arbitrary local group name
+  still requires operator review.
+- A browser mutation rejected for provenance must use the configured HTTPS
+  hostname and send same-origin `Origin` or `Referer`; do not derive trust from
+  request headers or relax the canonical origin.
+
+Rollback must preserve the perimeter. Close the public Cratedigger vhost before
+rolling to code/configuration that does not implement this gateway, or roll
+back to a generation that retains Basic mode and its runtime secret. Never
+point the public proxy at legacy port `8085`, expose the Unix socket, or use
+`enableInsecure` as a production rollback. Credential rollback is a separate
+signed sops transaction: restore the prior encrypted verifier, deploy it
+through the same validation/reload path, and prove the displaced credential
+is denied.
+
 ## Running non-root + filesystem permissions
 
-The `user`/`group` table row above defaults to root — zero-config, since slskd downloads and the beets library commonly live outside any unprivileged user's reach. Running non-root is fully supported (issue #570) and is the right shape when other services (Jellyfin, Plex) need to read AND write inside the same library tree.
+The `user`/`group` table row above defaults to root for pipeline-only
+installations, since slskd downloads and the beets library commonly live
+outside any unprivileged user's reach. Basic web mode deliberately rejects a
+root application identity so the app cannot read the nginx credential; use
+the non-root shape below (and in the worked example) when enabling it. Running
+non-root is fully supported (issue #570) and is also the right shape when other
+services (Jellyfin, Plex) need to read AND write inside the same library tree.
 
 ### Private processing boundary
 
@@ -180,7 +430,17 @@ See [`examples/cratedigger.nix`](../examples/cratedigger.nix) for the full worke
   preview outside the beets mutation lane.
 - `cratedigger-unfindable.service` — oneshot, `Type=oneshot`, `restartIfChanged = false`, `TimeoutStartSec=2h`, runs as `cfg.user`. Wraps `scripts/run_unfindable_detection.py` via the `cratedigger-unfindable` wrapper bin. `wants = ["cratedigger-db-migrate.service"]` (not `requires` — see the migrate unit's entry above) and shares the same `ExecStartPre` chain as `cratedigger.service` (`slskdHealthCheck` when `healthCheck.enable = true`, then `preStartScript`) — a slskd outage should fail the unit fast rather than write garbage `last_artist_probe_match_count=0` rows for every cohort member. Lives in its own systemd unit, NOT inline in the main `cratedigger.service` loop, because R20 ("the system never stops searching") forbids the regular search cadence from being throttled by detection state. Implements PR3 U13 (`docs/plans/2026-05-25-001-feat-search-plan-iteration-2-plan.md`). The upstream module sets `Environment="PIPELINE_DB_DSN=..."` only; the downstream wrapper must augment `serviceConfig.EnvironmentFile` with the sops `cratedigger-pgpass` path (same pattern the wrapper uses for `cratedigger.service`) — see `docs/search-plan-iter2-deploy.md` § "PR3 — Detection + telemetry" for the exact incantation and the 2026-05-26 first-deploy gotcha.
 - `cratedigger-unfindable.timer` — `OnCalendar=daily`, `Persistent=true`, `RandomizedDelaySec=30min`. The 30-min jitter is purely local cron-collision avoidance (logrotate, postgres autovacuum on doc2); the single-operator install has no fleet to spread across. The daily fire processes K=100 rows per run with a ~7-day per-request cadence target; full cohort coverage finishes in ~9 days for a ~830-row wanted cohort.
-- `cratedigger-web.service` — long-running web UI for music.ablz.au.
+- `cratedigger-web.socket` — systemd-owned AF_UNIX listener at
+  `/run/cratedigger-web/web.sock`, node `root:<web.accessGroup> 0660` beneath a
+  separately managed `root:<web.accessGroup> 0750` directory.
+- `cratedigger-web.service` — long-running Unix-only web backend. It requires
+  the socket and adopts exactly its one inherited fd; a direct start activates
+  the same socket rather than creating a bypass listener.
+- `nginx.service` — when web is enabled, the module adds an exact-host
+  loopback gateway plus a default-reject vhost, joins nginx only to the
+  dedicated web access group, and validates Basic runtime material before
+  start/reload. The module requires nginx reload support so policy and
+  credential changes validate before HUP without stopping unrelated vhosts.
 
 ### Untrusted-input service sandbox
 

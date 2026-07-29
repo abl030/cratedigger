@@ -3,9 +3,12 @@
 Browse MusicBrainz, add releases to the pipeline DB, view status.
 
 Usage:
-    python3 web/server.py --port 8085 --dsn postgresql://cratedigger@10.20.0.11/cratedigger
+    python3 web/server.py --canonical-origin https://music.example \
+        --dev-port 8085 --dsn postgresql://cratedigger@10.20.0.11/cratedigger
 """
 import os
+import socket
+import socketserver
 import sys
 from typing import ClassVar
 
@@ -28,11 +31,12 @@ sys.path[:] = [
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import argparse
+import functools
 import json
 import logging
 import re
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -46,6 +50,9 @@ logging.basicConfig(
 log = logging.getLogger("cratedigger-web")
 
 MAX_POST_BODY_BYTES = 1024 * 1024
+INSECURE_AUTH_WARNING = (
+    "Authentication is disabled for this Cratedigger instance."
+)
 
 # Ensure this module is importable as 'web.server' even when run as __main__,
 # so route modules can `from web import server` and get the same instance.
@@ -59,10 +66,19 @@ from web import cache
 from web import discogs as _discogs
 from web import mb as mb_api
 from web import overlay as _overlay
+from web.index_document import render_index_document
+from web.request_security import (
+    CHANNEL_HEADER,
+    RequestSecurityError,
+    authorize_request,
+    is_exact_liveness_request,
+    validate_canonical_origin,
+)
 from web.routes import api_index as _api_index_routes
 from web.routes import beets_distance as _beets_distance_routes
 from web.routes import browse as _browse_routes
 from web.routes import disk_coverage as _disk_coverage_routes
+from web.routes import health as _health_routes
 from web.routes import imports as _imports_routes
 from web.routes import labels as _labels_routes
 from web.routes import library as _library_routes
@@ -108,10 +124,12 @@ ALL_ROUTES: list[RouteRegistration] = merge_registries(
 )
 
 _db_dsn = None
+canonical_origin: str | None = None
+insecure_mode = False
 
 # Globals set in main() / injected by the test harness and dev server.
 # With `_db_dsn` set (production), request threads NEVER touch these —
-# each `ThreadingHTTPServer` worker gets its own handles via
+# each threaded HTTP worker gets its own handles via
 # `_thread_state` below, because neither psycopg2 connections nor
 # sqlite3 handles are safe to share across threads. With `_db_dsn`
 # unset (tests, web_dev_server live-db mode), `db` is the injected
@@ -134,6 +152,86 @@ delete_notify_fn = None
 # One-shot clients (curl, the importer's notify hooks) cost one
 # connect/teardown each — fine at single-operator scale.
 _thread_state = threading.local()
+
+
+def configure_insecure_mode(enabled: bool) -> None:
+    """Select insecure presentation and log the explicit startup decision."""
+    global insecure_mode
+
+    insecure_mode = enabled
+    if enabled:
+        log.critical(INSECURE_AUTH_WARNING)
+
+
+@functools.cache
+def _rendered_index_document(insecure: bool) -> bytes:
+    """Read and validate the immutable production index once per auth mode."""
+    html_path = os.path.join(os.path.dirname(__file__), "index.html")
+    with open(html_path, "rb") as handle:
+        return render_index_document(handle.read(), insecure=insecure)
+
+
+class ThreadingUnixHTTPServer(
+    socketserver.ThreadingMixIn,
+    socketserver.UnixStreamServer,
+):
+    """Thread-per-connection HTTP server over one adopted Unix listener."""
+
+    daemon_threads = True
+    server_name: str
+    server_port: int
+
+    def __init__(
+        self,
+        listener: socket.socket,
+        handler_class: type[BaseHTTPRequestHandler],
+    ) -> None:
+        # The socket is already bound/listening under systemd ownership.
+        # BaseServer initializes shutdown/threading state without creating,
+        # binding, or activating a second listener.
+        socketserver.BaseServer.__init__(
+            self,
+            listener.getsockname(),
+            handler_class,
+        )
+        self.socket = listener
+        self.server_name = "cratedigger.internal"
+        self.server_port = 0
+
+
+def _take_systemd_unix_listener(
+    *,
+    environ: Mapping[str, str] | None = None,
+    inherited_fd: int = 3,
+) -> socket.socket:
+    """Adopt systemd's sole listening AF_UNIX stream fd or fail closed."""
+    source = os.environ if environ is None else environ
+    if source.get("LISTEN_FDS") != "1":
+        raise RuntimeError("production requires exactly one inherited socket")
+    if source.get("LISTEN_PID") != str(os.getpid()):
+        raise RuntimeError("inherited socket does not belong to current process")
+    try:
+        listener = socket.socket(fileno=inherited_fd)
+    except OSError as exc:
+        raise RuntimeError("could not adopt inherited socket") from exc
+    try:
+        if listener.family != socket.AF_UNIX:
+            raise RuntimeError("inherited socket must use AF_UNIX")
+        if (
+            listener.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE)
+            != socket.SOCK_STREAM
+        ):
+            raise RuntimeError("inherited AF_UNIX socket must be a stream")
+        if not listener.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN):
+            raise RuntimeError("inherited AF_UNIX stream must be listening")
+        # systemd passes activation fds across this exec. The web process
+        # spawns helpers on some routes, so close the listener at every later
+        # exec boundary rather than leaking backend authority into children.
+        listener.set_inheritable(False)
+    except (OSError, RuntimeError):
+        listener.close()
+        raise
+    return listener
 
 
 def _try_reconnect_db():
@@ -224,7 +322,7 @@ def _configure_beets_library_root_from_runtime_config() -> None:
 def _close_thread_handles() -> None:
     """Close and drop this thread's DB handles.
 
-    Called from ``Handler.finish()`` — under ``ThreadingHTTPServer``
+    Called from ``Handler.finish()`` — under either threaded HTTP server
     one thread serves one connection, so connection-close IS
     thread-death and this releases the psycopg2/sqlite handles
     deterministically instead of waiting on GC (#435). Injected shared
@@ -332,19 +430,52 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         log.info(format % args)
 
+    def parse_request(self) -> bool:
+        """Apply the channel/origin boundary before method dispatch."""
+        if not super().parse_request():
+            return False
+        request_line_parts = self.requestline.split()
+        raw_request_target = (
+            request_line_parts[1] if len(request_line_parts) >= 2 else ""
+        )
+        self._security_request_target = raw_request_target
+        if is_exact_liveness_request(self.command, raw_request_target):
+            return True
+        if canonical_origin is None:
+            self.close_connection = True
+            self._error("Request rejected", 403)
+            return False
+        try:
+            authorize_request(
+                method=self.command,
+                channel_values=self.headers.get_all(CHANNEL_HEADER, []),
+                origin_values=self.headers.get_all("Origin", []),
+                referer_values=self.headers.get_all("Referer", []),
+                canonical_origin=canonical_origin,
+            )
+        except RequestSecurityError:
+            # A rejected request may carry an unread body. Closing guarantees
+            # those bytes cannot be reparsed as another HTTP request.
+            self.close_connection = True
+            self._error("Request rejected", 403)
+            return False
+        return True
+
     def _json(self, data: object, status: int = 200) -> None:
         body = json.dumps(data).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(body)
 
     def _html(self, path: str) -> None:
-        html_path = os.path.join(os.path.dirname(__file__), path)
-        with open(html_path, "rb") as f:
-            body = f.read()
+        if path == "index.html":
+            body = _rendered_index_document(insecure_mode)
+        else:
+            html_path = os.path.join(os.path.dirname(__file__), path)
+            with open(html_path, "rb") as f:
+                body = f.read()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -440,6 +571,12 @@ class Handler(BaseHTTPRequestHandler):
     # (no `web:` keys exist).
 
     def do_GET(self):
+        request_target = getattr(
+            self, "_security_request_target", self.path,
+        )
+        if is_exact_liveness_request(self.command, request_target):
+            _health_routes.serve_healthz(self)
+            return
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
         params = parse_qs(parsed.query)
@@ -560,17 +697,23 @@ class Handler(BaseHTTPRequestHandler):
         """Connection teardown: release this thread's DB handles.
 
         Runs once per connection (after the keep-alive loop ends), which
-        under ThreadingHTTPServer is the moment the worker thread dies."""
+        under the threaded server is the moment the worker thread dies."""
         try:
             super().finish()
         finally:
             _close_thread_handles()
 
+    def do_HEAD(self) -> None:
+        request_target = getattr(
+            self, "_security_request_target", self.path,
+        )
+        if is_exact_liveness_request(self.command, request_target):
+            _health_routes.serve_healthz(self)
+            return
+        self.send_error(501, "Unsupported method")
+
     def do_OPTIONS(self):
         self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
         # HTTP/1.1 keep-alive: a bodyless response must still declare
         # its (zero) length or the client waits for a body forever.
         self.send_header("Content-Length", "0")
@@ -583,11 +726,35 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    global beets_db_path, beets_library_root
+    global beets_db_path, beets_library_root, canonical_origin
 
     parser = argparse.ArgumentParser(description="Cratedigger Web UI")
-    parser.add_argument("--port", type=int, default=8085)
+    parser.add_argument(
+        "--dev-port",
+        type=int,
+        default=None,
+        help=(
+            "INSECURE DEVELOPMENT ONLY: listen on IPv4 loopback TCP instead "
+            "of requiring one systemd-provided Unix socket."
+        ),
+    )
     parser.add_argument("--dsn", default=os.environ.get("PIPELINE_DB_DSN", "postgresql://cratedigger@localhost/cratedigger"))
+    parser.add_argument(
+        "--canonical-origin",
+        default=os.environ.get("CRATEDIGGER_CANONICAL_ORIGIN"),
+        help=(
+            "Exact public HTTP(S) origin used for browser mutation "
+            "provenance. Required."
+        ),
+    )
+    parser.add_argument(
+        "--insecure-mode",
+        action="store_true",
+        help=(
+            "Render and log the explicit insecure-authentication warning. "
+            "The request-security envelope remains enforced."
+        ),
+    )
     parser.add_argument(
         "--beets-db",
         default=None,
@@ -615,10 +782,24 @@ def main():
     parser.add_argument("--redis-host", default=None, help="Redis host for caching (optional)")
     parser.add_argument("--redis-port", type=int, default=6379)
     args = parser.parse_args()
+    if args.canonical_origin is None:
+        parser.error("--canonical-origin is required")
+    try:
+        validate_canonical_origin(args.canonical_origin)
+    except RequestSecurityError as exc:
+        parser.error(f"invalid --canonical-origin: {exc}")
+    canonical_origin = args.canonical_origin
+    configure_insecure_mode(args.insecure_mode)
     if (args.beets_db is None) != (args.beets_directory is None):
         parser.error(
             "--beets-db and --beets-directory must be supplied together"
         )
+    inherited_listener: socket.socket | None = None
+    if args.dev_port is None:
+        try:
+            inherited_listener = _take_systemd_unix_listener()
+        except RuntimeError as exc:
+            parser.error(str(exc))
 
     if args.redis_host:
         cache.init(args.redis_host, args.redis_port)
@@ -664,8 +845,20 @@ def main():
     if beets_db_path is not None and not os.path.exists(beets_db_path):
         log.warning("Beets DB not found at %s; library routes degrade", beets_db_path)
 
-    server = ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
-    print(f"Cratedigger Web UI listening on http://0.0.0.0:{args.port}")
+    if inherited_listener is None:
+        dev_port = args.dev_port
+        if not isinstance(dev_port, int):
+            raise RuntimeError("development listener port was not selected")
+        log.critical(
+            "INSECURE DEVELOPMENT TCP listener enabled on 127.0.0.1:%s",
+            dev_port,
+        )
+        server = ThreadingHTTPServer(("127.0.0.1", dev_port), Handler)
+        listener_display = f"http://127.0.0.1:{dev_port}"
+    else:
+        server = ThreadingUnixHTTPServer(inherited_listener, Handler)
+        listener_display = f"unix:{inherited_listener.getsockname()}"
+    print(f"Cratedigger Web UI listening on {listener_display}")
     print(f"  Pipeline DB: {args.dsn}")
     if beets_db_path is not None:
         beets_display = f"{beets_db_path} (dev/test override)"
