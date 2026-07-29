@@ -62,22 +62,22 @@ class _AlbumRequestUpdate:
 # The ratchet does not infer parameter dataflow: transition SQL must use the
 # canonical direct call grammar below.
 _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
-    ("lib/pipeline_db/_core.py", 232, "472331a54ebaf9a6"): (
+    ("lib/pipeline_db/_core.py", 279, "472331a54ebaf9a6"): (
         "shared execute wrapper forwards caller-owned SQL with the caller's "
         "unchanged positional or mapping parameters"
     ),
-    ("lib/pipeline_db/_core.py", 234, "04ca6be85bb75a81"): (
+    ("lib/pipeline_db/_core.py", 281, "04ca6be85bb75a81"): (
         "shared execute wrapper forwards parameterless caller-owned SQL"
     ),
-    ("lib/pipeline_db/_core.py", 267, "472331a54ebaf9a6"): (
+    ("lib/pipeline_db/_core.py", 314, "472331a54ebaf9a6"): (
         "single reconnect retry forwards the same caller-owned SQL and "
         "unchanged positional or mapping parameters outside atomic scopes"
     ),
-    ("lib/pipeline_db/_core.py", 269, "04ca6be85bb75a81"): (
+    ("lib/pipeline_db/_core.py", 316, "04ca6be85bb75a81"): (
         "single reconnect retry forwards the same parameterless caller-owned "
         "SQL outside atomic scopes"
     ),
-    ("lib/pipeline_db/_core.py", 387, "cc41f306ff6d2fc6"): (
+    ("lib/pipeline_db/_core.py", 434, "cc41f306ff6d2fc6"): (
         "owner-session liveness probe interpolates only a positive integer "
         "statement timeout before a fixed SELECT"
     ),
@@ -89,13 +89,13 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "default raw-query seam runs in the transaction-enforced read-only "
         "scope on the live connection"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 153, "5fa18d2c1737583f"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 127, "5fa18d2c1737583f"): (
         "terminal metadata keys use the existing validated request-field "
         "vocabulary (issue #784: `dumps=lambda value: msgspec.json.encode("
         "value).decode()` replaced with the shared `_msgspec_json_dumps` "
         "helper from `_shared.py` — same encoder, same output, no SQL change)"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 368, "cd644e51f3670265"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 342, "cd644e51f3670265"): (
         "terminal attempt kind is restricted to the fixed retry-counter vocabulary"
     ),
     ("lib/pipeline_db/download_log.py", 739, "86ec443bac615c3c"): (
@@ -115,11 +115,11 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "JSON path key is selected from a closed server-owned vocabulary "
         "(issue #835 shifted this line only)"
     ),
-    ("lib/pipeline_db/import_jobs.py", 525, "ecf3d1844c67f653"): (
+    ("lib/pipeline_db/import_jobs.py", 496, "ecf3d1844c67f653"): (
         "optional job filter is a fixed literal WHERE clause "
         "(CD-SEC-19 typed payload imports shifted this reviewed SELECT by +3)"
     ),
-    ("lib/pipeline_db/import_jobs.py", 585, "d020bd0235c95c4a"): (
+    ("lib/pipeline_db/import_jobs.py", 556, "d020bd0235c95c4a"): (
         "claim exclusion predicate is assembled from fixed literal clauses "
         "(CD-SEC-19 typed payload imports shifted this reviewed SELECT by +3)"
     ),
@@ -136,74 +136,74 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "(issue #784: add_denylist/get_denylisted_users annotated above, "
         "shifting this line; no SQL change)"
     ),
-    ("lib/pipeline_db/requests.py", 97, "b84b3af3ecbbf089"): (
+    ("lib/pipeline_db/requests.py", 112, "b84b3af3ecbbf089"): (
         "INSERT columns derive from the fixed AddRequestInput schema "
         "and values remain one placeholder per validated schema field"
     ),
-    ("lib/pipeline_db/requests.py", 109, "ead47926ac19037a"): (
+    ("lib/pipeline_db/requests.py", 124, "ead47926ac19037a"): (
         "request-by-id uses the fixed shared presentation projection and one "
         "value placeholder"
     ),
-    ("lib/pipeline_db/requests.py", 136, "a2fdc21e825d7dad"): (
+    ("lib/pipeline_db/requests.py", 151, "a2fdc21e825d7dad"): (
         "badge-overlay batch IN list contains only psycopg value placeholders; "
         "the evidence and exact processing-owner joins are static SQL"
     ),
-    ("lib/pipeline_db/requests.py", 170, "fc57192d01989af4"): (
+    ("lib/pipeline_db/requests.py", 185, "fc57192d01989af4"): (
         "MusicBrainz request lookup uses the fixed shared presentation "
         "projection and one value placeholder"
     ),
-    ("lib/pipeline_db/requests.py", 183, "0ad0e7484937cd31"): (
+    ("lib/pipeline_db/requests.py", 198, "0ad0e7484937cd31"): (
         "Discogs request lookup uses the fixed shared presentation projection "
         "and one value placeholder"
     ),
-    ("lib/pipeline_db/requests.py", 232, "327e39bd024d50d3"): (
+    ("lib/pipeline_db/requests.py", 247, "327e39bd024d50d3"): (
         "replacement-chain lookup uses the fixed shared presentation "
         "projection and one value placeholder"
     ),
-    ("lib/pipeline_db/requests.py", 304, "1bd5cbde29149322"): (
+    ("lib/pipeline_db/requests.py", 319, "1bd5cbde29149322"): (
         "release-id lookup selects one of two fixed identity predicates "
         "and uses the fixed shared presentation projection"
     ),
-    ("lib/pipeline_db/requests.py", 327, "d1da142f4a1a30a8"): (
+    ("lib/pipeline_db/requests.py", 342, "d1da142f4a1a30a8"): (
         "non-replaced listing uses the fixed shared presentation projection "
         "with one static lifecycle predicate"
     ),
-    ("lib/pipeline_db/requests.py", 529, "bc05e500065af93a"): (
+    ("lib/pipeline_db/requests.py", 544, "bc05e500065af93a"): (
         "metadata keys are validated identifiers, lifecycle fields are reserved, "
         "values use one typed JSONB record parameter, and the exact active "
         "source plus absent processing owner are guarded"
     ),
-    ("lib/pipeline_db/requests.py", 548, "943205ae40bba7e6"): (
+    ("lib/pipeline_db/requests.py", 563, "943205ae40bba7e6"): (
         "metadata keys are validated identifiers, lifecycle fields are reserved, "
         "values use one typed JSONB record parameter, and any processing owner "
         "causes the guarded update to report a conflict"
     ),
-    ("lib/pipeline_db/requests.py", 1431, "890d0f2e35ffd73c"): (
+    ("lib/pipeline_db/requests.py", 1446, "890d0f2e35ffd73c"): (
         "optional LIMIT is normalized through int before interpolation "
         "and the base wanted query is static"
     ),
-    ("lib/pipeline_db/requests.py", 1461, "bf514491f423d3be"): (
+    ("lib/pipeline_db/requests.py", 1476, "bf514491f423d3be"): (
         "ORDER is selected from two literals and LIMIT remains a value placeholder "
         "over the fixed shared presentation projection"
     ),
-    ("lib/pipeline_db/requests.py", 1490, "93f3043b99b3ec7c"): (
+    ("lib/pipeline_db/requests.py", 1505, "93f3043b99b3ec7c"): (
         "request search composes only one fixed optional status predicate over "
         "the fixed presentation projection and value placeholders"
     ),
-    ("lib/pipeline_db/requests.py", 1605, "52e096d7e91c3df9"): (
+    ("lib/pipeline_db/requests.py", 1620, "52e096d7e91c3df9"): (
         "artist request lookup uses the fixed presentation projection and "
         "static UUID-aware fallback predicate"
     ),
-    ("lib/pipeline_db/requests.py", 1621, "4f083d3e22219997"): (
+    ("lib/pipeline_db/requests.py", 1636, "4f083d3e22219997"): (
         "artist-name fallback uses the fixed presentation projection and one "
         "escaped value placeholder"
     ),
-    ("lib/pipeline_db/requests.py", 1649, "fdbd2821ab3cbb5a"): (
+    ("lib/pipeline_db/requests.py", 1664, "fdbd2821ab3cbb5a"): (
         "attempt kind is validated against the fixed retry-counter vocabulary "
         "and every value remains a direct placeholder; an attached processing "
         "owner makes the compare-and-set a zero-write conflict"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 1084, "0359f0cf9c05697e"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 1057, "0359f0cf9c05697e"): (
         "processing-terminal metadata keys use the validated request-field "
         "vocabulary while exact request and owner predicates retain authority; "
         "the static owner-clearing status CAS remains the final request write"
@@ -217,56 +217,56 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
 # beside the implementation they review; movement or SQL-shape drift fails the
 # ratchet just like the dynamic-SQL exceptions above.
 _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
-    ("lib/pipeline_db/import_jobs.py", 450, "71e0271f65123747"): (
+    ("lib/pipeline_db/import_jobs.py", 421, "71e0271f65123747"): (
         "atomic download-to-processing handoff CASes the immutable download "
         "witness while installing the exact automation owner"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 195, "56802c71d0fd3622"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 169, "56802c71d0fd3622"): (
         "atomic terminal transition mirrors typed wanted CAS inside one transaction"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 254, "249bfbdab2b02ac4"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 228, "249bfbdab2b02ac4"): (
         "atomic preview recovery accepts only downloading as its exact source"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 409, "4f0561c784e817e9"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 383, "4f0561c784e817e9"): (
         "atomic terminal import CASes status with rescue audit in the same transaction"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 449, "9b11fb540dfe44e3"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 423, "9b11fb540dfe44e3"): (
         "atomic terminal typed transition CASes the source status selected by the DAG"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 1111, "32307a325c64f903"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 1084, "32307a325c64f903"): (
         "automation terminalization performs the final exact processing-owner "
         "CAS and clears the owner in the same static request write"
     ),
-    ("lib/pipeline_db/requests.py", 344, "a2f3083f8cbe8885"): (
+    ("lib/pipeline_db/requests.py", 359, "a2f3083f8cbe8885"): (
         "Replace holds the row lock and CASes the captured active source status "
         "only when no processing owner exists"
     ),
-    ("lib/pipeline_db/requests.py", 841, "b74f9eb518948ae5"): (
+    ("lib/pipeline_db/requests.py", 856, "b74f9eb518948ae5"): (
         "operator idempotence uses a no-op CAS against the observed status "
         "and refuses an active processing owner"
     ),
-    ("lib/pipeline_db/requests.py", 880, "94c8caa29b5f3093"): (
+    ("lib/pipeline_db/requests.py", 895, "94c8caa29b5f3093"): (
         "ordinary typed transitions CAS the source status selected by the DAG "
         "and refuse an active processing owner"
     ),
-    ("lib/pipeline_db/requests.py", 979, "cd2c8644115e82f6"): (
+    ("lib/pipeline_db/requests.py", 994, "cd2c8644115e82f6"): (
         "typed imported transition CASes status with rescue audit atomically "
         "and refuses an active processing owner"
     ),
-    ("lib/pipeline_db/requests.py", 1117, "745b1dc37147f0f5"): (
+    ("lib/pipeline_db/requests.py", 1132, "745b1dc37147f0f5"): (
         "typed reset-to-wanted transition CASes its captured source status; "
         "the Bad Rip priority timestamp is a static CASE update in the same CAS, "
         "and an active processing owner is refused"
     ),
-    ("lib/pipeline_db/requests.py", 1191, "3490139cad98e85e"): (
+    ("lib/pipeline_db/requests.py", 1206, "3490139cad98e85e"): (
         "automatic recovery accepts only downloading as its exact source "
         "without widening processing authority"
     ),
-    ("lib/pipeline_db/requests.py", 1236, "a0853139ff6dd9ad"): (
+    ("lib/pipeline_db/requests.py", 1251, "a0853139ff6dd9ad"): (
         "typed download claim accepts only the explicit wanted source status "
         "and installs one immutable active download state"
     ),
-    ("lib/pipeline_db/requests.py", 1272, "34dd9d8beb763829"): (
+    ("lib/pipeline_db/requests.py", 1287, "34dd9d8beb763829"): (
         "plan-aware download claim uses an exact wanted source predicate "
         "plus exact persisted-plan witnesses"
     ),

@@ -77,7 +77,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime
-from typing import NotRequired, TypedDict
+from typing import TypedDict
 
 import msgspec
 
@@ -139,7 +139,12 @@ class AlbumRequestRow(TypedDict):
     rescued_at: datetime | None
     prior_unfindable_category: str | None
     catalog_number: str | None
-    processing_owner: NotRequired[dict[str, object] | None]
+
+
+class AlbumRequestPresentationRow(AlbumRequestRow):
+    """Request table row enriched with its exact joined processor owner."""
+
+    processing_owner: dict[str, object] | None
 
 
 def album_request_row(raw: Mapping[str, object]) -> AlbumRequestRow:

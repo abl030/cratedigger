@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, TypedDict
 
+import msgspec
 import psycopg2
 import psycopg2.extras
 
@@ -28,12 +29,16 @@ from lib.pipeline_db._shared import (
     processing_owner_payload,
     validate_request_metadata_fields,
 )
-from lib.pipeline_db.rows import AlbumRequestRow, album_request_row
+from lib.pipeline_db.rows import (
+    AlbumRequestPresentationRow,
+    AlbumRequestRow,
+    album_request_row,
+)
 from lib.release_identity import ReleaseIdentity, normalize_release_id
 
 
 class AcquisitionPayload(TypedDict):
-    acquisition: list[AlbumRequestRow]
+    acquisition: list[AlbumRequestPresentationRow]
     youtube_ingest: list[dict[str, object]]
 
 
@@ -46,11 +51,16 @@ class _RequestsMixin(_PipelineDBBase):
     @staticmethod
     def _request_presentation_row(
         raw: Mapping[str, object],
-    ) -> AlbumRequestRow:
+    ) -> AlbumRequestPresentationRow:
         """Validate a request row and attach its exact owner projection."""
         row = album_request_row(raw)
-        row["processing_owner"] = processing_owner_payload(raw)
-        return row
+        return msgspec.convert(
+            {
+                **row,
+                "processing_owner": processing_owner_payload(raw),
+            },
+            type=AlbumRequestPresentationRow,
+        )
 
     def add_request(
         self,
