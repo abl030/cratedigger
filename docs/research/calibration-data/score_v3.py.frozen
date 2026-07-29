@@ -1,0 +1,227 @@
+"""Round-3 blind scorer v3 — issue #829.
+
+CHANGE FROM v2.1 (the round-2 failure): the affirmative-content leg was
+RELATIVE --
+
+    A = mean(12-14kHz) - mean(20.5-22kHz) ,  deny if A > 35
+
+-- which conflates two different worlds. A < 35 was read as "affirmative
+ultrasonic content is present, promote", but on quiet / HF-poor material it
+equally means "this album never had the dynamic range to show a gap". Round 2
+promoted 12 FLAC-container launders, every one of them on such an album.
+
+v3 replaces it with a LEVEL-INVARIANT leg: the ultrasonic deficit
+
+    U = mean_over_tracks[ ref_db(1-4kHz) - mean(20.5-22kHz) ] ,  deny if U >= T
+
+Normalising against the album's OWN midband reference is what makes the
+statistic comparable across masters: in absolute dB a quiet record's genuine
+ultrasonic content is indistinguishable from a loud record's launder leakage;
+after normalisation it is not. U is computed from the candidate alone, which
+is all production ever has, and the 12-14 kHz / 1-4 kHz reference bands lie
+below every codec cutoff in play, so U is stable across launder classes.
+
+Legs are evaluated per measurement window (offsets 0/60/120/180) and unioned:
+ANY window tripping ANY leg denies promotion. Cliff and ceiling legs are
+UNCHANGED from v2.1.
+
+THRESHOLD DERIVATION (training-side; see issue comment 2026-07-26):
+  binding minimum U over launder albums where this leg is the last line
+      TRAINING (34 albums)  67.9   (t-vorbisq5-flac / Radiohead)
+      ROUND-2  (27 albums)  66.7   (t-vorbisq5-flac / Aphex Twin)
+  T = 62 sits 4.7 dB below the tightest observed value, ~4x the 1.2 dB
+  inter-arm spread. Cost at T=62: 13/34 training and 10/27 round-2 genuine
+  albums denied -- and a denial is NOT a rejection: the album imports
+  normally, simply carries no spectral verified-lossless proof, and surfaces
+  in triage. Zero fraud promotion is the blocking bar; genuine denial is the
+  tunable cost.
+
+FROZEN before any round-3 measurement. Known accepted residuals are unchanged
+(apple-256-source launders; dynamic-cutoff AAC->MP3 on dense material). The
+verdict names every promoted fraud album; classification against documented
+residual classes is the analyst's job, reported to the operator, never
+automated.
+"""
+import sys
+from collections import Counter, defaultdict
+
+MEAS = sys.argv[1] if len(sys.argv) > 1 else "results-holdout3.tsv"
+EXT = sys.argv[2] if len(sys.argv) > 2 else "extended-holdout3.tsv"
+MULTIWIN = sys.argv[3] if len(sys.argv) > 3 else "multiwin-holdout3.tsv"
+T_ULTRA = float(sys.argv[4]) if len(sys.argv) > 4 else 62.0
+
+S_STEP, C_CONS = 15.0, 0.5
+INWINDOW_CLIFF_HZ, INWINDOW_FRAC = 19000, 0.6
+MP3_BUCKETS = [(15000, 96), (16000, 128), (17250, 160), (18250, 192), (19250, 256)]
+MP3_ORDER = [96, 128, 160, 192, 256, 320]
+FLAC_FRAUDS = ("t-mp3128-flac", "t-opus96-flac", "t-vorbisq5-flac")
+
+
+def load():
+    ext = {}
+    for ln in open(EXT):
+        p = ln.rstrip("\n").split("\t")
+        if p[2]:
+            ext[p[1]] = [float(x) for x in p[2:6]]
+    albums = defaultdict(lambda: defaultdict(lambda: ([], [], defaultdict(dict))))
+    outkey = {}
+    for ln in open(MEAS):
+        p = ln.rstrip("\n").split("\t")
+        if not p[11]:
+            continue
+        s16 = [float(x) for x in p[11:27]]
+        s20 = s16 + ext.get(p[5], [None] * 4)
+        tr, cl, wins = albums[p[1]][p[0]]
+        tr.append(s20)
+        cl.append((int(p[7]) if p[7] else None, float(p[9]) if p[9] else 0.0))
+        if s20[16] is not None and p[10]:
+            wins[0][p[5]] = [float(p[10])] + s20
+        outkey[p[5]] = (p[1], p[0])
+    try:
+        for ln in open(MULTIWIN):
+            p = ln.rstrip("\n").split("\t")
+            if len(p) >= 24 and p[3] != "SILENT" and p[1] in outkey:
+                v, slug = outkey[p[1]]
+                albums[v][slug][2][int(p[2])][p[1]] = [float(x) for x in p[3:24]]
+    except FileNotFoundError:
+        print("WARNING: no multiwin file — gate degrades to single-window", file=sys.stderr)
+    return albums
+
+
+def _window_legs(vecs):
+    """vecs: [ref_db, s12000..s21500 (20 slices)] -> (ceiling_leg, ultra_leg)"""
+    m = len(vecs)
+    mean = [sum(v[1 + i] for v in vecs) / m for i in range(20)]
+    step = max(((mean[k - 2] + mean[k - 1]) / 2 - sum(mean[k:]) / (20 - k))
+               for k in (15, 16, 17, 18))
+    poss = []
+    for v in vecs:
+        t = v[1:]
+        b, bk = -999.0, None
+        for k in (14, 15, 16, 17, 18):
+            s = (t[k - 2] + t[k - 1]) / 2 - sum(t[k:]) / (20 - k)
+            if s > b:
+                b, bk = s, k
+        if b >= 8:
+            poss.append(bk)
+    cons = (Counter(poss).most_common(1)[0][1] / m) if len(poss) >= max(2, m // 2) else 0.0
+    U = sum(v[0] - sum(v[18:21]) / 3.0 for v in vecs) / m
+    return (step >= S_STEP and cons >= C_CONS), (U >= T_ULTRA)
+
+
+def gate(tracks, tcliffs, wins):
+    n = len(tracks)
+    legs = set()
+    if sum(1 for c, _d in tcliffs if c and c <= INWINDOW_CLIFF_HZ) / n >= INWINDOW_FRAC:
+        legs.add("cliff")
+    for _off, vv in wins.items():
+        if len(vv) >= 2:
+            ceiling, no_ultra = _window_legs(list(vv.values()))
+            if ceiling:
+                legs.add("ceiling")
+            if no_ultra:
+                legs.add("no-ultrasonic")
+    return bool(legs), sorted(legs)
+
+
+def mp3_band(cliff):
+    if cliff is None:
+        return None
+    for edge, name in MP3_BUCKETS:
+        if cliff < edge:
+            return name
+    return 320
+
+
+def main() -> int:
+    albums = load()
+    false_accepts = []
+    print(f"== v3 promotion gate (T_ultra={T_ULTRA:g}): control + FLAC frauds ==")
+    for v in ("control-flac1644",) + FLAC_FRAUDS:
+        if v not in albums:
+            continue
+        denied, det = 0, []
+        for slug, (tr, cl, wins) in albums[v].items():
+            d, legs = gate(tr, cl, wins)
+            denied += d
+            if d and v == "control-flac1644":
+                det.append((slug.split("--")[0][:24], legs))
+        total = len(albums[v])
+        if v == "control-flac1644":
+            print(f"  {v:<18} denied (stays provisional) {denied}/{total}")
+            for s, l in det:
+                print(f"      {s}: {l}")
+        else:
+            promoted = [s.split("--")[0][:24] for s, (tr, cl, w) in albums[v].items()
+                        if not gate(tr, cl, w)[0]]
+            if promoted:
+                false_accepts.append((v, promoted))
+            print(f"  {v:<18} denied {denied}/{total}"
+                  + (f"  PROMOTED: {promoted}" if promoted else ""))
+
+    print("\n== MP3 band assertions (+/-1 tier tolerated; None = asserts nothing) ==")
+    expect = {"lame-cbr96": 96, "lame-cbr128": 128, "lame-cbr160": 160, "lame-cbr192": 192,
+              "lame-cbr224": 256, "lame-cbr256": 256, "lame-cbr320": 320, "lame-v2": 192}
+    from lib.spectral_check import detect_cliff
+    for v, e in expect.items():
+        if v not in albums:
+            continue
+        asserted, within1, none_ct = 0, 0, 0
+        for slug, (tr, cl, _w) in albums[v].items():
+            for t in tr:
+                s20 = t if t[16] is not None else t[:16]
+                slices = [{"freq": f, "db": d}
+                          for f, d in zip(range(12000, 12000 + 500 * len(s20), 500), s20)]
+                b = mp3_band(detect_cliff(slices))
+                if b is None:
+                    none_ct += 1
+                else:
+                    asserted += 1
+                    within1 += abs(MP3_ORDER.index(e) - MP3_ORDER.index(b)) <= 1
+        tot = asserted + none_ct
+        print(f"  {v:<12} expect {e:<4} asserted {asserted}/{tot}, "
+              f"within±1 {100*within1//max(1,asserted)}% of asserted")
+
+    print("\n== MP3-container frauds (band below container class = exposed) ==")
+    for v, container in (("t-mp3192-mp3320", 320), ("t-aac128-mp3320", 320)):
+        if v not in albums:
+            continue
+        exposed = 0
+        for slug, (tr, cl, _w) in albums[v].items():
+            n = len(cl)
+            low = sum(1 for c, d in cl
+                      if d >= 69.0 or (mp3_band(c) is not None
+                                       and MP3_ORDER.index(mp3_band(c)) < MP3_ORDER.index(container) - 1))
+            exposed += (low / n) >= 0.5
+        total = len(albums[v])
+        if exposed < total:
+            false_accepts.append((v, total - exposed))
+        print(f"  {v:<18} exposed {exposed}/{total}"
+              + ("  <-- PROMOTED FRAUD" if exposed < total else ""))
+
+    # Two DIFFERENT bars, reported separately (they were conflated in v2.1):
+    #  * PROOF BAR (blocking): a FLAC-container launder receiving verified-
+    #    lossless proof. This is the archivist-critical failure.
+    #  * LOSSY-SIDE (non-blocking): an MP3-container fraud whose band
+    #    assertion fails to sit below its container class. These files are
+    #    MP3s -- they can never receive lossless proof -- so a miss here is a
+    #    weaker claim, not a false grant of terminal status.
+    proof_bar = [fa for fa in false_accepts if fa[0] in FLAC_FRAUDS]
+    lossy_side = [fa for fa in false_accepts if fa[0] not in FLAC_FRAUDS]
+    print("\n" + "=" * 60)
+    if proof_bar:
+        print(f"PROOF BAR: FAIL — FLAC-container launders promoted to verified "
+              f"lossless: {proof_bar}")
+    else:
+        print("PROOF BAR: CLEAN — zero FLAC-container launders received proof")
+    if lossy_side:
+        print(f"LOSSY-SIDE: {lossy_side} (non-blocking; MP3 containers never "
+              f"receive lossless proof — classify vs documented residual classes)")
+    else:
+        print("LOSSY-SIDE: CLEAN")
+    return 1 if proof_bar else 0
+
+
+if __name__ == "__main__":
+    sys.path.insert(0, "/home/abl030/cratedigger")
+    sys.exit(main())

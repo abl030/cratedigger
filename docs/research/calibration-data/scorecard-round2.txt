@@ -1,0 +1,28 @@
+cratedigger dev shell — run: python3 -m unittest discover -s tests -t . -v
+== Promotion gate: control + FLAC frauds ==
+  control-flac1644   denied (stays provisional) 5/27
+      Charli_xcx: ['ceiling', 'no-affirm']
+      Cocteau_Twins: ['ceiling', 'no-affirm']
+      Gojira: ['ceiling']
+      Orbital: ['ceiling', 'no-affirm']
+      Talking_Heads: ['ceiling', 'no-affirm']
+  t-mp3128-flac      denied 25/27  PROMOTED: ['Gas', 'Johann_Sebastian_Bach_Vi']
+  t-opus96-flac      denied 24/27  PROMOTED: ['Aphex_Twin', 'Gas', 'Johann_Sebastian_Bach_Vi']
+  t-vorbisq5-flac    denied 20/27  PROMOTED: ['Aphex_Twin', 'Floating_Points', 'Gas', 'Johann_Sebastian_Bach_Vi', 'Max_Richter', 'Tim_Hecker', 'Ye']
+
+== MP3 band assertions (+/-1 tier tolerated; None = asserts nothing) ==
+  lame-cbr96   expect 96   asserted 216/337, within±1 100% of asserted
+  lame-cbr128  expect 128  asserted 263/337, within±1 100% of asserted
+  lame-cbr160  expect 160  asserted 154/337, within±1 98% of asserted
+  lame-cbr192  expect 192  asserted 251/337, within±1 96% of asserted
+  lame-cbr224  expect 256  asserted 147/337, within±1 94% of asserted
+  lame-cbr256  expect 256  asserted 150/337, within±1 94% of asserted
+  lame-cbr320  expect 320  asserted 252/337, within±1 97% of asserted
+  lame-v2      expect 192  asserted 242/337, within±1 87% of asserted
+
+== MP3-container frauds (band below container class = exposed) ==
+  t-mp3192-mp3320    exposed 27/27
+  t-aac128-mp3320    exposed 25/27  <-- PROMOTED FRAUD
+
+============================================================
+VERDICT: promoted fraud albums (analyst classifies vs documented residual classes): [('t-mp3128-flac', ['Gas', 'Johann_Sebastian_Bach_Vi']), ('t-opus96-flac', ['Aphex_Twin', 'Gas', 'Johann_Sebastian_Bach_Vi']), ('t-vorbisq5-flac', ['Aphex_Twin', 'Floating_Points', 'Gas', 'Johann_Sebastian_Bach_Vi', 'Max_Richter', 'Tim_Hecker', 'Ye']), ('t-aac128-mp3320', 2)]
