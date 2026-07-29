@@ -2041,12 +2041,6 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
         assert execution_lease is not None
         process_album = RecordingProcessAlbum(outcome=completion)
 
-        def process_album_with_authority(*args: Any, **kwargs: Any):
-            kwargs.pop("execution_lease", None)
-            kwargs.pop("cancellation_token", None)
-            kwargs.pop("owner_session_identity", None)
-            return process_album(*args, **kwargs)
-
         ctx = make_ctx_with_fake_db(db)
 
         def execute(
@@ -2065,7 +2059,7 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
                 execution_lease=execution_lease,
                 cancellation_token=cancellation_token,
                 owner_session_identity=owner_session_identity,
-                process_album_fn=process_album_with_authority,
+                process_album_fn=process_album,
             )
 
         token = CancellationToken()

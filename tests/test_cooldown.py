@@ -19,6 +19,7 @@ from tests.fakes import (
     FakeSlskdAPI,
 )
 from tests.helpers import (
+    make_active_download_state_json,
     make_ctx_with_fake_db,
     make_download_file,
     make_grab_list_entry,
@@ -282,6 +283,8 @@ class TestEnqueueCooldownFiltering(unittest.TestCase):
 class TestCooldownTriggerOnTimeout(unittest.TestCase):
     """_timeout_album() should call check_and_apply_cooldown after logging."""
 
+    ENQUEUED_AT = "2026-07-01T00:00:00+00:00"
+
     def test_timeout_triggers_cooldown_check(self):
         from lib.download import _timeout_album
 
@@ -293,12 +296,22 @@ class TestCooldownTriggerOnTimeout(unittest.TestCase):
             mb_release_id="mb-uuid", db_request_id=42,
         )
         db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state=make_active_download_state_json([]),
+        ))
         db.set_cooldown_result(True)
         ctx = make_ctx_with_fake_db(db)
 
         with patch("lib.download.cancel_and_delete"):
-            _timeout_album(entry, 42, "stalled", ctx)
+            _timeout_album(
+                entry,
+                42,
+                "stalled",
+                ctx,
+                expected_enqueued_at=self.ENQUEUED_AT,
+            )
 
         self.assertEqual(db.request(42)["status"], "wanted")
         self.assertEqual(len(db.download_logs), 1)
@@ -323,12 +336,22 @@ class TestCooldownTriggerOnTimeout(unittest.TestCase):
             mb_release_id="mb-uuid", db_request_id=42,
         )
         db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state=make_active_download_state_json([]),
+        ))
         db.set_cooldown_result(lambda u: u == "disc1user")
         ctx = make_ctx_with_fake_db(db)
 
         with patch("lib.download.cancel_and_delete"):
-            _timeout_album(entry, 42, "stalled", ctx)
+            _timeout_album(
+                entry,
+                42,
+                "stalled",
+                ctx,
+                expected_enqueued_at=self.ENQUEUED_AT,
+            )
 
         self.assertEqual(db.request(42)["status"], "wanted")
         self.assertEqual(set(db.cooldowns_applied), {"disc1user", "disc2user"})
@@ -346,11 +369,21 @@ class TestCooldownTriggerOnTimeout(unittest.TestCase):
             mb_release_id="mb-uuid", db_request_id=42,
         )
         db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state=make_active_download_state_json([]),
+        ))
         ctx = make_ctx_with_fake_db(db)
 
         with patch("lib.download.cancel_and_delete"):
-            _timeout_album(entry, 42, "stalled", ctx)
+            _timeout_album(
+                entry,
+                42,
+                "stalled",
+                ctx,
+                expected_enqueued_at=self.ENQUEUED_AT,
+            )
 
         self.assertEqual(db.request(42)["status"], "wanted")
         self.assertEqual(db.cooldowns_applied, [])

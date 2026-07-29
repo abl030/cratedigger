@@ -55,6 +55,8 @@ class TestProcessAlbumProtocolBoundary(unittest.TestCase):
                 "materialize_before_file_copy",
                 "materialize_fn",
                 "cancellation_token",
+                "execution_lease",
+                "owner_session_identity",
             ],
         )
         self.assertEqual(
@@ -67,6 +69,8 @@ class TestProcessAlbumProtocolBoundary(unittest.TestCase):
                 "Callable[[], None] | None",
                 "Callable[..., download_materialization.MaterializeResult] | None",
                 "CancellationToken | None",
+                "ExecutionLeaseSnapshot | None",
+                "OwnerSessionIdentity | None",
             ],
         )
         self.assertEqual(_annotation(call.returns), "CompletionResult")
@@ -105,29 +109,69 @@ class TestProcessAlbumProtocolBoundary(unittest.TestCase):
         self.assertNotIn("Callable[..., CompletionResult]", source)
         self.assertIn("process_album_fn: ProcessAlbumFn | None", source)
 
-    def test_test_doubles_are_protocol_checked_without_broad_splats(self) -> None:
+    def test_test_double_is_protocol_checked_without_broad_splats(self) -> None:
         fake_source = Path("tests/fakes/download.py").read_text(encoding="utf-8")
         self.assertIn(
             "_recorder_conformance: ProcessAlbumFn = RecordingProcessAlbum()",
             fake_source,
         )
-
-        integration_source = Path("tests/test_integration_slices.py").read_text(
-            encoding="utf-8"
-        )
-        self.assertNotIn("process_album_fn=lambda", integration_source)
         tree = ast.parse(
-            integration_source,
-            filename="tests/test_integration_slices.py",
+            fake_source,
+            filename="tests/fakes/download.py",
         )
-        exceptional_stub = next(
+        recorder = next(
             node
-            for node in ast.walk(tree)
-            if isinstance(node, ast.FunctionDef)
-            and node.name == "reject_inside_process"
+            for node in tree.body
+            if isinstance(node, ast.ClassDef)
+            and node.name == "RecordingProcessAlbum"
         )
-        self.assertIsNone(exceptional_stub.args.vararg)
-        self.assertIsNone(exceptional_stub.args.kwarg)
+        call = next(
+            node
+            for node in recorder.body
+            if isinstance(node, ast.FunctionDef) and node.name == "__call__"
+        )
+        self.assertIsNone(call.args.vararg)
+        self.assertIsNone(call.args.kwarg)
+
+        terminal_source = Path("tests/test_terminal_outcomes.py").read_text(
+            encoding="utf-8",
+        )
+        terminal_tree = ast.parse(
+            terminal_source,
+            filename="tests/test_terminal_outcomes.py",
+        )
+        helper = next(
+            node
+            for node in ast.walk(terminal_tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_run_job_backed_automation_result"
+        )
+        for function in (
+            node
+            for node in ast.walk(helper)
+            if isinstance(node, ast.FunctionDef)
+        ):
+            self.assertIsNone(function.args.vararg)
+            self.assertIsNone(function.args.kwarg)
+
+        injection = next(
+            node
+            for node in ast.walk(helper)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "execute_automation_import_job"
+        )
+        injected = {
+            keyword.arg: _annotation(keyword.value)
+            for keyword in injection.keywords
+        }
+        self.assertEqual(injected["process_album_fn"], "process_album")
+        self.assertEqual(injected["execution_lease"], "execution_lease")
+        self.assertEqual(injected["cancellation_token"], "cancellation_token")
+        self.assertEqual(
+            injected["owner_session_identity"],
+            "owner_session_identity",
+        )
 
 
 if __name__ == "__main__":

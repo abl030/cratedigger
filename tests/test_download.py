@@ -289,49 +289,6 @@ class TestPostRejectionWrongMatchTriage(unittest.TestCase):
         )
 
 
-class TestRequestScopedAutoImportPath(unittest.TestCase):
-
-    CASES: ClassVar = [
-        (
-            "under auto-import root with request suffix",
-            "/tmp/staging/auto-import/Artist/Album [request-42]",
-            "/tmp/staging",
-            True,
-        ),
-        (
-            "under auto-import root without request suffix",
-            "/tmp/staging/auto-import/Artist/Album",
-            "/tmp/staging",
-            False,
-        ),
-        (
-            "request suffix outside auto-import root",
-            "/tmp/downloads/Artist/Album [request-42]",
-            "/tmp/staging",
-            False,
-        ),
-        (
-            "request suffix under post-validation root",
-            "/tmp/staging/post-validation/Artist/Album [request-42]",
-            "/tmp/staging",
-            False,
-        ),
-    ]
-
-    def test_matches_only_request_scoped_auto_import_paths(self):
-        from lib.download_materialization import _is_request_scoped_auto_import_path
-
-        for desc, current_path, staging_dir, expected in self.CASES:
-            with self.subTest(desc=desc):
-                self.assertEqual(
-                    _is_request_scoped_auto_import_path(
-                        current_path=current_path,
-                        staging_dir=staging_dir,
-                    ),
-                    expected,
-                )
-
-
 class TestResolveRequestRejectionId(unittest.TestCase):
 
     def test_refuses_release_id_presence_mismatch(self):
@@ -4029,8 +3986,10 @@ class TestPollActiveDownloads(unittest.TestCase):
         assert current is not None
         self.assertEqual(current["status"], "downloading")
         self.assertEqual(current, installed_b_rows[0])
+        current_state = current["active_download_state"]
+        assert isinstance(current_state, dict)
         self.assertEqual(
-            ActiveDownloadState.from_dict(current["active_download_state"]).to_json(),
+            ActiveDownloadState.from_dict(current_state).to_json(),
             replacement_state_json,
         )
         self.assertEqual(

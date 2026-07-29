@@ -816,7 +816,7 @@ class LifecycleWorld:
             assert execution_lease is not None
             request = self._require_request(request_id)
             automation_authority = _AutomationPreviewAuthority(
-                request=request,
+                request=dict(request),
                 state=ActiveDownloadState.from_raw(
                     request["active_download_state"],
                 ),
@@ -1048,6 +1048,9 @@ class LifecycleWorld:
             measurement=measurement,
             codec=codec,
         )
+        candidate_evidence_id = persisted.id
+        if candidate_evidence_id is None:
+            raise AssertionError("world candidate evidence lost its persisted id")
 
         download_log_id: int | None = None
         if job_mode == "automation":
@@ -1069,7 +1072,7 @@ class LifecycleWorld:
             )
             self.db.set_download_log_candidate_evidence(
                 download_log_id,
-                persisted.id,
+                candidate_evidence_id,
             )
             import_job = self.db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
@@ -1087,7 +1090,7 @@ class LifecycleWorld:
             request_id=request_id,
             release=release,
             source_path=str(source),
-            candidate_evidence_id=persisted.id,
+            candidate_evidence_id=candidate_evidence_id,
             measurement=measurement,
             codec=codec,
             download_log_id=download_log_id,
@@ -1159,6 +1162,9 @@ class LifecycleWorld:
             codec=attempt.codec,
             verified_lossless_proof=proof,
         )
+        candidate_evidence_id = persisted_candidate.id
+        if candidate_evidence_id is None:
+            raise AssertionError("world candidate evidence lost its persisted id")
         origin_download_log_id = self.db.log_download(
             request_id,
             outcome="rejected",
@@ -1166,7 +1172,7 @@ class LifecycleWorld:
         )
         self.db.set_download_log_candidate_evidence(
             origin_download_log_id,
-            persisted_candidate.id,
+            candidate_evidence_id,
         )
         import_job = handoff_automation_owner(
             self.db,
@@ -1179,7 +1185,7 @@ class LifecycleWorld:
             request_id=request_id,
             release=attempt,
             source_path=str(staged_path),
-            candidate_evidence_id=persisted_candidate.id,
+            candidate_evidence_id=candidate_evidence_id,
             measurement=measurement,
             codec=attempt.codec,
             download_log_id=origin_download_log_id,
@@ -1379,6 +1385,9 @@ class LifecycleWorld:
             codec=attempt.codec,
             verified_lossless_proof=proof,
         )
+        candidate_evidence_id = persisted.id
+        if candidate_evidence_id is None:
+            raise AssertionError("world candidate evidence lost its persisted id")
         source.parent.mkdir(parents=True, exist_ok=True)
         origin.rename(source)
         download_log_id = self.db.log_download(
@@ -1392,7 +1401,7 @@ class LifecycleWorld:
         )
         self.db.set_download_log_candidate_evidence(
             download_log_id,
-            persisted.id,
+            candidate_evidence_id,
         )
         import_job = self.db.enqueue_import_job(
             IMPORT_JOB_FORCE,
@@ -1410,7 +1419,7 @@ class LifecycleWorld:
             request_id=request_id,
             release=attempt,
             source_path=str(source),
-            candidate_evidence_id=persisted.id,
+            candidate_evidence_id=candidate_evidence_id,
             measurement=measurement,
             codec=attempt.codec,
             download_log_id=download_log_id,

@@ -461,6 +461,7 @@ class TestProcessingOwnerGuardsGenerated(unittest.TestCase):
     ) -> None:
         db, request_id = self._owned_request()
         before = copy.deepcopy(db.get_request(request_id))
+        assert before is not None
         expected_status = "processing" if expected_is_current else "wanted"
 
         if writer == "rescue":
