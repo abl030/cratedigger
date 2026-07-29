@@ -307,21 +307,92 @@ class TestApiMutationCli(unittest.TestCase):
 
     def test_youtube_album_stays_headless_when_web_socket_is_missing(self) -> None:
         """The resolver is a direct service adapter, not a sixth API command."""
-        from lib.youtube_album_service import YoutubeAlbumResolverResult
+        from lib.pipeline_db import (
+            PersistedDistance,
+            PersistedTrack,
+            PersistedYoutubeRow,
+        )
         from scripts.pipeline_cli.cli import main
 
-        class _Session:
-            def close(self) -> None:
-                pass
+        release_group_id = "44438bf9-26d9-4460-9b4f-1a1b015e37a1"
 
-        result = YoutubeAlbumResolverResult(
-            outcome="ok",
-            release_group_identifier="group-3",
-            source="mb",
-            from_cache=False,
-            youtube_releases=[],
-            duration_ms=12,
+        class _ForbiddenYTClient:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            def search(self, *_args: object, **_kwargs: object) -> object:
+                self.calls.append("search")
+                raise AssertionError("cached dispatch must not search YouTube")
+
+            def get_album(self, *_args: object, **_kwargs: object) -> object:
+                self.calls.append("get_album")
+                raise AssertionError(
+                    "cached dispatch must not fetch a YouTube album",
+                )
+
+        class _Session:
+            def __init__(self) -> None:
+                self.close_calls = 0
+
+            def close(self) -> None:
+                self.close_calls += 1
+
+        class _NoopRedisCache:
+            def get(self, _key: str) -> None:
+                return None
+
+            def set(
+                self,
+                _key: str,
+                _value: bytes,
+                _ttl_seconds: int,
+            ) -> None:
+                return None
+
+        pdb = FakePipelineDB()
+        pdb.upsert_youtube_album_mapping(
+            release_group_id,
+            "mb",
+            [
+                PersistedYoutubeRow(
+                    yt_browse_id="MPREb-headless-cache",
+                    yt_audio_playlist_id="OLAK5uy-headless-cache",
+                    yt_url=(
+                        "https://music.youtube.com/playlist"
+                        "?list=OLAK5uy-headless-cache"
+                    ),
+                    yt_year=1996,
+                    yt_track_count=1,
+                    album_title="Headless Album",
+                    album_artist="Headless Artist",
+                    yt_tracks=[
+                        PersistedTrack(
+                            title="Cached Track",
+                            artists=[{"name": "Headless Artist"}],
+                            length_seconds=180.0,
+                            track_number=1,
+                            disc_number=1,
+                            video_id="cached-video",
+                        ),
+                    ],
+                    distances=[
+                        PersistedDistance(
+                            mbid=release_group_id,
+                            outcome="ok",
+                            distance=0.05,
+                            components={"tracks": 0.05},
+                            matched_tracks=1,
+                            total_local_tracks=1,
+                            total_mb_tracks=1,
+                            extra_local_tracks=0,
+                            extra_mb_tracks=0,
+                        ),
+                    ],
+                ),
+            ],
         )
+        yt = _ForbiddenYTClient()
+        session = _Session()
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = os.path.join(temp_dir, "config.ini")
             with open(config_path, "w", encoding="utf-8") as config_file:
@@ -336,20 +407,42 @@ class TestApiMutationCli(unittest.TestCase):
                 {"CRATEDIGGER_RUNTIME_CONFIG": config_path},
             ), patch(
                 "sys.argv",
-                ["pipeline-cli", "youtube-album", "release-3", "--json"],
+                [
+                    "pipeline-cli",
+                    "youtube-album",
+                    release_group_id,
+                    "--json",
+                ],
             ), patch(
                 "scripts.pipeline_cli.cli.PipelineDB",
-                return_value=FakePipelineDB(),
+                return_value=pdb,
             ), patch(
                 "scripts.pipeline_cli.youtube._build_youtube_client",
-                return_value=(object(), _Session()),
+                return_value=(yt, session),
             ), patch(
                 "scripts.pipeline_cli.youtube._RedisYoutubeCache",
-                return_value=object(),
+                return_value=_NoopRedisCache(),
             ), patch(
-                "scripts.pipeline_cli.youtube.resolve_youtube_album",
-                return_value=result,
-            ) as resolve, patch(
+                "web.mb.get_release",
+                side_effect=AssertionError(
+                    "cached dispatch must not fetch an MB release",
+                ),
+            ) as mb_release, patch(
+                "web.mb.get_release_group_releases",
+                side_effect=AssertionError(
+                    "cached dispatch must not fetch an MB release group",
+                ),
+            ) as mb_group, patch(
+                "web.discogs.get_release",
+                side_effect=AssertionError(
+                    "cached dispatch must not fetch a Discogs release",
+                ),
+            ) as discogs_release, patch(
+                "web.discogs.get_master_releases",
+                side_effect=AssertionError(
+                    "cached dispatch must not fetch a Discogs master",
+                ),
+            ) as discogs_master, patch(
                 "scripts.pipeline_cli.api_mutations.urllib.request."
                 "OpenerDirector.open",
             ) as api_open, redirect_stdout(io.StringIO()) as stdout, \
@@ -357,8 +450,34 @@ class TestApiMutationCli(unittest.TestCase):
                 main(api_socket=os.path.join(temp_dir, "missing.sock"))
 
         self.assertEqual(exited.exception.code, 0)
-        self.assertEqual(json.loads(stdout.getvalue())["outcome"], "ok")
-        resolve.assert_called_once()
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(
+            {
+                "outcome": payload["outcome"],
+                "from_cache": payload["from_cache"],
+                "source": payload["source"],
+                "release_group_identifier": (
+                    payload["release_group_identifier"]
+                ),
+                "browse_ids": [
+                    row["yt_browse_id"]
+                    for row in payload["youtube_releases"]
+                ],
+            },
+            {
+                "outcome": "ok",
+                "from_cache": True,
+                "source": "mb",
+                "release_group_identifier": release_group_id,
+                "browse_ids": ["MPREb-headless-cache"],
+            },
+        )
+        self.assertEqual(yt.calls, [])
+        self.assertEqual(session.close_calls, 1)
+        mb_release.assert_not_called()
+        mb_group.assert_not_called()
+        discogs_release.assert_not_called()
+        discogs_master.assert_not_called()
         api_open.assert_not_called()
 
     def test_unix_socket_failures_are_structured_and_never_fall_back_to_tcp(

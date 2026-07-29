@@ -176,7 +176,19 @@ claim that doc2 currently runs this chain:
   families retain their PostgreSQL, filesystem, Beets, and secret-specific
   authority boundaries. In particular, `youtube-album` remains a direct
   adapter over the shared cache-writing resolver, so it uses database/mirror
-  authority and still works when the optional web service is disabled.
+  authority and still works when the optional web service is disabled. The
+  authenticated browser POST is a separate adapter over that same service and
+  keeps its canonical-origin provenance check. No always-running control socket
+  is introduced to merge these authorities; the default headless module
+  installs the CLI while omitting the web service and Cratedigger sockets.
+- Exhausted configured HTTP status retries are caught at the public typed
+  `requests.exceptions.RetryError` boundary and classified as
+  `unresolved_mirror_unavailable`; nested exception text is not parsed for a
+  status code. A nonempty durable matrix remains available as an exact
+  `ok` / `from_cache` fallback during refresh exhaustion, while an absent or
+  empty refresh cache remains unavailable. This does not broaden the catch to
+  every `RequestException`, and a direct YouTube HTTP-429 server exception
+  retains its existing client-error classification.
 
 **Why this is not closed yet:** U6B must still produce the signed downstream
 edge-close/cutover and pin receipts, exact active source, fresh web

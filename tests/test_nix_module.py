@@ -105,6 +105,60 @@ class TestPipelineCliWrapperContract(unittest.TestCase):
         self.assertLess(wrapper.index(trusted_path), wrapper.index(safe_exec))
 
 
+class TestDefaultHeadlessComposition(unittest.TestCase):
+    """The exported module keeps the direct CLI usable without the web."""
+
+    def test_exported_module_installs_cli_without_web_units_or_sockets(
+        self,
+    ) -> None:
+        expression = r'''
+          let
+            f = builtins.getFlake (toString ./.);
+            lib = f.inputs.nixpkgs.lib;
+            system = lib.nixosSystem {
+              system = builtins.currentSystem;
+              modules = [
+                f.nixosModules.default
+                ({ ... }: {
+                  services.cratedigger = {
+                    enable = true;
+                    src = ./.;
+                    slskd.apiKeyFile = "/run/secrets/slskd-key";
+                    slskd.downloadDir = "/srv/slskd";
+                    pipelineDb.createLocally = true;
+                  };
+                })
+              ];
+            };
+          in builtins.toJSON {
+            webEnabled = system.config.services.cratedigger.web.enable;
+            systemPackages =
+              map lib.getName system.config.environment.systemPackages;
+            hasWebService =
+              builtins.hasAttr
+                "cratedigger-web"
+                system.config.systemd.services;
+            cratediggerSockets =
+              builtins.filter
+                (name: lib.hasPrefix "cratedigger" name)
+                (builtins.attrNames system.config.systemd.sockets);
+          }
+        '''
+        result = subprocess.run(
+            ["nix", "eval", "--raw", "--impure", "--expr", expression],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        composition = json.loads(result.stdout)
+        self.assertFalse(composition["webEnabled"])
+        self.assertIn("pipeline-cli", composition["systemPackages"])
+        self.assertFalse(composition["hasWebService"])
+        self.assertEqual(composition["cratediggerSockets"], [])
+
+
 class TestWebAuthenticationModuleContract(unittest.TestCase):
     """The enabled web surface has one fail-closed module-owned perimeter."""
 

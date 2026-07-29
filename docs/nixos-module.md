@@ -99,6 +99,16 @@ installed pipeline-cli youtube-album
      (independent of web.enable and the web socket)
 ```
 
+This split is deliberate: the CLI and browser route share the resolver service
+and its outcome vocabulary, not one transport authority. The browser POST
+retains the authenticated, same-origin web perimeter; the local CLI retains its
+database and mirror authority. Cratedigger does not add an always-running
+control socket merely to unify those adapters. With the exported module's
+default `web.enable = false` composition, `pipeline-cli` is still installed
+while `cratedigger-web.service` and Cratedigger-prefixed systemd sockets are
+absent. A seeded durable YouTube mapping therefore remains usable headlessly
+without API, mirror, or YouTube transport.
+
 The outer HTTPS proxy and the loopback gateway may be server blocks in the
 same nginx process, but they remain distinct listeners. Configure the outer
 proxy to forward only to `127.0.0.1:<web.gatewayPort>`. Do not publish that
