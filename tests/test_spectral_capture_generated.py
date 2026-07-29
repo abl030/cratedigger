@@ -210,15 +210,27 @@ class TestCaptureFieldsRoundTripFakeDB(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Invariant 2: the four capture fields never change a decision.
+# Invariant 2: the PROOF-LEG capture fields never change a decision.
 # ---------------------------------------------------------------------------
+#
+# Scope correction, issue #829 Phase 5 PR2b. PR1 captured four fields and
+# this invariant covered all four, because PR1 changed no decision. PR2b
+# deliberately promotes TWO of them — ``cliff_hz`` and ``codec_family`` —
+# to decision inputs: they are what let a spectral number be read in its
+# own codec's terms instead of through LAME's MP3 encoder table (download
+# 37946). Their decision effect is now patrolled in the positive direction
+# by ``tests/test_spectral_decision_seam_generated.py``.
+#
+# ``ultrasonic_deficit_db`` and ``spectral_measurement_version`` remain
+# pure passengers until PR3 wires the ultrasonic proof leg, and this
+# property keeps them honest.
 #
 # Review round 2 (should-fix 5): the original version only ever mutated
 # `candidate` and always passed `current=None`, but
 # `full_pipeline_decision_from_evidence` also reads `current.measurement`
 # (`lib/quality/pipeline.py` — the existing_spectral_grade/bitrate lines).
-# A decider that read `current.measurement.codec_family` would have
-# survived the old checker. This version mutates BOTH sides with an
+# A decider that read `current.measurement.ultrasonic_deficit_db` would
+# have survived the old checker. This version mutates BOTH sides with an
 # arbitrary (Hypothesis-drawn, not fixed) mutation tuple.
 
 def _mutated_capture_measurement(
@@ -234,11 +246,12 @@ def _mutated_capture_measurement(
         # check now explicitly rejects, not a world any production path
         # can reach.
         return measurement
-    cliff_hz, codec_family, ultrasonic_deficit_db, version = mutation
+    _cliff_hz, _codec_family, ultrasonic_deficit_db, version = mutation
+    # ``cliff_hz``/``codec_family`` are deliberately NOT mutated: PR2b made
+    # them decision inputs, so mutating them here would assert the opposite
+    # of what the decider is now required to do.
     return msgspec.structs.replace(
         measurement,
-        cliff_hz=cliff_hz,
-        codec_family=codec_family,
         ultrasonic_deficit_db=ultrasonic_deficit_db,
         spectral_measurement_version=version,
     )
@@ -253,8 +266,9 @@ def decision_ignores_capture_fields(
 ) -> bool:
     """Invariant checker: does ``decider`` produce the same decision dict
     for ``(candidate, current)`` whether or not EITHER side's measurement
-    carries the issue #829 Phase 5 PR1 capture fields, for an arbitrary
-    ``mutation`` tuple?
+    carries the issue #829 Phase 5 PR3 proof-leg capture fields
+    (``ultrasonic_deficit_db`` / ``spectral_measurement_version``), for an
+    arbitrary ``mutation`` tuple?
 
     ``decider`` is injectable ONLY so the known-bad self-tests below can
     prove this checker actually trips — production always calls it with
@@ -282,13 +296,14 @@ def _decoy_decider_reads_candidate_capture_fields(
     candidate: AlbumQualityEvidence,
     current: "AlbumQualityEvidence | None" = None,
 ) -> "dict[str, object]":
-    """A decider that (wrongly) lets candidate.cliff_hz influence its
-    output — used only to prove the checker can detect that."""
+    """A decider that (wrongly) lets candidate.ultrasonic_deficit_db
+    influence its output — used only to prove the checker can detect
+    that. PR3's proof leg is the code that will legitimately read it."""
     result: dict[str, object] = dict(
         full_pipeline_decision_from_evidence(candidate, current)
     )
-    if candidate.measurement.cliff_hz is not None:
-        result["final_status"] = "CORRUPTED_BY_CANDIDATE_CLIFF_HZ"
+    if candidate.measurement.ultrasonic_deficit_db is not None:
+        result["final_status"] = "CORRUPTED_BY_CANDIDATE_ULTRASONIC_DEFICIT"
     return result
 
 
@@ -296,14 +311,17 @@ def _decoy_decider_reads_current_capture_fields(
     candidate: AlbumQualityEvidence,
     current: "AlbumQualityEvidence | None" = None,
 ) -> "dict[str, object]":
-    """A decider that (wrongly) lets current.codec_family influence its
-    output — proves the checker covers the `current` side too, not just
-    `candidate` (should-fix 5)."""
+    """A decider that (wrongly) lets current.spectral_measurement_version
+    influence its output — proves the checker covers the `current` side
+    too, not just `candidate` (should-fix 5)."""
     result: dict[str, object] = dict(
         full_pipeline_decision_from_evidence(candidate, current)
     )
-    if current is not None and current.measurement.codec_family is not None:
-        result["final_status"] = "CORRUPTED_BY_CURRENT_CODEC_FAMILY"
+    if (
+        current is not None
+        and current.measurement.spectral_measurement_version is not None
+    ):
+        result["final_status"] = "CORRUPTED_BY_CURRENT_MEASUREMENT_VERSION"
     return result
 
 
@@ -314,7 +332,7 @@ class TestDecisionIgnoresCaptureFieldsCheckerSelfTest(unittest.TestCase):
     """Known-bad self-test: decision_ignores_capture_fields must trip when
     a decider (wrongly) reads one of the new fields, on EITHER side."""
 
-    def test_checker_trips_on_a_decider_that_reads_candidate_cliff_hz(self):
+    def test_checker_trips_on_a_decider_that_reads_candidate_ultrasonic(self):
         evidence = make_album_quality_evidence(
             mb_release_id="capture-fields-checker-selftest-candidate",
         )
@@ -325,7 +343,7 @@ class TestDecisionIgnoresCaptureFieldsCheckerSelfTest(unittest.TestCase):
             )
         )
 
-    def test_checker_trips_on_a_decider_that_reads_current_codec_family(self):
+    def test_checker_trips_on_a_decider_that_reads_current_version(self):
         candidate = make_album_quality_evidence(
             mb_release_id="capture-fields-checker-selftest-current-candidate",
         )
@@ -355,8 +373,13 @@ class TestDecisionIgnoresCaptureFieldsCheckerSelfTest(unittest.TestCase):
 
 class TestNewCaptureFieldsNeverChangeDecision(unittest.TestCase):
     """Pin + generated property: full_pipeline_decision_from_evidence is
-    blind to the four issue #829 Phase 5 PR1 capture fields, on the
-    candidate AND current side."""
+    blind to the issue #829 Phase 5 PR3 proof-leg capture fields
+    (``ultrasonic_deficit_db`` / ``spectral_measurement_version``), on the
+    candidate AND current side.
+
+    ``cliff_hz`` and ``codec_family`` left this invariant's scope in PR2b,
+    which promoted them to decision inputs on purpose; their behaviour is
+    patrolled in ``tests/test_spectral_decision_seam_generated.py``."""
 
     def test_pin_genuine_mp3_import_with_a_current_side(self):
         candidate = make_album_quality_evidence(

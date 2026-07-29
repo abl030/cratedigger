@@ -24,6 +24,43 @@ from lib.quality.ranks import (
     measurement_rank,
     quality_rank,
 )
+from lib.quality.spectral_interpretation import (
+    SpectralInterpretation,
+    decision_class_kbps,
+    interpret_measurement,
+    spectral_classes_comparable,
+)
+
+#: The one codec family whose class ladder is calibrated to
+#: ``QualityRankConfig.mp3_cbr``'s thresholds, and therefore the only family
+#: whose spectral-bound value may be classified with CBR bands regardless of
+#: the file's own encoding mode. See ``_shared_spectral_bitrates``.
+_CBR_CALIBRATED_RANK_FAMILY = "mp3"
+
+
+def _classify_with_cbr_bands(format_hint: str | None, *, spectral_bound: bool) -> bool:
+    """Whether a spectral-bound side must be ranked through the CBR bands.
+
+    Only MP3 routes on ``is_cbr`` at all (``quality_rank`` step 5: Opus,
+    AAC, Vorbis and WMA each have a single band table), and only MP3's
+    class ladder is calibrated to ``cfg.mp3_cbr``'s thresholds. Forcing CBR
+    for any other family was scoring an album on MP3-CBR bands purely
+    because a spectral number existed — the same class of error as the LAME
+    table itself (issue #829 Phase 5 PR2b).
+
+    Honest scope: against the SHIPPED band config this restriction is
+    provably inert, because every non-MP3 family already ignores ``is_cbr``
+    and only the two ladder families can be spectral-bound at all. It is
+    kept as a stated boundary rather than an implicit one, so that adding a
+    CBR/VBR split to another codec's bands (an ordinary config change)
+    cannot silently resurrect the defect. Pinned directly by
+    ``tests/test_quality_decisions.py::TestClassifyWithCbrBands`` — a
+    mutant widening it dies there, not at a decision, because there is no
+    decision left for it to move.
+    """
+    return spectral_bound and (
+        _codec_family_of(format_hint) == _CBR_CALIBRATED_RANK_FAMILY
+    )
 
 
 def _is_explicit_label(format_hint: str | None) -> bool:
@@ -126,62 +163,155 @@ def _shared_spectral_bitrates(
     cfg: QualityRankConfig,
     *,
     new_v0_probe: V0ProbeEvidence | None = None,
+    new_spectral: SpectralInterpretation,
+    existing_spectral: SpectralInterpretation,
 ) -> tuple[int | None, int | None, bool, bool] | None:
-    """Return rank-bucket bitrates when BOTH sides carry spectral estimates.
+    """Return rank-bucket bitrates when both sides carry COMPARABLE classes.
 
-    The clamp takes ``min(selected_metric, spectral_bitrate)`` per side — the
-    spectral estimate becomes an upper bound on the rank bucket. Same-bucket
-    tie-breaks still use the raw configured bitrate metric in
+    The clamp takes ``min(selected_metric, inferred_class)`` per side — the
+    codec-aware spectral class becomes an upper bound on the rank bucket.
+    Same-bucket tie-breaks still use the raw configured bitrate metric in
     ``compare_quality()``; otherwise an equal spectral floor would erase a
     real avg-bitrate upgrade and stop the pipeline from grinding upward when
     spectral analysis is too pessimistic.
 
-    This is deliberately *narrow*: it only fires when new and existing both
-    measured a spectral floor, so a stale estimate on only one side
+    Issue #829 Phase 5 PR2b replaced "both sides carry a raw
+    ``spectral_bitrate_kbps``" with ``spectral_classes_comparable``. The old
+    test admitted an ordinary AAC's natural rolloff — read through LAME's
+    MP3 encoder table as "128" — into a cross-codec clamp against an MP3
+    (download 37946). The comparability rule additionally refuses a pair
+    whose classes were derived differently (a ``cliff_hz`` re-derivation sits
+    systematically one tier above a legacy stored bucket) and a cross-codec
+    pair in stored-bucket basis. Every refusal WITHHOLDS the clamp — the
+    caller falls through to rank and the other evidence, which is never a
+    rejection.
+
+    Still deliberately *narrow*: a stale estimate on only one side
     (Springsteen shape: existing CBR 320 genuine+96, new MP3 V0 240 no
     spectral) keeps the container comparison — the rule that
-    ``test_springsteen_genuine_but_96kbps`` pins.
+    ``test_springsteen_genuine_but_96kbps`` pins. The one asymmetric case
+    that does bind is ``_candidate_spectral_bound`` below, which exists for
+    the opposite shape.
 
-    Mostly grade-tolerant by design. ``compute_effective_override_bitrate``
-    gates the clamp on ``SPECTRAL_TRANSCODE_GRADES`` because on a single-sided
-    override a genuine grade can't be distinguished from natural lo-fi
-    rolloff. Here, both sides carrying estimates is usually corroborating
-    evidence (Eno case, ``download_log.id=3291``). The caller still guards the
-    asymmetric case where a transcode-grade candidate would otherwise use a
-    higher spectral floor to replace a non-transcode-grade existing album with
-    a higher real quality rank.
+    NO LONGER grade-tolerant, and that is a deliberate reversal. This clamp
+    used to fire on any two estimates, on the theory that two independent
+    measurements agreeing is corroborating evidence (Eno case,
+    ``download_log.id=3291``). The four-arm calibration measured what those
+    estimates are on an album production already graded ``genuine``:
+    natural rolloff. Since PR2b a class exists only when the album verdict
+    authorizes a spectral finding (``_grade_authorizes``, the same
+    ``SPECTRAL_TRANSCODE_GRADES`` gate ``compute_effective_override_bitrate``
+    always applied), so two ``genuine`` albums are no longer clamped at all
+    and their raw metrics decide. The caller still guards the asymmetric
+    case where a transcode-grade candidate would otherwise use a higher
+    spectral floor to replace a non-transcode-grade existing album with a
+    higher real quality rank.
 
     Returns ``(new_value, existing_value, new_spectral_bound,
     existing_spectral_bound)`` — the two ``*_spectral_bound`` flags tell the
-    caller which side's returned value IS the spectral estimate (clamp
-    bound, ``spectral <= raw``) versus which is still the untouched raw
-    metric (clamp did not bind, ``spectral > raw``). This matters for rank
-    classification (issue #813 Finding 1): the spectral bucket values
-    (``lib/spectral_check.py``'s ``LAME_LOWPASS`` table — 96/128/160/192/
-    256/320) are calibrated to ``QualityRankConfig.mp3_cbr``'s thresholds
-    (128=acceptable, 192=good, 256=excellent, 320=transparent), not
-    ``mp3_vbr``'s more generous ones. Classifying a spectral-bound value
-    through a VBR-tagged side's own ``is_cbr=False`` inflates its rank
-    purely from table choice, not real content. The caller only forces CBR
-    bands when BOTH sides are bound (symmetric) — forcing it on one bound
-    side while an unbound side keeps its own (possibly more generous VBR)
-    table mixes a spectral-calibrated number against a raw-metric number
-    under two different band tables, which can itself invert the ordering.
+    caller which side's returned value IS the spectral class (clamp bound,
+    ``class <= raw``) versus which is still the untouched raw metric (clamp
+    did not bind, ``class > raw``). This matters for rank classification
+    (issue #813 Finding 1): an MP3 class ladder is calibrated to
+    ``QualityRankConfig.mp3_cbr``'s thresholds (128=acceptable, 192=good,
+    256=excellent, 320=transparent), not ``mp3_vbr``'s more generous ones.
+    Classifying a spectral-bound value through a VBR-tagged side's own
+    ``is_cbr=False`` inflates its rank purely from table choice, not real
+    content. The caller only forces CBR bands when BOTH sides are bound
+    (symmetric) AND the side is MP3 (``_classify_with_cbr_bands``) —
+    forcing it on one bound side while an unbound side keeps its own
+    (possibly more generous VBR) table mixes a spectral-calibrated number
+    against a raw-metric number under two different band tables, which can
+    itself invert the ordering.
     """
-    if (new.spectral_bitrate_kbps is None
-            or existing.spectral_bitrate_kbps is None):
+    if not spectral_classes_comparable(new_spectral, existing_spectral).comparable:
+        return None
+    new_class = decision_class_kbps(new_spectral)
+    existing_class = decision_class_kbps(existing_spectral)
+    if new_class is None or existing_class is None:
+        # Unreachable: comparability requires both sides decision-grade, and
+        # a decision-grade interpretation always carries a class. Fail closed
+        # rather than assert — withholding is always safe.
         return None
     new_br = _selected_quality_bitrate_with_source(new, cfg, new_v0_probe)[0]
     existing_br = _selected_bitrate(existing, cfg)
-    new_bound = new_br is None or new.spectral_bitrate_kbps <= new_br
-    existing_bound = (
-        existing_br is None or existing.spectral_bitrate_kbps <= existing_br
-    )
-    new_value = new.spectral_bitrate_kbps if new_bound else new_br
-    existing_value = (
-        existing.spectral_bitrate_kbps if existing_bound else existing_br
-    )
+    new_bound = new_br is None or new_class <= new_br
+    existing_bound = existing_br is None or existing_class <= existing_br
+    new_value = new_class if new_bound else new_br
+    existing_value = existing_class if existing_bound else existing_br
     return new_value, existing_value, new_bound, existing_bound
+
+
+def _candidate_spectral_bound(
+    new: AudioQualityMeasurement,
+    existing: AudioQualityMeasurement,
+    cfg: QualityRankConfig,
+    *,
+    new_format: str | None,
+    new_v0_probe: V0ProbeEvidence | None,
+    new_spectral: SpectralInterpretation,
+    existing_spectral: SpectralInterpretation,
+) -> int | None:
+    """Bound a transcode candidate by its own class against a known-clean HAVE.
+
+    The Fall 2007 anti-loop (issue #911, folded into #829 Phase 5 PR2b —
+    request 8902, Iron & Wine *Fall 2007*, evidence id 34219). A candidate
+    MP3 CBR 320 carrying a decision-grade transcode class re-derives from
+    ``cliff_hz=16500`` to the 160 class, but its RAW 320 container
+    manufactures a ``transparent`` rank and displaces a genuine MP3 CBR 160
+    that has no spectral bitrate at all. Later the genuine 160 displaces it
+    back, and the request loops forever.
+
+    ``_shared_spectral_bitrates`` cannot reach this: the clean HAVE has no
+    class (a ``genuine`` verdict authorizes none), so there is nothing to
+    compare symmetrically. ``_transcode_candidate_real_rank_regresses``
+    cannot reach it either: the candidate's RAW rank is *higher*, which is
+    exactly the manufactured claim. So this is the one asymmetric bound in
+    the comparison — narrowly gated:
+
+    * the candidate's interpretation is decision-grade AND supports a
+      transcode accusation (an invertible ladder whose album verdict
+      authorized a spectral finding). AAC, Opus and HE-AAC can never
+      satisfy this, by construction in ``interpret_spectral_cliff``;
+    * the current copy is KNOWN non-transcode — it has an affirmative
+      spectral grade that is not a transcode grade. A HAVE that was never
+      measured is not "known clean" and keeps today's container comparison;
+    * the current copy contributes no class of its own (implied by the
+      grade, asserted anyway so the symmetric clamp always wins);
+    * the candidate's format is a bare measured codec, not an explicit
+      contract label — a contract's rank ignores measured bitrate entirely,
+      so a bound would be a claim the rank never consumes;
+    * the bound actually binds (``class <= raw metric``).
+
+    Returns the bounded value, or None when any gate declines. The caller
+    then decides on RANK ALONE — see ``compare_quality``.
+    """
+    if not (new_spectral.decision_grade and new_spectral.supports_transcode_accusation):
+        return None
+    if _is_explicit_label(new_format):
+        return None
+    # The HAVE's grade is read RAW, deliberately. For an AAC this PR
+    # declares the grade meaningless as a CLASS — its cliff is native
+    # behaviour — yet a ``genuine`` AAC still counts as "known non-transcode"
+    # here. That asymmetry is a choice, not leftover codec-blindness:
+    # tightening it (demanding the HAVE's own interpretation admit an
+    # accusation) would make this bound fire MORE often, i.e. reject more
+    # candidates, and the conservative direction is to keep the bound narrow.
+    # A ``genuine`` verdict is also the one thing the grade says that no
+    # codec calibration contradicts — the calibration says AAC cliffs cannot
+    # convict, never that they falsely acquit.
+    existing_grade = existing.spectral_grade
+    if existing_grade is None or existing_grade in SPECTRAL_TRANSCODE_GRADES:
+        return None
+    if decision_class_kbps(existing_spectral) is not None:
+        return None
+    new_class = decision_class_kbps(new_spectral)
+    if new_class is None:
+        return None
+    new_br = _selected_quality_bitrate_with_source(new, cfg, new_v0_probe)[0]
+    if new_br is not None and new_class > new_br:
+        return None
+    return new_class
 
 
 def _transcode_candidate_real_rank_regresses(
@@ -220,6 +350,8 @@ def compare_quality(
     *,
     new_target_contract: TargetQualityContract | None = None,
     new_v0_probe: V0ProbeEvidence | None = None,
+    new_spectral: SpectralInterpretation | None = None,
+    existing_spectral: SpectralInterpretation | None = None,
 ) -> QualityComparisonBasis:
     """Codec-aware quality comparison.
 
@@ -267,8 +399,21 @@ def compare_quality(
     6039 lesson: any re-derivation outside this function eventually lies).
     Callers that only need the verdict read ``.verdict``.
 
+    ``new_spectral`` / ``existing_spectral`` carry each side's codec-aware
+    ``SpectralInterpretation`` (issue #829 Phase 5 PR2b). They default to
+    ``interpret_measurement`` over the measurement's own fields — the
+    measurement carries ``codec_family``/``cliff_hz``/``spectral_grade``, so
+    every caller is codec-aware without threading. Callers that hold the
+    whole ``AlbumQualityEvidence`` row pass an interpretation built with the
+    album-level context the measurement cannot carry (``filetype_band``'s
+    mixed-codec fail-closed), which can only ever WITHHOLD more.
+
     Pure function. No I/O, no hardcoded numbers — every threshold comes from cfg.
     """
+    if new_spectral is None:
+        new_spectral = interpret_measurement(new)
+    if existing_spectral is None:
+        existing_spectral = interpret_measurement(existing)
     new_br, new_metric = _selected_quality_bitrate_with_source(
         new, cfg, new_v0_probe
     )
@@ -358,39 +503,43 @@ def compare_quality(
         )
 
     shared = _shared_spectral_bitrates(
-        new, existing, cfg, new_v0_probe=new_v0_probe
+        new, existing, cfg,
+        new_v0_probe=new_v0_probe,
+        new_spectral=new_spectral,
+        existing_spectral=existing_spectral,
     )
-    if shared is not None:
-        clamped_new_br, clamped_existing_br, new_bound, existing_bound = shared
-        projected_is_cbr = (
-            new_target_contract.is_cbr
-            if new_target_contract is not None
-            else new.is_cbr
+    if shared is None:
+        # Fall 2007 anti-loop (issue #911): a transcode candidate whose own
+        # class is decision-grade, weighed against a known-clean HAVE that
+        # carries no class. The bound decides on RANK ALONE — the raw
+        # same-rank tiebreak below would re-admit the very container bitrate
+        # the class has already contradicted, which is the loop. Import only
+        # when the bounded rank is STRICTLY better than the current raw rank.
+        bounded_new_br = _candidate_spectral_bound(
+            new, existing, cfg,
+            new_format=new_format,
+            new_v0_probe=new_v0_probe,
+            new_spectral=new_spectral,
+            existing_spectral=existing_spectral,
         )
-        # A spectral-bound side's clamped value is the spectral estimate,
-        # calibrated to the CBR band thresholds regardless of that side's
-        # own encoding mode (see ``_shared_spectral_bitrates``'s docstring)
-        # — classify it with CBR bands. This only applies when BOTH sides
-        # are spectral-bound: forcing CBR on a bound side while an UNBOUND
-        # side keeps its own (possibly more generous VBR) bands mixes a
-        # spectral-calibrated number against a raw-metric number under two
-        # different band tables, which can itself invert the ordering (a
-        # bound side demoted into CBR's stricter table while an unbound
-        # side keeps VBR's more generous one). A side whose clamp did NOT
-        # bind still carries its own genuine raw metric, classified with
-        # its own encoding mode as before.
-        both_spectral_bound = new_bound and existing_bound
-        new_rank = quality_rank(
-            new_format, clamped_new_br,
-            True if both_spectral_bound else projected_is_cbr, cfg,
-        )
-        existing_rank = quality_rank(
-            existing.format, clamped_existing_br,
-            True if both_spectral_bound else existing.is_cbr, cfg,
-        )
-        rank_new_value, rank_existing_value = clamped_new_br, clamped_existing_br
-        spectral_clamped = True
-    else:
+        if bounded_new_br is not None:
+            bound_new_rank = quality_rank(
+                new_format, bounded_new_br,
+                _classify_with_cbr_bands(new_format, spectral_bound=True), cfg,
+            )
+            bound_existing_rank = measurement_rank(existing, cfg)
+            if bound_new_rank > bound_existing_rank:
+                bound_verdict = "better"
+            elif bound_new_rank < bound_existing_rank:
+                bound_verdict = "worse"
+            else:
+                bound_verdict = "equivalent"
+            return _basis(
+                bound_verdict, "spectral_candidate_bound",
+                bound_new_rank, bound_existing_rank,
+                new_value=bounded_new_br, existing_value=existing_br,
+                spectral_clamped=True,
+            )
         new_rank = measurement_rank(
             new,
             cfg,
@@ -401,6 +550,44 @@ def compare_quality(
         rank_new_value, rank_existing_value = new_br, existing_br
         spectral_clamped = False
         both_spectral_bound = False
+    else:
+        clamped_new_br, clamped_existing_br, new_bound, existing_bound = shared
+        projected_is_cbr = (
+            new_target_contract.is_cbr
+            if new_target_contract is not None
+            else new.is_cbr
+        )
+        # A spectral-bound side's clamped value is its codec's class,
+        # calibrated to the CBR band thresholds regardless of that side's
+        # own encoding mode (see ``_shared_spectral_bitrates``'s docstring)
+        # — classify it with CBR bands. Two gates, both load-bearing.
+        # BOTH sides must be spectral-bound: forcing CBR on a bound side
+        # while an UNBOUND side keeps its own (possibly more generous VBR)
+        # bands mixes a spectral-calibrated number against a raw-metric
+        # number under two different band tables, which can itself invert
+        # the ordering. And the side must be MP3
+        # (``_classify_with_cbr_bands``): only MP3 routes on ``is_cbr`` at
+        # all, and only MP3's ladder is calibrated to ``cfg.mp3_cbr``
+        # (issue #829 Phase 5 PR2b). A side whose clamp did NOT bind still
+        # carries its own genuine raw metric, classified with its own
+        # encoding mode as before.
+        both_spectral_bound = new_bound and existing_bound
+        new_rank = quality_rank(
+            new_format, clamped_new_br,
+            _classify_with_cbr_bands(
+                new_format, spectral_bound=both_spectral_bound,
+            ) or projected_is_cbr,
+            cfg,
+        )
+        existing_rank = quality_rank(
+            existing.format, clamped_existing_br,
+            _classify_with_cbr_bands(
+                existing.format, spectral_bound=both_spectral_bound,
+            ) or existing.is_cbr,
+            cfg,
+        )
+        rank_new_value, rank_existing_value = clamped_new_br, clamped_existing_br
+        spectral_clamped = True
 
     if new_rank > existing_rank:
         return _basis(

@@ -1464,6 +1464,34 @@ console.log('renderEvidenceStrip() marks spectral_tiebreak values with ~ too (is
   assertExcludes(strip, 'avg 200k', 'clamped value must not claim a metric');
 }
 
+console.log('renderEvidenceStrip() clamps ONLY the candidate on spectral_candidate_bound');
+{
+  // Issue #911's bound is asymmetric: the candidate is bounded by its own
+  // spectral class while the HAVE keeps its real raw metric. A single
+  // clamped flag would print the HAVE's honest average as an unlabelled
+  // ~, or the candidate's class under a metric name it never had.
+  const strip = renderEvidenceFixture({
+    actual_min_bitrate: 320,
+    spectral_grade: 'likely_transcode',
+    spectral_bitrate: 160,
+    comparison_basis: {
+      verdict: 'equivalent', branch: 'spectral_candidate_bound',
+      new_rank: 'acceptable', existing_rank: 'acceptable',
+      new_metric: 'avg', existing_metric: 'avg',
+      new_value_kbps: 160, existing_value_kbps: 160,
+      new_format: 'MP3', existing_format: 'MP3',
+      spectral_clamped: true, tolerance_kbps: null,
+      verified_lossless_bypass: false,
+    },
+  });
+  assertContains(strip, '~160k', 'the bounded candidate value gets the ~ prefix');
+  assertExcludes(strip, 'avg 160k',
+    'the candidate is CBR 320 — printing its class as an average is the display lie');
+  // ...and the grade chip must not re-print the same floor beside it.
+  assertExcludes(strip, '~160k likely transcode',
+    'the basis already carries the floor; the chip must not double it up');
+}
+
 console.log('renderEvidenceStrip() escapes basis strings');
 {
   const strip = renderEvidenceFixture({

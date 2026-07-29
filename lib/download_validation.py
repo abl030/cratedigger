@@ -38,7 +38,12 @@ from lib.import_manifest import (
     tracked_audio_paths_for_downloads,
 )
 from lib.processing_paths import source_dirs_for_album, stage_to_ai_path
-from lib.quality import ValidationResult, compute_effective_override_bitrate
+from lib.quality import (
+    SpectralEvidenceFacts,
+    ValidationResult,
+    compute_effective_override_bitrate,
+    interpret_spectral_evidence,
+)
 from lib.staged_album import StagedAlbum
 from lib.util import log_validation_result
 
@@ -363,14 +368,37 @@ def _handle_valid_result(
                 "beets_validate names a scenario on every valid result"
             )
             current_spectral = album_data.current_spectral
+            # Codec-aware (issue #829 Phase 5 PR2b). This fallback seam holds
+            # only a fresh spectral audit of the installed files, so the
+            # measured ``codec_family``/``cliff_hz`` captured alongside the
+            # grade are the whole codec context; a legacy audit that captured
+            # neither withholds, which leaves the container bitrate untouched.
+            # ``lib/dispatch/core.py`` overrides this value from linked current
+            # evidence (a strictly richer resolution) whenever one exists.
             override_min_bitrate = compute_effective_override_bitrate(
                 album_data.current_min_bitrate,
-                (
-                    current_spectral.bitrate_kbps
-                    if current_spectral is not None
-                    else None
-                ),
-                current_spectral.grade if current_spectral is not None else None,
+                interpret_spectral_evidence(SpectralEvidenceFacts(
+                    spectral_grade=(
+                        current_spectral.grade
+                        if current_spectral is not None
+                        else None
+                    ),
+                    codec_family=(
+                        current_spectral.codec_family
+                        if current_spectral is not None
+                        else None
+                    ),
+                    cliff_hz=(
+                        current_spectral.cliff_hz
+                        if current_spectral is not None
+                        else None
+                    ),
+                    spectral_bitrate_kbps=(
+                        current_spectral.bitrate_kbps
+                        if current_spectral is not None
+                        else None
+                    ),
+                )),
             )
 
             resolved_quality_gate_fn = (

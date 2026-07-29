@@ -16,6 +16,7 @@ from lib.quality.evidence_types import (
     EVIDENCE_SUBJECT_INSTALLED,
     SPECTRAL_TRANSCODE_GRADES,
     AudioQualityMeasurement,
+    CodecFamily,
     QualityComparisonBasis,
     TargetQualityContract,
     V0ProbeEvidence,
@@ -23,6 +24,7 @@ from lib.quality.evidence_types import (
     is_comparable_lossless_source_probe,
 )
 from lib.quality.ranks import QualityRank, QualityRankConfig, gate_rank
+from lib.quality.spectral_interpretation import SpectralInterpretation
 
 DECISION_PROVISIONAL_LOSSLESS_UPGRADE = "provisional_lossless_upgrade"
 DECISION_SUSPECT_LOSSLESS_DOWNGRADE = "suspect_lossless_downgrade"
@@ -172,6 +174,8 @@ def import_quality_decision(
     target_contract: TargetQualityContract | None = None,
     v0_probe: V0ProbeEvidence | None = None,
     verified_lossless_proof: bool = False,
+    source_spectral: SpectralInterpretation | None = None,
+    current_spectral: SpectralInterpretation | None = None,
 ) -> ImportQualityDecision:
     """Decide whether to import based on codec-aware quality comparison (issue #60).
 
@@ -219,6 +223,8 @@ def import_quality_decision(
         cfg,
         new_target_contract=target_contract,
         new_v0_probe=v0_probe,
+        new_spectral=source_spectral,
+        existing_spectral=current_spectral,
     )
     verdict = basis.verdict
 
@@ -258,6 +264,13 @@ class MeasuredImportDecisionInput(msgspec.Struct, frozen=True):
     target_contract: TargetQualityContract | None = None
     v0_probe: V0ProbeEvidence | None = None
     verified_lossless_proof: bool = False
+    # issue #829 Phase 5 PR2b — each side's codec-aware spectral
+    # interpretation, when the caller resolved it with album-level context
+    # the measurement cannot carry (``filetype_band``'s mixed-codec
+    # fail-closed). ``None`` means "derive from the measurement", which is
+    # what the harness does; supplying one can only ever withhold MORE.
+    source_spectral: SpectralInterpretation | None = None
+    current_spectral: SpectralInterpretation | None = None
 
 
 class MeasuredImportDecisionResult(msgspec.Struct, frozen=True):
@@ -420,12 +433,19 @@ def build_existing_quality_measurement(
     override_min_bitrate: int | None = None,
     spectral_grade: str | None = None,
     spectral_bitrate_kbps: int | None = None,
+    cliff_hz: int | None = None,
+    codec_family: CodecFamily | None = None,
 ) -> AudioQualityMeasurement | None:
     """Build an existing-album measurement from primitive quality facts.
 
     The spectral override clamps avg/median only for CBR albums. VBR existing
     albums keep their real avg/median so a stale spectral floor cannot erase
     the genuine rank signal that compare_quality() should use.
+
+    ``cliff_hz``/``codec_family`` are the issue #829 Phase 5 PR1 measured
+    facts. They carry through so the reconstructed measurement can still be
+    interpreted in its own codec's terms — the reconstruction dropping them
+    is exactly how a LAME-table number reached a cross-codec comparison.
     """
     if min_bitrate_kbps is None:
         return None
@@ -468,6 +488,8 @@ def build_existing_quality_measurement(
         spectral_provenance=(
             EVIDENCE_PROVENANCE_MEASURED if spectral_grade is not None else None
         ),
+        cliff_hz=cliff_hz if spectral_grade is not None else None,
+        codec_family=codec_family if spectral_grade is not None else None,
     )
 
 
@@ -485,6 +507,8 @@ def measured_import_decision(
         target_contract=measured.target_contract,
         v0_probe=measured.v0_probe,
         verified_lossless_proof=measured.verified_lossless_proof,
+        source_spectral=measured.source_spectral,
+        current_spectral=measured.current_spectral,
     )
     decision = quality.decision
     exit_code = 0

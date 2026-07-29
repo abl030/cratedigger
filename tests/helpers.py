@@ -34,6 +34,7 @@ from lib.quality import (
     AudioQualityMeasurement,
     AudioToolDiagnostic,
     AudioValidationReport,
+    CodecFamily,
     CodecRankBands,
     ConversionInfo,
     DisambiguationFailure,
@@ -393,6 +394,9 @@ def build_parity_candidate_evidence(
     matched_bad_audio_hash_id: int | None = None,
     matched_bad_audio_hash_path: str | None = None,
     snapshot_fingerprint: str = "sha256:candidate-fingerprint",
+    cliff_hz: int | None = None,
+    codec_family: CodecFamily | None = None,
+    filetype_band: str | None = None,
 ) -> AlbumQualityEvidence:
     """Build an ``AlbumQualityEvidence`` candidate row matching the
     simulator's flat-kwargs shape (post-U2/U3 schema).
@@ -466,6 +470,19 @@ def build_parity_candidate_evidence(
             ),
         )
 
+    # issue #829 Phase 5 PR1 capture. Stamped after the branch above so all
+    # three candidate shapes carry it identically; a row with no spectral
+    # grade may not carry these facts at all (evidence-row validation).
+    if spectral_grade is not None and (
+        cliff_hz is not None or codec_family is not None
+    ):
+        measurement = msgspec.structs.replace(
+            measurement,
+            cliff_hz=cliff_hz,
+            codec_family=codec_family,
+            spectral_measurement_version=2,
+        )
+
     v0_metric = None
     if candidate_v0_probe_avg is not None or candidate_v0_probe_min is not None:
         v0_metric = AlbumQualityV0Metric(
@@ -507,7 +524,9 @@ def build_parity_candidate_evidence(
         audio_file_count=(
             audio_file_count if audio_file_count is not None else len(files)
         ),
-        filetype_band=storage_format,
+        filetype_band=(
+            filetype_band if filetype_band is not None else storage_format
+        ),
         matched_bad_audio_hash_id=matched_bad_audio_hash_id,
         matched_bad_audio_hash_path=matched_bad_audio_hash_path,
     )
@@ -525,6 +544,9 @@ def build_parity_current_evidence(
     v0_metric: AlbumQualityV0Metric | None = None,
     matched_bad_audio_hash_id: int | None = None,
     matched_bad_audio_hash_path: str | None = None,
+    cliff_hz: int | None = None,
+    codec_family: CodecFamily | None = None,
+    filetype_band: str | None = None,
 ) -> AlbumQualityEvidence | None:
     """Build the existing-album evidence row for parity scenarios.
 
@@ -561,6 +583,14 @@ def build_parity_current_evidence(
                 EVIDENCE_PROVENANCE_MEASURED
                 if spectral_grade is not None else None
             ),
+            cliff_hz=cliff_hz if spectral_grade is not None else None,
+            codec_family=codec_family if spectral_grade is not None else None,
+            spectral_measurement_version=(
+                2
+                if spectral_grade is not None
+                and (cliff_hz is not None or codec_family is not None)
+                else None
+            ),
         ),
         measured_at=datetime(2026, 5, 16, tzinfo=UTC),
         files=files,
@@ -568,7 +598,9 @@ def build_parity_current_evidence(
         container=container,
         storage_format=format.lower(),
         audio_file_count=len(files),
-        filetype_band=format.lower(),
+        filetype_band=(
+            filetype_band if filetype_band is not None else format.lower()
+        ),
         v0_metric=v0_metric,
         matched_bad_audio_hash_id=matched_bad_audio_hash_id,
         matched_bad_audio_hash_path=matched_bad_audio_hash_path,

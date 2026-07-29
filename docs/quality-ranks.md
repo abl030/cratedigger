@@ -223,10 +223,14 @@ prove a CBR file came from lossless source. Spectral cliff detection may
 clamp it down further.
 
 **A spectral-bound value classifies via this table only when BOTH sides are
-bound.** The spectral cliff estimate (`lib/spectral_check.py`'s
-`LAME_LOWPASS` table: 96/112/128/160/192/224/256/320) is calibrated to
-these exact CBR thresholds, not the more generous MP3 VBR ones — a
-cliff-detected 192 IS a `good`-band reading, by construction. When
+bound AND the side is MP3** (issue #829 Phase 5 PR2b — only MP3 routes on
+`is_cbr` at all, and only MP3's class ladder is calibrated to these
+thresholds). The MP3 spectral class (`lib/spectral_check.py`'s
+`LAME_LOWPASS` table: 96/112/128/160/192/224/256/320, or the detector-space
+ladder in `lib/quality/spectral_interpretation.py` when a raw `cliff_hz`
+was captured) is calibrated to these exact CBR thresholds, not the more
+generous MP3 VBR ones — a cliff-detected 192 IS a `good`-band reading, by
+construction. When
 `compare_quality`'s shared spectral clamp (`_shared_spectral_bitrates`)
 binds on BOTH sides (`spectral <= raw metric`, each side individually),
 both clamped values classify through this table regardless of either
