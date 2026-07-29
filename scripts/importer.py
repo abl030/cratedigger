@@ -69,6 +69,7 @@ from lib.pipeline_db import (
     PipelineDB,
     ProcessingCleanupJournalRow,
 )
+from lib.pipeline_db._core import OwnerSessionLost
 from lib.pipeline_db.rows import AlbumRequestRow
 from lib.processing_cleanup import (
     PROCESSING_CLEANUP_NO_OP,
@@ -314,7 +315,21 @@ def _automation_cleanup_intent(
             raise RuntimeError(
                 "audio quarantine plan does not name the canonical owner path"
             )
-        quarantine_root = os.path.abspath(plan.audio_quarantine_root or "")
+        # Same precondition as the canonical producer
+        # (``quarantine_corrupt_audio_source``), which refuses a blank or
+        # absent root rather than moving anything. Here the intent is
+        # journaled as an immutable, unamendable plan, so an unusable root
+        # must be refused BEFORE it is written: resolving "" would silently
+        # name a destination under the importer's working directory.
+        configured_root = plan.audio_quarantine_root or ""
+        quarantine_root = (
+            os.path.abspath(configured_root) if configured_root else ""
+        )
+        if not quarantine_root or not os.path.isdir(quarantine_root):
+            raise RuntimeError(
+                "configured audio quarantine root is missing or not a "
+                "directory"
+            )
         base = os.path.join(
             quarantine_root,
             "failed_imports",
@@ -1471,42 +1486,68 @@ def process_claimed_job(
                 ),
                 expected_execution_lease=current_lease,
             )
-        cleanup_receipt = _complete_automation_processing_cleanup(
-            db,
-            current,
-            outcome,
-            execution_lease=current_lease,
-            cancellation_token=cancellation_token,
-            owner_session_identity=owner_session_identity,
-        )
-        completion_receipt = _automation_completion_from_job(current)
-        if (
-            current.beets_launch_authorized_at is not None
-            and completion_receipt is None
-        ):
+        # The owned-processor cleanup and the terminal persist are the last
+        # stage of a Beets-mutating execution, and both raise: seven owner
+        # RuntimeErrors plus ProcessingCleanupError/CleanupJournalConflict
+        # from the cleanup, ImportJobTerminalConflict from the terminal CAS.
+        # An escape here kills the whole importer process — the shared,
+        # serial lane for every request — where the identical class of crash
+        # before ``execute_fn`` is deliberately converted into an operator
+        # recovery. Route it the same way.
+        try:
+            cleanup_receipt = _complete_automation_processing_cleanup(
+                db,
+                current,
+                outcome,
+                execution_lease=current_lease,
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
+            )
+            completion_receipt = _automation_completion_from_job(current)
+            if (
+                current.beets_launch_authorized_at is not None
+                and completion_receipt is None
+            ):
+                return db.mark_import_job_recovery_required(
+                    job.id,
+                    reason=(
+                        "Automation completion receipt is missing or invalid"
+                    ),
+                    expected_execution_lease=current_lease,
+                )
+            pending = replace(
+                outcome.terminal_outcome,
+                automation=AutomationTerminalAuthority(
+                    expected_job_status="running",
+                    expected_preview_status=current.preview_status,
+                    expected_execution_lease=current_lease,
+                    cleanup_receipt=cleanup_receipt,
+                    completion_receipt=completion_receipt,
+                ),
+            )
+            terminal = db.persist_import_terminal_outcome(
+                pending.with_job(ImportJobTerminal(
+                    status="completed" if outcome.success else "failed",
+                    error=None if outcome.success else outcome.message,
+                    result=result,
+                    message=outcome.message,
+                ))
+            )
+        except (ExecutionCancelled, OwnerSessionLost):
+            # Fail-stop: this execution's authority is gone, so no further
+            # write on this session is trustworthy — including the recovery
+            # write below, which would raise again. Startup recovery owns
+            # the row once its lease is proven dead.
+            raise
+        except Exception as exc:
+            logger.exception(
+                "Automation terminal stage failed for import job %s", job.id,
+            )
             return db.mark_import_job_recovery_required(
                 job.id,
-                reason="Automation completion receipt is missing or invalid",
+                reason=f"{type(exc).__name__}: {exc}",
                 expected_execution_lease=current_lease,
             )
-        pending = replace(
-            outcome.terminal_outcome,
-            automation=AutomationTerminalAuthority(
-                expected_job_status="running",
-                expected_preview_status=current.preview_status,
-                expected_execution_lease=current_lease,
-                cleanup_receipt=cleanup_receipt,
-                completion_receipt=completion_receipt,
-            ),
-        )
-        terminal = db.persist_import_terminal_outcome(
-            pending.with_job(ImportJobTerminal(
-                status="completed" if outcome.success else "failed",
-                error=None if outcome.success else outcome.message,
-                result=result,
-                message=outcome.message,
-            ))
-        )
         return terminal.job
     if outcome.success:
         if outcome.terminal_outcome is not None:

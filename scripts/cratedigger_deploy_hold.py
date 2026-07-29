@@ -1244,6 +1244,15 @@ def _ensure_owned_control_mask(
         )
 
 
+def _assert_clean_old_lifecycle(backend: DeployHoldBackend) -> None:
+    """Prove the pre-migration lifecycle boundary the strict hold exists for."""
+    preflight = backend.lifecycle_preflight()
+    if dirty := preflight.dirty_fields():
+        raise DeployHoldError(
+            f"old lifecycle is not clean for migration: {dirty!r}"
+        )
+
+
 def acquire_hold(backend: DeployHoldBackend) -> None:
     """Create or resume an authoritative strict hold acquisition."""
     backend.ensure_control_dir()
@@ -1276,11 +1285,7 @@ def acquire_hold(backend: DeployHoldBackend) -> None:
     backend.stop_units(TIMER_UNITS)
     _ensure_owned_manual_hold(backend)
     _drain_services(backend, SERVICE_UNITS)
-    preflight = backend.lifecycle_preflight()
-    if dirty := preflight.dirty_fields():
-        raise DeployHoldError(
-            f"old lifecycle is not clean for migration: {dirty!r}"
-        )
+    _assert_clean_old_lifecycle(backend)
     backend.write_phase(PHASE_HELD)
 
 
@@ -1315,6 +1320,22 @@ def recover_held(backend: DeployHoldBackend) -> None:
     _drain_services(backend, SERVICE_UNITS)
     _clear_owned_inhibitors(backend)
     backend.clear_ordinary_invocation()
+    if phase == PHASE_ACQUIRING:
+        # create_receipt() persists PHASE_ACQUIRING before acquire_hold reaches
+        # either precondition, so an acquiring receipt has never proven them.
+        # Recovery must re-prove exactly what acquire_hold proves before it may
+        # promote that receipt to the HELD boundary verify_held and
+        # prepare_controlled trust. Proving last mirrors acquire_hold: a
+        # failure leaves the strictest boundary re-established and the receipt
+        # authoritatively acquiring.
+        #
+        # Every later phase already proved both before the switch that runs the
+        # migration this hold gates. The preflight is deliberately NOT re-run
+        # there: post-migration it reads a schema and a lifecycle the controlled
+        # cycle has legitimately moved on, so re-proving it could only brick a
+        # recovery that exists to restore safety.
+        backend.verify_controlled_start_contract()
+        _assert_clean_old_lifecycle(backend)
     backend.write_phase(PHASE_HELD)
 
 

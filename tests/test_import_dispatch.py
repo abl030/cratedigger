@@ -8,12 +8,15 @@ Pure function tests (TestPopulateDlInfo*, TestCleanupStagedDir) test in/out.
 """
 import configparser
 import errno
+import inspect
 import json
 import os
 import shutil
 import subprocess as sp
 import tempfile
+import threading
 import unittest
+from collections.abc import Callable
 from contextlib import AbstractContextManager
 from datetime import UTC
 from typing import ClassVar, Never
@@ -27,6 +30,7 @@ from lib.import_execution import (
     CancellationToken,
     ExecutionCancelled,
     ExecutionLeaseSnapshot,
+    MonitoredProcessGroup,
     ProcessIdentity,
 )
 from lib.quality import (
@@ -4179,6 +4183,178 @@ class TestDispatchJellyfinPinCaptureSlice(unittest.TestCase):
         self.assertEqual(pin["children_item_ids"], ["tr-old-1"])
         self.assertEqual(pin["original_date_created"], self.ORIGINAL)
         self.assertEqual(pin["request_id"], 42)
+
+
+class _RecordingProcessGroup:
+    """Typed stand-in for the injected child-supervision group."""
+
+    def __init__(
+        self,
+        process: sp.Popen[bytes],
+        *,
+        returncode: int = 0,
+        log: list[str] | None = None,
+        wait_hook: Callable[[], None] | None = None,
+    ) -> None:
+        self.process = process
+        self.calls: list[str] = log if log is not None else []
+        self.waited_tokens: list[CancellationToken] = []
+        self.probe_results: list[bool] = []
+        # Set by ``terminate_and_wait``, so a test can block inside ``wait``
+        # until the deadline timer's termination has actually landed.
+        self.terminated = threading.Event()
+        self._returncode = returncode
+        self._wait_hook = wait_hook
+
+    @property
+    def pid(self) -> int:
+        return 4321
+
+    def terminate_and_wait(self, *, timeout: float = 5.0) -> int:
+        del timeout
+        self.calls.append("terminate_and_wait")
+        self.terminated.set()
+        return -15
+
+    def wait(
+        self,
+        token: CancellationToken,
+        *,
+        owner_session_probe: Callable[[], bool] | None = None,
+        probe_interval: float = 1.0,
+    ) -> int:
+        del probe_interval
+        self.calls.append("wait")
+        self.waited_tokens.append(token)
+        if owner_session_probe is not None:
+            self.probe_results.append(owner_session_probe())
+        if self._wait_hook is not None:
+            self._wait_hook()
+        return self._returncode
+
+
+class TestRunImportOneProcessGroupSeam(unittest.TestCase):
+    """``run_import_one`` supervises the child through an injected factory.
+
+    The seam exists so tests never replace ``MonitoredProcessGroup`` — a
+    ~120-line supervisor carrying SIGTERM->SIGKILL escalation, deadline
+    arithmetic and termination-idempotence locking — by patching the module
+    binding. Definition-time defaults are injected, never patched.
+    """
+
+    def test_default_factory_is_the_production_supervisor(self) -> None:
+        from lib.dispatch.subprocess_runner import run_import_one
+
+        default = inspect.signature(run_import_one).parameters[
+            "process_group_factory"
+        ].default
+        self.assertIs(default, MonitoredProcessGroup)
+
+    def test_injected_factory_supervises_the_spawned_child(self) -> None:
+        from lib.dispatch.subprocess_runner import run_import_one
+
+        token = CancellationToken()
+        events: list[str] = []
+        built: list[_RecordingProcessGroup] = []
+
+        def factory(process: sp.Popen[bytes]) -> _RecordingProcessGroup:
+            group = _RecordingProcessGroup(process, log=events)
+            built.append(group)
+            events.append("factory")
+            return group
+
+        with patch("lib.dispatch.subprocess_runner.sp.Popen") as popen:
+            run = run_import_one(
+                path="/tmp/source",
+                mb_release_id="release-1",
+                beets_harness_path="/tmp/harness/run",
+                cancellation_token=token,
+                on_spawn=lambda pid: events.append(f"spawn:{pid}"),
+                owner_session_probe=lambda: True,
+                process_group_factory=factory,
+            )
+
+        self.assertEqual(len(built), 1)
+        group = built[0]
+        # The factory wraps the REAL spawned handle, and the group it returns
+        # is what the runner supervises — pid, wait, and cancellation token.
+        self.assertIs(group.process, popen.return_value)
+        self.assertEqual(events, ["factory", "spawn:4321", "wait"])
+        self.assertEqual(group.waited_tokens, [token])
+        self.assertEqual(group.probe_results, [True])
+        self.assertEqual(run.returncode, 0)
+
+    def test_spawn_failure_terminates_the_injected_group(self) -> None:
+        from lib.dispatch.subprocess_runner import run_import_one
+
+        built: list[_RecordingProcessGroup] = []
+
+        def factory(process: sp.Popen[bytes]) -> _RecordingProcessGroup:
+            group = _RecordingProcessGroup(process)
+            built.append(group)
+            return group
+
+        def reject_child(_pid: int) -> None:
+            raise RuntimeError("child lease CAS rejected")
+
+        with (
+            patch("lib.dispatch.subprocess_runner.sp.Popen"),
+            self.assertRaisesRegex(RuntimeError, "child lease CAS rejected"),
+        ):
+            run_import_one(
+                path="/tmp/source",
+                mb_release_id="release-1",
+                beets_harness_path="/tmp/harness/run",
+                cancellation_token=CancellationToken(),
+                on_spawn=reject_child,
+                process_group_factory=factory,
+            )
+
+        self.assertEqual(len(built), 1)
+        self.assertEqual(built[0].calls, ["terminate_and_wait"])
+
+    def test_owner_cancellation_wins_when_the_deadline_also_fires(self) -> None:
+        from lib.dispatch.subprocess_runner import run_import_one
+
+        token = CancellationToken()
+        built: list[_RecordingProcessGroup] = []
+
+        def lose_owner_while_waiting() -> None:
+            token.cancel("owner_session_lost")
+            # The zero-second deadline timer terminates the group from its own
+            # thread; block until that has landed so the timeout and the
+            # ownership cancellation genuinely race.
+            self.assertTrue(built[0].terminated.wait(timeout=5.0))
+
+        def factory(process: sp.Popen[bytes]) -> _RecordingProcessGroup:
+            group = _RecordingProcessGroup(
+                process,
+                returncode=-15,
+                wait_hook=lose_owner_while_waiting,
+            )
+            built.append(group)
+            return group
+
+        with (
+            patch("lib.dispatch.subprocess_runner.sp.Popen"),
+            self.assertRaisesRegex(ExecutionCancelled, "owner_session_lost"),
+        ):
+            run_import_one(
+                path="/tmp/source",
+                mb_release_id="release-1",
+                beets_harness_path="/tmp/harness/run",
+                timeout=0,
+                cancellation_token=token,
+                process_group_factory=factory,
+            )
+
+        # Ownership loss is the stronger cause: TimeoutExpired must not
+        # displace it even though the deadline demonstrably expired and
+        # terminated the group. The two land on different threads, so only
+        # their occurrence is ordered evidence, not their sequence.
+        self.assertEqual(len(built), 1)
+        self.assertEqual(sorted(built[0].calls), ["terminate_and_wait", "wait"])
+        self.assertTrue(built[0].terminated.is_set())
 
 
 if __name__ == "__main__":

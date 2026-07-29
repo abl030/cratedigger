@@ -94,6 +94,7 @@ from lib.pipeline_db import (
     ActiveSearchPlan,
     BadAudioHashInput,
     BadAudioHashRow,
+    CleanupJournalConflict,
     CleanupJournalIntent,
     CleanupJournalReceipt,
     ConsumedAttemptInput,
@@ -130,6 +131,10 @@ from lib.pipeline_db.import_jobs import (
     _decision_proves_exact_lease_dead,
     _recovery_cleanup_matches,
     _recovery_owner_matches,
+)
+from lib.pipeline_db.terminal_outcomes import (
+    ImportJobTerminalConflict,
+    _terminal_edge_side_effects,
 )
 from lib.quality import (
     EVIDENCE_PROVENANCE_MEASURED,
@@ -2899,6 +2904,48 @@ class FakePipelineDB:
         row = self._processing_cleanup_journals.get((job_id, request_id))
         return copy.deepcopy(row)
 
+    def _require_fake_exact_processing_owner(
+        self,
+        *,
+        request_id: int,
+        job_id: int,
+    ) -> None:
+        """Mirror ``_require_exact_processing_owner``'s typed conflict kinds.
+
+        Production raises three distinct ``CleanupJournalConflict`` kinds here
+        and callers catch the class, so the fake must too.
+        """
+        request = self._requests.get(request_id)
+        if request is None:
+            raise CleanupJournalConflict(
+                "request_missing",
+                f"cleanup request {request_id} does not exist",
+            )
+        if (
+            request.get("status") != "processing"
+            or request.get("active_automation_import_job_id") != job_id
+        ):
+            raise CleanupJournalConflict(
+                "owner_mismatch",
+                f"job {job_id} is not request {request_id}'s exact "
+                "processing owner",
+            )
+        job = next(
+            (row for row in self._import_jobs if row["id"] == job_id),
+            None,
+        )
+        if (
+            job is None
+            or job.get("request_id") != request_id
+            or job.get("job_type") != IMPORT_JOB_AUTOMATION
+            or job.get("status") not in IMPORT_JOB_ACTIVE_STATUSES
+        ):
+            raise CleanupJournalConflict(
+                "job_mismatch",
+                f"job {job_id} is not an active automation job for "
+                f"request {request_id}",
+            )
+
     def create_processing_cleanup_journal(
         self,
         *,
@@ -2925,21 +2972,10 @@ class FakePipelineDB:
                 raise ValueError(
                     "cleanup recovery declaration must be non-blank"
                 )
-        request = self._requests.get(request_id)
-        job = next(
-            (row for row in self._import_jobs if row["id"] == job_id),
-            None,
+        self._require_fake_exact_processing_owner(
+            request_id=request_id,
+            job_id=job_id,
         )
-        if (
-            request is None
-            or request.get("status") != "processing"
-            or request.get("active_automation_import_job_id") != job_id
-            or job is None
-            or job.get("request_id") != request_id
-            or job.get("job_type") != IMPORT_JOB_AUTOMATION
-            or job.get("status") not in IMPORT_JOB_ACTIVE_STATUSES
-        ):
-            raise RuntimeError("cleanup journal owner mismatch")
         key = (job_id, request_id)
         existing = self._processing_cleanup_journals.get(key)
         manifest = msgspec.convert(
@@ -2975,7 +3011,10 @@ class FakePipelineDB:
                 == intent.evidence_revision
             )
             if not exact:
-                raise RuntimeError("cleanup journal intent conflict")
+                raise CleanupJournalConflict(
+                    "intent_conflict",
+                    "cleanup journal already contains a different exact intent",
+                )
             return copy.deepcopy(existing)
         now = _utcnow()
         row: ProcessingCleanupJournalRow = {
@@ -3011,8 +3050,16 @@ class FakePipelineDB:
         step_progress: Mapping[str, object],
     ) -> ProcessingCleanupJournalRow:
         row = self._processing_cleanup_journals.get((job_id, request_id))
-        if row is None or row["revision"] != expected_revision:
-            raise RuntimeError("cleanup journal revision conflict")
+        if row is None:
+            raise CleanupJournalConflict(
+                "journal_missing",
+                "cleanup journal does not exist for the exact owner",
+            )
+        if row["revision"] != expected_revision:
+            raise CleanupJournalConflict(
+                "revision_conflict",
+                "cleanup checkpoint revision changed",
+            )
         row["revision"] += 1
         row["step_progress"] = copy.deepcopy(dict(step_progress))
         row["updated_at"] = _utcnow()
@@ -3027,11 +3074,22 @@ class FakePipelineDB:
         receipt: CleanupJournalReceipt,
     ) -> ProcessingCleanupJournalRow:
         row = self._processing_cleanup_journals.get((job_id, request_id))
-        if row is None or row["revision"] != expected_revision:
-            raise RuntimeError("cleanup journal revision conflict")
+        if row is None:
+            raise CleanupJournalConflict(
+                "journal_missing",
+                "cleanup journal does not exist for the exact owner",
+            )
+        if row["revision"] != expected_revision:
+            raise CleanupJournalConflict(
+                "revision_conflict",
+                "cleanup completion revision changed",
+            )
         if row["completed_receipt"] is not None:
             if row["completed_receipt"] != receipt:
-                raise RuntimeError("cleanup journal receipt conflict")
+                raise CleanupJournalConflict(
+                    "receipt_conflict",
+                    "cleanup journal already has a different completed receipt",
+                )
             return copy.deepcopy(row)
         now = _utcnow()
         row["revision"] += 1
@@ -3234,7 +3292,10 @@ class FakePipelineDB:
                     message=command.job.message,
                 )
             if job is None or job.request_id != command.request_id:
-                raise RuntimeError("import job terminal compare-and-set failed")
+                raise ImportJobTerminalConflict(
+                    f"import job {command.import_job_id} is no longer active "
+                    f"for request {command.request_id}"
+                )
             boundary(f"import_job.{command.job.status}")
         except Exception:
             self._restore_terminal_state(snapshot)
@@ -3254,6 +3315,13 @@ class FakePipelineDB:
         job_id: int,
         authority: AutomationTerminalAuthority,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
+        try:
+            self._require_fake_exact_processing_owner(
+                request_id=request_id,
+                job_id=job_id,
+            )
+        except CleanupJournalConflict as exc:
+            raise ImportJobTerminalConflict(str(exc)) from exc
         request = self._requests.get(request_id)
         job = next(
             (
@@ -3264,17 +3332,20 @@ class FakePipelineDB:
             ),
             None,
         )
+        if request is None or job is None:
+            raise ImportJobTerminalConflict(
+                "automation terminal owner disappeared under lock"
+            )
         if (
-            request is None
-            or request.get("status") != "processing"
-            or request.get("active_automation_import_job_id") != job_id
-            or job is None
-            or job.get("job_type") != IMPORT_JOB_AUTOMATION
+            job.get("job_type") != IMPORT_JOB_AUTOMATION
             or job.get("status") != authority.expected_job_status
             or job.get("preview_status") != authority.expected_preview_status
             or job.get("completed_at") is not None
         ):
-            raise RuntimeError("automation terminal owner or stage mismatch")
+            raise ImportJobTerminalConflict(
+                f"automation job {job_id} no longer has the exact terminal "
+                "stage"
+            )
         lease = authority.expected_execution_lease
         lease_matches = (
             all(
@@ -3296,12 +3367,15 @@ class FakePipelineDB:
                 include_child=True,
             )
         )
+        if not lease_matches:
+            raise ImportJobTerminalConflict(
+                f"automation job {job_id} execution lease changed"
+            )
         journal = self._processing_cleanup_journals.get(
             (job_id, request_id)
         )
         if (
-            not lease_matches
-            or journal is None
+            journal is None
             or journal["completed_receipt"] != authority.cleanup_receipt
             or journal["completed_at"] is None
             or journal["declared_result_status"]
@@ -3309,20 +3383,24 @@ class FakePipelineDB:
             or journal["declared_reason"] != authority.declared_reason
             or journal["evidence_revision"] != authority.evidence_revision
         ):
-            raise RuntimeError("automation terminal authority mismatch")
+            raise ImportJobTerminalConflict(
+                f"automation job {job_id} cleanup receipt is not exact"
+            )
         if authority.completion_receipt is not None:
             result = dict(job.get("result") or {})
             expected = msgspec.to_builtins(authority.completion_receipt)
             if result.get("automation_completion") != expected:
-                raise RuntimeError(
-                    "automation completion receipt mismatch"
+                raise ImportJobTerminalConflict(
+                    f"automation job {job_id} completion receipt changed"
                 )
         elif (
             authority.expected_job_status == "running"
             and authority.expected_preview_status == "evidence_ready"
             and job.get("beets_launch_authorized_at") is not None
         ):
-            raise RuntimeError("automation completion receipt missing")
+            raise ImportJobTerminalConflict(
+                f"automation job {job_id} lacks its completion receipt"
+            )
         return request, job
 
     @staticmethod
@@ -3366,33 +3444,58 @@ class FakePipelineDB:
             if transition is not None
         )
         if not sequence:
-            raise RuntimeError("automation terminal transition missing")
+            raise ImportJobTerminalConflict(
+                "automation terminal outcome has no private request edge"
+            )
         applied: list[transitions.TransitionApplied] = []
         virtual = "processing"
         imported_seen = False
         metadata_changed = False
+        counters = {
+            name: int(request.get(name) or 0)
+            for name in (
+                "search_attempts",
+                "download_attempts",
+                "validation_attempts",
+            )
+        }
+        retry_state_changed = False
+        attempt_backoff_minutes: int | None = None
         for transition in sequence:
             if transition.target_status not in {"wanted", "imported"}:
-                raise RuntimeError("invalid automation terminal status")
+                raise ValueError(
+                    "automation terminal edge must end wanted or imported"
+                )
             previous = virtual
             virtual = transition.target_status
-            if virtual == "wanted":
-                request["search_attempts"] = 0
-                request["download_attempts"] = 0
-                request["validation_attempts"] = 0
-                request["next_retry_after"] = None
-                request["last_attempt_at"] = None
+            # Retry-counter policy is read from the ONE canonical
+            # ``transitions.VALID_TRANSITIONS`` table, exactly as production's
+            # ``_finish_processing_request_last`` resolves it.  Restating a
+            # reset here would make the fake more permissive than the database
+            # it stands in for.
+            if _terminal_edge_side_effects(
+                previous,
+                virtual,
+            ).clear_retry_counters:
+                counters = dict.fromkeys(counters, 0)
+                retry_state_changed = True
+                attempt_backoff_minutes = None
             if transition.attempt_type is not None:
+                if transition.attempt_type not in {
+                    "search",
+                    "download",
+                    "validation",
+                }:
+                    raise ValueError(
+                        f"Unknown attempt type: {transition.attempt_type!r}"
+                    )
                 key = f"{transition.attempt_type}_attempts"
-                prior_attempts = int(request.get(key) or 0)
-                request[key] = prior_attempts + 1
-                now = _utcnow()
-                request["last_attempt_at"] = now
-                request["next_retry_after"] = now + timedelta(
-                    minutes=min(
-                        BACKOFF_BASE_MINUTES * (2 ** prior_attempts),
-                        BACKOFF_MAX_MINUTES,
-                    ),
+                prior_attempts = counters[key]
+                counters[key] = prior_attempts + 1
+                retry_state_changed = True
+                attempt_backoff_minutes = min(
+                    BACKOFF_BASE_MINUTES * (2 ** prior_attempts),
+                    BACKOFF_MAX_MINUTES,
                 )
             fields = dict(transition.fields)
             metadata_changed = metadata_changed or bool(fields)
@@ -3408,20 +3511,31 @@ class FakePipelineDB:
                 from_status=previous,
                 target_status=virtual,
             ))
+        now = _utcnow()
         if imported_seen and request.get("unfindable_category") is not None:
             if request.get("rescued_at") is None:
-                request["rescued_at"] = _utcnow()
+                request["rescued_at"] = now
                 request["prior_unfindable_category"] = request.get(
                     "unfindable_category"
                 )
             request["unfindable_category"] = None
-            request["unfindable_categorised_at"] = _utcnow()
+            request["unfindable_categorised_at"] = now
         if metadata_changed:
             boundary("request.processing_metadata")
+        request.update(counters)
+        if retry_state_changed:
+            request["next_retry_after"] = (
+                None
+                if attempt_backoff_minutes is None
+                else now + timedelta(minutes=attempt_backoff_minutes)
+            )
+            request["last_attempt_at"] = (
+                None if attempt_backoff_minutes is None else now
+            )
         request["status"] = virtual
         request["active_download_state"] = None
         request["active_automation_import_job_id"] = None
-        request["updated_at"] = _utcnow()
+        request["updated_at"] = now
         boundary(f"request.processing_to_{virtual}")
         return tuple(applied)
 
@@ -3600,7 +3714,10 @@ class FakePipelineDB:
                 message=command.message,
             )
             if job is None or job.request_id != command.request_id:
-                raise RuntimeError("preview job terminal compare-and-set failed")
+                raise ImportJobTerminalConflict(
+                    f"preview job {command.import_job_id} is no longer active "
+                    f"for request {command.request_id}"
+                )
             boundary("import_job.preview_failed")
         except Exception:
             self._restore_terminal_state(snapshot)
@@ -3689,7 +3806,9 @@ class FakePipelineDB:
             boundary("processing_cleanup.consumed")
             transition = command.request_transition
             if transition is None:
-                raise RuntimeError("automation preview terminal edge missing")
+                raise ImportJobTerminalConflict(
+                    "automation terminal outcome has no private request edge"
+                )
             request["status"] = transition.target_status
             request.update(dict(transition.fields))
             request["active_download_state"] = None

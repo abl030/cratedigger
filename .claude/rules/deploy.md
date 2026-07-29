@@ -66,3 +66,14 @@ The end of a shipped series is the only moment its debt is cheap to see — the 
 - Backup before any destructive migration: `env -u SSH_AUTH_SOCK ssh doc2 'pg_dump -h 10.20.0.11 -U cratedigger cratedigger' > /tmp/cratedigger_backup_$(date +%Y%m%d_%H%M%S).sql`
 - After deploy, verify the migration ran with `pipeline-cli query` on doc2 after exporting `PGPASSWORD` from `/run/secrets/cratedigger-pgpass`, passing the SQL through stdin as shown in `.claude/skills/deploy/SKILL.md`; never print the password or pass it from another host.
 - If a migration fails, check `env -u SSH_AUTH_SOCK ssh doc2 'sudo journalctl -u cratedigger-db-migrate.service'` for the error.
+- **Migration 066 (processing ownership, #898) is a hard forward-only boundary.**
+  Once applied, never repin cratedigger to a pre-#898 source — not even at zero
+  `processing` rows. 066 installs the `processing` status, the
+  `active_automation_import_job_id` owner equivalence CHECK, a partial unique
+  index over active `automation_import` jobs, deferred constraint triggers, and
+  the `processing_cleanup_journal` table; a repinned pre-#898 writer violates
+  them at COMMIT rather than failing cleanly. Forward-fix only. The
+  quiesce/hold preconditions the migration depends on are proven by
+  `scripts/cratedigger_deploy_hold.py::lifecycle_preflight`, which blocks
+  `acquire` unless active automation jobs, `recovery_required` jobs, and dirty
+  `downloading` rows are all zero.

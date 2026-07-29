@@ -13,7 +13,7 @@ import sys
 import tempfile
 import threading
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from lib.dispatch.types import ImportOneRun
 from lib.import_execution import CancellationToken, MonitoredProcessGroup
@@ -22,6 +22,26 @@ from lib.util import beets_subprocess_env
 
 if TYPE_CHECKING:
     from lib.quality import V0ProbeEvidence
+
+
+class SupervisedProcessGroup(Protocol):
+    """The child-supervision surface ``run_import_one`` depends on."""
+
+    @property
+    def pid(self) -> int: ...
+
+    def terminate_and_wait(self, *, timeout: float = ...) -> int: ...
+
+    def wait(
+        self,
+        token: CancellationToken,
+        *,
+        owner_session_probe: Callable[[], bool] | None = ...,
+        probe_interval: float = ...,
+    ) -> int: ...
+
+
+ProcessGroupFactory = Callable[["sp.Popen[bytes]"], SupervisedProcessGroup]
 
 
 def import_one_script_from_harness(beets_harness_path: str) -> str:
@@ -130,6 +150,7 @@ def run_import_one(
     cancellation_token: CancellationToken | None = None,
     on_spawn: Callable[[int], None] | None = None,
     owner_session_probe: Callable[[], bool] | None = None,
+    process_group_factory: ProcessGroupFactory = MonitoredProcessGroup,
 ) -> ImportOneRun:
     """Run import_one.py and parse its ImportResult sentinel."""
     cmd = build_import_one_command(
@@ -190,7 +211,7 @@ def run_import_one(
                 env=env,
                 start_new_session=True,
             )
-            monitored = MonitoredProcessGroup(process)
+            monitored = process_group_factory(process)
             try:
                 if on_spawn is not None:
                     on_spawn(monitored.pid)

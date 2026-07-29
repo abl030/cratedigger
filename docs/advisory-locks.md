@@ -282,7 +282,7 @@ watchdogs have stopped.
 | Witnessed automation handoff | `lib/pipeline_db/import_jobs.py` | `PipelineDB.handoff_automation_import` | IMPORT | `request_id` |
 | Automation preview owner scope | `scripts/import_preview_worker.py` | `_process_automation_claim` | IMPORT then RELEASE in the borrowed runtime path | `request_id`; `release_id_to_lock_key(release_id)` |
 | Automation importer owner scope | `scripts/importer.py` | `_process_automation_claim` | IMPORT then RELEASE | `request_id`; `release_id_to_lock_key(release_id)` |
-| Automation recovery close | `lib/import_job_recovery_service.py` | `apply_automation_recovery_action` | IMPORT then RELEASE | `request_id`; `release_id_to_lock_key(release_id)` |
+| Automation recovery close | `lib/import_job_recovery_service.py` | `apply_import_job_recovery` | IMPORT then RELEASE | `request_id`; `release_id_to_lock_key(release_id)` |
 | Auto + force-import dispatch | `lib/dispatch/core.py` | `dispatch_import_core` | RELEASE | `release_id_to_lock_key(mb_release_id)` |
 | Direct Add / new-row Upgrade | `lib/request_creation_service.py` | `RequestCreationService.create_or_resume` | RELEASE then PLAN | `release_id_to_lock_key(creation.release_id)`; `request_id` |
 | Force-import outer | `lib/dispatch/entry_points.py` | `dispatch_import_from_db` | IMPORT | `request_id` |

@@ -6,8 +6,9 @@ import json
 import tempfile
 import threading
 import unittest
+from collections.abc import Mapping
 from dataclasses import replace
-from datetime import UTC
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import msgspec
@@ -23,7 +24,11 @@ from lib.import_execution import (
     ProcessIdentity,
 )
 from lib.import_queue import IMPORT_JOB_FORCE, ImportJob
-from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_IMPORT, PipelineDB
+from lib.pipeline_db import (
+    ADVISORY_LOCK_NAMESPACE_IMPORT,
+    BACKOFF_BASE_MINUTES,
+    PipelineDB,
+)
 from lib.pipeline_db.cleanup_journal import (
     _CleanupCursor,
     _LockedCleanupScope,
@@ -232,6 +237,76 @@ def _snapshot(db: PipelineDB, request_id: int, job_id: int) -> dict[str, object]
         "job": dict(job),
         "counts": dict(counts),
     }
+
+
+SEEDED_BACKOFF_MINUTES = 7
+"""A deliberately unproducible prior backoff — real ones are 30 * 2**n."""
+
+_SEEDED_LAST_ATTEMPT_AT = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+
+
+def _seed_terminal_retry_state(
+    db: PipelineDB,
+    request_id: int,
+    *,
+    search_attempts: int,
+    download_attempts: int,
+    validation_attempts: int,
+) -> None:
+    """Give the locked row real prior automatic-retry history to preserve."""
+    db._execute(
+        """
+        UPDATE album_requests
+        SET search_attempts = %s,
+            download_attempts = %s,
+            validation_attempts = %s,
+            last_attempt_at = %s,
+            next_retry_after = %s
+        WHERE id = %s
+        """,
+        (
+            search_attempts,
+            download_attempts,
+            validation_attempts,
+            _SEEDED_LAST_ATTEMPT_AT,
+            _SEEDED_LAST_ATTEMPT_AT + timedelta(
+                minutes=SEEDED_BACKOFF_MINUTES,
+            ),
+            request_id,
+        ),
+    )
+
+
+def read_terminal_retry_state(
+    db: PipelineDB,
+    request_id: int,
+) -> dict[str, object]:
+    """Read exactly the retry-accounting columns a terminal edge rewrites."""
+    cur = db._execute(
+        """
+        SELECT search_attempts, download_attempts, validation_attempts,
+               last_attempt_at, next_retry_after
+        FROM album_requests
+        WHERE id = %s
+        """,
+        (request_id,),
+    )
+    row = cur.fetchone()
+    assert row is not None
+    return dict(row)
+
+
+def terminal_backoff_minutes(state: Mapping[str, object]) -> int | None:
+    """Return the automatic backoff window the row currently carries."""
+    last_attempt_at = state["last_attempt_at"]
+    next_retry_after = state["next_retry_after"]
+    if last_attempt_at is None or next_retry_after is None:
+        return None
+    assert isinstance(last_attempt_at, datetime)
+    assert isinstance(next_retry_after, datetime)
+    return round(
+        (next_retry_after - last_attempt_at).total_seconds() / 60
+    )
 
 
 def _seed_running_import(
@@ -499,6 +574,33 @@ def _prepare_automation_terminal_command(
             expected_execution_lease=lease,
             cleanup_receipt=cleanup_receipt,
         ),
+    )
+
+
+def automation_requeue_command(
+    prepared: ImportTerminalOutcome,
+    *,
+    attempt_type: str | None,
+) -> ImportTerminalOutcome:
+    """Rebuild a prepared owner command as a processing -> wanted rejection."""
+    return replace(
+        prepared,
+        initial_transition=transitions.RequestTransition.to_wanted(
+            from_status="processing",
+            attempt_type=attempt_type,
+        ),
+        audit=TerminalDownloadAudit(
+            outcome="rejected",
+            soulseek_username="automation-peer",
+            validation_result='{"valid":false,"scenario":"automation_reject"}',
+        ),
+        job=ImportJobTerminal(
+            status="failed",
+            result={"success": False},
+            message="automation rejected",
+            error="automation rejected",
+        ),
+        successful_terminal_acceptance=False,
     )
 
 
@@ -2298,6 +2400,90 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
         self.assertEqual(history[0]["outcome"], "failed")
         self.assertEqual(history[0]["error_message"], "staged_path_missing")
 
+    def test_automation_requeue_preserves_prior_retry_counters(self):
+        """processing -> wanted retains counters so backoff keeps growing.
+
+        The private owner edge stands in for ``("downloading", "wanted")``,
+        whose canonical ``TransitionSideEffects`` does NOT clear retry
+        counters. Zeroing them here would pin every repeatedly-failing
+        automation request at the base retry interval forever.
+        """
+        db, request_id, job_id = _seed_running_import(automation_state=True)
+        self.addCleanup(db.close)
+        _seed_terminal_retry_state(
+            db,
+            request_id,
+            search_attempts=5,
+            download_attempts=2,
+            validation_attempts=1,
+        )
+        prepared = _prepare_automation_terminal_command(db, request_id, job_id)
+
+        db.persist_import_terminal_outcome(automation_requeue_command(
+            prepared,
+            attempt_type="validation",
+        ))
+
+        request = db.get_request(request_id)
+        assert request is not None
+        self.assertEqual(request["status"], "wanted")
+        state = read_terminal_retry_state(db, request_id)
+        self.assertEqual(
+            (
+                state["search_attempts"],
+                state["download_attempts"],
+                state["validation_attempts"],
+            ),
+            (5, 2, 2),
+        )
+        # prior validation_attempts=1 grows the window to 30 * 2**1 minutes.
+        self.assertEqual(terminal_backoff_minutes(state), 60)
+        self.assertNotEqual(
+            terminal_backoff_minutes(state),
+            BACKOFF_BASE_MINUTES,
+        )
+
+    def test_automation_upgrade_requeue_still_clears_retry_counters(self):
+        """imported -> wanted keeps the canonical clean-slate re-queue."""
+        db, request_id, job_id = _seed_running_import(automation_state=True)
+        self.addCleanup(db.close)
+        _seed_terminal_retry_state(
+            db,
+            request_id,
+            search_attempts=5,
+            download_attempts=2,
+            validation_attempts=1,
+        )
+        prepared = _prepare_automation_terminal_command(db, request_id, job_id)
+
+        db.persist_import_terminal_outcome(replace(
+            prepared,
+            post_audit_transitions=(
+                transitions.RequestTransition.to_wanted(
+                    from_status="imported",
+                    search_filetype_override="lossless",
+                    min_bitrate=320,
+                ),
+            ),
+            successful_terminal_acceptance=False,
+        ))
+
+        request = db.get_request(request_id)
+        assert request is not None
+        self.assertEqual(request["status"], "wanted")
+        self.assertEqual(request["search_filetype_override"], "lossless")
+        state = read_terminal_retry_state(db, request_id)
+        self.assertEqual(
+            (
+                state["search_attempts"],
+                state["download_attempts"],
+                state["validation_attempts"],
+            ),
+            (0, 0, 0),
+        )
+        self.assertIsNone(state["last_attempt_at"])
+        self.assertIsNone(state["next_retry_after"])
+
     def test_job_backed_local_outcomes_roll_back_when_job_write_faults(self):
         assert TEST_DSN is not None
         cases = (
@@ -2316,12 +2502,20 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
                     fail_after_write=job_write_boundary,
                 )
                 try:
-                    with self.assertRaises(InjectedTerminalWriteFailure):
-                        self._run_job_backed_automation_result(
-                            failing,
-                            job_id,
-                            completion,
-                        )
+                    # The terminal stage now CONTAINS this fault instead of
+                    # letting it escape and kill the importer process (the
+                    # shared serial lane for every request). Containment is
+                    # pinned by tests/test_import_queue.py; the invariant
+                    # this test owns -- the whole job-backed bundle rolls
+                    # back to its pre-fault state -- is asserted below and
+                    # is unchanged. A fault that failed to fire would leave
+                    # a completed terminal, so `after == before` still
+                    # proves the write actually faulted.
+                    self._run_job_backed_automation_result(
+                        failing,
+                        job_id,
+                        completion,
+                    )
                 finally:
                     failing.close()
 

@@ -77,13 +77,7 @@ class TestOwnedImportSubprocessRunner(unittest.TestCase):
             return 0
 
         monitored.wait.side_effect = wait
-        with (
-            patch("lib.dispatch.subprocess_runner.sp.Popen"),
-            patch(
-                "lib.dispatch.subprocess_runner.MonitoredProcessGroup",
-                return_value=monitored,
-            ),
-        ):
+        with patch("lib.dispatch.subprocess_runner.sp.Popen"):
             run_import_one(
                 path="/tmp/source",
                 mb_release_id="release-1",
@@ -91,6 +85,7 @@ class TestOwnedImportSubprocessRunner(unittest.TestCase):
                 cancellation_token=token,
                 on_spawn=lambda pid: events.append(f"spawn:{pid}"),
                 owner_session_probe=lambda: True,
+                process_group_factory=lambda _process: monitored,
             )
 
         self.assertEqual(events, ["spawn:4321", "wait"])
@@ -106,10 +101,6 @@ class TestOwnedImportSubprocessRunner(unittest.TestCase):
 
         with (
             patch("lib.dispatch.subprocess_runner.sp.Popen"),
-            patch(
-                "lib.dispatch.subprocess_runner.MonitoredProcessGroup",
-                return_value=monitored,
-            ),
             self.assertRaisesRegex(RuntimeError, "child lease CAS rejected"),
         ):
             run_import_one(
@@ -118,6 +109,7 @@ class TestOwnedImportSubprocessRunner(unittest.TestCase):
                 beets_harness_path="/tmp/harness/run",
                 cancellation_token=CancellationToken(),
                 on_spawn=reject_child,
+                process_group_factory=lambda _process: monitored,
             )
 
         monitored.terminate_and_wait.assert_called_once_with()
@@ -143,10 +135,6 @@ class TestOwnedImportSubprocessRunner(unittest.TestCase):
         monitored.wait.side_effect = wait
         with (
             patch("lib.dispatch.subprocess_runner.sp.Popen"),
-            patch(
-                "lib.dispatch.subprocess_runner.MonitoredProcessGroup",
-                return_value=monitored,
-            ),
             self.assertRaisesRegex(ExecutionCancelled, "owner_session_lost"),
         ):
             run_import_one(
@@ -155,6 +143,7 @@ class TestOwnedImportSubprocessRunner(unittest.TestCase):
                 beets_harness_path="/tmp/harness/run",
                 timeout=0,
                 cancellation_token=token,
+                process_group_factory=lambda _process: monitored,
             )
 
         monitored.terminate_and_wait.assert_called()

@@ -89,13 +89,13 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "default raw-query seam runs in the transaction-enforced read-only "
         "scope on the live connection"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 126, "5fa18d2c1737583f"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 158, "5fa18d2c1737583f"): (
         "terminal metadata keys use the existing validated request-field "
         "vocabulary (issue #784: `dumps=lambda value: msgspec.json.encode("
         "value).decode()` replaced with the shared `_msgspec_json_dumps` "
         "helper from `_shared.py` — same encoder, same output, no SQL change)"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 341, "cd644e51f3670265"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 373, "cd644e51f3670265"): (
         "terminal attempt kind is restricted to the fixed retry-counter vocabulary"
     ),
     ("lib/pipeline_db/download_log.py", 739, "86ec443bac615c3c"): (
@@ -201,10 +201,13 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "and every value remains a direct placeholder; an attached processing "
         "owner makes the compare-and-set a zero-write conflict"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 1047, "0359f0cf9c05697e"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 1078, "ebb50341a8d836f6"): (
         "processing-terminal metadata keys use the validated request-field "
         "vocabulary while exact request and owner predicates retain authority; "
-        "the static owner-clearing status CAS remains the final request write"
+        "the static owner-clearing status CAS remains the final request write "
+        "(review #2: identity moved because the enclosing method now reads "
+        "retry-counter policy from the canonical VALID_TRANSITIONS table "
+        "instead of zeroing counters inline — no SQL-shape change here)"
     ),
 }
 
@@ -219,21 +222,27 @@ _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "atomic download-to-processing handoff CASes the immutable download "
         "witness while installing the exact automation owner"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 168, "56802c71d0fd3622"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 200, "56802c71d0fd3622"): (
         "atomic terminal transition mirrors typed wanted CAS inside one transaction"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 227, "249bfbdab2b02ac4"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 259, "249bfbdab2b02ac4"): (
         "atomic preview recovery accepts only downloading as its exact source"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 382, "4f0561c784e817e9"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 414, "4f0561c784e817e9"): (
         "atomic terminal import CASes status with rescue audit in the same transaction"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 422, "9b11fb540dfe44e3"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 454, "9b11fb540dfe44e3"): (
         "atomic terminal typed transition CASes the source status selected by the DAG"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 1074, "32307a325c64f903"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 1105, "6674811fa5453c86"): (
         "automation terminalization performs the final exact processing-owner "
-        "CAS and clears the owner in the same static request write"
+        "CAS and clears the owner in the same static request write "
+        "(review #2: retry counters are now policy-derived placeholders read "
+        "from the canonical VALID_TRANSITIONS table rather than unconditional "
+        "zeros, so `processing -> wanted` retains them and automatic backoff "
+        "keeps growing; the exact `status = 'processing' AND "
+        "active_automation_import_job_id = %s` predicate and the "
+        "owner-clearing final write are unchanged)"
     ),
     ("lib/pipeline_db/requests.py", 359, "a2f3083f8cbe8885"): (
         "Replace holds the row lock and CASes the captured active source status "

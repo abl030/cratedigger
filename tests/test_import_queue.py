@@ -10,6 +10,7 @@ import time
 import unittest
 from collections.abc import Mapping
 from contextlib import AbstractContextManager, contextmanager
+from dataclasses import replace as dataclass_replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from unittest.mock import ANY, MagicMock, patch
@@ -29,6 +30,7 @@ from lib.download_processing import (
     CompletionDeferred,
     CompletionDispatched,
     CompletionFailed,
+    CompletionResult,
 )
 from lib.import_execution import (
     CancellationToken,
@@ -50,6 +52,10 @@ from lib.import_queue import (
     force_import_payload,
     validate_payload,
 )
+from lib.pipeline_db._core import OwnerSessionLost
+from lib.pipeline_db.cleanup_journal import CleanupJournalConflict
+from lib.pipeline_db.terminal_outcomes import ImportJobTerminalConflict
+from lib.processing_cleanup import ProcessingCleanupError
 from lib.quality import (
     ActiveDownloadState,
     AudioQualityMeasurement,
@@ -7015,3 +7021,671 @@ class TestForcePreviewPathAuthority(unittest.TestCase):
                 preview_root="/preview",
                 preview_children=[],
             )
+
+
+# --- Owned-processor cleanup + terminal stage --------------------------------
+#
+# Two invariants of the automation branch of ``process_claimed_job``, stated
+# before the code:
+#
+#   1. Every fault the post-execution stage can raise either reaches the
+#      caller unchanged (execution/owner-session fail-stop) or is converted
+#      into ``recovery_required`` — it never escapes and kills the importer
+#      process, which drains the shared queue for every request.
+#   2. The owned-processor cleanup intent is journalled as an immutable,
+#      unamendable plan, so it must refuse an unusable configured quarantine
+#      root instead of resolving it against the importer's CWD.
+#
+# Both checkers are module-level so the known-bad self-tests below can call
+# them directly.
+
+_TERMINAL_STAGE_FAIL_STOP: tuple[type[BaseException], ...] = (
+    ExecutionCancelled,
+    OwnerSessionLost,
+)
+# Every exception class the cleanup + terminal-persist stage is documented to
+# raise, plus the two fail-stop classes it must never convert.
+_TERMINAL_STAGE_FAULTS: tuple[type[BaseException], ...] = (
+    RuntimeError,
+    ValueError,
+    OSError,
+    msgspec.ValidationError,
+    ProcessingCleanupError,
+    CleanupJournalConflict,
+    ImportJobTerminalConflict,
+    OwnerSessionLost,
+)
+
+
+def terminal_stage_fault_violation(
+    *,
+    fault: type[BaseException],
+    escaped: BaseException | None,
+    job_status: str,
+) -> str | None:
+    """Return why one injected terminal-stage fault broke invariant 1."""
+    if issubclass(fault, _TERMINAL_STAGE_FAIL_STOP):
+        if not isinstance(escaped, fault):
+            return f"fail-stop {fault.__name__} did not reach the caller"
+        if job_status != "running":
+            return f"fail-stop {fault.__name__} moved the job to {job_status}"
+        return None
+    if escaped is not None:
+        return (
+            f"{fault.__name__} escaped process_claimed_job as "
+            f"{type(escaped).__name__}"
+        )
+    if job_status != "recovery_required":
+        return f"{fault.__name__} left the job at {job_status}"
+    return None
+
+
+def quarantine_intent_violation(
+    *,
+    configured_root: str,
+    refused: bool,
+    destination_path: str | None,
+) -> str | None:
+    """Return why one cleanup-intent quarantine root broke invariant 2."""
+    usable = bool(configured_root) and os.path.isdir(configured_root)
+    if not usable:
+        if refused:
+            return None
+        return (
+            f"unusable quarantine root {configured_root!r} was journalled "
+            f"with destination {destination_path!r}"
+        )
+    if refused:
+        return f"usable quarantine root {configured_root!r} was refused"
+    if destination_path is None:
+        return f"usable quarantine root {configured_root!r} named no destination"
+    bucket = os.path.join(
+        os.path.abspath(configured_root), "failed_imports", "bad_files",
+    )
+    if destination_path != bucket and not destination_path.startswith(
+        bucket + os.sep
+    ):
+        return (
+            f"destination {destination_path!r} escaped the configured "
+            f"quarantine bucket {bucket!r}"
+        )
+    return None
+
+
+class _TerminalBoundaryFaultDB(FakePipelineDB):
+    """Fake whose terminal write fails at its first durable boundary.
+
+    ``_terminal_outcome_write_boundary`` is the fake's own fault-injection
+    seam (see ``tests/test_terminal_outcomes.py``); production raises the
+    real conflict/loss types from the same place when its compare-and-set
+    loses the row or the pinned session dies mid-bundle.
+    """
+
+    fault: type[BaseException] = RuntimeError
+
+    def _terminal_outcome_write_boundary(self, index: int, label: str) -> None:
+        del index, label
+        raise self.fault("injected terminal-stage fault")
+
+
+_TERMINAL_STAGE_RELEASE = "terminal-stage-release"
+
+
+def launch_automation_owner(
+    db: FakePipelineDB,
+    canonical_path: str,
+    *,
+    request_id: int = 42,
+    capture_completion: bool = True,
+) -> tuple[ImportJob, ExecutionLeaseSnapshot]:
+    """Drive the real lifecycle to a launch-authorized running owner."""
+    from lib.import_job_recovery_service import AutomationCompletionReceipt
+
+    db.seed_request(make_request_row(
+        id=request_id,
+        mb_release_id=_TERMINAL_STAGE_RELEASE,
+    ))
+    job = handoff_automation_owner(
+        db,
+        request_id,
+        state={
+            "filetype": "flac",
+            "enqueued_at": "2026-07-29T00:00:00+00:00",
+            "current_path": canonical_path,
+            "files": [],
+        },
+        canonical_path=canonical_path,
+    )
+    preview_lease = _preview_execution_lease(f"stage-preview-{job.id}")
+    claimed_preview = claim_next_import_preview_job(
+        db,
+        worker_id="preview",
+        execution_lease=preview_lease,
+    )
+    assert claimed_preview is not None
+    _seed_candidate_for_import_job(
+        db,
+        job.id,
+        mb_release_id=_TERMINAL_STAGE_RELEASE,
+        expected_execution_lease=preview_lease,
+    )
+    ready = db.mark_import_job_preview_importable(
+        job.id,
+        preview_result={"verdict": "would_import"},
+        message="ready",
+        expected_execution_lease=preview_lease,
+    )
+    assert ready is not None
+    lease = _importer_execution_lease(f"stage-import-{job.id}")
+    claimed = claim_next_import_job(
+        db,
+        worker_id="worker",
+        execution_lease=lease,
+    )
+    assert claimed is not None
+    authorized = db.authorize_import_job_launch(
+        job.id,
+        request_id=request_id,
+        release_id=_TERMINAL_STAGE_RELEASE,
+        source_path=canonical_path,
+        expected_execution_lease=lease,
+    )
+    assert authorized is not None
+    if capture_completion:
+        child = db.record_import_job_beets_child(
+            job.id,
+            expected_execution_lease=lease,
+            beets_pid=1,
+            beets_start_ticks=1,
+        )
+        assert child is not None
+        captured = db.capture_automation_import_completion(
+            job.id,
+            expected_execution_lease=dataclass_replace(
+                lease,
+                beets=ProcessIdentity(1, 1),
+            ),
+            receipt=AutomationCompletionReceipt(
+                job_id=job.id,
+                request_id=request_id,
+                release_id=_TERMINAL_STAGE_RELEASE,
+                canonical_path=canonical_path,
+                returncode=0,
+                captured_at="2026-07-29T04:00:00+00:00",
+            ),
+        )
+        assert captured is not None
+    return claimed, lease
+
+
+def terminal_stage_canonical_dir(case: unittest.TestCase) -> str:
+    """Create one real canonical owner directory for the calling test."""
+    path = tempfile.mkdtemp(prefix="cratedigger-terminal-stage-")
+    with open(os.path.join(path, "01.flac"), "wb") as handle:
+        handle.write(b"canonical owner fixture")
+    case.addCleanup(shutil.rmtree, path, ignore_errors=True)
+    return path
+
+
+class TestAutomationTerminalStageFaultRouting(unittest.TestCase):
+    """Invariant 1 — the post-execution stage never kills the worker."""
+
+    def _canonical_dir(self) -> str:
+        return terminal_stage_canonical_dir(self)
+
+    def _drift_the_cleanup_journal(
+        self,
+        db: FakePipelineDB,
+        job_id: int,
+        canonical_path: str,
+        *,
+        request_id: int = 42,
+    ) -> None:
+        """Journal a plan for a path that is no longer the canonical owner."""
+        from lib.pipeline_db import CleanupJournalIntent
+        from lib.processing_cleanup import (
+            PROCESSING_CLEANUP_NO_OP,
+            cleanup_manifest_builtins,
+            cleanup_manifest_hash,
+        )
+
+        db.create_processing_cleanup_journal(
+            request_id=request_id,
+            job_id=job_id,
+            intent=CleanupJournalIntent(
+                action=PROCESSING_CLEANUP_NO_OP,
+                source_path=os.path.join(canonical_path, "superseded"),
+                source_manifest=cleanup_manifest_builtins(()),
+                source_manifest_hash=cleanup_manifest_hash(()),
+            ),
+        )
+
+    def _run_terminal_stage(
+        self,
+        db: FakePipelineDB,
+        claimed: ImportJob,
+        lease: ExecutionLeaseSnapshot,
+        *,
+        drop_owner_session: bool = False,
+    ) -> tuple[ImportJob | None, BaseException | None]:
+        """Run the real automation branch through to its terminal stage."""
+        from scripts import importer
+
+        def completed_processing(
+            *_args: object,
+            **_kwargs: object,
+        ) -> CompletionResult:
+            """Stand in for the beets-mutating completion pipeline only."""
+            return CompletionDispatched(
+                outcome=DispatchOutcome(True, "Imported by dispatch"),
+            )
+
+        def execute(
+            owner: FakePipelineDB,
+            owned_job: ImportJob,
+            *,
+            ctx: object = None,
+            execution_lease: ExecutionLeaseSnapshot,
+            cancellation_token: CancellationToken,
+            owner_session_identity: OwnerSessionIdentity,
+        ) -> DispatchOutcome:
+            return importer.execute_automation_import_job(
+                owner,  # pyright: ignore[reportArgumentType]
+                owned_job,
+                ctx=ctx,
+                execution_lease=execution_lease,
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
+                completed_processing_fn=completed_processing,
+            )
+
+        token = CancellationToken()
+        escaped: BaseException | None = None
+        updated: ImportJob | None = None
+        with db._pin_owner_session(token) as owner_session_identity:
+            if drop_owner_session:
+                # Leaving the pin scope is exactly what production observes
+                # when the pinned backend goes away mid-execution.
+                db._owner_session_pin = None
+            try:
+                updated = importer.process_claimed_job(
+                    db,  # pyright: ignore[reportArgumentType]
+                    claimed,
+                    ctx=object(),
+                    execute_fn=execute,
+                    execution_lease=lease,
+                    cancellation_token=token,
+                    owner_session_identity=owner_session_identity,
+                )
+            except BaseException as exc:  # noqa: BLE001 - the pin under test
+                escaped = exc
+        return updated, escaped
+
+    def test_cleanup_failure_recovers_the_job_instead_of_killing_the_worker(
+        self,
+    ) -> None:
+        """A journal that no longer names the canonical owner is recoverable."""
+        db = FakePipelineDB()
+        canonical = self._canonical_dir()
+        claimed, lease = launch_automation_owner(db, canonical)
+        self._drift_the_cleanup_journal(db, claimed.id, canonical)
+
+        updated, escaped = self._run_terminal_stage(db, claimed, lease)
+
+        self.assertIsNone(escaped)
+        stored = db.get_import_job(claimed.id)
+        assert stored is not None and updated is not None
+        self.assertEqual(stored.status, "recovery_required")
+        self.assertEqual(updated.status, "recovery_required")
+        self.assertIn(
+            "automation cleanup journal changed canonical source path",
+            stored.message or "",
+        )
+        # The owner is untouched: the request keeps its processing owner and
+        # the canonical album survives for operator recovery.
+        self.assertEqual(db.request(42)["status"], "processing")
+        self.assertTrue(os.path.isdir(canonical))
+        self.assertIsNone(
+            terminal_stage_fault_violation(
+                fault=RuntimeError,
+                escaped=escaped,
+                job_status=stored.status,
+            )
+        )
+
+    def test_terminal_persist_conflict_recovers_instead_of_killing_worker(
+        self,
+    ) -> None:
+        """The terminal compare-and-set losing its row is recoverable."""
+        from lib.pipeline_db.terminal_outcomes import ImportJobTerminalConflict
+
+        class ConflictDB(_TerminalBoundaryFaultDB):
+            fault = ImportJobTerminalConflict
+
+        db = ConflictDB()
+        canonical = self._canonical_dir()
+        claimed, lease = launch_automation_owner(db, canonical)
+
+        updated, escaped = self._run_terminal_stage(db, claimed, lease)
+
+        self.assertIsNone(escaped)
+        stored = db.get_import_job(claimed.id)
+        assert stored is not None and updated is not None
+        self.assertEqual(stored.status, "recovery_required")
+        self.assertIn("ImportJobTerminalConflict", stored.message or "")
+        self.assertEqual(db.request(42)["status"], "processing")
+        self.assertIsNone(
+            terminal_stage_fault_violation(
+                fault=ImportJobTerminalConflict,
+                escaped=escaped,
+                job_status=stored.status,
+            )
+        )
+
+    def test_execution_cancellation_in_the_terminal_stage_still_fail_stops(
+        self,
+    ) -> None:
+        """Must-still-work: losing the pinned session is not recoverable."""
+        db = FakePipelineDB()
+        canonical = self._canonical_dir()
+        claimed, lease = launch_automation_owner(db, canonical)
+
+        _updated, escaped = self._run_terminal_stage(
+            db,
+            claimed,
+            lease,
+            drop_owner_session=True,
+        )
+
+        self.assertIsInstance(escaped, ExecutionCancelled)
+        stored = db.get_import_job(claimed.id)
+        assert stored is not None
+        # Fail-stop leaves the row running for lease-proven startup recovery.
+        self.assertEqual(stored.status, "running")
+        self.assertEqual(db.request(42)["status"], "processing")
+        self.assertIsNone(
+            terminal_stage_fault_violation(
+                fault=ExecutionCancelled,
+                escaped=escaped,
+                job_status=stored.status,
+            )
+        )
+
+    def test_owner_session_loss_in_the_terminal_stage_still_fail_stops(
+        self,
+    ) -> None:
+        """Must-still-work: a dead pinned session cannot write recovery."""
+        class LostDB(_TerminalBoundaryFaultDB):
+            fault = OwnerSessionLost
+
+        db = LostDB()
+        canonical = self._canonical_dir()
+        claimed, lease = launch_automation_owner(db, canonical)
+
+        _updated, escaped = self._run_terminal_stage(db, claimed, lease)
+
+        self.assertIsInstance(escaped, OwnerSessionLost)
+        stored = db.get_import_job(claimed.id)
+        assert stored is not None
+        self.assertEqual(stored.status, "running")
+        self.assertIsNone(
+            terminal_stage_fault_violation(
+                fault=OwnerSessionLost,
+                escaped=escaped,
+                job_status=stored.status,
+            )
+        )
+
+    @given(fault=st.sampled_from(_TERMINAL_STAGE_FAULTS))
+    def test_generated_every_terminal_stage_fault_recovers_or_fail_stops(
+        self,
+        fault: type[BaseException],
+    ) -> None:
+        """Property: invariant 1 holds for every fault class the stage raises."""
+        class GeneratedFaultDB(_TerminalBoundaryFaultDB):
+            pass
+
+        GeneratedFaultDB.fault = fault
+        db = GeneratedFaultDB()
+        canonical = self._canonical_dir()
+        claimed, lease = launch_automation_owner(db, canonical)
+
+        _updated, escaped = self._run_terminal_stage(db, claimed, lease)
+
+        stored = db.get_import_job(claimed.id)
+        assert stored is not None
+        violation = terminal_stage_fault_violation(
+            fault=fault,
+            escaped=escaped,
+            job_status=stored.status,
+        )
+        self.assertIsNone(violation, violation)
+
+
+class TestAutomationCleanupQuarantineRoot(unittest.TestCase):
+    """Invariant 2 — an unusable quarantine root is refused, never journalled."""
+
+    def _source_dir(self) -> str:
+        path = tempfile.mkdtemp(prefix="cratedigger-quarantine-source-")
+        with open(os.path.join(path, "01.flac"), "wb") as handle:
+            handle.write(b"corrupt candidate fixture")
+        self.addCleanup(shutil.rmtree, path, ignore_errors=True)
+        return path
+
+    def _plan(self, source: str, root: str | None):
+        from lib.dispatch.types import PostCommitCleanup
+
+        return PostCommitCleanup(
+            audio_quarantine_source_path=source,
+            audio_quarantine_root=root,
+        )
+
+    def test_unconfigured_staging_dir_is_refused_before_any_journal(
+        self,
+    ) -> None:
+        """The blank root comes from the producer, not from a test literal."""
+        from scripts import importer
+
+        # lib/dispatch/core.py threads beets_staging_dir straight into the
+        # plan, and lib/config.py defaults it to "".
+        blank_root = CratediggerConfig().beets_staging_dir
+        self.assertEqual(blank_root, "")
+        source = self._source_dir()
+
+        with self.assertRaises(RuntimeError) as caught:
+            importer._automation_cleanup_intent(
+                source_path=source,
+                plan=self._plan(source, blank_root),
+            )
+
+        self.assertIn("quarantine root", str(caught.exception))
+
+    def test_missing_quarantine_root_directory_is_refused(self) -> None:
+        """Mirror of quarantine_corrupt_audio_source's isdir precondition."""
+        from scripts import importer
+
+        source = self._source_dir()
+        missing = os.path.join(source, "does-not-exist")
+
+        with self.assertRaises(RuntimeError) as caught:
+            importer._automation_cleanup_intent(
+                source_path=source,
+                plan=self._plan(source, missing),
+            )
+
+        self.assertIn("quarantine root", str(caught.exception))
+
+    def test_refused_root_never_reaches_the_immutable_journal(self) -> None:
+        """The refusal happens before the intent is persisted."""
+        from lib.dispatch import DispatchOutcome
+        from scripts import importer
+
+        db = FakePipelineDB()
+        canonical = terminal_stage_canonical_dir(self)
+        claimed, lease = launch_automation_owner(
+            db,
+            canonical,
+            capture_completion=False,
+        )
+        outcome = DispatchOutcome(
+            success=False,
+            message="Corrupt audio",
+            post_commit_cleanup=self._plan(
+                canonical,
+                CratediggerConfig().beets_staging_dir,
+            ),
+        )
+        token = CancellationToken()
+
+        with (
+            db._pin_owner_session(token) as owner_session_identity,
+            self.assertRaises(RuntimeError),
+        ):
+            importer._complete_automation_processing_cleanup(
+                db,
+                claimed,
+                outcome,
+                execution_lease=lease,
+                cancellation_token=token,
+                owner_session_identity=owner_session_identity,
+            )
+
+        self.assertIsNone(db.get_processing_cleanup_journal(
+            request_id=42,
+            job_id=claimed.id,
+        ))
+        self.assertTrue(os.path.isdir(canonical))
+
+    def test_configured_root_still_selects_a_destination_under_it(self) -> None:
+        """Must-still-work: a real configured root keeps quarantining."""
+        from scripts import importer
+
+        source = self._source_dir()
+        root = tempfile.mkdtemp(prefix="cratedigger-quarantine-root-")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+
+        intent = importer._automation_cleanup_intent(
+            source_path=source,
+            plan=self._plan(source, root),
+        )
+
+        assert intent.destination_path is not None
+        self.assertIsNone(quarantine_intent_violation(
+            configured_root=root,
+            refused=False,
+            destination_path=intent.destination_path,
+        ))
+        self.assertFalse(
+            intent.destination_path.startswith(os.getcwd() + os.sep)
+            and not root.startswith(os.getcwd() + os.sep)
+        )
+
+    @given(root_kind=st.integers(min_value=0, max_value=4))
+    def test_generated_only_a_usable_root_produces_a_destination(
+        self,
+        root_kind: int,
+    ) -> None:
+        """Property: invariant 2 holds across every configured-root shape."""
+        from scripts import importer
+
+        source = self._source_dir()
+        usable_root = tempfile.mkdtemp(prefix="cratedigger-quarantine-root-")
+        self.addCleanup(shutil.rmtree, usable_root, ignore_errors=True)
+        roots: tuple[str | None, ...] = (
+            None,
+            "",
+            "   ",
+            os.path.join(usable_root, "missing"),
+            usable_root,
+        )
+        root = roots[root_kind]
+
+        refused = False
+        destination: str | None = None
+        try:
+            intent = importer._automation_cleanup_intent(
+                source_path=source,
+                plan=self._plan(source, root),
+            )
+        except RuntimeError:
+            refused = True
+        else:
+            destination = intent.destination_path
+
+        violation = quarantine_intent_violation(
+            configured_root=root or "",
+            refused=refused,
+            destination_path=destination,
+        )
+        self.assertIsNone(violation, violation)
+
+
+class TestTerminalStageInvariantCheckersTripOnViolations(unittest.TestCase):
+    """Known-bad self-tests: an unfalsifiable checker is not a checker."""
+
+    def test_escaping_crash_is_reported(self) -> None:
+        violation = terminal_stage_fault_violation(
+            fault=RuntimeError,
+            escaped=RuntimeError("boom"),
+            job_status="running",
+        )
+        assert violation is not None
+        self.assertIn("escaped process_claimed_job", violation)
+
+    def test_unrecovered_crash_is_reported(self) -> None:
+        violation = terminal_stage_fault_violation(
+            fault=RuntimeError,
+            escaped=None,
+            job_status="running",
+        )
+        assert violation is not None
+        self.assertIn("left the job at running", violation)
+
+    def test_swallowed_fail_stop_is_reported(self) -> None:
+        violation = terminal_stage_fault_violation(
+            fault=ExecutionCancelled,
+            escaped=None,
+            job_status="recovery_required",
+        )
+        assert violation is not None
+        self.assertIn("did not reach the caller", violation)
+
+    def test_fail_stop_that_wrote_a_terminal_status_is_reported(self) -> None:
+        violation = terminal_stage_fault_violation(
+            fault=OwnerSessionLost,
+            escaped=OwnerSessionLost("gone"),
+            job_status="failed",
+        )
+        assert violation is not None
+        self.assertIn("moved the job to failed", violation)
+
+    def test_cwd_derived_destination_is_reported(self) -> None:
+        violation = quarantine_intent_violation(
+            configured_root="",
+            refused=False,
+            destination_path=os.path.join(
+                os.getcwd(), "failed_imports", "bad_files", "Album",
+            ),
+        )
+        assert violation is not None
+        self.assertIn("was journalled", violation)
+
+    def test_refusing_a_usable_root_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            violation = quarantine_intent_violation(
+                configured_root=root,
+                refused=True,
+                destination_path=None,
+            )
+            assert violation is not None
+            self.assertIn("was refused", violation)
+
+    def test_destination_outside_the_configured_root_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            violation = quarantine_intent_violation(
+                configured_root=root,
+                refused=False,
+                destination_path="/elsewhere/failed_imports/bad_files/Album",
+            )
+            assert violation is not None
+            self.assertIn("escaped the configured", violation)

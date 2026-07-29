@@ -16,6 +16,7 @@ import {
   renderRemoveFromBeetsButton,
   suppressProcessingAction,
 } from '../web/js/release_actions.js';
+import { openReplacePicker } from '../web/js/replace_picker.js';
 
 let passed = 0;
 let failed = 0;
@@ -1149,6 +1150,207 @@ clearStore();
   assertContains(html, 'action-toolbar', 'toolbar wrapper present');
   assertContains(html, '>Add request</button>', 'falls back to Add request');
   assertContains(html, '>Remove from beets</button>', 'Remove from beets always present');
+}
+
+console.log('Replace picker — processing-locked 409 on resolve-rg gets owner-aware presentation, not the raw error string');
+{
+  const oldDocument = globalThis.document;
+  const oldWindow = globalThis.window;
+  const oldFetch = globalThis.fetch;
+  const oldHTMLElement = globalThis.HTMLElement;
+
+  class FakeHTMLElement {}
+  class FakeControl extends FakeHTMLElement {
+    constructor(textContent) {
+      super();
+      this.attributes = new Map();
+      this.dataset = {};
+      this.isConnected = true;
+      this.textContent = textContent;
+    }
+    setAttribute(name, value) { this.attributes.set(name, value); }
+    removeAttribute(name) { this.attributes.delete(name); }
+    getAttribute(name) { return this.attributes.has(name) ? this.attributes.get(name) : null; }
+    focus() {}
+    insertAdjacentElement() {}
+  }
+  globalThis.HTMLElement = FakeHTMLElement;
+
+  const originatingButton = new FakeControl('Replace');
+  const live = { textContent: '', setAttribute() {} };
+  const modal = {
+    style: {},
+    _html: '',
+    set innerHTML(value) { this._html = value; },
+    get innerHTML() { return this._html; },
+    querySelector() { return null; },
+  };
+
+  globalThis.document = {
+    activeElement: originatingButton,
+    body: { appendChild() {} },
+    documentElement: {},
+    createElement() {
+      return {
+        children: [],
+        className: '',
+        id: '',
+        type: '',
+        textContent: '',
+        hidden: false,
+        setAttribute() {},
+        appendChild(child) { this.children.push(child); },
+        remove() {},
+      };
+    },
+    getElementById(id) {
+      if (id === 'replace-picker-modal') return modal;
+      if (id === 'processing-lock-live-region') return live;
+      return null;
+    },
+    querySelectorAll() { return []; },
+  };
+  globalThis.window = { scrollX: 0, scrollY: 0, scrollTo() {} };
+
+  const fetchCalls = [];
+  globalThis.fetch = async (url) => {
+    fetchCalls.push(url);
+    if (url === '/api/pipeline/942/resolve-rg') {
+      return {
+        ok: false,
+        status: 409,
+        async json() {
+          return {
+            error: 'transition_conflict',
+            reason: 'processing_locked',
+            request_id: 942,
+            processing_owner: { job_id: 55, status: 'running', preview_status: 'evidence_ready' },
+          };
+        },
+      };
+    }
+    if (url === '/api/pipeline/942') {
+      return {
+        ok: true,
+        async json() {
+          return {
+            request: {
+              id: 942,
+              status: 'processing',
+              mb_release_id: 'rg-source-mbid',
+              processing_owner: { job_id: 55, status: 'running', preview_status: 'evidence_ready' },
+            },
+          };
+        },
+      };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+
+  // Not awaited directly: the pre-fix code path reaches the generic error
+  // branch without ever calling close(), which would hang this await
+  // forever when run against the unfixed source (verified during RED).
+  // Flushing the microtask queue a few times lets every mocked fetch/json
+  // in the real call chain settle without depending on the outer Promise.
+  openReplacePicker({
+    sourceRequestId: 942,
+    releaseGroupId: null,
+    sourceLabel: 'Test Album — Old Pressing',
+  }).catch(() => {});
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assertExcludes(modal.innerHTML, 'transition_conflict', 'raw conflict token never reaches operator-facing text');
+  assertEqual(originatingButton.getAttribute('aria-disabled'), 'true', 'originating control is locked via the shared presentation');
+  assertContains(originatingButton.getAttribute('aria-describedby') || '', 'processing-owner-55', 'lock names the exact owning job');
+  assertContains(live.textContent, 'job #55', 'aria-live announcement names the exact owner, not a generic string');
+  assertEqual(fetchCalls.includes('/api/pipeline/942'), true, 'affected request projection is refetched after the lock');
+
+  globalThis.document = oldDocument;
+  globalThis.window = oldWindow;
+  globalThis.fetch = oldFetch;
+  globalThis.HTMLElement = oldHTMLElement;
+}
+
+console.log('Replace picker — non-processing-locked resolve-rg failure still shows the generic error text');
+{
+  const oldDocument = globalThis.document;
+  const oldWindow = globalThis.window;
+  const oldFetch = globalThis.fetch;
+  const oldHTMLElement = globalThis.HTMLElement;
+
+  class FakeHTMLElement {}
+  class FakeControl extends FakeHTMLElement {
+    constructor(textContent) {
+      super();
+      this.attributes = new Map();
+      this.dataset = {};
+      this.isConnected = true;
+      this.textContent = textContent;
+    }
+    setAttribute(name, value) { this.attributes.set(name, value); }
+    removeAttribute(name) { this.attributes.delete(name); }
+    getAttribute(name) { return this.attributes.has(name) ? this.attributes.get(name) : null; }
+    focus() {}
+    insertAdjacentElement() {}
+  }
+  globalThis.HTMLElement = FakeHTMLElement;
+
+  const originatingButton = new FakeControl('Replace');
+  const modal = {
+    style: {},
+    _html: '',
+    set innerHTML(value) { this._html = value; },
+    get innerHTML() { return this._html; },
+    querySelector() { return null; },
+  };
+
+  globalThis.document = {
+    activeElement: originatingButton,
+    body: { appendChild() {} },
+    documentElement: {},
+    createElement() {
+      return {
+        children: [],
+        setAttribute() {},
+        appendChild(child) { this.children.push(child); },
+      };
+    },
+    getElementById(id) { return id === 'replace-picker-modal' ? modal : null; },
+    querySelectorAll() { return []; },
+  };
+  globalThis.window = { scrollX: 0, scrollY: 0, scrollTo() {} };
+
+  globalThis.fetch = async (url) => {
+    if (url === '/api/pipeline/943/resolve-rg') {
+      return {
+        ok: false,
+        status: 500,
+        async json() { return { error: 'boom' }; },
+      };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+
+  // This branch never calls close() either (the operator must click
+  // Close) — same not-directly-awaited approach as above.
+  openReplacePicker({
+    sourceRequestId: 943,
+    releaseGroupId: null,
+    sourceLabel: 'Test Album — Another Pressing',
+  }).catch(() => {});
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assertContains(modal.innerHTML, 'Failed to resolve release group: boom', 'non-conflict failure keeps the generic error text');
+  assertEqual(originatingButton.getAttribute('aria-disabled'), null, 'non-conflict failure never locks the row');
+
+  globalThis.document = oldDocument;
+  globalThis.window = oldWindow;
+  globalThis.fetch = oldFetch;
+  globalThis.HTMLElement = oldHTMLElement;
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

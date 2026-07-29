@@ -49,6 +49,38 @@ AUTOMATION_COMPLETION_RESULT_KEY = "automation_completion"
 PROCESSING_CLEANUP_AUDIT_KEY = "processing_cleanup"
 PROCESSING_CLEANUP_RESULT_KEY = "processing_cleanup"
 
+# The owner handoff enters ``processing`` from ``downloading``, so that is the
+# ordinary edge the private terminal edge stands in for.
+PROCESSING_ENTRY_STATUS = "downloading"
+
+
+def _terminal_edge_side_effects(
+    from_status: str,
+    target_status: str,
+) -> transitions.TransitionSideEffects:
+    """Answer the private processing edge from the ONE canonical table.
+
+    ``processing`` is deliberately absent from ``VALID_TRANSITIONS``: only
+    owner-aware bundles may cross that edge. That privacy governs WHO may
+    write the edge, not WHAT the edge does, so retry-counter policy is read
+    from ``transitions.VALID_TRANSITIONS`` instead of being restated here. A
+    ``processing`` source therefore resolves to the automatic ``downloading``
+    edge it stands in for — which retains retry counters exactly like
+    ``reset_downloading_to_wanted``, so automatic backoff keeps growing.
+    """
+    source = (
+        PROCESSING_ENTRY_STATUS
+        if from_status == "processing"
+        else from_status
+    )
+    side_effects = transitions.VALID_TRANSITIONS.get((source, target_status))
+    if side_effects is None:
+        raise ValueError(
+            f"automation terminal edge {from_status!r} -> {target_status!r} "
+            "has no canonical side-effect policy"
+        )
+    return side_effects
+
 
 def _lease_values(
     lease: ExecutionLeaseSnapshot | None,
@@ -988,12 +1020,11 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                         "automation terminal transition source changed"
                     )
             previous = virtual_status
-            if transition.target_status == "wanted":
-                counters = {
-                    "search_attempts": 0,
-                    "download_attempts": 0,
-                    "validation_attempts": 0,
-                }
+            if _terminal_edge_side_effects(
+                previous,
+                transition.target_status,
+            ).clear_retry_counters:
+                counters = dict.fromkeys(counters, 0)
                 retry_state_changed = True
                 attempt_backoff_minutes = None
             if transition.attempt_type is not None:

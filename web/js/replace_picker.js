@@ -46,6 +46,8 @@
  * `tests/web/test_routes_browse.py::test_release_detail_numeric_id_forwards_to_discogs`.
  */
 
+import { handleProcessingLockedConflict } from './release_action_state.js';
+
 /**
  * @typedef {Object} ReplacePickerOptionsStandard
  * @property {number} sourceRequestId
@@ -467,6 +469,22 @@ async function runStandard(options, showOverlay, close) {
       // `mb_release_group_id: null` as a failure).
       if (res.ok && body.status === 'masterless') {
         await runMasterless(options, showOverlay, close);
+        return;
+      }
+      // A processing-locked 409 gets the same owner-aware presentation the
+      // rest of the UI gives it — lock the underlying row's controls and
+      // close this picker rather than falling into the generic error text
+      // below (which would otherwise show a raw `transition_conflict`
+      // string). Mirrors main.js::openReplacePickerAndHandle's call for the
+      // final replace POST.
+      if (await handleProcessingLockedConflict({
+        httpStatus: res.status,
+        payload: body,
+        control: document.activeElement instanceof HTMLElement
+          ? document.activeElement
+          : null,
+      })) {
+        close({ outcome: 'cancelled' });
         return;
       }
       if (!res.ok || !body.mb_release_group_id) {

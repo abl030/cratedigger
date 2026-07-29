@@ -11,6 +11,7 @@ from scripts.cratedigger_deploy_hold import (
     MAIN_SERVICE,
     MAIN_TIMER,
     METADATA_MANUAL_HOLD,
+    PHASE_ACQUIRING,
     PHASE_COMPLETE_PENDING,
     PHASE_HELD,
     PHASE_MAIN_TIMER_OPEN,
@@ -396,6 +397,92 @@ class TestStagedRelease(unittest.TestCase):
         for invalid in ("", "none", "xyz", "a" * 31, "a" * 33):
             with self.subTest(invalid=invalid), self.assertRaisesRegex(DeployHoldError, "InvocationID"):
                 finish_release(self.backend, invalid)
+
+
+class TestRecoveryReprovesAnUnprovenAcquisition(unittest.TestCase):
+    """A receipt reaches HELD only through the acquire preconditions."""
+
+    def test_recovery_from_acquiring_refuses_a_dirty_old_lifecycle(self) -> None:
+        backend = FakeDeployHoldBackend(
+            lifecycle_preflight=LifecyclePreflight(0, 0, 2, 0),
+        )
+        with self.assertRaisesRegex(
+            DeployHoldError,
+            "dirty_downloading_rows",
+        ):
+            acquire_hold(backend)
+        self.assertEqual(backend.phase, PHASE_ACQUIRING)
+
+        with self.assertRaisesRegex(
+            DeployHoldError,
+            "old lifecycle is not clean",
+        ):
+            recover_held(backend)
+
+        self.assertEqual(backend.phase, PHASE_ACQUIRING)
+        # Recovery still re-established the strictest boundary before refusing
+        # to promote the unproven receipt.
+        self.assertTrue(backend.manual_hold)
+        self.assertTrue(backend.owned_manual_hold)
+        self.assertEqual(backend.owned_links, set(TIMER_UNITS))
+        self.assertEqual(
+            backend.control_links,
+            {timer: "/dev/null" for timer in TIMER_UNITS},
+        )
+        self.assertEqual(backend.inhibitor_files, set())
+
+    def test_recovery_from_acquiring_refuses_a_stale_start_contract(self) -> None:
+        backend = FakeDeployHoldBackend(
+            controlled_start_contract_current=False,
+        )
+        backend.create_receipt()
+
+        with self.assertRaisesRegex(
+            DeployHoldError,
+            "controlled-start prerequisite changed",
+        ):
+            recover_held(backend)
+
+        self.assertEqual(backend.phase, PHASE_ACQUIRING)
+        self.assertEqual(backend.owned_links, set(TIMER_UNITS))
+
+    def test_recovery_from_a_clean_acquiring_receipt_still_reaches_held(
+        self,
+    ) -> None:
+        backend = FakeDeployHoldBackend()
+        backend.create_receipt()
+        backend.mark_link_owned(MAIN_TIMER)
+
+        recover_held(backend)
+
+        backend.assert_default_held()
+        self.assertIn(("lifecycle-preflight",), backend.events)
+        self.assertEqual(
+            backend.control_links,
+            {timer: "/dev/null" for timer in TIMER_UNITS},
+        )
+
+    def test_recovery_after_the_migration_never_requeries_the_old_lifecycle(
+        self,
+    ) -> None:
+        backend = FakeDeployHoldBackend()
+        acquire_hold(backend)
+        prepare_controlled(backend)
+        # Post-migration reality: the controlled cycle legitimately enqueues
+        # automation work and the old-lifecycle schema this preflight reads has
+        # already been migrated. Recovery exists to restore safety, so it must
+        # not demand the pre-migration quiescence proof a second time.
+        backend.preflight = LifecyclePreflight(3, 1, 2, 1)
+        backend.controlled_start_contract_current = False
+        preflight_calls = backend.events.count(("lifecycle-preflight",))
+
+        recover_held(backend)
+
+        backend.assert_default_held()
+        self.assertEqual(
+            backend.events.count(("lifecycle-preflight",)),
+            preflight_calls,
+        )
 
 
 class TestFixedAuthoritySurface(unittest.TestCase):

@@ -3577,6 +3577,67 @@ class TestCmdShowSearchForensics(unittest.TestCase):
         self.assertNotIn("Peer message", out)
 
 
+class TestCmdShowProcessingOwner(unittest.TestCase):
+    """Finding #4 (PR #933 review): ``pipeline-cli show`` must surface the
+    processing owner already carried on ``PipelineDB.get_request``'s
+    presentation row (``req['processing_owner']``) — the web twin
+    (``GET /api/pipeline/<id>``) exposes the same projection, so the CLI
+    leaving it out is a real CLI <-> API asymmetry for this PR's own new
+    ``processing`` status.
+    """
+
+    def _capture(self, db: FakePipelineDB, request_id: int) -> str:
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            pipeline_cli.cmd_show(
+                db,
+                argparse.Namespace(
+                    id=request_id, beets_db=None, beets_directory=None,
+                ),
+                open_beets_fn=lambda **_kwargs: FakeBeetsDB(),
+            )
+        return stdout.getvalue()
+
+    def test_show_renders_processing_owner_for_processing_request(self) -> None:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=9001,
+            status="wanted",
+            mb_release_id=RELEASE_A,
+        ))
+        # Real lifecycle edge (wanted -> downloading -> processing) — never
+        # hand-seed the owner pointer directly.
+        owner = handoff_automation_owner(db, 9001)
+
+        out = self._capture(db, 9001)
+
+        self.assertIn("Status:       processing", out)
+        self.assertIn(
+            f"Owner:        job {owner.id} "
+            f"({owner.status}/{owner.preview_status})",
+            out,
+        )
+        self.assertIn(
+            f"Owner Detail: pipeline-cli import-job-recovery show {owner.id}",
+            out,
+        )
+
+    def test_show_omits_owner_block_for_non_processing_request(self) -> None:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=9002,
+            status="wanted",
+            mb_release_id=RELEASE_B,
+        ))
+
+        out = self._capture(db, 9002)
+
+        self.assertIn("Status:       wanted", out)
+        self.assertNotIn("Owner:", out)
+        self.assertNotIn("Owner Detail:", out)
+        self.assertNotIn("import-job-recovery", out)
+
+
 class TestCmdSearchPlanShow(unittest.TestCase):
     """U6 read-only inspection CLI: ``pipeline-cli search-plan show``.
 

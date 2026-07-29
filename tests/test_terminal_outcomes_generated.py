@@ -6,13 +6,17 @@ import unittest
 from dataclasses import dataclass
 from itertools import product
 
-from hypothesis import example, given
+from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401 - registers active profile
 from lib import transitions
 from lib.import_queue import IMPORT_JOB_FORCE
-from lib.pipeline_db import PipelineDB
+from lib.pipeline_db import (
+    BACKOFF_BASE_MINUTES,
+    BACKOFF_MAX_MINUTES,
+    PipelineDB,
+)
 from lib.terminal_outcomes import (
     ImportJobTerminal,
     ImportTerminalOutcome,
@@ -23,13 +27,18 @@ from tests.fakes import FakePipelineDB
 from tests.helpers import claim_next_import_job, make_request_row
 from tests.test_pipeline_db import TEST_DSN, requires_postgres
 from tests.test_terminal_outcomes import (
+    SEEDED_BACKOFF_MINUTES,
     FaultInjectingPipelineDB,
     InjectedTerminalWriteFailure,
     _prepare_automation_preview_terminal_command,
     _prepare_automation_terminal_command,
     _seed_running_automation_preview,
     _seed_running_import,
+    _seed_terminal_retry_state,
     _snapshot,
+    automation_requeue_command,
+    read_terminal_retry_state,
+    terminal_backoff_minutes,
 )
 
 
@@ -82,6 +91,84 @@ def assert_terminal_snapshot_all_or_none(
     )
     if after != expected:
         raise AssertionError(f"partial terminal outcome: {after!r}")
+
+
+@dataclass(frozen=True)
+class TerminalRetryState:
+    """The exact retry-accounting facts one terminal edge may rewrite."""
+
+    search_attempts: int
+    download_attempts: int
+    validation_attempts: int
+    backoff_minutes: int | None
+
+    def counters(self) -> dict[str, int]:
+        return {
+            "search_attempts": self.search_attempts,
+            "download_attempts": self.download_attempts,
+            "validation_attempts": self.validation_attempts,
+        }
+
+    @classmethod
+    def read(cls, db: PipelineDB, request_id: int) -> TerminalRetryState:
+        state = read_terminal_retry_state(db, request_id)
+        counters: list[int] = []
+        for name in (
+            "search_attempts",
+            "download_attempts",
+            "validation_attempts",
+        ):
+            value = state[name]
+            assert isinstance(value, int)
+            counters.append(value)
+        return cls(
+            *counters,
+            backoff_minutes=terminal_backoff_minutes(state),
+        )
+
+
+def assert_terminal_edge_retains_policy_counters(
+    *,
+    edge: tuple[str, str],
+    before: TerminalRetryState,
+    after: TerminalRetryState,
+    attempt_type: str | None,
+) -> None:
+    """Only an edge the canonical table clears may zero retry counters.
+
+    ``edge`` is the ordinary ``VALID_TRANSITIONS`` edge that the private
+    ``processing`` terminal edge stands in for. When that edge does not
+    declare ``clear_retry_counters``, prior automatic-retry history must
+    survive the terminal commit, and a recorded attempt's backoff must be the
+    one grown from that prior count — never the base interval.
+    """
+    cleared = transitions.VALID_TRANSITIONS[edge].clear_retry_counters
+    prior_counters = before.counters()
+    for name, value in after.counters().items():
+        recorded = int(
+            attempt_type is not None and name == f"{attempt_type}_attempts"
+        )
+        want = recorded if cleared else prior_counters[name] + recorded
+        if value != want:
+            raise AssertionError(
+                f"terminal edge {edge} left {name}={value}, want {want} "
+                f"(prior={prior_counters[name]}, cleared={cleared})"
+            )
+    if attempt_type is None:
+        want_backoff = None if cleared else before.backoff_minutes
+    else:
+        prior = (
+            0 if cleared else prior_counters[f"{attempt_type}_attempts"]
+        )
+        want_backoff = min(
+            BACKOFF_BASE_MINUTES * (2 ** prior),
+            BACKOFF_MAX_MINUTES,
+        )
+    if after.backoff_minutes != want_backoff:
+        raise AssertionError(
+            f"terminal edge {edge} left backoff={after.backoff_minutes} "
+            f"minutes, want {want_backoff} (cleared={cleared})"
+        )
 
 
 def assert_operator_stop_matches_terminal_acceptance(
@@ -464,6 +551,56 @@ class TestTerminalOutcomeGenerated(unittest.TestCase):
                     with self.assertRaises(AssertionError):
                         assert_terminal_snapshot_all_or_none(before, after)
 
+    def test_retained_counter_checker_trips_on_planted_violations(
+        self,
+    ) -> None:
+        retained = TerminalRetryState(5, 2, 1, SEEDED_BACKOFF_MINUTES)
+        # The compliant world the checker must NOT reject: counters survive
+        # the retaining edge and the attempt grows the window past the base.
+        assert_terminal_edge_retains_policy_counters(
+            edge=("downloading", "wanted"),
+            before=retained,
+            after=TerminalRetryState(5, 2, 2, BACKOFF_BASE_MINUTES * 2),
+            attempt_type="validation",
+        )
+        cases: tuple[
+            tuple[str, tuple[str, str], TerminalRetryState, str | None],
+            ...,
+        ] = (
+            (
+                "shipped reset of retained counters",
+                ("downloading", "wanted"),
+                TerminalRetryState(0, 0, 1, BACKOFF_BASE_MINUTES),
+                "validation",
+            ),
+            (
+                "retained counters but ungrown base backoff",
+                ("downloading", "wanted"),
+                TerminalRetryState(5, 2, 2, BACKOFF_BASE_MINUTES),
+                "validation",
+            ),
+            (
+                "clean-slate edge that kept its counters",
+                ("imported", "wanted"),
+                TerminalRetryState(5, 2, 2, BACKOFF_BASE_MINUTES),
+                "validation",
+            ),
+            (
+                "accepted edge that dropped its counters",
+                ("downloading", "imported"),
+                TerminalRetryState(0, 0, 0, None),
+                None,
+            ),
+        )
+        for label, edge, after, attempt_type in cases:
+            with self.subTest(label=label), self.assertRaises(AssertionError):
+                assert_terminal_edge_retains_policy_counters(
+                    edge=edge,
+                    before=retained,
+                    after=after,
+                    attempt_type=attempt_type,
+                )
+
     def test_automation_checker_rejects_known_bad_owner_first_world(
         self,
     ) -> None:
@@ -555,6 +692,91 @@ class TestProductionTerminalOutcomeGenerated(unittest.TestCase):
         self.assertEqual(
             snapshot,
             AutomationTerminalSnapshot(True, True, True, True),
+        )
+
+    @settings(max_examples=24, deadline=None)
+    @example(
+        search_attempts=5,
+        download_attempts=2,
+        validation_attempts=1,
+        attempt_type="validation",
+        requeue=True,
+    )
+    @example(
+        search_attempts=3,
+        download_attempts=4,
+        validation_attempts=6,
+        attempt_type=None,
+        requeue=True,
+    )
+    @example(
+        search_attempts=2,
+        download_attempts=1,
+        validation_attempts=3,
+        attempt_type="download",
+        requeue=False,
+    )
+    @given(
+        search_attempts=st.integers(min_value=0, max_value=6),
+        download_attempts=st.integers(min_value=0, max_value=6),
+        validation_attempts=st.integers(min_value=0, max_value=6),
+        attempt_type=st.one_of(
+            st.none(),
+            st.sampled_from(("search", "download", "validation")),
+        ),
+        requeue=st.booleans(),
+    )
+    def test_automation_terminal_edge_retains_policy_retry_counters(
+        self,
+        search_attempts: int,
+        download_attempts: int,
+        validation_attempts: int,
+        attempt_type: str | None,
+        requeue: bool,
+    ) -> None:
+        """The private owner edge never invents its own counter policy."""
+        assert TEST_DSN is not None
+        # ``RequestTransition.to_imported`` takes no attempt_type: an
+        # accepted terminal import cannot record an automatic retry attempt.
+        recorded_attempt = attempt_type if requeue else None
+        db, request_id, job_id = _seed_running_import(automation_state=True)
+        try:
+            _seed_terminal_retry_state(
+                db,
+                request_id,
+                search_attempts=search_attempts,
+                download_attempts=download_attempts,
+                validation_attempts=validation_attempts,
+            )
+            prepared = _prepare_automation_terminal_command(
+                db,
+                request_id,
+                job_id,
+            )
+            command = (
+                automation_requeue_command(
+                    prepared,
+                    attempt_type=recorded_attempt,
+                )
+                if requeue
+                else prepared
+            )
+            before = TerminalRetryState.read(db, request_id)
+            db.persist_import_terminal_outcome(command)
+            after = TerminalRetryState.read(db, request_id)
+            request = db.get_request(request_id)
+        finally:
+            db.close()
+
+        assert request is not None
+        target_status = "wanted" if requeue else "imported"
+        self.assertEqual(request["status"], target_status)
+        self.assertEqual(before.backoff_minutes, SEEDED_BACKOFF_MINUTES)
+        assert_terminal_edge_retains_policy_counters(
+            edge=("downloading", target_status),
+            before=before,
+            after=after,
+            attempt_type=recorded_attempt,
         )
 
     @given(

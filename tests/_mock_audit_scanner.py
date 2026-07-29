@@ -101,9 +101,6 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"\.sp\.(run|Popen|check_output|check_call)$"),
     re.compile(r"\.subprocess\.(run|Popen|check_output|check_call)$"),
     re.compile(r"^subprocess\."),
-    # Owned subprocess supervision wrapper. Tests inject a deterministic
-    # process group here while exercising launch/cancellation fencing.
-    re.compile(r"^lib\.dispatch\.subprocess_runner\.MonitoredProcessGroup$"),
     # HTTP / URL clients
     re.compile(r"\.urllib\."),
     re.compile(r"\.requests\."),
