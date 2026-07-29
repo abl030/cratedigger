@@ -45,8 +45,15 @@ export function analysisChipHtml(rg) {
  * @param {Object} disambData - /api/artist/<id>/disambiguate payload.
  */
 export function applyAnalysisChips(containerEl, disambData) {
+  // Large catalogues have hundreds of groups.  Index the rendered nodes once
+  // instead of scanning the whole document for every analysis row.
+  const rowsByReleaseGroupId = new Map(
+    Array.from(containerEl.querySelectorAll('.rg[data-rg-id]')).map(row => [
+      row.dataset.rgId, row,
+    ]),
+  );
   for (const rg of disambData.release_groups || []) {
-    const row = containerEl.querySelector(`.rg[data-rg-id="${cssEscape(rg.release_group_id)}"]`);
+    const row = rowsByReleaseGroupId.get(rg.release_group_id);
     if (!row || row.querySelector('.disamb-chip')) continue;
     const title = row.querySelector('.rg-title');
     if (!title) continue;
