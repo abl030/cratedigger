@@ -19,7 +19,7 @@ from unittest.mock import patch
 
 from scripts.pipeline_cli import api_mutations
 from scripts.pipeline_cli.routes_meta import _build_parser
-from tests.fakes import FakePipelineDB
+from tests.fakes import FakePipelineDB, FakeYTMusic
 from tests.helpers import handoff_automation_owner, make_request_row
 from tests.web._harness import _FakeDbWebServerCase
 
@@ -307,28 +307,9 @@ class TestApiMutationCli(unittest.TestCase):
 
     def test_youtube_album_stays_headless_when_web_socket_is_missing(self) -> None:
         """The resolver is a direct service adapter, not a sixth API command."""
-        from lib.pipeline_db import (
-            PersistedDistance,
-            PersistedTrack,
-            PersistedYoutubeRow,
-        )
         from scripts.pipeline_cli.cli import main
 
         release_group_id = "44438bf9-26d9-4460-9b4f-1a1b015e37a1"
-
-        class _ForbiddenYTClient:
-            def __init__(self) -> None:
-                self.calls: list[str] = []
-
-            def search(self, *_args: object, **_kwargs: object) -> object:
-                self.calls.append("search")
-                raise AssertionError("cached dispatch must not search YouTube")
-
-            def get_album(self, *_args: object, **_kwargs: object) -> object:
-                self.calls.append("get_album")
-                raise AssertionError(
-                    "cached dispatch must not fetch a YouTube album",
-                )
 
         class _Session:
             def __init__(self) -> None:
@@ -350,48 +331,48 @@ class TestApiMutationCli(unittest.TestCase):
                 return None
 
         pdb = FakePipelineDB()
-        pdb.upsert_youtube_album_mapping(
+        pdb.seed_youtube_album_mapping(
             release_group_id,
             "mb",
             [
-                PersistedYoutubeRow(
-                    yt_browse_id="MPREb-headless-cache",
-                    yt_audio_playlist_id="OLAK5uy-headless-cache",
-                    yt_url=(
+                {
+                    "yt_browse_id": "MPREb-headless-cache",
+                    "yt_audio_playlist_id": "OLAK5uy-headless-cache",
+                    "yt_url": (
                         "https://music.youtube.com/playlist"
                         "?list=OLAK5uy-headless-cache"
                     ),
-                    yt_year=1996,
-                    yt_track_count=1,
-                    album_title="Headless Album",
-                    album_artist="Headless Artist",
-                    yt_tracks=[
-                        PersistedTrack(
-                            title="Cached Track",
-                            artists=[{"name": "Headless Artist"}],
-                            length_seconds=180.0,
-                            track_number=1,
-                            disc_number=1,
-                            video_id="cached-video",
-                        ),
+                    "yt_year": 1996,
+                    "yt_track_count": 1,
+                    "album_title": "Headless Album",
+                    "album_artist": "Headless Artist",
+                    "yt_tracks": [
+                        {
+                            "title": "Cached Track",
+                            "artists": [{"name": "Headless Artist"}],
+                            "length_seconds": 180.0,
+                            "track_number": 1,
+                            "disc_number": 1,
+                            "video_id": "cached-video",
+                        },
                     ],
-                    distances=[
-                        PersistedDistance(
-                            mbid=release_group_id,
-                            outcome="ok",
-                            distance=0.05,
-                            components={"tracks": 0.05},
-                            matched_tracks=1,
-                            total_local_tracks=1,
-                            total_mb_tracks=1,
-                            extra_local_tracks=0,
-                            extra_mb_tracks=0,
-                        ),
+                    "distances": [
+                        {
+                            "mbid": release_group_id,
+                            "outcome": "ok",
+                            "distance": 0.05,
+                            "components": {"tracks": 0.05},
+                            "matched_tracks": 1,
+                            "total_local_tracks": 1,
+                            "total_mb_tracks": 1,
+                            "extra_local_tracks": 0,
+                            "extra_mb_tracks": 0,
+                        },
                     ],
-                ),
+                },
             ],
         )
-        yt = _ForbiddenYTClient()
+        yt = FakeYTMusic()
         session = _Session()
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = os.path.join(temp_dir, "config.ini")
@@ -472,7 +453,8 @@ class TestApiMutationCli(unittest.TestCase):
                 "browse_ids": ["MPREb-headless-cache"],
             },
         )
-        self.assertEqual(yt.calls, [])
+        self.assertEqual(yt.search_calls, [])
+        self.assertEqual(yt.get_album_calls, [])
         self.assertEqual(session.close_calls, 1)
         mb_release.assert_not_called()
         mb_group.assert_not_called()

@@ -137,7 +137,7 @@ class TestRetryInvariantCheckerTripsOnKnownBad(unittest.TestCase):
         observation = _good_observation(
             RetryWorld(503, "GET", "absent", "search"))
         observation.result = {"outcome": "unresolved_mirror_unavailable"}
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(TypeError):
             assert_retry_invariants(observation)
 
     def test_rejects_wrong_nonempty_fallback_matrix(self) -> None:

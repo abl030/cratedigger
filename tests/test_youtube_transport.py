@@ -1,8 +1,8 @@
 """Offline contract tests for the production YouTube Requests transport.
 
 The loopback server drives the actual ``Session`` and ``HTTPAdapter`` returned
-by the CLI/web builders.  Only urllib3's backoff sleep is suppressed: Requests
-still prepares, sends, retries, and raises its real public ``RetryError``.
+by the shared production factory. Only urllib3's backoff sleep is suppressed:
+Requests still prepares, sends, retries, and raises its public ``RetryError``.
 """
 
 from __future__ import annotations
@@ -10,11 +10,10 @@ from __future__ import annotations
 import copy
 import threading
 import unittest
-from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Literal, cast
+from typing import Any, Literal, Self, cast
 from unittest.mock import patch
 
 import msgspec
@@ -30,10 +29,12 @@ from lib.youtube_album_service import (
     YoutubeAlbumResolverResult,
     resolve_youtube_album,
 )
+from lib.youtube_transport import build_youtube_client
 from tests.fakes import (
     FakeDiscogsLookup,
     FakeMBLookup,
     FakePipelineDB,
+    FakeYTMusic,
 )
 
 RETRYABLE_STATUSES = (429, 500, 502, 503, 504)
@@ -126,7 +127,7 @@ class LoopbackRetryServer(AbstractContextManager["LoopbackRetryServer"]):
     def methods(self) -> list[str]:
         return list(self._server.methods)
 
-    def __enter__(self) -> LoopbackRetryServer:
+    def __enter__(self) -> Self:
         self._thread.start()
         return self
 
@@ -175,15 +176,13 @@ def _album(
     *,
     other_versions: list[str] | None = None,
 ) -> dict[str, Any]:
-    return {
-        "title": "Dr. Octagonecologyst",
-        "type": "Album",
-        "artists": [{"name": "Dr. Octagon", "id": "UCx"}],
-        "year": "1996",
-        "trackCount": 1,
-        "audioPlaylistId": f"OLAK-{browse_id}",
-        "tracks": [_track("Intro", f"vid-{browse_id}")],
-        "other_versions": [
+    return FakeYTMusic.make_album_fixture(
+        audio_playlist_id=f"OLAK-{browse_id}",
+        title="Dr. Octagonecologyst",
+        artists=[{"name": "Dr. Octagon", "id": "UCx"}],
+        year="1996",
+        tracks=[_track("Intro", f"vid-{browse_id}")],
+        other_versions=[
             {
                 "browseId": sibling,
                 "title": "Dr. Octagonecologyst",
@@ -194,7 +193,7 @@ def _album(
             }
             for sibling in (other_versions or [])
         ],
-    }
+    )
 
 
 class LoopbackYTClient:
@@ -328,27 +327,10 @@ def _mb_group() -> dict[str, Any]:
     }
 
 
-def _cli_builder() -> tuple[Any, requests.Session]:
-    from scripts.pipeline_cli.youtube import _build_youtube_client
-    return _build_youtube_client()
-
-
-def _web_builder() -> tuple[Any, requests.Session]:
-    from web.routes.youtube import _build_youtube_client
-    return _build_youtube_client()
-
-
-def production_builders(
-) -> tuple[tuple[str, Callable[[], tuple[Any, requests.Session]]], ...]:
-    return (("cli", _cli_builder), ("web", _web_builder))
-
-
 def run_retry_world(
     world: RetryWorld,
-    *,
-    builder: Callable[[], tuple[Any, requests.Session]] = _cli_builder,
 ) -> RetryObservation:
-    """Drive one generated world through the real adapter and resolver."""
+    """Drive one generated world through the shared transport and resolver."""
     db = _ObservedYoutubeDB()
     if world.cache_posture == "empty":
         db.seed_youtube_album_mapping(_RG, "mb", [])
@@ -363,7 +345,7 @@ def run_retry_world(
     result: object | None = None
     escaped: Exception | None = None
     with LoopbackRetryServer(world.status) as server:
-        _unused_client, session = builder()
+        _unused_client, session = build_youtube_client()
         session.trust_env = False
         try:
             yt_client = LoopbackYTClient(
@@ -416,7 +398,7 @@ def assert_retry_invariants(observation: RetryObservation) -> None:
             f"{type(observation.escaped_exception).__module__}."
             f"{type(observation.escaped_exception).__name__} escaped resolver")
     if not isinstance(observation.result, YoutubeAlbumResolverResult):
-        raise AssertionError(
+        raise TypeError(
             "resolver did not return YoutubeAlbumResolverResult")
 
     result = observation.result
@@ -481,13 +463,12 @@ class TestProductionYoutubeRetryPolicy(unittest.TestCase):
         self.assertIs(cli_builder, build_youtube_client)
         self.assertIs(web_builder, build_youtube_client)
 
-    def test_both_builders_retry_every_configured_status_and_method_four_times(
+    def test_shared_factory_retries_every_configured_status_and_method_four_times(
         self,
     ) -> None:
-        for builder_name, builder in production_builders():
-            _client, session = builder()
-            session.trust_env = False
-            self.addCleanup(session.close)
+        _client, session = build_youtube_client()
+        session.trust_env = False
+        try:
             adapter = cast(
                 HTTPAdapter, session.get_adapter("http://127.0.0.1/"))
             self.assertEqual(adapter.max_retries.total, 3)
@@ -502,7 +483,7 @@ class TestProductionYoutubeRetryPolicy(unittest.TestCase):
             for status in RETRYABLE_STATUSES:
                 for method in RETRYABLE_METHODS:
                     with self.subTest(
-                        builder=builder_name, status=status, method=method,
+                        status=status, method=method,
                     ), LoopbackRetryServer(status) as server, patch(
                         "urllib3.util.retry.time.sleep", return_value=None,
                     ):
@@ -512,6 +493,7 @@ class TestProductionYoutubeRetryPolicy(unittest.TestCase):
                             session.request(method, server.url)
                         self.assertEqual(server.attempts, 4)
                         self.assertEqual(server.methods, [method] * 4)
+        finally:
             session.close()
 
 
