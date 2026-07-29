@@ -76,6 +76,12 @@ status_receipt() {
     [[ -f "$receipt/command" && -f "$receipt/label" ]] || die "receipt metadata is incomplete: $receipt"
     [[ $(receipt_field "$receipt" command) == "$(gate_command "$(receipt_field "$receipt" label)")" ]] \
         || die "receipt command is not canonical for its gate label: $receipt"
+    if [[ $(receipt_field "$receipt" label) == tests && -f "$receipt/terminal" ]]; then
+        terminal=$(<"$receipt/terminal")
+        if [[ "$terminal" == "pass 0" && ! -f "$receipt/bundle" ]]; then
+            die "passing tests receipt is missing its suite bundle path: $receipt"
+        fi
+    fi
 
     if [[ -f "$receipt/terminal" ]]; then
         terminal=$(<"$receipt/terminal")
@@ -107,6 +113,36 @@ gate_command() {
         tests) printf '%s\n' 'bash scripts/run_tests.sh' ;;
         *) die "gate must be pyright or tests" ;;
     esac
+}
+
+record_suite_bundle() {
+    local receipt=$1 output=$2 runtime bundle resolved parent
+    local -a matches
+    mapfile -t matches < <(sed -n 's/^bundle: //p' "$output")
+    if (( ${#matches[@]} == 0 )); then
+        return 1
+    fi
+    if (( ${#matches[@]} != 1 )); then
+        printf 'test gate published multiple bundle paths\n' >&2
+        return 1
+    fi
+    runtime=$(runtime_dir)
+    bundle=${matches[0]}
+    [[ -d "$bundle" && ! -L "$bundle" ]] || {
+        printf 'test gate bundle is unavailable: %s\n' "$bundle" >&2
+        return 1
+    }
+    resolved=$(realpath -e "$bundle") || return 1
+    parent=$(dirname "$resolved")
+    [[ "$parent" == "$runtime" && $(stat -c '%a' "$resolved") == 700 ]] || {
+        printf 'test gate bundle is not a private runtime directory: %s\n' "$bundle" >&2
+        return 1
+    }
+    [[ -f "$resolved/summary.json" && ! -L "$resolved/summary.json" ]] || {
+        printf 'test gate bundle is missing summary.json: %s\n' "$bundle" >&2
+        return 1
+    }
+    printf '%s\n' "$resolved" >"$receipt/bundle"
 }
 
 run_gate() {
@@ -148,6 +184,13 @@ run_gate() {
     if (( status >= 128 )); then
         printf 'final gate %s: incomplete (signal-shaped exit %s)\n' "$label" "$status" >&2
         return "$status"
+    fi
+    if [[ "$label" == tests ]] && ! record_suite_bundle "$receipt" "$receipt/output.log"; then
+        if [[ "$status" == 0 ]]; then
+            printf 'final gate tests: incomplete (passing suite published no valid bundle)\n' >&2
+            return 2
+        fi
+        printf 'final gate tests: bundle unavailable for failed suite\n' >&2
     fi
     if ! current_tree_matches "$receipt"; then
         printf 'final gate %s: incomplete (tree changed before terminal receipt)\n' "$label" >&2

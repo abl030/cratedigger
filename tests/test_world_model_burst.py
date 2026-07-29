@@ -95,9 +95,13 @@ class TestWorldModelBurstScript(unittest.TestCase):
 
     def test_standard_suite_runs_only_the_deterministic_world_budget(self) -> None:
         script = RUN_TESTS_SCRIPT.read_text(encoding="utf-8")
+        coordinator = (
+            REPO_ROOT / "scripts" / "run_test_suite.py"
+        ).read_text(encoding="utf-8")
         runner = PYTHON_RUNNER.read_text(encoding="utf-8")
 
-        self.assertIn("python3 scripts/run_python_tests.py", script)
+        self.assertIn("scripts/run_test_suite.py", script)
+        self.assertIn('("python3", "scripts/run_python_tests.py")', coordinator)
         self.assertNotIn("python3 -m unittest tests.world_model.state_machine", script)
         self.assertIn('WORLD_MODEL_MODULE = "tests.world_model.state_machine"', runner)
         self.assertIn('("CRATEDIGGER_WORLD_RANDOMIZED", "0")', runner)

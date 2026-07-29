@@ -20,6 +20,9 @@ set -u
 printf '%s\\n' "$@" > "$FAKE_NIX_SHELL_RECORD"
 printf 'gate output\\n'
 printf 'gate error\\n' >&2
+if [[ "${2:-}" == "bash scripts/run_tests.sh" ]]; then
+    printf 'bundle: %s\\n' "$FAKE_NIX_SHELL_BUNDLE"
+fi
 case "$FAKE_NIX_SHELL_MODE" in
     exit) exit "$FAKE_NIX_SHELL_EXIT" ;;
     sleep) sleep 30 ;;
@@ -38,6 +41,14 @@ class FinalGateReceiptTestCase(unittest.TestCase):
         self.runtime = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
         self.assertTrue(self.runtime.is_dir(), "private runtime tmpfs is required for this test")
         self.fake_bin = tempfile.TemporaryDirectory(prefix="cratedigger-final-gate-bin-")
+        self.bundle = Path(
+            tempfile.mkdtemp(
+                prefix="cratedigger-checks.final-gate-test.",
+                dir=self.runtime,
+            )
+        )
+        self.bundle.chmod(0o700)
+        (self.bundle / "summary.json").write_text("{}\n", encoding="utf-8")
         fake_nix_shell = Path(self.fake_bin.name) / "nix-shell"
         fake_nix_shell.write_text(_FAKE_NIX_SHELL)
         fake_nix_shell.chmod(0o755)
@@ -53,6 +64,7 @@ class FinalGateReceiptTestCase(unittest.TestCase):
     def tearDown(self) -> None:
         for receipt in self.created_receipts:
             shutil.rmtree(receipt, ignore_errors=True)
+        shutil.rmtree(self.bundle, ignore_errors=True)
         self.fake_bin.cleanup()
         self.repo.cleanup()
 
@@ -70,6 +82,7 @@ class FinalGateReceiptTestCase(unittest.TestCase):
             "FAKE_NIX_SHELL_MODE": mode,
             "FAKE_NIX_SHELL_EXIT": str(exit_code),
             "FAKE_NIX_SHELL_REPO": self.repo.name,
+            "FAKE_NIX_SHELL_BUNDLE": str(self.bundle),
         }
 
     def _launch(self, label: str = "pyright", mode: str = "exit", exit_code: int = 0) -> subprocess.Popen[str]:
@@ -148,7 +161,25 @@ class FinalGateReceiptTestCase(unittest.TestCase):
         self.assertEqual(process.returncode, 0, stderr)
         self.assertEqual(self.record.read_text(), "--run\nbash scripts/run_tests.sh\n")
         self.assertEqual((receipt / "command").read_text(), "bash scripts/run_tests.sh\n")
+        self.assertEqual((receipt / "bundle").read_text().strip(), str(self.bundle))
         self.assertEqual(self._status(receipt), "pass")
+
+    def test_passing_tests_receipt_without_bundle_path_is_rejected(self) -> None:
+        process = self._launch(label="tests")
+        receipt = self._receipt_from(process)
+        process.communicate(timeout=10)
+        (receipt / "bundle").unlink()
+
+        result = subprocess.run(
+            [str(HELPER), "status", str(receipt)],
+            cwd=self.repo.name,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("missing its suite bundle path", result.stderr)
 
     def test_active_detached_recovery_requires_the_exact_live_process_identity(self) -> None:
         process = self._launch(mode="sleep")

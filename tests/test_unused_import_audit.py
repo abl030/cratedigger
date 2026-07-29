@@ -445,9 +445,11 @@ class TestUnusedImportAudit(unittest.TestCase):
 
     def test_full_suite_calls_the_canonical_repo_wide_ruff_gate(self) -> None:
         suite = Path("scripts/run_tests.sh").read_text(encoding="utf-8")
+        coordinator = Path("scripts/run_test_suite.py").read_text(encoding="utf-8")
         runner = Path("scripts/run_ruff.sh").read_text(encoding="utf-8")
 
-        self.assertIn('bash "$(dirname "$0")/run_ruff.sh"', suite)
+        self.assertIn("scripts/run_test_suite.py", suite)
+        self.assertIn('("bash", "scripts/run_ruff.sh")', coordinator)
         self.assertIn('set -- .', runner)
         self.assertIn("ruff check", runner)
 
