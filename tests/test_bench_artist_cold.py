@@ -57,7 +57,8 @@ def _request(base: str, path: str, *, method: str = "GET") -> tuple[int, dict[st
         with urllib.request.urlopen(urllib.request.Request(f"{base}{path}", method=method)) as response:
             return response.status, json.loads(response.read())
     except urllib.error.HTTPError as exc:
-        return exc.code, json.loads(exc.read())
+        with exc:
+            return exc.code, json.loads(exc.read())
 
 
 class _HungProcess:
