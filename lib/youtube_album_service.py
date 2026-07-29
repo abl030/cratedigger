@@ -650,6 +650,7 @@ def resolve_youtube_album(
                 yt_album_responses[other_browse_id] = _cached_get_album(
                     yt_client, cache, other_browse_id, refresh=refresh)
             except (YTMusicServerError, YTMusicUserError, YTMusicError,
+                    requests.exceptions.RetryError,
                     requests.Timeout, requests.ConnectionError,
                     KeyError, IndexError) as exc:
                 log.warning(
@@ -657,6 +658,11 @@ def resolve_youtube_album(
                     other_browse_id, exc,
                 )
                 continue
+    except requests.exceptions.RetryError as exc:
+        yt_failure = (
+            "unresolved_mirror_unavailable",
+            f"YT retries exhausted: {exc}",
+        )
     except requests.Timeout as exc:
         yt_failure = ("unresolved_timeout", f"YT timeout: {exc}")
     except requests.ConnectionError as exc:
