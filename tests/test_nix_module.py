@@ -35,6 +35,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MODULE_NIX = REPO_ROOT / "nix" / "module.nix"
 FLAKE_NIX = REPO_ROOT / "flake.nix"
+MODULE_VM_NIX = REPO_ROOT / "nix" / "tests" / "module-vm.nix"
 
 
 class TestPythonPathCarriesOnlyRepoRoot(unittest.TestCase):
@@ -322,6 +323,20 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
                 "users"
               ];
             };
+            nginxServiceNumericMediaGroup = evaluate {
+              services.cratedigger = {
+                user = "cratedigger";
+                group = "cratedigger";
+                web = {
+                  hostName = "music.example.test";
+                  enableInsecure = true;
+                };
+              };
+              users.groups.cratedigger.gid = 4242;
+              systemd.services.nginx.serviceConfig.SupplementaryGroups = [
+                "4242"
+              ];
+            };
             nginxPrimaryServiceGroup = evaluate {
               services.cratedigger = {
                 user = "cratedigger";
@@ -332,6 +347,41 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
                 };
               };
               services.nginx.group = "cratedigger";
+            };
+            nginxServiceRootUserOverride = evaluate {
+              services.cratedigger.web = {
+                hostName = "music.example.test";
+                enableInsecure = true;
+              };
+              systemd.services.nginx.serviceConfig.User =
+                lib.mkForce "root";
+            };
+            nginxServiceRootGroupOverride = evaluate {
+              services.cratedigger.web = {
+                hostName = "music.example.test";
+                enableInsecure = true;
+              };
+              systemd.services.nginx.serviceConfig.Group =
+                lib.mkForce "root";
+            };
+            nginxMissingAccessGroup = evaluate {
+              services.cratedigger.web = {
+                hostName = "music.example.test";
+                enableInsecure = true;
+              };
+              users.users.nginx.extraGroups = lib.mkForce [];
+              systemd.services.nginx.serviceConfig.SupplementaryGroups =
+                lib.mkForce [];
+            };
+            nginxNumericAccessGroup = evaluate {
+              services.cratedigger.web = {
+                hostName = "music.example.test";
+                enableInsecure = true;
+              };
+              users.groups.cratedigger-web.gid = 4243;
+              users.users.nginx.extraGroups = lib.mkForce [];
+              systemd.services.nginx.serviceConfig.SupplementaryGroups =
+                lib.mkForce [ "4243" ];
             };
             webServiceCredentialGroup = evaluate {
               services.cratedigger = {
@@ -483,11 +533,37 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
         )
         self.assertTrue(
             any(
+                "forbids nginx account/service membership" in message
+                for message in worlds["nginxServiceNumericMediaGroup"]
+            ),
+            worlds["nginxServiceNumericMediaGroup"],
+        )
+        self.assertTrue(
+            any(
                 "primary group" in message
                 for message in worlds["nginxPrimaryServiceGroup"]
             ),
             worlds["nginxPrimaryServiceGroup"],
         )
+        for world in (
+            "nginxServiceRootUserOverride",
+            "nginxServiceRootGroupOverride",
+        ):
+            self.assertTrue(
+                any(
+                    "final nginx.service User and Group" in message
+                    for message in worlds[world]
+                ),
+                (world, worlds[world]),
+            )
+        self.assertTrue(
+            any(
+                "membership in web.accessGroup" in message
+                for message in worlds["nginxMissingAccessGroup"]
+            ),
+            worlds["nginxMissingAccessGroup"],
+        )
+        self.assertEqual(worlds["nginxNumericAccessGroup"], [])
         self.assertTrue(
             any(
                 "cratedigger-web.service SupplementaryGroups" in message
@@ -652,6 +728,8 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
                 nginxUnit =
                   system.config.systemd.units."nginx.service".text;
                 nginxGroups = nginxService.serviceConfig.SupplementaryGroups;
+                nginxUser = nginxService.serviceConfig.User;
+                nginxGroup = nginxService.serviceConfig.Group;
                 nginxUserGroups =
                   system.config.users.users.${system.config.services.nginx.user}.extraGroups;
                 applicationUserGroups =
@@ -739,7 +817,7 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
         self.assertEqual(
             dual["proxyPass"], "http://unix:/run/cratedigger-web/web.sock:"
         )
-        self.assertIn("proxy_read_timeout 300s;", dual["gatewayExtra"])
+        self.assertNotIn("proxy_read_timeout", dual["gatewayExtra"])
         self.assertIn(
             "proxy_pass_request_headers off;", dual["gatewayExtra"]
         )
@@ -816,11 +894,21 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
         self.assertEqual(dual["nginxUnit"], insecure["nginxUnit"])
         self.assertEqual(dual["nginxUnit"], alternate["nginxUnit"])
         self.assertEqual(dual["nginxGroups"], ["cratedigger-web"])
+        self.assertEqual(dual["nginxUser"], "nginx")
+        self.assertEqual(dual["nginxGroup"], "nginx")
         self.assertIn("cratedigger-web", dual["nginxUserGroups"])
         self.assertIn("cratedigger-web", dual["applicationUserGroups"])
         self.assertTrue(dual["startPre"][0].startswith("+"))
-        self.assertIn("cratedigger-web-gateway-start", dual["startPre"][0])
-        self.assertIn("nginx-pre-start", dual["startPre"][1])
+        self.assertIn(
+            "cratedigger-web-gateway-clear-start", dual["startPre"][0]
+        )
+        self.assertFalse(dual["startPre"][1].startswith("+"))
+        self.assertIn(
+            "cratedigger-web-nginx-effective-identity", dual["startPre"][1]
+        )
+        self.assertTrue(dual["startPre"][2].startswith("+"))
+        self.assertIn("cratedigger-web-gateway-start", dual["startPre"][2])
+        self.assertIn("nginx-pre-start", dual["startPre"][3])
         self.assertTrue(dual["reload"][0].startswith("+"))
         self.assertIn("cratedigger-web-gateway-prepare-reload", dual["reload"][0])
         self.assertIn("nginx", dual["reload"][1])
@@ -832,7 +920,9 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
         self.assertEqual(dual["reload"], insecure["reload"])
         self.assertEqual(dual["reload"], alternate["reload"])
         self.assertEqual(insecure["basicAuthFile"], None)
-        self.assertIn("cratedigger-web-gateway-start", insecure["startPre"][0])
+        self.assertIn(
+            "cratedigger-web-gateway-clear-start", insecure["startPre"][0]
+        )
         self.assertIn(
             "cratedigger-web-gateway-prepare-reload", insecure["reload"][0]
         )
@@ -983,6 +1073,7 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
         self.assertNotIn("webGatewayPendingMarker", text)
         self.assertNotIn("webGatewayStageMarker", text)
         self.assertIn("${pkgs.findutils}/bin/find", marker_helpers)
+
         self.assertIn(
             "${lib.escapeShellArg webRuntimeDirectory}", marker_helpers
         )
@@ -1030,6 +1121,47 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
         self.assertIn("must not have extended/default ACLs", text)
         self.assertIn("check_ancestors", text)
         self.assertIn("resolved credential target is inside /nix/store", text)
+
+    def test_nginx_effective_identity_is_checked_before_gateway_readiness(
+        self,
+    ) -> None:
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        identity_start = text.index(
+            '"cratedigger-web-nginx-effective-identity"'
+        )
+        identity_script = text[
+            identity_start : text.index("webGatewayClearMarkers =")
+        ]
+        self.assertIn("${pkgs.coreutils}/bin/id -u", identity_script)
+        self.assertIn("${pkgs.coreutils}/bin/id -g", identity_script)
+        self.assertIn("${pkgs.coreutils}/bin/id -G", identity_script)
+        self.assertIn("webForbiddenAuthorityGroups", identity_script)
+        self.assertIn("effective nginx UID must not be 0", identity_script)
+        self.assertIn(
+            "effective nginx group set contains forbidden",
+            identity_script,
+        )
+        self.assertIn(
+            "effective nginx group set lacks required accessGroup",
+            identity_script,
+        )
+
+    def test_vm_tls_private_key_is_generated_outside_tracked_source(
+        self,
+    ) -> None:
+        text = MODULE_VM_NIX.read_text(encoding="utf-8")
+        self.assertNotRegex(
+            text,
+            r"-----BEGIN (?:EC |RSA |)PRIVATE KEY-----",
+        )
+        self.assertIn(
+            'pkgs.runCommand "cratedigger-module-vm-tls"',
+            text,
+        )
+        self.assertIn(
+            "security.pki.certificateFiles = [publicTlsCertificate];",
+            text,
+        )
 
 
 class TestImporterServiceContract(unittest.TestCase):

@@ -102,8 +102,11 @@ boundary is absent or unhealthy.
   If external authorization is implemented later, the settled direction is
   that it remains mutually exclusive with Basic and insecure mode and has no
   Basic fallback. Governs R2 and R5-R6.
-- KD4. **Local CLI authority comes from web access group membership.**
+- KD4. **The five API-backed CLI mutations use web access group authority.**
   `(session-settled: user-approved — chosen over interactive browser credentials or a duplicate direct service path: agents and automation remain passwordless while using canonical API behavior.)`
+  `pipeline-delete`, `set-quality`, `upgrade`, `wrong-match-converge`, and
+  `resolve-rg` use the permissioned web socket. Other CLI commands retain
+  their existing PostgreSQL, filesystem, Beets, mirror, and secret boundaries.
   Governs R11-R12.
 - KD5. **Insecure mode is deliberate but gently visible.**
   `(session-settled: user-directed — chosen over refusing all test use or showing a disruptive warning: the operator expects to use the escape hatch and wants a persistent nudge rather than harassment.)`
@@ -119,8 +122,9 @@ boundary is absent or unhealthy.
 - A3. **Module-owned authentication gateway:** Enforces Basic Auth, or
   deliberately omits browser authentication only in explicit insecure mode,
   before forwarding a classified browser request.
-- A4. **Local CLI or agent:** Uses web access group membership to call the
-  same canonical API behavior without a browser login.
+- A4. **Local CLI or agent:** Uses web access group membership for the five
+  API-backed mutations without a browser login; other commands retain their
+  resource-specific authority.
 - A5. **Health monitor:** Checks a non-sensitive liveness surface without
   receiving operator credentials.
 
@@ -156,15 +160,17 @@ boundary is absent or unhealthy.
   API contract.
 - R9. Every browser-facing mutation must reject a missing or mismatched
   same-origin `Origin`/`Referer` signal before application dispatch, while the
-  web access group-authorized CLI path remains usable without browser headers.
+  five web access group-authorized CLI mutation paths remain usable without
+  browser headers.
 - R10. Confirmation words and flags remain secondary intent checks and must
   never substitute for authentication or same-origin validation.
 
 #### Local operator and agent access
 
 - R11. `pipeline-cli` must remain non-interactive for authorized local
-  operators, agents, scripts, and systemd services, with web access group
-  membership deciding access.
+  operators, agents, scripts, and systemd services. Web access group membership
+  decides access to the five API-backed mutations; every other command retains
+  its resource-specific authority.
 - R12. API-backed CLI commands must continue through the canonical API behavior
   without a direct database or duplicate service fallback, and an unauthorized
   local user must not gain the CLI's trusted channel.
@@ -424,6 +430,7 @@ boundary is absent or unhealthy.
   absolute-form targets, and every other method/path stay gated. The web
   service may still require migration and dependencies to start; liveness is
   not readiness. Governs R5-R6.
+  Authority: "Keep `/healthz` as the only unauthenticated Cratedigger route, and keep explicit insecure mode as a deliberate browser-auth bypass while retaining the Unix gateway, request provenance, canonical Host, CORS removal, framing controls, and destructive confirmation." — https://github.com/abl030/cratedigger/pull/921#issuecomment-5112138316
 - KTD9. Add Unix HTTP transport inside the existing API mutation adapter,
   preserving `_relay`, JSON validation, timeouts, `_NoRedirectHandler`
   semantics for explicit TCP development, route payloads, status-to-exit
@@ -442,6 +449,7 @@ boundary is absent or unhealthy.
   explicit render/startup flag to the app, logs at CRITICAL on every start, and
   exposes a static non-dismissible footer in normal document flow. Governs
   R13-R15.
+  Authority: "Keep `/healthz` as the only unauthenticated Cratedigger route, and keep explicit insecure mode as a deliberate browser-auth bypass while retaining the Unix gateway, request provenance, canonical Host, CORS removal, framing controls, and destructive confirmation." — https://github.com/abl030/cratedigger/pull/921#issuecomment-5112138316
 - KTD11. Qualify policy at three independent layers: pure deterministic and
   generated origin/channel properties; real HTTP and AF_UNIX adapter tests
   with dispatch spies; and the real NixOS nginx/systemd boundary with
@@ -478,7 +486,7 @@ flowchart LR
     OP -->|"internal loopback HTTP<br/>canonical Host"| GW
     BA["Basic password file"] --> GW
     GW -->|"browser marker<br/>allowlisted headers"| US["/run Unix socket<br/>web access group"]
-    CLI["pipeline-cli / agent"] -->|"cli marker<br/>web access group authority"| US
+    CLI["five API-backed CLI mutations"] -->|"cli marker<br/>web access group authority"| US
     US --> APP["Cratedigger web process<br/>no TCP listener"]
     HM["Health monitor"] -->|"HTTPS /healthz"| OP
 ```
@@ -1076,6 +1084,9 @@ overlay or repeated prompt, while Basic mode renders no warning.
 
 The warning is persistent and gently visible exactly in insecure mode, and
 browser inspection confirms it does not interfere with normal archival work.
+The retained desktop, mobile, 200%-reflow, contrast, geometry, and
+accessibility evidence is in
+[the PR 921 browser evidence](../review-evidence/pr-921/README.md).
 
 ### U6. Document, configure, deploy, and close CD-SEC-02
 
@@ -1210,9 +1221,9 @@ retroactively alter the already-verified implementation tree.
 **Verification outcome**
 
 The public site is Basic-protected through its existing certificate and DNS
-path, CLI mutations by web access group members remain non-interactive, the
-signed credential-rotation transaction is proven, and the later audit tree and
-issue tell the exact implemented/deployed truth.
+path, the five API-backed CLI mutations remain non-interactive for web access
+group members, the signed credential-rotation transaction is proven, and the
+later audit tree and issue tell the exact implemented/deployed truth.
 
 ---
 

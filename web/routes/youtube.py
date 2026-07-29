@@ -25,12 +25,6 @@ from typing import Any
 import msgspec
 from pydantic import BaseModel, Field
 
-from lib.youtube_album_limits import (
-    YOUTUBE_HTTP_CONNECT_TIMEOUT_SECONDS,
-    YOUTUBE_HTTP_READ_TIMEOUT_SECONDS,
-    YOUTUBE_HTTP_RETRY_DELAY_CAP_SECONDS,
-    YOUTUBE_HTTP_RETRY_TOTAL,
-)
 from lib.youtube_album_service import (
     OUTCOME_HTTP_STATUS,
     resolve_youtube_album,
@@ -144,73 +138,16 @@ def _build_youtube_client():
     from ytmusicapi import YTMusic
 
     # Bind a default (connect, read) timeout so unresponsive remotes don't
-    # pin the worker forever. Finite per-call ``timeout=`` kwargs still
-    # override the default.
-    #
-    # Treat both omission and explicit ``None`` as the default: requests
-    # spells "wait forever" as ``timeout=None``, which is not safe at this
-    # external HTTP boundary.
-    #
-    # The remaining keyword params (params/data/headers/.../json) are
-    # typed ``Any`` — requests.Session.request's stub types them via
-    # private stub-only aliases (``_Params``, ``_Data``, ... in
-    # typeshed's requests-stubs) that aren't part of the public API and
-    # can't be imported or reconstructed without duplicating typeshed
-    # internals. ``allow_redirects`` mirrors the real
-    # base signature exactly since those are plain public types; the
-    # full named parameter list (matching the base method's arity) is
-    # required for ``reportIncompatibleMethodOverride``.
-    _UNSET: Any = object()
-
+    # pin the worker forever. Per-call ``timeout=`` kwargs still override.
     class _DefaultTimeoutSession(requests.Session):
-        def request(
-            self,
-            method: str | bytes,
-            url: str | bytes,
-            params: Any = None,
-            data: Any = None,
-            headers: Any = None,
-            cookies: Any = None,
-            files: Any = None,
-            auth: Any = None,
-            timeout: Any = _UNSET,
-            allow_redirects: bool = True,
-            proxies: Any = None,
-            hooks: Any = None,
-            stream: Any = None,
-            verify: Any = None,
-            cert: Any = None,
-            json: Any = None,
-        ) -> requests.Response:
-            if timeout is _UNSET or timeout is None:
-                timeout = (
-                    YOUTUBE_HTTP_CONNECT_TIMEOUT_SECONDS,
-                    YOUTUBE_HTTP_READ_TIMEOUT_SECONDS,
-                )
-            # The current Session.request stubs require ``str`` while the
-            # base override accepts ``str | bytes``. Requests' own request
-            # preparation uppercases strings later; this boundary only
-            # converts bytes to Requests' native string form. ASCII is
-            # deliberate: non-ASCII bytes raise ``UnicodeDecodeError``
-            # instead of being silently reinterpreted as UTF-8.
-            native_method = (
-                method.decode("ascii") if isinstance(method, bytes) else method
-            )
-            return super().request(
-                native_method, url,
-                params=params, data=data, headers=headers,
-                cookies=cookies, files=files, auth=auth,
-                timeout=timeout, allow_redirects=allow_redirects,
-                proxies=proxies, hooks=hooks, stream=stream,
-                verify=verify, cert=cert, json=json,
-            )
+        def request(self, *args: Any, **kwargs: Any):
+            kwargs.setdefault("timeout", (5, 30))
+            return super().request(*args, **kwargs)
 
     session = _DefaultTimeoutSession()
     retry = Retry(
-        total=YOUTUBE_HTTP_RETRY_TOTAL,
+        total=3,
         backoff_factor=1.5,
-        backoff_max=YOUTUBE_HTTP_RETRY_DELAY_CAP_SECONDS,
-        retry_after_max=YOUTUBE_HTTP_RETRY_DELAY_CAP_SECONDS,
         status_forcelist=(429, 500, 502, 503, 504),
         allowed_methods=frozenset(["GET", "POST"]),
     )

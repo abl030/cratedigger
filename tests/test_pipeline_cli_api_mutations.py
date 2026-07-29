@@ -17,17 +17,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import ClassVar, Self
 from unittest.mock import patch
 
-import msgspec
-
-from lib import youtube_album_limits, youtube_album_service
-from lib.beets_distance import SyntheticItem
-from lib.youtube_album_service import (
-    ResolvedDistance,
-    ResolvedYoutubeRelease,
-    YoutubeAlbumResolverResult,
-)
 from scripts.pipeline_cli import api_mutations
-from scripts.pipeline_cli import youtube as youtube_cli
 from scripts.pipeline_cli.routes_meta import _build_parser
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
@@ -47,52 +37,6 @@ class _Response:
 
     def __exit__(self, *_values: object) -> None:
         return None
-
-
-def _youtube_result_body(
-    outcome: str = "ok",
-    *,
-    full_matrix: bool = False,
-) -> bytes:
-    releases: list[ResolvedYoutubeRelease] = []
-    if full_matrix:
-        releases.append(ResolvedYoutubeRelease(
-            yt_browse_id="MPREb_example",
-            yt_audio_playlist_id="OLAK5uy_example",
-            yt_url="https://music.youtube.com/browse/MPREb_example",
-            year=2004,
-            track_count=1,
-            tracks=[SyntheticItem(
-                title="Track",
-                artist="Artist",
-                album="Album",
-                albumartist="Artist",
-                track=1,
-                tracktotal=1,
-                disc=1,
-                disctotal=1,
-                length=180.0,
-            )],
-            distances=[ResolvedDistance(
-                mbid="release-3",
-                outcome="ok",
-                distance=0.05,
-                components={"tracks": 0.05},
-                matched_tracks=1,
-                total_local_tracks=1,
-                total_mb_tracks=1,
-                extra_local_tracks=0,
-                extra_mb_tracks=0,
-            )],
-        ))
-    return msgspec.json.encode(YoutubeAlbumResolverResult(
-        outcome=outcome,
-        release_group_identifier="group-3" if full_matrix else None,
-        source="mb" if full_matrix else None,
-        from_cache=full_matrix,
-        youtube_releases=releases,
-        duration_ms=12 if full_matrix else None,
-    ))
 
 
 class _RedirectingApiHandler(BaseHTTPRequestHandler):
@@ -173,7 +117,6 @@ class TestApiMutationCli(unittest.TestCase):
             "upgrade": api_mutations.cmd_upgrade,
             "wrong-match-converge": api_mutations.cmd_wrong_match_converge,
             "resolve-rg": api_mutations.cmd_resolve_rg,
-            "youtube-album": youtube_cli.cmd_youtube_album,
         }
         stdout = io.StringIO()
         stderr = io.StringIO()
@@ -200,25 +143,15 @@ class TestApiMutationCli(unittest.TestCase):
             ("resolve-rg", {"api_endpoint": api_mutations.TcpApiEndpoint(
                 "http://api"), "request_id": 9},
              "/api/pipeline/9/resolve-rg", {}),
-            ("youtube-album", {"api_endpoint": api_mutations.TcpApiEndpoint(
-                "http://api"), "identifier": "release-3", "refresh": True,
-             "json": True},
-             "/api/youtube-album",
-             {"identifier": "release-3", "refresh": True}),
         ]
         for command, values, path, body in cases:
-            response_body = (
-                _youtube_result_body()
-                if command == "youtube-album"
-                else b'{"status":"ok"}'
-            )
             with self.subTest(command=command), patch(
                 "scripts.pipeline_cli.api_mutations.urllib.request.OpenerDirector.open",
-                return_value=_Response(200, response_body),
+                return_value=_Response(200),
             ) as urlopen:
                 code, output, error = self._run(command, **values)
             self.assertEqual(code, 0)
-            self.assertEqual(json.loads(output), json.loads(response_body))
+            self.assertEqual(json.loads(output), {"status": "ok"})
             self.assertEqual(error, "")
             request = urlopen.call_args.args[0]
             self.assertEqual(request.method, "POST")
@@ -243,165 +176,6 @@ class TestApiMutationCli(unittest.TestCase):
                 )
             self.assertEqual(code, expected)
             self.assertEqual(json.loads(output), {"error": "route"})
-
-    def test_youtube_album_preserves_route_status_exit_classes(self) -> None:
-        for status, expected, body in [
-            (200, 0, _youtube_result_body("ok")),
-            (400, 3, b'{"error":"Invalid request body"}'),
-            (404, 2, _youtube_result_body("not_found")),
-            (503, 5, _youtube_result_body("transient")),
-        ]:
-            with self.subTest(status=status), patch(
-                "scripts.pipeline_cli.api_mutations.urllib.request.OpenerDirector.open",
-                return_value=_Response(status, body),
-            ):
-                code, output, error = self._run(
-                    "youtube-album",
-                    api_endpoint=api_mutations.TcpApiEndpoint("http://api"),
-                    identifier="release",
-                    refresh=False,
-                    json=True,
-                )
-            self.assertEqual(code, expected)
-            self.assertEqual(json.loads(output), json.loads(body))
-            self.assertEqual(error, "")
-
-    def test_youtube_album_typed_results_use_service_outcome_exit_map(
-        self,
-    ) -> None:
-        self.assertIs(
-            youtube_cli.OUTCOME_EXIT_CODE,
-            youtube_album_service.OUTCOME_EXIT_CODE,
-        )
-        with patch(
-            "scripts.pipeline_cli.api_mutations.urllib.request.OpenerDirector.open",
-            return_value=_Response(200, _youtube_result_body("not_found")),
-        ):
-            code, output, error = self._run(
-                "youtube-album",
-                api_endpoint=api_mutations.TcpApiEndpoint("http://api"),
-                identifier="release",
-                refresh=False,
-                json=True,
-            )
-        self.assertEqual(code, youtube_album_service.OUTCOME_EXIT_CODE["not_found"])
-        self.assertEqual(json.loads(output)["outcome"], "not_found")
-        self.assertEqual(error, "")
-
-    def test_youtube_album_transport_outlives_resolver_response_budget(
-        self,
-    ) -> None:
-        self.assertEqual(
-            youtube_cli.YOUTUBE_ALBUM_API_TIMEOUT_SECONDS,
-            youtube_album_limits.YOUTUBE_ALBUM_API_TIMEOUT_SECONDS,
-        )
-        self.assertGreater(
-            youtube_cli.YOUTUBE_ALBUM_API_TIMEOUT_SECONDS,
-            youtube_album_limits.YOUTUBE_RESOLVER_RESPONSE_BUDGET_SECONDS,
-        )
-        self.assertEqual(
-            youtube_cli.YOUTUBE_ALBUM_API_TIMEOUT_SECONDS,
-            300.0,
-        )
-
-        with patch(
-            "scripts.pipeline_cli.api_mutations.urllib.request."
-            "OpenerDirector.open",
-            return_value=_Response(200, _youtube_result_body()),
-        ) as transport:
-            code, _output, error = self._run(
-                "youtube-album",
-                api_endpoint=api_mutations.TcpApiEndpoint("http://api"),
-                identifier="release",
-                refresh=False,
-                json=True,
-            )
-        self.assertEqual(code, 0)
-        self.assertEqual(error, "")
-        self.assertEqual(
-            transport.call_args.kwargs["timeout"],
-            youtube_album_limits.YOUTUBE_ALBUM_API_TIMEOUT_SECONDS,
-        )
-
-        unix_connection = api_mutations._UnixHTTPConnection(
-            "/run/cratedigger-web/web.sock",
-            timeout=youtube_album_limits.YOUTUBE_ALBUM_API_TIMEOUT_SECONDS,
-        )
-        self.assertEqual(
-            unix_connection.timeout,
-            youtube_album_limits.YOUTUBE_ALBUM_API_TIMEOUT_SECONDS,
-        )
-
-    def test_youtube_album_default_renders_human_distance_matrix(self) -> None:
-        with patch(
-            "scripts.pipeline_cli.api_mutations.urllib.request.OpenerDirector.open",
-            return_value=_Response(200, _youtube_result_body(full_matrix=True)),
-        ):
-            code, output, error = self._run(
-                "youtube-album",
-                api_endpoint=api_mutations.TcpApiEndpoint("http://api"),
-                identifier="release-3",
-                refresh=False,
-                json=False,
-            )
-        self.assertEqual(code, 0)
-        self.assertEqual(error, "")
-        self.assertIn("identifier:             release-3", output)
-        self.assertIn("outcome:                ok", output)
-        self.assertIn("release group:          group-3 (mb)", output)
-        self.assertIn("MPREb_example", output)
-        self.assertIn("release-3  outcome=ok  dist=0.0500", output)
-        self.assertIn("matched=1/1", output)
-
-    def test_youtube_album_json_emits_full_wire_shape(self) -> None:
-        body = _youtube_result_body(full_matrix=True)
-        with patch(
-            "scripts.pipeline_cli.api_mutations.urllib.request.OpenerDirector.open",
-            return_value=_Response(200, body),
-        ):
-            code, output, error = self._run(
-                "youtube-album",
-                api_endpoint=api_mutations.TcpApiEndpoint("http://api"),
-                identifier="release-3",
-                refresh=True,
-                json=True,
-            )
-        self.assertEqual(code, 0)
-        self.assertEqual(error, "")
-        decoded = json.loads(output)
-        self.assertEqual(decoded, json.loads(body))
-        self.assertEqual(
-            set(decoded),
-            {
-                "outcome",
-                "release_group_identifier",
-                "source",
-                "from_cache",
-                "youtube_releases",
-                "error_message",
-                "duration_ms",
-            },
-        )
-        self.assertEqual(
-            decoded["youtube_releases"][0]["tracks"][0]["title"],
-            "Track",
-        )
-
-    def test_youtube_album_malformed_typed_response_fails_closed(self) -> None:
-        with patch(
-            "scripts.pipeline_cli.api_mutations.urllib.request.OpenerDirector.open",
-            return_value=_Response(200, b'{"status":"not-a-resolver-result"}'),
-        ):
-            code, output, error = self._run(
-                "youtube-album",
-                api_endpoint=api_mutations.TcpApiEndpoint("http://api"),
-                identifier="release-3",
-                refresh=False,
-                json=False,
-            )
-        self.assertEqual(code, 5)
-        self.assertEqual(output, "")
-        self.assertEqual(json.loads(error)["error"], "api_protocol_error")
 
     def test_http_error_transport_and_malformed_responses_are_fail_closed(self) -> None:
         error = urllib.error.HTTPError("http://api", 404, "missing", Message(),
@@ -472,7 +246,6 @@ class TestApiMutationCli(unittest.TestCase):
             ["upgrade", "release-2"],
             ["wrong-match-converge", "8", "150", "--apply"],
             ["resolve-rg", "9"],
-            ["youtube-album", "release-3", "--refresh"],
         ]
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = os.path.join(temp_dir, "config.ini")
@@ -485,16 +258,11 @@ class TestApiMutationCli(unittest.TestCase):
                     "number_of_albums_to_grab = 1\n",
                 )
             for command in commands:
-                response_body = (
-                    _youtube_result_body()
-                    if command[0] == "youtube-album"
-                    else b'{"status":"ok"}'
-                )
                 with self.subTest(command=command), patch.dict(
                     os.environ, {"CRATEDIGGER_RUNTIME_CONFIG": config_path},
                 ), patch(
                     "scripts.pipeline_cli.api_mutations.urllib.request.OpenerDirector.open",
-                    return_value=_Response(200, response_body),
+                    return_value=_Response(200),
                 ) as urlopen, patch("sys.argv", [
                     "pipeline-cli", "--dsn", "not-a-postgresql-dsn",
                     "--api-base", "http://api", *command,
@@ -503,6 +271,62 @@ class TestApiMutationCli(unittest.TestCase):
                     main()
                 self.assertEqual(exited.exception.code, 0)
                 urlopen.assert_called_once()
+
+    def test_youtube_album_stays_headless_when_web_socket_is_missing(self) -> None:
+        """The resolver is a direct service adapter, not a sixth API command."""
+        from lib.youtube_album_service import YoutubeAlbumResolverResult
+        from scripts.pipeline_cli.cli import main
+
+        class _Session:
+            def close(self) -> None:
+                pass
+
+        result = YoutubeAlbumResolverResult(
+            outcome="ok",
+            release_group_identifier="group-3",
+            source="mb",
+            from_cache=False,
+            youtube_releases=[],
+            duration_ms=12,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = os.path.join(temp_dir, "config.ini")
+            with open(config_path, "w", encoding="utf-8") as config_file:
+                config_file.write(
+                    "[MusicBrainz]\n"
+                    "api_base = http://mb.test\n"
+                    "[Discogs]\n"
+                    "api_base = http://discogs.test\n",
+                )
+            with patch.dict(
+                os.environ,
+                {"CRATEDIGGER_RUNTIME_CONFIG": config_path},
+            ), patch(
+                "sys.argv",
+                ["pipeline-cli", "youtube-album", "release-3", "--json"],
+            ), patch(
+                "scripts.pipeline_cli.cli.PipelineDB",
+                return_value=FakePipelineDB(),
+            ), patch(
+                "scripts.pipeline_cli.youtube._build_youtube_client",
+                return_value=(object(), _Session()),
+            ), patch(
+                "scripts.pipeline_cli.youtube._RedisYoutubeCache",
+                return_value=object(),
+            ), patch(
+                "scripts.pipeline_cli.youtube.resolve_youtube_album",
+                return_value=result,
+            ) as resolve, patch(
+                "scripts.pipeline_cli.api_mutations.urllib.request."
+                "OpenerDirector.open",
+            ) as api_open, redirect_stdout(io.StringIO()) as stdout, \
+                    self.assertRaises(SystemExit) as exited:
+                main(api_socket=os.path.join(temp_dir, "missing.sock"))
+
+        self.assertEqual(exited.exception.code, 0)
+        self.assertEqual(json.loads(stdout.getvalue())["outcome"], "ok")
+        resolve.assert_called_once()
+        api_open.assert_not_called()
 
     def test_unix_socket_failures_are_structured_and_never_fall_back_to_tcp(
         self,

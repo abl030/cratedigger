@@ -26,29 +26,27 @@ let
   # the fixed plugin list with musicbrainz present (zero-candidates guard),
   # public-MB defaults and the explicit included-token shape.
   pyWithYaml = pkgs.python3.withPackages (ps: [ ps.pyyaml ]);
-  publicTlsCertificateText = ''
-    -----BEGIN CERTIFICATE-----
-    MIIBojCCAUegAwIBAgIUWTppiZzhKayj0JQqRwVqqu5q/fgwCgYIKoZIzj0EAwIw
-    GDEWMBQGA1UEAwwNbXVzaWMudm0udGVzdDAgFw0yNjA3MjgxNDI0MjVaGA8yMTI2
-    MDcwNDE0MjQyNVowGDEWMBQGA1UEAwwNbXVzaWMudm0udGVzdDBZMBMGByqGSM49
-    AgEGCCqGSM49AwEHA0IABF3yVQvMewXvlk7lhfV6vr8LSKC1W2YInYY5inIH1sUu
-    p2UVM/ToOPnyzRLkun/3L2pk/XeZMri8kZEat7BthK6jbTBrMB0GA1UdDgQWBBRK
-    91ZSJFVOJEjSBnYAjp0TGk3oAjAfBgNVHSMEGDAWgBRK91ZSJFVOJEjSBnYAjp0T
-    Gk3oAjAPBgNVHRMBAf8EBTADAQH/MBgGA1UdEQQRMA+CDW11c2ljLnZtLnRlc3Qw
-    CgYIKoZIzj0EAwIDSQAwRgIhANwinehxYN2uR0Kjo9nLpBO4NPM/wBF3kjv4aLGm
-    mMzxAiEAolZjeWZAgVJKkAZ+EjoGyKvjqcCJJnaKpv2yarsQMT0=
-    -----END CERTIFICATE-----
+  # Generate a throwaway VM-only TLS pair in the build fixture. The private
+  # key remains outside tracked source while certificateFiles installs the
+  # generated public certificate into the guest trust store, so every HTTPS
+  # probe still exercises certificate validation.
+  publicTlsFixture = pkgs.runCommand "cratedigger-module-vm-tls" {} ''
+    mkdir -p "$out"
+    ${pkgs.openssl}/bin/openssl req \
+      -x509 \
+      -newkey ec \
+      -pkeyopt ec_paramgen_curve:P-256 \
+      -nodes \
+      -sha256 \
+      -days 36500 \
+      -subj /CN=music.vm.test \
+      -addext subjectAltName=DNS:music.vm.test \
+      -addext basicConstraints=critical,CA:TRUE \
+      -keyout "$out/private-key.pem" \
+      -out "$out/certificate.pem"
   '';
-  publicTlsCertificate =
-    pkgs.writeText "cratedigger-module-vm-public.crt"
-      publicTlsCertificateText;
-  publicTlsPrivateKey = pkgs.writeText "cratedigger-module-vm-public.key" ''
-    -----BEGIN PRIVATE KEY-----
-    MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcyiXXt35KxE1uMho
-    9gMyIPuC8xqKegFmY3zmv4aqaWShRANCAARd8lULzHsF75ZO5YX1er6/C0igtVtm
-    CJ2GOYpyB9bFLqdlFTP06Dj58s0S5Lp/9y9qZP13mTK4vJGRGrewbYSu
-    -----END PRIVATE KEY-----
-  '';
+  publicTlsCertificate = "${publicTlsFixture}/certificate.pem";
+  publicTlsPrivateKey = "${publicTlsFixture}/private-key.pem";
   checkRenderedBeetsConfig = pkgs.writeText "check-rendered-beets-config.py" ''
     import yaml
 
@@ -156,7 +154,6 @@ let
     import os
     import socket
     import socketserver
-    import time
 
     RECORD_PATH = "/var/lib/cratedigger/test-header-recorder.jsonl"
 
@@ -193,8 +190,6 @@ let
                     json.dumps(row, separators=(",", ":"), sort_keys=True)
                     + "\n"
                 )
-            if self.path == "/recorder/slow":
-                time.sleep(2)
             self.send_response(204 if self.path == "/healthz" else 200)
             self.send_header("Content-Type", "text/plain")
             self.send_header("Content-Length", "0")
@@ -543,7 +538,7 @@ pkgs.testers.nixosTest {
       "music.vm.test"
       "unrelated.vm.test"
     ];
-    security.pki.certificates = [publicTlsCertificateText];
+    security.pki.certificateFiles = [publicTlsCertificate];
 
     # Stub beets library DB so cratedigger-web can open it read-only.
     environment.etc."cratedigger/beets.db" = {
@@ -620,10 +615,6 @@ pkgs.testers.nixosTest {
     # the canonical hostname and forwards only to the module's loopback
     # gateway with the public scheme/port envelope. A separate default vhost
     # rejects non-canonical Host values before they can be canonicalised.
-    # Make inherited timeouts deliberately too short. Both Cratedigger proxy
-    # hops must override this with their 300s resolver envelope; the 2s
-    # recorder probe below fault-qualifies either missing override quickly.
-    services.nginx.appendHttpConfig = "proxy_read_timeout 1s;";
     services.nginx.virtualHosts = {
       cratedigger-test-public = {
         serverName = "music.vm.test";
@@ -644,7 +635,6 @@ pkgs.testers.nixosTest {
         sslCertificateKey = publicTlsPrivateKey;
         locations."/".extraConfig = ''
           proxy_http_version 1.1;
-          proxy_read_timeout 300s;
           proxy_pass http://127.0.0.1:18086;
           proxy_set_header Host music.vm.test;
           proxy_set_header X-Forwarded-Proto https;
@@ -1400,8 +1390,6 @@ pkgs.testers.nixosTest {
         "/tmp/nginx-public-proxy; "
         "grep -F 'proxy_set_header X-Forwarded-Port 443' "
         "/tmp/nginx-public-proxy; "
-        "test \"$(grep -Fc 'proxy_read_timeout 300s' "
-        "/tmp/nginx-public-proxy)\" -ge 2; "
         "grep -F 'auth_basic off' /tmp/nginx-public-proxy; "
         "grep -F 'proxy_pass_request_body off' /tmp/nginx-public-proxy; "
         "grep -F 'proxy_set_header Connection close' /tmp/nginx-public-proxy"
@@ -1796,6 +1784,82 @@ pkgs.testers.nixosTest {
             timeout=10,
         )
 
+    # Fault-qualify the effective-identity ExecStartPre on the real shared
+    # nginx unit. A downstream runtime override adds numeric GID 0 without
+    # changing the configured services.nginx worker name; the unprivileged
+    # preflight must reject it before gateway readiness is published. Removing
+    # the drop-in restores the ordinary NixOS service, unrelated virtual host,
+    # and reload-only worker replacement behavior.
+    identity_fault_web = _service_runtime_identity(
+        "cratedigger-web.service"
+    )
+    machine.succeed("systemctl stop nginx.service")
+    machine.succeed(
+        "install -d -m 0755 /run/systemd/system/nginx.service.d; "
+        "printf '%s\\n' "
+        "'[Service]' "
+        "'SupplementaryGroups=' "
+        "'SupplementaryGroups=0' "
+        "'Restart=no' "
+        "> /run/systemd/system/nginx.service.d/"
+        "cratedigger-forbidden-identity.conf; "
+        "systemctl daemon-reload"
+    )
+    forbidden_status, forbidden_output = machine.execute(
+        "${pkgs.coreutils}/bin/timeout 30s "
+        "systemctl start nginx.service"
+    )
+    if forbidden_status == 0:
+        print(forbidden_output)
+        _print_gateway_diagnostics("forbidden nginx effective identity")
+    assert forbidden_status != 0, forbidden_output
+    machine.succeed("systemctl is-failed --quiet nginx.service")
+    machine.fail(
+        "find /run/cratedigger-web -maxdepth 1 -type f "
+        "-name 'gateway-policy-*' -print -quit | grep -q ."
+    )
+    machine.succeed(
+        "journalctl -b -u nginx.service --no-pager "
+        "| grep -F 'effective nginx group set contains forbidden root GID 0'"
+    )
+    assert _service_runtime_identity(
+        "cratedigger-web.service"
+    ) == identity_fault_web
+    machine.succeed(
+        "rm /run/systemd/system/nginx.service.d/"
+        "cratedigger-forbidden-identity.conf; "
+        "systemctl daemon-reload; "
+        "systemctl reset-failed nginx.service; "
+        "systemctl start nginx.service"
+    )
+    machine.wait_for_unit("nginx.service")
+    machine.wait_for_open_port(18086)
+    machine.succeed(
+        "test \"$(systemctl show nginx.service "
+        "--property=Restart --value)\" = always"
+    )
+    _assert_basic_auth_matrix()
+    machine.succeed(
+        "test \"$(curl --max-time 5 -sS -o /dev/null "
+        "-w '%{http_code}' -H 'Host: unrelated.vm.test' "
+        "http://127.0.0.1:18087/)\" = 204"
+    )
+    restored_nginx_identity = _service_runtime_identity("nginx.service")
+    restored_workers = _nginx_worker_pids()
+    _reload_nginx(True, "reload after forbidden nginx identity restoration")
+    assert _service_runtime_identity(
+        "nginx.service"
+    ) == restored_nginx_identity
+    assert _service_runtime_identity(
+        "cratedigger-web.service"
+    ) == identity_fault_web
+    _wait_for_nginx_workers_changed(restored_workers)
+    machine.succeed(
+        "test \"$(curl --max-time 5 -sS -o /dev/null "
+        "-w '%{http_code}' -H 'Host: unrelated.vm.test' "
+        "http://127.0.0.1:18087/)\" = 204"
+    )
+
     # The empty-file branch fails a real reload closed, then a restored
     # credential can publish readiness only after nginx has accepted the new
     # policy.
@@ -1958,14 +2022,6 @@ pkgs.testers.nixosTest {
         "| grep -F '${headerRecorder}'"
     )
 
-    # The test http block defaults proxy reads to 1s. This 2s backend response
-    # succeeds only when both the public TLS proxy and module gateway carry
-    # their explicit 300s resolver envelope.
-    machine.succeed(
-        "test \"$(curl --max-time 5 -sS -o /dev/null -w '%{http_code}' "
-        "--user test-operator:test-password -H 'Host: music.vm.test' "
-        "https://music.vm.test:18443/recorder/slow)\" = 200"
-    )
     machine.succeed(
         "rm -f /var/lib/cratedigger/test-header-recorder.jsonl"
     )

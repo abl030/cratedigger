@@ -13,11 +13,8 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from requests.adapters import HTTPAdapter
-
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from lib import youtube_album_limits as youtube_limits
 from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
 from web.request_security import BROWSER_CHANNEL, CHANNEL_HEADER
 
@@ -48,72 +45,7 @@ class TestYoutubeClientDefaultTimeoutSession(unittest.TestCase):
             send.assert_called_once()
             self.assertIs(send.call_args.args[0], session)
             self.assertEqual(send.call_args.args[1].method, "GET")
-            self.assertEqual(
-                send.call_args.kwargs["timeout"],
-                (
-                    youtube_limits.YOUTUBE_HTTP_CONNECT_TIMEOUT_SECONDS,
-                    youtube_limits.YOUTUBE_HTTP_READ_TIMEOUT_SECONDS,
-                ),
-            )
-
-    def test_explicit_none_timeout_is_replaced_with_finite_default(self) -> None:
-        session = self._session()
-        with patch("requests.Session.send", autospec=True) as send:
-            session.request(
-                "GET",
-                "https://example.invalid",
-                timeout=None,
-            )
-        self.assertEqual(
-            send.call_args.kwargs["timeout"],
-            (
-                youtube_limits.YOUTUBE_HTTP_CONNECT_TIMEOUT_SECONDS,
-                youtube_limits.YOUTUBE_HTTP_READ_TIMEOUT_SECONDS,
-            ),
-        )
-
-    def test_retry_delays_are_bounded(self) -> None:
-        session = self._session()
-        adapter = session.adapters["https://"]
-        self.assertIsInstance(adapter, HTTPAdapter)
-        assert isinstance(adapter, HTTPAdapter)
-        retry = adapter.max_retries
-        self.assertEqual(retry.total, youtube_limits.YOUTUBE_HTTP_RETRY_TOTAL)
-        self.assertEqual(
-            retry.backoff_max,
-            youtube_limits.YOUTUBE_HTTP_RETRY_DELAY_CAP_SECONDS,
-        )
-        self.assertEqual(
-            retry.retry_after_max,
-            youtube_limits.YOUTUBE_HTTP_RETRY_DELAY_CAP_SECONDS,
-        )
-
-    def test_shared_resolver_operational_budgets_are_exact(self) -> None:
-        self.assertEqual(
-            youtube_limits.YOUTUBE_RESOLVER_DEADLINE_SECONDS,
-            60.0,
-        )
-        self.assertEqual(
-            youtube_limits.YOUTUBE_HTTP_CONNECT_TIMEOUT_SECONDS,
-            5.0,
-        )
-        self.assertEqual(
-            youtube_limits.YOUTUBE_HTTP_READ_TIMEOUT_SECONDS,
-            30.0,
-        )
-        self.assertEqual(youtube_limits.YOUTUBE_HTTP_RETRY_TOTAL, 3)
-        self.assertEqual(
-            youtube_limits.YOUTUBE_HTTP_RETRY_DELAY_CAP_SECONDS,
-            10.0,
-        )
-        self.assertEqual(
-            youtube_limits.YOUTUBE_HTTP_MAX_CALL_SECONDS,
-            170.0,
-        )
-        self.assertEqual(
-            youtube_limits.YOUTUBE_RESOLVER_RESPONSE_BUDGET_SECONDS,
-            240.0,
-        )
+            self.assertEqual(send.call_args.kwargs["timeout"], (5, 30))
 
     def test_non_ascii_method_preserves_requests_str_and_bytes_behavior(self) -> None:
         session = self._session()

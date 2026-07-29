@@ -292,10 +292,6 @@
     };
   webProxyRequestConfig = ''
     proxy_http_version 1.1;
-    # POST /api/youtube-album has a configured 240s response envelope. Keep
-    # the authenticated browser proxy above that bound so nginx cannot return
-    # 504 while the resolver continues and later persists behind the client.
-    proxy_read_timeout 300s;
     proxy_pass_request_headers off;
     proxy_set_header Host ${webHostName};
     proxy_set_header Connection "";
@@ -468,6 +464,81 @@
         exit 1
       fi
     '';
+  webNginxEffectiveIdentityScript = pkgs.writeShellScript
+    "cratedigger-web-nginx-effective-identity"
+    ''
+      set -euo pipefail
+      set -f
+
+      # This command deliberately has no systemd "+" privilege prefix. It
+      # therefore observes the final User/Group/SupplementaryGroups merged
+      # onto nginx.service, including numeric group IDs and downstream
+      # overrides that cannot be reconstructed safely from Nix names alone.
+      expected_user=${lib.escapeShellArg config.services.nginx.user}
+      expected_group=${lib.escapeShellArg config.services.nginx.group}
+      access_group=${lib.escapeShellArg cfg.web.accessGroup}
+      forbidden_groups=(
+        ${lib.concatMapStringsSep "\n        " lib.escapeShellArg webForbiddenAuthorityGroups}
+      )
+
+      identity_fail() {
+        echo "Cratedigger nginx effective identity validation failed: $*" >&2
+        exit 1
+      }
+
+      expected_passwd="$(
+        ${pkgs.getent}/bin/getent passwd "$expected_user"
+      )" || identity_fail "services.nginx.user does not resolve"
+      IFS=: read -r _ _ expected_uid _ _ _ _ <<< "$expected_passwd"
+      expected_group_record="$(
+        ${pkgs.getent}/bin/getent group "$expected_group"
+      )" || identity_fail "services.nginx.group does not resolve"
+      IFS=: read -r _ _ expected_gid _ <<< "$expected_group_record"
+      access_group_record="$(
+        ${pkgs.getent}/bin/getent group "$access_group"
+      )" || identity_fail "services.cratedigger.web.accessGroup does not resolve"
+      IFS=: read -r _ _ access_gid _ <<< "$access_group_record"
+
+      effective_uid="$(${pkgs.coreutils}/bin/id -u)"
+      effective_gid="$(${pkgs.coreutils}/bin/id -g)"
+      effective_gids="$(${pkgs.coreutils}/bin/id -G)"
+      ${pkgs.coreutils}/bin/test "$effective_uid" != 0 \
+        || identity_fail "effective nginx UID must not be 0"
+      ${pkgs.coreutils}/bin/test "$effective_gid" != 0 \
+        || identity_fail "effective nginx primary GID must not be 0"
+      ${pkgs.coreutils}/bin/test "$effective_uid" = "$expected_uid" \
+        || identity_fail \
+          "effective UID differs from services.nginx.user"
+      ${pkgs.coreutils}/bin/test "$effective_gid" = "$expected_gid" \
+        || identity_fail \
+          "effective primary GID differs from services.nginx.group"
+
+      has_access_group=false
+      for member_gid in $effective_gids; do
+        if ${pkgs.coreutils}/bin/test "$member_gid" = "$access_gid"; then
+          has_access_group=true
+          break
+        fi
+      done
+      ${pkgs.coreutils}/bin/test "$has_access_group" = true \
+        || identity_fail \
+          "effective nginx group set lacks required accessGroup GID $access_gid"
+
+      for forbidden_group in "''${forbidden_groups[@]}"; do
+        if forbidden_group_record="$(
+          ${pkgs.getent}/bin/getent group "$forbidden_group"
+        )"; then
+          IFS=: read -r _ _ forbidden_gid _ <<< "$forbidden_group_record"
+          for member_gid in $effective_gids; do
+            if ${pkgs.coreutils}/bin/test \
+              "$member_gid" = "$forbidden_gid"; then
+              identity_fail \
+                "effective nginx group set contains forbidden $forbidden_group GID $forbidden_gid"
+            fi
+          done
+        fi
+      done
+    '';
   webGatewayClearMarkers = ''
     ${pkgs.findutils}/bin/find \
       ${lib.escapeShellArg webRuntimeDirectory} \
@@ -476,6 +547,18 @@
       -name ${lib.escapeShellArg "gateway-policy-*"} \
       -delete
   '';
+  webGatewayStartClearScript = pkgs.writeShellScript
+    "cratedigger-web-gateway-clear-start"
+    ''
+      set -euo pipefail
+
+      # Clear readiness as root before the unprivileged effective-identity
+      # preflight. If that check fails, no stale marker may survive and imply
+      # that the rejected nginx identity is ready to serve the gateway.
+      ${webGatewayClearMarkers}
+      ${pkgs.coreutils}/bin/rm -f -- \
+        ${lib.escapeShellArg webGatewayReloadReceipt}
+    '';
   webGatewayReadPolicy = ''
     gateway_fail() {
       echo "Cratedigger web gateway policy validation failed: $*" >&2
@@ -709,6 +792,10 @@
     config.users.users.${config.services.nginx.user}.extraGroups or [];
   webNginxServiceSupplementaryGroups =
     config.systemd.services.nginx.serviceConfig.SupplementaryGroups or [];
+  webNginxServiceUser =
+    config.systemd.services.nginx.serviceConfig.User or null;
+  webNginxServiceGroup =
+    config.systemd.services.nginx.serviceConfig.Group or null;
   webApplicationServiceSupplementaryGroups =
     config.systemd.services.cratedigger-web.serviceConfig.SupplementaryGroups
       or [];
@@ -731,7 +818,7 @@
   # Known high-authority groups must never double as the web socket boundary.
   # Arbitrary group purpose cannot be inferred from its name, so consumers
   # still own keeping any other configured accessGroup dedicated.
-  webForbiddenAuthorityGroups = lib.unique (
+  webForbiddenAuthorityGroupKeys = lib.unique (
     [
       cfg.group
       "root"
@@ -743,11 +830,70 @@
       (cfg.beets.package.discogsOperatorGroup != null)
       cfg.beets.package.discogsOperatorGroup
   );
+  webForbiddenAuthorityGroups = lib.unique (
+    map
+      (
+        group:
+          let
+            groupConfig = config.users.groups.${group} or {};
+          in
+            groupConfig.name or group
+      )
+      webForbiddenAuthorityGroupKeys
+  );
+  webForbiddenAuthorityGroupIds = lib.unique (
+    lib.concatMap
+      (
+        group:
+          let
+            groupConfig = config.users.groups.${group} or {};
+            groupGid = groupConfig.gid or null;
+          in
+            optional (groupGid != null) (toString groupGid)
+      )
+      webForbiddenAuthorityGroupKeys
+  );
   webNginxForbiddenGroupOverlap = lib.intersectLists
-    webForbiddenAuthorityGroups
+    (webForbiddenAuthorityGroups ++ webForbiddenAuthorityGroupIds)
     webNginxDeclaredSupplementaryGroups;
+  webAccessGroupConfig = config.users.groups.${cfg.web.accessGroup} or {};
+  webAccessGroupGid = webAccessGroupConfig.gid or null;
+  webAccessGroupNamesAndIds =
+    [
+      cfg.web.accessGroup
+      (webAccessGroupConfig.name or cfg.web.accessGroup)
+    ]
+    ++ optional
+      (webAccessGroupGid != null)
+      (toString webAccessGroupGid);
+  webNginxHasAccessGroup =
+    lib.intersectLists
+      (lib.unique webAccessGroupNamesAndIds)
+      webNginxDeclaredSupplementaryGroups
+    != [];
+  webNginxServiceIdentityIsModuleOwned =
+    webNginxServiceUser == config.services.nginx.user
+    && webNginxServiceGroup == config.services.nginx.group;
+  webNginxConfiguredUser =
+    config.users.users.${config.services.nginx.user} or {};
+  webNginxConfiguredGroup =
+    config.users.groups.${config.services.nginx.group} or {};
+  webNginxConfiguredUid = webNginxConfiguredUser.uid or null;
+  webNginxConfiguredPrimaryGid = webNginxConfiguredGroup.gid or null;
+  webNginxUserIsSafe =
+    config.services.nginx.user != "root"
+    && (
+      webNginxConfiguredUid == null
+      || webNginxConfiguredUid != 0
+    );
   webNginxPrimaryGroupIsSafe =
-    !lib.elem config.services.nginx.group webForbiddenAuthorityGroups;
+    !lib.elem config.services.nginx.group webForbiddenAuthorityGroups
+    && (
+      webNginxConfiguredPrimaryGid == null
+      || !lib.elem
+        (toString webNginxConfiguredPrimaryGid)
+        webForbiddenAuthorityGroupIds
+    );
   webAccessGroupIsSafe =
     cfg.web.accessGroup != config.services.nginx.group
     && !lib.elem cfg.web.accessGroup webForbiddenAuthorityGroups;
@@ -2084,12 +2230,26 @@ in {
         message = "services.cratedigger.web requires distinct application and nginx service users.";
       }
       {
+        assertion =
+          !cfg.web.enable
+          || webNginxServiceIdentityIsModuleOwned;
+        message = "services.cratedigger.web requires the final nginx.service User and Group to remain services.nginx.user and services.nginx.group.";
+      }
+      {
+        assertion = !cfg.web.enable || webNginxUserIsSafe;
+        message = "services.cratedigger.web requires the nginx worker user to resolve away from UID 0.";
+      }
+      {
         assertion = !cfg.web.enable || webNginxPrimaryGroupIsSafe;
-        message = "services.cratedigger.web requires nginx's primary group to differ from Cratedigger secret/media authority groups.";
+        message = "services.cratedigger.web requires nginx's primary group and resolved GID to differ from Cratedigger secret/media authority groups.";
       }
       {
         assertion = !cfg.web.enable || webNginxForbiddenGroupOverlap == [];
         message = "services.cratedigger.web forbids nginx account/service membership in root, wheel, cfg.group, discogsOperatorGroup, cratedigger-ops, or users.";
+      }
+      {
+        assertion = !cfg.web.enable || webNginxHasAccessGroup;
+        message = "services.cratedigger.web requires nginx account/service membership in web.accessGroup so the gateway can reach its Unix socket.";
       }
       {
         assertion = !cfg.web.enable || !webBasicEnabled || webBasicAuthPathIsValid;
@@ -2302,7 +2462,11 @@ in {
       serviceConfig = lib.mkMerge [
         {
           SupplementaryGroups = [cfg.web.accessGroup];
-          ExecStartPre = lib.mkBefore ["+${webGatewayStartScript}"];
+          ExecStartPre = lib.mkBefore [
+            "+${webGatewayStartClearScript}"
+            webNginxEffectiveIdentityScript
+            "+${webGatewayStartScript}"
+          ];
         }
         {
           ExecReload = lib.mkBefore [

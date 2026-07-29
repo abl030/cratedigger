@@ -1,9 +1,8 @@
 """HTTP-backed CLI adapters for canonical web mutation routes (CD-QUAL-01).
 
 These commands deliberately have no database or mirror setup path: the web
-route remains the one execution authority. The decoded relay centralizes
-transport and protocol failures while allowing a command to retain its stable
-renderer and explicit outcome-to-exit contract.
+route remains the one execution authority and this module only preserves its
+JSON response plus the CLI's stable exit-code convention.
 """
 
 from __future__ import annotations
@@ -15,7 +14,6 @@ import socket
 import sys
 import urllib.error
 import urllib.request
-from collections.abc import Callable
 from dataclasses import dataclass
 
 import msgspec
@@ -170,13 +168,10 @@ def _post(
         return None
 
 
-def _relay_decoded[T](
+def _relay(
     endpoint: ApiEndpoint,
     mutation: _ApiMutation,
     *,
-    decoder: Callable[[int, bytes], T],
-    renderer: Callable[[T], str],
-    exit_code_for: Callable[[int, T], int | None] | None = None,
     timeout_seconds: float = _TIMEOUT_SECONDS,
 ) -> int:
     result = _post(
@@ -187,41 +182,11 @@ def _relay_decoded[T](
     if result is None:
         return 5
     try:
-        value = decoder(result.status, result.body)
+        msgspec.json.decode(result.body, type=dict[str, object])
     except (msgspec.DecodeError, msgspec.ValidationError):
-        return _failure(
-            "api_protocol_error",
-            "API response did not match the expected JSON schema",
-        )
-    print(renderer(value))
-    if exit_code_for is not None:
-        explicit_exit_code = exit_code_for(result.status, value)
-        if explicit_exit_code is not None:
-            return explicit_exit_code
+        return _failure("api_protocol_error", "API response was not a JSON object")
+    print(result.body.decode("utf-8"))
     return _exit_code(result.status)
-
-
-def _decode_json_object(_status: int, body: bytes) -> dict[str, object]:
-    return msgspec.json.decode(body, type=dict[str, object])
-
-
-def _render_json_object(value: dict[str, object]) -> str:
-    return msgspec.json.encode(value).decode()
-
-
-def _relay(
-    endpoint: ApiEndpoint,
-    mutation: _ApiMutation,
-    *,
-    timeout_seconds: float = _TIMEOUT_SECONDS,
-) -> int:
-    return _relay_decoded(
-        endpoint,
-        mutation,
-        decoder=_decode_json_object,
-        renderer=_render_json_object,
-        timeout_seconds=timeout_seconds,
-    )
 
 
 def cmd_pipeline_delete(_db: object, args: argparse.Namespace) -> int:

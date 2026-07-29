@@ -97,13 +97,12 @@ def main(*, api_socket: str | None = None):
         "upgrade": cmd_upgrade,
         "wrong-match-converge": cmd_wrong_match_converge,
         "resolve-rg": cmd_resolve_rg,
-        "youtube-album": cmd_youtube_album,
     }
     if args.command in api_commands:
         sys.exit(api_commands[args.command](None, args))
 
     # Mirror origins for every web.mb / web.discogs consumer in this
-    # process (add --discogs, distance, Replace, field
+    # process (add --discogs, youtube-album, distance, Replace, field
     # resolution). Quarantine is filesystem/DB-only and must not fail on
     # unrelated mirror configuration before its own unavailable mapping can
     # run. ``routes`` already returned above for the same zero-init reason.
@@ -144,6 +143,7 @@ def main(*, api_socket: str | None = None):
         "beets-distance": cmd_beets_distance,
         "ban-source": cmd_ban_source,
         "library-delete": cmd_library_delete,
+        "youtube-album": cmd_youtube_album,
         "youtube-rescue": cmd_youtube_rescue,
         "long-tail": cmd_long_tail,
     }

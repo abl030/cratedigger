@@ -1,0 +1,1 @@
+- contentinfo [ref=e22] [box=16,59400,608,34]: Authentication is disabled for this Cratedigger instance.

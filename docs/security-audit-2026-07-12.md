@@ -174,7 +174,9 @@ claim that doc2 currently runs this chain:
   over the Unix socket with web access group authority and no Basic credential,
   TCP override, direct-DB fallback, or duplicate service path. Other CLI
   families retain their PostgreSQL, filesystem, Beets, and secret-specific
-  authority boundaries.
+  authority boundaries. In particular, `youtube-album` remains a direct
+  adapter over the shared cache-writing resolver, so it uses database/mirror
+  authority and still works when the optional web service is disabled.
 
 **Why this is not closed yet:** U6B must still produce the signed downstream
 edge-close/cutover and pin receipts, exact active source, fresh web

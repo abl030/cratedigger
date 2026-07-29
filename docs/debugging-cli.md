@@ -188,9 +188,11 @@ inside socket authorization, never credentials.
 - `pipeline-cli wrong-match-delete-group` — Delete visible Wrong Matches folders for one request.
 - `pipeline-cli wrong-match-triage` — Converge the full Wrong Matches queue using persisted evidence.
 - `pipeline-cli youtube-album` — Resolve a release to the YouTube Music album
-  matrix through the canonical cache-writing web route; accepts
+  matrix directly through the shared resolver service; accepts
   `<identifier> [--refresh] [--json]`, with human-readable output by default
-  and the full route response available as JSON.
+  and the full result available as JSON. It uses the configured database and
+  mirrors and remains available when `web.enable = false`; it does not use the
+  optional web Unix socket.
 - `pipeline-cli youtube-rescue` — Submit a YouTube Music rescue ingest.
 - `pipeline-cli upgrade` — Queue an exact release upgrade through its canonical web route.
 

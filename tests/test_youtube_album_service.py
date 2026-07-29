@@ -33,8 +33,6 @@ from lib.youtube_album_service import (
     ResolvedDistance,
     ResolvedYoutubeRelease,
     YoutubeAlbumResolverResult,
-    _cached_get_album,
-    _cached_search,
     resolve_youtube_album,
 )
 from tests.fakes import FakePipelineDB, FakeYTMusic
@@ -1801,304 +1799,30 @@ class TestSafeFloat(unittest.TestCase):
         self.assertTrue(math.isinf(_safe_float(float("inf"), 0.0)))
 
 
-class _DeadlineClock:
-    """Deterministic monotonic clock advanced only by fake collaborators."""
-
-    def __init__(self) -> None:
-        self.now = 0.0
-
-    def __call__(self) -> float:
-        return self.now
-
-    def advance(self, seconds: float) -> None:
-        self.now += seconds
-
-
-class _DeadlineCache:
-    """Redis-shaped fake whose operations can cross the resolver deadline."""
-
-    def __init__(
-        self,
-        clock: _DeadlineClock,
-        *,
-        get_advance_seconds: float = 0.0,
-        set_advance_seconds: float = 0.0,
-    ) -> None:
-        self._clock = clock
-        self._get_advance_seconds = get_advance_seconds
-        self._set_advance_seconds = set_advance_seconds
-        self.get_calls: list[str] = []
-        self.set_calls: list[str] = []
-
-    def get(self, key: str) -> bytes | None:
-        self.get_calls.append(key)
-        self._clock.advance(self._get_advance_seconds)
-        return None
-
-    def set(self, key: str, value: bytes, ttl_seconds: int) -> None:
-        del value, ttl_seconds
-        self.set_calls.append(key)
-        self._clock.advance(self._set_advance_seconds)
-
-
-class _DeadlineYTMusic(FakeYTMusic):
-    """YT fake that advances the deterministic clock during search."""
-
-    def __init__(
-        self,
-        clock: _DeadlineClock,
-        *,
-        search_advance_seconds: float,
-    ) -> None:
-        super().__init__()
-        self._clock = clock
-        self._search_advance_seconds = search_advance_seconds
-
-    def search(
-        self,
-        query: str,
-        filter: str | None = None,
-        scope: str | None = None,
-        limit: int = 20,
-        ignore_spelling: bool = False,
-    ) -> list[dict[str, object]]:
-        self._clock.advance(self._search_advance_seconds)
-        return super().search(
-            query,
-            filter=filter,
-            scope=scope,
-            limit=limit,
-            ignore_spelling=ignore_spelling,
-        )
-
-
-class _WriteTrackingPipelineDB(FakePipelineDB):
-    """Fake DB that distinguishes durable resolver writes from seeded state."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.youtube_mapping_writes: list[
-            tuple[str, str, list[PersistedYoutubeRow]]
-        ] = []
-
-    def upsert_youtube_album_mapping(
-        self,
-        release_group_identifier: str,
-        source: str,
-        rows: list[PersistedYoutubeRow],
-    ) -> None:
-        self.youtube_mapping_writes.append(
-            (release_group_identifier, source, list(rows))
-        )
-        super().upsert_youtube_album_mapping(
-            release_group_identifier,
-            source,
-            rows,
-        )
-
-
-def _seed_complete_youtube_matrix(
-    pdb: FakePipelineDB,
-    *,
-    rg: str = MB_RG,
-    browse_id: str = "MPREb-cached-complete",
-) -> list[dict[str, object]]:
-    """Seed one complete durable row and return its exact read projection."""
-    pdb.seed_youtube_album_mapping(rg, "mb", [{
-        "yt_browse_id": browse_id,
-        "yt_audio_playlist_id": "OLAK5uy-cached-complete",
-        "yt_url": (
-            "https://music.youtube.com/playlist"
-            "?list=OLAK5uy-cached-complete"
-        ),
-        "yt_year": 1996,
-        "yt_track_count": 2,
-        "album_title": "Dr. Octagonecologyst",
-        "album_artist": "Dr. Octagon",
-        "yt_tracks": [
-            {
-                "title": "Intro",
-                "artists": [{"name": "Dr. Octagon"}],
-                "length_seconds": 60.0,
-                "track_number": 1,
-                "disc_number": 1,
-                "video_id": "cached-video-1",
-            },
-            {
-                "title": "3000",
-                "artists": [{"name": "Dr. Octagon"}],
-                "length_seconds": 180.0,
-                "track_number": 2,
-                "disc_number": 1,
-                "video_id": "cached-video-2",
-            },
-        ],
-        "distances": [{
-            "mbid": MB_REL_A,
-            "outcome": "ok",
-            "distance": 0.05,
-            "components": {"tracks": 0.05},
-            "matched_tracks": 2,
-            "total_local_tracks": 2,
-            "total_mb_tracks": 2,
-            "extra_local_tracks": 0,
-            "extra_mb_tracks": 0,
-            "error_message": None,
-        }],
-    }])
-    seeded = pdb.get_youtube_album_mapping(rg, "mb")
-    assert seeded is not None
-    return seeded
-
-
 # ---------------------------------------------------------------------------
-# Cooperative resolver deadline
+# Scoring-loop deadline (round 2 P1-3)
 # ---------------------------------------------------------------------------
 
 
-class TestResolverDeadline(unittest.TestCase):
-    """The resolver stops launching work after an observed deadline breach."""
-
-    def _lookups_with_slow_sibling(
-        self,
-        clock: _DeadlineClock,
-        *,
-        sibling_seconds: float,
-    ) -> tuple[Callable[[str], dict | None], _LookupSpy]:
-        def _release_lookup(identifier: str) -> dict | None:
-            if identifier == MB_RG:
-                return None
-            clock.advance(sibling_seconds)
-            return _ok_mb_release(mbid=identifier, rg=MB_RG)
-
-        group_lookup = _LookupSpy({
-            MB_RG: _ok_mb_rg_releases((MB_REL_A, 1996)),
-        })
-        return _release_lookup, group_lookup
-
-    def test_deadline_breach_after_redis_get_prevents_yt_search(self) -> None:
-        clock = _DeadlineClock()
-        release_lookup, group_lookup = self._lookups_with_slow_sibling(
-            clock,
-            sibling_seconds=59.5,
-        )
-        cache = _DeadlineCache(clock, get_advance_seconds=1.0)
-        yt = FakeYTMusic()
-        yt.set_search("Dr. Octagon Dr. Octagonecologyst", [])
-        pdb = _WriteTrackingPipelineDB()
-
-        result = resolve_youtube_album(
-            MB_RG,
-            pdb=pdb,
-            mb_get_release=release_lookup,
-            mb_get_release_group_releases=group_lookup,
-            discogs_get_release=_empty_lookup(),
-            discogs_get_master_releases=_empty_lookup(),
-            yt_client=yt,
-            distance_fn=_canned_distance(),
-            cache=cache,
-            deadline_seconds=60,
-            monotonic_fn=clock,
-        )
-
-        self.assertEqual(result.outcome, "unresolved_timeout")
-        self.assertEqual(len(cache.get_calls), 1)
-        self.assertEqual(yt.search_calls, [])
-        self.assertEqual(cache.set_calls, [])
-        self.assertEqual(pdb.youtube_mapping_writes, [])
-
-    def test_deadline_breach_after_yt_search_prevents_redis_set(self) -> None:
-        clock = _DeadlineClock()
-        release_lookup, group_lookup = self._lookups_with_slow_sibling(
-            clock,
-            sibling_seconds=59.5,
-        )
-        cache = _DeadlineCache(clock)
-        yt = _DeadlineYTMusic(clock, search_advance_seconds=1.0)
-        yt.set_search("Dr. Octagon Dr. Octagonecologyst", [])
-        pdb = _WriteTrackingPipelineDB()
-
-        result = resolve_youtube_album(
-            MB_RG,
-            pdb=pdb,
-            mb_get_release=release_lookup,
-            mb_get_release_group_releases=group_lookup,
-            discogs_get_release=_empty_lookup(),
-            discogs_get_master_releases=_empty_lookup(),
-            yt_client=yt,
-            distance_fn=_canned_distance(),
-            cache=cache,
-            deadline_seconds=60,
-            monotonic_fn=clock,
-        )
-
-        self.assertEqual(result.outcome, "unresolved_timeout")
-        self.assertEqual(len(cache.get_calls), 1)
-        self.assertEqual(len(yt.search_calls), 1)
-        self.assertEqual(cache.set_calls, [])
-        self.assertEqual(pdb.youtube_mapping_writes, [])
-
-    def test_five_slow_siblings_stop_after_two_without_yt_or_persistence(
-        self,
-    ) -> None:
-        """Five 55s metadata calls previously ran for 275s before any check."""
-        sibling_ids = [
-            MB_REL_A,
-            MB_REL_B,
-            MB_REL_C,
-            "dddddddd-dddd-dddd-dddd-dddddddddddd",
-            "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
-        ]
-        group_lookup = _LookupSpy({
-            MB_RG: _ok_mb_rg_releases(
-                *((mbid, 1996 + index) for index, mbid in enumerate(sibling_ids))
-            ),
-        })
-        clock = _DeadlineClock()
-        sibling_calls: list[str] = []
-
-        def _slow_release_lookup(identifier: str) -> dict | None:
-            if identifier == MB_RG:
-                return None
-            sibling_calls.append(identifier)
-            clock.advance(55.0)
-            return _ok_mb_release(mbid=identifier, rg=MB_RG)
-
-        pdb = _WriteTrackingPipelineDB()
-        yt = FakeYTMusic()
-        result = resolve_youtube_album(
-            MB_RG,
-            pdb=pdb,
-            mb_get_release=_slow_release_lookup,
-            mb_get_release_group_releases=group_lookup,
-            discogs_get_release=_empty_lookup(),
-            discogs_get_master_releases=_empty_lookup(),
-            yt_client=yt,
-            distance_fn=_canned_distance(),
-            cache=None,
-            deadline_seconds=60,
-            monotonic_fn=clock,
-        )
-
-        self.assertEqual(result.outcome, "unresolved_timeout")
-        self.assertLessEqual(len(sibling_calls), 2)
-        self.assertEqual(sibling_calls, sibling_ids[:2])
-        self.assertEqual(yt.search_calls, [])
-        self.assertEqual(yt.get_album_calls, [])
-        self.assertEqual(pdb.youtube_mapping_writes, [])
+class TestScoringLoopDeadline(unittest.TestCase):
+    """Round 2 P1-3: ``deadline_seconds`` previously only fired between
+    YT ``get_album`` calls — one slow ``distance_fn`` invocation could
+    overshoot the budget. The deadline is now also checked between
+    scoring iterations; remaining unscored siblings are returned as a
+    partial matrix with the deadline message in ``error_message``.
+    """
 
     def _resolve_with_slow_distance(
-        self,
-        *,
-        durations: list[float],
-        pdb: _WriteTrackingPipelineDB | None = None,
-        refresh: bool = False,
-    ) -> tuple[
-        YoutubeAlbumResolverResult,
-        list[str],
-        _WriteTrackingPipelineDB,
-    ]:
-        """Advance the injected clock inside each distance collaborator."""
+        self, *, sleeps: list[float],
+    ) -> tuple[YoutubeAlbumResolverResult, list[str]]:
+        """Build a resolve with a fake monotonic clock that ticks
+        ``sleeps[i]`` seconds on iteration ``i`` of the scoring loop.
+        ``deadline_seconds=10`` so a single tick of 11s breaches the
+        deadline.
+
+        Returns ``(result, observed_distance_calls)`` so tests can
+        assert which siblings got scored before the deadline fired.
+        """
         rg = MB_RG
         mb_leaf = _LookupSpy({
             rg: None,
@@ -2127,13 +1851,25 @@ class TestResolverDeadline(unittest.TestCase):
             ),
         )
 
-        clock = _DeadlineClock()
+        # Fake monotonic that returns ``0.0`` then walks ``sleeps``;
+        # subsequent calls (e.g. ``_final``'s duration computation)
+        # repeat the last value so we never run out of ticks.
+        timeline = [0.0] + list(sleeps)
+        state = {"i": 0}
+
+        def _fake_monotonic() -> float:
+            i = state["i"]
+            if i >= len(timeline) - 1:
+                return timeline[-1]
+            v = timeline[i]
+            state["i"] = i + 1
+            return v
+
+        # Distance fn that records how many times it was invoked.
         calls: list[str] = []
 
         def _slow_distance(*, mbid: str, **_: Any) -> BeetsDistanceResult:
-            duration = durations[len(calls)] if len(calls) < len(durations) else 0
             calls.append(mbid)
-            clock.advance(duration)
             return BeetsDistanceResult(
                 outcome="ok", distance=0.1,
                 matched_tracks=2, total_local_tracks=2, total_mb_tracks=2,
@@ -2144,197 +1880,42 @@ class TestResolverDeadline(unittest.TestCase):
                 request_release_group_id=rg,
             )
 
-        resolver_db = pdb if pdb is not None else _WriteTrackingPipelineDB()
-        result = resolve_youtube_album(
-            rg,
-            pdb=resolver_db,
-            mb_get_release=mb_leaf,
-            mb_get_release_group_releases=mb_group,
-            discogs_get_release=_empty_lookup(),
-            discogs_get_master_releases=_empty_lookup(),
-            yt_client=yt,
-            distance_fn=_slow_distance,
-            cache=None,
-            deadline_seconds=10,
-            monotonic_fn=clock,
-            sleep_fn=lambda _: None,
-            refresh=refresh,
-        )
-        return result, calls, resolver_db
+        with patch("lib.youtube_album_service.time.monotonic",
+                   _fake_monotonic):
+            result = resolve_youtube_album(
+                rg,
+                pdb=FakePipelineDB(),
+                mb_get_release=mb_leaf,
+                mb_get_release_group_releases=mb_group,
+                discogs_get_release=_empty_lookup(),
+                discogs_get_master_releases=_empty_lookup(),
+                yt_client=yt,
+                distance_fn=_slow_distance,
+                cache=None,
+                deadline_seconds=10,
+                sleep_fn=lambda _: None,
+            )
+        return result, calls
 
-    def test_deadline_breach_inside_scoring_loop_returns_typed_failure(
-        self,
-    ) -> None:
-        result, observed, pdb = self._resolve_with_slow_distance(
-            durations=[11.0, 11.0]
-        )
-        self.assertEqual(result.outcome, "unresolved_timeout")
-        self.assertFalse(result.from_cache)
-        self.assertEqual(result.youtube_releases, [])
-        self.assertEqual(observed, [MB_REL_A])
+    def test_deadline_breach_inside_scoring_loop_returns_partial_matrix(self) -> None:
+        # First monotonic call inside the scoring loop returns 11s — past
+        # the 10s deadline; the scoring loop must break before scoring
+        # the second sibling.
+        result, _observed = self._resolve_with_slow_distance(sleeps=[11.0, 11.0])
+        # Still ok (we have a partial matrix), with deadline_message
+        # attached so the operator sees what happened.
+        self.assertEqual(result.outcome, "ok")
         self.assertIsNotNone(result.error_message)
         assert result.error_message is not None
         self.assertIn("deadline", result.error_message.lower())
-        self.assertEqual(pdb.youtube_mapping_writes, [])
-        self.assertIsNone(pdb.get_youtube_album_mapping(MB_RG, "mb"))
-
-    def test_refresh_scoring_deadline_serves_complete_cache_without_write(
-        self,
-    ) -> None:
-        pdb = _WriteTrackingPipelineDB()
-        durable_before = _seed_complete_youtube_matrix(pdb)
-
-        result, observed, _ = self._resolve_with_slow_distance(
-            durations=[11.0, 11.0],
-            pdb=pdb,
-            refresh=True,
-        )
-
-        self.assertEqual(result.outcome, "ok")
-        self.assertTrue(result.from_cache)
-        self.assertEqual(
-            [release.yt_browse_id for release in result.youtube_releases],
-            ["MPREb-cached-complete"],
-        )
-        self.assertEqual(observed, [MB_REL_A])
-        self.assertIsNotNone(result.error_message)
-        assert result.error_message is not None
-        self.assertIn("unresolved_timeout", result.error_message)
-        self.assertIn("serving from cache", result.error_message)
-        self.assertEqual(pdb.youtube_mapping_writes, [])
-        self.assertEqual(
-            pdb.get_youtube_album_mapping(MB_RG, "mb"),
-            durable_before,
-        )
 
     def test_deadline_not_breached_scoring_loop_runs_to_completion(self) -> None:
-        result, observed, pdb = self._resolve_with_slow_distance(
-            durations=[0.0, 0.0]
-        )
+        # Monotonic always returns 0 — well under the deadline; both
+        # siblings get scored.
+        result, observed = self._resolve_with_slow_distance(sleeps=[0.0, 0.0, 0.0])
         self.assertEqual(result.outcome, "ok")
+        # Both siblings scored — no early break.
         self.assertEqual(len(observed), 2)
-        self.assertEqual(len(pdb.youtube_mapping_writes), 1)
-
-
-# ---------------------------------------------------------------------------
-# Complete-matrix persistence
-# ---------------------------------------------------------------------------
-
-
-class TestCompleteMatrixPersistence(unittest.TestCase):
-    """Only confirmed complete YT truth may replace the durable cache."""
-
-    def _resolve(
-        self,
-        yt: FakeYTMusic,
-        pdb: _WriteTrackingPipelineDB,
-    ) -> YoutubeAlbumResolverResult:
-        mb_leaf = _LookupSpy({
-            MB_RG: None,
-            MB_REL_A: _ok_mb_release(mbid=MB_REL_A, rg=MB_RG, year=1996),
-        })
-        mb_group = _LookupSpy({
-            MB_RG: _ok_mb_rg_releases((MB_REL_A, 1996)),
-        })
-        return resolve_youtube_album(
-            MB_RG,
-            pdb=pdb,
-            mb_get_release=mb_leaf,
-            mb_get_release_group_releases=mb_group,
-            discogs_get_release=_empty_lookup(),
-            discogs_get_master_releases=_empty_lookup(),
-            yt_client=yt,
-            distance_fn=_canned_distance(),
-            cache=None,
-        )
-
-    def test_nonempty_search_without_browse_id_is_not_persisted_empty(
-        self,
-    ) -> None:
-        yt = FakeYTMusic()
-        yt.set_search(
-            "Dr. Octagon Dr. Octagonecologyst",
-            [{"title": "Present but missing its browseId"}],
-        )
-        pdb = _WriteTrackingPipelineDB()
-
-        result = self._resolve(yt, pdb)
-
-        self.assertEqual(result.outcome, "youtube_parse_failed")
-        self.assertEqual(result.youtube_releases, [])
-        self.assertEqual(yt.get_album_calls, [])
-        self.assertEqual(pdb.youtube_mapping_writes, [])
-        self.assertIsNone(pdb.get_youtube_album_mapping(MB_RG, "mb"))
-
-    def test_unscoreable_album_payload_is_not_persisted_empty(self) -> None:
-        browse_id = "MPREb-unscoreable"
-        yt = FakeYTMusic()
-        yt.set_search(
-            "Dr. Octagon Dr. Octagonecologyst",
-            [_yt_search_album_result(browse_id)],
-        )
-        yt.set_album(
-            browse_id,
-            FakeYTMusic.make_album_fixture(
-                audio_playlist_id="OLAK5uy-unscoreable",
-                title="Dr. Octagonecologyst",
-                artists=[{"name": "Dr. Octagon", "id": "UCx"}],
-                year="1996",
-                tracks=[],
-                other_versions=[],
-            ),
-        )
-        pdb = _WriteTrackingPipelineDB()
-
-        result = self._resolve(yt, pdb)
-
-        self.assertEqual(result.outcome, "youtube_parse_failed")
-        self.assertEqual(result.youtube_releases, [])
-        self.assertEqual(pdb.youtube_mapping_writes, [])
-        self.assertIsNone(pdb.get_youtube_album_mapping(MB_RG, "mb"))
-
-
-class TestYoutubeHttpCacheWireShape(unittest.TestCase):
-    """Top-level YT payload drift is rejected before it can look empty."""
-
-    class _WrongShapeClient:
-        def search(
-            self,
-            _query: str,
-            *,
-            filter: str,
-            limit: int,
-        ) -> dict[str, object]:
-            del filter, limit
-            return {}
-
-        def get_album(self, _browse_id: str) -> list[object]:
-            return []
-
-    def test_search_and_album_require_their_declared_container_shapes(
-        self,
-    ) -> None:
-        client = self._WrongShapeClient()
-
-        def _no_deadline(_stage: str) -> None:
-            return
-
-        with self.assertRaises(msgspec.ValidationError):
-            _cached_search(
-                client,
-                None,
-                "Generated query",
-                "albums",
-                10,
-                deadline_check=_no_deadline,
-            )
-        with self.assertRaises(msgspec.ValidationError):
-            _cached_get_album(
-                client,
-                None,
-                "MPREb-malformed",
-                deadline_check=_no_deadline,
-            )
 
 
 # ---------------------------------------------------------------------------
@@ -2396,12 +1977,7 @@ class TestPartialPairFailures(unittest.TestCase):
         self.assertEqual(outcomes_by_mbid, {
             MB_REL_A: "ok", MB_REL_B: "ok", MB_REL_C: "mb_lookup_failed"})
 
-    def _resolve_with_broken_yt_sibling(
-        self,
-        *,
-        pdb: _WriteTrackingPipelineDB,
-        refresh: bool,
-    ) -> YoutubeAlbumResolverResult:
+    def test_get_album_failure_for_one_sibling_excludes_it_from_matrix(self) -> None:
         rg = MB_RG
         mb_leaf = _LookupSpy({
             rg: None,
@@ -2429,9 +2005,9 @@ class TestPartialPairFailures(unittest.TestCase):
             "MPREb-broken",
             YTMusicServerError("Server returned HTTP 500: oops"),
         )
-        return resolve_youtube_album(
+        result = resolve_youtube_album(
             rg,
-            pdb=pdb,
+            pdb=FakePipelineDB(),
             mb_get_release=mb_leaf,
             mb_get_release_group_releases=mb_group,
             discogs_get_release=_empty_lookup(),
@@ -2439,54 +2015,10 @@ class TestPartialPairFailures(unittest.TestCase):
             yt_client=yt,
             distance_fn=_canned_distance(),
             cache=None,
-            refresh=refresh,
         )
-
-    def test_get_album_failure_for_one_sibling_returns_typed_failure(
-        self,
-    ) -> None:
-        pdb = _WriteTrackingPipelineDB()
-
-        result = self._resolve_with_broken_yt_sibling(
-            pdb=pdb,
-            refresh=False,
-        )
-
-        self.assertEqual(result.outcome, "unresolved_mirror_unavailable")
-        self.assertFalse(result.from_cache)
-        self.assertEqual(result.youtube_releases, [])
-        self.assertIsNotNone(result.error_message)
-        assert result.error_message is not None
-        self.assertIn("MPREb-broken", result.error_message)
-        self.assertEqual(pdb.youtube_mapping_writes, [])
-        self.assertIsNone(pdb.get_youtube_album_mapping(MB_RG, "mb"))
-
-    def test_refresh_get_album_failure_preserves_and_serves_complete_cache(
-        self,
-    ) -> None:
-        pdb = _WriteTrackingPipelineDB()
-        durable_before = _seed_complete_youtube_matrix(pdb)
-
-        result = self._resolve_with_broken_yt_sibling(
-            pdb=pdb,
-            refresh=True,
-        )
-
         self.assertEqual(result.outcome, "ok")
-        self.assertTrue(result.from_cache)
-        self.assertEqual(
-            [release.yt_browse_id for release in result.youtube_releases],
-            ["MPREb-cached-complete"],
-        )
-        self.assertIsNotNone(result.error_message)
-        assert result.error_message is not None
-        self.assertIn("unresolved_mirror_unavailable", result.error_message)
-        self.assertIn("serving from cache", result.error_message)
-        self.assertEqual(pdb.youtube_mapping_writes, [])
-        self.assertEqual(
-            pdb.get_youtube_album_mapping(MB_RG, "mb"),
-            durable_before,
-        )
+        self.assertEqual(len(result.youtube_releases), 1)
+        self.assertEqual(result.youtube_releases[0].yt_browse_id, "MPREb-seed")
 
 
 # ---------------------------------------------------------------------------
@@ -2599,80 +2131,6 @@ class TestYoutubeFailureModes(unittest.TestCase):
         self.assertIn("unresolved_4xx_client", result.error_message)
         self.assertIn("serving from cache", result.error_message)
         self.assertEqual(len(result.youtube_releases), 1)
-
-    def test_refresh_yt_timeout_serves_cached_empty_matrix(self) -> None:
-        rg, mb_leaf, mb_group = self._basic_lookups()
-        pdb = FakePipelineDB()
-        pdb.seed_youtube_album_mapping(rg, "mb", [])
-        yt = FakeYTMusic()
-        yt.set_search_error(
-            "Dr. Octagon Dr. Octagonecologyst",
-            requests.Timeout("timed out"),
-        )
-
-        result = resolve_youtube_album(
-            rg,
-            pdb=pdb,
-            mb_get_release=mb_leaf,
-            mb_get_release_group_releases=mb_group,
-            discogs_get_release=_empty_lookup(),
-            discogs_get_master_releases=_empty_lookup(),
-            yt_client=yt,
-            distance_fn=_canned_distance(),
-            cache=None,
-            refresh=True,
-        )
-
-        self.assertEqual(result.outcome, "ok")
-        self.assertTrue(result.from_cache)
-        self.assertEqual(result.youtube_releases, [])
-        self.assertIsNotNone(result.error_message)
-        assert result.error_message is not None
-        self.assertIn("unresolved_timeout", result.error_message)
-        self.assertIn("serving from cache", result.error_message)
-        self.assertEqual(pdb.get_youtube_album_mapping(rg, "mb"), [])
-
-    def test_refresh_deadline_breach_serves_cached_empty_matrix(self) -> None:
-        rg = MB_RG
-        clock = _DeadlineClock()
-
-        def _release_lookup(identifier: str) -> dict | None:
-            if identifier == rg:
-                return None
-            clock.advance(61.0)
-            return _ok_mb_release(mbid=identifier, rg=rg)
-
-        mb_group = _LookupSpy({
-            rg: _ok_mb_rg_releases((MB_REL_A, 1996)),
-        })
-        pdb = FakePipelineDB()
-        pdb.seed_youtube_album_mapping(rg, "mb", [])
-        yt = FakeYTMusic()
-
-        result = resolve_youtube_album(
-            rg,
-            pdb=pdb,
-            mb_get_release=_release_lookup,
-            mb_get_release_group_releases=mb_group,
-            discogs_get_release=_empty_lookup(),
-            discogs_get_master_releases=_empty_lookup(),
-            yt_client=yt,
-            distance_fn=_canned_distance(),
-            cache=None,
-            refresh=True,
-            deadline_seconds=60,
-            monotonic_fn=clock,
-        )
-
-        self.assertEqual(result.outcome, "ok")
-        self.assertTrue(result.from_cache)
-        self.assertEqual(result.youtube_releases, [])
-        self.assertIsNotNone(result.error_message)
-        assert result.error_message is not None
-        self.assertIn("unresolved_timeout", result.error_message)
-        self.assertIn("serving from cache", result.error_message)
-        self.assertEqual(yt.search_calls, [])
-        self.assertEqual(pdb.get_youtube_album_mapping(rg, "mb"), [])
 
     def test_yt_timeout_returns_unresolved_timeout(self) -> None:
         rg, mb_leaf, mb_group = self._basic_lookups()
