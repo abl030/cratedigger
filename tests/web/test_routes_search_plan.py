@@ -19,6 +19,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from tests.helpers import make_request_row
 from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
+from web.request_security import BROWSER_CHANNEL, CHANNEL_HEADER
+
+CANONICAL_ORIGIN = "https://music.ablz.au"
 
 
 class TestPipelineSearchPlanContract(_FakeDbWebServerCase):
@@ -794,7 +797,11 @@ class TestPipelineSearchPlanRegenerateContract(_FakeDbWebServerCase):
         req = Request(
             f"{self.base}/api/pipeline/100/search-plan/regenerate",
             data=raw_body,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                CHANNEL_HEADER: BROWSER_CHANNEL,
+                "Origin": CANONICAL_ORIGIN,
+            },
             method="POST",
         )
         with _patch(

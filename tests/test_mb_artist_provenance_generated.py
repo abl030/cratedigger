@@ -66,16 +66,22 @@ def _run_consumer(
             return {
                 "release-count": len(direct_statuses),
                 "releases": [
-                    {"status": status, "release-group": {"id": OWN_RG}}
-                    for status in direct_statuses
+                    {
+                        "id": f"direct-{index}", "status": status,
+                        "release-group": {"id": OWN_RG},
+                    }
+                    for index, status in enumerate(direct_statuses)
                 ],
             }
         if "/release?track_artist=" in url:
             return {
                 "release-count": len(track_statuses),
                 "releases": [
-                    {"status": status, "release-group": appearance_rg}
-                    for status in track_statuses
+                    {
+                        "id": f"track-{index}", "status": status,
+                        "release-group": appearance_rg,
+                    }
+                    for index, status in enumerate(track_statuses)
                 ],
             }
         raise AssertionError(f"unexpected MusicBrainz URL: {url}")

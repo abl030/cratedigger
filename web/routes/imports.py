@@ -562,7 +562,6 @@ def get_wrong_match_audio(
         except ValueError:
             h.send_response(416)
             h.send_header("Content-Range", f"bytes */{size}")
-            h.send_header("Access-Control-Allow-Origin", "*")
             h.send_header("Content-Length", "0")
             h.end_headers()
             return
@@ -580,7 +579,6 @@ def get_wrong_match_audio(
         h.send_header("Content-Length", str(content_length))
         h.send_header("Accept-Ranges", "bytes")
         h.send_header("Cache-Control", "no-cache")
-        h.send_header("Access-Control-Allow-Origin", "*")
         if requested_range is not None:
             h.send_header("Content-Range", f"bytes {start}-{end}/{size}")
         h.end_headers()

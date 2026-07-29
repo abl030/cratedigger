@@ -4,21 +4,66 @@
 
 A single-page web app for browsing MusicBrainz and adding album releases to the Cratedigger pipeline. It is the operator's album picker and is served at `https://music.ablz.au`.
 
-## Architecture
+## Post-U6B target architecture
+
+At U6A this is the required cutover topology, not a claim about the current
+live doc2 listener chain. U6B must deploy and prove it before the audit can
+describe it as active:
 
 ```
 Browser → https://music.ablz.au
-           → nginx (localProxy on doc2, ACME cert)
-             → localhost:8085
-               → web/server.py (stdlib http.server)
-                 → PostgreSQL (pipeline DB, nspawn container 10.20.0.11)
-                 → SQLite (beets library, /mnt/virtio/cratedigger/beets-db/beets-library.db, read-only)
-                 → MusicBrainz API (local mirror, 192.168.1.35:5200)
+           → public nginx vhost (localProxy on doc2, DNS/ACME/TLS)
+             → 127.0.0.1:8086
+               → module-owned nginx authentication gateway
+                 → /run/cratedigger-web/web.sock
+                   → web/server.py (stdlib http.server, inherited AF_UNIX fd)
+                     → PostgreSQL (pipeline DB, nspawn container 10.20.0.11)
+                     → SQLite (beets library, /mnt/virtio/cratedigger/beets-db/beets-library.db, read-only)
+                     → MusicBrainz API (local mirror, 192.168.1.35:5200)
 ```
 
 - **No build step, no npm, no framework** — stdlib `http.server`, vanilla JS, single HTML file
 - Runs on doc2 as `cratedigger-web` systemd service
 - Python env shared with cratedigger (psycopg2, requests, etc.)
+- The Python process has no production TCP listener. systemd owns the one Unix
+  socket; only nginx and explicitly authorized web access group members can
+  connect.
+
+## Authentication and request security
+
+The NixOS module has exactly two current, mutually exclusive web modes:
+
+- **Basic mode** protects the whole site: document, static files, read APIs,
+  route discovery, audio, and mutations.
+- **Explicit insecure mode** requires `web.enableInsecure = true`. It removes
+  only the Basic challenge, logs
+  `Authentication is disabled for this Cratedigger instance.` at `CRITICAL` on
+  every start, and renders the same text as a persistent footer.
+
+Missing or conflicting mode configuration fails closed. The only anonymous
+exception in Basic mode is exact `GET` or `HEAD` `/healthz` with no query. It
+returns a bare `204` and reads no database, cache, mirror, Beets, collection,
+route, version, or configuration state. Wrong-host, query-bearing,
+non-canonical, and other method/path requests do not inherit the exception.
+
+Authentication stays at the nginx gateway. It strips the browser's
+`Authorization`, cookies, tokens, connection/framing headers, forwarded
+identity, roles/groups, and any client-supplied internal request marker.
+`web/server.py` receives only a gateway-written `browser` channel plus the
+small reviewed header set; it never sees or verifies the Basic username or
+password.
+
+The UI is same-origin only. Wildcard CORS is absent, documents deny framing,
+and resources carry a same-origin policy. Every unsafe browser request must
+carry at least one valid `Origin` or `Referer`; every supplied signal must
+match the configured canonical `https://<web.hostName>` origin before the body
+or route is touched. Destructive confirmation words remain intent checks, not
+authentication.
+
+There is no external-auth/OIDC option or fallback in the current module. That
+mode is explicitly deferred until the external-session credential bridge is
+settled, so current installations must choose Basic or deliberate insecure
+operation.
 
 ## Files
 
@@ -27,12 +72,14 @@ Browser → https://music.ablz.au
 | `web/server.py` | HTTP server with JSON API endpoints |
 | `web/mb.py` | MusicBrainz API helpers (search, artist discography, releases) |
 | `web/discogs.py` | Discogs mirror API helpers (search, artist releases, master pressings) |
-| `web/index.html` | Frontend — single HTML file with inline CSS + JS |
+| `web/index.html` | Frontend HTML shell and inline CSS |
+| `web/js/` | Vanilla JavaScript ES modules |
 
 ## API Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
+| `/healthz` | GET, HEAD | Exact anonymous process liveness only; no query and no dependency or metadata reads |
 | `/` | GET | Serves the HTML UI |
 | `/api/search?q=...` | GET | Search MB for artists |
 | `/api/artist/<mbid>` | GET | Artist's normalized work catalogue plus an empty `ungrouped_releases` bucket; each row carries structural and provenance evidence |
@@ -43,6 +90,7 @@ Browser → https://music.ablz.au
 | `/api/pipeline/status` | GET | Pipeline DB status counts + wanted list |
 | `/api/pipeline/<id>` | GET | Single request details |
 | `/api/pipeline/force-import` | POST | Queue force-import for a rejected download `{"download_log_id": N}`; returns `202` + job id |
+| `/api/youtube-album` | POST | Resolve an MB/Discogs release or group to the cache-writing YouTube Music matrix; body `{"identifier": "...", "refresh": false}` |
 | `/api/wrong-matches` | GET | Group rejected downloads by release for triage |
 | `/api/wrong-matches/explorer` | GET | List files for one wrong-match candidate, including extracted tags and audio-preview URLs |
 | `/api/wrong-matches/audio` | GET | Stream an individual wrong-match audio file with byte-range support |
@@ -479,27 +527,46 @@ ssh -N -L 15432:10.20.0.11:5432 doc2
 ```
 
 The local proxy forwards byte-range headers, so wrong-match audio preview and
-seek still work through the tunnel.
+seek still work through the tunnel. The dev server is deliberately read-only
+and is not a production authentication boundary: every mutating API request is
+blocked. `--preview-insecure-warning` previews the exact production insecure
+footer without granting mutation authority.
 
 ## NixOS Configuration
 
 The upstream module declares the web options at `nix/module.nix` in this repo:
 
 ```nix
-services.cratedigger.web = {
-  enable = mkOption { type = types.bool; default = false; };
-  port = mkOption { type = types.port; default = 8085; };
-  redis = {
-    host = mkOption { type = types.str; default = "127.0.0.1"; };  # follows services.cratedigger.redis by default
-    port = mkOption { type = types.port; default = 6379; };
+services.cratedigger = {
+  user = "cratedigger";  # Basic mode requires a non-root app identity
+  group = "users";
+  web = {
+    enable = true;
+    hostName = "music.example.net";
+    gatewayPort = 8086;  # loopback nginx, not the Python server
+    basicAuthFile = "/run/secrets/cratedigger.htpasswd";
   };
 };
-services.cratedigger.beets.config = {
-  directory = mkOption { type = types.str; };
-  library = mkOption { type = types.str; };
-};
-services.cratedigger.redis.enable = mkOption { type = types.bool; default = true; };
+
+# The public HTTPS vhost forwards to http://127.0.0.1:8086.
+# Add only trusted local API-backed CLI operators:
+users.users.operator.extraGroups = [ "cratedigger-web" ];
 ```
+
+`basicAuthFile` is a runtime string outside `/nix/store`, not a Nix path or an
+inline nginx `basicAuth` value. Provision a non-empty bcrypt `htpasswd` file as
+exactly `root:nginx 0440` (using the configured nginx group) through sops or an
+equivalent runtime secret manager. The module verifies its resolved target,
+ACL, root-owned non-writable ancestors, nginx readability, and denial to the
+application and non-nginx socket users before nginx starts/reloads. See
+[`docs/nixos-module.md`](nixos-module.md#web-authentication-perimeter) for
+creation, atomic sops-backed rotation, health monitoring, CLI authority, and
+rollback.
+
+For deliberate insecure operation, omit `basicAuthFile` and set only
+`enableInsecure = true`; never set both. The same HTTPS canonical hostname,
+loopback gateway, Unix socket, header isolation, and same-origin mutation rules
+remain active.
 
 The web service opens `beets.config.library` together with
 `beets.config.directory` through the module-rendered `[Beets]` runtime
@@ -507,16 +574,27 @@ configuration. The paired `--beets-db` and `--beets-directory` flags on
 `web/server.py` remain explicit development/test overrides only; the NixOS
 service passes neither.
 
-Enabled in this homelab via `~/nixosconfig/hosts/doc2/configuration.nix` (the upstream module now owns `redis-cratedigger.service`; the homelab wrapper only supplies site-specific wiring such as reverse proxy defaults):
+The homelab's high-level Cratedigger switch already lives in
+`~/nixosconfig/hosts/doc2/configuration.nix`; that fact alone does not mean the
+candidate authentication gateway is deployed. U6B must update the downstream
+wrapper and prove the resulting chain:
 
 ```nix
 # in hosts/doc2/configuration.nix — picks up the wrapper's defaults
 homelab.services.cratedigger.enable = true;
-# the wrapper sets services.cratedigger.web.enable = true; on its own
+# U6B's wrapper candidate supplies the secure web options and gateway upstream
 ```
 
-What this creates on doc2:
-- `cratedigger-web.service` — simple type, restart on failure, ExecStart wraps `web/server.py` with the python env from `nix/package.nix`
+After the U6B cutover, the target configuration must create the following.
+This inventory is acceptance scope, not current-live evidence:
+- `cratedigger-web.socket` — systemd-owned `root:cratedigger-web 0660` Unix
+  listener under a separately managed `0750` runtime directory
+- `cratedigger-web.service` — socket-activated backend with no production TCP
+  listener; simple type, restart on failure, ExecStart wraps `web/server.py`
+  with the python env from `nix/package.nix`
+- module-owned loopback nginx exact-host/default-reject vhosts — whole-site
+  Basic or explicit insecure policy, fixed health exception, request-header
+  reconstruction, and Unix upstream
 - `cratedigger-importer.service` — long-lived worker that drains queued
   force/automation imports after DB migrations have run
 - `cratedigger-import-preview-worker.service` — long-lived async preview worker
@@ -524,7 +602,8 @@ What this creates on doc2:
   `services.cratedigger.importer.enable = true`; defaults to two worker
   loops via `services.cratedigger.importer.previewWorkers`
 - `redis-cratedigger.service` — provided by the upstream module as `services.redis.servers.cratedigger`
-- `music.ablz.au` nginx reverse proxy via `homelab.localProxy.hosts` (homelab wrapper)
+- `music.ablz.au` HTTPS nginx reverse proxy via `homelab.localProxy.hosts`
+  (homelab wrapper), forwarding only to the module gateway
 - Cloudflare DNS + ACME cert auto-provisioned
 
 ## Deployment
@@ -556,6 +635,14 @@ that leave `services.cratedigger.importer.enable = false` do not start either
 queue worker; newly queued jobs remain safely non-runnable until the
 preview/evidence path is restored.
 
+For the web perimeter, also verify the exact public chain: anonymous
+`/healthz` returns `204`; anonymous/invalid Basic requests to `/`, a static
+asset, a read API, route discovery, and a mutation receive `401`; valid Basic
+credentials reach protected reads and a same-origin mutation reaches its
+ordinary route contract; query-bearing `/healthz` is rejected without a
+liveness `204`; and `cratedigger-web.service` owns no TCP listener. Do not
+print credentials in argv or logs while probing.
+
 ## MusicBrainz API Usage
 
 All queries hit the local mirror at `http://192.168.1.35:5200/ws/2`.
@@ -581,5 +668,7 @@ Reads `/mnt/virtio/cratedigger/beets-db/beets-library.db` (SQLite, read-only) to
 
 - **Born to Run bug** — some release groups with 100+ releases intermittently fail to render in the frontend. Likely a JS rendering or caching issue. Needs browser dev tools to debug.
 - **Beatles loading time** — ~6 seconds to load due to fetching official release RG IDs (1000+ release groups, 2000+ releases). Acceptable but could be cached.
-- **No auth** — internal network only. If exposed externally, needs auth added.
+- **External identity providers are deferred** — the current portable secure
+  mode is whole-site Basic. No OIDC/external-auth option is exposed until its
+  session-credential bridge is designed and qualified.
 - **No websocket/live updates** — pipeline status is fetched on tab switch, not live.

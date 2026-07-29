@@ -478,7 +478,7 @@ MULTILINE_PATCH_BASELINE: dict[str, int] = {
     'web.routes.imports.delete_wrong_match_group': 1,
     'web.routes.youtube._RedisYoutubeCache': 2,
     'web.routes.youtube._build_youtube_client': 2,
-    'web.routes.youtube.resolve_youtube_album': 2,
+    'web.routes.youtube.resolve_youtube_album': 4,
     'web.server.ThreadingHTTPServer': 1,
 }
 

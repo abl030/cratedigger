@@ -120,7 +120,6 @@ from scripts.pipeline_cli.youtube import (
     OUTCOME_EXIT_CODE,
     cmd_youtube_album,
     cmd_youtube_rescue,
-    resolve_youtube_album,
 )
 
 __all__ = [
@@ -171,6 +170,5 @@ __all__ = [
     "fetch_mb_release",
     "finalize_request",
     "main",
-    "resolve_youtube_album",
     "tracks_from_mb_release",
 ]

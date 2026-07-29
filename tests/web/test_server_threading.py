@@ -1,7 +1,7 @@
 """Threading contract for the web server (#427).
 
-The production server is a ``ThreadingHTTPServer`` speaking HTTP/1.1
-keep-alive, with per-thread pipeline/beets DB handles. These tests pin
+The production server is threaded and speaks HTTP/1.1 keep-alive over its
+inherited Unix listener, with per-thread pipeline/beets DB handles. These tests pin
 the four load-bearing properties:
 
 1. A slow request must not block other requests (the head-of-line
@@ -16,6 +16,7 @@ the four load-bearing properties:
 """
 import configparser
 import http.client
+import io
 import os
 import socket
 import struct
@@ -24,14 +25,245 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import redirect_stderr
 from unittest.mock import patch
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 import conftest  # noqa: F401 — sets TEST_DB_DSN for the per-thread test
 
+from tests.fakes import FakePipelineDB
 from tests.web._harness import _WebServerCase
+from web.request_security import BROWSER_CHANNEL, CHANNEL_HEADER
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
+
+
+class _UnixHTTPConnection(http.client.HTTPConnection):
+    """Real stdlib HTTP/1.1 client over one AF_UNIX socket."""
+
+    def __init__(self, socket_path: str) -> None:
+        super().__init__("cratedigger.internal", timeout=10)
+        self._socket_path = socket_path
+
+    def connect(self) -> None:
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(self._socket_path)
+
+
+class TestInheritedUnixListener(unittest.TestCase):
+    """Production startup accepts exactly one listening AF_UNIX stream fd."""
+
+    def _environment(self, count: str = "1") -> dict[str, str]:
+        return {"LISTEN_PID": str(os.getpid()), "LISTEN_FDS": count}
+
+    def test_missing_and_multiple_systemd_fds_fail_closed(self) -> None:
+        from web import server as srv
+
+        cases = [
+            ({}, "exactly one"),
+            ({"LISTEN_PID": str(os.getpid()), "LISTEN_FDS": "0"}, "exactly one"),
+            (self._environment("2"), "exactly one"),
+            ({"LISTEN_PID": str(os.getpid() + 1), "LISTEN_FDS": "1"},
+             "current process"),
+        ]
+        for environment, detail in cases:
+            with self.subTest(environment=environment), self.assertRaisesRegex(
+                RuntimeError, detail,
+            ):
+                srv._take_systemd_unix_listener(
+                    environ=environment,
+                    inherited_fd=-1,
+                )
+
+    def test_default_startup_never_falls_back_to_tcp_without_systemd_fd(
+        self,
+    ) -> None:
+        from web import server as srv
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "server.py",
+                "--canonical-origin",
+                "https://music.ablz.au",
+            ],
+        ), patch.dict(
+            os.environ,
+            {},
+            clear=True,
+        ), redirect_stderr(io.StringIO()), self.assertRaises(
+            SystemExit,
+        ) as exited:
+            srv.main()
+        self.assertEqual(exited.exception.code, 2)
+
+    def test_wrong_family_and_non_listening_fds_fail_closed(self) -> None:
+        from web import server as srv
+
+        tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        unix = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            unix.bind(os.path.join(temp_dir, "not-listening.sock"))
+            for listener, detail in [
+                (tcp, "AF_UNIX"),
+                (unix, "listening"),
+            ]:
+                owned_fd = os.dup(listener.fileno())
+                with self.subTest(detail=detail), self.assertRaisesRegex(
+                    RuntimeError, detail,
+                ):
+                    srv._take_systemd_unix_listener(
+                        environ=self._environment(),
+                        inherited_fd=owned_fd,
+                    )
+                with self.assertRaises(OSError):
+                    os.fstat(owned_fd)
+        tcp.close()
+        unix.close()
+
+    def test_listening_unix_stream_fd_is_adopted(self) -> None:
+        from web import server as srv
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.bind(os.path.join(temp_dir, "web.sock"))
+            listener.listen()
+            inherited_fd = os.dup(listener.fileno())
+            os.set_inheritable(inherited_fd, True)
+            adopted = srv._take_systemd_unix_listener(
+                environ=self._environment(),
+                inherited_fd=inherited_fd,
+            )
+            try:
+                self.assertEqual(adopted.family, socket.AF_UNIX)
+                self.assertFalse(os.get_inheritable(adopted.fileno()))
+                self.assertEqual(
+                    adopted.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE),
+                    socket.SOCK_STREAM,
+                )
+                self.assertEqual(
+                    adopted.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN),
+                    1,
+                )
+            finally:
+                adopted.close()
+                listener.close()
+
+
+class TestThreadingUnixHTTPServer(unittest.TestCase):
+    """The inherited Unix listener retains threading and HTTP/1.1 behavior."""
+
+    def setUp(self) -> None:
+        from web import server as srv
+
+        self._srv = srv
+        self._saved_db = srv.db
+        self._saved_dsn = srv._db_dsn
+        self._saved_origin = srv.canonical_origin
+        srv.db = FakePipelineDB()
+        srv._db_dsn = None
+        srv.canonical_origin = "https://music.ablz.au"
+
+        self._temp_dir = tempfile.TemporaryDirectory()
+        self.socket_path = os.path.join(self._temp_dir.name, "web.sock")
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(self.socket_path)
+        listener.listen()
+        self.server = srv.ThreadingUnixHTTPServer(listener, srv.Handler)
+        self.thread = threading.Thread(
+            target=self.server.serve_forever,
+            daemon=True,
+        )
+        self.thread.start()
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+        self._srv.db = self._saved_db
+        self._srv._db_dsn = self._saved_dsn
+        self._srv.canonical_origin = self._saved_origin
+        self._temp_dir.cleanup()
+
+    def _connection(self) -> _UnixHTTPConnection:
+        return _UnixHTTPConnection(self.socket_path)
+
+    def test_keep_alive_reuses_one_unix_connection(self) -> None:
+        connection = self._connection()
+        headers = {CHANNEL_HEADER: BROWSER_CHANNEL}
+        try:
+            connection.request("GET", "/api/_index", headers=headers)
+            first = connection.getresponse()
+            self.assertEqual(first.status, 200)
+            self.assertTrue(first.read())
+            first_socket = connection.sock
+
+            connection.request("GET", "/api/_index", headers=headers)
+            second = connection.getresponse()
+            self.assertEqual(second.status, 200)
+            self.assertTrue(second.read())
+            self.assertIs(connection.sock, first_socket)
+        finally:
+            connection.close()
+
+    def test_slow_unix_request_does_not_block_another_connection(self) -> None:
+        srv = self._srv
+        entered = threading.Event()
+        release = threading.Event()
+        slow_result: list[int] = []
+
+        def slow_route(handler, _params):
+            entered.set()
+            if not release.wait(timeout=5):
+                raise AssertionError("slow Unix request was not released")
+            handler._json({"slow": True})
+
+        def run_slow() -> None:
+            connection = self._connection()
+            try:
+                connection.request(
+                    "GET",
+                    "/api/_test_slow",
+                    headers={CHANNEL_HEADER: BROWSER_CHANNEL},
+                )
+                response = connection.getresponse()
+                response.read()
+                slow_result.append(response.status)
+            finally:
+                connection.close()
+
+        with patch.dict(
+            srv.Handler._FUNC_GET_ROUTES,
+            {"/api/_test_slow": slow_route},
+        ):
+            slow_thread = threading.Thread(target=run_slow, daemon=True)
+            slow_thread.start()
+            self.assertTrue(entered.wait(timeout=5))
+            fast = self._connection()
+            try:
+                fast.request(
+                    "GET",
+                    "/api/_index",
+                    headers={CHANNEL_HEADER: BROWSER_CHANNEL},
+                )
+                response = fast.getresponse()
+                self.assertEqual(response.status, 200)
+                response.read()
+            finally:
+                fast.close()
+            release.set()
+            slow_thread.join(timeout=5)
+        self.assertEqual(slow_result, [200])
+
+    def test_server_close_leaves_systemd_owned_socket_node(self) -> None:
+        self.assertTrue(self.server.daemon_threads)
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+        self.assertFalse(self.thread.is_alive())
+        self.assertTrue(os.path.exists(self.socket_path))
 
 
 class TestConcurrentRequests(_WebServerCase):
@@ -192,6 +424,7 @@ class TestConcurrentRequests(_WebServerCase):
                     (
                         f"GET {path} HTTP/1.1\r\n"
                         f"Host: 127.0.0.1:{self.port}\r\n"
+                        f"{CHANNEL_HEADER}: {BROWSER_CHANNEL}\r\n"
                         "Connection: close\r\n\r\n"
                     ).encode()
                 )
@@ -236,7 +469,8 @@ class TestKeepAlive(_WebServerCase):
     def test_two_requests_reuse_one_connection(self):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
         try:
-            conn.request("GET", "/api/_index")
+            headers = {CHANNEL_HEADER: BROWSER_CHANNEL}
+            conn.request("GET", "/api/_index", headers=headers)
             r1 = conn.getresponse()
             body1 = r1.read()
             self.assertEqual(r1.status, 200)
@@ -244,7 +478,7 @@ class TestKeepAlive(_WebServerCase):
             # Same socket: a second request only works if the server
             # honoured keep-alive (it would have closed an HTTP/1.0
             # connection after the first response).
-            conn.request("GET", "/api/_index")
+            conn.request("GET", "/api/_index", headers=headers)
             r2 = conn.getresponse()
             self.assertEqual(r2.status, 200)
             self.assertTrue(r2.read())
@@ -254,7 +488,11 @@ class TestKeepAlive(_WebServerCase):
     def test_options_declares_zero_content_length(self):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
         try:
-            conn.request("OPTIONS", "/api/_index")
+            conn.request(
+                "OPTIONS",
+                "/api/_index",
+                headers={CHANNEL_HEADER: BROWSER_CHANNEL},
+            )
             resp = conn.getresponse()
             self.assertEqual(resp.status, 200)
             self.assertEqual(resp.getheader("Content-Length"), "0")
@@ -477,6 +715,10 @@ class TestPerThreadBeetsHandles(unittest.TestCase):
             "argv",
             [
                 "server.py",
+                "--canonical-origin",
+                "https://music.ablz.au",
+                "--dev-port",
+                "0",
                 "--dsn",
                 str(TEST_DSN),
                 "--beets-db",
@@ -490,10 +732,11 @@ class TestPerThreadBeetsHandles(unittest.TestCase):
         ), patch(
             "web.server.ThreadingHTTPServer",
             side_effect=BootStop,
-        ), self.assertRaises(BootStop):
+        ) as tcp_server, self.assertRaises(BootStop):
             srv.main()
 
         self.assertEqual(srv.beets_library_root, "/scratch/Music/Beets")
+        tcp_server.assert_called_once_with(("127.0.0.1", 0), srv.Handler)
 
 
 if __name__ == "__main__":

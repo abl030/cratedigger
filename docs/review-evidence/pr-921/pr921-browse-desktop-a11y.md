@@ -1,0 +1,23 @@
+- generic [active] [ref=e1] [box=240,0,800,284]:
+  - heading "Music Pipeline" [level=1] [ref=e2] [box=256,16,768,26]
+  - generic [ref=e3] [box=256,58,768,34]:
+    - generic [ref=e4] [cursor=pointer] [box=256,58,85,34]: Browse
+    - generic [ref=e5] [cursor=pointer] [box=349,58,90,34]: Recents
+    - generic [ref=e6] [cursor=pointer] [box=447,58,89,34]: Pipeline
+    - generic [ref=e7] [cursor=pointer] [box=543,58,142,34]: Wrong Matches
+  - generic [ref=e8] [box=256,108,768,67]:
+    - generic [ref=e9] [box=256,108,768,45]:
+      - textbox "Search artists or albums..." [ref=e10] [box=256,108,330,45]
+      - generic [ref=e11] [box=594,118,230,25]:
+        - button "Artist" [ref=e12] [cursor=pointer] [box=594,118,59,25]
+        - button "Album" [ref=e13] [cursor=pointer] [box=655,118,66,25]
+        - button "Label" [ref=e14] [cursor=pointer] [box=723,118,60,25]
+        - button "ID" [ref=e15] [cursor=pointer] [box=785,118,39,25]
+      - generic [ref=e16] [box=840,118,184,25]:
+        - generic [ref=e17] [box=849,125,47,12]: Source
+        - generic [ref=e18] [box=902,118,122,25]:
+          - button "MB" [ref=e19] [cursor=pointer] [box=902,118,45,25]
+          - button "Discogs" [ref=e20] [cursor=pointer] [box=950,118,74,25]
+    - generic [ref=e21] [box=258,161,766,14]: MusicBrainz identities selected for expansions and actions
+  - contentinfo [ref=e22] [box=256,199,768,34]: Authentication is disabled for this Cratedigger instance.
+  - generic [box=891,243,133,25]: DEV live-db readonly

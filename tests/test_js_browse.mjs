@@ -12,7 +12,9 @@
 import assert from 'node:assert/strict';
 
 import {
+  closeBrowseArtist,
   loadArtistPage,
+  pendingEarlyCompareHandoffsForTest,
   reloadBrowseArtist,
   resolverTargetIdentityKind,
   setBrowseSource,
@@ -48,6 +50,115 @@ function response(status, data) {
     status,
     async json() { return data; },
   };
+}
+
+// Lifecycle pin: an early payload can arrive before useful content, then the
+// view may close or be superseded.  Neither path may retain or later publish
+// that stale payload into the next artist's cache.
+resetWorld();
+{
+  const oldArtist = deferred();
+  const oldLibrary = deferred();
+  globalThis.fetch = url => {
+    if (url.includes('/api/artist/compare?')) {
+      return Promise.resolve(response(200, {
+        both: [], mb_unpaired: [{ id: 'stale-payload', title: 'Stale', source: 'mb', identity_kind: 'work', provenance: [] }],
+        discogs_unpaired: [], discogs_ungrouped_releases: [],
+      }));
+    }
+    if (url.includes('/api/library/artist')) return oldLibrary.promise;
+    return oldArtist.promise;
+  };
+  const old = loadArtistPage('closed-old', 'Closed Old');
+  await new Promise(resolve => setImmediate(resolve));
+  closeBrowseArtist();
+  oldArtist.resolve(response(200, { release_groups: [] }));
+  oldLibrary.resolve(response(200, { albums: [] }));
+  await old;
+  assert.equal(state.browseCache['closed-old'], undefined, 'close drops early stale compare handoff');
+
+  globalThis.fetch = async url => {
+    if (url.includes('/api/artist/compare?') || url.includes('/disambiguate')) return response(503, {});
+    return response(200, url.includes('/api/library/artist') ? { albums: [] } : { release_groups: [] });
+  };
+  await loadArtistPage('fresh-after-close', 'Fresh');
+  assert.equal(state.browseCache['fresh-after-close'].compare, null);
+  assert.doesNotMatch(artistBody.innerHTML, /Stale/);
+}
+
+// A source switch can invalidate an artist page before its useful pair lands.
+// If the new source has no name match, it does not start another artist load
+// to incidentally clear the old handoff; the invalidation itself owns that
+// cleanup. The old payload must never paint after this exact no-match path.
+resetWorld();
+{
+  const oldArtist = deferred();
+  const oldLibrary = deferred();
+  state.browseArtist = { id: 'switch-old', name: 'No Match Artist' };
+  globalThis.fetch = url => {
+    if (url.includes('/api/artist/compare?')) {
+      return Promise.resolve(response(200, {
+        both: [], mb_unpaired: [{ id: 'switch-stale', title: 'Stale', source: 'mb', identity_kind: 'work', provenance: [] }],
+        discogs_unpaired: [], discogs_ungrouped_releases: [],
+      }));
+    }
+    if (url.includes('/api/discogs/search?')) return Promise.resolve(response(200, { artists: [] }));
+    if (url.includes('/api/library/artist')) return oldLibrary.promise;
+    return oldArtist.promise;
+  };
+  const old = loadArtistPage('switch-old', 'No Match Artist');
+  await new Promise(resolve => setImmediate(resolve));
+  await setBrowseSource('discogs');
+  assert.equal(state.browseArtist, null, 'no cross-source match closes the old artist context');
+  assert.equal(
+    pendingEarlyCompareHandoffsForTest(), 0,
+    'source invalidation releases the early compare immediately, before old useful requests settle',
+  );
+  oldArtist.resolve(response(200, { release_groups: [] }));
+  oldLibrary.resolve(response(200, { albums: [] }));
+  await old;
+  assert.equal(state.browseCache['switch-old'], undefined, 'source switch drops old early compare handoff');
+  assert.doesNotMatch(artistBody.innerHTML, /Stale/);
+}
+
+// Useful-pair failure revokes its token. A compare that resolves after Retry
+// renders must not recreate the early handoff for that now-invalid page.
+resetWorld();
+{
+  const compare = deferred();
+  globalThis.fetch = url => {
+    if (url.includes('/api/artist/compare?')) return compare.promise;
+    if (url.includes('/api/library/artist')) return Promise.resolve(response(200, { albums: [] }));
+    return Promise.resolve(response(503, {}));
+  };
+  await loadArtistPage('failure-before-compare', 'Failure Before Compare');
+  assert.match(artistBody.innerHTML, />Retry</);
+  compare.resolve(response(200, { both: [], mb_unpaired: [], discogs_unpaired: [], discogs_ungrouped_releases: [] }));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(pendingEarlyCompareHandoffsForTest(), 0, 'late compare cannot revive failed useful load');
+  assert.equal(state.browseCache['failure-before-compare'], undefined);
+}
+
+// The inverse ordering also matters: a compare can win the race and occupy
+// the handoff before the useful response fails, but failure still owns final
+// cleanup and Retry leaves no retained payload.
+resetWorld();
+{
+  const artist = deferred();
+  globalThis.fetch = url => {
+    if (url.includes('/api/artist/compare?')) {
+      return Promise.resolve(response(200, { both: [], mb_unpaired: [], discogs_unpaired: [], discogs_ungrouped_releases: [] }));
+    }
+    if (url.includes('/api/library/artist')) return Promise.resolve(response(200, { albums: [] }));
+    return artist.promise;
+  };
+  const load = loadArtistPage('compare-before-failure', 'Compare Before Failure');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(pendingEarlyCompareHandoffsForTest(), 1, 'compare handoff exists before useful failure');
+  artist.resolve(response(503, {}));
+  await load;
+  assert.equal(pendingEarlyCompareHandoffsForTest(), 0, 'useful failure clears an already-early compare handoff');
+  assert.match(artistBody.innerHTML, />Retry</);
 }
 
 function resetWorld() {
@@ -263,7 +374,7 @@ resetWorld();
   const pending = [];
   globalThis.fetch = () => new Promise(resolve => pending.push(resolve));
   const oldLoad = loadArtistPage('old-artist', 'Old Artist');
-  assert.equal(pending.length, 2, 'old fast pair started both requests');
+  assert.equal(pending.length, 3, 'old load starts compare beside both fast requests');
 
   globalThis.fetch = async () => { throw new Error('new active failure'); };
   await loadArtistPage('new-artist', 'New Artist');
@@ -275,6 +386,37 @@ resetWorld();
   await oldLoad;
   assert.equal(artistBody.innerHTML, activeHtml, 'stale failure must not replace active content');
   assert.equal(state.browseCache['old-artist'], undefined);
+}
+
+// Cold request-graph pin: compare starts immediately, but an early compare
+// response remains an in-flight handoff until the useful pair succeeds.  A
+// failed useful pair must therefore never leave a partial cache entry.
+resetWorld();
+{
+  const aid = 'early-compare';
+  const artist = deferred();
+  const library = deferred();
+  globalThis.fetch = (url) => {
+    if (url.includes('/api/artist/compare?')) {
+      return Promise.resolve(response(200, {
+        both: [], mb_unpaired: [{
+          id: 'compare-only', title: 'Compare only', source: 'mb',
+          identity_kind: 'work', provenance: ['ordinary'],
+        }], discogs_unpaired: [], discogs_ungrouped_releases: [],
+      }));
+    }
+    if (url.includes('/api/library/artist')) return library.promise;
+    if (url.includes('/disambiguate')) return Promise.resolve(response(503, {}));
+    return artist.promise;
+  };
+  const load = loadArtistPage(aid, 'Early Compare');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(state.browseCache[aid], undefined, 'early compare cannot create partial cache');
+  artist.resolve(response(200, { release_groups: [] }));
+  library.resolve(response(200, { albums: [] }));
+  await load;
+  assert.equal(state.browseCache[aid].compare.mb_unpaired[0].id, 'compare-only');
+  assert.match(artistBody.innerHTML, /Compare only/);
 }
 
 // Source-switch race pin: invalidation happens before the cross-source artist
@@ -356,7 +498,10 @@ for (const [oldSource, newSource] of [['mb', 'discogs'], ['discogs', 'mb']]) {
       let callIndex = 0;
       state.browseSource = oldSource;
       state.browseArtist = { id: `old-${oldSource}`, name: 'Generated Race' };
-      globalThis.fetch = () => {
+      globalThis.fetch = (url) => {
+        if (url.includes('/api/artist/compare?')) {
+          return Promise.resolve(response(503, { error: 'decoration unavailable' }));
+        }
         const call = callIndex++;
         if (call === 0) return oldFastA.promise;
         if (call === 1) return oldFastB.promise;
