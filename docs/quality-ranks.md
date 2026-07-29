@@ -224,13 +224,37 @@ clamp it down further.
 
 **A spectral-bound value classifies via this table only when BOTH sides are
 bound AND the side is MP3** (issue #829 Phase 5 PR2b — only MP3 routes on
-`is_cbr` at all, and only MP3's class ladder is calibrated to these
-thresholds). The MP3 spectral class (`lib/spectral_check.py`'s
-`LAME_LOWPASS` table: 96/112/128/160/192/224/256/320, or the detector-space
-ladder in `lib/quality/spectral_interpretation.py` when a raw `cliff_hz`
-was captured) is calibrated to these exact CBR thresholds, not the more
-generous MP3 VBR ones — a cliff-detected 192 IS a `good`-band reading, by
-construction. When
+`is_cbr` at all, and only MP3 has a class ladder these thresholds share).
+The MP3 spectral class (`lib/spectral_check.py`'s `LAME_LOWPASS` table:
+96/112/128/160/192/224/256/320, or the detector-space ladder in
+`lib/quality/spectral_interpretation.py` when a raw `cliff_hz` was
+captured) is a *nominal kbps class* drawn from the same MP3 ladder these
+CBR thresholds are, not from the more generous MP3 VBR ones — so a class of
+192 lands in the `good` band arithmetically.
+
+**That is a statement about the class VALUES, not about accuracy** (issue
+#829 Phase 5 PR2c — this paragraph used to say a cliff-detected 192 "IS a
+`good`-band reading, by construction", which reads as a calibration claim
+the measurement does not support, and says nothing at all for a non-MP3
+album). The four-arm calibration measured `detect_cliff` reporting the
+first slice of the steep run — roughly one tier BELOW the encoder's actual
+lowpass — so the shipped `LAME_LOWPASS` table systematically under-rates
+MP3s: a real CBR-192 buckets as 160 on 75% of tracks. That is why PR2a
+derived `MP3_DETECTOR_CLASS_BUCKETS` in *detector* space for rows carrying
+a raw `cliff_hz`, and why the two derivations are never compared against
+each other (`spectral_classes_comparable` → `mixed_derivation_basis`).
+
+The claim is narrow in the other direction too, and it is worth stating
+precisely: **Vorbis q0–q4 has its own invertible ladder**
+(`VORBIS_DETECTOR_CLASS_BUCKETS`, `VORBIS_TOP_CLASS_KBPS`;
+`LADDER_CODEC_FAMILIES` is `{mp3, vorbis}`), and its classes ARE
+decision-grade — a same-Vorbis pair is comparable and clamps. Those classes
+simply classify through the **Vorbis** band table further down this page,
+never this MP3-CBR one. So the accurate statement is "no other codec's
+class reaches *this* table", not "no other codec has a ladder". The two
+families that genuinely have none are AAC — whose cliff is a one-sided
+content *floor*, never a class — and Opus/HE-AAC, which assert nothing at
+all. See `docs/research/spectral-calibration-findings.md`. When
 `compare_quality`'s shared spectral clamp (`_shared_spectral_bitrates`)
 binds on BOTH sides (`spectral <= raw metric`, each side individually),
 both clamped values classify through this table regardless of either

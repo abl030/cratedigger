@@ -37,7 +37,7 @@ from typing import Never
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import msgspec
-from hypothesis import example, given, settings
+from hypothesis import assume, example, given, settings
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
@@ -55,7 +55,10 @@ from lib.quality import (
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
     QualityComparisonBasis,
+    QualityRank,
     QualityRankConfig,
+    SpectralCodecContext,
+    SpectralComparability,
     SpectralEvidenceFacts,
     TargetQualityContract,
     VerifiedLosslessProof,
@@ -72,10 +75,12 @@ from lib.quality import (
     interpret_spectral_evidence,
     legacy_unrecorded_audio_validation_report,
     quality_gate_decision,
+    quality_rank,
     spectral_classes_comparable,
     spectral_import_decision,
 )
 from lib.quality.filetypes import has_mixed_lossless_and_lossy
+from lib.spectral_check import MIN_CLIFF_SLICES, SLICE_FREQS
 from tests.helpers import (
     build_parity_candidate_evidence,
     build_parity_current_evidence,
@@ -411,20 +416,30 @@ class StageParityWorld:
     (consistent-evidence) domain.
 
     ``new_format``/``existing_format`` are deliberately the SAME codec
-    family on both sides (see ``stage_parity_worlds``). Random probing
-    (millions of iterations, outside this property) found the shared
-    spectral clamp ALSO disagrees when the two sides are DIFFERENT codec
-    families — but the spectral bucket table (``LAME_LOWPASS``) is
-    calibrated to MP3/LAME specifically, and candidate-side spectral
-    analysis is only gated to run on MP3-shaped/CBR or FLAC->V0-conversion
-    candidates (``spectral_gate_trigger``), so a cross-codec spectral
-    pairing is itself evidence of a mismatch this docstring already scopes
-    as a separate-subsystem question (a fresh single measurement never
-    produces one codec's spectral estimate paired against a
-    DIFFERENT codec's raw measurement), not an independent decision-logic
-    gap. A correct fix would require deciding whether spectral evidence is
-    even comparable across codec families at all — out of scope for this
-    audit.
+    family on both sides (see ``stage_parity_worlds``) — but only because
+    that is where the same-rank spectral tiebreak this property patrols
+    lives, NOT because the cross-codec domain is safe.
+
+    **CORRECTION (issue #829 Phase 5 PR2c).** This docstring used to
+    justify the cross-codec exclusion by arguing that ``LAME_LOWPASS`` is
+    MP3/LAME-calibrated and the preimport gate only fires on MP3-shaped
+    candidates, so "a cross-codec spectral pairing is itself evidence of a
+    mismatch … not an independent decision-logic gap", and that a fresh
+    single measurement never produces one codec's spectral estimate paired
+    against a DIFFERENT codec's raw measurement. **Every clause of that is
+    false.** ``collect_attempt_spectral_audit`` measured EVERY codec
+    through the LAME table and persisted the result as decision-facing
+    evidence, so a fresh measurement produced exactly that pairing all the
+    time — download 37946 (request 6387, Wavves — *Wavves*) is an ordinary
+    AAC whose natural rolloff read as "MP3 128 transcode" and drove a live
+    cross-codec clamp. It WAS an independent decision-logic gap, it was
+    load-bearing in production, and issue #829's four-arm calibration
+    (60,102 measurements) settled the question this docstring called out of
+    scope: cutoff Hz is not a cross-codec currency (a 17 kHz cliff means
+    ~160 kbps in MP3 and 256-320 in AAC), so the comparison is refused
+    rather than rescaled. Phase 5 PR2b shipped the refusal
+    (``spectral_classes_comparable``); ``inadmissible_spectral_pair_worlds``
+    below patrols the domain this world type still excludes.
     """
     grade: str
     new_container: int
@@ -451,6 +466,22 @@ def _stage_parity_verdicts(
     new decision path: both are pure data constructors, and every verdict
     comes only from ``spectral_import_decision``/``compare_quality``
     themselves — the two decision surfaces this property patrols.
+
+    **Scope, stated because it is easy to over-read** (issue #829 Phase 5
+    PR2c). This harness reproduces ``full_pipeline_decision``'s Stage-1
+    WIRING inline rather than calling it, because Stage 2's verdict is
+    needed even in the worlds where Stage 1 rejects and short-circuits.
+    The consequence is that a mutant planted in that wiring is invisible
+    here: three separate reverts of the PR2b Stage-1 seam all live in
+    ``lib/quality/pipeline.py``, which this harness never calls, and all
+    three left this property green at both tiers. A fourth mutant, inside
+    ``spectral_classes_comparable`` — which this harness DOES call —
+    survived as well, because the checker only fires on ``reject`` +
+    ``"better"`` and this world type's same-codec ladder domain does not
+    reach that pairing. The seam itself is patrolled by
+    ``test_stage1_never_consumes_an_inadmissible_existing_class``, which
+    drives ``full_pipeline_decision`` directly for exactly that reason and
+    kills all four at both tiers.
     """
     new_m = AudioQualityMeasurement(
         min_bitrate_kbps=world.new_container,
@@ -492,6 +523,255 @@ def _stage_parity_verdicts(
     return stage1, stage2
 
 
+#: The three ways ``spectral_classes_comparable`` can refuse a pair whose
+#: CANDIDATE side is decision-grade. Each is a ``SpectralComparabilityReason``
+#: production emits, used here as the world's own declared shape so
+#: ``TestInadmissiblePairDomainIsWhatItClaims`` can check the strategy
+#: against the real refusal rather than against a comment.
+_INADMISSIBLE_SHAPES = (
+    "cross_codec_legacy_bucket",
+    "mixed_derivation_basis",
+    "right_not_decision_grade",
+)
+
+#: HAVE codec labels with no invertible ladder — AAC's cliff is a one-sided
+#: content floor, Opus carries no signal, WMA is uncalibrated.
+_NON_LADDER_HAVE_FORMATS = ("AAC", "Opus", "WMA")
+
+#: Album verdicts that do NOT authorize a spectral finding
+#: (``_grade_authorizes`` admits only ``SPECTRAL_TRANSCODE_GRADES``) AND can
+#: still carry spectral numbers. Two omissions are deliberate, both Rule C
+#: (``.claude/rules/test-fidelity.md``): ``None``, because an evidence row
+#: with no grade may not carry a spectral bitrate at all; and ``"error"``,
+#: because the only producer of an album-level ``error``
+#: (``analyze_album``'s all-tracks-errored branch) returns
+#: ``estimated_bitrate_kbps=None`` and no ``cliff_hz`` by construction.
+#: A HAVE carrying either alongside a stored bucket is a world no producer
+#: can write, and this domain exists for a HAVE whose numbers the pre-#829
+#: seam really would have consumed. ``genuine`` with a real estimate is the
+#: canonical live shape (Springsteen: CBR 320 graded ``genuine``,
+#: spectral 96).
+_NON_AUTHORIZING_GRADES = ("genuine", "marginal")
+
+#: Every raw ``cliff_hz`` ``detect_cliff`` can return, DERIVED from the
+#: production constants rather than transcribed (``.claude/rules/
+#: test-fidelity.md`` Rule C). ``detect_cliff`` returns
+#: ``slices[i - 1]["freq"]`` only after ``MIN_CLIFF_SLICES`` consecutive
+#: steep gradients, so the last two ``SLICE_FREQS`` entries can never be a
+#: cliff START — the reachable set is 12000-18500, and the live corpus
+#: agrees exactly (max ``cliff_hz`` = 18500, zero rows above, and the
+#: column has no operator override).
+#:
+#: Consequence worth stating rather than leaving implicit: the MP3 320
+#: class (cliff >= 19250) and the Vorbis 160 class (cliff >= 19000) are
+#: NOT reachable from a cliff at all. They exist only as legacy stored
+#: buckets, which is how ``_LAME_BUCKET_CLASSES`` reaches them here.
+_CLIFF_HZ_VALUES: tuple[int, ...] = tuple(SLICE_FREQS[:-MIN_CLIFF_SLICES])
+
+
+@dataclass(frozen=True)
+class InadmissibleSpectralPairWorld:
+    """A Stage-1-reachable world whose two spectral classes may NOT be paired.
+
+    The domain issue #828 item 1 asked for and issue #829 defined. Every
+    world here satisfies three things BY CONSTRUCTION, so the property
+    below never has to ask production whether its own precondition holds:
+
+    * the CANDIDATE is an MP3 whose interpretation is decision-grade — an
+      authorizing album verdict plus either a raw ``cliff_hz`` or a stored
+      ``LAME_LOWPASS`` bucket. MP3 is not a simplification: since PR2b made
+      ``spectral_gate_trigger`` codec-aware, ``stage0_gates_stage1`` is
+      only true for MP3 and lossless candidates, and a lossless container
+      never yields a kbps class — so an MP3 candidate is the ONLY shape
+      that can reach a Stage-1 spectral REJECTION (the checker's clause 1).
+      A lossless candidate still reaches Stage 1 and can still trip clause
+      2, which this domain does not cover; see
+      ``test_every_generated_candidate_reaches_stage_1_with_a_class``;
+    * the preimport gate would actually fire (CBR, or VBR below
+      ``cfg.mp3_vbr.excellent``), so ``stage1_spectral`` is a real verdict
+      rather than ``None``;
+    * the HAVE carries real spectral evidence that the pre-#829 seam WOULD
+      have consumed, while ``spectral_classes_comparable`` refuses it —
+      for the reason named in ``shape``.
+
+    Containers are drawn free of the spectral values. Stage 1 never
+    consults a container (evidence-set parity: it compares spectral
+    against spectral), and ``spectral > own container`` is reachable from
+    an ordinary fresh measurement anyway — see ``StageParityWorld``.
+    """
+
+    shape: str
+    grade: str
+    new_container: int
+    new_spectral: int | None
+    new_cliff_hz: int | None
+    new_is_cbr: bool
+    existing_format: str
+    existing_grade: str
+    existing_container: int
+    existing_spectral: int | None
+    existing_cliff_hz: int | None
+    existing_is_cbr: bool
+
+
+def _inadmissible_pair_stage1(
+    world: InadmissibleSpectralPairWorld,
+    *,
+    withhold_existing_spectral: bool,
+) -> str | None:
+    """Drive the REAL Stage-1 seam and return its verdict.
+
+    Deliberately NOT the ``_stage_parity_verdicts`` shape. That harness
+    reproduces ``full_pipeline_decision``'s Stage-1 wiring inline, which is
+    correct for the invariant it patrols (Stage 1 vs Stage 2 as two decision
+    surfaces) but useless here: the wiring IS what this property patrols, so
+    a copy of it in the harness would move with any mutant planted in the
+    seam. ``full_pipeline_decision`` is the seam's owner —
+    ``full_pipeline_decision_from_evidence``, the function the importer
+    calls, delegates to it.
+
+    ``withhold_existing_spectral`` removes the installed copy's spectral
+    evidence entirely — grade, stored bucket and raw cliff — which is the
+    counterfactual the invariant is stated against.
+    """
+    decision = full_pipeline_decision(
+        is_flac=False,
+        min_bitrate=world.new_container,
+        avg_bitrate=world.new_container,
+        is_cbr=world.new_is_cbr,
+        is_vbr=not world.new_is_cbr,
+        new_format="MP3",
+        spectral_grade=world.grade,
+        spectral_bitrate=world.new_spectral,
+        candidate_spectral_context=SpectralCodecContext(
+            cliff_hz=world.new_cliff_hz,
+        ),
+        existing_min_bitrate=world.existing_container,
+        existing_avg_bitrate=world.existing_container,
+        existing_format=world.existing_format,
+        existing_is_cbr=world.existing_is_cbr,
+        existing_spectral_grade=(
+            None if withhold_existing_spectral else world.existing_grade
+        ),
+        existing_spectral_bitrate=(
+            None if withhold_existing_spectral else world.existing_spectral
+        ),
+        existing_spectral_context=SpectralCodecContext(
+            cliff_hz=(
+                None if withhold_existing_spectral else world.existing_cliff_hz
+            ),
+        ),
+        override_min_bitrate=None,
+    )
+    return decision["stage1_spectral"]
+
+
+@dataclass(frozen=True)
+class HaveRepresentationWorld:
+    """An installed copy whose own decision-grade class contradicts its container.
+
+    The world space for the disarm identity (issue #829 Phase 5 PR2c item
+    6). The HAVE is decision-grade BY CONSTRUCTION — a ladder family with
+    an authorizing album verdict and either a raw ``cliff_hz`` or a stored
+    ``LAME_LOWPASS`` bucket — so exactly one representation mechanism must
+    always fire for it. The CANDIDATE is deliberately free, because which
+    mechanism fires depends entirely on whether the candidate's own class
+    is comparable against the HAVE's.
+
+    ``existing_is_cbr`` is fixed True and that is a real scope limit, not
+    an oversight: ``build_existing_quality_measurement`` clamps avg/median
+    from the override only for CBR albums, deliberately, so a VBR HAVE
+    keeps its real avg and a stale spectral floor cannot erase a genuine
+    rank signal. On a VBR HAVE the raw avg legitimately survives the
+    override and this invariant does not hold.
+    """
+
+    candidate_grade: str | None
+    candidate_container: int
+    candidate_spectral: int | None
+    candidate_cliff_hz: int | None
+    candidate_is_cbr: bool
+    existing_format: str
+    existing_grade: str
+    existing_container: int
+    existing_spectral: int | None
+    existing_cliff_hz: int | None
+
+
+def _have_representation_decision(
+    world: HaveRepresentationWorld,
+) -> tuple[dict[str, object], int]:
+    """Drive the real decider the way production's callers drive it.
+
+    The override is DERIVED with ``compute_effective_override_bitrate``
+    over the real interpretation — the same function
+    ``lib/import_preview.py`` and ``lib/dispatch/quality_gate.py`` call to
+    produce it — never a literal, so the world cannot feed the seam a value
+    no caller would compute (``.claude/rules/test-fidelity.md`` Rule C).
+    """
+    existing_interpretation = interpret_spectral_evidence(SpectralEvidenceFacts(
+        spectral_grade=world.existing_grade,
+        format=world.existing_format,
+        cliff_hz=world.existing_cliff_hz,
+        spectral_bitrate_kbps=world.existing_spectral,
+    ))
+    class_kbps = decision_class_kbps(existing_interpretation)
+    # Guaranteed by the strategy; asserted so a strategy regression is loud
+    # rather than a silently vacuous property.
+    assert class_kbps is not None, repr(world)
+    decision = full_pipeline_decision(
+        is_flac=False,
+        min_bitrate=world.candidate_container,
+        avg_bitrate=world.candidate_container,
+        is_cbr=world.candidate_is_cbr,
+        is_vbr=not world.candidate_is_cbr,
+        new_format="MP3",
+        spectral_grade=world.candidate_grade,
+        spectral_bitrate=world.candidate_spectral,
+        candidate_spectral_context=SpectralCodecContext(
+            cliff_hz=world.candidate_cliff_hz,
+        ),
+        existing_min_bitrate=world.existing_container,
+        existing_avg_bitrate=world.existing_container,
+        existing_format=world.existing_format,
+        existing_is_cbr=True,
+        existing_spectral_grade=world.existing_grade,
+        existing_spectral_bitrate=world.existing_spectral,
+        existing_spectral_context=SpectralCodecContext(
+            cliff_hz=world.existing_cliff_hz,
+        ),
+        override_min_bitrate=compute_effective_override_bitrate(
+            world.existing_container, existing_interpretation,
+        ),
+    )
+    return decision, class_kbps
+
+
+def _inadmissible_pair_comparability(
+    world: InadmissibleSpectralPairWorld,
+) -> SpectralComparability:
+    """Ask production whether this world's pair really is inadmissible.
+
+    Used ONLY by the domain pin, never by the property: a checker that
+    asks the function under test whether its own precondition holds goes
+    vacuous the moment that function is the thing that broke.
+    """
+    return spectral_classes_comparable(
+        interpret_spectral_evidence(SpectralEvidenceFacts(
+            spectral_grade=world.grade,
+            format="MP3",
+            cliff_hz=world.new_cliff_hz,
+            spectral_bitrate_kbps=world.new_spectral,
+        )),
+        interpret_spectral_evidence(SpectralEvidenceFacts(
+            spectral_grade=world.existing_grade,
+            format=world.existing_format,
+            cliff_hz=world.existing_cliff_hz,
+            spectral_bitrate_kbps=world.existing_spectral,
+        )),
+    )
+
+
 def assert_stage1_never_contradicts_stage2(
     stage1: str, stage2: QualityComparisonBasis,
 ) -> None:
@@ -515,6 +795,115 @@ def assert_stage1_never_contradicts_stage2(
             "Stage 1 rejected a candidate Stage 2 scores as an upgrade: "
             f"stage1={stage1!r} stage2.verdict={stage2.verdict!r} "
             f"stage2.branch={stage2.branch!r}"
+        )
+
+
+def assert_have_is_represented_by_its_own_class(
+    existing_rank: str,
+    class_rank: str,
+    *,
+    context: str = "",
+) -> None:
+    """Issue #829 Phase 5 PR2c — the "never neither" half of the disarm identity.
+
+    Two mechanisms can represent an installed album by its real content
+    rather than its container: the symmetric clamp inside
+    ``_shared_spectral_bitrates``, and the one-sided
+    ``override_min_bitrate``. ``full_pipeline_decision`` disarms the
+    one-sided override precisely when the clamp governs instead, and the
+    two predicates being the SAME condition is the whole argument — the
+    override is safe to drop only because something else then represents
+    the installed album by its own content.
+
+    **So exactly one of them always fires**, and the observable consequence
+    is that a HAVE carrying a decision-grade class is never RANKED above
+    that class. Widen the disarm to the plausible-looking "both sides have
+    a class" and a window opens where neither mechanism fires and a
+    known-fake 320 keeps its inflated ``transparent`` rank — download_log
+    29525, Clue to Kalo *Lily Perdida*, 132 of 9,219 live pairs.
+
+    The complementary "never BOTH" half is
+    ``assert_existing_override_noop_under_shared_clamp``. That one was
+    already patrolled by a generated property; this one shipped with
+    deterministic pins only (``TestMixedBasisDisarmWindow``), so a mutant
+    confined to the disarm predicate was caught by nothing generated.
+
+    Ranks, not values: ``metric_tiebreak`` deliberately falls back to the
+    RAW configured metric so equal spectral buckets can still converge
+    upward by bitrate (Mark DeNardo request 1308), which means the
+    displayed ``existing_value_kbps`` legitimately exceeds the class on
+    that branch. Rank is what governs the verdict and is the honest
+    invariant.
+    """
+    existing = QualityRank[existing_rank.upper()]
+    bound = QualityRank[class_rank.upper()]
+    if existing > bound:
+        where = f" [{context}]" if context else ""
+        raise AssertionError(
+            "the installed copy was ranked above its own spectral class"
+            f"{where}: existing_rank={existing_rank!r} but its class alone "
+            f"ranks {class_rank!r} — neither the symmetric clamp nor the "
+            "one-sided override represented it by its real content"
+        )
+
+
+def assert_stage1_ignores_inadmissible_existing_spectral(
+    stage1: str | None,
+    stage1_without_existing_spectral: str | None,
+    *,
+    context: str = "",
+) -> None:
+    """Issue #829 Phase 5 PR2c — the cross-codec half of the parity contract.
+
+    **Stage 1 must not reject on a spectral comparison Stage 2 is not
+    permitted to make.** Whenever ``spectral_classes_comparable`` refuses
+    the pair, the existing side's spectral evidence is inadmissible, and
+    inadmissible evidence must move NOTHING: Stage 1's verdict has to be
+    the verdict the same world produces with that evidence absent
+    entirely. The research finding this encodes, verbatim from
+    ``docs/research/spectral-calibration-findings.md``: "cross-codec
+    spectral comparison is undefined and fails closed", not a translation
+    table.
+
+    Two clauses, in the order they matter:
+
+    1. **No Stage-1 rejection.** Stage 1's only operative effect is
+       ``"reject"``, which short-circuits ``full_pipeline_decision``
+       before Stage 2 runs (denylist the source, stay ``wanted``). A
+       rejection built on a class Stage 2 refuses to weigh is the #829
+       defect at the parity seam: download 37946's shape pointed at the
+       candidate instead of the library.
+    2. **Withheld evidence moves nothing.** The silent direction clause 1
+       misses: an inadmissible class turning ``import_no_exist`` into
+       ``import_upgrade`` changes no outcome today, but it means the seam
+       consumed evidence it may not see.
+
+    Neither clause subsumes the other, which is why both are asserted.
+    Clause 2 alone would let a mutant that fabricates an existing class
+    from nothing pass, because BOTH runs would then reject and the two
+    verdicts would agree — the third case in the known-bad self-test.
+
+    Clause 1 also makes this property subsume ``assert_stage1_never_
+    contradicts_stage2`` on this whole domain, for EVERY possible Stage 2:
+    that checker's antecedent is ``stage1 == "reject"``, which clause 1
+    forbids outright. That is why the old checker is not re-run here — not
+    because it cannot fire on cross-codec worlds. It can: a cross-codec
+    pair at DIFFERENT ranks takes ``compare_quality``'s ``rank`` branch,
+    where ``"better"`` is perfectly reachable. Only the
+    ``cross_family_same_rank`` branch is structurally ``"equivalent"``.
+    """
+    where = f" [{context}]" if context else ""
+    if stage1 == "reject":
+        raise AssertionError(
+            "Stage 1 rejected on a spectral comparison Stage 2 is not "
+            f"permitted to make{where}: the two spectral classes are not "
+            "comparable, so the existing side contributes no class at all"
+        )
+    if stage1 != stage1_without_existing_spectral:
+        raise AssertionError(
+            "an inadmissible existing-side spectral class changed the "
+            f"Stage 1 verdict{where}: {stage1!r} (evidence present) vs "
+            f"{stage1_without_existing_spectral!r} (evidence withheld)"
         )
 
 
@@ -786,8 +1175,28 @@ def stage_parity_worlds(draw) -> StageParityWorld:
     ``test_existing_spectral_override_is_noop_when_candidate_has_spectral``'s
     fixed ``"MP3"``) so the search spends its budget on the same-codec-
     family same-rank tiebreak this property patrols, rather than diluting
-    across the ``cross_family_same_rank`` branch, which can never emit
-    ``"better"`` and so can never disagree with a Stage-1 reject.
+    across the ``cross_family_same_rank`` branch, which returns
+    ``"equivalent"`` unconditionally and so can never disagree with a
+    Stage-1 reject.
+
+    **That is a fact about the BRANCH, not about cross-codec worlds**
+    (correction, issue #829 Phase 5 PR2c — the original wording invited the
+    wider reading). ``cross_family_same_rank`` only fires at the SAME rank;
+    a cross-codec pair at DIFFERENT ranks takes ``compare_quality``'s
+    ``rank`` branch, where ``"better"`` is perfectly reachable, so a
+    cross-codec world CAN trip ``assert_stage1_never_contradicts_stage2``.
+    The negative is a code fact, not a sample: ``cross_family_same_rank``
+    hardcodes ``"equivalent"`` in ``lib/quality/compare.py``, so that
+    branch alone can never disagree — while ``rank``,
+    ``spectral_candidate_bound`` and ``metric_tiebreak`` all can, and are
+    all reachable cross-codec. Measured over a 46,286-world sweep of
+    MP3-candidate worlds simulating the pre-PR2b Stage-1 seam: 1,142 worlds
+    flipped Stage 1 to ``"reject"`` and 326 of those carried a Stage-2
+    ``"better"``, predominantly through ``rank``. That domain is patrolled by
+    ``inadmissible_spectral_pair_worlds`` /
+    ``test_stage1_never_consumes_an_inadmissible_existing_class``, whose
+    checker forbids the Stage-1 rejection outright and therefore subsumes
+    this checker there.
 
     **The shared format is drawn from the LADDER families only** (issue
     #829 Phase 5 PR2b): AAC, Opus and WMA now withhold a class on BOTH
@@ -817,6 +1226,248 @@ def stage_parity_worlds(draw) -> StageParityWorld:
         new_format=shared_format,
         existing_format=shared_format,
     )
+
+
+@st.composite
+def inadmissible_spectral_pair_worlds(draw) -> InadmissibleSpectralPairWorld:
+    """Worlds whose two spectral classes may NOT be compared (issue #829 PR2c).
+
+    The domain ``stage_parity_worlds`` excludes and #828 item 1 asked for.
+    Incomparability is a property of the WORLD, established by
+    construction, so the property's precondition never routes through
+    ``spectral_classes_comparable`` — a mutant inside that function would
+    otherwise flip the precondition too and the property would go vacuous
+    exactly when it was needed.
+
+    ``shape`` is drawn first and weighted evenly across the three refusal
+    reasons. A flat sweep over containers/grades/formats would spend ~92%
+    of its budget on ``right_not_decision_grade`` (measured: 37,029 of
+    40,181 incomparable worlds in a 46,286-world grid), starving the two
+    shapes where BOTH sides carry a real class — which are the shapes the
+    #829 calibration exists to separate.
+
+    * ``cross_codec_legacy_bucket`` — MP3 candidate vs Vorbis HAVE, both
+      classes derived from a legacy stored bucket. Live on prod: five rows
+      resolve to a Vorbis measured subject through ``format`` (evidence ids
+      33935/33941/33942/33943/33974), two carrying the documented LAME
+      over-read of Vorbis as 192.
+    * ``mixed_derivation_basis`` — same codec, but exactly one side carries
+      a raw ``cliff_hz``. A cliff re-derivation sits systematically one tier
+      above the legacy bucket, so the pair measures derivation, not content
+      (the Fall 2007 loop, issue #911, evidence id 34219).
+    * ``right_not_decision_grade`` — the HAVE has no admissible class at
+      all: a family with no invertible ladder (AAC's content floor, Opus's
+      absent signal, WMA's uncalibrated cliff), or an MP3 whose own album
+      verdict does not authorize a spectral finding. Download 37946 is the
+      first sub-case pointed at the library instead of the candidate.
+    """
+    shape = draw(st.sampled_from(_INADMISSIBLE_SHAPES))
+    grade = draw(st.sampled_from(("suspect", "likely_transcode")))
+    # The preimport gate must fire for Stage 1 to produce a verdict at all:
+    # MP3 CBR always, MP3 VBR only below ``cfg.mp3_vbr.excellent`` (210).
+    new_is_cbr = draw(st.booleans())
+    new_container = draw(
+        _bitrates(min_value=1, max_value=3000) if new_is_cbr
+        else _bitrates(min_value=1, max_value=209)
+    )
+    existing_container = draw(_bitrates(min_value=1, max_value=3000))
+    existing_is_cbr = draw(st.booleans())
+
+    # The candidate is decision-grade by construction: an authorizing
+    # verdict plus either a raw cliff or a real ``LAME_LOWPASS`` bucket.
+    # ``cross_codec_legacy_bucket`` additionally needs stored-bucket basis
+    # on BOTH sides — a cliff on either side makes the pair refuse for the
+    # mixed-basis reason instead, which is a different shape.
+    new_from_cliff = draw(st.booleans()) if shape != (
+        "cross_codec_legacy_bucket") else False
+    new_cliff_hz = draw(st.sampled_from(_CLIFF_HZ_VALUES)) if new_from_cliff else None
+    new_spectral = None if new_from_cliff else draw(
+        st.sampled_from(_LAME_BUCKET_CLASSES))
+
+    if shape == "cross_codec_legacy_bucket":
+        return InadmissibleSpectralPairWorld(
+            shape=shape, grade=grade,
+            new_container=new_container, new_spectral=new_spectral,
+            new_cliff_hz=None, new_is_cbr=new_is_cbr,
+            existing_format="Vorbis",
+            existing_grade=draw(st.sampled_from(
+                ("suspect", "likely_transcode"))),
+            existing_container=existing_container,
+            existing_spectral=draw(st.sampled_from(_LAME_BUCKET_CLASSES)),
+            existing_cliff_hz=None,
+            existing_is_cbr=existing_is_cbr,
+        )
+
+    if shape == "mixed_derivation_basis":
+        # Same family, opposite derivation: whichever side has no cliff
+        # falls back to its stored bucket, and the two bases differ.
+        existing_cliff_hz = (
+            None if new_from_cliff else draw(st.sampled_from(_CLIFF_HZ_VALUES))
+        )
+        return InadmissibleSpectralPairWorld(
+            shape=shape, grade=grade,
+            new_container=new_container, new_spectral=new_spectral,
+            new_cliff_hz=new_cliff_hz, new_is_cbr=new_is_cbr,
+            existing_format="MP3",
+            existing_grade=draw(st.sampled_from(
+                ("suspect", "likely_transcode"))),
+            existing_container=existing_container,
+            existing_spectral=(
+                None if existing_cliff_hz is not None
+                else draw(st.sampled_from(_LAME_BUCKET_CLASSES))
+            ),
+            existing_cliff_hz=existing_cliff_hz,
+            existing_is_cbr=existing_is_cbr,
+        )
+
+    # right_not_decision_grade: either an unladdered family (any verdict),
+    # or an MP3 whose verdict does not authorize a spectral finding.
+    have_is_unladdered = draw(st.booleans())
+    if have_is_unladdered:
+        existing_format = draw(st.sampled_from(_NON_LADDER_HAVE_FORMATS))
+        existing_grade = draw(st.sampled_from(
+            ("genuine", "marginal", "suspect", "likely_transcode")))
+    else:
+        existing_format = "MP3"
+        existing_grade = draw(st.sampled_from(_NON_AUTHORIZING_GRADES))
+    # The HAVE always carries at least one real number. A world where it
+    # carries none is inadmissible too, but trivially so — there is nothing
+    # for the pre-#829 seam to have consumed, and this domain exists to
+    # patrol the worlds where there was.
+    existing_stored, existing_cliff_hz = draw(st.one_of(
+        st.tuples(st.sampled_from(_LAME_BUCKET_CLASSES), st.none()),
+        st.tuples(st.none(), st.sampled_from(_CLIFF_HZ_VALUES)),
+        st.tuples(st.sampled_from(_LAME_BUCKET_CLASSES),
+                  st.sampled_from(_CLIFF_HZ_VALUES)),
+    ))
+    return InadmissibleSpectralPairWorld(
+        shape=shape, grade=grade,
+        new_container=new_container, new_spectral=new_spectral,
+        new_cliff_hz=new_cliff_hz, new_is_cbr=new_is_cbr,
+        existing_format=existing_format,
+        existing_grade=existing_grade,
+        existing_container=existing_container,
+        existing_spectral=existing_stored,
+        existing_cliff_hz=existing_cliff_hz,
+        existing_is_cbr=existing_is_cbr,
+    )
+
+
+@st.composite
+def have_representation_worlds(draw) -> HaveRepresentationWorld:
+    """Worlds for the disarm identity (issue #829 Phase 5 PR2c item 6).
+
+    The HAVE is always decision-grade: a ladder family, an authorizing
+    album verdict, and a class from either derivation. The CANDIDATE is
+    free — grade included — because the two mechanisms are selected by
+    whether the candidate's class is comparable against the HAVE's, so a
+    constrained candidate would explore only one arm of the identity.
+    """
+    existing_from_cliff = draw(st.booleans())
+    candidate_from_cliff = draw(st.booleans())
+    return HaveRepresentationWorld(
+        candidate_grade=draw(st.sampled_from(_GRADES)),
+        candidate_container=draw(_bitrates(min_value=1, max_value=3000)),
+        candidate_spectral=(
+            None if candidate_from_cliff
+            else draw(st.one_of(
+                st.none(), st.sampled_from(_LAME_BUCKET_CLASSES)))
+        ),
+        candidate_cliff_hz=(
+            draw(st.sampled_from(_CLIFF_HZ_VALUES))
+            if candidate_from_cliff else None
+        ),
+        candidate_is_cbr=draw(st.booleans()),
+        existing_format=draw(st.sampled_from(_LADDER_FORMATS)),
+        existing_grade=draw(st.sampled_from(("suspect", "likely_transcode"))),
+        existing_container=draw(_bitrates(min_value=1, max_value=3000)),
+        existing_spectral=(
+            None if existing_from_cliff
+            else draw(st.sampled_from(_LAME_BUCKET_CLASSES))
+        ),
+        existing_cliff_hz=(
+            draw(st.sampled_from(_CLIFF_HZ_VALUES))
+            if existing_from_cliff else None
+        ),
+    )
+
+
+#: The live world that found the disarm window: download_log 29525, Clue to
+#: Kalo *Lily Perdida*. The HAVE (evidence 17273) is an MP3 CBR 320 graded
+#: ``likely_transcode`` whose measured ``cliff_hz=15500`` re-derives to the
+#: 128 class; the candidate (evidence 22689) carries only a legacy stored
+#: bucket, so the bases differ, the clamp withholds, and the one-sided
+#: override is the only thing standing between a known-fake 320 and a
+#: ``transparent`` rank. Deterministic twin:
+#: ``tests/test_quality_classification.py::TestMixedBasisDisarmWindow``.
+_LILY_PERDIDA_WORLD = HaveRepresentationWorld(
+    candidate_grade="likely_transcode",
+    candidate_container=234,
+    candidate_spectral=192,
+    candidate_cliff_hz=None,
+    candidate_is_cbr=False,
+    existing_format="MP3",
+    existing_grade="likely_transcode",
+    existing_container=320,
+    existing_spectral=None,
+    existing_cliff_hz=15500,
+)
+
+
+#: The shrunk/live-shaped worlds pinned as ``@example``s on the property AND
+#: re-used by the domain pin, so the two can never describe different worlds.
+_PINNED_INADMISSIBLE_WORLDS: tuple[InadmissibleSpectralPairWorld, ...] = (
+    # Live shape. An MP3 CBR 256 candidate whose own cliff-free stored
+    # bucket says 128, against a Vorbis HAVE carrying the documented LAME
+    # over-read of q4 as 192 (evidence 33942/33943 shape). The pre-#829 seam
+    # weighed 128 against 192 and REJECTED the MP3 on a number produced by
+    # applying LAME's table to a Vorbis stream.
+    InadmissibleSpectralPairWorld(
+        shape="cross_codec_legacy_bucket", grade="likely_transcode",
+        new_container=256, new_spectral=128, new_cliff_hz=None,
+        new_is_cbr=True,
+        existing_format="Vorbis", existing_grade="likely_transcode",
+        existing_container=128, existing_spectral=192,
+        existing_cliff_hz=None, existing_is_cbr=True,
+    ),
+    # Fall 2007 shape (issue #911, evidence 34219): the HAVE carries a raw
+    # cliff at 16.5 kHz that re-derives to the 160 class, one tier above the
+    # candidate's legacy 128 bucket purely because of how each was derived.
+    InadmissibleSpectralPairWorld(
+        shape="mixed_derivation_basis", grade="suspect",
+        new_container=320, new_spectral=128, new_cliff_hz=None,
+        new_is_cbr=True,
+        existing_format="MP3", existing_grade="likely_transcode",
+        existing_container=160, existing_spectral=None,
+        existing_cliff_hz=16500, existing_is_cbr=True,
+    ),
+    # Download 37946's defect pointed at the LIBRARY instead of the
+    # candidate. The installed AAC's 15.5 kHz cliff is native behaviour at
+    # every rate the calibration measured from 96 to 320, and its
+    # LAME-bucketed 192 is not a class in any codec's terms — yet the
+    # pre-#829 seam let that number out-rank an MP3 candidate's real 128
+    # and reject a genuine upgrade over a 112 kbps AAC.
+    InadmissibleSpectralPairWorld(
+        shape="right_not_decision_grade", grade="likely_transcode",
+        new_container=256, new_spectral=128, new_cliff_hz=None,
+        new_is_cbr=True,
+        existing_format="AAC", existing_grade="likely_transcode",
+        existing_container=112, existing_spectral=192,
+        existing_cliff_hz=15500, existing_is_cbr=True,
+    ),
+    # The same refusal from the other direction: a same-codec MP3 HAVE whose
+    # album verdict is ``genuine``, so no spectral finding is authorized from
+    # its stored 320. The pre-#829 seam consumed that number regardless of
+    # the grade and rejected a 128-class candidate on it.
+    InadmissibleSpectralPairWorld(
+        shape="right_not_decision_grade", grade="likely_transcode",
+        new_container=192, new_spectral=128, new_cliff_hz=None,
+        new_is_cbr=True,
+        existing_format="MP3", existing_grade="genuine",
+        existing_container=320, existing_spectral=320,
+        existing_cliff_hz=None, existing_is_cbr=True,
+    ),
+)
 
 
 _FRESH_ALBUM = AlbumState(
@@ -1258,6 +1909,86 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
         """
         stage1, stage2 = _stage_parity_verdicts(world)
         assert_stage1_never_contradicts_stage2(stage1, stage2)
+
+    @given(world=inadmissible_spectral_pair_worlds())
+    @example(world=_PINNED_INADMISSIBLE_WORLDS[0])
+    @example(world=_PINNED_INADMISSIBLE_WORLDS[1])
+    @example(world=_PINNED_INADMISSIBLE_WORLDS[2])
+    @example(world=_PINNED_INADMISSIBLE_WORLDS[3])
+    def test_stage1_never_consumes_an_inadmissible_existing_class(self, world):
+        """PAIR (generated half) — issue #829 Phase 5 PR2c: the cross-codec
+        domain the #813/#827 parity property excluded, patrolled with the
+        semantics the four-arm calibration defined.
+
+        **This closes the CROSS-CODEC half of #828 item 1, not the item.**
+        That item names two deliberately-unpatrolled classes. The other —
+        unbound / self-inconsistent evidence, where a side's raw container
+        measures LOWER than its own spectral estimate — is untouched here
+        and remains recorded-only; ``docs/quality-verification.md`` §
+        "Stage 1 / Stage 2 parity" states why it is a different subsystem's
+        aggregation question.
+
+        Stage 1 must not reject on a spectral comparison Stage 2 is not
+        permitted to make, and an inadmissible existing-side class must
+        move nothing at Stage 1. Drives the REAL seam owner
+        (``full_pipeline_decision``, which
+        ``full_pipeline_decision_from_evidence`` delegates to) twice over
+        the same world — once as generated, once with the installed copy's
+        spectral evidence removed entirely — and requires the two Stage-1
+        verdicts to agree.
+
+        Deterministic pin twins:
+        ``tests/test_quality_classification.py::TestLiveBugReproductions``'s
+        ``test_stage_parity_cross_codec_*`` (and its ``_via_evidence``
+        mirror), which assert the DECIDED outcome the pre-#829 seam
+        destroyed.
+        """
+        assert_stage1_ignores_inadmissible_existing_spectral(
+            _inadmissible_pair_stage1(
+                world, withhold_existing_spectral=False),
+            _inadmissible_pair_stage1(
+                world, withhold_existing_spectral=True),
+            context=repr(world),
+        )
+
+    @given(world=have_representation_worlds())
+    @example(world=_LILY_PERDIDA_WORLD)
+    def test_the_installed_copy_is_never_ranked_above_its_own_class(
+        self, world,
+    ):
+        """PAIR (generated half) — issue #829 Phase 5 PR2c item 6: the
+        override-disarm predicate, which shipped in PR2b with deterministic
+        pins and no property.
+
+        ``spectral_classes_govern`` has two consumers. The clamp's own
+        firing condition was already patrolled; the symmetric-representation
+        disarm at the other consumer was not, so a mutant confined to it was
+        caught by nothing generated. This is the "never NEITHER" half of
+        that identity — its "never BOTH" twin is
+        ``test_existing_spectral_override_is_noop_when_candidate_has_spectral``.
+
+        Deterministic pin twin:
+        ``tests/test_quality_classification.py::TestMixedBasisDisarmWindow``
+        (download_log 29525, pinned here as the ``@example``).
+        """
+        decision, class_kbps = _have_representation_decision(world)
+        basis = decision["comparison_basis"]
+        # A Stage-1 short-circuit or a pre-comparison exit means no
+        # comparison ran, so there is no representation to check. ``assume``
+        # rather than ``return``: a return spends the example as a PASS and
+        # silently shrinks the budget (docs/generated-testing.md).
+        assume(isinstance(basis, dict))
+        assert isinstance(basis, dict)
+        existing_rank = basis["existing_rank"]
+        assert isinstance(existing_rank, str)
+        assert_have_is_represented_by_its_own_class(
+            existing_rank,
+            quality_rank(
+                world.existing_format, class_kbps, True,
+                QualityRankConfig.defaults(),
+            ).name.lower(),
+            context=repr(world),
+        )
 
     @given(
         codec_label=_unmapped_codec_labels(),
@@ -2056,6 +2787,78 @@ def _planted_bad_import(
     )
 
 
+class TestInadmissiblePairDomainIsWhatItClaims(unittest.TestCase):
+    """The #829 PR2c domain really is the domain it says it is.
+
+    ``test_stage1_never_consumes_an_inadmissible_existing_class`` asserts
+    unconditionally, because a checker that asks the function under test
+    whether its own precondition holds goes vacuous the moment that
+    function is what broke. These two tests carry the precondition
+    instead: they hold ``inadmissible_spectral_pair_worlds`` to production's
+    OWN refusal — comparability False, for the reason the world declares.
+    Mutate ``spectral_classes_comparable`` and both halves fail: this one
+    because the refusal disappears, the property because Stage 1 then
+    consumes the class.
+    """
+
+    def test_the_pinned_worlds_really_are_inadmissible(self):
+        for world in _PINNED_INADMISSIBLE_WORLDS:
+            with self.subTest(shape=world.shape, world=world):
+                comparability = _inadmissible_pair_comparability(world)
+                self.assertFalse(comparability.comparable)
+                self.assertEqual(comparability.reason, world.shape)
+
+    @given(world=inadmissible_spectral_pair_worlds())
+    def test_every_generated_world_really_is_inadmissible(self, world):
+        comparability = _inadmissible_pair_comparability(world)
+        self.assertFalse(
+            comparability.comparable,
+            f"strategy produced a COMPARABLE pair: {world!r}",
+        )
+        self.assertEqual(
+            comparability.reason, world.shape,
+            f"world declares {world.shape!r} but production refuses for "
+            f"{comparability.reason!r}: {world!r}",
+        )
+
+    @given(world=inadmissible_spectral_pair_worlds())
+    def test_every_generated_candidate_reaches_stage_1_with_a_class(
+        self, world,
+    ):
+        """The candidate side is decision-grade AND the gate fires.
+
+        Without both, clause 1 is unreachable: ``spectral_import_decision``
+        only rejects when BOTH values are non-zero, so a candidate with no
+        class can never produce the Stage-1 rejection this domain exists to
+        forbid. That is an entropy-budget constraint of the same kind
+        ``stage_parity_worlds``' ladder-narrowing already had to fix once.
+
+        **It is not a claim that a class-less candidate is inert.** Clause 2
+        still bites there: with an authorizing grade and no candidate class,
+        ``spectral_import_decision('suspect', None, 0)`` is
+        ``import_no_exist`` while admitting the existing class gives
+        ``import`` — a real withheld-evidence violation. Those are
+        ``left_not_decision_grade`` worlds, the FOURTH refusal reason,
+        deliberately absent from ``_INADMISSIBLE_SHAPES``; they are very
+        live (the 2,503 rows parking a container bitrate in
+        ``spectral_bitrate_kbps`` are exactly this shape). The exclusion is
+        a budget decision, not a safety argument, and it is recorded here so
+        the next reader can widen it on purpose.
+        """
+        candidate = interpret_spectral_evidence(SpectralEvidenceFacts(
+            spectral_grade=world.grade,
+            format="MP3",
+            cliff_hz=world.new_cliff_hz,
+            spectral_bitrate_kbps=world.new_spectral,
+        ))
+        self.assertIsNotNone(decision_class_kbps(candidate), repr(world))
+        self.assertIsNotNone(
+            _inadmissible_pair_stage1(
+                world, withhold_existing_spectral=False),
+            f"the preimport gate never fired: {world!r}",
+        )
+
+
 class TestInvariantCheckersTripOnViolations(unittest.TestCase):
     """Known-bad self-tests: prove the harness detects what it claims to."""
 
@@ -2245,6 +3048,52 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                 new_rank="transparent", existing_rank="good",
             ),
         )
+
+    def test_have_representation_checker_trips(self):
+        """Issue #829 PR2c item 6 known-bad self-test.
+
+        The planted violation is the download_log 29525 world exactly: a
+        HAVE ranked ``transparent`` on its 320 container while its own
+        cliff-derived class of 128 ranks ``acceptable``.
+        """
+        with self.assertRaises(AssertionError) as caught:
+            assert_have_is_represented_by_its_own_class(
+                "transparent", "acceptable")
+        self.assertIn("ranked above its own spectral class",
+                      str(caught.exception))
+        # One tier over is still a violation.
+        with self.assertRaises(AssertionError):
+            assert_have_is_represented_by_its_own_class("good", "acceptable")
+        # Equal is the normal clamped/overridden case, and BELOW the class
+        # is fine too — the raw metric can be the tighter of the two.
+        assert_have_is_represented_by_its_own_class(
+            "acceptable", "acceptable")
+        assert_have_is_represented_by_its_own_class("poor", "transparent")
+
+    def test_inadmissible_existing_class_checker_trips(self):
+        """Issue #829 PR2c known-bad self-test — both clauses trip."""
+        # Clause 1: a Stage-1 rejection built on an inadmissible pair.
+        with self.assertRaises(AssertionError) as caught:
+            assert_stage1_ignores_inadmissible_existing_spectral(
+                "reject", "import_no_exist")
+        self.assertIn("not permitted to make", str(caught.exception))
+        # Clause 2: the silent direction — no rejection, but the withheld
+        # evidence still moved the verdict.
+        with self.assertRaises(AssertionError) as caught:
+            assert_stage1_ignores_inadmissible_existing_spectral(
+                "import_upgrade", "import_no_exist")
+        self.assertIn("changed the Stage 1 verdict", str(caught.exception))
+        # A rejection trips even when the withheld run rejects too — a
+        # mutant that fabricates a class from nothing must not slip through
+        # the equality clause.
+        with self.assertRaises(AssertionError):
+            assert_stage1_ignores_inadmissible_existing_spectral(
+                "reject", "reject")
+        # Invariant worlds must NOT trip, including the gate-skipped shape.
+        assert_stage1_ignores_inadmissible_existing_spectral(
+            "import_no_exist", "import_no_exist")
+        assert_stage1_ignores_inadmissible_existing_spectral("import", "import")
+        assert_stage1_ignores_inadmissible_existing_spectral(None, None)
 
     def test_unmapped_codec_checker_trips_on_terminal_narrowing(self):
         bad = SimResult(
