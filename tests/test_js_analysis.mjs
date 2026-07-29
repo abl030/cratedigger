@@ -6,6 +6,7 @@
 
 import {
   analysisChipHtml,
+  applyAnalysisChips,
   computeRecordingDots,
   disambRemove,
   renderRecordingsBlock,
@@ -40,6 +41,38 @@ console.log('analysisChipHtml() — coverage precedence');
     '9 unique', 'unique count chip');
   assertContains(analysisChipHtml({ covered_by: null, unique_track_count: 0 }),
     '0 unique', 'zero-unique chip');
+}
+
+console.log('applyAnalysisChips() — one DOM index for a large catalogue');
+{
+  let wholeDocumentQueries = 0;
+  const inserted = [];
+  const row = id => ({
+    dataset: { rgId: id },
+    querySelector(selector) {
+      if (selector === '.disamb-chip') return null;
+      if (selector === '.rg-title') return {
+        insertAdjacentHTML(_where, html) { inserted.push(`${id}:${html}`); },
+      };
+      throw new Error(`unexpected row query ${selector}`);
+    },
+  });
+  const rows = Array.from({ length: 300 }, (_unused, index) => row(`rg-${index}`));
+  const container = {
+    querySelectorAll(selector) {
+      assertEqual(selector, '.rg[data-rg-id]', 'index selects all release-group rows once');
+      wholeDocumentQueries++;
+      return rows;
+    },
+    querySelector() { throw new Error('per-chip document scan regressed'); },
+  };
+  applyAnalysisChips(container, {
+    release_groups: rows.map((entry, index) => ({
+      release_group_id: entry.dataset.rgId, covered_by: null, unique_track_count: index,
+    })),
+  });
+  assertEqual(wholeDocumentQueries, 1, 'one catalogue-wide DOM query');
+  assertEqual(inserted.length, 300, 'every indexed group receives its chip');
 }
 
 console.log('computeRecordingDots() — membership + exclusives');

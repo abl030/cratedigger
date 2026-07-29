@@ -35,6 +35,7 @@ from lib.quality import (
     V0_PROBE_LOSSLESS_SOURCE,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
+    CodecFamily,
     ConversionInfo,
     DownloadInfo,
     DuplicateRemoveCandidate,
@@ -2926,12 +2927,18 @@ class TestOverrideMinBitrate(unittest.TestCase):
     None grades must leave the container bitrate untouched — see issue #61.
     """
 
-    def _get_override_value(self, min_br, spectral_br, grade):
+    def _get_override_value(self, min_br, spectral_br, grade,
+                            codec_family: CodecFamily = "mp3"):
         album_data = _make_album_data()
         album_data.current_min_bitrate = min_br
         album_data.current_spectral = SpectralMeasurement.from_parts(
             grade,
             spectral_br,
+            # ``collect_release_attempt_spectral_audit`` stamps the measured
+            # family on every fresh audit (issue #829 Phase 5 PR1), and PR2b
+            # made the override read it. A fixture omitting it describes a
+            # measurement this seam's producer cannot emit.
+            codec_family=codec_family,
         )
         cmd = _dispatch_valid_result_cmd(album_data=album_data)
 
@@ -2954,6 +2961,27 @@ class TestOverrideMinBitrate(unittest.TestCase):
         ("no container, suspect spectral",          None, 128, "suspect",         128),
         ("no container, genuine spectral ignored",  None, 128, "genuine",         None),
     ]
+
+    def test_uncalibrated_codec_never_floors_the_have(self):
+        """Issue #829 (download 37946) at the auto-import seam.
+
+        The same 320/128/suspect facts that floor an MP3 to 128 must leave
+        an AAC untouched: LAME's encoder table says nothing about an AAC's
+        natural rolloff, so the container bitrate stands. Opus asserts
+        nothing at all either.
+        """
+        families: tuple[CodecFamily, ...] = ("aac", "opus", "other")
+        for family in families:
+            with self.subTest(codec_family=family):
+                self.assertEqual(
+                    self._get_override_value(
+                        320, 128, "suspect", codec_family=family),
+                    320,
+                )
+        self.assertEqual(
+            self._get_override_value(320, 128, "suspect", codec_family="mp3"),
+            128,
+        )
 
     def test_override_from_attempt_local_have_table(self):
         for desc, min_br, spectral_br, grade, expected in self.CASES:
@@ -3207,9 +3235,25 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
 class TestLoadQualityGateState(unittest.TestCase):
     """Direct tests for the shared quality-gate state adapter."""
 
-    def test_uses_linked_measurement_and_ignores_request_quality_stamps(self):
+    @staticmethod
+    def _load_state(db, mb_id: str):
+        """The one seam where a FakePipelineDB crosses the PipelineDB type.
+
+        A single shared helper, so this class carries exactly one crossing
+        however many scenarios it grows — and the crossing needs no escape
+        hatch at all: the parameter is deliberately unannotated here, which
+        is what the per-call-site ``# type: ignore[arg-type]`` was
+        compensating for.
+        """
         from lib.dispatch import load_quality_gate_state
 
+        return load_quality_gate_state(
+            request_id=42,
+            db=db,
+            mb_id=mb_id,
+        )
+
+    def test_uses_linked_measurement_and_ignores_request_quality_stamps(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=42,
@@ -3243,11 +3287,7 @@ class TestLoadQualityGateState(unittest.TestCase):
             "get_request",
             side_effect=AssertionError("explicit MBID must avoid request lookup"),
         ) as get_request:
-            state = load_quality_gate_state(
-                request_id=42,
-                db=db,  # type: ignore[arg-type]
-                mb_id="mbid-123",
-            )
+            state = self._load_state(db, mb_id="mbid-123")
 
         self.assertIsNotNone(state)
         assert state is not None
@@ -3258,6 +3298,88 @@ class TestLoadQualityGateState(unittest.TestCase):
         self.assertFalse(state.verified_lossless_proof)
         self.assertIsNone(state.measurement.spectral_bitrate_kbps)
         get_request.assert_not_called()
+
+    def _state_for(self, *, measurement, storage_format, filetype_band):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, status="wanted", mb_release_id="mbid-ctx",
+        ))
+        evidence = msgspec.structs.replace(
+            make_album_quality_evidence(
+                mb_release_id="mbid-ctx", measurement=measurement,
+            ),
+            storage_format=storage_format,
+            filetype_band=filetype_band,
+        )
+        db.upsert_album_quality_evidence(evidence)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_request_current_evidence(42, persisted.id)
+        return self._load_state(db, mb_id="mbid-ctx")
+
+    def test_state_carries_the_album_level_codec_context(self):
+        """Issue #829 Phase 5 PR2b review S6.
+
+        Only the evidence ROW carries ``storage_format`` and
+        ``filetype_band``. The gate resolves the codec with them, so the
+        state must carry that context — every downstream consumer (the
+        ``pipeline-cli quality`` simulator) has to resolve with the same
+        evidence, not a weaker measurement-only view.
+        """
+        state = self._state_for(
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=320, avg_bitrate_kbps=320, format="MP3",
+                is_cbr=True, spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=128, spectral_subject="installed",
+                spectral_provenance="measured", codec_family="mp3",
+            ),
+            storage_format="mp3",
+            filetype_band="mp3",
+        )
+        assert state is not None
+        assert state.spectral_context is not None
+        self.assertEqual(state.spectral_context.storage_format, "mp3")
+        self.assertEqual(state.spectral_context.filetype_band, "mp3")
+        # ...and it really resolves the class the gate used.
+        interp = state.spectral_context.interpret(state.measurement)
+        self.assertTrue(interp.decision_grade)
+        self.assertEqual(interp.inferred_class_kbps, 128)
+        self.assertEqual(state.measurement.spectral_bitrate_kbps, 128)
+
+    def test_a_mixed_codec_album_fails_closed_through_the_carried_context(self):
+        """The context is not decoration — it is the fail-closed evidence.
+
+        ``filetype_band`` spanning codec families is the only signal that an
+        album's spectral grade was averaged ACROSS codecs (``codec_family``
+        capture is the FIRST track's). Without the carried context a
+        consumer resolves ``format='MP3'`` and admits a class the gate
+        itself withheld.
+        """
+        measurement = AudioQualityMeasurement(
+            min_bitrate_kbps=320, avg_bitrate_kbps=320, format="MP3",
+            is_cbr=True, spectral_grade="likely_transcode",
+            spectral_bitrate_kbps=128, spectral_subject="installed",
+            spectral_provenance="measured", codec_family="mp3",
+        )
+        state = self._state_for(
+            measurement=measurement,
+            storage_format="mp3",
+            filetype_band="mixed_lossy",
+        )
+        assert state is not None
+        assert state.spectral_context is not None
+        self.assertFalse(
+            state.spectral_context.interpret(state.measurement).decision_grade)
+        # The gate itself withheld too: no clamped value on the measurement.
+        self.assertIsNone(state.measurement.spectral_bitrate_kbps)
+        # And the measurement-only view — what a consumer that dropped the
+        # context would compute — WOULD admit the class. That gap is the
+        # whole reason the context is carried.
+        from lib.quality import interpret_measurement
+        self.assertTrue(interpret_measurement(measurement).decision_grade)
 
 
 class TestQualityGateUsesIntent(unittest.TestCase):

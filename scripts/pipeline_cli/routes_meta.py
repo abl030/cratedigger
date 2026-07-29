@@ -19,6 +19,8 @@ from lib.pipeline_db import DEFAULT_DSN
 from scripts.pipeline_cli.album_requests import add_album_requests_subparsers
 from scripts.pipeline_cli.api_mutations import (
     DEFAULT_API_BASE,
+    TcpApiEndpoint,
+    UnixApiEndpoint,
     add_api_mutation_subparsers,
 )
 from scripts.pipeline_cli.audit import add_audit_subparser
@@ -36,7 +38,10 @@ from scripts.pipeline_cli.wrong_match import add_wrong_match_subparsers
 from scripts.pipeline_cli.youtube import add_youtube_subparsers
 
 
-def _build_parser() -> tuple[
+def _build_parser(
+    *,
+    api_socket: str | None = None,
+) -> tuple[
     argparse.ArgumentParser, argparse.ArgumentParser, argparse.ArgumentParser
 ]:
     """Build the full pipeline-cli argument parser.
@@ -49,10 +54,19 @@ def _build_parser() -> tuple[
     """
     parser = argparse.ArgumentParser(description="Pipeline CLI — manage download pipeline DB")
     parser.add_argument("--dsn", default=DEFAULT_DSN, help="PostgreSQL connection string")
-    parser.add_argument(
-        "--api-base", default=DEFAULT_API_BASE,
-        help="Web API origin for API-backed mutation commands.",
-    )
+    if api_socket is None:
+        parser.add_argument(
+            "--api-base",
+            dest="api_endpoint",
+            type=TcpApiEndpoint,
+            default=TcpApiEndpoint(DEFAULT_API_BASE),
+            help="Development web API origin for API-backed mutation commands.",
+        )
+    else:
+        # The installed entry point supplies this trusted endpoint while
+        # constructing the parser. It deliberately exposes no command-line
+        # option capable of replacing the Unix socket with TCP.
+        parser.set_defaults(api_endpoint=UnixApiEndpoint(api_socket))
     sub = parser.add_subparsers(dest="command")
 
     # list / add / status / disk-coverage / set / set-intent

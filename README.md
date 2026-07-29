@@ -75,15 +75,28 @@ You need: **NixOS**, **a dedicated slskd instance** (`services.slskd` is in nixp
 
 ```nix
 {
-  inputs.cratedigger.url = "github:abl030/cratedigger";
+  inputs = {
+    cratedigger.url = "github:abl030/cratedigger";
+    nixpkgs.follows = "cratedigger/nixpkgs";
+  };
 
-  outputs = { self, nixpkgs, cratedigger, ... }: {
+  outputs = { nixpkgs, cratedigger, ... }: {
     nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
       modules = [
         cratedigger.nixosModules.default
         {
+          users.users.cratedigger = {
+            isSystemUser = true;
+            group = "users";
+            extraGroups = [ "slskd" "cratedigger-ops" ];
+          };
+
           services.cratedigger = {
             enable = true;
+            user = "cratedigger";
+            group = "users";
+            processingDir = "/srv/cratedigger-processing";
             slskd = {
               apiKeyFile = "/var/lib/secrets/slskd-api-key";  # raw key, one line
               downloadDir = "/srv/music/slskd-downloads";
@@ -98,7 +111,11 @@ You need: **NixOS**, **a dedicated slskd instance** (`services.slskd` is in nixp
               trackingFile = "/srv/music/beets-validated.jsonl";
             };
             web = {
-              enable = true;                    # UI on :8085
+              enable = true;
+              hostName = "music.example.net";
+              gatewayPort = 8086;
+              accessGroup = "cratedigger-web";
+              basicAuthFile = "/run/secrets/cratedigger.htpasswd";
             };
           };
         }
@@ -108,7 +125,9 @@ You need: **NixOS**, **a dedicated slskd instance** (`services.slskd` is in nixp
 }
 ```
 
-A complete, commented version of this (including slskd itself) is [`examples/cratedigger.nix`](examples/cratedigger.nix). Misconfigurations fail at eval time with messages that name the option to set. The module runs as root by default — zero-config, since Soulseek downloads and the library live outside any service user's home. To run non-root instead, set `services.cratedigger.user`/`.group`, put that user in the slskd download directory's group and whatever group owns its runtime secrets, and give the library a setgid group-`users` layout (`2775` dirs) so media servers can both read album art and write metadata alongside it. Full recipe: [docs/nixos-module.md § "Running non-root + filesystem permissions"](docs/nixos-module.md#running-non-root--filesystem-permissions); worked example in [`examples/cratedigger.nix`](examples/cratedigger.nix).
+A complete, commented version of this (including slskd itself) is [`examples/cratedigger.nix`](examples/cratedigger.nix). Misconfigurations fail at eval time with messages that name the option to set. The quick-start deliberately overrides the module's root defaults with a non-root service user. Adapt its supplementary groups so that user can read the slskd API key and download tree, and give the library a setgid group-`users` layout (`2775` dirs) so media servers can both read album art and write metadata alongside it. Full recipe: [docs/nixos-module.md § "Running non-root + filesystem permissions"](docs/nixos-module.md#running-non-root--filesystem-permissions); worked example in [`examples/cratedigger.nix`](examples/cratedigger.nix).
+
+Before the first switch, use a runtime secret manager such as sops-nix to provision `/run/secrets/cratedigger.htpasswd` as a non-empty bcrypt htpasswd file owned `root:nginx` with mode `0440`. Keep the file outside `/nix/store`; missing or invalid material blocks the nginx start rather than exposing the UI.
 
 `cratedigger-beet` lands on your PATH as the canonical beets binary for the managed library (run it with sudo). The operator CLI is also available without installing anything:
 

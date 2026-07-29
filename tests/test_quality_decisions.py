@@ -24,6 +24,7 @@ from lib.quality import (
     AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
+    CodecFamily,
     CodecRankBands,
     DownloadInfo,
     MeasuredImportDecisionInput,
@@ -69,12 +70,40 @@ class TestSpectralGateTrigger(unittest.TestCase):
 
     THRESHOLD = 210
 
-    def _run(self, *, is_flac, is_cbr, is_vbr=None, avg=None):
+    def _run(self, *, is_flac, is_cbr, is_vbr=None, avg=None,
+             codec_family: "CodecFamily | None" = "mp3"):
         from lib.quality import spectral_gate_trigger
         return spectral_gate_trigger(
             is_flac=is_flac, is_cbr=is_cbr, is_vbr=is_vbr,
             avg_bitrate_kbps=avg, vbr_threshold_kbps=self.THRESHOLD,
+            codec_family=codec_family,
         )
+
+    def test_uncalibrated_codecs_skip(self):
+        """Issue #829 Phase 5 PR2b: the mirror must answer what its own
+        production twin answers. ``_needs_spectral_check`` fires the
+        PREIMPORT gate for a lossless source or an MP3 and for nothing
+        else, so a mirror claiming it would run for AAC/Opus/Vorbis had
+        already accepted a codec-blind premise. An unknown codec skips too:
+        production reaches the same ``is_mp3`` test with the same unknown
+        label and answers False.
+
+        Not a claim the album was never measured at all — the harness
+        audits every candidate it receives and live AAC/Vorbis rows do
+        carry grades. A claim about which GATE fired, which is the fact
+        Stage 1 consumes.
+        """
+        families: tuple[CodecFamily | None, ...] = (
+            "aac", "opus", "vorbis", "other", "lossless", None)
+        for family in families:
+            with self.subTest(codec_family=family):
+                self.assertEqual(
+                    self._run(is_flac=False, is_cbr=True, codec_family=family),
+                    "skipped_uncalibrated_codec")
+        # FLAC's own branch still wins over the codec test.
+        self.assertEqual(
+            self._run(is_flac=True, is_cbr=False, codec_family="lossless"),
+            "skipped_flac")
 
     def test_flac_skips(self):
         """FLAC has its own flow (convert → V0 → transcode_detection)."""
@@ -953,7 +982,8 @@ EXPECTED_RESULT_KEYS = {
 # Valid values for each stage (None means stage was skipped)
 VALID_PREIMPORT_AUDIO = {None, "pass", "reject_corrupt", "skipped_off"}
 VALID_PREIMPORT_NESTED = {None, "pass", "reject_nested", "skipped_auto"}
-VALID_STAGE0 = {None, "would_run", "skipped_vbr_high_avg", "skipped_flac"}
+VALID_STAGE0 = {None, "would_run", "skipped_vbr_high_avg", "skipped_flac",
+                "skipped_uncalibrated_codec"}
 VALID_STAGE1 = {None, "import", "import_upgrade", "import_no_exist", "reject"}
 VALID_STAGE2 = {None, "import", "downgrade", "transcode_upgrade",
                 "transcode_downgrade", "transcode_first",
@@ -988,6 +1018,9 @@ EXPECTED_PARAMS = {
     # U7 proof-bearing HAVE lock: an explicit simulator input, not a
     # request-scalar inference.
     "current_verified_lossless_proof",
+    # issue #829 Phase 5 PR2b: the codec-resolution context per side. One
+    # keyword each, not six scalars — see ``SpectralCodecContext``.
+    "candidate_spectral_context", "existing_spectral_context",
 }
 
 
@@ -1295,7 +1328,12 @@ class TestFullPipelineDecisionFromEvidence(unittest.TestCase):
             min_bitrate=245,
             avg_bitrate=245,
             fmt="MP3",
-            spectral_grade="genuine",
+            # Both sides must carry a comparable decision-grade class for
+            # Stage 1 to reject at all (issue #829 Phase 5 PR2b). A
+            # ``genuine`` album verdict authorizes no class — its cliff is
+            # the false positive the calibration measured — so the HAVE is
+            # graded the way an album that really does carry a 128 class is.
+            spectral_grade="likely_transcode",
             spectral_bitrate=128,
         )
         result = full_pipeline_decision_from_evidence(candidate, current)
@@ -1623,16 +1661,23 @@ class TestFullPipelineContract(unittest.TestCase):
             # FLAC always skips the MP3 gate
             full_pipeline_decision(is_flac=True, min_bitrate=0, is_cbr=False),
             # CBR MP3 always gates
-            full_pipeline_decision(is_flac=False, min_bitrate=320, is_cbr=True),
+            full_pipeline_decision(is_flac=False, min_bitrate=320, is_cbr=True,
+                                   new_format="MP3"),
             # VBR MP3 with low avg gates (issue #93 Go! Team)
             full_pipeline_decision(is_flac=False, min_bitrate=126, is_cbr=False,
-                                   is_vbr=True, avg_bitrate=182),
+                                   is_vbr=True, avg_bitrate=182,
+                                   new_format="MP3"),
             # VBR MP3 with high avg skips (genuine V0)
             full_pipeline_decision(is_flac=False, min_bitrate=220, is_cbr=False,
-                                   is_vbr=True, avg_bitrate=245),
+                                   is_vbr=True, avg_bitrate=245,
+                                   new_format="MP3"),
             # VBR MP3 unknown avg (legacy or resumed) gates
             full_pipeline_decision(is_flac=False, min_bitrate=200, is_cbr=False,
-                                   is_vbr=True),
+                                   is_vbr=True, new_format="MP3"),
+            # Issue #829 Phase 5 PR2b: a non-MP3 lossy candidate is never
+            # measured by production's gate, so the mirror must say so.
+            full_pipeline_decision(is_flac=False, min_bitrate=256, is_cbr=True,
+                                   new_format="AAC"),
         ]
         for r in results:
             self.assertIn(r["stage0_spectral_gate"], VALID_STAGE0,
@@ -1644,10 +1689,10 @@ class TestFullPipelineContract(unittest.TestCase):
         misrepresent production behavior, which skips spectral entirely."""
         r = full_pipeline_decision(
             is_flac=False, min_bitrate=220, is_cbr=False,
-            is_vbr=True, avg_bitrate=245,
+            is_vbr=True, avg_bitrate=245, new_format="MP3",
             # Caller supplied spectral_grade, but stage 0 says don't gate.
             spectral_grade="suspect", spectral_bitrate=192,
-            existing_spectral_bitrate=100,
+            existing_spectral_bitrate=128, existing_spectral_grade="suspect",
         )
         self.assertEqual(r["stage0_spectral_gate"], "skipped_vbr_high_avg")
         self.assertIsNone(
@@ -1661,9 +1706,14 @@ class TestFullPipelineContract(unittest.TestCase):
         spectral is provided, stage 1 executes and can reject."""
         r = full_pipeline_decision(
             is_flac=False, min_bitrate=126, is_cbr=False,
-            is_vbr=True, avg_bitrate=182,
+            is_vbr=True, avg_bitrate=182, new_format="MP3",
             spectral_grade="likely_transcode", spectral_bitrate=96,
             existing_spectral_bitrate=128,
+            existing_spectral_grade="likely_transcode",
+            # The HAVE's codec has to be stated for its class to be
+            # interpretable at all (issue #829 Phase 5 PR2b): a spectral
+            # number with no codec is a number with no meaning.
+            existing_format="MP3", existing_min_bitrate=128,
         )
         self.assertEqual(r["stage0_spectral_gate"], "would_run")
         # 96 <= 128 → reject in stage 1
@@ -1680,7 +1730,7 @@ class TestFullPipelineContract(unittest.TestCase):
         """
         r = full_pipeline_decision(
             is_flac=False, min_bitrate=200, is_cbr=False,
-            is_vbr=True, avg_bitrate=245,
+            is_vbr=True, avg_bitrate=245, new_format="MP3",
         )
         # Stage 0: avg >= threshold → skip
         self.assertEqual(r["stage0_spectral_gate"], "skipped_vbr_high_avg")
@@ -1884,7 +1934,14 @@ class TestFullPipelineContract(unittest.TestCase):
             post_conversion_min_bitrate=228,
             existing_v0_probe_avg=171,
         )
-        self.assertEqual(r["stage1_spectral"], "reject")
+        # Issue #829 Phase 5 PR2b: a lossless container's cliff is the
+        # fake-lossless detector, never a kbps class, so Stage 1 has no two
+        # classes to compare and withholds ("import_no_exist"). The
+        # load-bearing reject was never Stage 1's here — a suspect lossless
+        # source with no comparable probe is confidently rejected by the
+        # provisional lane, and one WITH a probe (this world) is the
+        # provisional upgrade below, exactly as before.
+        self.assertEqual(r["stage1_spectral"], "import_no_exist")
         self.assertEqual(
             r["stage2_import"], DECISION_PROVISIONAL_LOSSLESS_UPGRADE)
         self.assertTrue(r["imported"])
@@ -2002,9 +2059,11 @@ class TestFullPipelineContract(unittest.TestCase):
         )
 
         self.assertEqual(r["stage0_spectral_gate"], "skipped_flac")
-        # Equal spectral floor (96 == 96) now ties and defers to Stage 2; the
-        # provisional-lossless lane owns the real reject below.
-        self.assertEqual(r["stage1_spectral"], "import")
+        # A lossless container yields no kbps class (issue #829 Phase 5
+        # PR2b), so Stage 1 has nothing to compare and withholds. It was
+        # already not the load-bearing reject: the provisional-lossless
+        # lane owns that below, unchanged.
+        self.assertEqual(r["stage1_spectral"], "import_no_exist")
         self.assertEqual(
             r["stage2_import"], DECISION_SUSPECT_LOSSLESS_DOWNGRADE)
         self.assertFalse(r["imported"])
@@ -2139,12 +2198,20 @@ class TestFullPipelineTargetFormat(unittest.TestCase):
 # ============================================================================
 
 class TestComputeEffectiveOverrideBitrate(unittest.TestCase):
-    """Grade-aware spectral/container override computation (pure).
+    """Codec-aware spectral/container override computation (pure).
 
-    Spectral bitrate only participates when grade is in SPECTRAL_TRANSCODE_GRADES
-    (suspect / likely_transcode). For genuine/marginal/error/None/unknown grades
-    the helper must return the container bitrate untouched — a genuine file with
-    a low spectral cliff estimate must not drag the comparison bitrate down.
+    The spectral class only participates when the album's
+    ``SpectralInterpretation`` is decision-grade: an invertible ladder
+    (MP3 / Vorbis) whose grade is in SPECTRAL_TRANSCODE_GRADES. For
+    genuine/marginal/error/None/unknown grades — and for EVERY AAC, Opus,
+    HE-AAC or unresolved codec whatever its grade — the helper returns the
+    container bitrate untouched. A genuine file with a low spectral cliff
+    estimate must not drag the comparison bitrate down, and neither must an
+    ordinary AAC's natural rolloff (issue #829, download 37946).
+
+    The table below is fixed to ``codec_family="mp3"`` so it keeps pinning
+    the grade axis exactly as before; ``test_codec_family_axis`` owns the
+    codec axis PR2b added.
     """
 
     # (description, container, spectral, grade, expected)
@@ -2177,17 +2244,103 @@ class TestComputeEffectiveOverrideBitrate(unittest.TestCase):
         ("transcoded mp3 v0 row, lossless_source spectral",  225, 128, "likely_transcode", 128),
     ]
 
+    @staticmethod
+    def _interp(spectral, grade, codec_family: "CodecFamily | None" = "mp3",
+                cliff_hz=None):
+        from lib.quality import (
+            SpectralEvidenceFacts,
+            interpret_spectral_evidence,
+        )
+        return interpret_spectral_evidence(SpectralEvidenceFacts(
+            spectral_grade=grade,
+            codec_family=codec_family,
+            cliff_hz=cliff_hz,
+            spectral_bitrate_kbps=spectral,
+        ))
+
     def test_grade_aware_table(self):
         from lib.quality import compute_effective_override_bitrate
         for desc, container, spectral, grade, expected in self.CASES:
             with self.subTest(desc=desc):
                 self.assertEqual(
-                    compute_effective_override_bitrate(container, spectral, grade),
+                    compute_effective_override_bitrate(
+                        container, self._interp(spectral, grade)),
                     expected,
                     f"{desc}: compute_effective_override_bitrate"
                     f"({container!r}, {spectral!r}, {grade!r}) "
                     f"expected {expected!r}",
                 )
+
+    def test_codec_family_axis(self):
+        """The download-37946 defect, at the seam that produced it.
+
+        An ordinary AAC at container 256 whose natural 13-18 kHz rolloff was
+        read through LAME's MP3 encoder table as "128" used to floor the
+        album to 128. Only the two invertible ladders may contribute a
+        class; every other family withholds and the container survives.
+        Vorbis is included because it is the OTHER ladder — the rule is
+        "invertible ladder", not "MP3".
+        """
+        from lib.quality import compute_effective_override_bitrate
+        CASES: list[tuple[str, CodecFamily | None, int]] = [
+            ("aac natural rolloff never floors", "aac", 256),
+            ("opus asserts nothing", "opus", 256),
+            ("uncalibrated other", "other", 256),
+            ("unresolved codec", None, 256),
+            ("mp3 ladder floors", "mp3", 128),
+            ("vorbis ladder floors", "vorbis", 128),
+        ]
+        for desc, family, expected in CASES:
+            with self.subTest(desc=desc):
+                self.assertEqual(
+                    compute_effective_override_bitrate(
+                        256,
+                        self._interp(128, "likely_transcode",
+                                     codec_family=family),
+                    ),
+                    expected,
+                )
+
+    def test_aac_content_floor_is_never_admitted_to_the_clamp(self):
+        """An AAC content floor is a LOWER bound — the opposite direction.
+
+        A real AAC cliff at 15.5 kHz supports the assertion ">= 96 kbps"
+        and nothing more; feeding it to a clamp that takes ``min()`` would
+        floor a 256 kbps album to 96 on evidence that says the exact
+        opposite. ``decision_class_kbps`` is what refuses it: the AAC
+        branch is ``floor_only`` and never decision-grade, so the class it
+        carries must never reach this function's ``min()``.
+        """
+        from lib.quality import (
+            AAC_FLOOR_LOW_CLASS_KBPS,
+            compute_effective_override_bitrate,
+            interpret_spectral_cliff,
+        )
+        floored = interpret_spectral_cliff(
+            "aac", spectral_grade="likely_transcode", cliff_hz=15500)
+        # The floor really is there, and really is lower than the container.
+        self.assertEqual(floored.inferred_class_kbps, AAC_FLOOR_LOW_CLASS_KBPS)
+        self.assertTrue(floored.floor_only)
+        self.assertFalse(floored.decision_grade)
+        # ...and the clamp still returns the container untouched.
+        self.assertEqual(compute_effective_override_bitrate(256, floored), 256)
+
+    def test_lossless_container_never_yields_a_class(self):
+        """A FLAC's cliff is the fake-lossless detector, never a kbps class.
+
+        Reading it as one would score a lossless container on a lossy
+        ladder. The container bitrate survives untouched even on a
+        ``likely_transcode`` fake-FLAC — the provisional-lossless lane owns
+        that album, not this clamp.
+        """
+        from lib.quality import compute_effective_override_bitrate
+        self.assertEqual(
+            compute_effective_override_bitrate(
+                900,
+                self._interp(128, "likely_transcode", codec_family="lossless"),
+            ),
+            900,
+        )
 
     def test_spectral_transcode_grades_constant(self):
         """Locks the set of grades that authorize spectral override."""
@@ -3279,6 +3432,35 @@ class TestCompareQuality(unittest.TestCase):
         self.assertEqual(compare_quality(new, existing, cfg_min).verdict, "worse")
 
 
+class TestClassifyWithCbrBands(unittest.TestCase):
+    """The CBR-band forcing is scoped to MP3 (issue #829 Phase 5 PR2b).
+
+    ``quality_rank`` only consults ``is_cbr`` for the MP3 family, and only
+    MP3's class ladder is calibrated to ``cfg.mp3_cbr``'s thresholds. The
+    restriction is inert against the shipped band config by construction —
+    which is exactly why it needs a pin at its own seam: no decision can
+    carry it.
+    """
+
+    def _classify(self, format_hint, *, bound):
+        from lib.quality.compare import _classify_with_cbr_bands
+        return _classify_with_cbr_bands(format_hint, spectral_bound=bound)
+
+    def test_only_mp3_is_forced(self):
+        for label in ("MP3", "mp3", "mp3 320"):
+            with self.subTest(format=label):
+                self.assertTrue(self._classify(label, bound=True))
+        for label in ("AAC", "Opus", "opus 128", "Vorbis", "WMA", "FLAC",
+                      "", "   ", None):
+            with self.subTest(format=label):
+                self.assertFalse(self._classify(label, bound=True))
+
+    def test_an_unbound_side_is_never_forced(self):
+        for label in ("MP3", "AAC", None):
+            with self.subTest(format=label):
+                self.assertFalse(self._classify(label, bound=False))
+
+
 class TestCompareQualitySharedSpectralBucket(unittest.TestCase):
     """Shared-spectral bucket: when BOTH measurements carry
     ``spectral_bitrate_kbps``, the comparison clamps each side's rank bucket
@@ -3303,6 +3485,14 @@ class TestCompareQualitySharedSpectralBucket(unittest.TestCase):
         return AudioQualityMeasurement(**kwargs)
 
     # (description, new_kwargs, existing_kwargs, expected)
+    #
+    # Issue #829 Phase 5 PR2b, test-fidelity Rule C: every world below now
+    # states a ``spectral_grade``, and every ``spectral_bitrate_kbps`` is a
+    # value ``estimate_bitrate_from_cliff`` can actually emit (a
+    # ``LAME_LOWPASS`` class). A spectral number with no grade, or a number
+    # no producer emits, describes a row production cannot write — and
+    # under the codec-aware interpretation it contributes nothing, so a
+    # world built that way silently stops exercising the clamp it names.
     CASES: ClassVar = [
         # --- Both sides agree on 96 kbps floor → same bucket, avg wins ---
         # The Eno case: inflated container avg on new, existing uniform
@@ -3310,45 +3500,56 @@ class TestCompareQualitySharedSpectralBucket(unittest.TestCase):
         # same bucket; raw avg is still the tiebreaker.
         ("Eno shape: both spectral=96, new avg=290, existing avg=128",
          {"format": "MP3", "avg_bitrate_kbps": 290, "min_bitrate_kbps": 128,
-              "spectral_bitrate_kbps": 96},
+              "spectral_grade": "likely_transcode", "spectral_bitrate_kbps": 96},
          {"format": "MP3", "avg_bitrate_kbps": 128, "min_bitrate_kbps": 128,
-              "spectral_bitrate_kbps": 96},
+              "spectral_grade": "likely_transcode", "spectral_bitrate_kbps": 96},
          "better"),
         ("both spectral=96, equal containers → still equivalent",
-         {"format": "MP3", "avg_bitrate_kbps": 128, "spectral_bitrate_kbps": 96},
-         {"format": "MP3", "avg_bitrate_kbps": 128, "spectral_bitrate_kbps": 96},
+         {"format": "MP3", "avg_bitrate_kbps": 128,
+              "spectral_grade": "likely_transcode", "spectral_bitrate_kbps": 96},
+         {"format": "MP3", "avg_bitrate_kbps": 128,
+              "spectral_grade": "likely_transcode", "spectral_bitrate_kbps": 96},
          "equivalent"),
 
         # --- Same spectral bucket still allows raw-metric progress ---
         ("new clamped rank == existing clamped rank → raw avg tiebreaker wins",
-         {"format": "MP3", "avg_bitrate_kbps": 290, "spectral_bitrate_kbps": 96},
-         {"format": "MP3", "avg_bitrate_kbps": 128, "spectral_bitrate_kbps": 96},
+         {"format": "MP3", "avg_bitrate_kbps": 290,
+              "spectral_grade": "suspect", "spectral_bitrate_kbps": 96},
+         {"format": "MP3", "avg_bitrate_kbps": 128,
+              "spectral_grade": "likely_transcode", "spectral_bitrate_kbps": 96},
          "better"),
 
         # --- Different floors → clamped comparison decides ---
         ("new spectral=160 > existing spectral=96 → better after clamp",
-         {"format": "MP3", "avg_bitrate_kbps": 290, "spectral_bitrate_kbps": 160},
-         {"format": "MP3", "avg_bitrate_kbps": 128, "spectral_bitrate_kbps": 96},
+         {"format": "MP3", "avg_bitrate_kbps": 290,
+              "spectral_grade": "suspect", "spectral_bitrate_kbps": 160},
+         {"format": "MP3", "avg_bitrate_kbps": 128,
+              "spectral_grade": "likely_transcode", "spectral_bitrate_kbps": 96},
          "better"),
         ("new spectral rank below existing spectral rank → worse after clamp",
-         {"format": "MP3", "avg_bitrate_kbps": 290, "spectral_bitrate_kbps": 64},
-         {"format": "MP3", "avg_bitrate_kbps": 170, "spectral_bitrate_kbps": 170},
+         {"format": "MP3", "avg_bitrate_kbps": 290,
+              "spectral_grade": "likely_transcode", "spectral_bitrate_kbps": 96},
+         {"format": "MP3", "avg_bitrate_kbps": 170,
+              "spectral_grade": "likely_transcode", "spectral_bitrate_kbps": 160},
          "worse"),
 
         # --- Only one side has spectral: clamp does NOT fire ---
-        # Springsteen shape: existing CBR 320 has a stale 96 estimate, new
-        # MP3 V0 240 has no spectral. The container-based comparison wins
-        # and the existing 320 beats the 240 — test_springsteen_genuine_but_96kbps
-        # (simulator) pins this at the full-pipeline level; this confirms
-        # the rule holds inside compare_quality itself.
+        # Springsteen shape: existing CBR 320 has a stale 96 estimate on a
+        # ``genuine`` album, new MP3 V0 240 has no spectral. The
+        # container-based comparison wins and the existing 320 beats the 240
+        # — test_springsteen_genuine_but_96kbps (simulator) pins this at the
+        # full-pipeline level; this confirms the rule holds inside
+        # compare_quality itself. The ``genuine`` verdict is what withholds
+        # the class, so the safeguard survives PR2b for the same reason it
+        # always held in ``compute_effective_override_bitrate``.
         ("existing-only spectral → no clamp, container comparison",
          {"format": "mp3 v0", "avg_bitrate_kbps": 240, "is_cbr": False},
          {"format": "mp3 320", "avg_bitrate_kbps": 320, "is_cbr": True,
-              "spectral_bitrate_kbps": 96},
+              "spectral_grade": "genuine", "spectral_bitrate_kbps": 96},
          "equivalent"),  # V0 and 320 are same-rank different-family → equivalent
-        ("new-only spectral → no clamp either way",
+        ("new-only spectral, HAVE never measured → container comparison",
          {"format": "MP3", "avg_bitrate_kbps": 290, "is_cbr": False,
-              "spectral_bitrate_kbps": 96},
+              "spectral_grade": "likely_transcode", "spectral_bitrate_kbps": 96},
          {"format": "MP3", "avg_bitrate_kbps": 128, "is_cbr": False},
          "better"),  # Container comparison: 290 > 128
 
@@ -3357,9 +3558,9 @@ class TestCompareQualitySharedSpectralBucket(unittest.TestCase):
         # they stay equivalent regardless of raw-bitrate deltas.
         ("both explicit labels + both spectral=96 → equivalent",
          {"format": "mp3 v0", "avg_bitrate_kbps": 240,
-              "spectral_bitrate_kbps": 96},
+              "spectral_grade": "suspect", "spectral_bitrate_kbps": 96},
          {"format": "mp3 v0", "avg_bitrate_kbps": 245,
-              "spectral_bitrate_kbps": 96},
+              "spectral_grade": "suspect", "spectral_bitrate_kbps": 96},
          "equivalent"),
     ]
 
@@ -3373,20 +3574,29 @@ class TestCompareQualitySharedSpectralBucket(unittest.TestCase):
                     f"{desc}: new={new_kw} existing={existing_kw} "
                     f"expected {expected!r} got {result!r}")
 
-    def test_same_grade_clamp_still_uses_shared_spectral_floor(self):
-        """The bucket still fires when both sides share a non-transcode grade.
+    def test_two_genuine_albums_are_never_spectrally_clamped(self):
+        """A ``genuine`` album verdict authorizes NO class, on either side.
 
-        Unlike ``compute_effective_override_bitrate`` (which gates on
-        SPECTRAL_TRANSCODE_GRADES), same-grade agreement between two
-        independent estimates is still corroborating evidence. Verified by
-        passing grade=genuine on both sides and confirming the rank bucket
-        still applies while the raw avg tiebreaker wins.
+        This inverts a pre-#829 rule. The clamp used to be grade-tolerant
+        on the theory that two independent estimates agreeing is
+        corroborating evidence; the four-arm calibration measured what those
+        estimates actually are on a genuine album — natural rolloff, the
+        false positive the whole project exists to remove. So a genuine
+        album's cliff no longer drags its own rank down, on either side, and
+        the raw metrics decide. Same outcome here as before, for the honest
+        reason; ``spectral_clamped`` is the field that says which.
         """
         new = self._m(format="MP3", avg_bitrate_kbps=290,
                       spectral_grade="genuine", spectral_bitrate_kbps=96)
         existing = self._m(format="MP3", avg_bitrate_kbps=128,
                            spectral_grade="genuine", spectral_bitrate_kbps=96)
-        self.assertEqual(compare_quality(new, existing, CFG).verdict, "better")
+        basis = compare_quality(new, existing, CFG)
+        self.assertEqual(basis.verdict, "better")
+        self.assertFalse(basis.spectral_clamped)
+        # Unclamped, the two raw avgs land in DIFFERENT rank bands
+        # (290 transparent vs 128 below-acceptable); the clamp used to bury
+        # both at the shared 96 floor and let the raw metric tiebreak decide.
+        self.assertEqual(basis.branch, "rank")
 
     def test_transcode_candidate_cannot_spectral_floor_past_lower_real_rank(self):
         """Muse live shape: spectral floor improved, real quality rank regressed.
@@ -3420,13 +3630,20 @@ class TestCompareQualitySharedSpectralBucket(unittest.TestCase):
         self.assertEqual(import_quality_decision(new, existing, cfg=CFG).decision,
                          "downgrade")
 
-    def test_transcode_guard_requires_known_non_transcode_existing_grade(self):
-        """Unknown existing grade keeps the backward-compatible shared bucket.
+    def test_ungraded_existing_spectral_number_is_not_evidence(self):
+        """An existing spectral bitrate with no grade contributes nothing.
 
-        Issue #813 Finding 1: both clamped values (160, 128) land in the
-        same CBR-calibrated "acceptable" band, so the ``spectral_tiebreak``
-        branch decides directly on the differing clamped values — not the
-        raw ``rank`` branch, and not the fully-unclamped raw metric.
+        The pre-#829 world here carried ``spectral_bitrate_kbps=128`` with
+        no ``spectral_grade`` — a shape the evidence row's own validation
+        rejects ("spectral bitrate requires a spectral grade"), so no
+        producer can write it. It nonetheless drove the shared clamp, which
+        let a transcode candidate's 160 floor beat it.
+
+        Under the codec-aware interpretation that number is not evidence:
+        no grade, no class. And the Fall 2007 candidate bound deliberately
+        does NOT step in either — an unmeasured HAVE is not a KNOWN-clean
+        HAVE. So the raw containers decide, and a transcode candidate at
+        avg 196 does not displace an album at avg 261.
         """
         new = self._m(
             format="MP3",
@@ -3437,21 +3654,30 @@ class TestCompareQualitySharedSpectralBucket(unittest.TestCase):
         existing = self._m(
             format="MP3",
             avg_bitrate_kbps=261,
-            spectral_bitrate_kbps=128,
         )
 
         basis = compare_quality(new, existing, CFG)
-        self.assertEqual(basis.verdict, "better")
-        self.assertEqual(basis.branch, "spectral_tiebreak")
-        self.assertEqual(basis.new_rank, "acceptable")
-        self.assertEqual(basis.existing_rank, "acceptable")
+        self.assertEqual(basis.verdict, "worse")
+        self.assertEqual(basis.branch, "rank")
+        self.assertFalse(basis.spectral_clamped)
 
-    def test_transcode_candidate_can_still_import_when_real_rank_does_not_regress(self):
-        """Bay of Biscay shape: spectral and actual selected metric both improve.
+    def test_bay_of_biscay_transcode_no_longer_displaces_a_genuine_have(self):
+        """Bay of Biscay shape — the outcome PR2b deliberately flips.
 
-        Issue #813 Finding 1: both clamped values (160, 128) land in the
-        same CBR-calibrated "acceptable" band — ``spectral_tiebreak``, not
-        the ``rank`` branch, decides.
+        Candidate: ``likely_transcode`` MP3 VBR avg 179, spectral class 160.
+        HAVE: ``genuine`` MP3 VBR avg 172 carrying a 128 spectral estimate.
+
+        Pre-#829 the shared clamp buried BOTH sides at their estimates, and
+        160 > 128 imported the transcode over the genuine album. The 128 on
+        a ``genuine`` album is the calibrated false positive: a minority
+        track's natural rolloff on an album the verdict already cleared.
+        With it withheld, the genuine album stands on its real avg 172
+        (``good``) while the candidate is bounded by its OWN class 160
+        (``acceptable``) — so the genuine copy is kept and the search
+        continues.
+
+        The must-still-work direction is
+        ``test_transcode_candidate_bounded_rank_strictly_better_still_imports``.
         """
         new = self._m(
             format="MP3",
@@ -3473,8 +3699,41 @@ class TestCompareQualitySharedSpectralBucket(unittest.TestCase):
         )
 
         basis = compare_quality(new, existing, CFG)
+        self.assertEqual(basis.verdict, "worse")
+        self.assertEqual(basis.branch, "spectral_candidate_bound")
+        self.assertEqual(basis.new_value_kbps, 160)
+        self.assertEqual(import_quality_decision(new, existing, cfg=CFG).decision,
+                         "downgrade")
+
+    def test_transcode_candidate_bounded_rank_strictly_better_still_imports(self):
+        """Must-still-work: the bound blocks nothing that is really better.
+
+        Same shape as the Bay of Biscay world, but the candidate's own class
+        is 256 — its bounded rank (``excellent``) is STRICTLY better than the
+        genuine HAVE's raw rank (``good``), so it imports. The bound is a
+        ceiling on an accusation, not a blanket refusal.
+        """
+        new = self._m(
+            format="MP3",
+            min_bitrate_kbps=290,
+            avg_bitrate_kbps=290,
+            is_cbr=True,
+            spectral_grade="likely_transcode",
+            spectral_bitrate_kbps=256,
+        )
+        existing = self._m(
+            format="MP3",
+            min_bitrate_kbps=172,
+            avg_bitrate_kbps=172,
+            is_cbr=False,
+            spectral_grade="genuine",
+            spectral_bitrate_kbps=128,
+        )
+
+        basis = compare_quality(new, existing, CFG)
         self.assertEqual(basis.verdict, "better")
-        self.assertEqual(basis.branch, "spectral_tiebreak")
+        self.assertEqual(basis.branch, "spectral_candidate_bound")
+        self.assertEqual(basis.new_value_kbps, 256)
         self.assertEqual(import_quality_decision(new, existing, cfg=CFG).decision,
                          "import")
 

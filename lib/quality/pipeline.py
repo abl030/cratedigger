@@ -56,6 +56,14 @@ from lib.quality.gates import (
 )
 from lib.quality.import_result_types import QualityEvidenceActionProvenance
 from lib.quality.ranks import QualityRankConfig
+from lib.quality.spectral_interpretation import (
+    SpectralCodecContext,
+    SpectralInterpretation,
+    codec_context_from_measurement,
+    decision_class_kbps,
+    interpret_spectral_evidence,
+    spectral_classes_comparable,
+)
 
 # ---------------------------------------------------------------------------
 # Full pipeline decision — combines all three stages
@@ -110,6 +118,14 @@ def full_pipeline_decision(
     candidate_v0_probe_kind: str | None = None,
     supported_lossless_source: bool | None = None,
     current_verified_lossless_proof: bool = False,
+    # issue #829 Phase 5 PR2b — the codec-resolution context the flat
+    # ``spectral_grade``/``spectral_bitrate`` pair cannot carry. One keyword
+    # per side; ``SpectralCodecContext.facts()`` recombines it with the flat
+    # scalars, so the grade/bucket/format have exactly one source of truth.
+    # Omitting them leaves the codec unknown, which WITHHOLDS the spectral
+    # opinion (never rejects) — the fail-closed direction.
+    candidate_spectral_context: SpectralCodecContext | None = None,
+    existing_spectral_context: SpectralCodecContext | None = None,
     # Return type quoted (this module has no ``from __future__ import
     # annotations``) so the lexical typing-escape-hatch scanner's NAME-
     # token count doesn't grow — the module already carries this ``Any``
@@ -214,6 +230,48 @@ def full_pipeline_decision(
         result["keep_searching"] = True
         return _finalize_denylist(result)
 
+    # --- Codec-aware spectral interpretation (issue #829 Phase 5 PR2b) ---
+    # Computed ONCE per side, here, and consumed by every seam below. No
+    # decision may read a raw ``spectral_bitrate_kbps`` again: a number
+    # produced by LAME's MP3 encoder table means nothing for an AAC, an
+    # Opus or an HE-AAC stream (download 37946). ``decision_class_kbps``
+    # returns the codec's own class only when the interpretation is
+    # decision-grade; otherwise it withholds, and withholding falls through
+    # to rank and the other evidence — it is never a rejection.
+    #
+    # The format labels are exactly the ones the rank model classifies:
+    # every ``is_flac`` branch below builds its measurement with
+    # ``new_format or "flac"``, and the native-lossy branch passes
+    # ``new_format`` straight through ``comparison_format_hint``.
+    candidate_format_label = (new_format or "flac") if is_flac else new_format
+    effective_existing_format = (
+        existing_format if existing_format is not None else "MP3"
+    )
+    candidate_context = candidate_spectral_context or SpectralCodecContext()
+    existing_context = existing_spectral_context or SpectralCodecContext()
+    candidate_spectral = interpret_spectral_evidence(candidate_context.facts(
+        spectral_grade=spectral_grade,
+        spectral_bitrate_kbps=spectral_bitrate,
+        format=candidate_format_label,
+    ))
+    # The existing side's codec claim uses the raw label, never the "MP3"
+    # rank-model default: a fabricated codec is exactly what #829 removes.
+    existing_spectral = interpret_spectral_evidence(existing_context.facts(
+        spectral_grade=existing_spectral_grade,
+        spectral_bitrate_kbps=existing_spectral_bitrate,
+        format=existing_format,
+    ))
+    candidate_spectral_class = decision_class_kbps(candidate_spectral)
+    existing_spectral_class = decision_class_kbps(existing_spectral)
+    # ONE predicate, computed once, for every seam that asks "does the
+    # spectral leg govern this pair?" — Stage 1's comparison AND the
+    # symmetric-representation gate below. They were the same condition
+    # before this PR and must stay the same condition: they are the two
+    # halves of "represent the installed album by its real content".
+    spectral_classes_govern = spectral_classes_comparable(
+        candidate_spectral, existing_spectral,
+    ).comparable
+
     # --- Stage 0: Spectral gate trigger (issue #93) ---
     # Mirrors lib.measurement._needs_spectral_check. Tells the operator
     # whether the preimport spectral gate would even run on this file,
@@ -225,6 +283,7 @@ def full_pipeline_decision(
         is_vbr=is_vbr,
         avg_bitrate_kbps=avg_bitrate,
         vbr_threshold_kbps=cfg.mp3_vbr.excellent,
+        codec_family=candidate_spectral.codec_family,
     )
     result["stage0_spectral_gate"] = gate
 
@@ -248,9 +307,19 @@ def full_pipeline_decision(
             and post_conversion_min_bitrate is not None
         )
     )
+    # Stage 1 compares two spectral CLASSES. Both must be decision-grade in
+    # their own codec's terms, and the pair must be comparable at all — a
+    # class re-derived from ``cliff_hz`` sits systematically one tier above
+    # a legacy stored bucket, so weighing one against the other measures
+    # derivation rather than content (the Fall 2007 loop, issue #911).
+    # Withholding the existing side is safe by construction: Stage 1 only
+    # rejects when BOTH values are non-zero.
+    stage1_existing_class = (
+        existing_spectral_class if spectral_classes_govern else None
+    )
     if spectral_grade and stage0_gates_stage1:
         result["stage1_spectral"] = spectral_import_decision(
-            spectral_grade, spectral_bitrate, existing_spectral_bitrate or 0)
+            spectral_grade, candidate_spectral_class, stage1_existing_class or 0)
 
         if (result["stage1_spectral"] == "reject"
                 and not (provisional_source_candidate
@@ -271,7 +340,6 @@ def full_pipeline_decision(
     # downstream comparisons misrepresent production. When the caller didn't
     # measure an avg, nothing is fabricated: metric selection falls back to
     # min and the persisted basis says "min" (dl 36660 display-lie class).
-    effective_existing_format = existing_format if existing_format is not None else "MP3"
     # Symmetric-representation gate (issue #813 Finding 1). The existing-side
     # spectral-floor ``override_min_bitrate`` represents the installed album by
     # its real content so a fake-high existing (CBR 320 whose spectral says 96)
@@ -289,9 +357,21 @@ def full_pipeline_decision(
     # clamp will govern; keep it for the single-sided case (candidate carries no
     # spectral estimate) it exists to serve. Rank demotion is unchanged either
     # way — only the same-rank tiebreak now compares true container bitrates.
-    shared_spectral_clamp_will_fire = (
-        spectral_bitrate is not None and existing_spectral_bitrate is not None
-    )
+    #
+    # The disarm predicate is EXACTLY ``_shared_spectral_bitrates``' firing
+    # condition, and that identity is the whole argument: the override is
+    # only safe to drop because something else then represents the installed
+    # album by its real content. Issue #829 Phase 5 PR2b narrowed the clamp
+    # to comparable CLASSES (a ``cliff_hz`` re-derivation sits one tier above
+    # a legacy stored bucket, so a mixed-basis pair measures derivation, not
+    # content). Disarming on the wider "both sides have a class" would open a
+    # window where NEITHER mechanism fires and a known-fake installed copy
+    # keeps its inflated container — download_log 29525, Clue to Kalo *Lily
+    # Perdida*: a CBR-320 HAVE graded ``likely_transcode`` with a cliff-derived
+    # class of 128 would have blocked a genuinely better VBR 234 candidate.
+    # Deerhunter is unreachable through that window: it is same-codec,
+    # same-basis, i.e. comparable, so the gate still fires there.
+    shared_spectral_clamp_will_fire = spectral_classes_govern
     effective_existing_override = (
         None if shared_spectral_clamp_will_fire else override_min_bitrate
     )
@@ -302,7 +382,9 @@ def full_pipeline_decision(
         is_cbr=existing_is_cbr,
         override_min_bitrate=effective_existing_override,
         spectral_grade=existing_spectral_grade,
-        spectral_bitrate_kbps=existing_spectral_bitrate,
+        spectral_bitrate_kbps=existing_spectral_class,
+        cliff_hz=existing_context.cliff_hz,
+        codec_family=existing_context.codec_family,
     )
 
     if is_flac and target_format in ("flac", "lossless"):
@@ -332,12 +414,24 @@ def full_pipeline_decision(
             min_bitrate_kbps=min_bitrate,
             format=stage2_new_format,
             spectral_grade=spectral_grade,
-            spectral_bitrate_kbps=spectral_bitrate,
+            spectral_bitrate_kbps=candidate_spectral_class,
             spectral_subject=(
                 EVIDENCE_SUBJECT_SOURCE if spectral_grade is not None else None
             ),
             spectral_provenance=(
                 EVIDENCE_PROVENANCE_MEASURED
+                if spectral_grade is not None else None
+            ),
+            # Gated on the grade for the same reason
+            # ``build_existing_quality_measurement`` gates: these facts are
+            # measured in the SAME pass as the grade, so a measurement with
+            # no grade cannot legitimately carry them.
+            cliff_hz=(
+                candidate_context.cliff_hz
+                if spectral_grade is not None else None
+            ),
+            codec_family=(
+                candidate_context.codec_family
                 if spectral_grade is not None else None
             ))
         if v0_verified_override:
@@ -376,6 +470,8 @@ def full_pipeline_decision(
                 new_m,
                 existing_m,
                 verified_lossless_proof=will_be_verified,
+                source_spectral=candidate_spectral,
+                current_spectral=existing_spectral,
             ),
             cfg=cfg,
         )
@@ -443,12 +539,24 @@ def full_pipeline_decision(
             min_bitrate_kbps=min_bitrate,
             format=new_format or "flac",
             spectral_grade=spectral_grade,
-            spectral_bitrate_kbps=spectral_bitrate,
+            spectral_bitrate_kbps=candidate_spectral_class,
             spectral_subject=(
                 EVIDENCE_SUBJECT_SOURCE if spectral_grade is not None else None
             ),
             spectral_provenance=(
                 EVIDENCE_PROVENANCE_MEASURED
+                if spectral_grade is not None else None
+            ),
+            # Gated on the grade for the same reason
+            # ``build_existing_quality_measurement`` gates: these facts are
+            # measured in the SAME pass as the grade, so a measurement with
+            # no grade cannot legitimately carry them.
+            cliff_hz=(
+                candidate_context.cliff_hz
+                if spectral_grade is not None else None
+            ),
+            codec_family=(
+                candidate_context.codec_family
                 if spectral_grade is not None else None
             ))
         # The audit target names only an output policy that would actually be
@@ -527,6 +635,8 @@ def full_pipeline_decision(
                     else None
                 ),
                 will_be_verified,
+                source_spectral=candidate_spectral,
+                current_spectral=existing_spectral,
             ),
             cfg=cfg,
         )
@@ -606,12 +716,24 @@ def full_pipeline_decision(
             format=stage2_new_format,
             is_cbr=is_cbr,
             spectral_grade=spectral_grade,
-            spectral_bitrate_kbps=spectral_bitrate,
+            spectral_bitrate_kbps=candidate_spectral_class,
             spectral_subject=(
                 EVIDENCE_SUBJECT_SOURCE if spectral_grade is not None else None
             ),
             spectral_provenance=(
                 EVIDENCE_PROVENANCE_MEASURED
+                if spectral_grade is not None else None
+            ),
+            # Gated on the grade for the same reason
+            # ``build_existing_quality_measurement`` gates: these facts are
+            # measured in the SAME pass as the grade, so a measurement with
+            # no grade cannot legitimately carry them.
+            cliff_hz=(
+                candidate_context.cliff_hz
+                if spectral_grade is not None else None
+            ),
+            codec_family=(
+                candidate_context.codec_family
                 if spectral_grade is not None else None
             ))
         # Lossless-source lock: a recorded existing lossless-source V0 probe
@@ -640,6 +762,8 @@ def full_pipeline_decision(
                 new_m,
                 existing_m,
                 verified_lossless_proof=candidate_verified_lossless_proof,
+                source_spectral=candidate_spectral,
+                current_spectral=existing_spectral,
             ),
             cfg=cfg,
         )
@@ -666,14 +790,14 @@ def full_pipeline_decision(
     # --- Stage 3: Post-import quality gate ---
     gate_spectral_bitrate = None
     effective_gate_bitrate = compute_effective_override_bitrate(
-        gate_bitrate, spectral_bitrate, spectral_grade)
+        gate_bitrate, candidate_spectral)
     # ``gate_bitrate`` is assigned from ``min_bitrate`` (now typed ``int``,
     # never ``None``) on every branch above, so it is never ``None`` here —
     # the redundant ``gate_bitrate is not None`` guard is dropped now that
     # ``min_bitrate: int`` makes that provable rather than merely assumed.
     if (effective_gate_bitrate is not None
             and effective_gate_bitrate < gate_bitrate):
-        gate_spectral_bitrate = spectral_bitrate
+        gate_spectral_bitrate = candidate_spectral_class
     gate_measurement_format = (
         gate_contract.format.split()[0]
         if gate_contract is not None
@@ -693,6 +817,22 @@ def full_pipeline_decision(
         spectral_provenance=(
             EVIDENCE_PROVENANCE_MEASURED
             if spectral_grade is not None else None
+        ),
+        # The measured codec facts describe the CANDIDATE's bytes. They ride
+        # the gate measurement only when the gate is still looking at those
+        # bytes (native lossy import); after a conversion the gate describes
+        # the output, whose codec family is the target's, not the source's.
+        # Stamping the source's family on an output projection would be the
+        # download-37946 mistake in the other direction.
+        cliff_hz=(
+            candidate_context.cliff_hz
+            if gate_measurement_format == candidate_format_label
+            else None
+        ),
+        codec_family=(
+            candidate_context.codec_family
+            if gate_measurement_format == candidate_format_label
+            else None
         ))
     result["stage3_quality_gate"] = quality_gate_decision(
         gate_m,
@@ -1033,6 +1173,39 @@ def _new_format_hint_from_evidence(
     return candidate.measurement.format or candidate.storage_format
 
 
+def evidence_spectral_context(
+    evidence: AlbumQualityEvidence | None,
+) -> SpectralCodecContext:
+    """The codec-resolution context one evidence row carries.
+
+    ``storage_format`` and ``filetype_band`` live on the evidence row, not
+    the measurement, and only the row can fail closed on a mixed-codec
+    album — whose album-level spectral grade was averaged ACROSS codec
+    families and whose ``codec_family`` capture is only the first track's.
+    """
+    if evidence is None:
+        return SpectralCodecContext()
+    return codec_context_from_measurement(
+        evidence.measurement,
+        storage_format=evidence.storage_format,
+        filetype_band=evidence.filetype_band,
+    )
+
+
+def interpret_evidence_spectral(
+    evidence: AlbumQualityEvidence | None,
+) -> SpectralInterpretation:
+    """Interpret one evidence row's spectral evidence in its codec's terms.
+
+    Context and measurement are combined by ``SpectralCodecContext.interpret``
+    — the one place that pairing happens, so no caller can accidentally
+    resolve a codec with less evidence than the row carries.
+    """
+    return evidence_spectral_context(evidence).interpret(
+        evidence.measurement if evidence is not None else None
+    )
+
+
 def override_bitrate_from_current_evidence(
     current: AlbumQualityEvidence | None,
 ) -> int | None:
@@ -1042,8 +1215,7 @@ def override_bitrate_from_current_evidence(
     current_min = measurement.min_bitrate_kbps
     effective = compute_effective_override_bitrate(
         current_min,
-        measurement.spectral_bitrate_kbps,
-        measurement.spectral_grade,
+        interpret_evidence_spectral(current),
     )
     if current_min is not None and effective is not None and effective != current_min:
         return effective
@@ -1329,4 +1501,6 @@ def full_pipeline_decision_from_evidence(
             current is not None
             and current.verified_lossless_proof is not None
         ),
+        candidate_spectral_context=evidence_spectral_context(candidate),
+        existing_spectral_context=evidence_spectral_context(current),
     )

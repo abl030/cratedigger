@@ -20,8 +20,10 @@ from lib.quality import (
     AudioQualityMeasurement,
     DownloadInfo,
     SpectralAnalysisDetail,
+    SpectralEvidenceFacts,
     compute_effective_override_bitrate,
     full_pipeline_decision,
+    interpret_spectral_evidence,
     rejection_backfill_override,
     resolve_rejection_search_override,
     search_tiers,
@@ -313,10 +315,18 @@ def simulate(
     """Run full_pipeline_decision + rejection backfill."""
     # Derive existing state params (same logic as cmd_quality)
     existing_spectral_bitrate = album.spectral_bitrate
+    # Codec-aware (issue #829 Phase 5 PR2b): the existing side's spectral
+    # number only participates when its own codec's ladder can interpret
+    # it. Mirrors ``full_pipeline_decision``'s internal derivation exactly —
+    # same format label, same facts adapter — so the simulator helper cannot
+    # drift from the decider it drives.
     effective_existing = compute_effective_override_bitrate(
         album.min_bitrate,
-        album.spectral_bitrate,
-        album.spectral_grade,
+        interpret_spectral_evidence(SpectralEvidenceFacts(
+            spectral_grade=album.spectral_grade,
+            spectral_bitrate_kbps=album.spectral_bitrate,
+            format=_derive_album_format(album),
+        )),
     )
     override = None
     if (effective_existing is not None and album.min_bitrate is not None
@@ -938,18 +948,33 @@ class TestNamedRegressions(unittest.TestCase):
 
         r = simulate(album, dl)
 
-        self.assertEqual(r.stage1_spectral, "import_upgrade")
+        # Issue #829 Phase 5 PR2b: the HAVE is ``genuine``, and a genuine
+        # album verdict authorizes no spectral class — its 128 is the
+        # natural-rolloff false positive the four-arm calibration measured.
+        # So Stage 1 has nothing to compare and withholds; the guard that
+        # actually protects the genuine album is Stage 2's, unchanged.
+        self.assertEqual(r.stage1_spectral, "import_no_exist")
         self.assertFalse(r.imported)
         self.assertEqual(r.stage2_import, "downgrade")
 
-    def test_bay_likely_transcode_non_regressing_real_rank_still_imports(self):
-        """Bay shape: transcode-grade candidate can still be real progress.
+    def test_bay_transcode_no_longer_displaces_the_genuine_have(self):
+        """Bay shape — the outcome issue #829 Phase 5 PR2b deliberately flips.
 
-        Velella Velella - The Bay of Biscay remains valid because the
-        likely_transcode candidate's selected-metric rank does not regress:
-        avg rises from 172k to 179k while the spectral floor rises from 128k
-        to 160k. The Muse guard should block only lower-rank transcodes over
-        non-transcode existing albums.
+        Velella Velella - The Bay of Biscay. The candidate is a
+        ``likely_transcode`` whose own cliff says 160; the HAVE is a
+        ``genuine`` album at avg 172 carrying a 128 spectral estimate.
+
+        The old rule read the two estimates against each other — 160 > 128
+        — and imported the transcode. But a ``genuine`` album verdict means
+        the album-level decision already rejected the minority cliff that
+        produced that 128, and the calibration measured what such a cliff
+        is: natural rolloff. With it withheld the genuine album stands on
+        its real avg 172 (``good``) while the candidate is bounded by its
+        OWN class 160 (``acceptable``), so the genuine copy is kept and the
+        search continues.
+
+        Must-still-work companion:
+        ``test_bay_shape_transcode_with_a_strictly_better_class_still_imports``.
         """
         album = AlbumState(
             "bay_of_biscay_existing",
@@ -976,8 +1001,44 @@ class TestNamedRegressions(unittest.TestCase):
 
         r = simulate(album, dl)
 
+        self.assertFalse(r.imported)
+        self.assertEqual(r.stage2_import, "downgrade")
+        self.assertTrue(r.keep_searching)
+
+    def test_bay_shape_transcode_with_a_strictly_better_class_still_imports(self):
+        """Must-still-work: the candidate bound blocks nothing really better.
+
+        Same HAVE as the Bay shape. A transcode candidate whose own class
+        is 256 has a bounded rank (``excellent``) strictly above the
+        genuine HAVE's raw ``good``, so it imports and the search continues
+        — the bound is a ceiling on an accusation, not a blanket refusal.
+        """
+        album = AlbumState(
+            "bay_of_biscay_existing",
+            128,
+            False,
+            "genuine",
+            128,
+            False,
+            None,
+            avg_bitrate=172,
+            existing_format="MP3",
+        )
+        dl = DownloadScenario(
+            "bay_of_biscay_better_candidate",
+            False,
+            290,
+            True,
+            avg_bitrate=290,
+            spectral_grade="likely_transcode",
+            spectral_bitrate=256,
+            new_format="MP3",
+        )
+
+        r = simulate(album, dl)
+
         self.assertTrue(r.imported)
-        self.assertIn(r.stage2_import, ("import", "transcode_upgrade"))
+        self.assertEqual(r.stage2_import, "import")
 
 
     def test_unter_null_failure_epiphany_vbr_real_upgrade(self):

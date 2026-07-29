@@ -8,15 +8,38 @@ JSON response plus the CLI's stable exit-code convention.
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
+import socket
 import sys
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 
 import msgspec
 
+from web.request_security import CHANNEL_HEADER, CLI_CHANNEL
+
 DEFAULT_API_BASE = "http://127.0.0.1:8085"
 _TIMEOUT_SECONDS = 15.0
+_INTERNAL_HOST = "cratedigger.internal"
+
+
+@dataclass(frozen=True)
+class TcpApiEndpoint:
+    """Explicit standalone-development TCP API origin."""
+
+    api_base: str
+
+
+@dataclass(frozen=True)
+class UnixApiEndpoint:
+    """Permissioned local API socket selected by the installed wrapper."""
+
+    socket_path: str
+
+
+ApiEndpoint = TcpApiEndpoint | UnixApiEndpoint
 
 
 class _ApiMutation(msgspec.Struct, frozen=True):
@@ -44,6 +67,24 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
         return None
 
 
+class _UnixHTTPConnection(http.client.HTTPConnection):
+    """Stdlib HTTP/1.1 connection whose transport is AF_UNIX."""
+
+    def __init__(self, socket_path: str, *, timeout: float) -> None:
+        super().__init__(_INTERNAL_HOST, timeout=timeout)
+        self._socket_path = socket_path
+
+    def connect(self) -> None:
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        connection.settimeout(self.timeout)
+        try:
+            connection.connect(self._socket_path)
+        except OSError:
+            connection.close()
+            raise
+        self.sock = connection
+
+
 def _failure(error: str, detail: str) -> int:
     print(json.dumps({"error": error, "detail": detail}), file=sys.stderr)
     return 5
@@ -61,16 +102,57 @@ def _exit_code(status: int) -> int:
     return 5
 
 
-def _post(api_base: str, mutation: _ApiMutation) -> _ApiResult | None:
+def _post_unix(
+    endpoint: UnixApiEndpoint,
+    mutation: _ApiMutation,
+    *,
+    timeout_seconds: float,
+) -> _ApiResult:
+    connection = _UnixHTTPConnection(
+        endpoint.socket_path,
+        timeout=timeout_seconds,
+    )
     try:
+        connection.request(
+            "POST",
+            mutation.path,
+            body=msgspec.json.encode(mutation.body),
+            headers={
+                "Host": _INTERNAL_HOST,
+                "Content-Type": "application/json",
+                CHANNEL_HEADER: CLI_CHANNEL,
+            },
+        )
+        response = connection.getresponse()
+        return _ApiResult(status=response.status, body=response.read())
+    finally:
+        connection.close()
+
+
+def _post(
+    endpoint: ApiEndpoint,
+    mutation: _ApiMutation,
+    *,
+    timeout_seconds: float = _TIMEOUT_SECONDS,
+) -> _ApiResult | None:
+    try:
+        if isinstance(endpoint, UnixApiEndpoint):
+            return _post_unix(
+                endpoint,
+                mutation,
+                timeout_seconds=timeout_seconds,
+            )
         request = urllib.request.Request(
-            f"{api_base.rstrip('/')}{mutation.path}",
+            f"{endpoint.api_base.rstrip('/')}{mutation.path}",
             data=msgspec.json.encode(mutation.body),
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                CHANNEL_HEADER: CLI_CHANNEL,
+            },
             method="POST",
         )
         opener = urllib.request.build_opener(_NoRedirectHandler())
-        with opener.open(request, timeout=_TIMEOUT_SECONDS) as response:
+        with opener.open(request, timeout=timeout_seconds) as response:
             return _ApiResult(status=response.status, body=response.read())
     except urllib.error.HTTPError as exc:
         with exc:
@@ -81,10 +163,22 @@ def _post(api_base: str, mutation: _ApiMutation) -> _ApiResult | None:
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         _failure("api_unavailable", str(exc))
         return None
+    except http.client.HTTPException as exc:
+        _failure("api_protocol_error", str(exc))
+        return None
 
 
-def _relay(api_base: str, mutation: _ApiMutation) -> int:
-    result = _post(api_base, mutation)
+def _relay(
+    endpoint: ApiEndpoint,
+    mutation: _ApiMutation,
+    *,
+    timeout_seconds: float = _TIMEOUT_SECONDS,
+) -> int:
+    result = _post(
+        endpoint,
+        mutation,
+        timeout_seconds=timeout_seconds,
+    )
     if result is None:
         return 5
     try:
@@ -100,7 +194,7 @@ def cmd_pipeline_delete(_db: object, args: argparse.Namespace) -> int:
         print(json.dumps({"error": "confirmation_required", "confirm": "DELETE"}),
               file=sys.stderr)
         return 3
-    return _relay(args.api_base, _ApiMutation(
+    return _relay(args.api_endpoint, _ApiMutation(
         path="/api/pipeline/delete", body={"id": args.request_id},
     ))
 
@@ -111,13 +205,13 @@ def cmd_set_quality(_db: object, args: argparse.Namespace) -> int:
         body["status"] = args.status
     if args.min_bitrate is not None:
         body["min_bitrate"] = args.min_bitrate
-    return _relay(args.api_base, _ApiMutation(
+    return _relay(args.api_endpoint, _ApiMutation(
         path="/api/pipeline/set-quality", body=body,
     ))
 
 
 def cmd_upgrade(_db: object, args: argparse.Namespace) -> int:
-    return _relay(args.api_base, _ApiMutation(
+    return _relay(args.api_endpoint, _ApiMutation(
         path="/api/pipeline/upgrade", body={"mb_release_id": args.release_id},
     ))
 
@@ -127,14 +221,14 @@ def cmd_wrong_match_converge(_db: object, args: argparse.Namespace) -> int:
         print(json.dumps({"error": "confirmation_required", "flag": "--apply"}),
               file=sys.stderr)
         return 3
-    return _relay(args.api_base, _ApiMutation(
+    return _relay(args.api_endpoint, _ApiMutation(
         path="/api/wrong-matches/converge",
         body={"request_id": args.request_id, "threshold_milli": args.threshold_milli},
     ))
 
 
 def cmd_resolve_rg(_db: object, args: argparse.Namespace) -> int:
-    return _relay(args.api_base, _ApiMutation(
+    return _relay(args.api_endpoint, _ApiMutation(
         path=f"/api/pipeline/{args.request_id}/resolve-rg", body={},
     ))
 

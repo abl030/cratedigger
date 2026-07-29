@@ -375,8 +375,15 @@ class TestImportPreviewValues(unittest.TestCase):
                 is_flac=False,
                 min_bitrate=320,
                 is_cbr=True,
+                # Both codecs and both grades are stated (issue #829 Phase 5
+                # PR2b): a spectral number carries no class without a codec
+                # whose ladder can read it and an authorizing album verdict.
+                new_format="MP3",
+                existing_format="MP3",
+                existing_min_bitrate=128,
                 spectral_grade="suspect",
                 spectral_bitrate=96,
+                existing_spectral_grade="likely_transcode",
                 existing_spectral_bitrate=128,
             )
         )
@@ -393,6 +400,7 @@ class TestImportPreviewValues(unittest.TestCase):
                 avg_bitrate=160,
                 is_cbr=False,
                 is_vbr=True,
+                new_format="MP3",
             )
         )
 
@@ -479,7 +487,11 @@ class TestImportPreviewValues(unittest.TestCase):
         self.assertEqual(preview.verdict, "would_import")
         self.assertFalse(preview.cleanup_eligible)
         self.assertEqual(preview.reason, "provisional_lossless_upgrade")
-        self.assertIn("stage1_spectral:reject", preview.stage_chain)
+        # A lossless container yields no kbps class (issue #829 Phase 5
+        # PR2b), so Stage 1 withholds instead of rejecting. The preserved
+        # contract is the one this test is named for: the provisional lane
+        # still owns the verdict for a suspect lossless source.
+        self.assertIn("stage1_spectral:import_no_exist", preview.stage_chain)
         self.assertIn(
             "stage2_import:provisional_lossless_upgrade",
             preview.stage_chain,

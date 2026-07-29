@@ -6,9 +6,11 @@ Both are enriched with library/pipeline status via check_beets_library() and che
 """
 from __future__ import annotations
 
+import concurrent.futures
 import copy
 import urllib.error
 import uuid
+from collections.abc import Callable
 from typing import NotRequired, TypedDict, TypeGuard, cast
 
 import msgspec
@@ -42,6 +44,31 @@ from web.routes._registry import (
     route,
 )
 from web.routes._server_access import _server
+
+
+def _parallel_results[Key, Result](
+    jobs: dict[Key, Callable[[], Result]], *, max_workers: int,
+) -> dict[Key, Result]:
+    """Fan out independent route sources without delaying an upstream error."""
+    if not jobs:
+        return {}
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+    futures = {key: executor.submit(job) for key, job in jobs.items()}
+    try:
+        done, _pending = concurrent.futures.wait(
+            futures.values(), return_when=concurrent.futures.FIRST_EXCEPTION,
+        )
+        for future in done:
+            future.result()
+        results = {key: future.result() for key, future in futures.items()}
+    except BaseException:
+        for future in futures.values():
+            future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
+    else:
+        executor.shutdown(wait=True)
+        return results
 
 
 def get_search(h: RouteHandler, params: dict[str, list[str]]) -> None:
@@ -689,13 +716,16 @@ def _build_compare_skeleton(
     resolved `(mbid, discogs_id)` pair and pure-metadata inputs.
     """
     srv = _server()
-    mb_groups: list[ArtistCatalogueRow] = []
-    if mbid:
-        mb_groups = srv.mb_api.get_artist_release_groups(mbid)
-
-    discogs_groups: list[ArtistCatalogueRow] = []
-    if discogs_id:
-        discogs_groups = discogs_api.get_artist_releases(int(discogs_id))
+    # The source catalogues have no dependency on each other.  Starting them
+    # together removes a cold compare waterfall while each adapter retains its
+    # own mirror-specific fan-out limits and cache/singleflight semantics.
+    sources = _parallel_results({
+        **({"mb": lambda: srv.mb_api.get_artist_release_groups(mbid)} if mbid else {}),
+        **({"discogs": lambda: discogs_api.get_artist_releases(int(discogs_id))}
+           if discogs_id else {}),
+    }, max_workers=2)
+    mb_groups = sources.get("mb", [])
+    discogs_groups = sources.get("discogs", [])
 
     merged = merge_discographies(mb_groups, discogs_groups)
     return ArtistCompareSkeleton(

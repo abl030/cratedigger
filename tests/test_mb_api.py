@@ -29,6 +29,19 @@ from web.mb import (
     search_release_groups,
 )
 
+# URL-construction tests use the public default base but never intend to test
+# pacing. Bypass the policy function itself: a no-op sleep would still mutate
+# the real module-global public schedule and contaminate later timing tests.
+_public_pacing_patch = patch("web.mb._wait_for_public_musicbrainz", lambda _url: None)
+
+
+def setUpModule() -> None:
+    _public_pacing_patch.start()
+
+
+def tearDownModule() -> None:
+    _public_pacing_patch.stop()
+
 
 def _mock_urlopen(response_data):
     """Patch web.mb's urlopen to return canned JSON; capture the Request."""
@@ -377,8 +390,8 @@ class TestArtistReleaseGroupsWithAppearances(unittest.TestCase):
         direct_releases = {
             "release-count": 2,
             "releases": [
-                {"status": None, "release-group": {"id": self.OWN_RG}},
-                {"status": "Pseudo-Release", "release-group": {"id": self.OWN_RG}},
+                {"id": "release-null-status", "status": None, "release-group": {"id": self.OWN_RG}},
+                {"id": "release-pseudo", "status": "Pseudo-Release", "release-group": {"id": self.OWN_RG}},
             ],
         }
         with _mock_urlopen_by_fragment({

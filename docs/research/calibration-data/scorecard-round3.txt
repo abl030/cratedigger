@@ -1,0 +1,33 @@
+cratedigger dev shell — run: python3 -m unittest discover -s tests -t . -v
+== v3 promotion gate (T_ultra=62): control + FLAC frauds ==
+  control-flac1644   denied (stays provisional) 9/24
+      Bjork: ['ceiling', 'no-ultrasonic']
+      Dire_Straits: ['ceiling']
+      Fugazi: ['ceiling', 'no-ultrasonic']
+      Kate_Bush: ['ceiling', 'no-ultrasonic']
+      Philip_Glass: ['no-ultrasonic']
+      Steve_Reich_Kronos_Quart: ['no-ultrasonic']
+      Sunn_O: ['no-ultrasonic']
+      Swans: ['no-ultrasonic']
+      Talk_Talk: ['ceiling', 'no-ultrasonic']
+  t-mp3128-flac      denied 24/24
+  t-opus96-flac      denied 24/24
+  t-vorbisq5-flac    denied 24/24
+
+== MP3 band assertions (+/-1 tier tolerated; None = asserts nothing) ==
+  lame-cbr96   expect 96   asserted 121/220, within±1 100% of asserted
+  lame-cbr128  expect 128  asserted 167/220, within±1 100% of asserted
+  lame-cbr160  expect 160  asserted 84/220, within±1 100% of asserted
+  lame-cbr192  expect 192  asserted 170/220, within±1 94% of asserted
+  lame-cbr224  expect 256  asserted 79/220, within±1 97% of asserted
+  lame-cbr256  expect 256  asserted 80/220, within±1 98% of asserted
+  lame-cbr320  expect 320  asserted 166/220, within±1 99% of asserted
+  lame-v2      expect 192  asserted 145/220, within±1 78% of asserted
+
+== MP3-container frauds (band below container class = exposed) ==
+  t-mp3192-mp3320    exposed 23/24  <-- PROMOTED FRAUD
+  t-aac128-mp3320    exposed 18/24  <-- PROMOTED FRAUD
+
+============================================================
+PROOF BAR: CLEAN — zero FLAC-container launders received proof
+LOSSY-SIDE: [('t-mp3192-mp3320', 1), ('t-aac128-mp3320', 6)] (non-blocking; MP3 containers never receive lossless proof — classify vs documented residual classes)

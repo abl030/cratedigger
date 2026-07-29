@@ -83,20 +83,22 @@ function withWas(value, wasValue) {
 }
 
 /**
- * Whether a comparison basis's displayed value is a clamped
- * min(metric, spectral floor) rather than the named statistic — true for
- * the `rank` branch and `spectral_tiebreak` (issue #813 Finding 1: the
- * same-rank tiebreak also decides on clamped values when they differ).
- * Labelling either with the raw metric name would lie, which is what the
- * basis exists to prevent.
+ * Whether ONE SIDE of a comparison basis shows a clamped
+ * min(metric, spectral class) rather than the named statistic. True for
+ * both sides of the `rank` branch and `spectral_tiebreak` (issue #813
+ * Finding 1: the same-rank tiebreak also decides on clamped values when
+ * they differ), and for the CANDIDATE ONLY on `spectral_candidate_bound`
+ * (issue #911 — that branch bounds the candidate by its own class while
+ * the HAVE keeps its real raw metric). Labelling any of them with the raw
+ * metric name would lie, which is what the basis exists to prevent.
  * @param {Object} basis - comparison_basis dict from the API
+ * @param {'new'|'existing'} side
  * @returns {boolean}
  */
-function basisUsesClampedValue(basis) {
-  return Boolean(
-    basis && basis.spectral_clamped
-      && (basis.branch === 'rank' || basis.branch === 'spectral_tiebreak'),
-  );
+function basisUsesClampedValue(basis, side) {
+  if (!basis || !basis.spectral_clamped) return false;
+  if (basis.branch === 'rank' || basis.branch === 'spectral_tiebreak') return true;
+  return basis.branch === 'spectral_candidate_bound' && side === 'new';
 }
 
 /**
@@ -113,7 +115,7 @@ function basisValuePhrase(basis, side) {
   const metric = side === 'new' ? basis.new_metric : basis.existing_metric;
   if (metric === 'contract') return 'contract';
   if (value === null || value === undefined) return 'unmeasured';
-  if (basisUsesClampedValue(basis)) return `~${esc(value)}k`;
+  if (basisUsesClampedValue(basis, side)) return `~${esc(value)}k`;
   return `${esc(metric)} ${esc(value)}k`;
 }
 
@@ -175,7 +177,7 @@ function comparisonMetricPhrase(avg, median, min, basis, side) {
 
   const metric = side === 'new' ? basis.new_metric : basis.existing_metric;
   const value = side === 'new' ? basis.new_value_kbps : basis.existing_value_kbps;
-  if (basisUsesClampedValue(basis)) {
+  if (basisUsesClampedValue(basis, side)) {
     return basisValuePhrase(basis, side);
   }
   if (metric === 'avg') return avgMinPhrase(value, null, min);
@@ -276,11 +278,12 @@ function buildEvidenceCardModel(h) {
     }
   }
   if (h.spectral_grade) {
-    // With a basis, the clamped rank/spectral_tiebreak value already
-    // carries the floor — repeating "~250k" in the grade chip would
-    // double it up.
+    // With a basis, a clamped candidate value already carries the floor —
+    // repeating "~250k" in the grade chip would double it up. The
+    // candidate side is the one the chip sits beside, so that is the side
+    // asked about here.
     const basisAlreadyHasFloor = Boolean(
-      basisUsesClampedValue(basis)
+      basisUsesClampedValue(basis, 'new')
       && Number(basis.new_value_kbps) === Number(h.spectral_bitrate),
     );
     const floor = (h.spectral_bitrate && !basisAlreadyHasFloor)

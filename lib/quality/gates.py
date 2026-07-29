@@ -1,10 +1,12 @@
 """Pre-import gate triggers (spectral, audio-integrity, nested-layout).
 
 Extracted verbatim from the monolithic ``lib/quality.py`` (issue #477).
-Pure move: every definition is AST-identical to the original.
+Pure move: every definition is AST-identical to the original — except
+``spectral_gate_trigger``, which issue #829 Phase 5 PR2b made codec-aware
+so it stops claiming production would measure codecs it never measures.
 """
 
-
+from lib.quality.evidence_types import CODEC_FAMILY_MP3, CodecFamily
 
 # ---------------------------------------------------------------------------
 # Pre-import spectral decision (MP3/CBR path in process_completed_album)
@@ -17,29 +19,58 @@ def spectral_gate_trigger(
     is_vbr: bool | None = None,
     avg_bitrate_kbps: int | None = None,
     vbr_threshold_kbps: int,
+    codec_family: CodecFamily | None,
 ) -> str:
-    """Decide whether the preimport spectral gate would run on this file.
+    """Decide whether the PREIMPORT spectral gate would run on this file.
 
-    Mirrors ``lib.measurement._needs_spectral_check`` but operates on the
-    simulator's booleans (``is_flac`` / ``is_cbr``) instead of a filetype
-    string, so ``full_pipeline_decision`` and the web UI Decisions tab can
-    explain why the gate fired (or didn't) for a given file.
+    Mirrors ``lib.measurement._needs_spectral_check`` — and only that. That
+    helper reads a filetype string and answers "lossless source → always;
+    MP3 → per the VBR rules; **every other codec → never, they have no
+    calibrated cliff policy**". This mirror used to see only
+    ``is_flac``/``is_cbr``/``is_vbr`` and so answered ``"would_run"`` for an
+    AAC or Opus candidate the preimport gate would never have run on — the
+    codec-blind seam issue #829 exists to close. ``codec_family`` is
+    required (not defaulted) precisely so a caller cannot silently
+    reintroduce that blindness.
+
+    **This is not a claim that the album was never measured.**
+    ``harness/import_one.py`` calls ``collect_attempt_spectral_audit``
+    unconditionally for every candidate that reaches it, and the
+    current-library evidence path measures installed albums whatever their
+    codec — 19 AAC and 5 Vorbis source-subject rows carry a measured grade
+    on prod today, two AAC rows with a raw ``cliff_hz``. A non-MP3 album
+    really can arrive here holding spectral evidence. The narrower and
+    exact claim is: the PREIMPORT gate, whose verdict Stage 1 consumes,
+    does not fire for this codec, and no cliff policy is calibrated for it,
+    so whatever was measured elsewhere yields no class.
 
     Returns one of:
         "skipped_flac"          — FLACs use convert → V0 → transcode_detection,
                                   not the MP3 preimport spectral gate
+        "skipped_uncalibrated_codec"
+                                — the measured codec is not MP3 (or is
+                                  unknown), so the preimport gate never
+                                  fires and no cliff policy is calibrated
+                                  for it
         "skipped_vbr_high_avg"  — VBR MP3 with avg bitrate >= threshold;
                                   genuine V0 falls through without analysis
-        "would_run"             — CBR MP3, unknown VBR, or VBR MP3 with avg
-                                  below / equal to / unknown
+        "would_run"             — CBR MP3, MP3 with unknown VBR, or VBR MP3
+                                  with avg below / equal to / unknown
 
     When ``is_vbr`` is None but ``is_cbr`` is known, ``is_vbr`` is derived
     as ``not is_cbr``. Callers that have genuine ambiguity (mutagen failed
-    to read bitrate_mode) pass ``is_vbr=None`` AND ``is_cbr=None`` and the
-    function routes to "would_run" — the conservative choice.
+    to read bitrate_mode) pass ``is_vbr=None`` AND ``is_cbr=None`` and an
+    MP3 routes to "would_run" — the conservative choice within MP3.
+
+    An unknown ``codec_family`` skips rather than running: production's
+    ``_needs_spectral_check`` reaches its ``is_mp3`` test with the same
+    unknown label and answers False. Conservatism here means *withholding a
+    spectral opinion*, never rejecting an album.
     """
     if is_flac:
         return "skipped_flac"
+    if codec_family != CODEC_FAMILY_MP3:
+        return "skipped_uncalibrated_codec"
     if is_vbr is None and is_cbr is not None:
         is_vbr = not is_cbr
     if not is_vbr:

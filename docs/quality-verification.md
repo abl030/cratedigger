@@ -319,7 +319,7 @@ bitrate alone is not proof in the current policy.
 
 ## Downgrade prevention
 
-- `--override-min-bitrate` arg: preview/dispatch derive the comparison floor from linked current evidence or the same attempt's fresh HAVE audit. When spectral says the installed files are 128 kbps but the container says 320 kbps (fake CBR), the spectral truth is used so genuine upgrades are not blocked. Request-row quality stamps never feed this value. **This existing-side spectral floor is one-sided, so it applies only when the CANDIDATE carries no spectral estimate (issue #813 Finding 1). When both sides have a spectral estimate, `_shared_spectral_bitrates` already floors both symmetrically for rank; adding the one-sided override on top would compare the candidate's raw container bitrate against the existing's spectral floor and mint a phantom "better" for an identical transcode (Deerhunter *Rhapsody Original*, download_log 37725: a 256/spectral-192 candidate scored an upgrade over an identical 256/spectral-192 installed copy). `full_pipeline_decision` gates the override off in that case so the same-rank tiebreak compares true containers.**
+- `--override-min-bitrate` arg: preview/dispatch derive the comparison floor from linked current evidence or the same attempt's fresh HAVE audit. When spectral says the installed files are 128 kbps but the container says 320 kbps (fake CBR), the spectral truth is used so genuine upgrades are not blocked. Request-row quality stamps never feed this value. **This existing-side spectral floor is one-sided, so it applies only when the symmetric clamp does NOT govern the pair (issue #813 Finding 1). The disarm predicate is exactly `_shared_spectral_bitrates`' firing condition — `spectral_classes_comparable` since issue #829 Phase 5 PR2b — and that identity is the argument: the override is safe to drop only because something else then represents the installed album by its real content. When the clamp governs, adding the one-sided override on top would compare the candidate's raw container bitrate against the existing's spectral floor and mint a phantom "better" for an identical transcode (Deerhunter *Rhapsody Original*, download_log 37725: a 256/spectral-192 candidate scored an upgrade over an identical 256/spectral-192 installed copy). Disarming on the WIDER "both sides have a class" would open a window where neither mechanism fires and a known-fake installed copy keeps its inflated container — download_log 29525, Clue to Kalo *Lily Perdida*: a CBR-320 HAVE graded `likely_transcode` with a cliff-derived class of 128 blocking a genuinely better VBR 234 candidate. Deerhunter is unreachable through that window: same codec, same basis, i.e. comparable.** The floor itself only ever consumes a class `lib/quality/spectral_interpretation.py` calls decision-grade — an invertible ladder (MP3, Vorbis q0–q4) with an authorizing album verdict. An AAC's natural rolloff, an Opus stream, an HE-AAC stream or an unresolved codec contributes nothing and the container bitrate stands (download 37946).
 - `ImportResult.verified_lossless_proof` is the sole acquisition claim. `AudioQualityMeasurement` contains only byte observations; evidence persistence derives its CHECK-tied convenience boolean from proof presence rather than re-deriving verification from a measurement.
 - Spectral request-state writes always go through `RequestSpectralStateUpdate` so the historical grade/bitrate stamps stay atomic. Active decisions use the linked evidence row's spectral fact, not those request scalars.
 - `--target-format` flag: when `target_format="lossless"` (or legacy `"flac"`), keeps lossless on disk. ALAC/WAV sources are normalized to FLAC via `FLAC_SPEC`. A temporary V0 probe is still produced when needed for provisional source comparison. Keeping a lossless container does not itself verify it; the import needs affirmative proof.
@@ -331,11 +331,14 @@ bitrate alone is not proof in the current policy.
 
 Every `compare_quality()` call returns a `QualityComparisonBasis`
 (`lib/quality/evidence_types.py`): the verdict plus which branch fired
-(`rank`, `spectral_tiebreak`, `metric_tiebreak`, `label_contract_same_rank`,
+(`rank`, `spectral_tiebreak`, `spectral_candidate_bound`, `metric_tiebreak`,
+`label_contract_same_rank`,
 `cross_family_same_rank`, `lossless_same_rank`, `metric_missing`,
 `transcode_rank_regression`), the per-side ranks, the values that decided
 that branch (spectral-clamped values on a clamped rank comparison or
-`spectral_tiebreak`, raw configured-metric values on `metric_tiebreak`), and
+`spectral_tiebreak`, the candidate's own class against the HAVE's raw
+metric on `spectral_candidate_bound`, raw configured-metric values on
+`metric_tiebreak`), and
 the per-side statistic actually classified (`min`/`avg`/`median` — the
 configured metric falls back to min when unmeasured). An explicit codec
 label such as `opus 128` is instead persisted as `contract`: the label's
@@ -353,6 +356,42 @@ action file, and the dispatch-synthesized reject `ImportResult`. Re-typing
 back from the dict goes through `comparison_basis_from_decision()` — the one
 converter.
 
+### Codec-aware spectral participation (issue #829 Phase 5 PR2b)
+
+Every decision seam that consumes a spectral number now consumes a
+**decision-grade class** from `lib/quality/spectral_interpretation.py`, not
+the raw `spectral_bitrate_kbps` column. `decision_class_kbps()` is the one
+accessor; `None` means the spectral leg withholds, and a withheld opinion
+falls through to rank and the other evidence — it is never a rejection and
+never an accusation. Two consequences are worth stating separately because
+both changed shipped behaviour:
+
+**The shared clamp is no longer grade-tolerant.** It used to fire on any
+two spectral estimates, on the theory that two independent measurements
+agreeing is corroborating evidence. The four-arm calibration measured what
+those estimates actually are on an album production already graded
+`genuine`: natural rolloff, the false positive this whole project exists to
+remove. A class now exists only when the album verdict authorizes a
+spectral finding — the same `SPECTRAL_TRANSCODE_GRADES` gate
+`compute_effective_override_bitrate` always applied — so two `genuine`
+albums are not clamped at all and their raw metrics decide. This resolves
+an inconsistency rather than adding one: the two mechanisms disagreed about
+the grade before.
+
+**One asymmetric bound exists: `spectral_candidate_bound`** (issue #911,
+request 8902 Iron & Wine *Fall 2007*). When a candidate carries a
+decision-grade transcode class and the current copy is KNOWN non-transcode
+with no class of its own, the candidate is bounded by its own class and the
+verdict is decided on **rank alone** — imported only when the bounded rank
+is strictly better than the current raw rank. Without it, a fake CBR 320
+whose measured cliff puts its real content at 160 manufactures a
+`transparent` rank, displaces a genuine 160, and is displaced back forever.
+Five gates keep it narrow (accusation-capable decision-grade candidate;
+bare measured codec label, not a contract; HAVE with an affirmative
+non-transcode grade; HAVE with no class; and the bound must actually bind).
+The branch clamps only the CANDIDATE's displayed value — the HAVE keeps its
+real measured statistic, and the renderers are per-side accordingly.
+
 ### Stage 1 / Stage 2 parity (issue #813 Finding 1)
 
 `spectral_import_decision` (Stage 1, pre-import spectral gate,
@@ -366,8 +405,10 @@ other Stage 1 verdict defers unconditionally. A generated property
 ::test_stage1_never_contradicts_stage2`) drives both deciders directly over
 the same evidence and asserts Stage 1 never rejects a candidate Stage 2
 would score `"better"` — the audit found and fixed two independent gaps,
-both inside the shared spectral clamp (`_shared_spectral_bitrates`, fires
-when BOTH sides carry `spectral_bitrate_kbps`):
+both inside the shared spectral clamp (`_shared_spectral_bitrates`, which
+since issue #829 Phase 5 PR2b fires when the two sides' spectral CLASSES
+are comparable — `spectral_classes_comparable` — rather than merely when
+both carry a `spectral_bitrate_kbps`):
 
 1. **Same-rank tiebreak** (`spectral_tiebreak` branch). The coarse
    `QualityRank` band can bucket two genuinely UNEQUAL clamped spectral
@@ -383,18 +424,77 @@ when BOTH sides carry `spectral_bitrate_kbps`):
    actually bound turns the branch into a stealth `metric_tiebreak` with no
    `±5kbps` tolerance whenever one (or neither) side is bound, since the
    "clamped" value on an unbound side is just its raw metric.
-2. **CBR/VBR band-table mismatch** (`rank` branch). The spectral bucket
-   values (`lib/spectral_check.py`'s `LAME_LOWPASS` table — 96/128/160/192/
-   256/320) are calibrated to `QualityRankConfig.mp3_cbr`'s thresholds
+2. **CBR/VBR band-table mismatch** (`rank` branch). An MP3 class ladder is
+   calibrated to `QualityRankConfig.mp3_cbr`'s thresholds
    (128=acceptable, 192=good, 256=excellent, 320=transparent), not
    `mp3_vbr`'s more generous ones. A side whose clamp is spectral-bound now
    classifies via CBR bands regardless of that side's own `is_cbr` — but
-   **only when BOTH sides are bound** (another PR #827 review finding):
-   forcing CBR on one bound side while an unbound side keeps its own
-   (possibly more generous VBR) table mixes a spectral-calibrated number
-   against a raw-metric number under two different band tables, which can
-   itself invert the ordering. A side whose clamp did NOT bind (raw is the
-   tighter value) always classifies with its own encoding mode.
+   **only when BOTH sides are bound** (another PR #827 review finding)
+   **and only for MP3** (issue #829 Phase 5 PR2b): forcing CBR on one bound
+   side while an unbound side keeps its own (possibly more generous VBR)
+   table mixes a spectral-calibrated number against a raw-metric number
+   under two different band tables, which can itself invert the ordering,
+   and only MP3 routes on `is_cbr` at all. A side whose clamp did NOT bind
+   (raw is the tighter value) always classifies with its own encoding mode.
+
+#### The cross-codec domain (issue #829 Phase 5 PR2c)
+
+**Scope: this closes the cross-codec half of #828 item 1.** That item names
+two deliberately-unpatrolled classes. The second — unbound /
+self-inconsistent evidence, where a side's raw container measures lower
+than its own spectral estimate — is untouched and remains recorded-only;
+the paragraph beginning "Stage 1 remains load-bearing" below is its record.
+
+
+That property's world space is same-codec by construction. The exclusion
+used to be justified by "the spectral bucket table is MP3/LAME-calibrated
+and the preimport gate only fires on MP3-shaped candidates, so a
+cross-codec spectral pairing is itself evidence of a mismatch, not an
+independent decision-logic gap". **Issue #829 falsified that.**
+`collect_attempt_spectral_audit` measured every codec through the LAME
+table and persisted the result as decision-facing evidence, so an ordinary
+fresh measurement produced exactly that pairing routinely — download 37946
+is a 256 kbps AAC whose natural rolloff read as "MP3 128 transcode" and
+drove a live cross-codec clamp. It *was* an independent decision-logic gap.
+
+The four-arm calibration then settled the question the old scoping called
+out of scope: **there is no common currency**, so the comparison is refused
+rather than rescaled. A 17 kHz cliff means ~160 kbps in MP3 and 256–320 in
+AAC. `docs/research/spectral-calibration-findings.md` states the resulting
+rule for this property verbatim — "cross-codec spectral comparison is
+undefined and fails closed", not a translation table.
+
+The domain is patrolled by a second property,
+`TestGeneratedSimulatorInvariants::test_stage1_never_consumes_an_inadmissible_existing_class`,
+over `inadmissible_spectral_pair_worlds` — worlds whose two classes
+`spectral_classes_comparable` refuses, in each of its three reasons
+(`cross_codec_legacy_bucket`, `mixed_derivation_basis`,
+`right_not_decision_grade`). The invariant is admissibility, not ordering:
+
+> **Stage 1 must not reject on a spectral comparison Stage 2 is not
+> permitted to make**, and an inadmissible existing-side class must move
+> nothing at Stage 1 — the verdict has to equal the verdict the same world
+> produces with that evidence absent entirely.
+
+Two things follow. The first clause forbids `stage1 == "reject"` outright
+on that whole domain, which *subsumes* the older no-contradiction checker
+there for every possible Stage 2 — that checker's antecedent can never
+hold. And the property drives `full_pipeline_decision` itself, because the
+Stage-1 seam (which class reaches `spectral_import_decision`) is the thing
+under test; the older property's harness reproduces that wiring inline so
+it can compute Stage 2 even in short-circuiting worlds, and is therefore
+blind to a mutant planted in the seam.
+
+Note for anyone re-reading the older scoping: `cross_family_same_rank`
+returning `"equivalent"` unconditionally is a fact about **that branch**,
+not about cross-codec worlds. That branch only fires at the *same* rank; a
+cross-codec pair at different ranks takes `rank`, and
+`spectral_candidate_bound` and `metric_tiebreak` are reachable cross-codec
+too — all three can emit `"better"`. The negative is a code fact rather
+than a sample: only `cross_family_same_rank` hardcodes `"equivalent"`.
+Measured over a 46,286-world sweep of MP3-candidate worlds with the
+pre-PR2b Stage-1 seam simulated, 1,142 worlds flipped Stage 1 to
+`"reject"` and 326 of those carried a Stage-2 `"better"`.
 
 Stage 1 remains load-bearing and was NOT folded into Stage 2: the property
 is deliberately scoped to internally-consistent evidence (`spectral <=` the

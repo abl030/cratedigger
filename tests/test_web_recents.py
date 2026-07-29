@@ -2210,18 +2210,23 @@ class TestClassifyComparisonBasis(unittest.TestCase):
         self.assertEqual(c.comparison_basis["tolerance_kbps"], 5)
 
     def test_spectral_tiebreak_upgrade_shows_clamped_values_not_raw(self):
-        """Issue #813 Finding 1: the coarse "good" band buckets spectral 230
-        and 200 together, so the same-rank tiebreak decides on the clamped
-        values (~230k / ~200k), never the fully-unclamped raw containers
-        (1000 / 235) that would launder a worse-spectral candidate in on a
-        higher declared bitrate alone."""
+        """Issue #813 Finding 1: the coarse "good" band buckets the 224 and
+        192 classes together, so the same-rank tiebreak decides on the
+        clamped values (~224k / ~192k), never the fully-unclamped raw
+        containers (1000 / 235) that would launder a worse-spectral
+        candidate in on a higher declared bitrate alone.
+
+        The two class values are ``LAME_LOWPASS`` members: issue #829 Phase
+        5 PR2b only admits a legacy stored bucket the estimator can actually
+        emit, so an invented number would silently stop reaching the clamp
+        this test names."""
         basis = self._basis_dict(
             {"min_bitrate_kbps": 1000, "avg_bitrate_kbps": 1000, "format": "MP3",
                  "is_cbr": True, "spectral_grade": "likely_transcode",
-                 "spectral_bitrate_kbps": 230},
+                 "spectral_bitrate_kbps": 224},
             {"min_bitrate_kbps": 235, "avg_bitrate_kbps": 235, "format": "MP3",
                  "is_cbr": True, "spectral_grade": "likely_transcode",
-                 "spectral_bitrate_kbps": 200},
+                 "spectral_bitrate_kbps": 192},
         )
         self.assertEqual(basis["branch"], "spectral_tiebreak")
         self.assertEqual(basis["verdict"], "better")
@@ -2233,9 +2238,77 @@ class TestClassifyComparisonBasis(unittest.TestCase):
                            "comparison_basis": basis},
         )
         c = classify_log_entry(entry)
-        self.assertEqual(c.verdict, "Upgrade: MP3 ~200k → ~230k (both good)")
+        self.assertEqual(c.verdict, "Upgrade: MP3 ~192k → ~224k (both good)")
         self.assertNotIn("1000", c.verdict)
         self.assertNotIn("235", c.verdict)
+
+    def test_spectral_candidate_bound_clamps_only_the_candidate(self):
+        """Issue #911's bound is asymmetric — the rendering must be too.
+
+        The candidate is bounded by its OWN spectral class (160, from a
+        16.5 kHz cliff) while the HAVE keeps its real raw metric. The
+        candidate's file is CBR 320: printing 160 as its "avg" is exactly
+        the request-6039 display lie QualityComparisonBasis exists to
+        prevent, and printing the HAVE's honest avg 160 as an unlabelled
+        "~160k" is the same lie pointed the other way.
+
+        The basis comes from the real compare_quality, not a literal.
+        """
+        basis = self._basis_dict(
+            {"min_bitrate_kbps": 320, "avg_bitrate_kbps": 320, "format": "MP3",
+                 "is_cbr": True, "spectral_grade": "likely_transcode",
+                 "spectral_bitrate_kbps": 128, "cliff_hz": 16500,
+                 "codec_family": "mp3", "spectral_subject": "source",
+                 "spectral_provenance": "measured"},
+            {"min_bitrate_kbps": 160, "avg_bitrate_kbps": 160, "format": "MP3",
+                 "is_cbr": True, "spectral_grade": "genuine",
+                 "spectral_subject": "installed",
+                 "spectral_provenance": "measured"},
+        )
+        self.assertEqual(basis["branch"], "spectral_candidate_bound")
+        self.assertEqual(basis["verdict"], "equivalent")
+        from web.classify import _verdict_from_basis
+        verdict = _verdict_from_basis(
+            msgspec.convert(basis, type=QualityComparisonBasis))
+        self.assertEqual(
+            verdict, "Equivalent: MP3 ~160k vs avg 160k — both acceptable")
+        # The candidate is CBR 320. Neither its class nor the HAVE's real
+        # average may be attributed to the wrong side or the wrong metric.
+        self.assertNotIn("avg 320k", verdict)
+        self.assertNotIn("~160k vs ~160k", verdict)
+
+    def test_spectral_candidate_bound_upgrade_reaches_the_log_renderer(self):
+        """The same asymmetry through classify_log_entry's success path.
+
+        A bounded candidate whose class (256) really is a rank above the
+        genuine HAVE imports, so this is the reachable entry shape where a
+        false number would be shown to the operator.
+        """
+        basis = self._basis_dict(
+            {"min_bitrate_kbps": 290, "avg_bitrate_kbps": 290, "format": "MP3",
+                 "is_cbr": True, "spectral_grade": "likely_transcode",
+                 "spectral_bitrate_kbps": 256, "spectral_subject": "source",
+                 "spectral_provenance": "measured"},
+            {"min_bitrate_kbps": 172, "avg_bitrate_kbps": 172, "format": "MP3",
+                 "is_cbr": False, "spectral_grade": "genuine",
+                 "spectral_subject": "installed",
+                 "spectral_provenance": "measured"},
+        )
+        self.assertEqual(basis["branch"], "spectral_candidate_bound")
+        entry = _entry(
+            outcome="success",
+            existing_min_bitrate=172,
+            actual_min_bitrate=290,
+            import_result={"version": 2, "decision": "import",
+                           "comparison_basis": basis},
+        )
+        c = classify_log_entry(entry)
+        self.assertIn("~256k", c.verdict)
+        # The HAVE's 172 is a real measured average and keeps its label.
+        self.assertIn("avg 172k", c.verdict)
+        # The candidate's own container is 290; its class must never be
+        # presented as a measured statistic of the file.
+        self.assertNotIn("avg 256k", c.verdict)
 
     def test_verified_lossless_bypass_names_the_bypass(self):
         basis = self._bypass_basis_dict(

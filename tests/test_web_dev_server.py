@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import threading
 import unittest
+from contextlib import redirect_stdout
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import StringIO
 from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.parse import urlparse
@@ -20,9 +24,58 @@ from scripts.web_dev_server import (
     DevConfig,
     DevHandler,
     DevHTTPServer,
+    build_config,
+    build_parser,
     create_server,
 )
 from tests.test_web_cache import FakeRedis
+
+INSECURE_AUTH_WARNING = (
+    "Authentication is disabled for this Cratedigger instance."
+)
+
+
+def assert_preview_badge_in_normal_flow(body: str) -> None:
+    """Assert the preview badge cannot overlap the preceding footer."""
+    style = re.search(
+        r"#cratedigger-dev-badge \{(?P<rules>[^}]*)\}",
+        body,
+        re.DOTALL,
+    )
+    if style is None:
+        raise AssertionError("development badge style is missing")
+    if body.count("#cratedigger-dev-badge") != 1:
+        raise AssertionError(
+            "development badge must have one effective ID selector"
+        )
+    rules = style.group("rules")
+    if "position: static;" not in rules:
+        raise AssertionError(
+            "preview badge must remain in normal document flow"
+        )
+    if any(
+        property_name in rules
+        for property_name in (
+            "position: fixed;",
+            "position: absolute;",
+            "position: sticky;",
+            "transform:",
+        )
+    ):
+        raise AssertionError("preview badge uses overlapping geometry")
+    if body.index("</footer>") > body.index(
+        '<div id="cratedigger-dev-badge">'
+    ):
+        raise AssertionError("preview badge must follow the insecure footer")
+    style_end = body.index("</style>", style.end())
+    if body[style.end():style_end].strip():
+        raise AssertionError(
+            "development badge style must be the final effective rule"
+        )
+    if "<style" in body[style_end + len("</style>"):]:
+        raise AssertionError(
+            "development badge style must be the final style block"
+        )
 
 
 class WebDevServerTest(unittest.TestCase):
@@ -54,15 +107,157 @@ class WebDevServerTest(unittest.TestCase):
     def get_json(self, path: str) -> dict:
         with urlopen(f"{self.base}{path}") as resp:
             self.assertEqual(resp.status, 200)
+            self.assertIsNone(resp.headers.get("Access-Control-Allow-Origin"))
             return json.loads(resp.read())
 
     def test_serves_index_with_dev_badge_and_reload_hook(self):
         with urlopen(f"{self.base}/") as resp:
             body = resp.read().decode()
+            self.assertIsNone(resp.headers.get("Access-Control-Allow-Origin"))
 
         self.assertIn("DEV fixture:peers", body)
         self.assertIn("new EventSource('/__dev/events')", body)
         self.assertIn('type="module" src="/js/main.js"', body)
+        self.assertNotIn(INSECURE_AUTH_WARNING, body)
+        badge_style = re.search(
+            r"#cratedigger-dev-badge \{(?P<rules>[^}]*)\}",
+            body,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(badge_style)
+        assert badge_style is not None
+        self.assertIn("position: fixed;", badge_style.group("rules"))
+
+    def test_explicit_insecure_warning_preview_keeps_read_only_dev_badge(
+        self,
+    ) -> None:
+        config = replace(
+            self.server.config,
+            preview_insecure_warning=True,
+        )
+        server = DevHTTPServer(("127.0.0.1", 0), DevHandler, config)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+
+        with urlopen(f"{base}/") as response:
+            body = response.read().decode()
+        self.assertEqual(body.count(INSECURE_AUTH_WARNING), 1)
+        self.assertEqual(body.count("<footer "), 1)
+        self.assertIn("DEV fixture:peers", body)
+        self.assertIn("new EventSource('/__dev/events')", body)
+        assert_preview_badge_in_normal_flow(body)
+
+        request = Request(
+            f"{base}/api/pipeline/delete",
+            data=b'{"id":1}',
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with self.assertRaises(HTTPError) as raised:
+            urlopen(request)
+        with raised.exception:
+            self.assertEqual(raised.exception.code, 405)
+            raised.exception.read()
+
+    def test_preview_badge_geometry_checker_rejects_fixed_position(self) -> None:
+        config = replace(
+            self.server.config,
+            preview_insecure_warning=True,
+        )
+        server = DevHTTPServer(("127.0.0.1", 0), DevHandler, config)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        with urlopen(f"{base}/") as response:
+            body = response.read().decode()
+
+        malformed = body.replace(
+            (
+                "#cratedigger-dev-badge {\n"
+                "  position: static;"
+            ),
+            (
+                "#cratedigger-dev-badge {\n"
+                "  position: fixed;"
+            ),
+            1,
+        )
+        with self.assertRaisesRegex(
+            AssertionError, "normal document flow",
+        ):
+            assert_preview_badge_in_normal_flow(malformed)
+
+    def test_preview_badge_checker_rejects_later_id_override(self) -> None:
+        config = replace(
+            self.server.config,
+            preview_insecure_warning=True,
+        )
+        server = DevHTTPServer(("127.0.0.1", 0), DevHandler, config)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        with urlopen(f"{base}/") as response:
+            body = response.read().decode()
+
+        badge_style = re.search(
+            r"#cratedigger-dev-badge \{(?P<rules>[^}]*)\}",
+            body,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(badge_style)
+        assert badge_style is not None
+        badge_style_end = body.index("</style>", badge_style.end())
+        same_style_block = (
+            body[:badge_style_end]
+            + '[id="cratedigger-dev-badge"] '
+            + "{ position: fixed !important; }\n"
+            + body[badge_style_end:]
+        )
+        with self.assertRaisesRegex(
+            AssertionError, "final effective rule",
+        ):
+            assert_preview_badge_in_normal_flow(same_style_block)
+
+        duplicate_selector = (
+            body
+            + "<style>#cratedigger-dev-badge "
+            + "{ position: fixed !important; }</style>"
+        )
+        with self.assertRaisesRegex(
+            AssertionError, "one effective ID selector",
+        ):
+            assert_preview_badge_in_normal_flow(duplicate_selector)
+
+        later_style_block = (
+            body
+            + '<style>[id="cratedigger-dev-badge"] '
+            + "{ position: fixed !important; }</style>"
+        )
+        with self.assertRaisesRegex(
+            AssertionError, "final style block",
+        ):
+            assert_preview_badge_in_normal_flow(later_style_block)
+
+    def test_insecure_warning_preview_cli_flag_maps_through_config(self) -> None:
+        for argv, expected in (
+            ([], False),
+            (["--preview-insecure-warning"], True),
+        ):
+            with self.subTest(argv=argv):
+                args = build_parser().parse_args(argv)
+                config = build_config(args)
+
+                self.assertIs(config.preview_insecure_warning, expected)
 
     def test_serves_fixture_api_scenario(self):
         payload = self.get_json("/api/pipeline/dashboard")
@@ -83,6 +278,9 @@ class WebDevServerTest(unittest.TestCase):
             urlopen(f"{self.base}/api/not-real")
 
         self.assertEqual(raised.exception.code, 404)
+        self.assertIsNone(
+            raised.exception.headers.get("Access-Control-Allow-Origin")
+        )
         payload = json.loads(raised.exception.read())
         self.assertEqual(payload["path"], "/api/not-real")
 
@@ -97,8 +295,26 @@ class WebDevServerTest(unittest.TestCase):
             urlopen(req)
 
         self.assertEqual(raised.exception.code, 405)
+        self.assertIsNone(
+            raised.exception.headers.get("Access-Control-Allow-Origin")
+        )
         payload = json.loads(raised.exception.read())
         self.assertIn("blocked", payload["error"])
+
+    def test_options_publishes_no_cors_contract(self):
+        request = Request(f"{self.base}/", method="OPTIONS")
+        with urlopen(request) as response:
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.headers.get("Content-Length"), "0")
+            self.assertIsNone(
+                response.headers.get("Access-Control-Allow-Origin")
+            )
+            self.assertIsNone(
+                response.headers.get("Access-Control-Allow-Methods")
+            )
+            self.assertIsNone(
+                response.headers.get("Access-Control-Allow-Headers")
+            )
 
 
 class _FakeUpstreamResponse:
@@ -177,7 +393,183 @@ class WebDevServerProxyTest(unittest.TestCase):
         self.assertEqual(resp.status, 206)
         self.assertEqual(resp.headers.get("Content-Range"), "bytes 1-3/6")
         self.assertEqual(resp.headers.get("Accept-Ranges"), "bytes")
+        self.assertIsNone(resp.headers.get("Access-Control-Allow-Origin"))
         self.assertEqual(body, b"bcd")
+
+
+_BASIC_CHALLENGE = 'Basic realm="Cratedigger dev upstream"'
+_BASIC_CREDENTIAL = "Basic ZGV2OnNlY3JldA=="
+
+
+class _BasicAuthUpstream(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self) -> None:
+        super().__init__(("127.0.0.1", 0), _BasicAuthUpstreamHandler)
+        self.authorizations: list[str | None] = []
+        self.redirect_target: str | None = None
+
+    @property
+    def origin(self) -> str:
+        return f"http://127.0.0.1:{self.server_port}"
+
+
+class _BasicAuthUpstreamHandler(BaseHTTPRequestHandler):
+    server: _BasicAuthUpstream  # pyright: ignore[reportIncompatibleVariableOverride]
+
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+    def do_GET(self) -> None:
+        authorization = self.headers.get("Authorization")
+        self.server.authorizations.append(authorization)
+        if self.path == "/api/redirect":
+            assert self.server.redirect_target is not None
+            self.send_response(302)
+            self.send_header("Location", self.server.redirect_target)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if authorization != _BASIC_CREDENTIAL:
+            body = b'{"error":"authentication required"}'
+            self.send_response(401)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("WWW-Authenticate", _BASIC_CHALLENGE)
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        body = b'{"authenticated":true}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class WebDevServerBasicAuthProxyIntegrationTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.upstream = _BasicAuthUpstream()
+        self.upstream_thread = threading.Thread(
+            target=self.upstream.serve_forever,
+            daemon=True,
+        )
+        self.upstream_thread.start()
+        config = DevConfig(
+            data="prod-api",
+            scenario="peers",
+            prod_base_url=self.upstream.origin,
+            dsn=None,
+            beets_db=None,
+            mb_api=None,
+            discogs_api=None,
+            redis_host=None,
+            redis_port=6379,
+        )
+        self.proxy = DevHTTPServer(("127.0.0.1", 0), DevHandler, config)
+        self.proxy_thread = threading.Thread(
+            target=self.proxy.serve_forever,
+            daemon=True,
+        )
+        self.proxy_thread.start()
+        self.base = f"http://127.0.0.1:{self.proxy.server_port}"
+
+    def tearDown(self) -> None:
+        self.proxy.shutdown()
+        self.proxy.server_close()
+        self.proxy_thread.join(timeout=2)
+        self.upstream.shutdown()
+        self.upstream.server_close()
+        self.upstream_thread.join(timeout=2)
+
+    def test_relays_basic_challenge_then_forwards_browser_credential(self) -> None:
+        with self.assertRaises(HTTPError) as raised:
+            urlopen(f"{self.base}/api/protected")
+        with raised.exception as response:
+            self.assertEqual(response.code, 401)
+            self.assertEqual(
+                response.headers.get("WWW-Authenticate"),
+                _BASIC_CHALLENGE,
+            )
+            self.assertIsNone(
+                response.headers.get("Access-Control-Allow-Origin")
+            )
+            response.read()
+
+        request = Request(
+            f"{self.base}/api/protected",
+            headers={"Authorization": _BASIC_CREDENTIAL},
+        )
+        output = StringIO()
+        with redirect_stdout(output), urlopen(request) as response:
+            body = json.loads(response.read())
+            self.assertEqual(response.status, 200)
+            self.assertIsNone(
+                response.headers.get("Access-Control-Allow-Origin")
+            )
+
+        self.assertEqual(
+            self.upstream.authorizations,
+            [None, _BASIC_CREDENTIAL],
+        )
+        self.assertEqual(body, {"authenticated": True})
+        self.assertNotIn(_BASIC_CREDENTIAL, output.getvalue())
+
+    def test_does_not_forward_non_basic_authorization(self) -> None:
+        credential = "Bearer runtime-secret"
+        request = Request(
+            f"{self.base}/api/protected",
+            headers={"Authorization": credential},
+        )
+        output = StringIO()
+        with redirect_stdout(output), self.assertRaises(HTTPError) as raised:
+            urlopen(request)
+        with raised.exception as response:
+            self.assertEqual(response.code, 401)
+            self.assertEqual(
+                response.headers.get("WWW-Authenticate"),
+                _BASIC_CHALLENGE,
+            )
+            self.assertIsNone(
+                response.headers.get("Access-Control-Allow-Origin")
+            )
+            response.read()
+
+        self.assertEqual(self.upstream.authorizations, [None])
+        self.assertNotIn(credential, output.getvalue())
+
+    def test_strips_basic_credential_from_cross_origin_redirect(self) -> None:
+        redirected = _BasicAuthUpstream()
+        redirected_thread = threading.Thread(
+            target=redirected.serve_forever,
+            daemon=True,
+        )
+        redirected_thread.start()
+        self.addCleanup(redirected_thread.join, 2)
+        self.addCleanup(redirected.server_close)
+        self.addCleanup(redirected.shutdown)
+        self.upstream.redirect_target = f"{redirected.origin}/api/protected"
+
+        request = Request(
+            f"{self.base}/api/redirect",
+            headers={"Authorization": _BASIC_CREDENTIAL},
+        )
+        with self.assertRaises(HTTPError) as raised:
+            urlopen(request)
+        with raised.exception as response:
+            self.assertEqual(response.code, 401)
+            self.assertEqual(
+                response.headers.get("WWW-Authenticate"),
+                _BASIC_CHALLENGE,
+            )
+            self.assertIsNone(
+                response.headers.get("Access-Control-Allow-Origin")
+            )
+            response.read()
+
+        self.assertEqual(self.upstream.authorizations, [_BASIC_CREDENTIAL])
+        self.assertEqual(redirected.authorizations, [None])
 
 
 class WebDevServerLiveDbErrorMappingTest(unittest.TestCase):

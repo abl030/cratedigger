@@ -21,6 +21,7 @@ finalize_request = transitions.finalize_request
 
 from lib.dispatch.types import QualityGateState
 from lib.quality import (
+    codec_context_from_measurement,
     compute_effective_override_bitrate,
     extract_usernames,
     quality_gate_decision,
@@ -139,13 +140,21 @@ def load_quality_gate_state(
     min_br_kbps = linked_measurement.min_bitrate_kbps
     if min_br_kbps is None:
         return None
-    spectral_grade = linked_measurement.spectral_grade
-    raw_br_int = linked_measurement.spectral_bitrate_kbps
+    # The gate measurement carries the album's own codec-aware spectral
+    # class, never the raw LAME-table bucket (issue #829 Phase 5 PR2b).
+    # The context is captured, not just the verdict: it rides the returned
+    # state so the simulator resolves the codec with the same album-level
+    # facts this gate did.
+    linked_context = codec_context_from_measurement(
+        linked_measurement,
+        storage_format=current_evidence.storage_format,
+        filetype_band=current_evidence.filetype_band,
+    )
+    linked_spectral = linked_context.interpret(linked_measurement)
     spectral_br: int | None = None
-    effective = compute_effective_override_bitrate(
-        min_br_kbps, raw_br_int, spectral_grade)
+    effective = compute_effective_override_bitrate(min_br_kbps, linked_spectral)
     if effective is not None and effective < min_br_kbps:
-        spectral_br = raw_br_int
+        spectral_br = effective
 
     current = msgspec.structs.replace(
         linked_measurement,
@@ -163,6 +172,7 @@ def load_quality_gate_state(
             current_evidence.verified_lossless_proof is not None
         ),
         source_v0_avg_bitrate_kbps=source_v0_avg,
+        spectral_context=linked_context,
     )
 
 

@@ -33,6 +33,7 @@ if TYPE_CHECKING:
         AudioQualityMeasurement,
         DownloadInfo,
         ImportResult,
+        SpectralCodecContext,
         SpectralDetail,
         V0ProbeEvidence,
     )
@@ -82,6 +83,16 @@ class QualityGateState:
     measurement: AudioQualityMeasurement
     verified_lossless_proof: bool = False
     source_v0_avg_bitrate_kbps: int | None = None
+    # The installed album's codec-resolution context, captured ONCE by
+    # ``load_quality_gate_state`` from the evidence row — including the two
+    # album-level fields the measurement cannot carry (``storage_format``
+    # and ``filetype_band``'s mixed-codec fail-closed). Carried here so
+    # every consumer, the gate itself and the ``pipeline-cli quality``
+    # simulator alike, resolves the codec with the SAME context instead of
+    # re-deriving a weaker one from the measurement and showing a class
+    # production withheld (issue #829 Phase 5 PR2b review S6). ``None`` on
+    # a test-constructed state means "measurement-only", the old behaviour.
+    spectral_context: SpectralCodecContext | None = None
 
 
 @dataclass(frozen=True)

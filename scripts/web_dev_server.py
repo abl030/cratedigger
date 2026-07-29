@@ -12,14 +12,18 @@ import html
 import json
 import mimetypes
 import os
+import secrets
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from email.message import Message
+from http.client import HTTPMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import IO
 from urllib.parse import ParseResult, parse_qs, urlparse
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -29,6 +33,9 @@ PROD_BASE_URL = "https://music.ablz.au"
 
 sys.path.insert(0, str(REPO_ROOT))
 
+from web.index_document import (
+    render_index_document,
+)
 
 FALLBACK_FIXTURES: dict[str, dict[str, object]] = {
     "/api/pipeline/all": {
@@ -80,6 +87,8 @@ class DevConfig:
     redis_host: str | None
     redis_port: int
     beets_directory: str | None = None
+    measure_mirror_requests: bool = False
+    preview_insecure_warning: bool = False
 
     @property
     def badge_text(self) -> str:
@@ -88,6 +97,37 @@ class DevConfig:
         if self.data == "prod-api":
             return "DEV prod-api readonly"
         return "DEV live-db readonly"
+
+
+def _http_origin(url: str) -> tuple[str, str, int | None]:
+    parsed = urlparse(url)
+    scheme = parsed.scheme.lower()
+    default_port = {"http": 80, "https": 443}.get(scheme)
+    port = parsed.port if parsed.port is not None else default_port
+    return scheme, (parsed.hostname or "").lower(), port
+
+
+class _CredentialSafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Keep Basic credentials on the configured origin only."""
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: HTTPMessage,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        redirected = super().redirect_request(
+            req, fp, code, msg, headers, newurl,
+        )
+        if (
+            redirected is not None
+            and _http_origin(req.full_url) != _http_origin(redirected.full_url)
+        ):
+            redirected.remove_header("Authorization")
+        return redirected
 
 
 class DevHTTPServer(ThreadingHTTPServer):
@@ -101,6 +141,7 @@ class DevHTTPServer(ThreadingHTTPServer):
     ) -> None:
         super().__init__(server_address, RequestHandlerClass)
         self.config = config
+        self.mirror_request_counts = MirrorRequestCounts()
 
     def watched_files(self) -> list[Path]:
         paths = [WEB_ROOT / "index.html"]
@@ -123,6 +164,61 @@ class DevHTTPServer(ThreadingHTTPServer):
         return version
 
 
+class MirrorRequestCounts:
+    """Dev-only exclusive measurement lease at outbound HTTP boundaries."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._mb = 0
+        self._discogs = 0
+        self._active_token: str | None = None
+
+    def start(self) -> str:
+        with self._lock:
+            if self._active_token is not None:
+                raise MirrorMeasurementLeaseConflict("a mirror measurement is already active")
+            self._active_token = secrets.token_urlsafe(24)
+            self._mb = 0
+            self._discogs = 0
+            return self._active_token
+
+    def _require_owner(self, token: str) -> None:
+        if self._active_token != token:
+            raise MirrorMeasurementLeaseOwnerError("mirror measurement lease is not owned by this request")
+
+    def record_mb(self) -> None:
+        with self._lock:
+            if self._active_token is not None:
+                self._mb += 1
+
+    def record_discogs(self) -> None:
+        with self._lock:
+            if self._active_token is not None:
+                self._discogs += 1
+
+    def snapshot(self, token: str) -> dict[str, int]:
+        with self._lock:
+            self._require_owner(token)
+            return {"mb_mirror_requests": self._mb, "discogs_mirror_requests": self._discogs}
+
+    def finish(self, token: str) -> dict[str, int]:
+        with self._lock:
+            self._require_owner(token)
+            result = {"mb_mirror_requests": self._mb, "discogs_mirror_requests": self._discogs}
+            self._active_token = None
+            self._mb = 0
+            self._discogs = 0
+            return result
+
+
+class MirrorMeasurementLeaseConflict(RuntimeError):
+    """A second benchmark tried to use the one dev-server counter."""
+
+
+class MirrorMeasurementLeaseOwnerError(RuntimeError):
+    """A token does not own the active measurement lease."""
+
+
 class DevHandler(BaseHTTPRequestHandler):
     server: DevHTTPServer  # pyright: ignore[reportIncompatibleVariableOverride]
 
@@ -135,6 +231,16 @@ class DevHandler(BaseHTTPRequestHandler):
         if path == "/__dev/events":
             self._serve_events()
             return
+        if path == "/__dev/mirror-counts/capability" and self.server.config.measure_mirror_requests:
+            self._json({"data": self.server.config.data, "redis_enabled": bool(self.server.config.redis_host)})
+            return
+        if path == "/__dev/mirror-counts" and self.server.config.measure_mirror_requests:
+            token = parse_qs(parsed.query).get("token", [""])[0]
+            try:
+                self._json(self.server.mirror_request_counts.snapshot(token))
+            except MirrorMeasurementLeaseOwnerError as exc:
+                self._error(str(exc), 403)
+            return
         if path.startswith("/api/"):
             self._serve_api_get(parsed)
             return
@@ -145,6 +251,21 @@ class DevHandler(BaseHTTPRequestHandler):
         self._serve_static(path)
 
     def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        if self.server.config.measure_mirror_requests:
+            if parsed.path == "/__dev/mirror-counts/start":
+                try:
+                    self._json({"token": self.server.mirror_request_counts.start()})
+                except MirrorMeasurementLeaseConflict as exc:
+                    self._error(str(exc), 409)
+                return
+            if parsed.path == "/__dev/mirror-counts/finish":
+                token = parse_qs(parsed.query).get("token", [""])[0]
+                try:
+                    self._json(self.server.mirror_request_counts.finish(token))
+                except MirrorMeasurementLeaseOwnerError as exc:
+                    self._error(str(exc), 403)
+                return
         if urlparse(self.path).path.startswith("/api/"):
             self._json(
                 {
@@ -161,9 +282,7 @@ class DevHandler(BaseHTTPRequestHandler):
 
     def do_OPTIONS(self) -> None:
         self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Content-Length", "0")
         self.end_headers()
 
     def _serve_static(self, path: str) -> None:
@@ -179,7 +298,10 @@ class DevHandler(BaseHTTPRequestHandler):
             return
 
         if target.name == "index.html":
-            body = target.read_text(encoding="utf-8")
+            body = render_index_document(
+                target.read_bytes(),
+                insecure=self.server.config.preview_insecure_warning,
+            ).decode("utf-8")
             body = body.replace("</body>", f"{self._dev_injection()}</body>")
             self._send_bytes(
                 body.encode("utf-8"),
@@ -240,13 +362,27 @@ class DevHandler(BaseHTTPRequestHandler):
         range_header = self.headers.get("Range")
         if range_header:
             headers["Range"] = range_header
+        # This is a per-request browser bridge, not credential configuration:
+        # keep only Basic in memory long enough to perform this read-only GET.
+        authorization = self.headers.get("Authorization")
+        if authorization:
+            scheme, separator, credential = authorization.partition(" ")
+            if separator and credential and scheme.lower() == "basic":
+                headers["Authorization"] = authorization
         req = urllib.request.Request(
             url,
             headers=headers,
             method="GET",
         )
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            if "Authorization" in headers:
+                opener = urllib.request.build_opener(
+                    _CredentialSafeRedirectHandler(),
+                )
+                response = opener.open(req, timeout=30)
+            else:
+                response = urllib.request.urlopen(req, timeout=30)
+            with response as resp:
                 body = resp.read()
                 self._proxy_response(body, resp.headers, status=resp.status)
         except urllib.error.HTTPError as exc:
@@ -256,8 +392,10 @@ class DevHandler(BaseHTTPRequestHandler):
             # msgspec/JSON boundary involved, just a stdlib stub gap out of
             # this migration's scope) that recovers the concrete
             # ``Message[str, str]`` shape ``_proxy_response`` expects.
-            exc_headers: Message[str, str] = exc.headers
-            self._proxy_response(exc.read(), exc_headers, status=exc.code)
+            with exc:
+                exc_headers: Message[str, str] = exc.headers
+                body = exc.read()
+            self._proxy_response(body, exc_headers, status=exc.code)
         except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             self._json({"error": str(exc), "upstream": url}, status=502)
 
@@ -267,8 +405,13 @@ class DevHandler(BaseHTTPRequestHandler):
         content_type = headers.get("Content-Type", "application/json")
         self.send_response(status)
         self.send_header("Content-Type", content_type)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        for name in ("Content-Length", "Cache-Control", "Accept-Ranges", "Content-Range"):
+        for name in (
+            "Content-Length",
+            "Cache-Control",
+            "Accept-Ranges",
+            "Content-Range",
+            "WWW-Authenticate",
+        ):
             value = headers.get(name)
             if value:
                 self.send_header(name, value)
@@ -328,12 +471,20 @@ class DevHandler(BaseHTTPRequestHandler):
 
     def _dev_injection(self) -> str:
         label = html.escape(self.server.config.badge_text)
+        if self.server.config.preview_insecure_warning:
+            badge_layout = """\
+  position: static;
+  width: fit-content;
+  margin: 10px 0 0 auto;"""
+        else:
+            badge_layout = """\
+  position: fixed;
+  right: 10px;
+  bottom: 10px;"""
         return f"""
 <style>
 #cratedigger-dev-badge {{
-  position: fixed;
-  right: 10px;
-  bottom: 10px;
+{badge_layout}
   z-index: 99999;
   padding: 5px 8px;
   border: 1px solid #6a9;
@@ -374,7 +525,6 @@ class DevHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
         if cache_control:
             self.send_header("Cache-Control", cache_control)
         self.end_headers()
@@ -394,17 +544,25 @@ def configure_live_db_metadata(config: DevConfig) -> None:
     discogs.DISCOGS_API_BASE = config.discogs_api
 
 
-def configure_live_db(config: DevConfig) -> None:
+def configure_live_db(
+    config: DevConfig, mirror_request_counts: MirrorRequestCounts | None = None,
+) -> None:
     if not config.dsn:
         raise SystemExit("--dsn or PIPELINE_DB_DSN is required for --data live-db")
 
     import web.server as web_server
     from lib.pipeline_db import PipelineDB
+    from web import discogs, mb
 
     # These adapters use module globals in production too. Assign BOTH for
     # every live-db configuration, including missing values, so a second dev
     # server in the same process cannot inherit a stale mirror from the first.
     configure_live_db_metadata(config)
+    mirror_request_counts = mirror_request_counts or MirrorRequestCounts()
+    mb._on_mirror_request = mirror_request_counts.record_mb if config.measure_mirror_requests else None
+    discogs._on_mirror_request = (
+        mirror_request_counts.record_discogs if config.measure_mirror_requests else None
+    )
 
     def connect_readonly() -> None:
         if web_server.db is not None:
@@ -452,16 +610,26 @@ def build_config(args: argparse.Namespace) -> DevConfig:
         redis_host=args.redis_host,
         redis_port=args.redis_port,
         beets_directory=getattr(args, "beets_directory", None),
+        measure_mirror_requests=getattr(args, "measure_mirror_requests", False),
+        preview_insecure_warning=getattr(
+            args, "preview_insecure_warning", False,
+        ),
     )
 
 
 def create_server(host: str, port: int, config: DevConfig) -> DevHTTPServer:
+    if config.measure_mirror_requests and config.data != "live-db":
+        raise ValueError("--measure-mirror-requests requires --data live-db")
+    if config.measure_mirror_requests and config.redis_host:
+        raise ValueError("--measure-mirror-requests requires Redis to be disabled")
+    server = DevHTTPServer((host, port), DevHandler, config)
     if config.data == "live-db":
-        configure_live_db(config)
-    return DevHTTPServer((host, port), DevHandler, config)
+        configure_live_db(config, server.mirror_request_counts)
+    return server
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
+    """Build the development server's command-line contract."""
     parser = argparse.ArgumentParser(description="Cratedigger frontend dev server")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8096)
@@ -505,6 +673,23 @@ def main() -> None:
     )
     parser.add_argument("--redis-host", default=None)
     parser.add_argument("--redis-port", type=int, default=6379)
+    parser.add_argument(
+        "--preview-insecure-warning",
+        action="store_true",
+        help=(
+            "Preview the insecure-authentication footer. The dev server "
+            "remains read-only."
+        ),
+    )
+    parser.add_argument(
+        "--measure-mirror-requests", action="store_true",
+        help="expose exact dev-only outbound MB/Discogs counters to bench_artist_cold.py",
+    )
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
     args = parser.parse_args()
     if (args.beets_db is None) != (args.beets_directory is None):
         parser.error(
@@ -512,7 +697,10 @@ def main() -> None:
         )
 
     config = build_config(args)
-    server = create_server(args.host, args.port, config)
+    try:
+        server = create_server(args.host, args.port, config)
+    except ValueError as exc:
+        parser.error(str(exc))
     url = f"http://{args.host}:{args.port}"
     print(f"Cratedigger frontend dev server listening on {url}")
     print(f"  data: {config.data}")
@@ -531,6 +719,8 @@ def main() -> None:
         else:
             print("  Discogs metadata: NOT CONFIGURED (compare returns HTTP 503)")
     print("  mutating API requests: blocked")
+    if config.preview_insecure_warning:
+        print("  insecure-authentication footer: preview enabled")
     print("  live reload: web/index.html, web/js/*.js, active fixtures")
     try:
         server.serve_forever()
