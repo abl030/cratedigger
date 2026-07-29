@@ -340,6 +340,89 @@ class TestLiveBugReproductions(unittest.TestCase):
         self.assertEqual(r["comparison_basis"]["verdict"], "worse")
         self.assertFalse(r["imported"])
 
+    def test_stage_parity_cross_codec_vorbis_bucket_never_rejects(self):
+        """Issue #829 Phase 5 PR2c — the cross-codec half of the #813
+        parity contract, as a decided outcome.
+
+        The pre-#829 Stage-1 seam fed ``spectral_import_decision`` the two
+        sides' RAW stored buckets, whatever codec produced them. Here that
+        is an MP3 candidate's real 128 against a Vorbis HAVE's 192 — and a
+        Vorbis 192 is the LAME table's documented one-directional over-read
+        of q4's real 128 kbps, not a Vorbis class. Five live rows carry
+        exactly this shape (evidence ids 33935/33941/33942/33943/33974, two
+        of them holding the over-read 192).
+
+        Stage 1 therefore rejected, short-circuited before Stage 2 ever
+        ran, denylisted the source and left the request ``wanted``. The
+        shipped seam refuses the comparison (``spectral_classes_comparable``
+        → ``cross_codec_legacy_bucket``), Stage 1 withholds, and Stage 2
+        decides on rank — which is an import.
+        """
+        # The counterfactual, driven through the REAL Stage-1 decider with
+        # the raw stored numbers the pre-#829 seam handed it.
+        from lib.quality import spectral_import_decision
+        self.assertEqual(
+            spectral_import_decision("likely_transcode", 128, 192), "reject")
+
+        r = full_pipeline_decision(
+            is_flac=False,
+            min_bitrate=256,
+            avg_bitrate=256,
+            is_cbr=True,
+            new_format="MP3",
+            spectral_grade="likely_transcode",
+            spectral_bitrate=128,
+            existing_min_bitrate=128,
+            existing_avg_bitrate=128,
+            existing_format="Vorbis",
+            existing_is_cbr=True,
+            existing_spectral_grade="likely_transcode",
+            existing_spectral_bitrate=192,
+        )
+        # The decided outcome, not a proxy: the candidate is imported.
+        self.assertEqual(r["stage1_spectral"], "import_no_exist")
+        self.assertEqual(r["stage2_import"], "import")
+        self.assertTrue(r["imported"])
+        self.assertEqual(r["comparison_basis"]["verdict"], "better")
+        # Withholding a spectral opinion never stops the search.
+        self.assertTrue(r["keep_searching"])
+
+    def test_stage_parity_aac_have_bucket_never_rejects(self):
+        """Issue #829 Phase 5 PR2c — download 37946's defect pointed at the
+        library instead of the candidate.
+
+        The installed AAC's 15.5 kHz cliff is native AAC behaviour at every
+        encoder rate the four-arm calibration measured from 96 to 320 kbps,
+        so its LAME-bucketed 192 is not a class in any codec's terms. The
+        pre-#829 seam nonetheless weighed it against an MP3 candidate's
+        real 128 and rejected a genuine upgrade over a 112 kbps AAC.
+        """
+        from lib.quality import SpectralCodecContext, spectral_import_decision
+        self.assertEqual(
+            spectral_import_decision("likely_transcode", 128, 192), "reject")
+
+        r = full_pipeline_decision(
+            is_flac=False,
+            min_bitrate=256,
+            avg_bitrate=256,
+            is_cbr=True,
+            new_format="MP3",
+            spectral_grade="likely_transcode",
+            spectral_bitrate=128,
+            existing_min_bitrate=112,
+            existing_avg_bitrate=112,
+            existing_format="AAC",
+            existing_is_cbr=True,
+            existing_spectral_grade="likely_transcode",
+            existing_spectral_bitrate=192,
+            existing_spectral_context=SpectralCodecContext(cliff_hz=15500),
+        )
+        self.assertEqual(r["stage1_spectral"], "import_no_exist")
+        self.assertEqual(r["stage2_import"], "import")
+        self.assertTrue(r["imported"])
+        self.assertEqual(r["comparison_basis"]["existing_format"], "aac")
+        self.assertTrue(r["keep_searching"])
+
     def test_taboo_vi_fake_flac_192_accepted(self):
         """Fake FLAC (192k source) converted to V0 at 224kbps is provisional.
 
@@ -1248,6 +1331,47 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
         self.assertIsNone(r["stage1_spectral"])
         self.assertEqual(r["stage2_import"], "import")
         self.assertTrue(r["imported"])
+
+    def test_stage_parity_cross_codec_vorbis_bucket_via_evidence(self):
+        """Parity twin of the cross-codec Stage-1 pin (issue #829 PR2c)."""
+        from lib.quality import full_pipeline_decision_from_evidence
+
+        candidate = self._build_candidate(
+            is_flac=False, min_bitrate=256, is_cbr=True, avg_bitrate=256,
+            spectral_grade="likely_transcode", spectral_bitrate=128,
+        )
+        current = self._build_current(
+            min_bitrate=128, avg_bitrate=128, format="Vorbis", is_cbr=True,
+            spectral_grade="likely_transcode", spectral_bitrate=192,
+        )
+
+        r = full_pipeline_decision_from_evidence(candidate, current)
+
+        self.assertEqual(r["stage1_spectral"], "import_no_exist")
+        self.assertEqual(r["stage2_import"], "import")
+        self.assertTrue(r["imported"])
+        self.assertTrue(r["keep_searching"])
+
+    def test_stage_parity_aac_have_bucket_via_evidence(self):
+        """Parity twin of the AAC-HAVE Stage-1 pin (issue #829 PR2c)."""
+        from lib.quality import full_pipeline_decision_from_evidence
+
+        candidate = self._build_candidate(
+            is_flac=False, min_bitrate=256, is_cbr=True, avg_bitrate=256,
+            spectral_grade="likely_transcode", spectral_bitrate=128,
+        )
+        current = self._build_current(
+            min_bitrate=112, avg_bitrate=112, format="AAC", is_cbr=True,
+            spectral_grade="likely_transcode", spectral_bitrate=192,
+            cliff_hz=15500, codec_family="aac",
+        )
+
+        r = full_pipeline_decision_from_evidence(candidate, current)
+
+        self.assertEqual(r["stage1_spectral"], "import_no_exist")
+        self.assertEqual(r["stage2_import"], "import")
+        self.assertTrue(r["imported"])
+        self.assertTrue(r["keep_searching"])
 
     def test_fall_2007_fake_320_via_evidence(self):
         """Parity twin of the Fall 2007 anti-loop pin (issue #911)."""

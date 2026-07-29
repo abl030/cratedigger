@@ -437,6 +437,65 @@ both carry a `spectral_bitrate_kbps`):
    and only MP3 routes on `is_cbr` at all. A side whose clamp did NOT bind
    (raw is the tighter value) always classifies with its own encoding mode.
 
+#### The cross-codec domain (issue #829 Phase 5 PR2c)
+
+**Scope: this closes the cross-codec half of #828 item 1.** That item names
+two deliberately-unpatrolled classes. The second — unbound /
+self-inconsistent evidence, where a side's raw container measures lower
+than its own spectral estimate — is untouched and remains recorded-only;
+the paragraph beginning "Stage 1 remains load-bearing" below is its record.
+
+
+That property's world space is same-codec by construction. The exclusion
+used to be justified by "the spectral bucket table is MP3/LAME-calibrated
+and the preimport gate only fires on MP3-shaped candidates, so a
+cross-codec spectral pairing is itself evidence of a mismatch, not an
+independent decision-logic gap". **Issue #829 falsified that.**
+`collect_attempt_spectral_audit` measured every codec through the LAME
+table and persisted the result as decision-facing evidence, so an ordinary
+fresh measurement produced exactly that pairing routinely — download 37946
+is a 256 kbps AAC whose natural rolloff read as "MP3 128 transcode" and
+drove a live cross-codec clamp. It *was* an independent decision-logic gap.
+
+The four-arm calibration then settled the question the old scoping called
+out of scope: **there is no common currency**, so the comparison is refused
+rather than rescaled. A 17 kHz cliff means ~160 kbps in MP3 and 256–320 in
+AAC. `docs/research/spectral-calibration-findings.md` states the resulting
+rule for this property verbatim — "cross-codec spectral comparison is
+undefined and fails closed", not a translation table.
+
+The domain is patrolled by a second property,
+`TestGeneratedSimulatorInvariants::test_stage1_never_consumes_an_inadmissible_existing_class`,
+over `inadmissible_spectral_pair_worlds` — worlds whose two classes
+`spectral_classes_comparable` refuses, in each of its three reasons
+(`cross_codec_legacy_bucket`, `mixed_derivation_basis`,
+`right_not_decision_grade`). The invariant is admissibility, not ordering:
+
+> **Stage 1 must not reject on a spectral comparison Stage 2 is not
+> permitted to make**, and an inadmissible existing-side class must move
+> nothing at Stage 1 — the verdict has to equal the verdict the same world
+> produces with that evidence absent entirely.
+
+Two things follow. The first clause forbids `stage1 == "reject"` outright
+on that whole domain, which *subsumes* the older no-contradiction checker
+there for every possible Stage 2 — that checker's antecedent can never
+hold. And the property drives `full_pipeline_decision` itself, because the
+Stage-1 seam (which class reaches `spectral_import_decision`) is the thing
+under test; the older property's harness reproduces that wiring inline so
+it can compute Stage 2 even in short-circuiting worlds, and is therefore
+blind to a mutant planted in the seam.
+
+Note for anyone re-reading the older scoping: `cross_family_same_rank`
+returning `"equivalent"` unconditionally is a fact about **that branch**,
+not about cross-codec worlds. That branch only fires at the *same* rank; a
+cross-codec pair at different ranks takes `rank`, and
+`spectral_candidate_bound` and `metric_tiebreak` are reachable cross-codec
+too — all three can emit `"better"`. The negative is a code fact rather
+than a sample: only `cross_family_same_rank` hardcodes `"equivalent"`.
+Measured over a 46,286-world sweep of MP3-candidate worlds with the
+pre-PR2b Stage-1 seam simulated, 1,142 worlds flipped Stage 1 to
+`"reject"` and 326 of those carried a Stage-2 `"better"`.
+
 Stage 1 remains load-bearing and was NOT folded into Stage 2: the property
 is deliberately scoped to internally-consistent evidence (`spectral <=` the
 side's own raw metric, the domain `_shared_spectral_bitrates` assumes — see
