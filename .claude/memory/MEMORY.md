@@ -76,3 +76,4 @@
 - [#882 audits shipped](project_882_audits_shipped.md) — fuzz burst had NEVER completed (discovery abort); classify copy keyed on a scenario no producer emits; depth-blind properties hid a live authority mutant
 - [Subagent worktree absolute paths](feedback_subagent_worktree_absolute_paths.md) — isolation:"worktree" does not stop absolute-path writes into the shared checkout; brief it explicitly and verify after
 - [Convergence signal + evidence recapture](project_convergence_signal_and_evidence_recapture.md) — inter-candidate cliff constancy = "network converged" (search-stop, not proof); denylist-release recapture; beets-rejected candidates DO carry full evidence
+- [Worktree switch kills live subagent](feedback_worktree_switch_kills_live_subagent.md) — EnterWorktree mid-run revokes another worktree's write guard; the agent then shell-writes around it and can leave a planted mutant behind
