@@ -169,14 +169,13 @@ A request can be `wanted` while intentionally skipped for a few hours: retry-wor
 
 ```bash
 nix-shell --run "python3 -m unittest tests.test_X -v"  # focused iteration
-nix-shell --run "pyright --threads 4"                   # final whole repo
-nix-shell --run "bash scripts/run_tests.sh"             # final full suite
+nix-shell --run "pyright --threads 4"                   # whole repository
+nix-shell --run "bash scripts/run_tests.sh"             # complete suite
 ```
 
-Use focused tests while implementing. On the final reviewed and committed tree,
-run threaded whole-repo Pyright followed by the full suite exactly once before
-the first branch push. Both commands must pass; CI does not enforce this local
-agent workflow.
+These checks are available throughout development. The repository's agent
+instructions own validation timing and the final receipt-backed pre-push
+confirmation; CI does not enforce this local workflow.
 
 The dev shell resolves the same pinned nixpkgs as the module and production — one beets everywhere; `tests/test_harness_beets2_contract.py` runs the real beets so version drift fails the suite instead of production.
 
