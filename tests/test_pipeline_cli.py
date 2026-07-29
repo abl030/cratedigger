@@ -772,6 +772,48 @@ class TestCmdImportJobRecovery(unittest.TestCase):
             payload["detail"]["evidence_revision"].startswith("sha256:")
         )
 
+    def test_show_not_found_uses_canonical_not_found_exit(self) -> None:
+        db = FakePipelineDB()
+        args = argparse.Namespace(
+            recovery_action="show",
+            job_id=999999,
+            beets_db=None,
+            beets_directory=None,
+        )
+
+        with (
+            patch(
+                "scripts.pipeline_cli.imports._open_recovery_beets",
+                side_effect=FileNotFoundError("beets unavailable"),
+            ),
+            redirect_stdout(io.StringIO()) as stdout,
+        ):
+            rc = pipeline_cli.cmd_import_job_recovery(db, args)
+
+        self.assertEqual(rc, 2)
+        self.assertEqual(json.loads(stdout.getvalue())["outcome"], "not_found")
+
+    def test_service_validation_uses_canonical_semantic_exit(self) -> None:
+        db = FakePipelineDB()
+        args = argparse.Namespace(
+            recovery_action="retry",
+            job_id=999999,
+            reason="",
+            evidence_revision=None,
+            result_status=None,
+            beets_db=None,
+            beets_directory=None,
+        )
+
+        with redirect_stderr(io.StringIO()) as stderr:
+            rc = pipeline_cli.cmd_import_job_recovery(db, args)
+
+        self.assertEqual(rc, 3)
+        self.assertIn(
+            "recovery resolution requires a non-empty reason",
+            stderr.getvalue(),
+        )
+
     def test_parser_exposes_forward_only_show_retry_close_verbs(self) -> None:
         from scripts.pipeline_cli.routes_meta import _build_parser
 
@@ -862,9 +904,9 @@ class TestCmdImportJobRecovery(unittest.TestCase):
                     db,
                     close_args,
                 )
-        self.assertEqual(retry_rc, 2)
+        self.assertEqual(retry_rc, 3)
         self.assertIn("evidence", retry_error.getvalue())
-        self.assertEqual(close_rc, 2)
+        self.assertEqual(close_rc, 3)
         self.assertIn("result_status", close_error.getvalue())
 
     def test_automation_stale_revision_prints_refreshed_typed_detail(
@@ -5923,6 +5965,7 @@ class TestDestructiveCliAdapters(unittest.TestCase):
         self.assertEqual(rc, 4)
         self.assertEqual(payload["error"], "transition_conflict")
         self.assertEqual(payload["reason"], "processing_locked")
+        self.assertEqual(payload["request_id"], 41)
         self.assertEqual(payload["processing_owner"], {
             "job_id": owner.id,
             "status": owner.status,
@@ -6022,6 +6065,7 @@ class TestDestructiveCliAdapters(unittest.TestCase):
         self.assertEqual(rc, 4)
         self.assertEqual(payload["error"], "transition_conflict")
         self.assertEqual(payload["reason"], "processing_locked")
+        self.assertEqual(payload["request_id"], 41)
         self.assertEqual(payload["processing_owner"], {
             "job_id": owner.id,
             "status": owner.status,

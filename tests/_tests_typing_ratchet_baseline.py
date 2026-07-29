@@ -70,7 +70,7 @@ TESTS_TYPING_RATCHET_BASELINE: dict[str, dict[str, int]] = {
     "tests/test_import_queue.py": {"any": 77, "cast": 43},
     "tests/test_import_result.py": {"type_ignore": 4},
     "tests/test_integration.py": {"type_ignore": 1},
-    "tests/test_integration_slices.py": {"any": 40, "cast": 23, "type_ignore": 33},
+    "tests/test_integration_slices.py": {"any": 39, "cast": 21, "type_ignore": 33},
     "tests/test_library_artist_service.py": {"cast": 2},
     "tests/test_lossless_lineage_check_generated.py": {"type_ignore": 1},
     "tests/test_matching.py": {"any": 11, "cast": 5},

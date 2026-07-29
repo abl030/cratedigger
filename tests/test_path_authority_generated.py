@@ -47,7 +47,11 @@ from lib.processing_paths import canonical_folder_for_row, processing_albums_dir
 from lib.quality_evidence import EvidenceBuildResult
 from lib.staged_album import StagedAlbum
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_ctx_with_fake_db, make_grab_list_entry
+from tests.helpers import (
+    make_ctx_with_fake_db,
+    make_grab_list_entry,
+    make_request_row,
+)
 from tests.test_path_authority import assert_publication_invariant
 from web.wrong_match_file_service import (
     WrongMatchExplorerLimits,
@@ -729,6 +733,7 @@ class TestGeneratedForceFrontGateAuthority(unittest.TestCase):
             with open(os.path.join(payload_path, "01.mp3"), "wb") as handle:
                 handle.write(payload_bytes)
             db = FakePipelineDB()
+            db.seed_request(make_request_row(id=42, status="wanted"))
             log_id = db.log_download(
                 42,
                 outcome="rejected",
@@ -800,6 +805,12 @@ class TestGeneratedForceFrontGateAuthority(unittest.TestCase):
                 handle.write(b"payload metadata")
 
             db = FakePipelineDB()
+            setattr(db, "dsn", "postgresql://generated")  # noqa: B010
+            db.seed_request(make_request_row(
+                id=42,
+                status="wanted",
+                mb_release_id="",
+            ))
             log_id = db.log_download(
                 42,
                 outcome="rejected",
@@ -821,13 +832,18 @@ class TestGeneratedForceFrontGateAuthority(unittest.TestCase):
                 db,
                 worker_id="generated-preview",
                 runtime_config=cfg,
+                stage_db_factory=lambda _dsn: db,
+                heartbeat_db_factory=lambda _dsn: db,
             )
 
             self.assertIsNotNone(updated)
             assert updated is not None and updated.preview_result is not None
             self.assertEqual(updated.status, "failed")
             self.assertEqual(updated.preview_status, "measurement_failed")
-            self.assertEqual(updated.preview_result["reason"], "request_not_found")
+            self.assertEqual(
+                updated.preview_result["reason"],
+                "missing_release_id",
+            )
             self.assertEqual(updated.preview_result["source_path"], db_path)
             self.assertNotEqual(updated.preview_result["source_path"], payload_path)
             self.assertEqual(os.listdir(os.path.join(processing, "preview")), [])

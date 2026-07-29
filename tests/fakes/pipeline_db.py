@@ -1451,22 +1451,33 @@ class FakePipelineDB:
         ))
         return [ImportJob.from_row(copy.deepcopy(row)) for row in rows]
 
-    def claim_next_import_job(
+    def _import_job_candidate_rows(
         self,
         *,
-        worker_id: str | None = None,
         execution_lease: ExecutionLeaseSnapshot | None = None,
-    ) -> ImportJob | None:
+    ) -> list[dict[str, object]]:
         queued = [
             row for row in self._import_jobs
             if row.get("status") == "queued"
             and row.get("preview_status") in IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES
             and (
-                row.get("job_type") != IMPORT_JOB_AUTOMATION
+                row.get("job_type") not in (
+                    IMPORT_JOB_AUTOMATION,
+                    IMPORT_JOB_FORCE,
+                )
                 or (
-                    execution_lease is not None
+                    row.get("job_type") == IMPORT_JOB_AUTOMATION
+                    and execution_lease is not None
                     and execution_lease.beets is None
                     and self._automation_job_has_authority(row)
+                )
+                or (
+                    row.get("job_type") == IMPORT_JOB_FORCE
+                    and row.get("request_id") is not None
+                    and self._force_job_request_is_current(
+                        row,
+                        request_id=int(row["request_id"]),
+                    )
                 )
             )
         ]
@@ -1475,24 +1486,195 @@ class FakePipelineDB:
             _as_datetime(row.get("created_at")),
             row["id"],
         ))
-        if not queued:
+        return queued
+
+    def _next_import_job_row(
+        self,
+        *,
+        execution_lease: ExecutionLeaseSnapshot | None = None,
+    ) -> dict[str, object] | None:
+        queued = self._import_job_candidate_rows(
+            execution_lease=execution_lease,
+        )
+        return queued[0] if queued else None
+
+    def peek_import_job_candidates(
+        self,
+        *,
+        execution_lease: ExecutionLeaseSnapshot | None = None,
+        limit: int,
+        offset: int = 0,
+    ) -> list[ImportJob]:
+        if limit <= 0:
+            raise ValueError("import candidate limit must be positive")
+        if offset < 0:
+            raise ValueError("import candidate offset cannot be negative")
+        return [
+            ImportJob.from_row(copy.deepcopy(row))
+            for row in self._import_job_candidate_rows(
+                execution_lease=execution_lease,
+            )[offset:offset + limit]
+        ]
+
+    def peek_next_import_job(
+        self,
+        *,
+        execution_lease: ExecutionLeaseSnapshot | None = None,
+    ) -> ImportJob | None:
+        row = self._next_import_job_row(execution_lease=execution_lease)
+        return (
+            ImportJob.from_row(copy.deepcopy(row))
+            if row is not None
+            else None
+        )
+
+    def claim_next_import_job(
+        self,
+        *,
+        worker_id: str | None = None,
+        execution_lease: ExecutionLeaseSnapshot | None = None,
+    ) -> ImportJob | None:
+        row = self._next_import_job_row(execution_lease=execution_lease)
+        if row is None:
             return None
-        row = queued[0]
         request_id = row.get("request_id")
+        job_id = row.get("id")
+        if not isinstance(job_id, int):
+            raise TypeError("fake import job row has a non-integer id")
         if row.get("job_type") == IMPORT_JOB_AUTOMATION:
             assert execution_lease is not None
-            assert request_id is not None
+            if not isinstance(request_id, int):
+                return None
             with self.advisory_lock(
                 ADVISORY_LOCK_NAMESPACE_IMPORT,
-                int(request_id),
+                request_id,
             ) as acquired:
                 if not acquired or not self._automation_job_has_authority(row):
                     return None
-                return self._claim_import_job_row(
-                    row,
+                return self.claim_automation_import_job_under_lock(
+                    job_id,
+                    request_id=request_id,
                     worker_id=worker_id,
                     execution_lease=execution_lease,
                 )
+        if row.get("job_type") == IMPORT_JOB_FORCE:
+            if not isinstance(request_id, int):
+                return None
+            with self.advisory_lock(
+                ADVISORY_LOCK_NAMESPACE_IMPORT,
+                request_id,
+            ) as acquired:
+                if not acquired:
+                    return None
+                return self.claim_force_import_job_under_lock(
+                    job_id,
+                    request_id=request_id,
+                    worker_id=worker_id,
+                )
+        return self.claim_import_job_candidate(
+            job_id,
+            worker_id=worker_id,
+        )
+
+    def claim_import_job_candidate(
+        self,
+        job_id: int,
+        *,
+        worker_id: str | None = None,
+    ) -> ImportJob | None:
+        row = next(
+            (
+                candidate
+                for candidate in self._import_jobs
+                if candidate.get("id") == job_id
+                and candidate.get("job_type") not in (
+                    IMPORT_JOB_AUTOMATION,
+                    IMPORT_JOB_FORCE,
+                )
+                and candidate.get("status") == "queued"
+                and candidate.get("preview_status")
+                in IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES
+            ),
+            None,
+        )
+        if row is None:
+            return None
+        return self._claim_import_job_row(
+            row,
+            worker_id=worker_id,
+            execution_lease=None,
+        )
+
+    def claim_automation_import_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+        execution_lease: ExecutionLeaseSnapshot,
+    ) -> ImportJob | None:
+        row = next(
+            (
+                candidate
+                for candidate in self._import_jobs
+                if candidate["id"] == job_id
+                and candidate.get("request_id") == request_id
+                and candidate.get("job_type") == IMPORT_JOB_AUTOMATION
+                and candidate.get("status") == "queued"
+                and candidate.get("preview_status")
+                in IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES
+            ),
+            None,
+        )
+        if row is None or not self._automation_job_has_authority(row):
+            return None
+        return self._claim_import_job_row(
+            row,
+            worker_id=worker_id,
+            execution_lease=execution_lease,
+        )
+
+    def _force_job_request_is_current(
+        self,
+        row: Mapping[str, object],
+        *,
+        request_id: int,
+    ) -> bool:
+        request = self._requests.get(request_id)
+        return bool(
+            request is not None
+            and row.get("request_id") == request_id
+            and row.get("expected_request_status") is not None
+            and request.get("status") == row.get("expected_request_status")
+            and request.get("status") not in ("processing", "replaced")
+            and request.get("active_automation_import_job_id") is None
+        )
+
+    def claim_force_import_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+    ) -> ImportJob | None:
+        row = next(
+            (
+                candidate
+                for candidate in self._import_jobs
+                if candidate["id"] == job_id
+                and candidate.get("request_id") == request_id
+                and candidate.get("job_type") == IMPORT_JOB_FORCE
+                and candidate.get("status") == "queued"
+                and candidate.get("preview_status")
+                in IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES
+            ),
+            None,
+        )
+        if row is None or not self._force_job_request_is_current(
+            row,
+            request_id=request_id,
+        ):
+            return None
         return self._claim_import_job_row(
             row,
             worker_id=worker_id,
@@ -1626,6 +1808,8 @@ class FakePipelineDB:
                 if (
                     not isinstance(job.payload, ForceImportPayload)
                     or job.payload.failed_path != source_path
+                    or request.get("status") == "processing"
+                    or request.get("active_automation_import_job_id") is not None
                 ):
                     return None
             elif job.job_type == IMPORT_JOB_YOUTUBE:
@@ -2027,6 +2211,43 @@ class FakePipelineDB:
         resolution: str,
         reason: str,
     ) -> tuple[ImportJob, ImportJob | None] | None:
+        candidate = next(
+            (
+                item for item in self._import_jobs
+                if item["id"] == job_id
+                and item.get("job_type") != IMPORT_JOB_AUTOMATION
+                and not self._is_attached_processing_owner(job_id)
+            ),
+            None,
+        )
+        if candidate is None:
+            return None
+        candidate_request_id = candidate.get("request_id")
+        if not isinstance(candidate_request_id, int):
+            return self._resolve_import_job_recovery_under_lock(
+                job_id,
+                resolution=resolution,
+                reason=reason,
+            )
+        with self.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_IMPORT,
+            candidate_request_id,
+        ) as acquired:
+            if not acquired:
+                return None
+            return self._resolve_import_job_recovery_under_lock(
+                job_id,
+                resolution=resolution,
+                reason=reason,
+            )
+
+    def _resolve_import_job_recovery_under_lock(
+        self,
+        job_id: int,
+        *,
+        resolution: str,
+        reason: str,
+    ) -> tuple[ImportJob, ImportJob | None] | None:
         if resolution not in ("retry", "close"):
             raise ValueError(f"Invalid import recovery resolution: {resolution}")
         reason = reason.strip()
@@ -2346,44 +2567,211 @@ class FakePipelineDB:
                 return ImportJob.from_row(copy.deepcopy(row))
         return None
 
+    def _import_preview_job_candidate_rows(
+        self,
+        *,
+        execution_lease: ExecutionLeaseSnapshot | None = None,
+    ) -> list[dict[str, object]]:
+        queued = [
+            row for row in self._import_jobs
+            if row.get("status") == "queued"
+            and row.get("preview_status") == "waiting"
+            and (
+                row.get("job_type") not in (
+                    IMPORT_JOB_AUTOMATION,
+                    IMPORT_JOB_FORCE,
+                )
+                or (
+                    row.get("job_type") == IMPORT_JOB_AUTOMATION
+                    and execution_lease is not None
+                    and execution_lease.beets is None
+                    and self._automation_job_has_authority(row)
+                )
+                or (
+                    row.get("job_type") == IMPORT_JOB_FORCE
+                    and row.get("request_id") is not None
+                    and self._force_job_request_is_current(
+                        row,
+                        request_id=int(row["request_id"]),
+                    )
+                )
+            )
+        ]
+        queued.sort(key=lambda row: (_as_datetime(row.get("created_at")), row["id"]))
+        return queued
+
+    def _next_import_preview_job_row(
+        self,
+        *,
+        execution_lease: ExecutionLeaseSnapshot | None = None,
+    ) -> dict[str, object] | None:
+        queued = self._import_preview_job_candidate_rows(
+            execution_lease=execution_lease,
+        )
+        return queued[0] if queued else None
+
+    def peek_import_preview_job_candidates(
+        self,
+        *,
+        execution_lease: ExecutionLeaseSnapshot | None = None,
+        limit: int,
+        offset: int = 0,
+    ) -> list[ImportJob]:
+        if limit <= 0:
+            raise ValueError("preview candidate limit must be positive")
+        if offset < 0:
+            raise ValueError("preview candidate offset cannot be negative")
+        return [
+            ImportJob.from_row(copy.deepcopy(row))
+            for row in self._import_preview_job_candidate_rows(
+                execution_lease=execution_lease,
+            )[offset:offset + limit]
+        ]
+
+    def peek_next_import_preview_job(
+        self,
+        *,
+        execution_lease: ExecutionLeaseSnapshot | None = None,
+    ) -> ImportJob | None:
+        row = self._next_import_preview_job_row(
+            execution_lease=execution_lease,
+        )
+        return (
+            ImportJob.from_row(copy.deepcopy(row))
+            if row is not None
+            else None
+        )
+
     def claim_next_import_preview_job(
         self,
         *,
         worker_id: str | None = None,
         execution_lease: ExecutionLeaseSnapshot | None = None,
     ) -> ImportJob | None:
-        queued = [
-            row for row in self._import_jobs
-            if row.get("status") == "queued"
-            and row.get("preview_status") == "waiting"
-            and (
-                row.get("job_type") != IMPORT_JOB_AUTOMATION
-                or (
-                    execution_lease is not None
-                    and execution_lease.beets is None
-                    and self._automation_job_has_authority(row)
-                )
-            )
-        ]
-        queued.sort(key=lambda row: (_as_datetime(row.get("created_at")), row["id"]))
-        if not queued:
+        row = self._next_import_preview_job_row(
+            execution_lease=execution_lease,
+        )
+        if row is None:
             return None
-        row = queued[0]
         request_id = row.get("request_id")
+        job_id = row.get("id")
+        if not isinstance(job_id, int):
+            raise TypeError("fake preview job row has a non-integer id")
         if row.get("job_type") == IMPORT_JOB_AUTOMATION:
             assert execution_lease is not None
-            assert request_id is not None
+            if not isinstance(request_id, int):
+                return None
             with self.advisory_lock(
                 ADVISORY_LOCK_NAMESPACE_IMPORT,
-                int(request_id),
+                request_id,
             ) as acquired:
                 if not acquired or not self._automation_job_has_authority(row):
                     return None
-                return self._claim_import_preview_row(
-                    row,
+                return self.claim_automation_import_preview_job_under_lock(
+                    job_id,
+                    request_id=request_id,
                     worker_id=worker_id,
                     execution_lease=execution_lease,
                 )
+        if row.get("job_type") == IMPORT_JOB_FORCE:
+            if not isinstance(request_id, int):
+                return None
+            with self.advisory_lock(
+                ADVISORY_LOCK_NAMESPACE_IMPORT,
+                request_id,
+            ) as acquired:
+                if not acquired:
+                    return None
+                return self.claim_force_import_preview_job_under_lock(
+                    job_id,
+                    request_id=request_id,
+                    worker_id=worker_id,
+                )
+        return self.claim_import_preview_job_candidate(
+            job_id,
+            worker_id=worker_id,
+        )
+
+    def claim_import_preview_job_candidate(
+        self,
+        job_id: int,
+        *,
+        worker_id: str | None = None,
+    ) -> ImportJob | None:
+        row = next(
+            (
+                candidate
+                for candidate in self._import_jobs
+                if candidate.get("id") == job_id
+                and candidate.get("job_type") not in (
+                    IMPORT_JOB_AUTOMATION,
+                    IMPORT_JOB_FORCE,
+                )
+                and candidate.get("status") == "queued"
+                and candidate.get("preview_status") == "waiting"
+            ),
+            None,
+        )
+        if row is None:
+            return None
+        return self._claim_import_preview_row(
+            row,
+            worker_id=worker_id,
+            execution_lease=None,
+        )
+
+    def claim_automation_import_preview_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+        execution_lease: ExecutionLeaseSnapshot,
+    ) -> ImportJob | None:
+        row = next(
+            (
+                candidate
+                for candidate in self._import_jobs
+                if candidate["id"] == job_id
+                and candidate.get("request_id") == request_id
+                and candidate.get("job_type") == IMPORT_JOB_AUTOMATION
+                and candidate.get("status") == "queued"
+                and candidate.get("preview_status") == "waiting"
+            ),
+            None,
+        )
+        if row is None or not self._automation_job_has_authority(row):
+            return None
+        return self._claim_import_preview_row(
+            row,
+            worker_id=worker_id,
+            execution_lease=execution_lease,
+        )
+
+    def claim_force_import_preview_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+    ) -> ImportJob | None:
+        row = next(
+            (
+                candidate
+                for candidate in self._import_jobs
+                if candidate["id"] == job_id
+                and candidate.get("request_id") == request_id
+                and candidate.get("job_type") == IMPORT_JOB_FORCE
+                and candidate.get("status") == "queued"
+                and candidate.get("preview_status") == "waiting"
+            ),
+            None,
+        )
+        if row is None or not self._force_job_request_is_current(
+            row,
+            request_id=request_id,
+        ):
+            return None
         return self._claim_import_preview_row(
             row,
             worker_id=worker_id,

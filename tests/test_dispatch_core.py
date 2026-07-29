@@ -20,6 +20,7 @@ from lib.dispatch.types import DispatchOutcome, EvidenceImportGate, ImportOneRun
 from lib.import_execution import (
     CancellationToken,
     ExecutionLeaseSnapshot,
+    OwnerSessionIdentity,
     ProcessIdentity,
 )
 from lib.import_queue import IMPORT_JOB_FORCE
@@ -98,6 +99,30 @@ def _seed_current_for_request(db, request_id: int, *, mb_release_id: str,
 
 
 _HARNESS = "/nix/store/fake/harness/run_beets_harness.sh"
+
+
+class TestDispatchExecutionAuthority(unittest.TestCase):
+    def test_partial_force_authority_cannot_hide_behind_no_lease_fast_path(self):
+        from lib.dispatch.core import _validate_automation_dispatch_authority
+
+        db = FakePipelineDB()
+        partials = (
+            (CancellationToken(), None),
+            (None, OwnerSessionIdentity(connection_object_id=1, backend_pid=2)),
+        )
+        for token, identity in partials:
+            with self.subTest(
+                token=token is not None,
+                identity=identity is not None,
+            ), self.assertRaisesRegex(ValueError, "must be paired"):
+                _validate_automation_dispatch_authority(
+                    db,  # pyright: ignore[reportArgumentType]
+                    force=True,
+                    import_job_id=7,
+                    execution_lease=None,
+                    cancellation_token=token,
+                    owner_session_identity=identity,
+                )
 
 
 def _owned_test_runner(**kwargs):

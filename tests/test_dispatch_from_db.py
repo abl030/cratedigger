@@ -20,6 +20,7 @@ from lib.import_evidence import (
     ActionEvidenceProvenance,
     CandidateEvidenceActionResult,
 )
+from lib.import_execution import CancellationToken
 from lib.import_queue import IMPORT_JOB_FORCE
 from lib.quality import AudioQualityMeasurement, ImportResult
 from lib.quality_evidence import snapshot_audio_files
@@ -1054,6 +1055,21 @@ class TestDispatchFromDbRuntimeConfigSeam(unittest.TestCase):
 
 
 class TestDispatchFromDbStorageAuthority(unittest.TestCase):
+    def test_partial_execution_authority_fails_before_any_db_or_config_effect(self):
+        from lib.dispatch import dispatch_import_from_db
+        from lib.pipeline_db import PipelineDB
+
+        db = create_autospec(PipelineDB, instance=True)
+        with self.assertRaisesRegex(ValueError, "must be paired"):
+            dispatch_import_from_db(
+                db,
+                request_id=42,
+                failed_path="/never-observed",
+                cancellation_token=CancellationToken(),
+            )
+
+        self.assertEqual(db.mock_calls, [])
+
     def test_partial_storage_override_fails_before_advisory_lock(self):
         from lib.dispatch import dispatch_import_from_db
         from lib.pipeline_db import PipelineDB

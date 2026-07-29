@@ -10,7 +10,7 @@ import sys
 import time
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any, Protocol, assert_never, runtime_checkable
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -20,6 +20,7 @@ if REPO_ROOT not in sys.path:
 import msgspec
 
 from lib import transitions
+from lib.config import CratediggerConfig
 from lib.dispatch import (
     DISPATCH_CODE_REQUEUE_FAILED,
     DISPATCH_CODE_REQUEUED_FOR_PREVIEW,
@@ -94,7 +95,21 @@ RESTART_REQUEUE_MESSAGE = "Importer restarted while job was running; retry queue
 RESTART_RECOVERY_MESSAGE = (
     "Recovery required: importer restarted after Beets launch authorization"
 )
+IMPORT_CANDIDATE_SCAN_LIMIT = 32
 IMPORTER_SYSTEMD_UNIT = "cratedigger-importer.service"
+
+
+@dataclass
+class _ClaimState:
+    claimed: bool = False
+
+    def mark(self) -> None:
+        self.claimed = True
+
+
+@dataclass
+class _CandidateScanCursor:
+    offset: int = 0
 
 
 def _job_result(outcome: DispatchOutcome) -> dict[str, Any]:
@@ -569,6 +584,8 @@ def execute_import_job(
     execution_lease: ExecutionLeaseSnapshot | None = None,
     cancellation_token: CancellationToken | None = None,
     owner_session_identity: OwnerSessionIdentity | None = None,
+    force_dispatch_fn: Callable[..., DispatchOutcome] | None = None,
+    force_runtime_config: CratediggerConfig | None = None,
 ) -> DispatchOutcome:
     """Execute one claimed import job without mutating job status."""
     if job.request_id is None:
@@ -585,6 +602,7 @@ def execute_import_job(
         # function's docstring (issue #510) for why this isn't unified
         # further.
         from lib.dispatch import dispatch_import_from_db
+        force_dispatch = force_dispatch_fn or dispatch_import_from_db
 
         if not isinstance(job.payload, ForceImportPayload):
             raise AssertionError("force_import payload type mismatch")
@@ -592,8 +610,20 @@ def execute_import_job(
         from lib.config import read_runtime_config
         from lib.import_preview import force_action_copy_path
 
+        if (cancellation_token is None) != (owner_session_identity is None):
+            raise ValueError(
+                "force job cancellation and pinned session must be paired"
+            )
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
+        runtime_config = force_runtime_config or read_runtime_config()
+        dispatch_config: dict[str, Any] = (
+            {"cfg": runtime_config}
+            if force_runtime_config is not None
+            else {}
+        )
         action_path = _force_action_path(job)
-        expected_action_path = force_action_copy_path(read_runtime_config(), job.id)
+        expected_action_path = force_action_copy_path(runtime_config, job.id)
         if (
             action_path is None
             or action_path != expected_action_path
@@ -604,18 +634,35 @@ def execute_import_job(
                 import_job_id=job.id,
                 reason="force action copy unavailable; preview must rebuild it",
             )
-        return dispatch_import_from_db(
+        source_dirs = (
+            [source_dir for source_dir in payload.source_dirs if source_dir]
+            or None
+        )
+        if cancellation_token is None:
+            return force_dispatch(
+                db,
+                request_id=job.request_id,
+                failed_path=action_path,
+                source_reference_path=payload.failed_path,
+                source_username=payload.source_username,
+                source_dirs=source_dirs,
+                import_job_id=job.id,
+                download_log_id=payload.download_log_id,
+                **dispatch_config,
+            )
+        assert owner_session_identity is not None
+        return force_dispatch(
             db,
             request_id=job.request_id,
             failed_path=action_path,
             source_reference_path=payload.failed_path,
             source_username=payload.source_username,
-            source_dirs=(
-                [source_dir for source_dir in payload.source_dirs if source_dir]
-                or None
-            ),
+            source_dirs=source_dirs,
             import_job_id=job.id,
             download_log_id=payload.download_log_id,
+            cancellation_token=cancellation_token,
+            owner_session_identity=owner_session_identity,
+            **dispatch_config,
         )
 
     if job.job_type == IMPORT_JOB_AUTOMATION:
@@ -1092,6 +1139,39 @@ class _AutomationStageDB(_AutomationOwnerDB, Protocol):
         key: int,
     ) -> AbstractContextManager[bool]: ...
 
+    def claim_automation_import_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+        execution_lease: ExecutionLeaseSnapshot,
+    ) -> ImportJob | None: ...
+
+    def close(self) -> None: ...
+
+
+@runtime_checkable
+class _ForceStageDB(Protocol):
+    def _pin_owner_session(
+        self,
+        cancellation_token: CancellationToken,
+    ) -> AbstractContextManager[OwnerSessionIdentity]: ...
+
+    def advisory_lock(
+        self,
+        namespace: int,
+        key: int,
+    ) -> AbstractContextManager[bool]: ...
+
+    def claim_force_import_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+    ) -> ImportJob | None: ...
+
     def close(self) -> None: ...
 
 
@@ -1127,16 +1207,18 @@ def _automation_claim_is_current(
 
 
 def _process_automation_claim(
-    job: ImportJob,
+    candidate: ImportJob,
     *,
     dsn: str,
+    worker_id: str,
     execution_lease: ExecutionLeaseSnapshot,
     ctx: object | None,
     stage_db_factory: Callable[[str], object],
     execute_fn: Callable[..., DispatchOutcome] = execute_import_job,
+    claim_callback: Callable[[], None] | None = None,
 ) -> ImportJob | None:
-    """Run one automation importer under its pinned IMPORT owner session."""
-    if job.request_id is None:
+    """Claim and run one automation job on the pinned IMPORT session."""
+    if candidate.request_id is None:
         return None
     stage_db = stage_db_factory(dsn)
     if not isinstance(stage_db, _AutomationStageDB):
@@ -1149,15 +1231,28 @@ def _process_automation_claim(
             token.raise_if_cancelled()
             with stage_db.advisory_lock(
                 ADVISORY_LOCK_NAMESPACE_IMPORT,
-                job.request_id,
+                candidate.request_id,
             ) as acquired:
                 token.raise_if_cancelled()
                 if not acquired:
-                    # A failed lock attempt grants no lifecycle authority.
-                    # Preserve the exact running owner for its live holder or
-                    # the startup death-proof recovery path; never mutate it
-                    # from outside IMPORT.
+                    # The queue connection only selected this candidate.
+                    # Preserve queued claimability for the next poll.
                     return None
+                job = stage_db.claim_automation_import_job_under_lock(
+                    candidate.id,
+                    request_id=candidate.request_id,
+                    worker_id=worker_id,
+                    execution_lease=execution_lease,
+                )
+                if job is None:
+                    return None
+                logger.info(
+                    "Claimed import job %s (%s)",
+                    job.id,
+                    job.job_type,
+                )
+                if claim_callback is not None:
+                    claim_callback()
                 if not _automation_claim_is_current(
                     stage_db,
                     job,
@@ -1170,6 +1265,55 @@ def _process_automation_claim(
                     ctx=ctx,
                     execute_fn=execute_fn,
                     execution_lease=execution_lease,
+                    cancellation_token=token,
+                    owner_session_identity=owner_session_identity,
+                )
+    finally:
+        stage_db.close()
+
+
+def _process_force_claim(
+    candidate: ImportJob,
+    *,
+    dsn: str,
+    worker_id: str,
+    ctx: object | None,
+    stage_db_factory: Callable[[str], object],
+    execute_fn: Callable[..., DispatchOutcome] = execute_import_job,
+    claim_callback: Callable[[], None] | None = None,
+) -> ImportJob | None:
+    """Claim and run force effects on one pinned IMPORT session."""
+    if candidate.request_id is None:
+        return None
+    stage_db = stage_db_factory(dsn)
+    if not isinstance(stage_db, _ForceStageDB):
+        raise TypeError("force stage DB is missing its owner-session protocol")
+    token = CancellationToken()
+    try:
+        with stage_db._pin_owner_session(token) as owner_session_identity:
+            token.raise_if_cancelled()
+            with stage_db.advisory_lock(
+                ADVISORY_LOCK_NAMESPACE_IMPORT,
+                candidate.request_id,
+            ) as acquired:
+                token.raise_if_cancelled()
+                if not acquired:
+                    return None
+                job = stage_db.claim_force_import_job_under_lock(
+                    candidate.id,
+                    request_id=candidate.request_id,
+                    worker_id=worker_id,
+                )
+                if job is None:
+                    return None
+                if claim_callback is not None:
+                    claim_callback()
+                logger.info("Claimed import job %s (%s)", job.id, job.job_type)
+                return process_claimed_job(
+                    stage_db,  # pyright: ignore[reportArgumentType]
+                    job,
+                    ctx=ctx,
+                    execute_fn=execute_fn,
                     cancellation_token=token,
                     owner_session_identity=owner_session_identity,
                 )
@@ -1198,21 +1342,41 @@ def process_claimed_job(
     just automation + youtube, issue #510).
     """
     is_automation = job.job_type == IMPORT_JOB_AUTOMATION
-    if is_automation and (
-        execution_lease is None
-        or cancellation_token is None
-        or owner_session_identity is None
-    ):
+    is_force = job.job_type == IMPORT_JOB_FORCE
+    if is_automation and execution_lease is None:
         raise ValueError(
             "automation job processing requires exact execution authority"
         )
+    if is_automation and (
+        cancellation_token is None
+        or owner_session_identity is None
+    ):
+        raise ValueError(
+            f"{job.job_type} processing requires pinned session authority"
+        )
+    if is_force and (
+        (cancellation_token is None) != (owner_session_identity is None)
+    ):
+        raise ValueError(
+            "force job cancellation and pinned session must be paired"
+        )
     try:
+        if is_force and cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
         if is_automation:
             outcome = execute_fn(
                 db,
                 job,
                 ctx=ctx,
                 execution_lease=execution_lease,
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
+            )
+        elif is_force and cancellation_token is not None:
+            outcome = execute_fn(
+                db,
+                job,
+                ctx=ctx,
                 cancellation_token=cancellation_token,
                 owner_session_identity=owner_session_identity,
             )
@@ -1257,6 +1421,8 @@ def process_claimed_job(
         return _record_terminal_force_action_cleanup(db, job, failed)
 
     result = _job_result(outcome)
+    if is_force and cancellation_token is not None:
+        cancellation_token.raise_if_cancelled()
     if is_automation:
         assert execution_lease is not None
         assert cancellation_token is not None
@@ -1521,7 +1687,9 @@ def run_once(
     stage_db_factory: Callable[[str], object] | None = None,
     execution_lease_factory: Callable[..., ExecutionLeaseSnapshot] | None = None,
     execute_fn: Callable[..., DispatchOutcome] = execute_import_job,
+    scan_cursor: _CandidateScanCursor | None = None,
 ) -> ImportJob | None:
+    cursor = scan_cursor or _CandidateScanCursor()
     capture = execution_lease_factory or capture_execution_lease
     try:
         execution_lease = capture(systemd_unit=IMPORTER_SYSTEMD_UNIT)
@@ -1529,28 +1697,71 @@ def run_once(
         # Non-systemd development runs may still process Force/YouTube jobs.
         # Automation stays invisible without a complete invocation lease.
         execution_lease = None
-    job = db.claim_next_import_job(
-        worker_id=worker_id,
+    candidates = db.peek_import_job_candidates(
         execution_lease=execution_lease,
+        limit=IMPORT_CANDIDATE_SCAN_LIMIT,
+        offset=cursor.offset,
     )
-    if job is None:
-        return None
-    logger.info("Claimed import job %s (%s)", job.id, job.job_type)
-    if job.job_type == IMPORT_JOB_AUTOMATION:
-        if execution_lease is None:
-            return None
-        dsn = getattr(db, "dsn", None)
-        if not dsn:
-            return None
-        return _process_automation_claim(
-            job,
-            dsn=str(dsn),
+    if not candidates and cursor.offset:
+        cursor.offset = 0
+        candidates = db.peek_import_job_candidates(
             execution_lease=execution_lease,
-            ctx=ctx,
-            stage_db_factory=stage_db_factory or PipelineDB,
-            execute_fn=execute_fn,
+            limit=IMPORT_CANDIDATE_SCAN_LIMIT,
+            offset=0,
         )
-    return process_claimed_job(db, job, ctx=ctx, execute_fn=execute_fn)
+    for index, candidate in enumerate(candidates):
+        claim_state = _ClaimState()
+
+        if candidate.job_type == IMPORT_JOB_AUTOMATION:
+            if execution_lease is None:
+                continue
+            dsn = getattr(db, "dsn", None)
+            if not dsn:
+                continue
+            result = _process_automation_claim(
+                candidate,
+                dsn=str(dsn),
+                worker_id=worker_id,
+                execution_lease=execution_lease,
+                ctx=ctx,
+                stage_db_factory=stage_db_factory or PipelineDB,
+                execute_fn=execute_fn,
+                claim_callback=claim_state.mark,
+            )
+            if claim_state.claimed:
+                # The claimed row leaves the eligible set, so its immediate
+                # successor compacts into the claimed row's former index.
+                cursor.offset += index
+                return result
+            continue
+        if candidate.job_type == IMPORT_JOB_FORCE:
+            dsn = getattr(db, "dsn", None)
+            if not dsn:
+                continue
+            result = _process_force_claim(
+                candidate,
+                dsn=str(dsn),
+                worker_id=worker_id,
+                ctx=ctx,
+                stage_db_factory=stage_db_factory or PipelineDB,
+                execute_fn=execute_fn,
+                claim_callback=claim_state.mark,
+            )
+            if claim_state.claimed:
+                cursor.offset += index
+                return result
+            continue
+        job = db.claim_import_job_candidate(
+            candidate.id,
+            worker_id=worker_id,
+        )
+        if job is None:
+            continue
+        logger.info("Claimed import job %s (%s)", job.id, job.job_type)
+        cursor.offset += index
+        return process_claimed_job(db, job, ctx=ctx, execute_fn=execute_fn)
+    cursor.offset += len(candidates)
+    return None
 
 
 def recover_abandoned_running_jobs(
@@ -1625,8 +1836,13 @@ def main() -> int:
                     len(recovered),
                 )
 
+            scan_cursor = _CandidateScanCursor()
             while True:
-                job = run_once(db, worker_id=worker_id)
+                job = run_once(
+                    db,
+                    worker_id=worker_id,
+                    scan_cursor=scan_cursor,
+                )
                 if args.once:
                     return 0
                 if job is None:

@@ -411,11 +411,57 @@ AutomationRecoveryActionOutcome = Literal[
 ]
 
 
+class AutomationRecoveryJobResponse(msgspec.Struct, frozen=True):
+    """JSON-safe import-job projection shared by both recovery adapters."""
+
+    id: int
+    job_type: str
+    status: str
+    request_id: int | None
+    dedupe_key: str | None
+    payload: dict[str, object]
+    result: dict[str, object] | None
+    message: str | None
+    error: str | None
+    attempts: int
+    worker_id: str | None
+    created_at: str | None
+    updated_at: str | None
+    started_at: str | None
+    heartbeat_at: str | None
+    completed_at: str | None
+    preview_status: str | None
+    preview_result: dict[str, object] | None
+    preview_message: str | None
+    preview_error: str | None
+    preview_attempts: int
+    preview_worker_id: str | None
+    preview_started_at: str | None
+    preview_heartbeat_at: str | None
+    preview_completed_at: str | None
+    importable_at: str | None
+    candidate_evidence_id: int | None
+    expected_request_status: str | None
+    beets_launch_authorized_at: str | None
+    beets_launch_release_id: str | None
+    beets_launch_source_path: str | None
+    beets_launch_request_status: str | None
+    beets_launch_snapshot_fingerprint: str | None
+    execution_invocation_id: str | None
+    execution_host_boot_id: str | None
+    execution_systemd_unit: str | None
+    execution_worker_pid: int | None
+    execution_worker_start_ticks: int | None
+    execution_beets_pid: int | None
+    execution_beets_start_ticks: int | None
+    deduped: bool
+
+
 class AutomationRecoveryActionResult(msgspec.Struct, frozen=True):
     outcome: AutomationRecoveryActionOutcome
     detail: AutomationRecoveryDetail | None = None
-    job: ImportJob | None = None
-    retry_job: ImportJob | None = None
+    job: AutomationRecoveryJobResponse | None = None
+    retry_job: AutomationRecoveryJobResponse | None = None
     message: str = ""
 
     def to_dict(self) -> dict[str, object]:
@@ -432,6 +478,58 @@ class _AutomationRecoveryObservation:
 
 def _iso(value: datetime | None) -> str | None:
     return value.isoformat() if value is not None else None
+
+
+def automation_recovery_job_response(
+    job: ImportJob,
+) -> AutomationRecoveryJobResponse:
+    """Project one typed DB row into the recovery response wire contract."""
+    payload: dict[str, object] = msgspec.to_builtins(job.payload)
+    return AutomationRecoveryJobResponse(
+        id=job.id,
+        job_type=job.job_type,
+        status=job.status,
+        request_id=job.request_id,
+        dedupe_key=job.dedupe_key,
+        payload=payload,
+        result=job.result,
+        message=job.message,
+        error=job.error,
+        attempts=job.attempts,
+        worker_id=job.worker_id,
+        created_at=_iso(job.created_at),
+        updated_at=_iso(job.updated_at),
+        started_at=_iso(job.started_at),
+        heartbeat_at=_iso(job.heartbeat_at),
+        completed_at=_iso(job.completed_at),
+        preview_status=job.preview_status,
+        preview_result=job.preview_result,
+        preview_message=job.preview_message,
+        preview_error=job.preview_error,
+        preview_attempts=job.preview_attempts,
+        preview_worker_id=job.preview_worker_id,
+        preview_started_at=_iso(job.preview_started_at),
+        preview_heartbeat_at=_iso(job.preview_heartbeat_at),
+        preview_completed_at=_iso(job.preview_completed_at),
+        importable_at=_iso(job.importable_at),
+        candidate_evidence_id=job.candidate_evidence_id,
+        expected_request_status=job.expected_request_status,
+        beets_launch_authorized_at=_iso(job.beets_launch_authorized_at),
+        beets_launch_release_id=job.beets_launch_release_id,
+        beets_launch_source_path=job.beets_launch_source_path,
+        beets_launch_request_status=job.beets_launch_request_status,
+        beets_launch_snapshot_fingerprint=(
+            job.beets_launch_snapshot_fingerprint
+        ),
+        execution_invocation_id=job.execution_invocation_id,
+        execution_host_boot_id=job.execution_host_boot_id,
+        execution_systemd_unit=job.execution_systemd_unit,
+        execution_worker_pid=job.execution_worker_pid,
+        execution_worker_start_ticks=job.execution_worker_start_ticks,
+        execution_beets_pid=job.execution_beets_pid,
+        execution_beets_start_ticks=job.execution_beets_start_ticks,
+        deduped=job.deduped,
+    )
 
 
 def _validate_completion_receipt(
@@ -786,6 +884,14 @@ def _cleanup_snapshot(
     try:
         receipt = row["completed_receipt"]
         completed_at = row["completed_at"]
+        step_progress: dict[str, object] = msgspec.to_builtins(
+            row["step_progress"]
+        )
+        completed_receipt: dict[str, object] | None = (
+            None
+            if receipt is None
+            else msgspec.to_builtins(receipt)
+        )
         if (receipt is None) != (completed_at is None):
             status: CleanupJournalStatus = "unavailable"
             reason = "cleanup_journal_completion_inconsistent"
@@ -802,19 +908,9 @@ def _cleanup_snapshot(
             request_id=row["request_id"],
             revision=row["revision"],
             action=row["action"],
-            step_progress=msgspec.convert(
-                msgspec.to_builtins(row["step_progress"]),
-                type=dict[str, object],
-            ),
+            step_progress=step_progress,
             completed_at=_iso(completed_at),
-            completed_receipt=(
-                None
-                if receipt is None
-                else msgspec.convert(
-                    msgspec.to_builtins(receipt),
-                    type=dict[str, object],
-                )
-            ),
+            completed_receipt=completed_receipt,
             declared_result_status=row["declared_result_status"],
             declared_reason=row["declared_reason"],
             declared_evidence_revision=row["evidence_revision"],
@@ -1133,10 +1229,8 @@ def _automation_recovery_cas(
 
 
 def _json_object(value: object) -> dict[str, object]:
-    return msgspec.convert(
-        msgspec.to_builtins(value),
-        type=dict[str, object],
-    )
+    result: dict[str, object] = msgspec.to_builtins(value)
+    return result
 
 
 def _refreshed_action_result(
@@ -1252,8 +1346,16 @@ def _apply_import_job_recovery(
             outcome = "closed"
         return AutomationRecoveryActionResult(
             outcome=outcome,
-            job=legacy.job,
-            retry_job=legacy.retry_job,
+            job=(
+                None
+                if legacy.job is None
+                else automation_recovery_job_response(legacy.job)
+            ),
+            retry_job=(
+                None
+                if legacy.retry_job is None
+                else automation_recovery_job_response(legacy.retry_job)
+            ),
             message=legacy.message,
         )
 
@@ -1333,8 +1435,8 @@ def _apply_import_job_recovery(
                 if retained_cleanup
                 else "retry_queued"
             ),
-            job=applied.original,
-            retry_job=applied.retry,
+            job=automation_recovery_job_response(applied.original),
+            retry_job=automation_recovery_job_response(applied.retry),
             message=(
                 (
                     f"Closed ambiguous job {job_id}, retargeted its cleanup "
@@ -1559,7 +1661,7 @@ def _apply_import_job_recovery(
                 )
             return AutomationRecoveryActionResult(
                 outcome="closed",
-                job=terminal.job,
+                job=automation_recovery_job_response(terminal.job),
                 message=(
                     f"Closed automation job {job_id} as {result_status}"
                 ),

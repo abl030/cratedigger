@@ -552,6 +552,7 @@ class TestPipelineResolveRgContract(_FakeDbWebServerCase):
         self.assertEqual(status, 409)
         self.assertEqual(data["error"], "transition_conflict")
         self.assertEqual(data["reason"], "processing_locked")
+        self.assertEqual(data["request_id"], 42)
         self.assertEqual(data["status"], "conflict")
         self.assertEqual(data["processing_owner"], {
             "job_id": owner.id,

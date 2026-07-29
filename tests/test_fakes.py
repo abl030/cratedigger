@@ -3680,6 +3680,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         from lib.import_queue import IMPORT_JOB_FORCE
 
         db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="wanted"))
         first = db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=42,
@@ -4109,6 +4110,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         from lib.import_queue import IMPORT_JOB_FORCE
 
         db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="wanted"))
         job = db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=42,
@@ -4170,6 +4172,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         from lib.import_queue import IMPORT_JOB_FORCE
 
         db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="wanted"))
         queued = db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=42,
@@ -4286,6 +4289,8 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         from lib.import_queue import IMPORT_JOB_FORCE
 
         db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="wanted"))
+        db.seed_request(make_request_row(id=43, status="wanted"))
         queued = db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=42,
@@ -5250,6 +5255,11 @@ class TestFakeActiveImportJobsForWrongMatch(unittest.TestCase):
         from lib.import_queue import IMPORT_JOB_FORCE, force_import_payload
 
         db = FakePipelineDB()
+        for request_id in (1, 2, 3, 42):
+            db.seed_request(make_request_row(
+                id=request_id,
+                status="wanted",
+            ))
         by_log = db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=1,

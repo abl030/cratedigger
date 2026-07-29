@@ -310,6 +310,35 @@ function lockProcessingControl(control, presentation, requestId) {
 }
 
 /**
+ * Accept only an explicit, live mutation control that is not bound to another
+ * request. Request-scoped controls discovered by querySelectorAll are already
+ * authoritative and do not pass through this helper.
+ *
+ * @param {HTMLElement|null|undefined} control
+ * @param {number} requestId
+ * @returns {HTMLElement|null}
+ */
+function processingOriginControl(control, requestId) {
+  if (!control || typeof control.setAttribute !== 'function') return null;
+  if (
+    typeof document !== 'undefined'
+    && (
+      control === document.body
+      || (
+        document.documentElement
+        && control === document.documentElement
+      )
+    )
+  ) {
+    return null;
+  }
+  if (control.isConnected === false) return null;
+  const boundRequestId = control.getAttribute('data-pipeline-request-id');
+  if (boundRequestId && boundRequestId !== String(requestId)) return null;
+  return control;
+}
+
+/**
  * @param {string} message
  */
 function announceStatusMessage(message) {
@@ -469,12 +498,14 @@ function exposeRefreshRetry(control, refetch, presentation) {
   retry.textContent = 'Retry row refresh';
   retry.setAttribute('aria-label', `Retry row refresh. ${presentation.lockReason}`);
   retry.onclick = async () => {
+    const ownsFocus = document.activeElement === retry;
     retry.setAttribute('aria-busy', 'true');
     try {
       const refreshed = await refetch();
+      const stillOwnsFocus = ownsFocus && document.activeElement === retry;
       retry.remove();
       announceRefreshResult(refreshed, presentation);
-      control.focus();
+      if (stillOwnsFocus && control.isConnected) control.focus();
     } catch (_error) {
       retry.removeAttribute('aria-busy');
       announceProcessingLock(presentation);
@@ -506,27 +537,14 @@ export async function handleProcessingLockedConflict({
   if (!conflict) return false;
   const presentation = processingOwnerPresentation('processing', conflict.owner);
   if (!presentation) return false;
-  const activeCandidate = (
-    control
-    || (
-      typeof document !== 'undefined'
-      && document.activeElement
-      ? document.activeElement
-      : null
-    )
-  );
-  const active = (
-    activeCandidate
-    && typeof activeCandidate.setAttribute === 'function'
-  )
-    ? /** @type {HTMLElement} */ (activeCandidate)
-    : null;
+  const originatingControl = processingOriginControl(control, conflict.requestId);
   const focusTarget = typeof document !== 'undefined'
     ? document.activeElement
     : null;
   const scrollX = typeof window !== 'undefined' ? window.scrollX : 0;
   const scrollY = typeof window !== 'undefined' ? window.scrollY : 0;
-  let activeLocked = active;
+  let originLocked = false;
+  let retryAnchor = null;
 
   if (releaseId) {
     updatePipelineStatus(
@@ -542,21 +560,31 @@ export async function handleProcessingLockedConflict({
     );
     for (const candidate of controls) {
       if (typeof candidate.setAttribute === 'function') {
+        const candidateControl = /** @type {HTMLElement} */ (candidate);
+        const candidateWasFocused = candidateControl === focusTarget;
         const locked = lockProcessingControl(
-          /** @type {HTMLElement} */ (candidate),
+          candidateControl,
           presentation,
           conflict.requestId,
         );
-        if (candidate === active) activeLocked = locked;
+        if (!retryAnchor) retryAnchor = locked;
+        if (candidateControl === originatingControl) {
+          originLocked = true;
+          retryAnchor = locked;
+        }
+        if (candidateWasFocused && locked !== candidateControl) locked.focus();
       }
     }
   }
-  const activeRequestId = active
-    && typeof active.getAttribute === 'function'
-    ? active.getAttribute('data-pipeline-request-id')
-    : null;
-  if (active && activeRequestId !== String(conflict.requestId)) {
-    activeLocked = lockProcessingControl(active, presentation, conflict.requestId);
+  if (originatingControl && !originLocked) {
+    const originWasFocused = originatingControl === focusTarget;
+    const locked = lockProcessingControl(
+      originatingControl,
+      presentation,
+      conflict.requestId,
+    );
+    retryAnchor = locked;
+    if (originWasFocused && locked !== originatingControl) locked.focus();
   }
   announceProcessingLock(presentation);
 
@@ -567,18 +595,9 @@ export async function handleProcessingLockedConflict({
     const refreshed = await refresh();
     announceRefreshResult(refreshed, presentation);
   } catch (_error) {
-    if (activeLocked) exposeRefreshRetry(activeLocked, refresh, presentation);
+    if (retryAnchor) exposeRefreshRetry(retryAnchor, refresh, presentation);
   } finally {
     if (typeof window !== 'undefined') window.scrollTo(scrollX, scrollY);
-    if (
-      focusTarget
-      && typeof focusTarget.focus === 'function'
-      && focusTarget.isConnected
-    ) {
-      /** @type {HTMLElement} */ (focusTarget).focus();
-    } else if (activeLocked?.isConnected) {
-      activeLocked.focus();
-    }
   }
   return true;
 }

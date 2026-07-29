@@ -473,7 +473,7 @@ MULTILINE_PATCH_BASELINE: dict[str, int] = {
     'lib.wrong_match_cleanup_service.load_current_evidence_for_action': 1,
     'lib.wrong_match_delete_service.delete_wrong_match': 6,
     'lib.wrong_match_delete_service.delete_wrong_match_group': 4,
-    'scripts.import_preview_worker.measure_and_persist_candidate_evidence': 14,
+    'scripts.import_preview_worker.measure_and_persist_candidate_evidence': 13,
     'scripts.pipeline_cli.youtube._RedisYoutubeCache': 2,
     'scripts.pipeline_cli.youtube._build_youtube_client': 2,
     'scripts.pipeline_cli.youtube.resolve_youtube_album': 2,

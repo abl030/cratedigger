@@ -1855,6 +1855,17 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(data["outcome"], "not_found")
         self.assertIsNone(data["detail"])
 
+    def test_automation_recovery_action_not_found_is_typed(self):
+        status, data = self._post("/api/import-jobs/999999/recovery", {
+            "action": "retry",
+            "reason": "missing operation",
+        })
+
+        self.assertEqual(status, 404)
+        self.assertEqual(data["outcome"], "not_found")
+        self.assertIsNone(data["job"])
+        self.assertIsNone(data["retry_job"])
+
     def test_automation_recovery_actions_require_revision_and_close_result(
         self,
     ):

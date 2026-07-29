@@ -54,6 +54,9 @@ class _RedirectingApiHandler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def do_POST(self) -> None:
+        content_length = int(self.headers.get("Content-Length", "0"))
+        if content_length:
+            self.rfile.read(content_length)
         if self.path == "/initial":
             self.initial_methods.append("POST")
             self._json(self.redirect_status, b'{"error":"redirect"}',
@@ -181,6 +184,7 @@ class TestApiMutationCli(unittest.TestCase):
         conflict = {
             "error": "transition_conflict",
             "reason": "processing_locked",
+            "request_id": 42,
             "expected_status": "processing",
             "actual_status": "processing",
             "target_status": "deleted",
@@ -569,6 +573,7 @@ class TestApiMutationRealRouteRoundTrips(_FakeDbWebServerCase):
 
         self.assertEqual(code, 4)
         self.assertEqual(body["reason"], "processing_locked")
+        self.assertEqual(body["request_id"], 106)
         self.assertEqual(body["processing_owner"], {
             "job_id": owner.id,
             "status": owner.status,

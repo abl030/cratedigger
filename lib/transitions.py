@@ -161,6 +161,7 @@ def transition_conflict_payload(
     payload: dict[str, object] = {
         "error": "transition_conflict",
         "reason": conflict.kind.value,
+        "request_id": conflict.request_id,
         "expected_status": conflict.expected_status,
         "actual_status": conflict.actual_status,
         "target_status": conflict.target_status,

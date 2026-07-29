@@ -125,7 +125,9 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
     """Contract tests for frontend-consumed pipeline mutation routes."""
 
     ADD_REQUIRED_FIELDS: ClassVar = {"status", "id", "artist", "album", "tracks"}
-    EXISTS_REQUIRED_FIELDS: ClassVar = {"status", "id", "current_status"}
+    EXISTS_REQUIRED_FIELDS: ClassVar = {
+        "status", "id", "current_status", "processing_owner",
+    }
     UPDATE_REQUIRED_FIELDS: ClassVar = {"status", "id", "new_status"}
     UPGRADE_REQUIRED_FIELDS: ClassVar = {
         "status", "id", "min_bitrate", "search_filetype_override",
@@ -142,6 +144,14 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         "status", "request_id", "artist", "album", "message",
     }
     DELETE_REQUIRED_FIELDS: ClassVar = {"status", "id"}
+
+    def test_release_tracks_gracefully_narrows_decoded_mirror_json(self):
+        from web.routes.pipeline_mutations import _release_tracks
+
+        tracks = [{"title": "Track", "position": 1}]
+        self.assertIs(_release_tracks({"tracks": tracks})[0], tracks[0])
+        self.assertEqual(_release_tracks({"tracks": ["malformed"]}), [])
+        self.assertEqual(_release_tracks({"tracks": {"title": "wrong"}}), [])
 
     def setUp(self) -> None:
         super().setUp()
@@ -233,6 +243,29 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, self.EXISTS_REQUIRED_FIELDS,
                                 "pipeline add exists response")
+        self.assertIsNone(data["processing_owner"])
+
+    def test_pipeline_add_processing_exists_exposes_exact_recovery_owner(self):
+        self.db.seed_request(make_request_row(
+            id=504,
+            status="wanted",
+            mb_release_id="processing-add-exists",
+        ))
+        owner = handoff_automation_owner(self.db, 504)
+
+        status, data = self._post(
+            "/api/pipeline/add",
+            {"mb_release_id": "processing-add-exists"},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["status"], "exists")
+        self.assertEqual(data["current_status"], "processing")
+        self.assertEqual(data["processing_owner"], {
+            "job_id": owner.id,
+            "status": owner.status,
+            "preview_status": owner.preview_status,
+        })
 
     @patch("web.routes.pipeline_mutations.mb_api.get_release")
     def test_pipeline_add_mb_preflight_race_reports_authoritative_exists(
@@ -831,6 +864,7 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(status, 409)
         self.assertEqual(data["error"], "transition_conflict")
         self.assertEqual(data["reason"], RESULT_PROCESSING_LOCKED)
+        self.assertEqual(data["request_id"], 605)
         self.assertEqual(data["actual_status"], "processing")
         self.assertEqual(data["processing_owner"], {
             "job_id": owner.id,
@@ -1028,6 +1062,7 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(status, 409)
         self.assertEqual(data["error"], "transition_conflict")
         self.assertEqual(data["reason"], RESULT_PROCESSING_LOCKED)
+        self.assertEqual(data["request_id"], 1712)
         self.assertEqual(data["processing_owner"], {
             "job_id": owner.id,
             "status": owner.status,
@@ -1078,6 +1113,7 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(status, 409)
         self.assertEqual(data["error"], "transition_conflict")
         self.assertEqual(data["reason"], RESULT_PROCESSING_LOCKED)
+        self.assertEqual(data["request_id"], 1713)
         self.assertEqual(data["processing_owner"], {
             "job_id": owner.id,
             "status": owner.status,
@@ -1169,6 +1205,7 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(status, 409)
         self.assertEqual(data["error"], "transition_conflict")
         self.assertEqual(data["reason"], RESULT_PROCESSING_LOCKED)
+        self.assertEqual(data["request_id"], 103)
         self.assertEqual(data["processing_owner"], {
             "job_id": owner.id,
             "status": owner.status,
@@ -1348,6 +1385,7 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(status, 409)
         self.assertEqual(data["error"], "transition_conflict")
         self.assertEqual(data["reason"], RESULT_PROCESSING_LOCKED)
+        self.assertEqual(data["request_id"], 105)
         self.assertEqual(data["processing_owner"], {
             "job_id": owner.id,
             "status": owner.status,
@@ -2062,6 +2100,7 @@ class TestBanSourceBadRipExtensions(_FakeDbWebServerCase):
         self.assertEqual(status, 409)
         self.assertEqual(data["error"], "transition_conflict")
         self.assertEqual(data["reason"], "processing_locked")
+        self.assertEqual(data["request_id"], 1704)
         self.assertEqual(data["processing_owner"], {
             "job_id": owner.id,
             "status": owner.status,

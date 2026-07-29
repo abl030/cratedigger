@@ -281,13 +281,17 @@ END;
 $$;
 
 CREATE CONSTRAINT TRIGGER album_requests_complete_processing_owner
-    AFTER INSERT OR UPDATE OR DELETE ON album_requests
+    AFTER INSERT OR DELETE
+        OR UPDATE OF id, status, active_automation_import_job_id
+        ON album_requests
     DEFERRABLE INITIALLY DEFERRED
     FOR EACH ROW
     EXECUTE FUNCTION enforce_complete_processing_owner();
 
 CREATE CONSTRAINT TRIGGER import_jobs_complete_processing_owner
-    AFTER INSERT OR UPDATE OR DELETE ON import_jobs
+    AFTER INSERT OR DELETE
+        OR UPDATE OF id, request_id, job_type, status
+        ON import_jobs
     DEFERRABLE INITIALLY DEFERRED
     FOR EACH ROW
     EXECUTE FUNCTION enforce_complete_processing_owner();
@@ -402,19 +406,8 @@ END;
 $$;
 
 CREATE CONSTRAINT TRIGGER processing_cleanup_journal_exact_owner
-    AFTER INSERT OR UPDATE OR DELETE ON processing_cleanup_journal
-    DEFERRABLE INITIALLY DEFERRED
-    FOR EACH ROW
-    EXECUTE FUNCTION enforce_processing_cleanup_journal_owner();
-
-CREATE CONSTRAINT TRIGGER album_requests_cleanup_journal_exact_owner
-    AFTER INSERT OR UPDATE OR DELETE ON album_requests
-    DEFERRABLE INITIALLY DEFERRED
-    FOR EACH ROW
-    EXECUTE FUNCTION enforce_processing_cleanup_journal_owner();
-
-CREATE CONSTRAINT TRIGGER import_jobs_cleanup_journal_exact_owner
-    AFTER INSERT OR UPDATE OR DELETE ON import_jobs
+    AFTER INSERT OR DELETE OR UPDATE OF job_id, request_id
+        ON processing_cleanup_journal
     DEFERRABLE INITIALLY DEFERRED
     FOR EACH ROW
     EXECUTE FUNCTION enforce_processing_cleanup_journal_owner();

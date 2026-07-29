@@ -24,12 +24,16 @@ import psycopg2
 
 from lib.beets_db import AlbumInfo
 from lib.config import CratediggerConfig
+from lib.context import CratediggerContext
 from lib.grab_list import GrabListEntry
 from lib.import_execution import (
     CancellationToken,
     ExecutionLeaseSnapshot,
+    OwnerSessionIdentity,
     ProcessIdentity,
 )
+from lib.import_queue import ImportJob
+from lib.pipeline_db import PipelineDB
 from lib.quality import (
     IMPORT_RESULT_SENTINEL,
     QUALITY_UPGRADE_TIERS,
@@ -6384,18 +6388,15 @@ class TestU5PreviewWorkerLifecycleSlice(unittest.TestCase):
         self.assertEqual(persisted["source_path"], "/tmp/u5-vanished")
 
     def test_request_not_found_no_finalize_subcase(self):
-        """request_id=None subcase: the self-heal helper raises (the
-        audit row cannot carry a NULL request_id), the worker's
-        try/except absorbs it, and the job still lands failed from the
-        worker's own step 1. No exception bubbles up."""
-        from lib.import_preview import ImportPreviewResult
+        """An ownerless force job is invisible to the preview claim boundary.
+
+        The worker never receives the invalid job, so it cannot synthesize an
+        ownerless terminal audit or mutate the queued row.
+        """
         from lib.import_queue import IMPORT_JOB_FORCE, force_import_payload
-        from lib.quality import MeasurementFailure
-        from scripts import import_preview_worker
 
         db = FakePipelineDB()
-        # Enqueue a job with request_id=None (orphan).
-        db.enqueue_import_job(
+        orphan = db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=None,
             payload=force_import_payload(
@@ -6403,38 +6404,15 @@ class TestU5PreviewWorkerLifecycleSlice(unittest.TestCase):
                 failed_path="/tmp/gone",
             ),
         )
-        claimed = db.claim_next_import_preview_job(worker_id="preview")
-        assert claimed is not None
 
-        payload = MeasurementFailure(
-            reason="request_not_found",
-            detail="album_request 999 not found",
-            source_path="",
+        self.assertIsNone(
+            db.claim_next_import_preview_job(worker_id="preview"),
         )
-        preview_result = ImportPreviewResult(
-            mode="path",
-            verdict="measurement_failed",
-            decision="request_not_found",
-            reason="request_not_found",
-            detail=payload.detail,
-            request_id=None,
-            failure=payload,
-        )
-        with patch(
-            "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
-            return_value=preview_result,
-        ):
-            updated = import_preview_worker.process_claimed_preview_job(
-                cast(Any, db), claimed,
-            )
-
-        assert updated is not None
-        self.assertEqual(updated.preview_status, "measurement_failed")
-        self.assertEqual(updated.status, "failed")
-        # The audit row cannot be written without a request_id, so this is a
-        # job-only precondition failure rather than a terminal domain bundle.
-        outcomes = [log.outcome for log in db.download_logs]
-        self.assertNotIn("measurement_failed", outcomes)
+        current = db.get_import_job(orphan.id)
+        assert current is not None
+        self.assertEqual(current.status, "queued")
+        self.assertEqual(current.preview_status, "waiting")
+        self.assertEqual(db.download_logs, [])
 
 
 class TestU5PreviewEvidenceReadySlice(unittest.TestCase):
@@ -7321,264 +7299,523 @@ class TestProcessingOwnerPostgresFilesystemSlice(unittest.TestCase):
     """Real PostgreSQL and filesystem lifecycle from publish to terminal."""
 
     _MBID = "integration-processing-owner-terminal"
+    db: PipelineDB
 
     def setUp(self) -> None:
-        from lib.pipeline_db import PipelineDB
-
         self.db = PipelineDB(_u7_test_dsn())
         self.addCleanup(self.db.close)
-        self._delete_fixture()
-        self.addCleanup(self._delete_fixture)
+        self._truncate_fixture()
+        self.addCleanup(self._truncate_fixture)
 
-    def _delete_fixture(self) -> None:
-        conn = psycopg2.connect(_u7_test_dsn())
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE import_jobs
-                    SET status = 'failed'
-                    WHERE request_id IN (
-                        SELECT id
-                        FROM album_requests
-                        WHERE mb_release_id = %s
-                    )
-                      AND job_type = 'automation_import'
-                      AND status IN (
-                          'queued', 'running', 'recovery_required'
-                      )
-                    """,
-                    (self._MBID,),
-                )
-                cur.execute(
-                    """
-                    UPDATE album_requests
-                    SET status = 'wanted',
-                        active_automation_import_job_id = NULL
-                    WHERE mb_release_id = %s
-                    """,
-                    (self._MBID,),
-                )
-                cur.execute(
-                    "DELETE FROM album_requests WHERE mb_release_id = %s",
-                    (self._MBID,),
-                )
-            conn.commit()
-        except BaseException:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+    def _truncate_fixture(self) -> None:
+        """Keep the production queue entrypoint isolated from prior PG tests."""
+        self.db._execute("TRUNCATE album_requests CASCADE")
+        self.db.conn.commit()
 
-    def test_materialize_unlink_and_terminal_commit_share_exact_owner(self) -> None:
-        from album_source import DatabaseSource
-        from lib import transitions
-        from lib.context import CratediggerContext
-        from lib.dispatch import DispatchOutcome
-        from lib.dispatch.types import PostCommitCleanup
-        from lib.download_materialization import (
-            Materialized,
-            _materialize_processing_dir,
-        )
+    def _handoff_through_preview(
+        self,
+        root: str,
+    ) -> tuple[int, ImportJob, str, CratediggerConfig]:
+        """Drive the public handoff and preview entrypoint on one real owner."""
+        from lib.import_preview import ImportPreviewResult
         from lib.pipeline_db import PipelineDB
         from lib.processing_paths import (
             canonical_folder_for_row,
             processing_albums_dir,
         )
-        from lib.quality import ActiveDownloadFileState
+        from lib.quality import (
+            ActiveDownloadFileState,
+            AudioQualityMeasurement,
+        )
         from lib.quality_evidence import snapshot_audio_files
+        from scripts import import_preview_worker
+
+        slskd_root = os.path.join(root, "slskd")
+        processing_root = os.path.join(root, "processing")
+        staging_root = os.path.join(root, "Incoming")
+        os.makedirs(slskd_root, mode=0o700)
+        os.makedirs(os.path.join(processing_root, "albums"), mode=0o700)
+        os.chmod(processing_root, 0o700)
+        os.makedirs(staging_root, mode=0o700)
+        source_dir = os.path.join(slskd_root, "peer", "Album")
+        os.makedirs(source_dir)
+        source_path = os.path.join(source_dir, "01.flac")
+        with open(source_path, "wb") as handle:
+            handle.write(b"exact source bytes")
+
+        request_id = self.db.add_request(
+            mb_release_id=self._MBID,
+            artist_name="Integration Artist",
+            album_title="Integration Album",
+            year=2020,
+            source="request",
+        )
+        download_file = make_download_file(
+            filename="peer\\Album\\01.flac",
+            file_dir="peer\\Album",
+            username="peer",
+            size=os.path.getsize(source_path),
+            bitRate=None,
+        )
+        download_file.local_path = source_path
+        album = make_grab_list_entry(
+            files=[download_file],
+            filetype="flac",
+            artist="Integration Artist",
+            title="Integration Album",
+            mb_release_id=self._MBID,
+            db_request_id=request_id,
+            db_source="request",
+        )
+        canonical_path = canonical_folder_for_row(
+            album,
+            processing_albums_dir(processing_root),
+        )
+        enqueued_at = "2026-07-29T00:00:00+00:00"
+        state = ActiveDownloadState(
+            filetype="flac",
+            enqueued_at=enqueued_at,
+            files=[
+                ActiveDownloadFileState(
+                    username="peer",
+                    filename="peer\\Album\\01.flac",
+                    file_dir="peer\\Album",
+                    size=os.path.getsize(source_path),
+                    local_path=source_path,
+                ),
+            ],
+        )
+        self.assertTrue(self.db.set_downloading(
+            request_id,
+            state.to_json(),
+            expected_status="wanted",
+        ))
+        handoff = self.db.handoff_automation_import(
+            request_id=request_id,
+            expected_enqueued_at=enqueued_at,
+            canonical_path=canonical_path,
+            message="real integration owner handoff",
+        )
+        assert handoff.job is not None
+        job = handoff.job
+        cfg = CratediggerConfig(
+            beets_harness_path=_HARNESS,
+            beets_validation_enabled=True,
+            beets_staging_dir=staging_root,
+            slskd_download_dir=slskd_root,
+            processing_dir=processing_root,
+            pipeline_db_enabled=True,
+            pipeline_db_dsn=str(_u7_test_dsn()),
+        )
+        preview_lease = _preview_execution_lease(
+            f"integration-real-preview-{job.id}",
+        )
+        candidate = self.db.peek_next_import_preview_job(
+            execution_lease=preview_lease,
+        )
+        assert candidate is not None, (
+            self.db.get_request(request_id),
+            self.db.get_import_job(job.id),
+        )
+        self.assertEqual(candidate.id, job.id)
+
+        def measured_candidate(
+            preview_db: PipelineDB,
+            *,
+            path: str,
+            import_job_id: int,
+            cancellation_token: CancellationToken,
+            **_kwargs: object,
+        ) -> ImportPreviewResult:
+            cancellation_token.raise_if_cancelled()
+            self.assertEqual(
+                os.path.abspath(path),
+                os.path.abspath(canonical_path),
+            )
+            _seed_candidate_for_import_job(
+                preview_db,
+                import_job_id,
+                mb_release_id=self._MBID,
+                source_path=path,
+                files=snapshot_audio_files(path),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=900,
+                    avg_bitrate_kbps=900,
+                    median_bitrate_kbps=900,
+                    format="FLAC",
+                    spectral_grade="genuine",
+                ),
+                codec="flac",
+                container="flac",
+                storage_format="FLAC",
+            )
+            return ImportPreviewResult(
+                mode="path",
+                verdict="evidence_ready",
+                decision="import",
+                reason="import",
+                stage_chain=["preview:evidence_ready"],
+                request_id=request_id,
+                source_path=path,
+            )
+
+        previewed = import_preview_worker.run_once(
+            self.db,
+            worker_id="integration-real-preview",
+            heartbeat_interval=3600.0,
+            runtime_config=cfg,
+            stage_db_factory=PipelineDB,
+            heartbeat_db_factory=PipelineDB,
+            execution_lease_factory=lambda **_kwargs: preview_lease,
+            candidate_measurement_fn=measured_candidate,
+        )
+
+        assert previewed is not None, (
+            self.db.get_request(request_id),
+            self.db.get_import_job(job.id),
+        )
+        self.assertEqual(previewed.id, job.id)
+        self.assertEqual(previewed.preview_status, "evidence_ready")
+        self.assertFalse(os.path.exists(source_path))
+        self.assertEqual(os.listdir(canonical_path), ["01.flac"])
+        return request_id, job, canonical_path, cfg
+
+    @staticmethod
+    def _importer_lease(job_id: int) -> ExecutionLeaseSnapshot:
+        return ExecutionLeaseSnapshot(
+            host_boot_id="integration-boot",
+            invocation_id=f"integration-real-importer-{job_id}",
+            systemd_unit="cratedigger-importer.service",
+            worker=ProcessIdentity(7302, 73002),
+        )
+
+    def test_production_entrypoints_validate_cleanup_and_commit_exact_owner(
+        self,
+    ) -> None:
+        from album_source import DatabaseSource
+        from lib import transitions
+        from lib.dispatch import DispatchOutcome
+        from lib.dispatch.types import PostCommitCleanup
+        from lib.download_processing import CompletionResult, process_completed_album
+        from lib.pipeline_db.cleanup_journal import (
+            CleanupJournalConflict,
+            CleanupJournalIntent,
+        )
+        from lib.processing_cleanup import cleanup_manifest_hash
+        from lib.quality import ValidationResult
         from lib.terminal_outcomes import (
-            AutomationTerminalAuthority,
-            ImportJobTerminal,
-            ImportTerminalOutcome,
+            PendingImportTerminalOutcome,
             TerminalDownloadAudit,
         )
         from scripts import importer
 
         with tempfile.TemporaryDirectory() as root:
-            slskd_root = os.path.join(root, "slskd")
-            processing_root = os.path.join(root, "processing")
-            os.makedirs(slskd_root, mode=0o700)
-            os.makedirs(processing_root, mode=0o700)
-            os.makedirs(
-                os.path.join(processing_root, "albums"),
-                mode=0o700,
+            request_id, job, canonical_path, cfg = (
+                self._handoff_through_preview(root)
             )
-            source_dir = os.path.join(slskd_root, "peer", "Album")
-            os.makedirs(source_dir)
-            source_path = os.path.join(source_dir, "01.flac")
-            with open(source_path, "wb") as handle:
-                handle.write(b"exact source bytes")
+            importer_lease = self._importer_lease(job.id)
+            candidate = self.db.peek_next_import_job(
+                execution_lease=importer_lease,
+            )
+            assert candidate is not None
+            self.assertEqual(candidate.id, job.id)
 
-            request_id = self.db.add_request(
-                mb_release_id=self._MBID,
-                artist_name="Integration Artist",
-                album_title="Integration Album",
-                source="request",
-            )
-            download_file = make_download_file(
-                filename="peer\\Album\\01.flac",
-                file_dir="peer\\Album",
-                username="peer",
-                size=os.path.getsize(source_path),
-                bitRate=None,
-            )
-            download_file.local_path = source_path
-            album = make_grab_list_entry(
-                files=[download_file],
-                filetype="flac",
-                artist="Integration Artist",
-                title="Integration Album",
-                mb_release_id=self._MBID,
-                db_request_id=request_id,
-                db_source="request",
-            )
-            cfg = CratediggerConfig(
-                slskd_download_dir=slskd_root,
-                processing_dir=processing_root,
-                pipeline_db_enabled=True,
-                pipeline_db_dsn=str(_u7_test_dsn()),
-            )
+            # The same real PostgreSQL slice rejects an adjacent job id before
+            # any filesystem command can be journaled.
+            with self.assertRaises(CleanupJournalConflict) as rejected:
+                self.db.create_processing_cleanup_journal(
+                    request_id=request_id,
+                    job_id=job.id + 1,
+                    intent=CleanupJournalIntent(
+                        action="no_op",
+                        source_path=canonical_path,
+                        source_manifest=(),
+                        source_manifest_hash=cleanup_manifest_hash(()),
+                    ),
+                )
+            self.assertEqual(rejected.exception.kind, "owner_mismatch")
+
+            validated_paths: list[str] = []
             source = DatabaseSource(
                 str(_u7_test_dsn()),
                 musicbrainz_ws2_base=cfg.musicbrainz_api_base,
                 discogs_api_base=cfg.discogs_api_base,
-                borrowed_db=cast(PipelineDB, self.db),
+                borrowed_db=self.db,
             )
-            ctx = CratediggerContext(
+            runtime_context = CratediggerContext(
                 cfg=cfg,
                 slskd=FakeSlskdAPI(),
                 pipeline_db_source=source,
             )
-            canonical_path = canonical_folder_for_row(
-                album,
-                processing_albums_dir(processing_root),
-            )
-            enqueued_at = "2026-07-29T00:00:00+00:00"
-            state = ActiveDownloadState(
-                filetype="flac",
-                enqueued_at=enqueued_at,
-                files=[
-                    ActiveDownloadFileState(
-                        username="peer",
-                        filename="peer\\Album\\01.flac",
-                        file_dir="peer\\Album",
-                        size=os.path.getsize(source_path),
-                        local_path=source_path,
-                    ),
-                ],
-            )
-            self.assertTrue(
-                self.db.set_downloading(
-                    request_id,
-                    state.to_json(),
-                    expected_status="wanted",
-                )
-            )
-            handoff = self.db.handoff_automation_import(
-                request_id=request_id,
-                expected_enqueued_at=enqueued_at,
-                canonical_path=canonical_path,
-                message="real integration owner handoff",
-            )
-            assert handoff.job is not None
-            job = handoff.job
 
-            staged = StagedAlbum.from_entry(
-                album,
-                default_path=canonical_path,
-            )
-            materialized = _materialize_processing_dir(album, staged, ctx)
-
-            self.assertIsInstance(materialized, Materialized)
-            self.assertFalse(os.path.exists(source_path))
-            self.assertEqual(os.listdir(canonical_path), ["01.flac"])
-
-            preview_lease = _preview_execution_lease(
-                f"integration-real-preview-{job.id}"
-            )
-            self.assertIsNotNone(
-                self.db._claim_automation_import_preview_job(
-                    job.id,
-                    request_id=request_id,
-                    worker_id="integration-real-preview",
-                    execution_lease=preview_lease,
-                )
-            )
-            _seed_candidate_for_import_job(
-                self.db,
-                job.id,
-                mb_release_id=self._MBID,
-                source_path=canonical_path,
-                files=snapshot_audio_files(canonical_path),
-                expected_execution_lease=preview_lease,
-            )
-            self.db.mark_import_job_preview_importable(
-                job.id,
-                preview_result={"ready": True},
-                expected_execution_lease=preview_lease,
-            )
-            importer_lease = ExecutionLeaseSnapshot(
-                host_boot_id="integration-boot",
-                invocation_id=f"integration-real-importer-{job.id}",
-                systemd_unit="cratedigger-importer.service",
-                worker=ProcessIdentity(7302, 73002),
-            )
-            claimed = self.db._claim_automation_import_job(
-                job.id,
-                request_id=request_id,
-                worker_id="integration-real-importer",
-                execution_lease=importer_lease,
-            )
-            assert claimed is not None
-            token = CancellationToken()
-            with self.db._pin_owner_session(token) as owner_session:
-                cleanup_receipt = (
-                    importer._complete_automation_processing_cleanup(
-                        self.db,
-                        claimed,
-                        DispatchOutcome(
-                            success=True,
-                            message="integration import complete",
-                            post_commit_cleanup=PostCommitCleanup(
-                                staged_path=canonical_path,
-                            ),
+            def validated_handler(
+                album_data: GrabListEntry,
+                bv_result: ValidationResult,
+                staged_album: StagedAlbum,
+                ctx: CratediggerContext,
+                **_kwargs: object,
+            ) -> DispatchOutcome:
+                del album_data, ctx
+                self.assertTrue(bv_result.valid)
+                validated_paths.append(staged_album.current_path)
+                return DispatchOutcome(
+                    success=True,
+                    message="integration import complete",
+                    terminal_outcome=PendingImportTerminalOutcome(
+                        request_id=request_id,
+                        import_job_id=job.id,
+                        initial_transition=transitions.RequestTransition.to_imported(
+                            from_status="processing",
                         ),
-                        execution_lease=importer_lease,
-                        cancellation_token=token,
-                        owner_session_identity=owner_session,
-                    )
-                )
-            result = self.db.persist_import_terminal_outcome(
-                ImportTerminalOutcome(
-                    request_id=request_id,
-                    import_job_id=job.id,
-                    initial_transition=transitions.RequestTransition.to_imported(
-                        from_status="processing",
-                        verified_lossless=True,
+                        audit=TerminalDownloadAudit(
+                            outcome="success",
+                            download_path=canonical_path,
+                            valid=True,
+                        ),
                     ),
-                    audit=TerminalDownloadAudit(outcome="success"),
-                    job=ImportJobTerminal(
-                        status="completed",
-                        result={"success": True},
-                        message="integration import complete",
-                    ),
-                    successful_terminal_acceptance=True,
-                    automation=AutomationTerminalAuthority(
-                        expected_job_status="running",
-                        expected_preview_status=claimed.preview_status,
-                        expected_execution_lease=importer_lease,
-                        cleanup_receipt=cleanup_receipt,
+                    post_commit_cleanup=PostCommitCleanup(
+                        staged_path=canonical_path,
                     ),
                 )
+
+            def validated_process(
+                album_data: GrabListEntry,
+                ctx: CratediggerContext,
+                *,
+                import_job_id: int,
+                cancellation_token: CancellationToken | None = None,
+                execution_lease: ExecutionLeaseSnapshot | None = None,
+                owner_session_identity: OwnerSessionIdentity | None = None,
+                **_kwargs: object,
+            ) -> CompletionResult:
+                assert (
+                    cancellation_token is not None
+                    and execution_lease is not None
+                    and owner_session_identity is not None
+                )
+                return process_completed_album(
+                    album_data,
+                    ctx,
+                    import_job_id=import_job_id,
+                    handle_valid_fn=validated_handler,
+                    cancellation_token=cancellation_token,
+                    execution_lease=execution_lease,
+                    owner_session_identity=owner_session_identity,
+                )
+
+            def execute_validated(
+                stage_db: PipelineDB,
+                claimed_job: ImportJob,
+                *,
+                ctx: object | None = None,
+                execution_lease: ExecutionLeaseSnapshot | None = None,
+                cancellation_token: CancellationToken | None = None,
+                owner_session_identity: OwnerSessionIdentity | None = None,
+            ) -> DispatchOutcome:
+                assert (
+                    execution_lease is not None
+                    and cancellation_token is not None
+                    and owner_session_identity is not None
+                )
+                del ctx
+                return importer.execute_automation_import_job(
+                    stage_db,
+                    claimed_job,
+                    ctx=runtime_context,
+                    process_album_fn=validated_process,
+                    execution_lease=execution_lease,
+                    cancellation_token=cancellation_token,
+                    owner_session_identity=owner_session_identity,
+                )
+
+            with (
+                patch(
+                    "lib.beets.beets_validate",
+                    return_value=ValidationResult(
+                        valid=True,
+                        distance=0.01,
+                        scenario="strong_match",
+                    ),
+                ),
+                patch("lib.config.read_runtime_config", return_value=cfg),
+            ):
+                completed = importer.run_once(
+                    self.db,
+                    worker_id="integration-real-importer",
+                    ctx=runtime_context,
+                    execution_lease_factory=lambda **_kwargs: importer_lease,
+                    execute_fn=execute_validated,
+                )
+
+            assert completed is not None
+            request = self.db.get_request(request_id)
+            journal = self.db.get_processing_cleanup_journal(
+                request_id=request_id,
+                job_id=job.id,
+            )
+            assert request is not None, (
+                completed,
+                request,
+                self.db.get_import_job(job.id),
+                validated_paths,
+            )
+            self.assertEqual(validated_paths, [canonical_path])
+            self.assertEqual(request["status"], "imported")
+            self.assertIsNone(request["active_automation_import_job_id"])
+            self.assertEqual(completed.status, "completed")
+            self.assertIsNone(journal)
+            assert completed.result is not None
+            cleanup = completed.result["processing_cleanup"]
+            self.assertIsInstance(cleanup, dict)
+            assert isinstance(cleanup, dict)
+            self.assertEqual(cleanup["action"], "remove_source_tree")
+            self.assertEqual(cleanup["outcome"], "completed")
+            self.assertFalse(os.path.exists(canonical_path))
+
+    def test_killed_claim_session_cancels_injected_callback_and_recovers(
+        self,
+    ) -> None:
+        """Exercise the claim/session fence without claiming child coverage.
+
+        This slice deliberately replaces the dispatch callback and kills the
+        pinned PostgreSQL backend before that callback can record an external
+        effect.  The real ``dispatch_import_core`` -> ``run_import_one`` child
+        group proof lives in
+        ``TestImportJobQueueAPI.test_force_backend_loss_terminates_real_child_group_before_recovery``.
+        """
+        from lib.import_execution import (
+            ExecutionCancelled,
+            ExecutionLivenessEvidence,
+        )
+        from lib.pipeline_db import PipelineDB
+        from scripts import importer
+
+        class ChangedBootProbe:
+            def observe(
+                self,
+                lease: ExecutionLeaseSnapshot,
+            ) -> ExecutionLivenessEvidence:
+                return ExecutionLivenessEvidence(
+                    lease=lease,
+                    current_host_boot_id="boot-after-backend-loss",
+                    boot_error=None,
+                    worker=None,
+                    beets=None,
+                    invocation=None,
+                    cgroup=None,
+                )
+
+        with tempfile.TemporaryDirectory() as root:
+            request_id, job, canonical_path, _cfg = (
+                self._handoff_through_preview(root)
+            )
+            importer_lease = self._importer_lease(job.id)
+            external_effects: list[str] = []
+
+            def kill_before_external_effect(
+                stage_db: PipelineDB,
+                _claimed_job: object,
+                *,
+                cancellation_token: CancellationToken,
+                owner_session_identity: OwnerSessionIdentity,
+                **_kwargs: object,
+            ) -> Never:
+                killer = PipelineDB(_u7_test_dsn())
+                try:
+                    killed = killer._execute(
+                        "SELECT pg_terminate_backend(%s) AS killed",
+                        (owner_session_identity.backend_pid,),
+                    ).fetchone()
+                    self.assertTrue(killed["killed"])
+                finally:
+                    killer.close()
+                probe = stage_db._probe_owner_session(
+                    owner_session_identity,
+                )
+                self.assertFalse(probe.live)
+                cancellation_token.raise_if_cancelled()
+                external_effects.append("beets")
+                raise AssertionError("cancelled execution reached Beets")
+
+            with self.assertRaises(ExecutionCancelled):
+                importer.run_once(
+                    self.db,
+                    worker_id="integration-killed-importer",
+                    execution_lease_factory=lambda **_kwargs: importer_lease,
+                    execute_fn=kill_before_external_effect,
+                )
+
+            running = self.db.get_import_job(job.id)
+            request = self.db.get_request(request_id)
+            assert running is not None and request is not None
+            self.assertEqual(external_effects, [])
+            self.assertEqual(running.status, "running")
+            self.assertEqual(request["status"], "processing")
+            self.assertEqual(
+                request["active_automation_import_job_id"],
+                job.id,
+            )
+            self.assertTrue(os.path.isdir(canonical_path))
+
+            recovered = importer.recover_abandoned_running_jobs(
+                self.db,
+                liveness_probe=ChangedBootProbe(),
+            )
+            current = self.db.get_import_job(job.id)
+            request = self.db.get_request(request_id)
+            assert current is not None and request is not None
+            self.assertEqual([item.id for item in recovered], [job.id])
+            self.assertEqual(current.status, "queued")
+            self.assertEqual(current.preview_status, "evidence_ready")
+            self.assertIsNone(current.execution_invocation_id)
+            self.assertEqual(request["status"], "processing")
+            self.assertEqual(
+                request["active_automation_import_job_id"],
+                job.id,
+            )
+            self.assertTrue(os.path.isdir(canonical_path))
+
+    def test_known_bad_importer_without_terminal_bundle_fails_closed(self) -> None:
+        from lib.dispatch import DispatchOutcome
+        from scripts import importer
+
+        with tempfile.TemporaryDirectory() as root:
+            request_id, job, canonical_path, _cfg = (
+                self._handoff_through_preview(root)
+            )
+            importer_lease = self._importer_lease(job.id)
+            mutant_calls: list[int] = []
+
+            def mutant_without_terminal(
+                _stage_db: object,
+                claimed_job: ImportJob,
+                **_kwargs: object,
+            ) -> DispatchOutcome:
+                mutant_calls.append(claimed_job.id)
+                return DispatchOutcome(
+                    success=True,
+                    message="known-bad importer skipped terminal bundle",
+                )
+
+            result = importer.run_once(
+                self.db,
+                worker_id="integration-known-bad-importer",
+                execution_lease_factory=lambda **_kwargs: importer_lease,
+                execute_fn=mutant_without_terminal,
             )
 
             request = self.db.get_request(request_id)
-            assert request is not None
-            self.assertEqual(request["status"], "imported")
-            self.assertIsNone(request["active_automation_import_job_id"])
-            self.assertEqual(result.job.status, "completed")
-            self.assertFalse(os.path.exists(canonical_path))
+            current = self.db.get_import_job(job.id)
+            assert request is not None and current is not None
+            self.assertIsNone(result)
+            self.assertEqual(mutant_calls, [job.id])
+            self.assertEqual(current.status, "running")
+            self.assertEqual(request["status"], "processing")
+            self.assertEqual(
+                request["active_automation_import_job_id"],
+                job.id,
+            )
+            self.assertTrue(os.path.isdir(canonical_path))
 
 
 class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):

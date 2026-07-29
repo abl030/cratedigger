@@ -11,10 +11,10 @@ import urllib.error
 from collections.abc import Mapping
 from typing import Literal, Self
 
-import msgspec
 from pydantic import BaseModel, Field, model_validator
 
 from lib.config import read_runtime_config
+from lib.json_narrow import is_object_list, is_str_object_dict
 from lib.pipeline_db import PipelineDB
 from lib.pipeline_db.rows import AlbumRequestRow
 from lib.request_creation_service import (
@@ -73,17 +73,18 @@ def _release_tracks(release: dict[str, object]) -> list[dict[str, object]]:
     back to the concrete shape ``set_tracks`` and the response payloads
     consume.
 
-    Graceful narrowing over the external mirror-JSON boundary:
-    ``msgspec.convert`` validates the list-of-objects SHAPE only (the
-    target ``dict[str, object]`` accepts any per-track field values), so
-    this behaves the same as the untyped ``.get(...)`` it replaces for
-    any real mirror response — it only raises if ``tracks`` is present
-    but isn't structurally a list of string-keyed objects.
+    Gracefully narrow the already-decoded external mirror JSON through the
+    shared TypeGuard. A malformed member makes the field read as absent.
     """
     tracks = release.get("tracks")
-    if not isinstance(tracks, list):
+    if not is_object_list(tracks):
         return []
-    return msgspec.convert(tracks, type=list[dict[str, object]])
+    result: list[dict[str, object]] = []
+    for track in tracks:
+        if not is_str_object_dict(track):
+            return []
+        result.append(track)
+    return result
 
 
 def _release_str(release: dict[str, object], key: str, default: str = "") -> str:
@@ -191,6 +192,7 @@ def _add_exists_response(h: RouteHandler, db: PipelineDB,
         "status": "exists",
         "id": existing["id"],
         "current_status": existing["status"],
+        "processing_owner": existing.get("processing_owner"),
     }
     if existing["status"] == "replaced":
         descendant = db.get_request_by_replaces_request_id(existing["id"])

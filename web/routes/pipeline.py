@@ -502,22 +502,7 @@ def post_import_job_recovery(
         h._error(str(exc), 400)
         return
 
-    payload: dict[str, object] = {
-        "outcome": result.outcome,
-        "message": result.message,
-        "job": (
-            _serialize_import_job(result.job)
-            if result.job is not None else None
-        ),
-        "retry_job": (
-            _serialize_import_job(result.retry_job)
-            if result.retry_job is not None else None
-        ),
-        "detail": (
-            msgspec.to_builtins(result.detail)
-            if result.detail is not None else None
-        ),
-    }
+    payload = result.to_dict()
     if result.outcome == "not_found":
         h._json(payload, status=404)
         return

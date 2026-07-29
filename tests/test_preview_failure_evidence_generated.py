@@ -157,7 +157,7 @@ def preview_failure_worlds(draw: st.DrawFn) -> PreviewFailureWorld:
         job_type=job_type,
         owner=draw(st.sampled_from(
             ("exact", "missing_mbid")
-            if job_type == IMPORT_JOB_AUTOMATION
+            if job_type in (IMPORT_JOB_AUTOMATION, IMPORT_JOB_FORCE)
             else ("exact", "missing_mbid", "orphan")
         )),
         library=draw(st.sampled_from(("installed", "absent", "unreadable"))),

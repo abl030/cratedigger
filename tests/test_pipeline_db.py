@@ -29,7 +29,19 @@ import psycopg2.extras
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401 — sets TEST_DB_DSN env var
 
-from lib.import_queue import AutomationHandoffResult
+from lib.dispatch import DispatchOutcome
+from lib.import_execution import (
+    CancellationToken,
+    ExecutionCancelled,
+    ExecutionLeaseSnapshot,
+    OwnerSessionIdentity,
+)
+from lib.import_queue import (
+    IMPORT_JOB_FORCE,
+    AutomationHandoffResult,
+    ImportJob,
+    force_import_payload,
+)
 from lib.json_narrow import json_dict
 from lib.pipeline_db import (
     JELLYFIN_PIN_STATUSES,
@@ -43,6 +55,7 @@ from lib.pipeline_db import (
 )
 from lib.pipeline_db._shared import REQUEST_METADATA_RESERVED_FIELDS
 from lib.quality import (
+    ActiveDownloadState,
     AlbumQualityEvidenceFile,
     AudioQualityMeasurement,
     AudioToolDiagnostic,
@@ -98,6 +111,12 @@ def make_db():
         db._execute(f"TRUNCATE {table} CASCADE")
     db.conn.commit()
     return db
+
+
+def _unavailable_execution_lease(
+    **_kwargs: object,
+) -> ExecutionLeaseSnapshot:
+    raise ValueError("test run is outside systemd")
 
 
 @requires_postgres
@@ -1409,6 +1428,429 @@ class TestImportJobQueueAPI(unittest.TestCase):
         finally:
             other.close()
 
+    def _seed_downloading_force_job(
+        self,
+        *,
+        suffix: str,
+        importable: bool,
+        source_path: str | None = None,
+    ) -> tuple[int, ImportJob, str]:
+        request_id = self.db.add_request(
+            mb_release_id=f"force-owner-{suffix}",
+            artist_name="Force Owner",
+            album_title=suffix,
+            source="request",
+        )
+        witness = f"2026-07-29T12:00:{request_id % 60:02d}+00:00"
+        exact_source_path = source_path or f"/tmp/force-owner-{suffix}"
+        state = ActiveDownloadState(
+            filetype="flac",
+            enqueued_at=witness,
+            current_path=exact_source_path,
+            files=[],
+        )
+        self.assertTrue(self.db.set_downloading(
+            request_id,
+            state.to_json(),
+            expected_status="wanted",
+        ))
+        job = self.db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=request_id,
+            dedupe_key=f"force-owner:{suffix}",
+            payload=force_import_payload(
+                download_log_id=request_id,
+                failed_path=exact_source_path,
+            ),
+        )
+        if importable:
+            ready = self.db.mark_import_job_preview_importable(
+                job.id,
+                preview_result={"verdict": "evidence_ready"},
+            )
+            assert ready is not None
+            job = ready
+        return request_id, job, witness
+
+    def test_force_workers_retain_import_lock_through_effects(self) -> None:
+        """Real sessions serialize handoff behind preview and import effects."""
+        from lib.pipeline_db import PipelineDB
+        from scripts import import_preview_worker, importer
+
+        for lane in ("preview", "import"):
+            with self.subTest(lane=lane):
+                request_id, _job, witness = (
+                    self._seed_downloading_force_job(
+                        suffix=f"retained-{lane}",
+                        importable=lane == "import",
+                    )
+                )
+                effect_started = threading.Event()
+                release_effect = threading.Event()
+                errors: list[BaseException] = []
+
+                def preview_effect(
+                    _stage_db: object,
+                    claimed: ImportJob,
+                    _effect_started: threading.Event = effect_started,
+                    _release_effect: threading.Event = release_effect,
+                    **_kwargs: object,
+                ) -> ImportJob:
+                    _effect_started.set()
+                    self.assertTrue(_release_effect.wait(timeout=5))
+                    return claimed
+
+                def import_effect(
+                    _stage_db: object,
+                    _claimed: ImportJob,
+                    *,
+                    ctx: object | None = None,
+                    cancellation_token: CancellationToken,
+                    owner_session_identity: OwnerSessionIdentity,
+                    _effect_started: threading.Event = effect_started,
+                    _release_effect: threading.Event = release_effect,
+                ) -> DispatchOutcome:
+                    del ctx, cancellation_token, owner_session_identity
+                    _effect_started.set()
+                    self.assertTrue(_release_effect.wait(timeout=5))
+                    return DispatchOutcome(False, "lock overlap proof")
+
+                def run_force(
+                    _lane: str = lane,
+                    _errors: list[BaseException] = errors,
+                ) -> None:
+                    try:
+                        if _lane == "preview":
+                            import_preview_worker.run_once(
+                                self.db,
+                                worker_id=f"real-force-{_lane}",
+                                execution_lease_factory=(
+                                    _unavailable_execution_lease
+                                ),
+                                process_fn=preview_effect,
+                            )
+                        else:
+                            importer.run_once(
+                                self.db,
+                                worker_id=f"real-force-{_lane}",
+                                execution_lease_factory=(
+                                    _unavailable_execution_lease
+                                ),
+                                execute_fn=import_effect,
+                            )
+                    except BaseException as exc:  # noqa: BLE001 - thread handoff
+                        _errors.append(exc)
+
+                worker = threading.Thread(target=run_force)
+                worker.start()
+                self.assertTrue(effect_started.wait(timeout=5))
+                contender = PipelineDB(TEST_DSN)
+                try:
+                    blocked = contender.handoff_automation_import(
+                        request_id=request_id,
+                        expected_enqueued_at=witness,
+                        canonical_path=f"/tmp/processing-{lane}",
+                        message="must wait for force owner",
+                    )
+                    self.assertEqual(blocked.outcome, "lock_unavailable")
+                    request = contender.get_request(request_id)
+                    assert request is not None
+                    self.assertEqual(request["status"], "downloading")
+
+                    release_effect.set()
+                    worker.join(timeout=5)
+                    self.assertFalse(worker.is_alive())
+                    self.assertEqual(errors, [])
+
+                    committed = contender.handoff_automation_import(
+                        request_id=request_id,
+                        expected_enqueued_at=witness,
+                        canonical_path=f"/tmp/processing-{lane}",
+                        message="force owner exited",
+                    )
+                    self.assertEqual(committed.outcome, "committed")
+                finally:
+                    release_effect.set()
+                    worker.join(timeout=5)
+                    contender.close()
+
+    def test_known_bad_force_owner_released_before_effect_is_detected(
+        self,
+    ) -> None:
+        """Qualify the lock-overlap proof against the historical mutant."""
+        from lib.pipeline_db import (
+            ADVISORY_LOCK_NAMESPACE_IMPORT,
+            PipelineDB,
+        )
+
+        for lane in ("preview", "import"):
+            with self.subTest(lane=lane):
+                request_id, candidate, witness = (
+                    self._seed_downloading_force_job(
+                        suffix=f"released-{lane}",
+                        importable=lane == "import",
+                    )
+                )
+                effect_started = threading.Event()
+                release_effect = threading.Event()
+
+                def released_owner_mutant(
+                    _lane: str = lane,
+                    _request_id: int = request_id,
+                    _candidate: ImportJob = candidate,
+                    _effect_started: threading.Event = effect_started,
+                    _release_effect: threading.Event = release_effect,
+                ) -> None:
+                    stage = PipelineDB(TEST_DSN)
+                    token = CancellationToken()
+                    try:
+                        with stage._pin_owner_session(
+                            token,
+                        ), stage.advisory_lock(
+                            ADVISORY_LOCK_NAMESPACE_IMPORT,
+                            _request_id,
+                        ) as acquired:
+                            self.assertTrue(acquired)
+                            if _lane == "preview":
+                                claimed = (
+                                    stage
+                                    .claim_force_import_preview_job_under_lock(
+                                        _candidate.id,
+                                        request_id=_request_id,
+                                        worker_id="known-bad-preview",
+                                    )
+                                )
+                            else:
+                                claimed = (
+                                    stage.claim_force_import_job_under_lock(
+                                        _candidate.id,
+                                        request_id=_request_id,
+                                        worker_id="known-bad-import",
+                                    )
+                                )
+                            self.assertIsNotNone(claimed)
+                        # Known-bad shape: effect begins after IMPORT exits.
+                        _effect_started.set()
+                        self.assertTrue(_release_effect.wait(timeout=5))
+                    finally:
+                        stage.close()
+
+                worker = threading.Thread(target=released_owner_mutant)
+                worker.start()
+                self.assertTrue(effect_started.wait(timeout=5))
+                contender = PipelineDB(TEST_DSN)
+                try:
+                    committed = contender.handoff_automation_import(
+                        request_id=request_id,
+                        expected_enqueued_at=witness,
+                        canonical_path=f"/tmp/mutant-processing-{lane}",
+                        message="known bad overlaps force effect",
+                    )
+                    self.assertEqual(committed.outcome, "committed")
+                    self.assertTrue(worker.is_alive())
+                finally:
+                    release_effect.set()
+                    worker.join(timeout=5)
+                    contender.close()
+
+    def test_force_backend_loss_terminates_real_child_group_before_recovery(
+        self,
+    ) -> None:
+        """The full force lane reaps real import_one.py before recovery."""
+        from beets import library as beets_library
+
+        from lib.config import CratediggerConfig
+        from lib.dispatch import dispatch_import_from_db
+        from lib.dispatch.subprocess_runner import run_import_one
+        from lib.pipeline_db import PipelineDB
+        from lib.quality_evidence import snapshot_audio_files
+        from scripts import importer
+
+        errors: list[BaseException] = []
+        backend_pid: list[int] = []
+        later_effects: list[str] = []
+        with tempfile.TemporaryDirectory() as root:
+            raw_source = Path(root, "operator-source")
+            raw_source.mkdir()
+            Path(raw_source, "01.mp3").write_bytes(b"owned source")
+            request_id, job, _witness = self._seed_downloading_force_job(
+                suffix="backend-kill",
+                importable=False,
+                source_path=str(raw_source),
+            )
+            self.db.set_tracks(request_id, [{
+                "disc_number": 1,
+                "track_number": 1,
+                "title": "Controlled child",
+                "length_seconds": 60,
+                "track_artist": "Force Owner",
+            }])
+
+            processing_dir = Path(root, "processing")
+            action_path = (
+                processing_dir / "albums" / f"force-action-{job.id}"
+            )
+            action_path.mkdir(parents=True)
+            Path(action_path, "01.mp3").write_bytes(b"owned source")
+            evidence = make_album_quality_evidence(
+                mb_release_id="force-owner-backend-kill",
+                source_path=str(action_path),
+                files=snapshot_audio_files(str(action_path)),
+            )
+            self.db.upsert_album_quality_evidence(evidence)
+            persisted = self.db.find_album_quality_evidence(
+                mb_release_id=evidence.mb_release_id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert persisted is not None and persisted.id is not None
+            self.db.set_import_job_candidate_evidence(job.id, persisted.id)
+            ready = self.db.mark_import_job_preview_importable(
+                job.id,
+                preview_result={
+                    "verdict": "evidence_ready",
+                    "action_path": str(action_path),
+                },
+            )
+            assert ready is not None
+            job = ready
+
+            library_root = Path(root, "library")
+            library_root.mkdir()
+            library_db = Path(root, "beets-library.db")
+            beets = beets_library.Library(
+                str(library_db),
+                str(library_root),
+            )
+            beets._close()
+            harness_dir = Path(root, "harness")
+            harness_dir.mkdir()
+            harness_path = Path(harness_dir, "run_beets_harness.sh")
+            harness_path.write_text("# controlled sibling lookup\n")
+            leader_file = Path(root, "leader.pid")
+            descendant_file = Path(root, "descendant.pid")
+            forbidden_effect = Path(root, "must-not-exist")
+            child_program = (
+                "import os,time,pathlib\n"
+                f"pathlib.Path({str(leader_file)!r}).write_text(str(os.getpid()))\n"
+                "child=os.fork()\n"
+                "if child == 0:\n"
+                "    time.sleep(60)\n"
+                "    raise SystemExit(0)\n"
+                f"pathlib.Path({str(descendant_file)!r}).write_text(str(child))\n"
+                "time.sleep(60)\n"
+            )
+            Path(harness_dir, "import_one.py").write_text(child_program)
+            cfg = CratediggerConfig(
+                processing_dir=str(processing_dir),
+                beets_harness_path=str(harness_path),
+                beets_library_db=str(library_db),
+                beets_directory=str(library_root),
+            )
+
+            def tracked_real_import_one(**kwargs: object):
+                result = run_import_one(**kwargs)  # pyright: ignore[reportArgumentType]
+                later_effects.append("after-child")
+                forbidden_effect.write_text("must not execute")
+                return result
+
+            def full_force_dispatch(
+                stage_db: PipelineDB,
+                **kwargs: object,
+            ) -> DispatchOutcome:
+                return dispatch_import_from_db(
+                    stage_db,
+                    run_import_fn=tracked_real_import_one,
+                    **kwargs,  # pyright: ignore[reportArgumentType]
+                )
+
+            def execute_through_production(
+                stage_db: PipelineDB,
+                claimed: ImportJob,
+                *,
+                ctx: object | None = None,
+                cancellation_token: CancellationToken,
+                owner_session_identity: OwnerSessionIdentity,
+            ) -> DispatchOutcome:
+                backend_pid.append(owner_session_identity.backend_pid)
+                return importer.execute_import_job(
+                    stage_db,
+                    claimed,
+                    ctx=ctx,
+                    cancellation_token=cancellation_token,
+                    owner_session_identity=owner_session_identity,
+                    force_dispatch_fn=full_force_dispatch,
+                    force_runtime_config=cfg,
+                )
+
+            def run_force() -> None:
+                try:
+                    importer.run_once(
+                        self.db,
+                        worker_id="force-backend-kill",
+                        execution_lease_factory=_unavailable_execution_lease,
+                        execute_fn=execute_through_production,
+                    )
+                except BaseException as exc:  # noqa: BLE001 - thread handoff
+                    errors.append(exc)
+
+            worker = threading.Thread(target=run_force)
+            worker.start()
+            deadline = time.monotonic() + 10
+            while (
+                (not leader_file.exists() or not descendant_file.exists())
+                and time.monotonic() < deadline
+            ):
+                threading.Event().wait(0.01)
+            self.assertTrue(leader_file.exists())
+            self.assertTrue(descendant_file.exists())
+            stage_pid_cur = PipelineDB(TEST_DSN)
+            try:
+                self.assertEqual(len(backend_pid), 1)
+                killed = stage_pid_cur._execute(
+                    "SELECT pg_terminate_backend(%s) AS killed",
+                    (backend_pid[0],),
+                ).fetchone()
+                self.assertTrue(killed["killed"])
+            finally:
+                stage_pid_cur.close()
+
+            worker.join(timeout=10)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(len(errors), 1)
+            self.assertIsInstance(errors[0], ExecutionCancelled)
+            self.assertEqual(later_effects, [])
+            self.assertFalse(forbidden_effect.exists())
+            leader_pid = int(leader_file.read_text())
+            with self.assertRaises(ProcessLookupError):
+                os.killpg(leader_pid, 0)
+            descendant_pid = int(descendant_file.read_text())
+            with self.assertRaises(ProcessLookupError):
+                os.kill(descendant_pid, 0)
+
+            running = self.db.get_import_job(job.id)
+            request = self.db.get_request(request_id)
+            assert running is not None and request is not None
+            self.assertEqual(running.status, "running")
+            self.assertEqual(request["status"], "downloading")
+            self.assertEqual(running.worker_id, "force-backend-kill")
+            self.assertEqual(running.request_id, request_id)
+            self.assertIsNotNone(running.beets_launch_authorized_at)
+            self.assertEqual(
+                running.beets_launch_release_id,
+                "force-owner-backend-kill",
+            )
+            self.assertEqual(
+                running.beets_launch_source_path,
+                str(raw_source),
+            )
+
+            recovered = self.db.recover_running_import_jobs(
+                requeue_message="child group proven absent",
+                recovery_message="backend and child group proven absent",
+            )
+            self.assertEqual([item.id for item in recovered], [job.id])
+            self.assertEqual(recovered[0].status, "recovery_required")
+
     def test_unlaunched_jobs_can_be_requeued_after_worker_restart(self):
         from lib.import_queue import IMPORT_JOB_FORCE
 
@@ -1760,6 +2202,131 @@ class TestAutomationImportHandoff(unittest.TestCase):
             1,
         )
 
+    def test_force_jobs_queued_before_handoff_fail_fresh_claim_cas(self):
+        """Real PG rejects stale force preview/import after owner handoff."""
+        from lib.import_execution import (
+            ExecutionLeaseSnapshot,
+            ProcessIdentity,
+        )
+        from lib.import_queue import (
+            IMPORT_JOB_FORCE,
+            force_import_payload,
+        )
+        from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_IMPORT
+
+        preview_job = self.db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=self.request_id,
+            dedupe_key="force-before-handoff:preview",
+            payload=force_import_payload(
+                download_log_id=93301,
+                failed_path="/tmp/force-before-handoff-preview",
+            ),
+        )
+        import_job = self.db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=self.request_id,
+            dedupe_key="force-before-handoff:import",
+            payload=force_import_payload(
+                download_log_id=93302,
+                failed_path="/tmp/force-before-handoff-import",
+            ),
+        )
+        self.assertEqual(preview_job.expected_request_status, "downloading")
+        self.assertEqual(import_job.expected_request_status, "downloading")
+        self.assertIsNotNone(self.db.mark_import_job_preview_importable(
+            import_job.id,
+            preview_result={"verdict": "evidence_ready"},
+            message="ready before automation handoff",
+        ))
+        handoff = self._handoff(self.db, self.ENQUEUED_A)
+        self.assertTrue(handoff.committed)
+
+        before_preview = self.db.get_import_job(preview_job.id)
+        before_import = self.db.get_import_job(import_job.id)
+        self.assertIsNone(self.db.claim_next_import_preview_job(
+            worker_id="stale-force-preview",
+        ))
+        self.assertIsNone(self.db.claim_next_import_job(
+            worker_id="stale-force-import",
+        ))
+        assert handoff.job is not None
+        owner_preview = self.db.claim_next_import_preview_job(
+            worker_id="automation-preview",
+            execution_lease=ExecutionLeaseSnapshot(
+                host_boot_id="boot-force-fence",
+                invocation_id="invocation-force-fence",
+                systemd_unit="cratedigger-import-preview-worker.service",
+                worker=ProcessIdentity(pid=933, start_ticks=9330),
+            ),
+        )
+        self.assertIsNotNone(owner_preview)
+        assert owner_preview is not None
+        self.assertEqual(owner_preview.id, handoff.job.id)
+        with self.db.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_IMPORT,
+            self.request_id,
+        ) as acquired:
+            self.assertTrue(acquired)
+            self.assertIsNone(
+                self.db.claim_force_import_preview_job_under_lock(
+                    preview_job.id,
+                    request_id=self.request_id,
+                    worker_id="stale-force-preview-stage",
+                )
+            )
+            self.assertIsNone(self.db.claim_force_import_job_under_lock(
+                import_job.id,
+                request_id=self.request_id,
+                worker_id="stale-force-import-stage",
+            ))
+        self.assertEqual(self.db.get_import_job(preview_job.id), before_preview)
+        self.assertEqual(self.db.get_import_job(import_job.id), before_import)
+
+    def test_force_beets_launch_rechecks_absent_automation_owner(self):
+        """Final force launch fails if ownership changed after a raw claim."""
+        from lib.import_queue import IMPORT_JOB_FORCE, force_import_payload
+
+        source_path = "/tmp/force-before-owner-launch"
+        force_job = self.db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=self.request_id,
+            dedupe_key="force-before-handoff:launch",
+            payload=force_import_payload(
+                download_log_id=93303,
+                failed_path=source_path,
+            ),
+        )
+        evidence = make_album_quality_evidence(
+            mb_release_id="automation-handoff-real",
+            source_path=source_path,
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        persisted = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        self.assertTrue(self.db.set_import_job_candidate_evidence(
+            force_job.id,
+            persisted.id,
+        ))
+        self.assertIsNotNone(self.db.mark_import_job_preview_importable(
+            force_job.id,
+            preview_result={"verdict": "evidence_ready"},
+        ))
+        claimed = self.db.claim_next_import_job(worker_id="force-importer")
+        self.assertIsNotNone(claimed)
+
+        handoff = self._handoff(self.db, self.ENQUEUED_A)
+        self.assertTrue(handoff.committed)
+        self.assertIsNone(self.db.authorize_import_job_launch(
+            force_job.id,
+            request_id=self.request_id,
+            release_id="automation-handoff-real",
+            source_path=source_path,
+        ))
+
     def test_exact_owner_preview_and_importer_commands_round_trip_leases(self):
         from lib.import_execution import ExecutionLeaseSnapshot, ProcessIdentity
 
@@ -1855,6 +2422,91 @@ class TestAutomationImportHandoff(unittest.TestCase):
             job.id,
             expected_execution_lease=importer_lease,
         ))
+
+    def test_preview_heartbeat_and_terminal_lock_order_do_not_deadlock(self):
+        """A heartbeat never queues an owner trigger behind its job lock."""
+        from lib import pipeline_db
+        from lib.import_execution import ExecutionLeaseSnapshot, ProcessIdentity
+
+        handoff = self._handoff(self.db, self.ENQUEUED_A)
+        assert handoff.job is not None
+        job = handoff.job
+        lease = ExecutionLeaseSnapshot(
+            host_boot_id="heartbeat-overlap-boot",
+            invocation_id="heartbeat-overlap-preview",
+            systemd_unit="cratedigger-import-preview-worker.service",
+            worker=ProcessIdentity(pid=501, start_ticks=5001),
+        )
+        assert self.db.claim_next_import_preview_job(
+            worker_id="preview",
+            execution_lease=lease,
+        ) is not None
+
+        heartbeat = pipeline_db.PipelineDB(TEST_DSN)
+        terminal = pipeline_db.PipelineDB(TEST_DSN)
+        request_locked = threading.Event()
+        job_locked = threading.Event()
+        errors: list[psycopg2.Error] = []
+        heartbeat.conn.autocommit = False
+        terminal.conn.autocommit = False
+        try:
+            heartbeat._execute(
+                "SET LOCAL statement_timeout = '5s'"
+            )
+            terminal._execute(
+                "SET LOCAL statement_timeout = '5s'"
+            )
+            heartbeat._execute("""
+                UPDATE import_jobs
+                SET preview_heartbeat_at = NOW(), updated_at = NOW()
+                WHERE id = %s
+            """, (job.id,))
+
+            def lock_terminal_scope() -> None:
+                try:
+                    terminal._execute("""
+                        SELECT id
+                        FROM album_requests
+                        WHERE id = %s
+                        FOR UPDATE
+                    """, (self.request_id,))
+                    request_locked.set()
+                    terminal._execute("""
+                        SELECT id
+                        FROM import_jobs
+                        WHERE request_id = %s
+                        ORDER BY id
+                        FOR UPDATE
+                    """, (self.request_id,))
+                    job_locked.set()
+                    terminal.conn.rollback()
+                except psycopg2.Error as exc:
+                    errors.append(exc)
+
+            worker = threading.Thread(target=lock_terminal_scope)
+            worker.start()
+            self.assertTrue(request_locked.wait(timeout=5))
+            self.assertFalse(job_locked.is_set())
+
+            # Before the trigger was column-restricted this commit ran the
+            # deferred owner validator, requested the already-held request
+            # row, and deadlocked against terminal's request -> job order.
+            heartbeat.conn.commit()
+            worker.join(timeout=5)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(errors, [])
+            self.assertTrue(job_locked.is_set())
+        finally:
+            for db in (heartbeat, terminal):
+                try:
+                    db.conn.rollback()
+                except psycopg2.Error:
+                    pass
+                try:
+                    db.conn.autocommit = True
+                except psycopg2.Error:
+                    pass
+                db.close()
 
     def test_record_import_job_beets_child_round_trip_preserves_exact_execution_columns(
         self,

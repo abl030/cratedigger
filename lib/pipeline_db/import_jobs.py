@@ -14,6 +14,7 @@ from lib.import_execution import (
 )
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
+    IMPORT_JOB_FORCE,
     IMPORT_JOB_PREVIEW_WAITING,
     AutomationHandoffResult,
     ForceImportPayload,
@@ -26,7 +27,7 @@ from lib.import_queue import (
     validate_preview_failure_status,
     validate_status,
 )
-from lib.json_narrow import is_dict_like
+from lib.json_narrow import is_dict_like, is_str_object_dict
 from lib.pipeline_db._core import _PipelineDBBase
 from lib.pipeline_db._shared import ADVISORY_LOCK_NAMESPACE_IMPORT
 from lib.pipeline_db.cleanup_journal import (
@@ -124,10 +125,8 @@ def _decision_proves_exact_lease_dead(
 
 
 def _json_mapping(value: object) -> dict[str, object]:
-    return msgspec.convert(
-        msgspec.to_builtins(value),
-        type=dict[str, object],
-    )
+    built = msgspec.to_builtins(value)
+    return built if is_str_object_dict(built) else {}
 
 
 def _recovery_cleanup_matches(
@@ -631,49 +630,113 @@ class _ImportJobsMixin(_PipelineDBBase):
         return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]
 
 
-    def claim_next_import_job(
+    def peek_import_job_candidates(
         self,
         *,
-        worker_id: str | None = None,
         execution_lease: ExecutionLeaseSnapshot | None = None,
-    ) -> ImportJob | None:
+        limit: int,
+        offset: int = 0,
+    ) -> list[ImportJob]:
+        """Select a bounded ordered import set without creating state."""
+        if limit <= 0:
+            raise ValueError("import candidate limit must be positive")
+        if offset < 0:
+            raise ValueError("import candidate offset cannot be negative")
         if execution_lease is not None and execution_lease.beets is not None:
-            return None
+            return []
         lease = _lease_values(execution_lease)
         candidate_cur = self._execute("""
-            SELECT job.id, job.request_id, job.job_type
+            SELECT job.*
             FROM import_jobs AS job
             LEFT JOIN album_requests AS request
               ON request.id = job.request_id
             WHERE job.status = 'queued'
               AND job.preview_status = 'evidence_ready'
               AND (
-                  job.job_type <> 'automation_import'
+                  job.job_type NOT IN (
+                      'automation_import',
+                      'force_import'
+                  )
                   OR (
-                      %s IS NOT NULL
+                      job.job_type = 'automation_import'
+                      AND %s IS NOT NULL
                       AND request.status = 'processing'
                       AND request.active_automation_import_job_id = job.id
+                  )
+                  OR (
+                      job.job_type = 'force_import'
+                      AND request.status = job.expected_request_status
+                      AND request.status NOT IN ('processing', 'replaced')
+                      AND request.active_automation_import_job_id IS NULL
                   )
               )
             ORDER BY
                 job.importable_at ASC NULLS LAST,
                 job.created_at ASC,
                 job.id ASC
-            LIMIT 1
-        """, (lease[0],))
-        candidate = candidate_cur.fetchone()
+            LIMIT %s
+            OFFSET %s
+        """, (lease[0], limit, offset))
+        return [
+            ImportJob.from_row(dict(candidate))
+            for candidate in candidate_cur.fetchall()
+        ]
+
+
+    def peek_next_import_job(
+        self,
+        *,
+        execution_lease: ExecutionLeaseSnapshot | None = None,
+    ) -> ImportJob | None:
+        """Select the next import candidate without creating execution state."""
+        candidates = self.peek_import_job_candidates(
+            execution_lease=execution_lease,
+            limit=1,
+        )
+        return candidates[0] if candidates else None
+
+
+    def claim_next_import_job(
+        self,
+        *,
+        worker_id: str | None = None,
+        execution_lease: ExecutionLeaseSnapshot | None = None,
+    ) -> ImportJob | None:
+        candidate = self.peek_next_import_job(
+            execution_lease=execution_lease,
+        )
         if candidate is None:
             return None
-        job_id = int(candidate["id"])
-        if candidate["job_type"] == IMPORT_JOB_AUTOMATION:
-            if execution_lease is None or candidate["request_id"] is None:
+        if candidate.job_type == IMPORT_JOB_AUTOMATION:
+            if execution_lease is None or candidate.request_id is None:
                 return None
             return self._claim_automation_import_job(
-                job_id,
-                request_id=int(candidate["request_id"]),
+                candidate.id,
+                request_id=candidate.request_id,
                 worker_id=worker_id,
                 execution_lease=execution_lease,
             )
+        if candidate.job_type == IMPORT_JOB_FORCE:
+            if candidate.request_id is None:
+                return None
+            return self._claim_force_import_job(
+                candidate.id,
+                request_id=candidate.request_id,
+                worker_id=worker_id,
+            )
+        return self.claim_import_job_candidate(
+            candidate.id,
+            worker_id=worker_id,
+        )
+
+
+    def claim_import_job_candidate(
+        self,
+        job_id: int,
+        *,
+        worker_id: str | None = None,
+    ) -> ImportJob | None:
+        """Claim one exact non-request-scoped candidate from a bounded scan."""
         cur = self._execute("""
             UPDATE import_jobs
             SET status = 'running',
@@ -683,13 +746,88 @@ class _ImportJobsMixin(_PipelineDBBase):
                 heartbeat_at = NOW(),
                 updated_at = NOW()
             WHERE id = %s
-              AND job_type <> 'automation_import'
+              AND job_type NOT IN ('automation_import', 'force_import')
               AND status = 'queued'
               AND preview_status = 'evidence_ready'
             RETURNING *
         """, (worker_id, job_id))
         row = cur.fetchone()
         return ImportJob.from_row(dict(row)) if row else None
+
+
+    def _claim_force_import_job(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+    ) -> ImportJob | None:
+        """Claim one force import in IMPORT -> request -> job order."""
+        with self.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_IMPORT,
+            request_id,
+        ) as acquired:
+            if not acquired:
+                return None
+            return self.claim_force_import_job_under_lock(
+                job_id,
+                request_id=request_id,
+                worker_id=worker_id,
+            )
+
+
+    def claim_force_import_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+    ) -> ImportJob | None:
+        """Claim the exact force job while the caller retains pinned IMPORT."""
+        with self._atomic():
+            request_cur = self._execute("""
+                SELECT status
+                FROM album_requests
+                WHERE id = %s
+                  AND status NOT IN ('processing', 'replaced')
+                  AND active_automation_import_job_id IS NULL
+                FOR UPDATE
+            """, (request_id,))
+            request = request_cur.fetchone()
+            if request is None:
+                self.conn.rollback()
+                return None
+            job_cur = self._execute("""
+                SELECT id
+                FROM import_jobs
+                WHERE id = %s
+                  AND request_id = %s
+                  AND job_type = 'force_import'
+                  AND status = 'queued'
+                  AND preview_status = 'evidence_ready'
+                  AND expected_request_status = %s
+                FOR UPDATE
+            """, (job_id, request_id, request["status"]))
+            if job_cur.fetchone() is None:
+                self.conn.rollback()
+                return None
+            claimed_cur = self._execute("""
+                UPDATE import_jobs
+                SET status = 'running',
+                    attempts = attempts + 1,
+                    worker_id = %s,
+                    started_at = COALESCE(started_at, NOW()),
+                    heartbeat_at = NOW(),
+                    updated_at = NOW()
+                WHERE id = %s
+                RETURNING *
+            """, (worker_id, job_id))
+            row = claimed_cur.fetchone()
+            if row is None:
+                self.conn.rollback()
+                return None
+            self.conn.commit()
+            return ImportJob.from_row(dict(row))
 
 
     def _claim_automation_import_job(
@@ -701,62 +839,79 @@ class _ImportJobsMixin(_PipelineDBBase):
         execution_lease: ExecutionLeaseSnapshot,
     ) -> ImportJob | None:
         """Claim one processing owner in IMPORT -> request -> job order."""
-        lease = _lease_values(execution_lease)
         with self.advisory_lock(
             ADVISORY_LOCK_NAMESPACE_IMPORT,
             request_id,
         ) as acquired:
             if not acquired:
                 return None
-            with self._atomic():
-                request_cur = self._execute("""
-                    SELECT id
-                    FROM album_requests
-                    WHERE id = %s
-                      AND status = 'processing'
-                      AND active_automation_import_job_id = %s
-                    FOR UPDATE
-                """, (request_id, job_id))
-                if request_cur.fetchone() is None:
-                    self.conn.rollback()
-                    return None
-                job_cur = self._execute("""
-                    SELECT id
-                    FROM import_jobs
-                    WHERE id = %s
-                      AND request_id = %s
-                      AND job_type = 'automation_import'
-                      AND status = 'queued'
-                      AND preview_status = 'evidence_ready'
-                    FOR UPDATE
-                """, (job_id, request_id))
-                if job_cur.fetchone() is None:
-                    self.conn.rollback()
-                    return None
-                claimed_cur = self._execute("""
-                    UPDATE import_jobs
-                    SET status = 'running',
-                        attempts = attempts + 1,
-                        worker_id = %s,
-                        started_at = COALESCE(started_at, NOW()),
-                        heartbeat_at = NOW(),
-                        execution_invocation_id = %s,
-                        execution_host_boot_id = %s,
-                        execution_systemd_unit = %s,
-                        execution_worker_pid = %s,
-                        execution_worker_start_ticks = %s,
-                        execution_beets_pid = NULL,
-                        execution_beets_start_ticks = NULL,
-                        updated_at = NOW()
-                    WHERE id = %s
-                    RETURNING *
-                """, (worker_id, *lease, job_id))
-                row = claimed_cur.fetchone()
-                if row is None:
-                    self.conn.rollback()
-                    return None
-                self.conn.commit()
-                return ImportJob.from_row(dict(row))
+            return self.claim_automation_import_job_under_lock(
+                job_id,
+                request_id=request_id,
+                worker_id=worker_id,
+                execution_lease=execution_lease,
+            )
+
+
+    def claim_automation_import_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+        execution_lease: ExecutionLeaseSnapshot,
+    ) -> ImportJob | None:
+        """Claim the exact owner while the caller retains pinned IMPORT."""
+        lease = _lease_values(execution_lease)
+        with self._atomic():
+            request_cur = self._execute("""
+                SELECT id
+                FROM album_requests
+                WHERE id = %s
+                  AND status = 'processing'
+                  AND active_automation_import_job_id = %s
+                FOR UPDATE
+            """, (request_id, job_id))
+            if request_cur.fetchone() is None:
+                self.conn.rollback()
+                return None
+            job_cur = self._execute("""
+                SELECT id
+                FROM import_jobs
+                WHERE id = %s
+                  AND request_id = %s
+                  AND job_type = 'automation_import'
+                  AND status = 'queued'
+                  AND preview_status = 'evidence_ready'
+                FOR UPDATE
+            """, (job_id, request_id))
+            if job_cur.fetchone() is None:
+                self.conn.rollback()
+                return None
+            claimed_cur = self._execute("""
+                UPDATE import_jobs
+                SET status = 'running',
+                    attempts = attempts + 1,
+                    worker_id = %s,
+                    started_at = COALESCE(started_at, NOW()),
+                    heartbeat_at = NOW(),
+                    execution_invocation_id = %s,
+                    execution_host_boot_id = %s,
+                    execution_systemd_unit = %s,
+                    execution_worker_pid = %s,
+                    execution_worker_start_ticks = %s,
+                    execution_beets_pid = NULL,
+                    execution_beets_start_ticks = NULL,
+                    updated_at = NOW()
+                WHERE id = %s
+                RETURNING *
+            """, (worker_id, *lease, job_id))
+            row = claimed_cur.fetchone()
+            if row is None:
+                self.conn.rollback()
+                return None
+            self.conn.commit()
+            return ImportJob.from_row(dict(row))
 
 
     def heartbeat_import_job(
@@ -893,6 +1048,8 @@ class _ImportJobsMixin(_PipelineDBBase):
                     )
                     OR (
                         job.job_type = 'force_import'
+                        AND request.status != 'processing'
+                        AND request.active_automation_import_job_id IS NULL
                         AND job.payload->>'failed_path' = %s
                     )
                     OR (
@@ -1401,17 +1558,79 @@ class _ImportJobsMixin(_PipelineDBBase):
         if not reason:
             raise ValueError("Import recovery resolution requires a reason")
 
+        candidate_cur = self._execute(
+            "SELECT job.request_id FROM import_jobs AS job "
+            "WHERE job.id = %s "
+            "AND job.job_type <> 'automation_import' "
+            "AND NOT EXISTS ("
+            "    SELECT 1 FROM album_requests AS request "
+            "    WHERE request.active_automation_import_job_id = job.id"
+            ")",
+            (job_id,),
+        )
+        candidate = candidate_cur.fetchone()
+        if candidate is None:
+            return None
+        candidate_request_id = candidate["request_id"]
+        request_id = (
+            int(candidate_request_id)
+            if candidate_request_id is not None
+            else None
+        )
+        if request_id is None:
+            return self._resolve_import_job_recovery_under_lock(
+                job_id,
+                request_id=None,
+                resolution=resolution,
+                reason=reason,
+            )
+        with self.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_IMPORT,
+            request_id,
+        ) as acquired:
+            if not acquired:
+                return None
+            return self._resolve_import_job_recovery_under_lock(
+                job_id,
+                request_id=request_id,
+                resolution=resolution,
+                reason=reason,
+            )
+
+
+    def _resolve_import_job_recovery_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int | None,
+        resolution: str,
+        reason: str,
+    ) -> tuple[ImportJob, ImportJob | None] | None:
+        """Resolve after IMPORT, locking request before its recovery job."""
         with self._atomic():
+            request_authority = None
+            if request_id is not None:
+                request_cur = self._execute("""
+                    SELECT status, mb_release_id
+                    FROM album_requests
+                    WHERE id = %s
+                    FOR UPDATE
+                """, (request_id,))
+                request_authority = request_cur.fetchone()
+                if request_authority is None:
+                    self.conn.rollback()
+                    return None
             cur = self._execute(
                 "SELECT * FROM import_jobs AS job "
                 "WHERE job.id = %s "
+                "AND job.request_id IS NOT DISTINCT FROM %s "
                 "AND job.job_type <> 'automation_import' "
                 "AND NOT EXISTS ("
                 "    SELECT 1 FROM album_requests AS request "
                 "    WHERE request.active_automation_import_job_id = job.id"
                 ") "
                 "FOR UPDATE",
-                (job_id,),
+                (job_id, request_id),
             )
             raw = cur.fetchone()
             if raw is None or raw["status"] != "recovery_required":
@@ -1420,24 +1639,20 @@ class _ImportJobsMixin(_PipelineDBBase):
             original = ImportJob.from_row(dict(raw))
 
             if resolution == "retry":
-                authority_cur = self._execute("""
-                    SELECT request.status,
-                           request.mb_release_id,
-                           evidence.snapshot_fingerprint
-                    FROM album_requests AS request
-                    LEFT JOIN album_quality_evidence AS evidence
-                      ON evidence.id = %s
-                    WHERE request.id = %s
-                    FOR UPDATE OF request
-                """, (original.candidate_evidence_id, original.request_id))
-                authority = authority_cur.fetchone()
+                evidence_cur = self._execute("""
+                    SELECT snapshot_fingerprint
+                    FROM album_quality_evidence
+                    WHERE id = %s
+                """, (original.candidate_evidence_id,))
+                evidence = evidence_cur.fetchone()
                 if (
-                    authority is None
-                    or authority["status"]
+                    request_authority is None
+                    or evidence is None
+                    or request_authority["status"]
                     != original.beets_launch_request_status
-                    or authority["mb_release_id"]
+                    or request_authority["mb_release_id"]
                     != original.beets_launch_release_id
-                    or authority["snapshot_fingerprint"]
+                    or evidence["snapshot_fingerprint"]
                     != original.beets_launch_snapshot_fingerprint
                 ):
                     self.conn.rollback()
@@ -1965,46 +2180,110 @@ class _ImportJobsMixin(_PipelineDBBase):
         return ImportJob.from_row(dict(row)) if row else None
 
 
-    def claim_next_import_preview_job(
+    def peek_import_preview_job_candidates(
         self,
         *,
-        worker_id: str | None = None,
         execution_lease: ExecutionLeaseSnapshot | None = None,
-    ) -> ImportJob | None:
+        limit: int,
+        offset: int = 0,
+    ) -> list[ImportJob]:
+        """Select a bounded ordered preview set without creating state."""
+        if limit <= 0:
+            raise ValueError("preview candidate limit must be positive")
+        if offset < 0:
+            raise ValueError("preview candidate offset cannot be negative")
         if execution_lease is not None and execution_lease.beets is not None:
-            return None
+            return []
         lease = _lease_values(execution_lease)
         candidate_cur = self._execute("""
-            SELECT job.id, job.request_id, job.job_type
+            SELECT job.*
             FROM import_jobs AS job
             LEFT JOIN album_requests AS request
               ON request.id = job.request_id
             WHERE job.status = 'queued'
               AND job.preview_status = 'waiting'
               AND (
-                  job.job_type <> 'automation_import'
+                  job.job_type NOT IN (
+                      'automation_import',
+                      'force_import'
+                  )
                   OR (
-                      %s IS NOT NULL
+                      job.job_type = 'automation_import'
+                      AND %s IS NOT NULL
                       AND request.status = 'processing'
                       AND request.active_automation_import_job_id = job.id
                   )
-              )
+                  OR (
+                      job.job_type = 'force_import'
+                      AND request.status = job.expected_request_status
+                      AND request.status NOT IN ('processing', 'replaced')
+                      AND request.active_automation_import_job_id IS NULL
+                  )
+            )
             ORDER BY job.created_at ASC, job.id ASC
-            LIMIT 1
-        """, (lease[0],))
-        candidate = candidate_cur.fetchone()
+            LIMIT %s
+            OFFSET %s
+        """, (lease[0], limit, offset))
+        return [
+            ImportJob.from_row(dict(candidate))
+            for candidate in candidate_cur.fetchall()
+        ]
+
+
+    def peek_next_import_preview_job(
+        self,
+        *,
+        execution_lease: ExecutionLeaseSnapshot | None = None,
+    ) -> ImportJob | None:
+        """Select the next preview candidate without creating execution state."""
+        candidates = self.peek_import_preview_job_candidates(
+            execution_lease=execution_lease,
+            limit=1,
+        )
+        return candidates[0] if candidates else None
+
+
+    def claim_next_import_preview_job(
+        self,
+        *,
+        worker_id: str | None = None,
+        execution_lease: ExecutionLeaseSnapshot | None = None,
+    ) -> ImportJob | None:
+        candidate = self.peek_next_import_preview_job(
+            execution_lease=execution_lease,
+        )
         if candidate is None:
             return None
-        job_id = int(candidate["id"])
-        if candidate["job_type"] == IMPORT_JOB_AUTOMATION:
-            if execution_lease is None or candidate["request_id"] is None:
+        if candidate.job_type == IMPORT_JOB_AUTOMATION:
+            if execution_lease is None or candidate.request_id is None:
                 return None
             return self._claim_automation_import_preview_job(
-                job_id,
-                request_id=int(candidate["request_id"]),
+                candidate.id,
+                request_id=candidate.request_id,
                 worker_id=worker_id,
                 execution_lease=execution_lease,
             )
+        if candidate.job_type == IMPORT_JOB_FORCE:
+            if candidate.request_id is None:
+                return None
+            return self._claim_force_import_preview_job(
+                candidate.id,
+                request_id=candidate.request_id,
+                worker_id=worker_id,
+            )
+        return self.claim_import_preview_job_candidate(
+            candidate.id,
+            worker_id=worker_id,
+        )
+
+
+    def claim_import_preview_job_candidate(
+        self,
+        job_id: int,
+        *,
+        worker_id: str | None = None,
+    ) -> ImportJob | None:
+        """Claim one exact non-request-scoped candidate from a bounded scan."""
         cur = self._execute("""
             UPDATE import_jobs
             SET preview_status = 'running',
@@ -2016,13 +2295,93 @@ class _ImportJobsMixin(_PipelineDBBase):
                 preview_error = NULL,
                 updated_at = NOW()
             WHERE id = %s
-              AND job_type <> 'automation_import'
+              AND job_type NOT IN ('automation_import', 'force_import')
               AND status = 'queued'
               AND preview_status = 'waiting'
             RETURNING *
         """, (worker_id, job_id))
         row = cur.fetchone()
         return ImportJob.from_row(dict(row)) if row else None
+
+
+    def _claim_force_import_preview_job(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+    ) -> ImportJob | None:
+        """Claim one force preview in IMPORT -> request -> job order."""
+        with self.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_IMPORT,
+            request_id,
+        ) as acquired:
+            if not acquired:
+                return None
+            return self.claim_force_import_preview_job_under_lock(
+                job_id,
+                request_id=request_id,
+                worker_id=worker_id,
+            )
+
+
+    def claim_force_import_preview_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+    ) -> ImportJob | None:
+        """Claim the exact force preview while caller retains pinned IMPORT."""
+        with self._atomic():
+            request_cur = self._execute("""
+                SELECT status
+                FROM album_requests
+                WHERE id = %s
+                  AND status NOT IN ('processing', 'replaced')
+                  AND active_automation_import_job_id IS NULL
+                FOR UPDATE
+            """, (request_id,))
+            request = request_cur.fetchone()
+            if request is None:
+                self.conn.rollback()
+                return None
+            job_cur = self._execute("""
+                SELECT id
+                FROM import_jobs
+                WHERE id = %s
+                  AND request_id = %s
+                  AND job_type = 'force_import'
+                  AND status = 'queued'
+                  AND preview_status = 'waiting'
+                  AND expected_request_status = %s
+                FOR UPDATE
+            """, (job_id, request_id, request["status"]))
+            if job_cur.fetchone() is None:
+                self.conn.rollback()
+                return None
+            claimed_cur = self._execute("""
+                UPDATE import_jobs
+                SET preview_status = 'running',
+                    preview_attempts = preview_attempts + 1,
+                    preview_worker_id = %s,
+                    preview_started_at = COALESCE(
+                        preview_started_at,
+                        NOW()
+                    ),
+                    preview_heartbeat_at = NOW(),
+                    preview_message = NULL,
+                    preview_error = NULL,
+                    updated_at = NOW()
+                WHERE id = %s
+                RETURNING *
+            """, (worker_id, job_id))
+            row = claimed_cur.fetchone()
+            if row is None:
+                self.conn.rollback()
+                return None
+            self.conn.commit()
+            return ImportJob.from_row(dict(row))
 
 
     def _claim_automation_import_preview_job(
@@ -2034,67 +2393,84 @@ class _ImportJobsMixin(_PipelineDBBase):
         execution_lease: ExecutionLeaseSnapshot,
     ) -> ImportJob | None:
         """Claim one preview owner in IMPORT -> request -> job order."""
-        lease = _lease_values(execution_lease)
         with self.advisory_lock(
             ADVISORY_LOCK_NAMESPACE_IMPORT,
             request_id,
         ) as acquired:
             if not acquired:
                 return None
-            with self._atomic():
-                request_cur = self._execute("""
-                    SELECT id
-                    FROM album_requests
-                    WHERE id = %s
-                      AND status = 'processing'
-                      AND active_automation_import_job_id = %s
-                    FOR UPDATE
-                """, (request_id, job_id))
-                if request_cur.fetchone() is None:
-                    self.conn.rollback()
-                    return None
-                job_cur = self._execute("""
-                    SELECT id
-                    FROM import_jobs
-                    WHERE id = %s
-                      AND request_id = %s
-                      AND job_type = 'automation_import'
-                      AND status = 'queued'
-                      AND preview_status = 'waiting'
-                    FOR UPDATE
-                """, (job_id, request_id))
-                if job_cur.fetchone() is None:
-                    self.conn.rollback()
-                    return None
-                claimed_cur = self._execute("""
-                    UPDATE import_jobs
-                    SET preview_status = 'running',
-                        preview_attempts = preview_attempts + 1,
-                        preview_worker_id = %s,
-                        preview_started_at = COALESCE(
-                            preview_started_at,
-                            NOW()
-                        ),
-                        preview_heartbeat_at = NOW(),
-                        preview_message = NULL,
-                        preview_error = NULL,
-                        execution_invocation_id = %s,
-                        execution_host_boot_id = %s,
-                        execution_systemd_unit = %s,
-                        execution_worker_pid = %s,
-                        execution_worker_start_ticks = %s,
-                        execution_beets_pid = NULL,
-                        execution_beets_start_ticks = NULL,
-                        updated_at = NOW()
-                    WHERE id = %s
-                    RETURNING *
-                """, (worker_id, *lease, job_id))
-                row = claimed_cur.fetchone()
-                if row is None:
-                    self.conn.rollback()
-                    return None
-                self.conn.commit()
-                return ImportJob.from_row(dict(row))
+            return self.claim_automation_import_preview_job_under_lock(
+                job_id,
+                request_id=request_id,
+                worker_id=worker_id,
+                execution_lease=execution_lease,
+            )
+
+
+    def claim_automation_import_preview_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+        execution_lease: ExecutionLeaseSnapshot,
+    ) -> ImportJob | None:
+        """Claim the exact preview while the caller retains pinned IMPORT."""
+        lease = _lease_values(execution_lease)
+        with self._atomic():
+            request_cur = self._execute("""
+                SELECT id
+                FROM album_requests
+                WHERE id = %s
+                  AND status = 'processing'
+                  AND active_automation_import_job_id = %s
+                FOR UPDATE
+            """, (request_id, job_id))
+            if request_cur.fetchone() is None:
+                self.conn.rollback()
+                return None
+            job_cur = self._execute("""
+                SELECT id
+                FROM import_jobs
+                WHERE id = %s
+                  AND request_id = %s
+                  AND job_type = 'automation_import'
+                  AND status = 'queued'
+                  AND preview_status = 'waiting'
+                FOR UPDATE
+            """, (job_id, request_id))
+            if job_cur.fetchone() is None:
+                self.conn.rollback()
+                return None
+            claimed_cur = self._execute("""
+                UPDATE import_jobs
+                SET preview_status = 'running',
+                    preview_attempts = preview_attempts + 1,
+                    preview_worker_id = %s,
+                    preview_started_at = COALESCE(
+                        preview_started_at,
+                        NOW()
+                    ),
+                    preview_heartbeat_at = NOW(),
+                    preview_message = NULL,
+                    preview_error = NULL,
+                    execution_invocation_id = %s,
+                    execution_host_boot_id = %s,
+                    execution_systemd_unit = %s,
+                    execution_worker_pid = %s,
+                    execution_worker_start_ticks = %s,
+                    execution_beets_pid = NULL,
+                    execution_beets_start_ticks = NULL,
+                    updated_at = NOW()
+                WHERE id = %s
+                RETURNING *
+            """, (worker_id, *lease, job_id))
+            row = claimed_cur.fetchone()
+            if row is None:
+                self.conn.rollback()
+                return None
+            self.conn.commit()
+            return ImportJob.from_row(dict(row))
 
 
     def heartbeat_import_job_preview(

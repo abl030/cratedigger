@@ -35,8 +35,11 @@ from lib.import_execution import (
 from lib.import_job_recovery_service import (
     AUTOMATION_COMPLETION_RESULT_KEY,
     AutomationCompletionReceipt,
+    AutomationRecoveryActionResult,
     AutomationRecoveryBeets,
+    AutomationRecoveryJobResponse,
     automation_completion_result_patch,
+    automation_recovery_job_response,
     get_automation_recovery_detail,
 )
 from lib.import_queue import ImportJob
@@ -279,6 +282,30 @@ def _detail(
 
 
 class TestAutomationRecoveryDetail(unittest.TestCase):
+    def test_action_job_projection_is_one_strict_wire_contract(self) -> None:
+        job = _job()
+        projected = automation_recovery_job_response(job)
+        result = AutomationRecoveryActionResult(
+            outcome="closed",
+            job=projected,
+            message="closed",
+        )
+
+        payload = result.to_dict()
+        job_payload = payload["job"]
+        self.assertIsInstance(job_payload, dict)
+        assert isinstance(job_payload, dict)
+        self.assertEqual(job_payload, job.to_json_dict())
+
+        malformed = msgspec.to_builtins(projected)
+        malformed["id"] = "7"
+        with self.assertRaises(msgspec.ValidationError):
+            msgspec.convert(
+                malformed,
+                type=AutomationRecoveryJobResponse,
+                strict=True,
+            )
+
     def test_liveness_uses_shared_live_reused_dead_child_boot_and_unknown_transcripts(
         self,
     ) -> None:

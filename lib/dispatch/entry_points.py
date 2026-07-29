@@ -34,6 +34,7 @@ from lib.terminal_outcomes import ImportJobTerminal
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
     from lib.dispatch.types import ImportOneRunner, QualityGateFn
+    from lib.import_execution import CancellationToken, OwnerSessionIdentity
     from lib.pipeline_db import PipelineDB
 
 logger = logging.getLogger("cratedigger")
@@ -54,6 +55,8 @@ def dispatch_import_from_db(
     run_import_fn: ImportOneRunner | None = None,
     beets_library_db_path: str | None = None,
     beets_library_root: str | None = None,
+    cancellation_token: CancellationToken | None = None,
+    owner_session_identity: OwnerSessionIdentity | None = None,
 ) -> DispatchOutcome:
     """Run a force-import through the full dispatch pipeline.
 
@@ -100,6 +103,13 @@ def dispatch_import_from_db(
     from lib.config import read_runtime_config
     from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_IMPORT
 
+    if (cancellation_token is None) != (owner_session_identity is None):
+        raise ValueError(
+            "cancellation token and owner session identity must be paired"
+        )
+    if cancellation_token is not None:
+        cancellation_token.raise_if_cancelled()
+
     validate_beets_storage_pair(
         db_path=beets_library_db_path,
         library_root=beets_library_root,
@@ -129,6 +139,8 @@ def dispatch_import_from_db(
             run_import_fn=run_import_fn,
             beets_library_db_path=beets_library_db_path,
             beets_library_root=beets_library_root,
+            cancellation_token=cancellation_token,
+            owner_session_identity=owner_session_identity,
         )
 
 
@@ -147,6 +159,8 @@ def _dispatch_import_from_db_locked(
     run_import_fn: ImportOneRunner | None = None,
     beets_library_db_path: str | None = None,
     beets_library_root: str | None = None,
+    cancellation_token: CancellationToken | None = None,
+    owner_session_identity: OwnerSessionIdentity | None = None,
 ) -> DispatchOutcome:
     """Body of dispatch_import_from_db, called once the advisory lock is held.
 
@@ -298,6 +312,8 @@ def _dispatch_import_from_db_locked(
         run_import_fn=run_import_fn,
         beets_library_db_path=beets_library_db_path,
         beets_library_root=beets_library_root,
+        cancellation_token=cancellation_token,
+        owner_session_identity=owner_session_identity,
     )
     return _persist_terminal_dispatch_outcome(
         db,

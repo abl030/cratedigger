@@ -1,5 +1,6 @@
 """Tests for the shared import queue worker."""
 
+import copy
 import json
 import os
 import shutil
@@ -91,6 +92,17 @@ def _importer_execution_lease(
         systemd_unit="cratedigger-importer.service",
         worker=ProcessIdentity(pid=7002, start_ticks=70002),
     )
+
+
+def _unavailable_execution_lease(
+    **_kwargs: object,
+) -> ExecutionLeaseSnapshot:
+    raise ValueError("test run is outside systemd")
+
+
+def assert_long_lived_worker_reuses_cursor(cursors: list[object]) -> None:
+    if len(cursors) < 2 or any(cursor is not cursors[0] for cursor in cursors[1:]):
+        raise AssertionError("long-lived worker recreated its scan cursor")
 
 
 def setUpModule() -> None:
@@ -185,6 +197,8 @@ def _force_download_log(
     failed_path: str,
 ) -> int:
     """Seed the DB-owned force source; payload paths are not authority."""
+    if db.get_request(request_id) is None:
+        db.seed_request(make_request_row(id=request_id, status="wanted"))
     return db.log_download(
         request_id,
         outcome="rejected",
@@ -722,6 +736,109 @@ class TestImporterWorker(unittest.TestCase):
         assert job.result is not None
         return job.result
 
+    def test_force_stages_queued_before_automation_handoff_have_zero_effect(
+        self,
+    ) -> None:
+        """Both force lanes re-read ownership before any stage effect."""
+        from lib.import_preview import force_action_copy_path
+        from scripts import import_preview_worker, importer
+
+        for lane in ("preview", "import"):
+            with self.subTest(lane=lane):
+                db = FakePipelineDB()
+                setattr(db, "dsn", "postgresql://fake")  # noqa: B010
+                db.seed_request(make_request_row(id=42, status="wanted"))
+                state = ActiveDownloadState(
+                    filetype="flac",
+                    enqueued_at="2026-07-29T01:00:00+00:00",
+                    files=[],
+                )
+                self.assertTrue(db.set_downloading(
+                    42,
+                    state.to_json(),
+                    expected_status="wanted",
+                ))
+                force_job = db.enqueue_import_job(
+                    IMPORT_JOB_FORCE,
+                    request_id=42,
+                    dedupe_key=f"force-before-owner:{lane}",
+                    payload=force_import_payload(
+                        download_log_id=7,
+                        failed_path="/tmp/force-before-owner",
+                    ),
+                )
+                if lane == "import":
+                    self.assertIsNotNone(
+                        db.mark_import_job_preview_importable(
+                            force_job.id,
+                            preview_result={"verdict": "evidence_ready"},
+                            message="ready before automation handoff",
+                        )
+                    )
+                before_job = db.get_import_job(force_job.id)
+                before_evidence = copy.deepcopy(db._evidence_by_id)
+                before_tree = sorted(
+                    os.path.relpath(os.path.join(root, name), self._force_root)
+                    for root, dirs, files in os.walk(self._force_root)
+                    for name in [*dirs, *files]
+                )
+                dispatch = MagicMock()
+                measurement = MagicMock()
+
+                def stage_factory(
+                    _dsn: str,
+                    db: FakePipelineDB = db,
+                    state: ActiveDownloadState = state,
+                ) -> FakePipelineDB:
+                    handoff = db.handoff_automation_import(
+                        request_id=42,
+                        expected_enqueued_at=state.enqueued_at,
+                        canonical_path="/processing/albums/automation-owner",
+                        message="automation wins after force queue selection",
+                    )
+                    self.assertTrue(handoff.committed)
+                    return db
+
+                if lane == "preview":
+                    result = import_preview_worker.run_once(
+                        db,
+                        worker_id="force-preview",
+                        runtime_config=self._force_cfg,
+                        stage_db_factory=stage_factory,
+                        heartbeat_db_factory=lambda _dsn, db=db: db,
+                        candidate_measurement_fn=measurement,
+                    )
+                else:
+                    result = importer.run_once(
+                        db,  # pyright: ignore[reportArgumentType]
+                        worker_id="force-importer",
+                        stage_db_factory=stage_factory,
+                        execute_fn=dispatch,
+                    )
+
+                self.assertIsNone(result)
+                request = db.get_request(42)
+                assert request is not None
+                self.assertEqual(request["status"], "processing")
+                self.assertEqual(db.get_import_job(force_job.id), before_job)
+                self.assertEqual(db._evidence_by_id, before_evidence)
+                self.assertEqual(
+                    sorted(
+                        os.path.relpath(
+                            os.path.join(root, name),
+                            self._force_root,
+                        )
+                        for root, dirs, files in os.walk(self._force_root)
+                        for name in [*dirs, *files]
+                    ),
+                    before_tree,
+                )
+                self.assertFalse(os.path.exists(
+                    force_action_copy_path(self._force_cfg, force_job.id),
+                ))
+                dispatch.assert_not_called()
+                measurement.assert_not_called()
+
     def _log_wrong_match(
         self,
         db: FakePipelineDB,
@@ -730,6 +847,11 @@ class TestImporterWorker(unittest.TestCase):
         failed_path: str,
         username: str = "alice",
     ) -> int:
+        if db.get_request(request_id) is None:
+            db.seed_request(make_request_row(
+                id=request_id,
+                status="wanted",
+            ))
         db.log_download(
             request_id,
             soulseek_username=username,
@@ -817,6 +939,7 @@ class TestImporterWorker(unittest.TestCase):
         from scripts import importer
 
         db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="wanted"))
         job = db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=42,
@@ -910,6 +1033,7 @@ class TestImporterWorker(unittest.TestCase):
         from scripts import importer
 
         db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="wanted"))
         job = db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=42,
@@ -949,6 +1073,7 @@ class TestImporterWorker(unittest.TestCase):
         from scripts import importer
 
         db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="wanted"))
         job = db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=42,
@@ -977,6 +1102,7 @@ class TestImporterWorker(unittest.TestCase):
             source_measurement=AudioQualityMeasurement(min_bitrate_kbps=245),
         )
         db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="wanted"))
         job = db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=42,
@@ -1791,6 +1917,8 @@ class TestImporterWorker(unittest.TestCase):
         from scripts import importer
 
         db = FakePipelineDB()
+        setattr(db, "dsn", "postgresql://fake")  # noqa: B010
+        db.seed_request(make_request_row(id=42, status="wanted"))
         job = db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=42,
@@ -1812,7 +1940,11 @@ class TestImporterWorker(unittest.TestCase):
             "lib.dispatch.dispatch_import_from_db",
             return_value=DispatchOutcome(True, "imported on retry"),
         ):
-            updated = importer.run_once(cast(Any, db), worker_id="new-worker")
+            updated = importer.run_once(
+                cast(Any, db),
+                worker_id="new-worker",
+                stage_db_factory=lambda _dsn: db,
+            )
 
         assert updated is not None
         self.assertEqual(updated.status, "completed")
@@ -2097,6 +2229,307 @@ class TestImporterWorker(unittest.TestCase):
         self.assertEqual(updated.error, "Pre-import gate rejected")
         self.assertEqual(self._result(updated)["success"], False)
 
+    def test_force_worker_forwards_pinned_session_authority(self) -> None:
+        """The force worker must not drop authority before dispatch."""
+        from scripts import importer
+
+        db = FakePipelineDB()
+        setattr(db, "dsn", "postgresql://fake")  # noqa: B010
+        db.seed_request(make_request_row(id=42, status="wanted"))
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            dedupe_key="force:pinned-authority",
+            payload=force_import_payload(
+                download_log_id=7,
+                failed_path="/tmp/force-pinned-authority",
+            ),
+        )
+        self._mark_importable(db, job)
+        observed: dict[str, object] = {}
+
+        def execute(
+            _stage_db: object,
+            _job: ImportJob,
+            *,
+            ctx: object | None = None,
+            cancellation_token: CancellationToken,
+            owner_session_identity: OwnerSessionIdentity,
+        ) -> DispatchOutcome:
+            del ctx
+            observed["token"] = cancellation_token
+            observed["identity"] = owner_session_identity
+            return DispatchOutcome(False, "stop after authority proof")
+
+        result = importer.run_once(
+            db,  # pyright: ignore[reportArgumentType]
+            worker_id="force-authority",
+            stage_db_factory=lambda _dsn: db,
+            execution_lease_factory=_unavailable_execution_lease,
+            execute_fn=execute,
+        )
+
+        self.assertIsNotNone(result)
+        self.assertIsInstance(observed["token"], CancellationToken)
+        self.assertIsInstance(
+            observed["identity"],
+            OwnerSessionIdentity,
+        )
+
+    def test_force_executor_forwards_authority_into_dispatch(self) -> None:
+        """The executor preserves the token/session pair at dispatch."""
+        from scripts import importer
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="wanted"))
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            dedupe_key="force:dispatch-authority",
+            payload=force_import_payload(
+                download_log_id=7,
+                failed_path="/tmp/force-dispatch-authority",
+            ),
+        )
+        ready = self._mark_importable(db, job)
+        claimed = db.claim_next_import_job(worker_id="force-dispatch")
+        assert claimed is not None
+        token = CancellationToken()
+        observed: dict[str, object] = {}
+
+        def dispatch(
+            _db: object,
+            **kwargs: object,
+        ) -> DispatchOutcome:
+            observed.update(kwargs)
+            return DispatchOutcome(False, "authority recorded")
+
+        with db._pin_owner_session(token) as identity:
+            importer.execute_import_job(
+                db,  # pyright: ignore[reportArgumentType]
+                claimed,
+                cancellation_token=token,
+                owner_session_identity=identity,
+                force_dispatch_fn=dispatch,
+            )
+
+        self.assertEqual(ready.id, claimed.id)
+        self.assertIs(observed["cancellation_token"], token)
+        self.assertEqual(
+            observed["owner_session_identity"],
+            identity,
+        )
+
+    def test_force_executor_rejects_partial_authority_before_any_fallback(
+        self,
+    ) -> None:
+        """Token/session authority is atomic even when the action is absent."""
+        from scripts import importer
+
+        setup_db = FakePipelineDB()
+        setup_db.seed_request(make_request_row(id=42, status="wanted"))
+        job = setup_db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            dedupe_key="force:partial-execution-authority",
+            payload=force_import_payload(
+                download_log_id=7,
+                failed_path="/tmp/partial-execution-authority",
+            ),
+        )
+        ready = setup_db.mark_import_job_preview_importable(
+            job.id,
+            preview_result={"verdict": "evidence_ready"},
+        )
+        assert ready is not None
+        claimed = setup_db.claim_next_import_job(worker_id="partial-authority")
+        assert claimed is not None
+        self.assertNotIn("action_path", claimed.preview_result or {})
+
+        partials = (
+            (
+                "token-only",
+                CancellationToken(),
+                None,
+            ),
+            (
+                "session-only",
+                None,
+                OwnerSessionIdentity(connection_object_id=1, backend_pid=2),
+            ),
+        )
+        for label, token, identity in partials:
+            with self.subTest(label=label):
+                effect_db = MagicMock()
+                runtime_config = MagicMock(
+                    side_effect=AssertionError(
+                        "partial authority reached runtime config"
+                    )
+                )
+                dispatch = MagicMock(
+                    side_effect=AssertionError(
+                        "partial authority reached force dispatch"
+                    )
+                )
+                with (
+                    patch(
+                        "lib.config.read_runtime_config",
+                        runtime_config,
+                    ),
+                    self.assertRaisesRegex(ValueError, "must be paired"),
+                ):
+                    importer.execute_import_job(
+                        cast(Any, effect_db),
+                        claimed,
+                        cancellation_token=token,
+                        owner_session_identity=identity,
+                        force_dispatch_fn=dispatch,
+                    )
+
+                runtime_config.assert_not_called()
+                dispatch.assert_not_called()
+                self.assertEqual(effect_db.mock_calls, [])
+
+    def test_importer_scans_past_contended_force_candidate(self) -> None:
+        """One busy request cannot starve a later unrelated import."""
+        from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_IMPORT
+        from scripts import importer
+
+        db = FakePipelineDB()
+        setattr(db, "dsn", "postgresql://fake")  # noqa: B010
+        for request_id in (42, 43):
+            db.seed_request(make_request_row(id=request_id, status="wanted"))
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=request_id,
+                dedupe_key=f"force:scan:{request_id}",
+                payload=force_import_payload(
+                    download_log_id=request_id,
+                    failed_path=f"/tmp/force-scan-{request_id}",
+                ),
+            )
+            self._mark_importable(db, job)
+
+        class StageSession:
+            def __getattr__(self, name: str) -> object:
+                return getattr(db, name)
+
+            @contextmanager
+            def _pin_owner_session(self, token: CancellationToken):
+                with db._pin_owner_session(token) as identity:
+                    yield identity
+
+            @contextmanager
+            def advisory_lock(self, namespace: int, key: int):
+                if (
+                    namespace == ADVISORY_LOCK_NAMESPACE_IMPORT
+                    and key == 42
+                ):
+                    yield False
+                else:
+                    with db.advisory_lock(namespace, key) as acquired:
+                        yield acquired
+
+            def claim_force_import_job_under_lock(
+                self,
+                job_id: int,
+                *,
+                request_id: int,
+                worker_id: str | None,
+            ) -> ImportJob | None:
+                return db.claim_force_import_job_under_lock(
+                    job_id,
+                    request_id=request_id,
+                    worker_id=worker_id,
+                )
+
+            def close(self) -> None:
+                return None
+
+        executed: list[int] = []
+
+        def execute(
+            _stage_db: object,
+            claimed: ImportJob,
+            *,
+            ctx: object | None = None,
+            cancellation_token: CancellationToken,
+            owner_session_identity: OwnerSessionIdentity,
+        ) -> DispatchOutcome:
+            del ctx, cancellation_token, owner_session_identity
+            assert claimed.request_id is not None
+            executed.append(claimed.request_id)
+            return DispatchOutcome(False, "bounded progress proof")
+
+        importer.run_once(
+            db,  # pyright: ignore[reportArgumentType]
+            worker_id="force-scan",
+            stage_db_factory=lambda _dsn: StageSession(),
+            execution_lease_factory=_unavailable_execution_lease,
+            execute_fn=execute,
+        )
+
+        self.assertEqual(executed, [43])
+        first = db.get_import_job(1)
+        second = db.get_import_job(2)
+        assert first is not None and second is not None
+        self.assertEqual(first.status, "queued")
+        self.assertEqual(second.status, "failed")
+
+    def test_main_reuses_one_scan_cursor_across_polls(self) -> None:
+        """The process loop, not callers, owns the persistent import cursor."""
+        from scripts import importer
+
+        class PollProbeComplete(RuntimeError):
+            pass
+
+        db = FakePipelineDB()
+        observed: list[object] = []
+
+        def observe_poll(
+            _db: object,
+            *,
+            worker_id: str,
+            scan_cursor: object,
+        ) -> None:
+            del worker_id
+            observed.append(scan_cursor)
+            if len(observed) == 2:
+                raise PollProbeComplete
+
+        argv = [
+            "importer.py",
+            "--dsn",
+            "postgresql://fake",
+            "--poll-interval",
+            "0",
+            "--worker-id",
+            "cursor-probe",
+        ]
+        with (
+            patch("sys.argv", argv),
+            patch("scripts.importer.PipelineDB", return_value=db),
+            patch(
+                "scripts.importer.recover_abandoned_running_jobs",
+                return_value=[],
+            ),
+            patch("scripts.importer.run_once", side_effect=observe_poll),
+            patch("scripts.importer.time.sleep"),
+            self.assertRaises(PollProbeComplete),
+        ):
+            importer.main()
+
+        assert_long_lived_worker_reuses_cursor(observed)
+
+        def cursor_recreation_mutant() -> list[object]:
+            return [
+                importer._CandidateScanCursor(),
+                importer._CandidateScanCursor(),
+            ]
+
+        with self.assertRaisesRegex(AssertionError, "recreated"):
+            assert_long_lived_worker_reuses_cursor(cursor_recreation_mutant())
+
 
 class TestAutomationImporterOwnership(unittest.TestCase):
     def _importable_owner(
@@ -2181,6 +2614,32 @@ class TestAutomationImporterOwnership(unittest.TestCase):
                 finally:
                     trace.append(f"lock-exit:{namespace}:{key}")
 
+            def claim_automation_import_job_under_lock(
+                self,
+                job_id: int,
+                *,
+                request_id: int,
+                worker_id: str | None,
+                execution_lease: ExecutionLeaseSnapshot,
+            ) -> ImportJob | None:
+                self.assert_claim_inside_import_lock()
+                trace.append("claim")
+                return db.claim_automation_import_job_under_lock(
+                    job_id,
+                    request_id=request_id,
+                    worker_id=worker_id,
+                    execution_lease=execution_lease,
+                )
+
+            @staticmethod
+            def assert_claim_inside_import_lock() -> None:
+                if trace[-1] != (
+                    f"lock-enter:{ADVISORY_LOCK_NAMESPACE_IMPORT}:42"
+                ):
+                    raise AssertionError(
+                        "automation claim escaped the pinned IMPORT lock"
+                    )
+
             def close(self) -> None:
                 self.closed = True
                 trace.append("close")
@@ -2232,6 +2691,7 @@ class TestAutomationImporterOwnership(unittest.TestCase):
         self.assertEqual(trace, [
             "pin-enter",
             f"lock-enter:{ADVISORY_LOCK_NAMESPACE_IMPORT}:42",
+            "claim",
             f"lock-enter:{ADVISORY_LOCK_NAMESPACE_RELEASE}:99",
             f"lock-exit:{ADVISORY_LOCK_NAMESPACE_RELEASE}:99",
             f"lock-exit:{ADVISORY_LOCK_NAMESPACE_IMPORT}:42",
@@ -2269,6 +2729,21 @@ class TestAutomationImporterOwnership(unittest.TestCase):
             def advisory_lock(self, _namespace: int, _key: int):
                 yield True
 
+            def claim_automation_import_job_under_lock(
+                self,
+                job_id: int,
+                *,
+                request_id: int,
+                worker_id: str | None,
+                execution_lease: ExecutionLeaseSnapshot,
+            ) -> ImportJob | None:
+                return db.claim_automation_import_job_under_lock(
+                    job_id,
+                    request_id=request_id,
+                    worker_id=worker_id,
+                    execution_lease=execution_lease,
+                )
+
             def close(self) -> None:
                 return None
 
@@ -2290,9 +2765,10 @@ class TestAutomationImporterOwnership(unittest.TestCase):
         execute.assert_not_called()
         stored = db.get_import_job(1)
         assert stored is not None
-        self.assertEqual(stored.status, "running")
+        self.assertEqual((stored.status, stored.attempts), ("queued", 0))
+        self.assertIsNone(stored.execution_invocation_id)
 
-    def test_import_lock_contention_performs_zero_lifecycle_writes(self) -> None:
+    def test_import_lock_contention_leaves_claimable_then_progresses(self) -> None:
         from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_IMPORT
         from scripts import importer
 
@@ -2303,8 +2779,11 @@ class TestAutomationImporterOwnership(unittest.TestCase):
         writes: list[str] = []
 
         class StageSession:
+            def __init__(self, *, acquire: bool) -> None:
+                self.acquire = acquire
+
             def __getattr__(self, name: str) -> object:
-                if name in {
+                if not self.acquire and name in {
                     "requeue_import_job_for_preview",
                     "mark_import_job_recovery_required",
                     "mark_import_job_failed",
@@ -2334,32 +2813,65 @@ class TestAutomationImporterOwnership(unittest.TestCase):
             @contextmanager
             def advisory_lock(self, namespace: int, _key: int):
                 self.assert_import_namespace(namespace)
-                yield False
+                yield self.acquire
 
             @staticmethod
             def assert_import_namespace(namespace: int) -> None:
                 if namespace != ADVISORY_LOCK_NAMESPACE_IMPORT:
                     raise AssertionError(f"unexpected lock namespace {namespace}")
 
+            def claim_automation_import_job_under_lock(
+                self,
+                job_id: int,
+                *,
+                request_id: int,
+                worker_id: str | None,
+                execution_lease: ExecutionLeaseSnapshot,
+            ) -> ImportJob | None:
+                return db.claim_automation_import_job_under_lock(
+                    job_id,
+                    request_id=request_id,
+                    worker_id=worker_id,
+                    execution_lease=execution_lease,
+                )
+
             def close(self) -> None:
                 return None
 
-        execute = MagicMock()
-        result = importer.run_once(
+        execute = MagicMock(return_value=DispatchOutcome(
+            False,
+            "prelaunch defer",
+            deferred=True,
+        ))
+        blocked = importer.run_once(
             db,  # pyright: ignore[reportArgumentType]
             worker_id="importer",
-            stage_db_factory=lambda _dsn: StageSession(),
+            stage_db_factory=lambda _dsn: StageSession(acquire=False),
             execution_lease_factory=lambda **_kwargs: lease,
             execute_fn=execute,
         )
 
-        self.assertIsNone(result)
+        self.assertIsNone(blocked)
         self.assertEqual(writes, [])
         execute.assert_not_called()
         stored = db.get_import_job(1)
         assert stored is not None
-        self.assertEqual(stored.status, "running")
-        self.assertEqual(importer._execution_lease_from_job(stored), lease)
+        self.assertEqual((stored.status, stored.attempts), ("queued", 0))
+        self.assertIsNone(importer._execution_lease_from_job(stored))
+
+        progressed = importer.run_once(
+            db,  # pyright: ignore[reportArgumentType]
+            worker_id="importer",
+            stage_db_factory=lambda _dsn: StageSession(acquire=True),
+            execution_lease_factory=lambda **_kwargs: lease,
+            execute_fn=execute,
+        )
+
+        self.assertIsNone(progressed)
+        execute.assert_called_once()
+        retried = db.get_import_job(1)
+        assert retried is not None
+        self.assertEqual((retried.status, retried.attempts), ("queued", 1))
 
     def test_owner_session_cancellation_fail_stops_without_requeue(self) -> None:
         from scripts import importer
@@ -2390,6 +2902,21 @@ class TestAutomationImporterOwnership(unittest.TestCase):
             @contextmanager
             def advisory_lock(self, _namespace: int, _key: int):
                 yield True
+
+            def claim_automation_import_job_under_lock(
+                self,
+                job_id: int,
+                *,
+                request_id: int,
+                worker_id: str | None,
+                execution_lease: ExecutionLeaseSnapshot,
+            ) -> ImportJob | None:
+                return db.claim_automation_import_job_under_lock(
+                    job_id,
+                    request_id=request_id,
+                    worker_id=worker_id,
+                    execution_lease=execution_lease,
+                )
 
             def close(self) -> None:
                 return None
@@ -2650,6 +3177,88 @@ class TestImportPreviewWorker(unittest.TestCase):
             module_text,
         )
 
+    def test_preview_scans_past_contended_force_candidate(self) -> None:
+        """One busy request cannot starve a later unrelated preview."""
+        from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_IMPORT
+        from scripts import import_preview_worker
+
+        db = FakePipelineDB()
+        setattr(db, "dsn", "postgresql://fake")  # noqa: B010
+        for request_id in (42, 43):
+            db.seed_request(make_request_row(id=request_id, status="wanted"))
+            db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=request_id,
+                dedupe_key=f"force:preview-scan:{request_id}",
+                payload=force_import_payload(
+                    download_log_id=request_id,
+                    failed_path=f"/tmp/force-preview-scan-{request_id}",
+                ),
+            )
+
+        class StageSession:
+            def __getattr__(self, name: str) -> object:
+                return getattr(db, name)
+
+            @contextmanager
+            def _pin_owner_session(self, token: CancellationToken):
+                with db._pin_owner_session(token) as identity:
+                    yield identity
+
+            @contextmanager
+            def advisory_lock(self, namespace: int, key: int):
+                if (
+                    namespace == ADVISORY_LOCK_NAMESPACE_IMPORT
+                    and key == 42
+                ):
+                    yield False
+                else:
+                    with db.advisory_lock(namespace, key) as acquired:
+                        yield acquired
+
+            def claim_force_import_preview_job_under_lock(
+                self,
+                job_id: int,
+                *,
+                request_id: int,
+                worker_id: str | None,
+            ) -> ImportJob | None:
+                return db.claim_force_import_preview_job_under_lock(
+                    job_id,
+                    request_id=request_id,
+                    worker_id=worker_id,
+                )
+
+            def close(self) -> None:
+                return None
+
+        processed: list[int] = []
+
+        def pause_after_claim(
+            _stage_db: object,
+            claimed: ImportJob,
+            **_kwargs: object,
+        ) -> ImportJob:
+            assert claimed.request_id is not None
+            processed.append(claimed.request_id)
+            return claimed
+
+        result = import_preview_worker.run_once(
+            db,
+            worker_id="preview-scan",
+            stage_db_factory=lambda _dsn: StageSession(),
+            execution_lease_factory=_unavailable_execution_lease,
+            process_fn=pause_after_claim,
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(processed, [43])
+        first = db.get_import_job(1)
+        second = db.get_import_job(2)
+        assert first is not None and second is not None
+        self.assertEqual(first.preview_status, "waiting")
+        self.assertEqual(second.preview_status, "running")
+
     def test_terminal_force_preview_failure_reclaims_unpublished_stale_action(self):
         """A failed preview owns and removes a stale action left by its retry."""
         from lib.import_preview import force_action_copy_path
@@ -2825,11 +3434,10 @@ class TestImportPreviewWorker(unittest.TestCase):
     def test_force_execute_path_requires_forwarded_runtime_config(self):
         """The real execute path must retain the caller's private config.
 
-        The request is deliberately absent, so after the configured outer
-        snapshot the real measurement returns ``request_not_found`` before it
-        can load its own runtime config.  Dropping ``runtime_config`` before
-        ``execute_preview_job`` instead makes the production config reject
-        this private test source at the exact execute boundary.
+        The force request is present because claim now requires fresh request
+        authority. Dropping ``runtime_config`` before ``execute_preview_job``
+        still makes the production config reject this private test source at
+        the exact execute boundary.
         """
         from lib.fs_authority import FilesystemAuthorityError
         from scripts import import_preview_worker
@@ -2877,7 +3485,10 @@ class TestImportPreviewWorker(unittest.TestCase):
             self.assertEqual(updated.status, "failed")
             self.assertEqual(updated.preview_status, "measurement_failed")
             assert updated.preview_result is not None
-            self.assertEqual(updated.preview_result["reason"], "request_not_found")
+            self.assertEqual(
+                updated.preview_result["reason"],
+                "measurement_crashed",
+            )
             self.assertEqual(updated.preview_result["source_path"], source)
             self.assertEqual(
                 os.listdir(os.path.join(cfg.processing_dir, "preview")),
@@ -3058,8 +3669,8 @@ class TestImportPreviewWorker(unittest.TestCase):
             assert claimed_for_import is not None
             self.assertEqual(claimed_for_import.id, updated.id)
 
-    def test_automation_run_once_resumes_handoff_under_dedicated_locked_session(self):
-        """A crash-after-handoff job resumes once under its pinned owner session."""
+    def test_preview_lock_contention_leaves_claimable_then_progresses(self):
+        """A transient IMPORT miss stays queued and the next poll progresses."""
         from lib.download_reconstruction import reconstruct_grab_list_entry
         from lib.processing_paths import (
             canonical_folder_for_row,
@@ -3106,6 +3717,25 @@ class TestImportPreviewWorker(unittest.TestCase):
                 finally:
                     self._trace.append("pin-exit")
                     self._pinned = False
+
+            def claim_automation_import_preview_job_under_lock(
+                self,
+                job_id: int,
+                *,
+                request_id: int,
+                worker_id: str | None,
+                execution_lease: ExecutionLeaseSnapshot,
+            ) -> ImportJob | None:
+                if not self._pinned or not self._lock_held:
+                    raise AssertionError(
+                        "preview claim escaped the pinned IMPORT lock"
+                    )
+                return self._inner.claim_automation_import_preview_job_under_lock(
+                    job_id,
+                    request_id=request_id,
+                    worker_id=worker_id,
+                    execution_lease=execution_lease,
+                )
 
             def set_import_job_candidate_evidence(
                 self,
@@ -3203,31 +3833,15 @@ class TestImportPreviewWorker(unittest.TestCase):
                 *_args: Any,
                 **_kwargs: Any,
             ) -> ImportPreviewResult:
-                claimed = claimed_holder["job"]
-                persisted = db.get_import_job(claimed.id)
+                persisted = db.get_import_job(job.id)
                 assert persisted is not None
                 persisted_claim_leases.append((
                     persisted.execution_invocation_id,
                     persisted.execution_systemd_unit,
                 ))
-                # A second worker seeing the same claimed job cannot enter the
-                # request's IMPORT critical section and therefore cannot
-                # measure or commit it.
-                duplicate = import_preview_worker._process_automation_claim(
-                    claimed,
-                    dsn="postgresql://fake",
-                    execution_lease=lease,
-                    heartbeat_interval=3600,
-                    runtime_config=CratediggerConfig(),
-                    stage_db_factory=lambda _dsn: StageSession(
-                        db, blocked_trace, acquire=False,
-                    ),
-                    heartbeat_db_factory=lambda _dsn: db,
-                )
-                self.assertIsNone(duplicate)
                 self._seed_job_candidate_evidence(
                     preview_db,
-                    claimed.id,
+                    job.id,
                     canonical_path,
                 )
                 return self._preview(
@@ -3236,15 +3850,36 @@ class TestImportPreviewWorker(unittest.TestCase):
                     source_path=canonical_path,
                 )
 
-            # ``run_once`` owns the initial claim; retain its exact row for the
-            # nested duplicate-attempt proof above.
-            claimed_holder: dict[str, ImportJob] = {}
-
             def stage_factory(_dsn: str) -> StageSession:
-                stored = db.get_import_job(job.id)
-                assert stored is not None
-                claimed_holder["job"] = stored
                 return StageSession(db, trace, acquire=True)
+
+            blocked = import_preview_worker.run_once(
+                db,
+                worker_id="preview",
+                heartbeat_interval=3600,
+                runtime_config=CratediggerConfig(
+                    processing_dir=processing_dir,
+                ),
+                stage_db_factory=lambda _dsn: StageSession(
+                    db,
+                    blocked_trace,
+                    acquire=False,
+                ),
+                heartbeat_db_factory=lambda _dsn: db,
+                execution_lease_factory=capture_lease,
+                candidate_measurement_fn=preview,
+            )
+            self.assertIsNone(blocked)
+            unclaimed = db.get_import_job(job.id)
+            assert unclaimed is not None
+            self.assertEqual(
+                (
+                    unclaimed.preview_status,
+                    unclaimed.preview_attempts,
+                    unclaimed.execution_invocation_id,
+                ),
+                ("waiting", 0, None),
+            )
 
             updated = import_preview_worker.run_once(
                 db,
@@ -3263,7 +3898,10 @@ class TestImportPreviewWorker(unittest.TestCase):
         self.assertEqual(updated.preview_status, "evidence_ready")
         self.assertEqual(
             captured_units,
-            [import_preview_worker.PREVIEW_SYSTEMD_UNIT],
+            [
+                import_preview_worker.PREVIEW_SYSTEMD_UNIT,
+                import_preview_worker.PREVIEW_SYSTEMD_UNIT,
+            ],
         )
         self.assertEqual(
             persisted_claim_leases,
@@ -3311,6 +3949,21 @@ class TestImportPreviewWorker(unittest.TestCase):
             def advisory_lock(self, _namespace: int, _key: int):
                 yield True
 
+            def claim_automation_import_preview_job_under_lock(
+                self,
+                job_id: int,
+                *,
+                request_id: int,
+                worker_id: str | None,
+                execution_lease: ExecutionLeaseSnapshot,
+            ) -> ImportJob | None:
+                return self._inner.claim_automation_import_preview_job_under_lock(
+                    job_id,
+                    request_id=request_id,
+                    worker_id=worker_id,
+                    execution_lease=execution_lease,
+                )
+
             def close(self) -> None:
                 return None
 
@@ -3334,16 +3987,16 @@ class TestImportPreviewWorker(unittest.TestCase):
                 canonical_path=canonical_path,
             )
             lease = _preview_execution_lease("wrong-owner")
-            claimed = db.claim_next_import_preview_job(
-                worker_id="preview",
+            candidate = db.peek_next_import_preview_job(
                 execution_lease=lease,
             )
-            assert claimed is not None
+            assert candidate is not None
             db._requests[42]["active_automation_import_job_id"] = job.id + 1
 
             updated = import_preview_worker._process_automation_claim(
-                claimed,
+                candidate,
                 dsn="postgresql://fake",
+                worker_id="preview",
                 execution_lease=lease,
                 heartbeat_interval=3600,
                 runtime_config=CratediggerConfig(),
@@ -3353,7 +4006,7 @@ class TestImportPreviewWorker(unittest.TestCase):
             self.assertEqual(os.listdir(canonical_path), [])
 
         self.assertIsNone(updated)
-        stored = db.get_import_job(claimed.id)
+        stored = db.get_import_job(candidate.id)
         assert stored is not None
         self.assertIsNone(stored.candidate_evidence_id)
 
@@ -3394,6 +4047,18 @@ class TestImportPreviewWorker(unittest.TestCase):
                 )
                 yield False  # pragma: no cover - contextmanager shape only
 
+            def claim_automation_import_preview_job_under_lock(
+                self,
+                job_id: int,
+                *,
+                request_id: int,
+                worker_id: str | None,
+                execution_lease: ExecutionLeaseSnapshot,
+            ) -> ImportJob | None:
+                raise AssertionError(
+                    "claim ran after owner-session loss"
+                )
+
             def close(self) -> None:
                 return None
 
@@ -3417,16 +4082,16 @@ class TestImportPreviewWorker(unittest.TestCase):
                 canonical_path=canonical_path,
             )
             lease = _preview_execution_lease("lost-before-lock")
-            claimed = db.claim_next_import_preview_job(
-                worker_id="preview",
+            candidate = db.peek_next_import_preview_job(
                 execution_lease=lease,
             )
-            assert claimed is not None
+            assert candidate is not None
 
             with self.assertRaises(OwnerSessionLost):
                 import_preview_worker._process_automation_claim(
-                    claimed,
+                    candidate,
                     dsn="postgresql://fake",
+                    worker_id="preview",
                     execution_lease=lease,
                     heartbeat_interval=3600,
                     runtime_config=CratediggerConfig(),
@@ -3435,13 +4100,10 @@ class TestImportPreviewWorker(unittest.TestCase):
                 )
             self.assertEqual(os.listdir(canonical_path), [])
 
-        stored = db.get_import_job(claimed.id)
+        stored = db.get_import_job(candidate.id)
         assert stored is not None
-        self.assertEqual(stored.preview_status, "running")
-        self.assertEqual(
-            stored.execution_invocation_id,
-            lease.invocation_id,
-        )
+        self.assertEqual(stored.preview_status, "waiting")
+        self.assertIsNone(stored.execution_invocation_id)
         self.assertIsNone(stored.candidate_evidence_id)
 
     def test_automation_session_loss_during_materialization_blocks_later_mutation(self):
@@ -3632,6 +4294,7 @@ class TestImportPreviewWorker(unittest.TestCase):
         db = FakePipelineDB()
         dsn = "postgresql://fake"
         setattr(db, "dsn", dsn)  # noqa: B010 - test-only protocol seam
+        db.seed_request(make_request_row(id=42, status="wanted"))
         db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=42,
@@ -3826,6 +4489,7 @@ class TestImportPreviewWorker(unittest.TestCase):
         from scripts import import_preview_worker
 
         db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="wanted"))
         db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=42,
@@ -3860,6 +4524,7 @@ class TestImportPreviewWorker(unittest.TestCase):
         from scripts import import_preview_worker
 
         db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="wanted"))
         db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=42,
@@ -4074,7 +4739,8 @@ class TestImportPreviewWorker(unittest.TestCase):
         calls = 0
         calls_lock = threading.Lock()
 
-        def run_once(db, *, worker_id):
+        def run_once(db, *, worker_id, scan_cursor=None):
+            del scan_cursor
             nonlocal calls
             with calls_lock:
                 calls += 1
@@ -4124,7 +4790,8 @@ class TestImportPreviewWorker(unittest.TestCase):
         calls_lock = threading.Lock()
         stop_holder: dict[str, Any] = {}
 
-        def run_once(db, *, worker_id):
+        def run_once(db, *, worker_id, scan_cursor=None):
+            del scan_cursor
             nonlocal calls
             with calls_lock:
                 calls += 1
@@ -4171,6 +4838,65 @@ class TestImportPreviewWorker(unittest.TestCase):
         # We saw at least the transient raise + one post-recover poll.
         self.assertGreaterEqual(calls, 2)
 
+    def test_threaded_worker_reuses_one_scan_cursor_across_polls(self):
+        """Each long-lived preview thread retains its own rotating cursor."""
+        from scripts import import_preview_worker
+
+        class PollProbeComplete(RuntimeError):
+            pass
+
+        class ThreadDB:
+            def close(self) -> None:
+                return None
+
+        observed: list[object] = []
+
+        def observe_poll(
+            _db: object,
+            *,
+            worker_id: str,
+            scan_cursor: object,
+        ) -> None:
+            del worker_id
+            observed.append(scan_cursor)
+            if len(observed) == 2:
+                raise PollProbeComplete
+
+        with (
+            patch(
+                "scripts.import_preview_worker.PipelineDB",
+                side_effect=lambda _dsn: ThreadDB(),
+            ),
+            patch(
+                "scripts.import_preview_worker.run_once",
+                side_effect=observe_poll,
+            ),
+            patch(
+                "scripts.import_preview_worker.preview_recovery_loop",
+                return_value=None,
+            ),
+            patch("scripts.import_preview_worker.logger.exception"),
+            patch("scripts.import_preview_worker.logger.error"),
+        ):
+            exit_code = import_preview_worker.run_threaded_workers(
+                dsn="postgresql://example",
+                worker_id="preview-cursor-probe",
+                worker_count=1,
+                poll_interval=0,
+            )
+
+        self.assertEqual(exit_code, 1)
+        assert_long_lived_worker_reuses_cursor(observed)
+
+        def cursor_recreation_mutant() -> list[object]:
+            return [
+                import_preview_worker._CandidateScanCursor(),
+                import_preview_worker._CandidateScanCursor(),
+            ]
+
+        with self.assertRaisesRegex(AssertionError, "recreated"):
+            assert_long_lived_worker_reuses_cursor(cursor_recreation_mutant())
+
     def test_main_requeues_running_preview_jobs_on_startup(self):
         """A preview job left in ``preview_status='running'`` by a dead
         worker process must be flipped back to ``waiting`` the moment
@@ -4180,6 +4906,7 @@ class TestImportPreviewWorker(unittest.TestCase):
         from scripts import import_preview_worker
 
         db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="wanted"))
         db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=42,

@@ -308,7 +308,7 @@ def _denylist_reason(decision: str, new_bitrate: int | None) -> str:
     return f"rejected: {decision}"
 
 
-def _checkpoint_automation_owner(
+def _checkpoint_import_owner(
     db: PipelineDB,
     *,
     import_job_id: int | None,
@@ -316,7 +316,19 @@ def _checkpoint_automation_owner(
     cancellation_token: CancellationToken | None,
     owner_session_identity: OwnerSessionIdentity | None,
 ) -> None:
-    """Skip force paths; otherwise delegate the exact bundle invariant."""
+    """Fail-stop pinned force sessions and exact automation owners."""
+    if (cancellation_token is None) != (owner_session_identity is None):
+        raise ValueError(
+            "cancellation token and owner session identity must be paired"
+        )
+    if cancellation_token is not None and owner_session_identity is not None:
+        cancellation_token.raise_if_cancelled()
+        probe = db._probe_owner_session(owner_session_identity)
+        if not probe.live:
+            cancellation_token.cancel(
+                f"owner_session_reverification_failed:{probe.reason}"
+            )
+            cancellation_token.raise_if_cancelled()
     if (
         import_job_id is None
         or execution_lease is None
@@ -343,6 +355,12 @@ def _validate_automation_dispatch_authority(
     owner_session_identity: OwnerSessionIdentity | None,
 ) -> None:
     """Require the complete exact-owner bundle before automation dispatch."""
+    if (cancellation_token is None) != (owner_session_identity is None):
+        raise ValueError(
+            "cancellation token and owner session identity must be paired"
+        )
+    if cancellation_token is not None:
+        cancellation_token.raise_if_cancelled()
     if execution_lease is None:
         return
     if (
@@ -355,7 +373,7 @@ def _validate_automation_dispatch_authority(
             "automation dispatch requires lease, token, pinned session, "
             "and import job"
         )
-    _checkpoint_automation_owner(
+    _checkpoint_import_owner(
         db,
         import_job_id=import_job_id,
         execution_lease=execution_lease,
@@ -364,7 +382,7 @@ def _validate_automation_dispatch_authority(
     )
 
 
-def _automation_runner_hooks(
+def _import_runner_hooks(
     db: PipelineDB,
     *,
     import_job_id: int | None,
@@ -376,18 +394,26 @@ def _automation_runner_hooks(
     Callable[[int], None] | None,
     Callable[[], bool] | None,
 ]:
-    """Build child-recording hooks around one mutable execution lease."""
+    """Build process-group cancellation hooks for pinned import sessions."""
     execution_lease = execution_lease_holder[0]
-    if execution_lease is None:
+    if cancellation_token is None and owner_session_identity is None:
         return None, None, None
+    if cancellation_token is None or owner_session_identity is None:
+        raise ValueError(
+            "cancellation token and owner session identity must be paired"
+        )
+    if execution_lease is None:
+        return (
+            cancellation_token,
+            None,
+            lambda: db._probe_owner_session(owner_session_identity).live,
+        )
     assert import_job_id is not None
-    assert cancellation_token is not None
-    assert owner_session_identity is not None
 
     def record_beets_child(pid: int) -> None:
         current_lease = execution_lease_holder[0]
         assert current_lease is not None
-        _checkpoint_automation_owner(
+        _checkpoint_import_owner(
             db,
             import_job_id=import_job_id,
             execution_lease=current_lease,
@@ -489,7 +515,7 @@ def _trigger_post_import_notifiers(
     from lib.util import trigger_jellyfin_scan as trigger_jellyfin
     from lib.util import trigger_plex_scan as trigger_plex
 
-    _checkpoint_automation_owner(
+    _checkpoint_import_owner(
         db,
         import_job_id=import_job_id,
         execution_lease=execution_lease,
@@ -1002,7 +1028,7 @@ def dispatch_import_core(
                 runner_cancellation_token,
                 runner_on_spawn,
                 runner_owner_session_probe,
-            ) = _automation_runner_hooks(
+            ) = _import_runner_hooks(
                 db,
                 import_job_id=candidate_import_job_id,
                 execution_lease_holder=execution_lease_holder,
@@ -1050,7 +1076,7 @@ def dispatch_import_core(
                     owner_session_probe=runner_owner_session_probe,
                 )
             active_execution_lease = execution_lease_holder[0]
-            _checkpoint_automation_owner(
+            _checkpoint_import_owner(
                 db,
                 import_job_id=candidate_import_job_id,
                 execution_lease=active_execution_lease,
@@ -1144,7 +1170,7 @@ def dispatch_import_core(
                     if isinstance(pending, PendingImportTerminalOutcome):
                         terminal_outcome = pending
                     try:
-                        _checkpoint_automation_owner(
+                        _checkpoint_import_owner(
                             db,
                             import_job_id=candidate_import_job_id,
                             execution_lease=active_execution_lease,
@@ -1177,7 +1203,7 @@ def dispatch_import_core(
                             f"{type(exc).__name__}: {exc}",
                         )
                     try:
-                        _checkpoint_automation_owner(
+                        _checkpoint_import_owner(
                             db,
                             import_job_id=candidate_import_job_id,
                             execution_lease=active_execution_lease,
@@ -1437,7 +1463,7 @@ def dispatch_import_core(
                 automation_completion_captured=automation_completion_captured,
             )
             if cleanup_action_file:
-                _checkpoint_automation_owner(
+                _checkpoint_import_owner(
                     db,
                     import_job_id=candidate_import_job_id,
                     execution_lease=active_execution_lease,
@@ -1448,7 +1474,7 @@ def dispatch_import_core(
                     quality_evidence_action_file
                 )
 
-    _checkpoint_automation_owner(
+    _checkpoint_import_owner(
         db,
         import_job_id=candidate_import_job_id,
         execution_lease=active_execution_lease,

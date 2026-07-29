@@ -23,7 +23,11 @@ from lib.import_execution import (
     ProcessIdentity,
 )
 from lib.import_queue import IMPORT_JOB_FORCE, ImportJob
-from lib.pipeline_db import PipelineDB
+from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_IMPORT, PipelineDB
+from lib.pipeline_db.cleanup_journal import (
+    _CleanupCursor,
+    _LockedCleanupScope,
+)
 from lib.quality import ActiveDownloadState
 from lib.quality_evidence import snapshot_audio_files
 from lib.terminal_outcomes import (
@@ -85,6 +89,46 @@ class PausingTerminalPipelineDB(PipelineDB):
         if not self.release.wait(timeout=10):
             raise TimeoutError("terminal row-lock test was not released")
         return status
+
+
+class PausingAutomationTerminalPipelineDB(PipelineDB):
+    """Pause after request lock, before terminalization locks request jobs."""
+
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        request_locked: threading.Event,
+        release: threading.Event,
+    ) -> None:
+        super().__init__(dsn)
+        self.request_locked = request_locked
+        self.release = release
+
+    def _lock_processing_cleanup_scope(
+        self,
+        cur: _CleanupCursor,
+        *,
+        request_id: int,
+    ) -> _LockedCleanupScope:
+        cur.execute(
+            """
+            SELECT status, active_automation_import_job_id
+            FROM album_requests
+            WHERE id = %s
+            FOR UPDATE
+            """,
+            (request_id,),
+        )
+        if cur.fetchone() is None:
+            raise AssertionError("terminal request disappeared")
+        self.request_locked.set()
+        if not self.release.wait(timeout=10):
+            raise TimeoutError("automation terminal overlap was not released")
+        return super()._lock_processing_cleanup_scope(
+            cur,
+            request_id=request_id,
+        )
 
 
 class ObservedOperatorPipelineDB(PipelineDB):
@@ -561,6 +605,87 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
                 finally:
                     observer.close()
 
+    def test_recovery_serializes_before_automation_terminal_request_jobs(
+        self,
+    ) -> None:
+        """IMPORT prevents recovery job->request deadlock at terminalization."""
+        assert TEST_DSN is not None
+        seed, request_id, automation_job_id = _seed_running_import(
+            automation_state=True,
+        )
+        command = _prepare_automation_terminal_command(
+            seed,
+            request_id,
+            automation_job_id,
+        )
+        recovery = seed.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=request_id,
+            dedupe_key="force:terminal-recovery-overlap",
+            payload={
+                "download_log_id": request_id,
+                "failed_path": "/tmp/terminal-recovery-overlap",
+            },
+        )
+        seed._execute(
+            """
+            UPDATE import_jobs
+            SET status = 'recovery_required'
+            WHERE id = %s
+            """,
+            (recovery.id,),
+        )
+        seed.close()
+
+        request_locked = threading.Event()
+        release = threading.Event()
+        terminal = PausingAutomationTerminalPipelineDB(
+            TEST_DSN,
+            request_locked=request_locked,
+            release=release,
+        )
+        resolver = PipelineDB(TEST_DSN)
+        self.addCleanup(terminal.close)
+        self.addCleanup(resolver.close)
+        terminal_errors: list[BaseException] = []
+
+        def persist_terminal() -> None:
+            try:
+                with terminal.advisory_lock(
+                    ADVISORY_LOCK_NAMESPACE_IMPORT,
+                    request_id,
+                ) as acquired:
+                    self.assertTrue(acquired)
+                    terminal.persist_import_terminal_outcome(command)
+            except BaseException as exc:  # noqa: BLE001 - thread handoff
+                terminal_errors.append(exc)
+
+        worker = threading.Thread(target=persist_terminal)
+        worker.start()
+        self.assertTrue(request_locked.wait(timeout=10))
+        self.assertIsNone(
+            resolver.resolve_import_job_recovery(
+                recovery.id,
+                resolution="close",
+                reason="must serialize behind terminal owner",
+            )
+        )
+        release.set()
+        worker.join(timeout=10)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(terminal_errors, [])
+
+        resolved = resolver.resolve_import_job_recovery(
+            recovery.id,
+            resolution="close",
+            reason="terminal owner exited",
+        )
+        self.assertIsNotNone(resolved)
+        assert resolved is not None
+        closed, retry = resolved
+        self.assertEqual(closed.status, "failed")
+        self.assertIsNone(retry)
+
     def test_automation_terminal_bundle_is_all_or_none_at_every_boundary(
         self,
     ) -> None:
@@ -659,6 +784,73 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
             counts["cleanup_journals"],
             0,
         )
+
+    def test_automation_terminal_preserves_decoded_json_shapes(self) -> None:
+        db, request_id, job_id = _seed_running_import(
+            automation_state=True,
+        )
+        self.addCleanup(db.close)
+        command = _prepare_automation_terminal_command(
+            db,
+            request_id,
+            job_id,
+        )
+        current_job = db.get_import_job(job_id)
+        assert current_job is not None
+        existing_result = dict(current_job.result or {})
+        existing_json = {
+            "nested": {
+                "items": [1, 1.25, True, None, {"label": "existing"}],
+            },
+            "empty_object": {},
+            "empty_list": [],
+        }
+        existing_result["existing_json"] = existing_json
+        db._execute(
+            "UPDATE import_jobs SET result = %s::jsonb WHERE id = %s",
+            (json.dumps(existing_result), job_id),
+        )
+        terminal_json = {
+            "success": True,
+            "terminal_json": {
+                "items": [0, -4.5, False, None, {"label": "terminal"}],
+                "empty_object": {},
+                "empty_list": [],
+            },
+        }
+        audit_json = {
+            "valid": True,
+            "audit_json": {
+                "items": [2, 9.75, False, None, {"label": "audit"}],
+                "empty_object": {},
+                "empty_list": [],
+            },
+        }
+        command = replace(
+            command,
+            audit=replace(
+                command.audit,
+                validation_result=json.dumps(audit_json),
+            ),
+            job=replace(command.job, result=terminal_json),
+        )
+
+        result = db.persist_import_terminal_outcome(command)
+
+        assert result.job.result is not None
+        self.assertEqual(
+            result.job.result["existing_json"],
+            existing_json,
+        )
+        self.assertEqual(
+            result.job.result["terminal_json"],
+            terminal_json["terminal_json"],
+        )
+        validation = db.get_download_history(request_id)[0][
+            "validation_result"
+        ]
+        assert isinstance(validation, dict)
+        self.assertEqual(validation["audit_json"], audit_json["audit_json"])
 
     def test_automation_preview_terminal_bundle_is_all_or_none(
         self,

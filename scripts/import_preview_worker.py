@@ -103,6 +103,16 @@ PREVIEW_HEARTBEAT_INTERVAL_SECONDS = 30.0
 PREVIEW_STALE_RECOVERY_INTERVAL_SECONDS = 60.0
 PREVIEW_STALE_AGE = timedelta(minutes=15)
 PREVIEW_SYSTEMD_UNIT = "cratedigger-import-preview-worker.service"
+PREVIEW_CANDIDATE_SCAN_LIMIT = 32
+
+
+@dataclass
+class _ClaimState:
+    claimed: bool = False
+
+    def mark(self) -> None:
+        self.claimed = True
+
 
 FailureHavePrepareFn = Callable[..., str]
 FailureHaveEnrichFn = Callable[..., str]
@@ -480,11 +490,19 @@ class _DownloadLogEntryReader(Protocol):
 
 
 class _ImportPreviewJobClaimer(Protocol):
-    def claim_next_import_preview_job(
+    def peek_import_preview_job_candidates(
         self,
         *,
-        worker_id: str,
         execution_lease: ExecutionLeaseSnapshot | None = None,
+        limit: int,
+        offset: int = 0,
+    ) -> list[ImportJob]: ...
+
+    def claim_import_preview_job_candidate(
+        self,
+        job_id: int,
+        *,
+        worker_id: str,
     ) -> ImportJob | None: ...
 
 
@@ -497,6 +515,11 @@ class _PreviewHeartbeatDB(Protocol):
     ) -> bool: ...
 
     def close(self) -> None: ...
+
+
+@dataclass
+class _CandidateScanCursor:
+    offset: int = 0
 
 
 def _force_download_log_failed_path(
@@ -1405,22 +1428,60 @@ class _AutomationPreviewStageDB(Protocol):
         key: int,
     ) -> AbstractContextManager[bool]: ...
 
+    def claim_automation_import_preview_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+        execution_lease: ExecutionLeaseSnapshot,
+    ) -> ImportJob | None: ...
+
+    def close(self) -> None: ...
+
+
+@runtime_checkable
+class _ForcePreviewStageDB(Protocol):
+    def _pin_owner_session(
+        self,
+        cancellation_token: CancellationToken,
+    ) -> AbstractContextManager[OwnerSessionIdentity]: ...
+
+    def advisory_lock(
+        self,
+        namespace: int,
+        key: int,
+    ) -> AbstractContextManager[bool]: ...
+
+    def claim_force_import_preview_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+    ) -> ImportJob | None: ...
+
     def close(self) -> None: ...
 
 
 def _process_automation_claim(
-    job: ImportJob,
+    candidate: ImportJob,
     *,
     dsn: str,
+    worker_id: str,
     execution_lease: ExecutionLeaseSnapshot,
     heartbeat_interval: float,
     runtime_config: CratediggerConfig | None,
     stage_db_factory: Callable[[str], object],
     heartbeat_db_factory: Callable[[str], _PreviewHeartbeatDB],
     candidate_measurement_fn: Callable[..., ImportPreviewResult] | None = None,
+    claim_callback: Callable[[], None] | None = None,
+    process_fn: Callable[..., ImportJob | None] = (
+        process_claimed_preview_job_with_heartbeat
+    ),
 ) -> ImportJob | None:
-    """Run one automation preview under its exact dedicated owner session."""
-    if job.request_id is None:
+    """Claim and run one preview on its exact pinned IMPORT session."""
+    if candidate.request_id is None:
         return None
     stage_db = stage_db_factory(dsn)
     if not isinstance(stage_db, _AutomationPreviewStageDB):
@@ -1431,10 +1492,25 @@ def _process_automation_claim(
             token,
         ) as owner_session_identity, stage_db.advisory_lock(
             ADVISORY_LOCK_NAMESPACE_IMPORT,
-            job.request_id,
+            candidate.request_id,
         ) as acquired:
             if not acquired:
                 return None
+            job = stage_db.claim_automation_import_preview_job_under_lock(
+                candidate.id,
+                request_id=candidate.request_id,
+                worker_id=worker_id,
+                execution_lease=execution_lease,
+            )
+            if job is None:
+                return None
+            if claim_callback is not None:
+                claim_callback()
+            logger.info(
+                "Claimed import preview job %s (%s)",
+                job.id,
+                job.job_type,
+            )
             authority = _automation_authority_snapshot(
                 stage_db,
                 job,
@@ -1444,13 +1520,73 @@ def _process_automation_claim(
             if authority is None:
                 return None
             token.raise_if_cancelled()
-            return process_claimed_preview_job_with_heartbeat(
+            return process_fn(
                 stage_db,
                 job,
                 heartbeat_interval=heartbeat_interval,
                 runtime_config=runtime_config,
                 execution_lease=execution_lease,
                 automation_authority=authority,
+                cancellation_token=token,
+                owner_session_identity=owner_session_identity,
+                heartbeat_db_factory=heartbeat_db_factory,
+                candidate_measurement_fn=candidate_measurement_fn,
+            )
+    finally:
+        stage_db.close()
+
+
+def _process_force_claim(
+    candidate: ImportJob,
+    *,
+    dsn: str,
+    worker_id: str,
+    heartbeat_interval: float,
+    runtime_config: CratediggerConfig | None,
+    stage_db_factory: Callable[[str], object],
+    heartbeat_db_factory: Callable[[str], _PreviewHeartbeatDB],
+    candidate_measurement_fn: Callable[..., ImportPreviewResult] | None = None,
+    claim_callback: Callable[[], None] | None = None,
+    process_fn: Callable[..., ImportJob | None] = (
+        process_claimed_preview_job_with_heartbeat
+    ),
+) -> ImportJob | None:
+    """Claim and run force preview effects on one pinned IMPORT session."""
+    if candidate.request_id is None:
+        return None
+    stage_db = stage_db_factory(dsn)
+    if not isinstance(stage_db, _ForcePreviewStageDB):
+        raise TypeError("force preview DB is missing its owner-session protocol")
+    token = CancellationToken()
+    try:
+        with stage_db._pin_owner_session(
+            token,
+        ) as owner_session_identity, stage_db.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_IMPORT,
+            candidate.request_id,
+        ) as acquired:
+            token.raise_if_cancelled()
+            if not acquired:
+                return None
+            job = stage_db.claim_force_import_preview_job_under_lock(
+                candidate.id,
+                request_id=candidate.request_id,
+                worker_id=worker_id,
+            )
+            if job is None:
+                return None
+            if claim_callback is not None:
+                claim_callback()
+            logger.info(
+                "Claimed import preview job %s (%s)",
+                job.id,
+                job.job_type,
+            )
+            return process_fn(
+                stage_db,
+                job,
+                heartbeat_interval=heartbeat_interval,
+                runtime_config=runtime_config,
                 cancellation_token=token,
                 owner_session_identity=owner_session_identity,
                 heartbeat_db_factory=heartbeat_db_factory,
@@ -1470,7 +1606,12 @@ def run_once(
     heartbeat_db_factory: Callable[[str], _PreviewHeartbeatDB] | None = None,
     execution_lease_factory: Callable[..., ExecutionLeaseSnapshot] | None = None,
     candidate_measurement_fn: Callable[..., ImportPreviewResult] | None = None,
+    process_fn: Callable[..., ImportJob | None] = (
+        process_claimed_preview_job_with_heartbeat
+    ),
+    scan_cursor: _CandidateScanCursor | None = None,
 ) -> ImportJob | None:
+    cursor = scan_cursor or _CandidateScanCursor()
     capture = execution_lease_factory or capture_execution_lease
     try:
         execution_lease = capture(systemd_unit=PREVIEW_SYSTEMD_UNIT)
@@ -1478,37 +1619,84 @@ def run_once(
         # Non-systemd development runs may still process Force/YouTube jobs.
         # Automation remains invisible to claim without a complete lease.
         execution_lease = None
-    job = db.claim_next_import_preview_job(
-        worker_id=worker_id,
+    candidates = db.peek_import_preview_job_candidates(
         execution_lease=execution_lease,
+        limit=PREVIEW_CANDIDATE_SCAN_LIMIT,
+        offset=cursor.offset,
     )
-    if job is None:
-        return None
-    logger.info("Claimed import preview job %s (%s)", job.id, job.job_type)
-    if job.job_type == IMPORT_JOB_AUTOMATION:
-        if execution_lease is None:
-            return None
-        dsn = getattr(db, "dsn", None)
-        if not dsn:
-            return None
-        return _process_automation_claim(
-            job,
-            dsn=str(dsn),
+    if not candidates and cursor.offset:
+        cursor.offset = 0
+        candidates = db.peek_import_preview_job_candidates(
             execution_lease=execution_lease,
+            limit=PREVIEW_CANDIDATE_SCAN_LIMIT,
+            offset=0,
+        )
+    for index, candidate in enumerate(candidates):
+        claim_state = _ClaimState()
+
+        if candidate.job_type == IMPORT_JOB_AUTOMATION:
+            if execution_lease is None:
+                continue
+            dsn = getattr(db, "dsn", None)
+            if not dsn:
+                continue
+            result = _process_automation_claim(
+                candidate,
+                dsn=str(dsn),
+                worker_id=worker_id,
+                execution_lease=execution_lease,
+                heartbeat_interval=heartbeat_interval,
+                runtime_config=runtime_config,
+                stage_db_factory=stage_db_factory or PipelineDB,
+                heartbeat_db_factory=heartbeat_db_factory or PipelineDB,
+                candidate_measurement_fn=candidate_measurement_fn,
+                claim_callback=claim_state.mark,
+                process_fn=process_fn,
+            )
+            if claim_state.claimed:
+                # The claimed row leaves the eligible set, so its immediate
+                # successor compacts into the claimed row's former index.
+                cursor.offset += index
+                return result
+            continue
+        if candidate.job_type == IMPORT_JOB_FORCE:
+            dsn = getattr(db, "dsn", None)
+            if not dsn:
+                continue
+            result = _process_force_claim(
+                candidate,
+                dsn=str(dsn),
+                worker_id=worker_id,
+                heartbeat_interval=heartbeat_interval,
+                runtime_config=runtime_config,
+                stage_db_factory=stage_db_factory or PipelineDB,
+                heartbeat_db_factory=heartbeat_db_factory or PipelineDB,
+                candidate_measurement_fn=candidate_measurement_fn,
+                claim_callback=claim_state.mark,
+                process_fn=process_fn,
+            )
+            if claim_state.claimed:
+                cursor.offset += index
+                return result
+            continue
+        job = db.claim_import_preview_job_candidate(
+            candidate.id,
+            worker_id=worker_id,
+        )
+        if job is None:
+            continue
+        logger.info("Claimed import preview job %s (%s)", job.id, job.job_type)
+        cursor.offset += index
+        return process_fn(
+            db,
+            job,
             heartbeat_interval=heartbeat_interval,
             runtime_config=runtime_config,
-            stage_db_factory=stage_db_factory or PipelineDB,
-            heartbeat_db_factory=heartbeat_db_factory or PipelineDB,
+            heartbeat_db_factory=heartbeat_db_factory,
             candidate_measurement_fn=candidate_measurement_fn,
         )
-    return process_claimed_preview_job_with_heartbeat(
-        db,
-        job,
-        heartbeat_interval=heartbeat_interval,
-        runtime_config=runtime_config,
-        heartbeat_db_factory=heartbeat_db_factory,
-        candidate_measurement_fn=candidate_measurement_fn,
-    )
+    cursor.offset += len(candidates)
+    return None
 
 
 def recover_abandoned_preview_jobs(
@@ -1650,10 +1838,15 @@ def run_threaded_workers(
     def worker_loop(index: int) -> None:
         thread_db = PipelineDB(dsn)
         thread_worker_id = f"{worker_id}:preview-{index}"
+        scan_cursor = _CandidateScanCursor()
         try:
             while not stop.is_set():
                 try:
-                    job = run_once(thread_db, worker_id=thread_worker_id)
+                    job = run_once(
+                        thread_db,
+                        worker_id=thread_worker_id,
+                        scan_cursor=scan_cursor,
+                    )
                 except (psycopg2.OperationalError, psycopg2.InterfaceError) as exc:
                     # Transient DB connection loss — the live failure mode
                     # is PostgreSQL dropping the worker's idle connection
@@ -1753,7 +1946,11 @@ def main() -> int:
                 poll_interval=args.poll_interval,
             )
 
-        run_once(db, worker_id=worker_id)
+        run_once(
+            db,
+            worker_id=worker_id,
+            scan_cursor=_CandidateScanCursor(),
+        )
         return 0
     finally:
         db.close()

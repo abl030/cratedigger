@@ -25,6 +25,7 @@ from lib.force_import_service import (
 )
 from lib.import_preview import ImportPreviewValues
 from lib.import_queue import ImportJob
+from lib.json_narrow import is_str_object_dict
 from scripts.pipeline_cli.quality import _load_runtime_rank_config
 
 if TYPE_CHECKING:
@@ -165,7 +166,7 @@ def cmd_import_job_recovery(
                     args.job_id,
                 )
         print(json.dumps(detail_result.to_dict(), indent=2, sort_keys=True))
-        return 0 if detail_result.outcome == "ok" else 3
+        return 0 if detail_result.outcome == "ok" else 2
     if action not in {"retry", "close"}:
         print("  recovery action must be retry or close", file=sys.stderr)
         return 2
@@ -212,7 +213,7 @@ def cmd_import_job_recovery(
                 )
     except ValueError as exc:
         print(f"  {exc}", file=sys.stderr)
-        return 2
+        return 3
     if current is not None and current.job_type == "automation_import":
         if result.outcome in {
             "retry_queued",
@@ -221,7 +222,7 @@ def cmd_import_job_recovery(
         }:
             exit_code = 0
         elif result.outcome == "not_found":
-            exit_code = 3
+            exit_code = 2
         elif result.outcome in {"lock_unavailable", "cleanup_failed"}:
             exit_code = 5
         else:
@@ -233,7 +234,7 @@ def cmd_import_job_recovery(
         return exit_code
     if result.outcome == "not_found":
         print(f"  {result.message}", file=sys.stderr)
-        return 3
+        return 2
     if result.outcome in {
         "wrong_state",
         "ineligible",
@@ -255,9 +256,9 @@ def _preview_values_from_args(args: argparse.Namespace) -> ImportPreviewValues:
     raw: dict[str, object] = {}
     if args.values_json:
         parsed: object = json.loads(args.values_json)
-        if not isinstance(parsed, dict):
+        if not is_str_object_dict(parsed):
             raise ValueError("--values-json must be a JSON object")
-        raw.update(msgspec.convert(parsed, type=dict[str, object]))
+        raw.update(parsed)
 
     for attr in (
         "is_flac",

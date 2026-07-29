@@ -1,6 +1,9 @@
 """Tests for lib/transitions.py — state transition validation and side effects."""
 
+import json
+import subprocess
 import unittest
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from lib.transitions import (
@@ -344,6 +347,7 @@ class TestApplyTransition(unittest.TestCase):
             {
                 "error": "transition_conflict",
                 "reason": "processing_locked",
+                "request_id": 1,
                 "expected_status": "processing",
                 "actual_status": "processing",
                 "target_status": "wanted",
@@ -355,6 +359,55 @@ class TestApplyTransition(unittest.TestCase):
             },
         )
         self.assertEqual(db.get_request(1), before)
+
+    def test_production_conflict_payload_reaches_browser_detector(self):
+        """The browser consumes the real serializer, not a copied fixture."""
+        db = self._make_db("wanted")
+        job = handoff_automation_owner(db, 1)
+        result = apply_transition(
+            db,
+            1,
+            "wanted",
+            from_status="processing",
+        )
+        assert isinstance(result, TransitionConflict)
+        payload = transition_conflict_payload(result)
+        module_url = (
+            Path(__file__).parents[1]
+            / "web"
+            / "js"
+            / "release_action_state.js"
+        ).as_uri()
+        script = f"""
+import {{ processingConflictFromResponse }} from {json.dumps(module_url)};
+let serialized = '';
+for await (const chunk of process.stdin) serialized += chunk;
+const conflict = processingConflictFromResponse(
+  409,
+  JSON.parse(serialized),
+);
+process.stdout.write(JSON.stringify(conflict));
+"""
+
+        completed = subprocess.run(
+            ["node", "--input-type=module", "--eval", script],
+            input=json.dumps(payload),
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {
+                "requestId": 1,
+                "owner": {
+                    "job_id": job.id,
+                    "status": job.status,
+                    "preview_status": job.preview_status,
+                },
+            },
+        )
 
     def test_wanted_to_unsearchable_sets_status(self):
         db = self._make_db("wanted")

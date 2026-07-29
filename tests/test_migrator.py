@@ -4361,9 +4361,7 @@ class TestProcessingAutomationOwnerMigration(unittest.TestCase):
                   AND tgname IN (
                       'album_requests_complete_processing_owner',
                       'import_jobs_complete_processing_owner',
-                      'processing_cleanup_journal_exact_owner',
-                      'album_requests_cleanup_journal_exact_owner',
-                      'import_jobs_cleanup_journal_exact_owner'
+                      'processing_cleanup_journal_exact_owner'
                   )
             """)
         }
@@ -4373,9 +4371,32 @@ class TestProcessingAutomationOwnerMigration(unittest.TestCase):
                 "album_requests_complete_processing_owner": (True, True),
                 "import_jobs_complete_processing_owner": (True, True),
                 "processing_cleanup_journal_exact_owner": (True, True),
-                "album_requests_cleanup_journal_exact_owner": (True, True),
-                "import_jobs_cleanup_journal_exact_owner": (True, True),
             },
+        )
+        trigger_defs = {
+            str(name): str(definition)
+            for name, definition in self._exec("""
+                SELECT tgname, pg_get_triggerdef(oid)
+                FROM pg_trigger
+                WHERE NOT tgisinternal
+                  AND tgname IN (
+                      'album_requests_complete_processing_owner',
+                      'import_jobs_complete_processing_owner',
+                      'processing_cleanup_journal_exact_owner'
+                  )
+            """)
+        }
+        self.assertIn(
+            "UPDATE OF id, status, active_automation_import_job_id",
+            trigger_defs["album_requests_complete_processing_owner"],
+        )
+        self.assertIn(
+            "UPDATE OF id, request_id, job_type, status",
+            trigger_defs["import_jobs_complete_processing_owner"],
+        )
+        self.assertIn(
+            "UPDATE OF job_id, request_id",
+            trigger_defs["processing_cleanup_journal_exact_owner"],
         )
         indexes = self._exec("""
             SELECT indexdef

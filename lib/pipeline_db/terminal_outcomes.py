@@ -14,6 +14,7 @@ import psycopg2.extras
 from lib import transitions
 from lib.import_execution import ExecutionLeaseSnapshot
 from lib.import_queue import ImportJob, validate_preview_failure_status
+from lib.json_narrow import is_str_object_dict, json_dict
 from lib.pipeline_db._core import _PipelineDBBase
 from lib.pipeline_db._shared import (
     BACKOFF_BASE_MINUTES,
@@ -66,10 +67,8 @@ def _lease_values(
 
 
 def _receipt_builtins(receipt: object) -> dict[str, object]:
-    return msgspec.convert(
-        msgspec.to_builtins(receipt),
-        type=dict[str, object],
-    )
+    builtins: dict[str, object] = msgspec.to_builtins(receipt)
+    return builtins
 
 
 class _TransactionalTransitionsDB:
@@ -866,10 +865,7 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
             )
 
         raw_result = job["result"]
-        result = msgspec.convert(
-            raw_result or {},
-            type=dict[str, object],
-        )
+        result = json_dict(raw_result)
         completion = authority.completion_receipt
         if completion is not None:
             completion_builtins = _receipt_builtins(completion)
@@ -900,11 +896,11 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
             payload: dict[str, object] = {}
         else:
             decoded = json.loads(raw)
-            if not isinstance(decoded, dict):
+            if not is_str_object_dict(decoded):
                 raise ValueError(
                     "automation validation audit must be a JSON object"
                 )
-            payload = msgspec.convert(decoded, type=dict[str, object])
+            payload = decoded
         cleanup = _receipt_builtins(authority.cleanup_receipt)
         existing = payload.get(PROCESSING_CLEANUP_AUDIT_KEY)
         if existing is not None and existing != cleanup:
@@ -922,14 +918,8 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
         terminal: dict[str, object],
         authority: AutomationTerminalAuthority,
     ) -> dict[str, object]:
-        merged = msgspec.convert(
-            existing or {},
-            type=dict[str, object],
-        )
-        merged.update(msgspec.convert(
-            terminal,
-            type=dict[str, object],
-        ))
+        merged = dict(json_dict(existing))
+        merged.update(terminal)
         merged[PROCESSING_CLEANUP_RESULT_KEY] = _receipt_builtins(
             authority.cleanup_receipt
         )

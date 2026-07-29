@@ -557,7 +557,10 @@ inferred-ownership design that issue #898 rejected.
   `(session-settled: user-approved review amendment — cleanup-before-terminal was chosen over a durable post-terminal cleanup receipt.)`
 - KTD8. Recovery `close` retains its action name but requires
   `result_status` for automation jobs.
-  `(session-settled: user-directed — chosen over always-wanted or always-imported: ambiguous Beets work requires an explicit operator reconciliation result.)`
+  Authority: "When automation recovery `close` reconciles ambiguous Beets
+  work, the operator must explicitly declare `result_status` as `wanted` or
+  `imported`; recovery must not infer that result." —
+  https://github.com/abl030/cratedigger/issues/898#issuecomment-5116826096
   CLI and API share one typed, revisioned `AutomationRecoveryDetail` and action
   service. Forward-only CLI verbs are
   `pipeline-cli import-job-recovery show|retry|close JOB_ID`; automation retry

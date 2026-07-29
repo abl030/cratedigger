@@ -20,8 +20,9 @@ import copy
 import os
 import unittest
 from collections.abc import Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from typing import Literal
+from typing import Literal, Never
 
 from hypothesis import example, given
 from hypothesis import strategies as st
@@ -35,8 +36,10 @@ from hypothesis.stateful import (
 import tests._hypothesis_profiles  # noqa: F401 - load active profile
 from lib import transitions
 from lib.import_execution import (
+    CancellationToken,
     ExecutionLeaseSnapshot,
     ExecutionLivenessEvidence,
+    OwnerSessionIdentity,
     ProcessIdentity,
 )
 from lib.import_job_recovery_service import (
@@ -45,10 +48,12 @@ from lib.import_job_recovery_service import (
 )
 from lib.import_queue import (
     IMPORT_JOB_ACTIVE_STATUSES,
+    IMPORT_JOB_FORCE,
     IMPORT_JOB_PREVIEW_EVIDENCE_READY,
     IMPORT_JOB_PREVIEW_RUNNING,
     IMPORT_JOB_PREVIEW_WAITING,
     IMPORT_JOB_RECOVERY_REQUIRED,
+    force_import_payload,
 )
 from lib.pipeline_db.cleanup_journal import CleanupJournalIntent
 from lib.pipeline_delete_service import delete_pipeline_request
@@ -102,6 +107,155 @@ class _TerminalFacts:
     audit_present: bool
     job_terminal: bool
     cleanup_consumed: bool
+
+
+ClaimLane = Literal["preview", "import"]
+
+
+@dataclass(frozen=True)
+class _ClaimProgressFacts:
+    status: str
+    preview_status: str | None
+    attempts: int
+    preview_attempts: int
+
+
+def _claim_progress_facts(
+    db: FakePipelineDB,
+    job_id: int,
+) -> _ClaimProgressFacts:
+    job = db.get_import_job(job_id)
+    assert job is not None
+    return _ClaimProgressFacts(
+        status=job.status,
+        preview_status=job.preview_status,
+        attempts=job.attempts,
+        preview_attempts=job.preview_attempts,
+    )
+
+
+def _assert_lock_miss_then_progress(
+    *,
+    lane: ClaimLane,
+    before: _ClaimProgressFacts,
+    after_miss: _ClaimProgressFacts,
+    after_progress: _ClaimProgressFacts,
+) -> None:
+    """A transient IMPORT miss creates no claim and the next poll advances."""
+    if after_miss != before:
+        raise AssertionError(
+            f"{lane} lock miss created execution state: {after_miss!r}"
+        )
+    if lane == "preview":
+        progressed = (
+            after_progress.preview_attempts == before.preview_attempts + 1
+            and after_progress.preview_status == IMPORT_JOB_PREVIEW_RUNNING
+        )
+    else:
+        progressed = after_progress.attempts == before.attempts + 1
+    if not progressed:
+        raise AssertionError(
+            f"{lane} did not progress after contention cleared: "
+            f"{after_progress!r}"
+        )
+
+
+class _GeneratedStageSession:
+    """Pinned stage-session stand-in around the stateful production-parity DB."""
+
+    def __init__(self, db: FakePipelineDB, *, acquire: bool) -> None:
+        self.db = db
+        self.acquire = acquire
+        self.pinned = False
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self.db, name)
+
+    def get_import_job(self, job_id: int):
+        return self.db.get_import_job(job_id)
+
+    def get_request(self, request_id: int) -> Mapping[str, object] | None:
+        return self.db.get_request(request_id)
+
+    @contextmanager
+    def _pin_owner_session(self, token: CancellationToken):
+        token.raise_if_cancelled()
+        self.pinned = True
+        try:
+            yield OwnerSessionIdentity(id(self), 898)
+        finally:
+            self.pinned = False
+
+    @contextmanager
+    def advisory_lock(self, namespace: int, key: int):
+        from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_IMPORT
+
+        if not self.pinned:
+            raise AssertionError("generated IMPORT lock used an unpinned session")
+        if namespace != ADVISORY_LOCK_NAMESPACE_IMPORT or key != _REQUEST_ID:
+            raise AssertionError(
+                f"unexpected generated advisory lock {(namespace, key)!r}"
+            )
+        yield self.acquire
+
+    def claim_automation_import_preview_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+        execution_lease: ExecutionLeaseSnapshot,
+    ):
+        return self.db.claim_automation_import_preview_job_under_lock(
+            job_id,
+            request_id=request_id,
+            worker_id=worker_id,
+            execution_lease=execution_lease,
+        )
+
+    def claim_automation_import_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+        execution_lease: ExecutionLeaseSnapshot,
+    ):
+        return self.db.claim_automation_import_job_under_lock(
+            job_id,
+            request_id=request_id,
+            worker_id=worker_id,
+            execution_lease=execution_lease,
+        )
+
+    def claim_force_import_preview_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+    ):
+        return self.db.claim_force_import_preview_job_under_lock(
+            job_id,
+            request_id=request_id,
+            worker_id=worker_id,
+        )
+
+    def claim_force_import_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+    ):
+        return self.db.claim_force_import_job_under_lock(
+            job_id,
+            request_id=request_id,
+            worker_id=worker_id,
+        )
+
+    def close(self) -> None:
+        return None
 
 
 class _InjectedLifecycleFailure(RuntimeError):
@@ -244,6 +398,18 @@ def _mutant_handoff_ignores_witness(
     owner_job_id: int | None,
 ) -> bool:
     return status == "downloading" and owner_job_id is None
+
+
+def _assert_force_owner_fence(
+    before: _ClaimProgressFacts,
+    after: _ClaimProgressFacts,
+    *,
+    effect_count: int,
+) -> None:
+    if after != before or effect_count:
+        raise AssertionError(
+            "owned request admitted stale force execution state or effects"
+        )
 
 
 def _database_snapshot(db: FakePipelineDB) -> object:
@@ -1034,6 +1200,292 @@ class TestProcessingLifecycleGenerated(unittest.TestCase):
         self.assertIn(result, (None, False))
         self.assertEqual(_database_snapshot(db), before)
 
+    @given(
+        lane=st.sampled_from(("preview", "import")),
+        misses=st.integers(min_value=1, max_value=4),
+    )
+    @example(lane="import", misses=2)
+    def test_transient_stage_lock_contention_stays_claimable(
+        self,
+        lane: ClaimLane,
+        misses: int,
+    ) -> None:
+        from lib.dispatch import DispatchOutcome
+        from scripts import import_preview_worker, importer
+
+        db, job_id = _new_owner_db()
+        setattr(db, "dsn", "postgresql://generated")  # noqa: B010
+        if lane == "preview":
+            lease = _execution_lease("preview", job_id, 1)
+        else:
+            preview_lease = _execution_lease("preview", job_id, 1)
+            claimed_preview = db.claim_next_import_preview_job(
+                worker_id="generated-setup-preview",
+                execution_lease=preview_lease,
+            )
+            assert claimed_preview is not None
+            assert db.mark_import_job_preview_importable(
+                job_id,
+                preview_result={"ready": True},
+                expected_execution_lease=preview_lease,
+            ) is not None
+            lease = _execution_lease("import", job_id, 2)
+
+        before = _claim_progress_facts(db, job_id)
+        for generation in range(misses):
+            if lane == "preview":
+                result = import_preview_worker.run_once(
+                    db,
+                    worker_id=f"generated-preview-miss-{generation}",
+                    stage_db_factory=lambda _dsn: _GeneratedStageSession(
+                        db,
+                        acquire=False,
+                    ),
+                    execution_lease_factory=lambda **_kwargs: lease,
+                )
+            else:
+                result = importer.run_once(
+                    db,  # pyright: ignore[reportArgumentType]
+                    worker_id=f"generated-import-miss-{generation}",
+                    stage_db_factory=lambda _dsn: _GeneratedStageSession(
+                        db,
+                        acquire=False,
+                    ),
+                    execution_lease_factory=lambda **_kwargs: lease,
+                )
+            self.assertIsNone(result)
+            self.assertEqual(_claim_progress_facts(db, job_id), before)
+
+        after_miss = _claim_progress_facts(db, job_id)
+        if lane == "preview":
+            result = import_preview_worker.run_once(
+                db,
+                worker_id="generated-preview-progress",
+                stage_db_factory=lambda _dsn: _GeneratedStageSession(
+                    db,
+                    acquire=True,
+                ),
+                execution_lease_factory=lambda **_kwargs: lease,
+            )
+        else:
+            result = importer.run_once(
+                db,  # pyright: ignore[reportArgumentType]
+                worker_id="generated-import-progress",
+                stage_db_factory=lambda _dsn: _GeneratedStageSession(
+                    db,
+                    acquire=True,
+                ),
+                execution_lease_factory=lambda **_kwargs: lease,
+                execute_fn=lambda *_args, **_kwargs: DispatchOutcome(
+                    False,
+                    "generated prelaunch defer",
+                    deferred=True,
+                ),
+            )
+        self.assertIsNone(result)
+        _assert_lock_miss_then_progress(
+            lane=lane,
+            before=before,
+            after_miss=after_miss,
+            after_progress=_claim_progress_facts(db, job_id),
+        )
+
+    @given(
+        lane=st.sampled_from(("preview", "import")),
+        polls=st.integers(min_value=1, max_value=4),
+    )
+    @example(lane="preview", polls=2)
+    @example(lane="import", polls=2)
+    def test_force_queued_before_owner_handoff_never_crosses_stage_boundary(
+        self,
+        lane: ClaimLane,
+        polls: int,
+    ) -> None:
+        from lib.dispatch import DispatchOutcome
+        from lib.import_preview import ImportPreviewResult
+        from scripts import import_preview_worker, importer
+
+        db = FakePipelineDB()
+        setattr(db, "dsn", "postgresql://generated")  # noqa: B010
+        db.seed_request(make_request_row(
+            id=_REQUEST_ID,
+            status="wanted",
+            mb_release_id=_RELEASE_ID,
+        ))
+        self.assertTrue(db.set_downloading(
+            _REQUEST_ID,
+            _active_state(_WITNESS_A).to_json(),
+            expected_status="wanted",
+        ))
+        force_job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=_REQUEST_ID,
+            dedupe_key=f"generated-force-before-owner:{lane}",
+            payload=force_import_payload(
+                download_log_id=898,
+                failed_path="/tmp/generated-force-before-owner",
+            ),
+        )
+        if lane == "import":
+            self.assertIsNotNone(db.mark_import_job_preview_importable(
+                force_job.id,
+                preview_result={"verdict": "evidence_ready"},
+                message="generated force ready",
+            ))
+        before = _claim_progress_facts(db, force_job.id)
+        effects: list[str] = []
+        handoff_done = False
+
+        def capture_without_systemd(**_kwargs: object) -> Never:
+            raise ValueError("generated force worker has no systemd lease")
+
+        def stage_factory(_dsn: str) -> _GeneratedStageSession:
+            nonlocal handoff_done
+            if not handoff_done:
+                handoff = db.handoff_automation_import(
+                    request_id=_REQUEST_ID,
+                    expected_enqueued_at=_WITNESS_A,
+                    canonical_path=_CANONICAL_PATH,
+                    message="generated owner wins after force selection",
+                )
+                if not handoff.committed:
+                    raise AssertionError(
+                        f"generated handoff failed: {handoff.outcome}"
+                    )
+                handoff_done = True
+            return _GeneratedStageSession(db, acquire=True)
+
+        def forbidden_preview(
+            *_args: object,
+            **_kwargs: object,
+        ) -> ImportPreviewResult:
+            effects.append("preview")
+            raise AssertionError("stale force preview crossed owner fence")
+
+        def forbidden_import(
+            *_args: object,
+            **_kwargs: object,
+        ) -> DispatchOutcome:
+            effects.append("import")
+            raise AssertionError("stale force import crossed owner fence")
+
+        for poll in range(polls):
+            if lane == "preview":
+                result = import_preview_worker.run_once(
+                    db,
+                    worker_id=f"generated-force-preview-{poll}",
+                    stage_db_factory=stage_factory,
+                    execution_lease_factory=capture_without_systemd,
+                    candidate_measurement_fn=forbidden_preview,
+                )
+            else:
+                result = importer.run_once(
+                    db,  # pyright: ignore[reportArgumentType]
+                    worker_id=f"generated-force-import-{poll}",
+                    stage_db_factory=stage_factory,
+                    execution_lease_factory=capture_without_systemd,
+                    execute_fn=forbidden_import,
+                )
+            self.assertIsNone(result)
+            _assert_force_owner_fence(
+                before,
+                _claim_progress_facts(db, force_job.id),
+                effect_count=len(effects),
+            )
+        self.assertTrue(handoff_done)
+
+    @given(
+        lane=st.sampled_from(("preview", "import")),
+        request_changed=st.booleans(),
+    )
+    @example(lane="preview", request_changed=False)
+    @example(lane="import", request_changed=True)
+    def test_force_lock_miss_preserves_exact_future_claimability(
+        self,
+        lane: ClaimLane,
+        request_changed: bool,
+    ) -> None:
+        """A miss is zero-state; only the enqueue-time request state may retry."""
+        from lib.dispatch import DispatchOutcome
+        from lib.import_preview import ImportPreviewResult
+        from scripts import import_preview_worker, importer
+
+        db = FakePipelineDB()
+        setattr(db, "dsn", "postgresql://generated")  # noqa: B010
+        db.seed_request(make_request_row(
+            id=_REQUEST_ID,
+            status="wanted",
+            mb_release_id=_RELEASE_ID,
+        ))
+        force_job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=_REQUEST_ID,
+            dedupe_key=f"generated-force-lock-miss:{lane}",
+            payload=force_import_payload(
+                download_log_id=899,
+                failed_path="/tmp/generated-force-lock-miss",
+            ),
+        )
+        if lane == "import":
+            self.assertIsNotNone(db.mark_import_job_preview_importable(
+                force_job.id,
+                preview_result={"verdict": "evidence_ready"},
+            ))
+        before = _claim_progress_facts(db, force_job.id)
+
+        def no_systemd(**_kwargs: object) -> Never:
+            raise ValueError("generated force worker has no systemd lease")
+
+        def forbidden_preview(
+            *_args: object,
+            **_kwargs: object,
+        ) -> ImportPreviewResult:
+            raise AssertionError("lock miss reached force preview")
+
+        def forbidden_import(
+            *_args: object,
+            **_kwargs: object,
+        ) -> DispatchOutcome:
+            raise AssertionError("lock miss reached force import")
+
+        if lane == "preview":
+            result = import_preview_worker.run_once(
+                db,
+                worker_id="generated-force-preview-miss",
+                stage_db_factory=lambda _dsn: _GeneratedStageSession(
+                    db,
+                    acquire=False,
+                ),
+                execution_lease_factory=no_systemd,
+                candidate_measurement_fn=forbidden_preview,
+            )
+        else:
+            result = importer.run_once(
+                db,  # pyright: ignore[reportArgumentType]
+                worker_id="generated-force-import-miss",
+                stage_db_factory=lambda _dsn: _GeneratedStageSession(
+                    db,
+                    acquire=False,
+                ),
+                execution_lease_factory=no_systemd,
+                execute_fn=forbidden_import,
+            )
+        self.assertIsNone(result)
+        self.assertEqual(_claim_progress_facts(db, force_job.id), before)
+
+        if request_changed:
+            self.assertTrue(db.set_downloading(
+                _REQUEST_ID,
+                _active_state(_WITNESS_A).to_json(),
+                expected_status="wanted",
+            ))
+        claimed = (
+            db.claim_next_import_preview_job(worker_id="future-preview")
+            if lane == "preview"
+            else db.claim_next_import_job(worker_id="future-import")
+        )
+        self.assertEqual(claimed is not None, not request_changed)
+
     @given(witness=st.sampled_from(_WITNESSES))
     @example(witness=_WITNESS_B)
     def test_dead_preview_requeues_without_releasing_owner(
@@ -1336,6 +1788,79 @@ class TestProcessingLifecycleGenerated(unittest.TestCase):
                 old_journal_present=False,
                 new_journal_revision=2,
                 expected_new_journal_revision=2,
+            )
+
+    def test_known_bad_claim_before_lock_is_detected(self) -> None:
+        cases: tuple[
+            tuple[ClaimLane, _ClaimProgressFacts, _ClaimProgressFacts],
+            ...,
+        ] = (
+            (
+                "preview",
+                _ClaimProgressFacts(
+                    status="queued",
+                    preview_status=IMPORT_JOB_PREVIEW_WAITING,
+                    attempts=0,
+                    preview_attempts=0,
+                ),
+                _ClaimProgressFacts(
+                    status="queued",
+                    preview_status=IMPORT_JOB_PREVIEW_RUNNING,
+                    attempts=0,
+                    preview_attempts=1,
+                ),
+            ),
+            (
+                "import",
+                _ClaimProgressFacts(
+                    status="queued",
+                    preview_status=IMPORT_JOB_PREVIEW_EVIDENCE_READY,
+                    attempts=0,
+                    preview_attempts=1,
+                ),
+                _ClaimProgressFacts(
+                    status="running",
+                    preview_status=IMPORT_JOB_PREVIEW_EVIDENCE_READY,
+                    attempts=1,
+                    preview_attempts=1,
+                ),
+            ),
+        )
+        for lane, before, mutant in cases:
+            with (
+                self.subTest(lane=lane),
+                self.assertRaisesRegex(
+                    AssertionError,
+                    f"{lane} lock miss created execution state",
+                ),
+            ):
+                _assert_lock_miss_then_progress(
+                    lane=lane,
+                    before=before,
+                    after_miss=mutant,
+                    after_progress=mutant,
+                )
+
+    def test_known_bad_force_claim_after_owner_handoff_is_detected(self) -> None:
+        before = _ClaimProgressFacts(
+            status="queued",
+            preview_status=IMPORT_JOB_PREVIEW_WAITING,
+            attempts=0,
+            preview_attempts=0,
+        )
+        mutant = replace(
+            before,
+            preview_status=IMPORT_JOB_PREVIEW_RUNNING,
+            preview_attempts=1,
+        )
+        with self.assertRaisesRegex(
+            AssertionError,
+            "owned request admitted stale force",
+        ):
+            _assert_force_owner_fence(
+                before,
+                mutant,
+                effect_count=1,
             )
 
 

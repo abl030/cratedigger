@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 import tempfile
 import unittest
-from typing import Protocol
+from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager, nullcontext
+from datetime import datetime
+from functools import partial
+from typing import Literal, Protocol
 from unittest.mock import patch
 
 import msgspec
@@ -15,17 +20,25 @@ sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401
 
 from lib.import_execution import (
+    CgroupObservation,
     ExecutionLeaseSnapshot,
     ExecutionLivenessEvidence,
     ExecutionLivenessProbe,
+    InvocationObservation,
     OwnerSessionIdentity,
     OwnerSessionProbe,
     ProcessIdentity,
+    ProcessObservation,
 )
 from lib.import_job_recovery_service import (
     AutomationRecoveryMutationDB,
     apply_import_job_recovery,
     get_automation_recovery_detail,
+)
+from lib.pipeline_db._shared import (
+    ADVISORY_LOCK_NAMESPACE_IMPORT,
+    ADVISORY_LOCK_NAMESPACE_RELEASE,
+    release_id_to_lock_key,
 )
 from lib.pipeline_db.cleanup_journal import CleanupJournalIntent
 from lib.pipeline_db.terminal_outcomes import ImportJobTerminalConflict
@@ -44,6 +57,22 @@ class _RawRecoveryDB(AutomationRecoveryMutationDB, Protocol):
         sql: str,
         params: tuple[object, ...] = (),
     ) -> object: ...
+
+
+class _RecoveryTranscriptDB(AutomationRecoveryMutationDB, Protocol):
+    def claim_next_import_preview_job(
+        self,
+        *,
+        worker_id: str,
+        execution_lease: ExecutionLeaseSnapshot,
+    ) -> object | None: ...
+
+    def claim_next_import_job(
+        self,
+        *,
+        worker_id: str,
+        execution_lease: ExecutionLeaseSnapshot,
+    ) -> object | None: ...
 
 
 def _replacement_lease(label: str) -> ExecutionLeaseSnapshot:
@@ -91,6 +120,49 @@ class _MutatingChangedBootProbe(_ChangedBootProbe):
         return super().observe(lease)
 
 
+class _MutatingOnSecondChangedBootProbe(_ChangedBootProbe):
+    """Introduce a race after the action has captured its DB observation."""
+
+    def __init__(self, mutate: Callable[[], None]) -> None:
+        self._mutate = mutate
+        self.observe_calls = 0
+        self.mutation_calls = 0
+
+    def observe(
+        self,
+        lease: ExecutionLeaseSnapshot,
+    ) -> ExecutionLivenessEvidence:
+        self.observe_calls += 1
+        if self.observe_calls == 2:
+            self._mutate()
+            self.mutation_calls += 1
+        return super().observe(lease)
+
+
+def _set_fake_execution_invocation(
+    rows: list[dict[str, object]],
+    job_id: int,
+    invocation_id: str,
+) -> None:
+    row = next(item for item in rows if item["id"] == job_id)
+    row["execution_invocation_id"] = invocation_id
+
+
+def _set_real_execution_invocation(
+    db: _RawRecoveryDB,
+    job_id: int,
+    invocation_id: str,
+) -> None:
+    db._execute(
+        """
+        UPDATE import_jobs
+        SET execution_invocation_id = %s
+        WHERE id = %s
+        """,
+        (invocation_id, job_id),
+    )
+
+
 class _UnknownProbe:
     def observe(
         self,
@@ -98,6 +170,357 @@ class _UnknownProbe:
     ) -> ExecutionLivenessEvidence:
         del lease
         raise OSError("liveness probe unavailable")
+
+
+class _LiveProbe:
+    def observe(
+        self,
+        lease: ExecutionLeaseSnapshot,
+    ) -> ExecutionLivenessEvidence:
+        cgroup = "/system.slice/cratedigger-importer.service"
+        return ExecutionLivenessEvidence(
+            lease=lease,
+            current_host_boot_id=lease.host_boot_id,
+            boot_error=None,
+            worker=ProcessObservation(
+                identity=lease.worker,
+                state="exact",
+                observed_start_ticks=lease.worker.start_ticks,
+                cgroup_path=cgroup,
+                reason="exact_process_identity",
+            ),
+            beets=None,
+            invocation=InvocationObservation(
+                state="exact",
+                stored_invocation_id=lease.invocation_id,
+                observed_invocation_id=lease.invocation_id,
+                control_group=cgroup,
+                reason="exact_invocation",
+                active_state="active",
+                sub_state="running",
+            ),
+            cgroup=CgroupObservation(
+                state="exact",
+                path=cgroup,
+                member_pids=(lease.worker.pid,),
+                reason="exact_cgroup",
+            ),
+        )
+
+
+def _plain(value: object) -> object:
+    """Convert a complete DB state into deterministic comparison builtins."""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, bytes):
+        return value.hex()
+    if isinstance(value, Mapping):
+        return {
+            str(key): _plain(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_plain(item) for item in value]
+    converted: object = msgspec.to_builtins(value)
+    if converted is value:
+        raise TypeError(f"cannot normalize state value {type(value)!r}")
+    return _plain(converted)
+
+
+def _filesystem_observation(path: str) -> dict[str, object]:
+    """Observe path identity, tree membership, and exact file bytes."""
+    if not os.path.lexists(path):
+        return {"kind": "missing"}
+    if os.path.islink(path):
+        return {
+            "kind": "symlink",
+            "target": os.readlink(path),
+        }
+    if not os.path.isdir(path):
+        with open(path, "rb") as handle:
+            return {
+                "kind": "file",
+                "sha256": hashlib.sha256(handle.read()).hexdigest(),
+            }
+    entries: list[dict[str, object]] = []
+    for root, dirs, files in os.walk(path, followlinks=False):
+        dirs.sort()
+        files.sort()
+        relative_root = os.path.relpath(root, path)
+        for directory in dirs:
+            entries.append({
+                "kind": "directory",
+                "path": os.path.normpath(os.path.join(
+                    relative_root,
+                    directory,
+                )),
+            })
+        for filename in files:
+            absolute = os.path.join(root, filename)
+            relative = os.path.normpath(os.path.join(
+                relative_root,
+                filename,
+            ))
+            if os.path.islink(absolute):
+                entries.append({
+                    "kind": "symlink",
+                    "path": relative,
+                    "target": os.readlink(absolute),
+                })
+                continue
+            with open(absolute, "rb") as handle:
+                entries.append({
+                    "kind": "file",
+                    "path": relative,
+                    "sha256": hashlib.sha256(handle.read()).hexdigest(),
+                })
+    return {"kind": "directory", "entries": entries}
+
+
+def _complete_recovery_state(
+    db: _RecoveryTranscriptDB,
+    *,
+    request_id: int,
+    job_id: int,
+    canonical_path: str,
+) -> dict[str, object]:
+    request = db.get_request(request_id)
+    job = db.get_import_job(job_id)
+    assert request is not None and job is not None
+    journal = db.get_processing_cleanup_journal(
+        request_id=request_id,
+        job_id=job_id,
+    )
+    return {
+        "request": _plain(request),
+        "job": _plain(job.to_dict()),
+        "journal": _plain(journal),
+        "filesystem": _filesystem_observation(canonical_path),
+    }
+
+
+def _normalize_recovery_state(
+    state: dict[str, object],
+) -> dict[str, object]:
+    """Erase backend-assigned identities/times while retaining every field."""
+    normalized = msgspec.convert(
+        state,
+        type=dict[str, object],
+    )
+    request = normalized["request"]
+    job = normalized["job"]
+    journal = normalized["journal"]
+    assert isinstance(request, dict)
+    assert isinstance(job, dict)
+    request["id"] = "<request_id>"
+    job["id"] = "<job_id>"
+
+    def normalize(value: object, *, key: str = "") -> object:
+        if value is None:
+            return None
+        if key.endswith("_at"):
+            return "<timestamp>"
+        if key == "request_id":
+            return "<request_id>"
+        if key in {"job_id", "active_automation_import_job_id"}:
+            return "<job_id>"
+        if key == "dedupe_key":
+            return "<dedupe_key>"
+        if isinstance(value, dict):
+            return {
+                str(child_key): normalize(
+                    child_value,
+                    key=str(child_key),
+                )
+                for child_key, child_value in value.items()
+            }
+        if isinstance(value, list):
+            return [normalize(item) for item in value]
+        return value
+
+    result = {
+        "request": normalize(request),
+        "job": normalize(job),
+        "journal": normalize(journal),
+        "filesystem": normalized["filesystem"],
+    }
+    return result
+
+
+def _normalized_rejection_transcript(
+    db: _RecoveryTranscriptDB,
+    *,
+    request_id: int,
+    job_id: int,
+    canonical_path: str,
+    expected_outcome: str,
+    probe: ExecutionLivenessProbe,
+    stale_revision: bool = False,
+    action: Literal["retry", "close"] = "retry",
+    result_status: Literal["wanted", "imported"] | None = None,
+    lock_scope: AbstractContextManager[object] | None = None,
+    after_apply: Callable[[], None] | None = None,
+) -> dict[str, object]:
+    observed = get_automation_recovery_detail(
+        db,
+        None,
+        job_id,
+        liveness_probe=probe,
+    )
+    assert observed.detail is not None
+    revision = (
+        "sha256:stale"
+        if stale_revision
+        else observed.detail.evidence_revision
+    )
+    before = _complete_recovery_state(
+        db,
+        request_id=request_id,
+        job_id=job_id,
+        canonical_path=canonical_path,
+    )
+    before_job = before["job"]
+    assert isinstance(before_job, dict)
+    try:
+        with lock_scope or nullcontext() as lock_held:
+            if lock_scope is not None:
+                assert lock_held is True
+            result = apply_import_job_recovery(
+                db,
+                None,
+                job_id,
+                action=action,
+                reason=f"backend-neutral rejection {expected_outcome}",
+                evidence_revision=revision,
+                result_status=result_status,
+                liveness_probe=probe,
+            )
+    finally:
+        if after_apply is not None:
+            after_apply()
+    after = _complete_recovery_state(
+        db,
+        request_id=request_id,
+        job_id=job_id,
+        canonical_path=canonical_path,
+    )
+    after_job = after["job"]
+    assert isinstance(after_job, dict)
+    protected_job_fields = (
+        "result",
+        "error",
+        "message",
+        "updated_at",
+        "started_at",
+        "heartbeat_at",
+        "completed_at",
+        "execution_invocation_id",
+        "execution_host_boot_id",
+        "execution_systemd_unit",
+        "execution_worker_pid",
+        "execution_worker_start_ticks",
+        "execution_beets_pid",
+        "execution_beets_start_ticks",
+    )
+    return {
+        "outcome": result.outcome,
+        "expected_outcome": expected_outcome,
+        "action_job_absent": result.job is None,
+        "retry_job_absent": result.retry_job is None,
+        "state_unchanged": before == after,
+        "protected_job_fields_unchanged": all(
+            before_job[field] == after_job[field]
+            for field in protected_job_fields
+        ),
+        "before": _normalize_recovery_state(before),
+        "after": _normalize_recovery_state(after),
+    }
+
+
+def _normalized_retry_transcript(
+    db: _RecoveryTranscriptDB,
+    *,
+    request_id: int,
+    job_id: int,
+    canonical_path: str,
+) -> dict[str, object]:
+    """Run the same public recovery conversation on fake and PostgreSQL."""
+    journal = db.create_processing_cleanup_journal(
+        request_id=request_id,
+        job_id=job_id,
+        intent=CleanupJournalIntent(
+            action="no_op",
+            source_path=canonical_path,
+            source_manifest=(),
+            source_manifest_hash=cleanup_manifest_hash(()),
+        ),
+    )
+    probe = _ChangedBootProbe()
+    observed = get_automation_recovery_detail(
+        db,
+        None,
+        job_id,
+        liveness_probe=probe,
+    )
+    assert observed.detail is not None
+    result = apply_import_job_recovery(
+        db,
+        None,
+        job_id,
+        action="retry",
+        reason="backend-neutral transcript",
+        evidence_revision=observed.detail.evidence_revision,
+        liveness_probe=probe,
+    )
+    assert result.retry_job is not None
+    retry_id = result.retry_job.id
+    old = db.get_import_job(job_id)
+    request = db.get_request(request_id)
+    moved = db.get_processing_cleanup_journal(
+        request_id=request_id,
+        job_id=retry_id,
+    )
+    replacement = get_automation_recovery_detail(
+        db,
+        None,
+        retry_id,
+    )
+    assert (
+        old is not None
+        and request is not None
+        and moved is not None
+        and replacement.detail is not None
+    )
+    preview_claim = db.claim_next_import_preview_job(
+        worker_id="transcript-preview",
+        execution_lease=_replacement_lease("transcript-preview"),
+    )
+    import_claim = db.claim_next_import_job(
+        worker_id="transcript-import",
+        execution_lease=_replacement_lease("transcript-import"),
+    )
+    return {
+        "outcome": result.outcome,
+        "old_status": old.status,
+        "retry_status": result.retry_job.status,
+        "request_status": request["status"],
+        "owner_is_retry": request["active_automation_import_job_id"] == retry_id,
+        "old_journal_missing": db.get_processing_cleanup_journal(
+            request_id=request_id,
+            job_id=job_id,
+        ) is None,
+        "journal_action": moved["action"],
+        "journal_path_preserved": moved["source_path"] == canonical_path,
+        "journal_revision_delta": moved["revision"] - journal["revision"],
+        "preview_claimed": preview_claim is not None,
+        "import_claimed": import_claim is not None,
+        "replacement_liveness": (
+            replacement.detail.execution_liveness.status,
+            replacement.detail.execution_liveness.reason,
+        ),
+    }
 
 
 class TestAutomationRecoveryMutationsFakeParity(unittest.TestCase):
@@ -320,6 +743,434 @@ class TestAutomationRecoveryMutationsPostgres(unittest.TestCase):
         )
         assert result.detail is not None
         return result.detail.evidence_revision
+
+    def test_retry_transcript_is_identical_on_fake_and_postgres(self) -> None:
+        from tests.fakes import FakePipelineDB
+        from tests.helpers import make_request_row
+
+        canonical_path = "/processing/backend-neutral-retry"
+        request_id, real_job = self._owner(canonical_path)
+        self._make_recovery_required(real_job.id)
+
+        fake = FakePipelineDB()
+        fake.seed_request(make_request_row(
+            id=42,
+            status="wanted",
+            mb_release_id=_RELEASE_ID,
+        ))
+        fake_job = handoff_automation_owner(
+            fake,
+            42,
+            canonical_path=canonical_path,
+        )
+        fake_row = next(
+            item for item in fake._import_jobs
+            if item["id"] == fake_job.id
+        )
+        fake_row.update({
+            "status": "recovery_required",
+            "execution_invocation_id": "old-claim",
+            "execution_host_boot_id": "boot-before-restart",
+            "execution_systemd_unit": "cratedigger-importer.service",
+            "execution_worker_pid": 101,
+            "execution_worker_start_ticks": 1001,
+        })
+
+        fake_transcript = _normalized_retry_transcript(
+            fake,
+            request_id=42,
+            job_id=fake_job.id,
+            canonical_path=canonical_path,
+        )
+        real_transcript = _normalized_retry_transcript(
+            self.db,
+            request_id=request_id,
+            job_id=real_job.id,
+            canonical_path=canonical_path,
+        )
+
+        self.assertEqual(real_transcript, fake_transcript)
+        self.assertEqual(real_transcript, {
+            "outcome": "retry_recovery_required",
+            "old_status": "failed",
+            "retry_status": "recovery_required",
+            "request_status": "processing",
+            "owner_is_retry": True,
+            "old_journal_missing": True,
+            "journal_action": "no_op",
+            "journal_path_preserved": True,
+            "journal_revision_delta": 1,
+            "preview_claimed": False,
+            "import_claimed": False,
+            "replacement_liveness": ("dead", "never_claimed"),
+        })
+
+    def test_rejection_matrix_is_identical_on_fake_and_postgres(self) -> None:
+        from lib.pipeline_db import PipelineDB
+        from tests.fakes import FakePipelineDB
+        from tests.helpers import make_request_row
+
+        cases: tuple[
+            tuple[
+                str,
+                str,
+                bool,
+                Literal["retry", "close"],
+                Literal["wanted", "imported"] | None,
+                bool,
+            ],
+            ...,
+        ] = (
+            (
+                "live",
+                "execution_live",
+                False,
+                "retry",
+                None,
+                True,
+            ),
+            (
+                "execution_unknown",
+                "execution_unknown",
+                False,
+                "retry",
+                None,
+                True,
+            ),
+            (
+                "stale_revision",
+                "evidence_changed",
+                True,
+                "retry",
+                None,
+                True,
+            ),
+            (
+                "import_lock_unavailable",
+                "lock_unavailable",
+                False,
+                "retry",
+                None,
+                True,
+            ),
+            (
+                "wrong_state",
+                "wrong_state",
+                False,
+                "retry",
+                None,
+                True,
+            ),
+            (
+                "ineligible",
+                "ineligible",
+                False,
+                "retry",
+                None,
+                True,
+            ),
+            (
+                "release_lock_unavailable",
+                "lock_unavailable",
+                False,
+                "close",
+                "wanted",
+                False,
+            ),
+            (
+                "late_cas_rejection",
+                "evidence_changed",
+                False,
+                "retry",
+                None,
+                True,
+            ),
+            (
+                "cleanup_blocked",
+                "cleanup_uninspectable",
+                False,
+                "close",
+                "wanted",
+                False,
+            ),
+        )
+
+        for (
+            name,
+            expected_outcome,
+            stale_revision,
+            action,
+            result_status,
+            seed_journal,
+        ) in cases:
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as root:
+                canonical_path = os.path.join(root, "canonical")
+                if name == "cleanup_blocked":
+                    held_source = os.path.join(root, "held-source")
+                    os.mkdir(held_source)
+                    with open(
+                        os.path.join(held_source, "track.flac"),
+                        "wb",
+                    ) as handle:
+                        handle.write(b"preserved audio")
+                    os.symlink(
+                        held_source,
+                        canonical_path,
+                        target_is_directory=True,
+                    )
+                else:
+                    os.mkdir(canonical_path)
+                    with open(
+                        os.path.join(canonical_path, "track.flac"),
+                        "wb",
+                    ) as handle:
+                        handle.write(b"preserved audio")
+
+                fake = FakePipelineDB()
+                fake.seed_request(make_request_row(
+                    id=42,
+                    status="wanted",
+                    mb_release_id=_RELEASE_ID,
+                    artist_name="Recovery Artist",
+                    album_title="Recovery Album",
+                    year=None,
+                    country=None,
+                ))
+                fake_job = handoff_automation_owner(
+                    fake,
+                    42,
+                    canonical_path=canonical_path,
+                )
+                fake_row = next(
+                    item for item in fake._import_jobs
+                    if item["id"] == fake_job.id
+                )
+                fake_row.update({
+                    "status": (
+                        "queued"
+                        if name == "wrong_state"
+                        else "recovery_required"
+                    ),
+                    "result": {"sentinel": "preserve"},
+                    "message": "preserve-message",
+                    "error": "preserve-error",
+                    "attempts": 3,
+                    "worker_id": "preserve-worker",
+                    "preview_status": "evidence_ready",
+                    "preview_message": "Preview gate disabled",
+                    "preview_completed_at": fake_row["updated_at"],
+                    "importable_at": fake_row["updated_at"],
+                    "execution_invocation_id": "old-claim",
+                    "execution_host_boot_id": "boot-before-restart",
+                    "execution_systemd_unit": (
+                        "cratedigger-importer.service"
+                    ),
+                    "execution_worker_pid": 101,
+                    "execution_worker_start_ticks": 1001,
+                })
+                if name == "ineligible":
+                    fake.request(42)["active_download_state"] = None
+                if seed_journal:
+                    fake.create_processing_cleanup_journal(
+                        request_id=42,
+                        job_id=fake_job.id,
+                        intent=CleanupJournalIntent(
+                            action="no_op",
+                            source_path=canonical_path,
+                            source_manifest=(),
+                            source_manifest_hash=cleanup_manifest_hash(()),
+                        ),
+                    )
+
+                self.db._execute("TRUNCATE album_requests CASCADE")
+                self.db.conn.commit()
+                request_id, real_job = self._owner(canonical_path)
+                self.db._execute(
+                    """
+                    UPDATE import_jobs
+                    SET status = %s,
+                        result = '{"sentinel":"preserve"}'::jsonb,
+                        message = 'preserve-message',
+                        error = 'preserve-error',
+                        attempts = 3,
+                        worker_id = 'preserve-worker',
+                        preview_status = 'evidence_ready',
+                        preview_message = 'Preview gate disabled',
+                        preview_completed_at = COALESCE(
+                            preview_completed_at,
+                            updated_at
+                        ),
+                        importable_at = COALESCE(importable_at, updated_at),
+                        execution_invocation_id = 'old-claim',
+                        execution_host_boot_id = 'boot-before-restart',
+                        execution_systemd_unit =
+                            'cratedigger-importer.service',
+                        execution_worker_pid = 101,
+                        execution_worker_start_ticks = 1001
+                    WHERE id = %s
+                    """,
+                    (
+                        (
+                            "queued"
+                            if name == "wrong_state"
+                            else "recovery_required"
+                        ),
+                        real_job.id,
+                    ),
+                )
+                if name == "ineligible":
+                    self.db._execute(
+                        """
+                        UPDATE album_requests
+                        SET active_download_state = NULL
+                        WHERE id = %s
+                        """,
+                        (request_id,),
+                    )
+                if seed_journal:
+                    self.db.create_processing_cleanup_journal(
+                        request_id=request_id,
+                        job_id=real_job.id,
+                        intent=CleanupJournalIntent(
+                            action="no_op",
+                            source_path=canonical_path,
+                            source_manifest=(),
+                            source_manifest_hash=cleanup_manifest_hash(()),
+                        ),
+                    )
+
+                fake_lock: AbstractContextManager[object] | None = None
+                real_lock: AbstractContextManager[object] | None = None
+                holder: PipelineDB | None = None
+                fake_after_apply: Callable[[], None] | None = None
+                real_after_apply: Callable[[], None] | None = None
+                fake_probe: ExecutionLivenessProbe
+                real_probe: ExecutionLivenessProbe
+                if name == "live":
+                    fake_probe = _LiveProbe()
+                    real_probe = _LiveProbe()
+                elif name == "execution_unknown":
+                    fake_probe = _UnknownProbe()
+                    real_probe = _UnknownProbe()
+                elif name == "late_cas_rejection":
+                    fake_probe = _MutatingOnSecondChangedBootProbe(partial(
+                        _set_fake_execution_invocation,
+                        fake._import_jobs,
+                        fake_job.id,
+                        "fresh-claim",
+                    ))
+                    real_probe = _MutatingOnSecondChangedBootProbe(partial(
+                        _set_real_execution_invocation,
+                        self.db,
+                        real_job.id,
+                        "fresh-claim",
+                    ))
+                    fake_after_apply = partial(
+                        _set_fake_execution_invocation,
+                        fake._import_jobs,
+                        fake_job.id,
+                        "old-claim",
+                    )
+                    real_after_apply = partial(
+                        _set_real_execution_invocation,
+                        self.db,
+                        real_job.id,
+                        "old-claim",
+                    )
+                else:
+                    fake_probe = _ChangedBootProbe()
+                    real_probe = _ChangedBootProbe()
+
+                if name == "import_lock_unavailable":
+                    fake.set_advisory_lock_result(False)
+                    holder = PipelineDB(TEST_DSN)
+                    real_lock = holder.advisory_lock(
+                        ADVISORY_LOCK_NAMESPACE_IMPORT,
+                        request_id,
+                    )
+                elif name == "release_lock_unavailable":
+                    fake.set_advisory_lock_result(
+                        lambda namespace, _key: (
+                            namespace != ADVISORY_LOCK_NAMESPACE_RELEASE
+                        )
+                    )
+                    holder = PipelineDB(TEST_DSN)
+                    real_lock = holder.advisory_lock(
+                        ADVISORY_LOCK_NAMESPACE_RELEASE,
+                        release_id_to_lock_key(_RELEASE_ID),
+                    )
+
+                try:
+                    fake_transcript = _normalized_rejection_transcript(
+                        fake,
+                        request_id=42,
+                        job_id=fake_job.id,
+                        canonical_path=canonical_path,
+                        expected_outcome=expected_outcome,
+                        probe=fake_probe,
+                        stale_revision=stale_revision,
+                        action=action,
+                        result_status=result_status,
+                        lock_scope=fake_lock,
+                        after_apply=fake_after_apply,
+                    )
+                    real_transcript = _normalized_rejection_transcript(
+                        self.db,
+                        request_id=request_id,
+                        job_id=real_job.id,
+                        canonical_path=canonical_path,
+                        expected_outcome=expected_outcome,
+                        probe=real_probe,
+                        stale_revision=stale_revision,
+                        action=action,
+                        result_status=result_status,
+                        lock_scope=real_lock,
+                        after_apply=real_after_apply,
+                    )
+                finally:
+                    if holder is not None:
+                        holder.close()
+
+                self.assertEqual(real_transcript, fake_transcript)
+                self.assertEqual(
+                    real_transcript["outcome"],
+                    expected_outcome,
+                )
+                self.assertTrue(real_transcript["action_job_absent"])
+                self.assertTrue(real_transcript["retry_job_absent"])
+                self.assertTrue(real_transcript["state_unchanged"])
+                self.assertTrue(
+                    real_transcript["protected_job_fields_unchanged"],
+                )
+                self.assertEqual(
+                    real_transcript["before"],
+                    real_transcript["after"],
+                )
+                if name == "release_lock_unavailable":
+                    self.assertEqual(
+                        [
+                            namespace
+                            for namespace, _key
+                            in fake.advisory_lock_calls[-2:]
+                        ],
+                        [
+                            ADVISORY_LOCK_NAMESPACE_IMPORT,
+                            ADVISORY_LOCK_NAMESPACE_RELEASE,
+                        ],
+                    )
+                if name == "late_cas_rejection":
+                    assert isinstance(
+                        fake_probe,
+                        _MutatingOnSecondChangedBootProbe,
+                    )
+                    assert isinstance(
+                        real_probe,
+                        _MutatingOnSecondChangedBootProbe,
+                    )
+                    self.assertEqual(fake_probe.mutation_calls, 1)
+                    self.assertEqual(real_probe.mutation_calls, 1)
+                    self.assertEqual(fake_probe.observe_calls, 3)
+                    self.assertEqual(real_probe.observe_calls, 3)
 
     def test_retry_swaps_owner_and_retargets_journal_atomically(self) -> None:
         request_id, job = self._owner("/processing/retry")

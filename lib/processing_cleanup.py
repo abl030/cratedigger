@@ -169,8 +169,8 @@ def cleanup_manifest_builtins(
     manifest: CleanupExactManifest,
 ) -> tuple[dict[str, object], ...]:
     """Return the JSON shape accepted by ``CleanupJournalIntent``."""
-    value = msgspec.to_builtins(manifest)
-    return msgspec.convert(value, type=tuple[dict[str, object], ...])
+    value: list[dict[str, object]] = msgspec.to_builtins(manifest)
+    return tuple(value)
 
 
 def _read_opened_file(opened_fd: int) -> tuple[int, str]:

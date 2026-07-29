@@ -89,13 +89,13 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "default raw-query seam runs in the transaction-enforced read-only "
         "scope on the live connection"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 127, "5fa18d2c1737583f"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 126, "5fa18d2c1737583f"): (
         "terminal metadata keys use the existing validated request-field "
         "vocabulary (issue #784: `dumps=lambda value: msgspec.json.encode("
         "value).decode()` replaced with the shared `_msgspec_json_dumps` "
         "helper from `_shared.py` — same encoder, same output, no SQL change)"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 342, "cd644e51f3670265"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 341, "cd644e51f3670265"): (
         "terminal attempt kind is restricted to the fixed retry-counter vocabulary"
     ),
     ("lib/pipeline_db/download_log.py", 739, "86ec443bac615c3c"): (
@@ -115,13 +115,11 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "JSON path key is selected from a closed server-owned vocabulary "
         "(issue #835 shifted this line only)"
     ),
-    ("lib/pipeline_db/import_jobs.py", 496, "ecf3d1844c67f653"): (
-        "optional job filter is a fixed literal WHERE clause "
-        "(CD-SEC-19 typed payload imports shifted this reviewed SELECT by +3)"
+    ("lib/pipeline_db/import_jobs.py", 495, "ecf3d1844c67f653"): (
+        "optional job filter is a fixed literal WHERE clause"
     ),
-    ("lib/pipeline_db/import_jobs.py", 556, "d020bd0235c95c4a"): (
-        "claim exclusion predicate is assembled from fixed literal clauses "
-        "(CD-SEC-19 typed payload imports shifted this reviewed SELECT by +3)"
+    ("lib/pipeline_db/import_jobs.py", 555, "d020bd0235c95c4a"): (
+        "claim exclusion predicate is assembled from fixed literal clauses"
     ),
     ("lib/pipeline_db/misc.py", 186, "12cfdd83a367c90e"): (
         "track-count batch IN list contains only psycopg value placeholders"
@@ -203,7 +201,7 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "and every value remains a direct placeholder; an attached processing "
         "owner makes the compare-and-set a zero-write conflict"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 1057, "0359f0cf9c05697e"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 1047, "0359f0cf9c05697e"): (
         "processing-terminal metadata keys use the validated request-field "
         "vocabulary while exact request and owner predicates retain authority; "
         "the static owner-clearing status CAS remains the final request write"
@@ -217,23 +215,23 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
 # beside the implementation they review; movement or SQL-shape drift fails the
 # ratchet just like the dynamic-SQL exceptions above.
 _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
-    ("lib/pipeline_db/import_jobs.py", 421, "71e0271f65123747"): (
+    ("lib/pipeline_db/import_jobs.py", 420, "71e0271f65123747"): (
         "atomic download-to-processing handoff CASes the immutable download "
         "witness while installing the exact automation owner"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 169, "56802c71d0fd3622"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 168, "56802c71d0fd3622"): (
         "atomic terminal transition mirrors typed wanted CAS inside one transaction"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 228, "249bfbdab2b02ac4"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 227, "249bfbdab2b02ac4"): (
         "atomic preview recovery accepts only downloading as its exact source"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 383, "4f0561c784e817e9"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 382, "4f0561c784e817e9"): (
         "atomic terminal import CASes status with rescue audit in the same transaction"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 423, "9b11fb540dfe44e3"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 422, "9b11fb540dfe44e3"): (
         "atomic terminal typed transition CASes the source status selected by the DAG"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 1084, "32307a325c64f903"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 1074, "32307a325c64f903"): (
         "automation terminalization performs the final exact processing-owner "
         "CAS and clears the owner in the same static request write"
     ),

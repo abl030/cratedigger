@@ -51,6 +51,53 @@ function clearStore() {
   pipelineStore.clear();
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function fakeDomElement(
+  textContent = '',
+  requestId = null,
+  inserted = [],
+  isConnected = true,
+) {
+  const attributes = new Map();
+  if (requestId != null) {
+    attributes.set('data-pipeline-request-id', String(requestId));
+  }
+  return {
+    attributes,
+    children: [],
+    dataset: {},
+    focused: 0,
+    isConnected,
+    removed: false,
+    textContent,
+    setAttribute(name, value) { attributes.set(name, value); },
+    removeAttribute(name) { attributes.delete(name); },
+    getAttribute(name) { return attributes.get(name) || null; },
+    appendChild(child) {
+      child.isConnected = true;
+      this.children.push(child);
+    },
+    insertAdjacentElement(_position, element) {
+      element.isConnected = true;
+      inserted.push(element);
+    },
+    focus() { this.focused++; },
+    remove() {
+      this.isConnected = false;
+      this.removed = true;
+    },
+  };
+}
+
 console.log('Acquire button — fresh row → Add request enabled');
 clearStore();
 {
@@ -226,6 +273,7 @@ console.log('Processing conflict detector — canonical and temporary transition
     request_id: 902,
     processing_owner: owner,
   });
+  assertEqual(transition?.requestId, 902, 'transition response exact request id');
   assertEqual(transition?.owner.job_id, 72, 'temporary transition mapping uses same detector');
   assertEqual(
     processingConflictFromResponse(400, {
@@ -309,7 +357,7 @@ console.log('Processing conflict handler — immediate lock, row refetch, focus 
   assertEqual(control.dataset.processingLocked, 'true', 'typed locked state is retained');
   assertEqual(refetches, 1, 'only affected request is refetched');
   assertEqual(restored, '13,29', 'scroll context restored');
-  assertEqual(focused, 1, 'focus restored to acted-on control');
+  assertEqual(focused, 0, 'already-focused control is not redundantly focused after refetch');
   assertContains(live.textContent, 'job #73', 'aria-live announcement names exact owner');
   assertEqual(inserted.length, 1, 'visible owner explanation stays beside the locked control');
   assertEqual(
@@ -627,10 +675,242 @@ console.log('Processing conflict handler — failed refetch stays locked with wo
   assertEqual(inserted.length, 2, 'visible explanation and accessible retry are exposed');
   const retry = inserted[1];
   assertEqual(retry.textContent, 'Retry row refresh', 'retry has explicit action text');
+  globalThis.document.activeElement = retry;
   await retry.onclick();
   assertEqual(attempts, 2, 'retry refetches the affected row');
   assertEqual(retry.removed, true, 'successful retry removes retry affordance');
-  assertEqual(focused, 2, 'initial failure and successful retry retain focus context');
+  assertEqual(focused, 1, 'successful focused retry returns focus to the locked control');
+  globalThis.document = oldDocument;
+  globalThis.window = oldWindow;
+}
+
+console.log('Processing conflict handler — closed Replace modal cannot lock document.body');
+{
+  const oldDocument = globalThis.document;
+  const oldWindow = globalThis.window;
+  const inserted = [];
+  const body = fakeDomElement('application shell', null, inserted);
+  const requestControl = fakeDomElement('Replace', 907, inserted);
+  const removedConfirm = fakeDomElement('Confirm Replace', null, inserted, false);
+  const live = fakeDomElement('', null, inserted);
+  globalThis.document = {
+    activeElement: body,
+    body,
+    documentElement: fakeDomElement('document root', null, inserted),
+    createElement() {
+      return fakeDomElement('', null, inserted, false);
+    },
+    getElementById(id) {
+      if (id === 'processing-lock-live-region') return live;
+      return inserted.find(element => element.id === id && element.isConnected) || null;
+    },
+    querySelectorAll() { return [requestControl]; },
+  };
+  globalThis.window = { scrollX: 0, scrollY: 0, scrollTo() {} };
+  assertEqual(removedConfirm.isConnected, false, 'Replace confirmation is gone before handling');
+  await handleProcessingLockedConflict({
+    httpStatus: 409,
+    payload: {
+      error: 'processing_locked',
+      request_id: 907,
+      processing_owner: {
+        job_id: 78,
+        status: 'queued',
+        preview_status: 'waiting',
+      },
+    },
+    control: globalThis.document.activeElement,
+    refetch: async () => {},
+  });
+  assertEqual(body.textContent, 'application shell', 'document.body content is preserved');
+  assertEqual(
+    body.attributes.has('data-processing-locked'),
+    false,
+    'document.body is never treated as the mutation control',
+  );
+  assertEqual(
+    requestControl.attributes.get('aria-disabled'),
+    'true',
+    'request-scoped controls still lock after modal teardown',
+  );
+  globalThis.document = oldDocument;
+  globalThis.window = oldWindow;
+}
+
+console.log('Processing conflict handler — focus moved during mutation locks only captured origin');
+{
+  const oldDocument = globalThis.document;
+  const oldWindow = globalThis.window;
+  const inserted = [];
+  const body = fakeDomElement('application shell', null, inserted);
+  const originatingControl = fakeDomElement('Add request', null, inserted);
+  const unrelatedControl = fakeDomElement('Open another album', 999, inserted);
+  const live = fakeDomElement('', null, inserted);
+  globalThis.document = {
+    activeElement: unrelatedControl,
+    body,
+    documentElement: fakeDomElement('document root', null, inserted),
+    createElement() {
+      return fakeDomElement('', null, inserted, false);
+    },
+    getElementById(id) {
+      if (id === 'processing-lock-live-region') return live;
+      return inserted.find(element => element.id === id && element.isConnected) || null;
+    },
+    querySelectorAll() { return []; },
+  };
+  globalThis.window = { scrollX: 0, scrollY: 0, scrollTo() {} };
+  await handleProcessingLockedConflict({
+    httpStatus: 409,
+    payload: {
+      error: 'processing_locked',
+      request_id: 908,
+      processing_owner: {
+        job_id: 79,
+        status: 'queued',
+        preview_status: 'running',
+      },
+    },
+    control: originatingControl,
+    refetch: async () => {},
+  });
+  assertEqual(
+    originatingControl.attributes.get('aria-disabled'),
+    'true',
+    'explicit pre-request control receives the lock',
+  );
+  assertEqual(
+    unrelatedControl.attributes.has('data-processing-locked'),
+    false,
+    'newly focused unrelated control is untouched',
+  );
+  assertEqual(
+    globalThis.document.activeElement,
+    unrelatedControl,
+    'focus moved during the mutation stays on the operator-selected target',
+  );
+  globalThis.document = oldDocument;
+  globalThis.window = oldWindow;
+}
+
+console.log('Processing conflict handler — focus moved during refetch is not stolen back');
+{
+  const oldDocument = globalThis.document;
+  const oldWindow = globalThis.window;
+  const inserted = [];
+  const body = fakeDomElement('application shell', null, inserted);
+  const originatingControl = fakeDomElement('Delete request', 909, inserted);
+  const unrelatedControl = fakeDomElement('Imports tab', null, inserted);
+  const live = fakeDomElement('', null, inserted);
+  const refresh = deferred();
+  globalThis.document = {
+    activeElement: originatingControl,
+    body,
+    documentElement: fakeDomElement('document root', null, inserted),
+    createElement() {
+      return fakeDomElement('', null, inserted, false);
+    },
+    getElementById(id) {
+      if (id === 'processing-lock-live-region') return live;
+      return inserted.find(element => element.id === id && element.isConnected) || null;
+    },
+    querySelectorAll() { return [originatingControl]; },
+  };
+  globalThis.window = { scrollX: 0, scrollY: 0, scrollTo() {} };
+  const handling = handleProcessingLockedConflict({
+    httpStatus: 409,
+    payload: {
+      error: 'processing_locked',
+      request_id: 909,
+      processing_owner: {
+        job_id: 80,
+        status: 'running',
+        preview_status: 'evidence_ready',
+      },
+    },
+    control: originatingControl,
+    refetch: async () => refresh.promise,
+  });
+  globalThis.document.activeElement = unrelatedControl;
+  refresh.resolve();
+  await handling;
+  assertEqual(
+    globalThis.document.activeElement,
+    unrelatedControl,
+    'refetch completion preserves focus moved elsewhere',
+  );
+  assertEqual(
+    originatingControl.focused,
+    0,
+    'refetch completion does not focus the old control',
+  );
+  globalThis.document = oldDocument;
+  globalThis.window = oldWindow;
+}
+
+console.log('Processing conflict retry — focus moved during retry is not stolen back');
+{
+  const oldDocument = globalThis.document;
+  const oldWindow = globalThis.window;
+  const inserted = [];
+  const body = fakeDomElement('application shell', null, inserted);
+  const originatingControl = fakeDomElement('Delete request', 910, inserted);
+  const unrelatedControl = fakeDomElement('History tab', null, inserted);
+  const live = fakeDomElement('', null, inserted);
+  const retryRefresh = deferred();
+  let attempts = 0;
+  globalThis.document = {
+    activeElement: originatingControl,
+    body,
+    documentElement: fakeDomElement('document root', null, inserted),
+    createElement() {
+      return fakeDomElement('', null, inserted, false);
+    },
+    getElementById(id) {
+      if (id === 'processing-lock-live-region') return live;
+      return inserted.find(element => element.id === id && element.isConnected) || null;
+    },
+    querySelectorAll() { return [originatingControl]; },
+  };
+  globalThis.window = { scrollX: 0, scrollY: 0, scrollTo() {} };
+  await handleProcessingLockedConflict({
+    httpStatus: 409,
+    payload: {
+      error: 'processing_locked',
+      request_id: 910,
+      processing_owner: {
+        job_id: 81,
+        status: 'recovery_required',
+        preview_status: 'running',
+      },
+    },
+    control: originatingControl,
+    refetch: async () => {
+      attempts++;
+      if (attempts === 1) throw new Error('offline');
+      return retryRefresh.promise;
+    },
+  });
+  const retry = inserted.find(
+    element => element.className === 'p-btn processing-refresh-retry',
+  );
+  assertEqual(!!retry, true, 'failed refresh exposes retry control');
+  globalThis.document.activeElement = retry;
+  const retrying = retry.onclick();
+  globalThis.document.activeElement = unrelatedControl;
+  retryRefresh.resolve();
+  await retrying;
+  assertEqual(retry.removed, true, 'successful retry removes its control');
+  assertEqual(
+    globalThis.document.activeElement,
+    unrelatedControl,
+    'retry completion preserves focus moved elsewhere',
+  );
+  assertEqual(
+    originatingControl.focused,
+    0,
+    'retry completion does not focus the old control after focus moves',
+  );
   globalThis.document = oldDocument;
   globalThis.window = oldWindow;
 }
