@@ -61,7 +61,7 @@ TESTS_TYPING_RATCHET_BASELINE: dict[str, dict[str, int]] = {
     "tests/test_harness_config_guard.py": {"any": 4, "cast": 5},
     "tests/test_harness_mutation_log.py": {"any": 3},
     "tests/test_harness_serialization.py": {"any": 4},
-    "tests/test_import_dispatch.py": {"type_ignore": 26},
+    "tests/test_import_dispatch.py": {"type_ignore": 25},
     "tests/test_import_manifest.py": {"any": 7, "cast": 7},
     "tests/test_import_manifest_generated.py": {"cast": 2},
     "tests/test_import_one_stages.py": {"any": 2, "cast": 2},

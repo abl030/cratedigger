@@ -56,18 +56,23 @@ from lib.quality import (
     AudioQualityMeasurement,
     QualityComparisonBasis,
     QualityRankConfig,
+    SpectralEvidenceFacts,
     TargetQualityContract,
     VerifiedLosslessProof,
     build_existing_quality_measurement,
     classify_full_pipeline_decision,
     compare_quality,
     compute_effective_override_bitrate,
+    decision_class_kbps,
     determine_verified_lossless,
     evidence_decision_name,
     full_pipeline_decision,
     full_pipeline_decision_from_evidence,
+    interpret_measurement,
+    interpret_spectral_evidence,
     legacy_unrecorded_audio_validation_report,
     quality_gate_decision,
+    spectral_classes_comparable,
     spectral_import_decision,
 )
 from lib.quality.filetypes import has_mixed_lossless_and_lossy
@@ -80,6 +85,7 @@ from tests.test_simulator_scenarios import (
     AlbumState,
     DownloadScenario,
     SimResult,
+    _derive_album_format,
     assert_denylist_has_valid_cause,
     simulate,
 )
@@ -468,8 +474,20 @@ def _stage_parity_verdicts(
     # world.existing_container is a definite int, so the builder's
     # min_bitrate_kbps-is-None early return can never fire here.
     assert existing_m is not None
+    # Stage 1 consumes decision-grade CLASSES gated on comparability, which
+    # is exactly how ``full_pipeline_decision`` wires it (issue #829 Phase 5
+    # PR2b). Feeding it the raw stored numbers here would make the harness
+    # more permissive than the decider it patrols — the mirror lie
+    # ``.claude/rules/test-fidelity.md`` exists to forbid.
+    new_spectral = interpret_measurement(new_m)
+    existing_spectral = interpret_measurement(existing_m)
+    stage1_existing = (
+        decision_class_kbps(existing_spectral)
+        if spectral_classes_comparable(new_spectral, existing_spectral).comparable
+        else None
+    )
     stage1 = spectral_import_decision(
-        world.grade, world.new_spectral, world.existing_spectral)
+        world.grade, decision_class_kbps(new_spectral), stage1_existing or 0)
     stage2 = compare_quality(new_m, existing_m, QualityRankConfig.defaults())
     return stage1, stage2
 
@@ -587,7 +605,14 @@ def assert_basis_metrics_truthful(
             f"candidate basis claims 'avg' but the world measured none: {basis!r}")
     if basis["existing_metric"] == "avg" and album.avg_bitrate is None:
         clamped_cbr = album.is_cbr and compute_effective_override_bitrate(
-            album.min_bitrate, album.spectral_bitrate, album.spectral_grade,
+            album.min_bitrate,
+            interpret_spectral_evidence(SpectralEvidenceFacts(
+                spectral_grade=album.spectral_grade,
+                spectral_bitrate_kbps=album.spectral_bitrate,
+                # The same label ``simulate`` feeds the decider, so this
+                # mirror cannot resolve a different codec than the run did.
+                format=_derive_album_format(album),
+            )),
         ) != album.min_bitrate
         if not clamped_cbr:
             raise AssertionError(
@@ -730,6 +755,24 @@ def obvious_lower_rank_lossy_downloads(draw) -> DownloadScenario:
     )
 
 
+#: The only values ``estimate_bitrate_from_cliff`` can emit. A spectral
+#: number outside this set is not a legacy bucket, carries no class under
+#: the codec-aware interpretation (issue #829 Phase 5 PR2b), and so
+#: describes a world where the clamp these properties patrol never fires.
+_LAME_BUCKET_CLASSES = (96, 112, 128, 160, 192, 224, 256, 320)
+
+#: The lossy families with an invertible class ladder — the only ones whose
+#: spectral evidence can reach the shared clamp at all. See
+#: ``stage_parity_worlds``.
+_LADDER_FORMATS = ("MP3", "Vorbis")
+
+
+def _lame_buckets_at_or_below(container: int) -> st.SearchStrategy[int]:
+    """A producible spectral class no higher than its own container."""
+    candidates = [b for b in _LAME_BUCKET_CLASSES if b <= container]
+    return st.sampled_from(candidates or [_LAME_BUCKET_CLASSES[0]])
+
+
 @st.composite
 def stage_parity_worlds(draw) -> StageParityWorld:
     """Worlds for the issue #813 Finding 1 no-disagreement property.
@@ -739,21 +782,28 @@ def stage_parity_worlds(draw) -> StageParityWorld:
     every other grade) — sampling only these two focuses the search on the
     space where a disagreement could exist, the same convention
     ``test_only_strictly_lower_spectral_rejects_at_stage1`` already uses.
-    ``existing_grade`` is free (the shared clamp is grade-tolerant by
-    design — see ``_shared_spectral_bitrates``'s own docstring). Format is
-    shared across both sides (like
+    ``existing_grade`` is free. Format is shared across both sides (like
     ``test_existing_spectral_override_is_noop_when_candidate_has_spectral``'s
     fixed ``"MP3"``) so the search spends its budget on the same-codec-
     family same-rank tiebreak this property patrols, rather than diluting
     across the ``cross_family_same_rank`` branch, which can never emit
     ``"better"`` and so can never disagree with a Stage-1 reject.
+
+    **The shared format is drawn from the LADDER families only** (issue
+    #829 Phase 5 PR2b): AAC, Opus and WMA now withhold a class on BOTH
+    sides, so a world drawn from all five families would spend most of its
+    budget where neither stage has anything to compare and the
+    disagreement this property hunts is unreachable by construction. That
+    is not extra safety — it is the same coverage dilution the
+    same-codec-family choice above already rejects, so the family list is
+    narrowed for the same reason. Vorbis is kept: it has an invertible
+    ladder, and a same-Vorbis pair is comparable.
     """
     new_container = draw(_bitrates(min_value=1, max_value=3000))
-    new_spectral = draw(_bitrates(min_value=1, max_value=new_container))
+    new_spectral = draw(_lame_buckets_at_or_below(new_container))
     existing_container = draw(_bitrates(min_value=1, max_value=3000))
-    existing_spectral = draw(
-        _bitrates(min_value=1, max_value=existing_container))
-    shared_format = draw(st.sampled_from(_LOSSY_FORMATS))
+    existing_spectral = draw(_lame_buckets_at_or_below(existing_container))
+    shared_format = draw(st.sampled_from(_LADDER_FORMATS))
     return StageParityWorld(
         grade=draw(st.sampled_from(("suspect", "likely_transcode"))),
         new_container=new_container,
@@ -1068,8 +1118,8 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
     @given(
         candidate_container=_bitrates(min_value=64, max_value=320),
         existing_container=_bitrates(min_value=64, max_value=320),
-        candidate_spectral=_bitrates(min_value=32, max_value=320),
-        existing_spectral=_bitrates(min_value=32, max_value=320),
+        candidate_spectral=st.sampled_from(_LAME_BUCKET_CLASSES),
+        existing_spectral=st.sampled_from(_LAME_BUCKET_CLASSES),
         grade=st.sampled_from(("suspect", "likely_transcode")),
         existing_grade=st.sampled_from(("suspect", "likely_transcode")),
     )
@@ -1091,10 +1141,13 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
         makes the override decisive (with it -> phantom "better"; gated off ->
         "equivalent"), so a mutant reverting the gate dies here.
         """
-        # A spectral floor above the container is not something measurement
-        # produces; clamp it so the world stays physical.
-        candidate_spectral = min(candidate_spectral, candidate_container)
-        existing_spectral = min(existing_spectral, existing_container)
+        # A spectral floor above the container is not what this property is
+        # about; raise the containers instead of clamping the classes, which
+        # would produce values no cliff estimator can emit (issue #829 Phase
+        # 5 PR2b: an off-ladder number carries no class at all, so a clamped
+        # world would stop exercising the clamp this property names).
+        candidate_container = max(candidate_container, candidate_spectral)
+        existing_container = max(existing_container, existing_spectral)
         # The floor override_bitrate_from_current_evidence would derive.
         override = min(existing_container, existing_spectral)
 

@@ -12,10 +12,7 @@ from lib.quality.decisions import (
     post_import_search_action_if_known,
 )
 from lib.quality.download_state import DownloadInfo
-from lib.quality.evidence_types import (
-    SPECTRAL_TRANSCODE_GRADES,
-    AudioQualityMeasurement,
-)
+from lib.quality.evidence_types import AudioQualityMeasurement
 from lib.quality.filetypes import (
     LOSSLESS_CODECS,
     QUALITY_LOSSLESS,
@@ -23,6 +20,10 @@ from lib.quality.filetypes import (
 )
 from lib.quality.import_result_types import SpectralAnalysisDetail
 from lib.quality.ranks import QualityRankConfig
+from lib.quality.spectral_interpretation import (
+    SpectralInterpretation,
+    decision_class_kbps,
+)
 
 # ---------------------------------------------------------------------------
 # Dispatch logic — extracted from import_dispatch.py for testability
@@ -131,31 +132,38 @@ def decision_denylists(decision: str) -> bool:
 
 def compute_effective_override_bitrate(
     container_bitrate: int | None,
-    spectral_bitrate: int | None,
-    spectral_grade: str | None,
+    spectral: SpectralInterpretation,
 ) -> int | None:
-    """Compute the grade-aware effective override bitrate.
+    """Compute the codec-aware effective override bitrate.
 
-    Spectral bitrate only participates when ``spectral_grade`` is in
-    ``SPECTRAL_TRANSCODE_GRADES`` (``suspect`` / ``likely_transcode``). For any
-    other grade — ``genuine``, ``marginal``, ``error``, ``None``, or an unknown
-    future value — the spectral input is ignored and the container bitrate is
-    returned untouched.
+    Takes the album's ``SpectralInterpretation`` rather than a raw
+    ``(spectral_bitrate, spectral_grade)`` pair (issue #829 Phase 5 PR2b).
+    The grade gate this function used to own now lives in
+    ``lib.quality.spectral_interpretation._grade_authorizes`` — reading the
+    same ``SPECTRAL_TRANSCODE_GRADES`` frozenset — alongside the per-codec
+    rules the grade gate alone could not express. That widening is the whole
+    point: an ordinary AAC's natural rolloff used to arrive here as a
+    LAME-table "128" and floor a 256 kbps album to 128 (download 37946).
 
-    When spectral is authorized, the function returns the lower of the two
-    available values (conservative). Used by the auto / force import seams to
-    derive ``--override-min-bitrate`` for ``import_one.py`` and by the quality
-    gate to determine whether to apply a spectral override to the gate bitrate.
+    ``decision_class_kbps`` returns the class only when the interpretation
+    is decision-grade — a ladder codec (MP3, Vorbis) whose album verdict
+    authorized a spectral finding. Otherwise it withholds and the container
+    bitrate is returned untouched, which is never a rejection: the caller
+    falls through to rank and the other evidence exactly as it does for an
+    album that was never spectrally measured. An AAC content floor is a
+    LOWER bound and never reaches this clamp.
+
+    When a class is available the function returns the lower of the two
+    values (conservative). Used by the auto / force import seams to derive
+    ``--override-min-bitrate`` for ``import_one.py`` and by the quality gate
+    to determine whether to apply a spectral override to the gate bitrate.
     """
-    if spectral_grade not in SPECTRAL_TRANSCODE_GRADES:
+    class_kbps = decision_class_kbps(spectral)
+    if class_kbps is None:
         return container_bitrate
-    if container_bitrate is None and spectral_bitrate is None:
-        return None
     if container_bitrate is None:
-        return spectral_bitrate
-    if spectral_bitrate is None:
-        return container_bitrate
-    return min(container_bitrate, spectral_bitrate)
+        return class_kbps
+    return min(container_bitrate, class_kbps)
 
 
 def extract_usernames(files: Any) -> set[str]:

@@ -639,6 +639,8 @@ COMPARISON_BASIS_BRANCHES: frozenset[str] = frozenset({
     "cross_family_same_rank",      # same rank, different codec family
     "label_contract_same_rank",    # same rank, explicit label is authoritative
     "spectral_tiebreak",           # same rank, differing clamped spectral values decide
+    "spectral_candidate_bound",    # transcode candidate bounded by its own class
+                                   # against a known-clean HAVE; rank alone decides
     "metric_tiebreak",             # same rank, raw metric delta vs tolerance
     "metric_missing",              # same rank, a side has no classifiable value
     "transcode_rank_regression",   # transcode-grade candidate regresses real rank

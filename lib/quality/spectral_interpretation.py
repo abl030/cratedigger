@@ -1,9 +1,10 @@
-"""Per-codec spectral interpretation (issue #829 Phase 5 PR2a).
+"""Per-codec spectral interpretation (issue #829 Phase 5 PR2a/PR2b).
 
-Pure decisions only. **Nothing in this module is wired into the decider,
-the measurement path, or any operator surface yet** — PR2b does that. It
-exists so the codec-aware semantics can be stated, pinned and patrolled
-before they change any behaviour.
+Pure decisions only. PR2a stated the semantics; **PR2b wires them into the
+decider** — ``interpret_measurement`` + ``decision_class_kbps`` are the two
+entry points every decision seam uses, and no seam may read a raw
+``spectral_bitrate_kbps`` for a decision again. Operator-facing display is
+still unwired (PR4).
 
 Why this module exists
 ----------------------
@@ -135,6 +136,7 @@ from lib.quality.evidence_types import (
     CODEC_FAMILY_VORBIS,
     EVIDENCE_SUBJECT_SOURCE,
     SPECTRAL_TRANSCODE_GRADES,
+    AudioQualityMeasurement,
     CodecFamily,
     EvidenceSubject,
 )
@@ -327,6 +329,75 @@ class SpectralEvidenceFacts:
     cliff_hz: int | None = None
     spectral_bitrate_kbps: int | None = None
     sbr_present: bool | None = None
+
+
+@dataclass(frozen=True)
+class SpectralCodecContext:
+    """The codec-resolution context a flat ``(grade, bitrate)`` pair lacks.
+
+    ``full_pipeline_decision`` is a flat-kwargs simulator: its world is
+    described by scalars, and the scalars it already carries
+    (``spectral_grade`` / ``spectral_bitrate`` / the format hint) cannot say
+    which codec produced the measurement. This carries exactly the rest —
+    one keyword per side instead of six — and ``facts()`` recombines it with
+    the flat scalars so there is never a second source of truth for the
+    grade, the stored bucket or the format label.
+
+    Every field is consumed by ``resolve_measured_codec_family`` or
+    ``interpret_spectral_cliff``. ``sbr_present`` is deliberately absent:
+    it has no producer until PR3 captures the AAC object type, and inert
+    plumbing is dead code.
+    """
+
+    codec_family: CodecFamily | None = None
+    cliff_hz: int | None = None
+    filetype_band: str = ""
+    storage_format: str | None = None
+    spectral_subject: EvidenceSubject | None = None
+    was_converted_from: str | None = None
+
+    def interpret(
+        self,
+        measurement: "AudioQualityMeasurement | None",
+    ) -> "SpectralInterpretation":
+        """Interpret a measurement through THIS context's album-level facts.
+
+        The one way to combine a captured context with the measurement it
+        describes. A caller that holds a context must never fall back to
+        ``interpret_measurement`` on the bare measurement: the context is
+        exactly the extra evidence (``storage_format``, ``filetype_band``)
+        that can fail a mixed-codec album closed, so dropping it resolves a
+        codec production withheld.
+        """
+        if measurement is None:
+            return interpret_spectral_evidence(self.facts(
+                spectral_grade=None, spectral_bitrate_kbps=None, format=None,
+            ))
+        return interpret_spectral_evidence(self.facts(
+            spectral_grade=measurement.spectral_grade,
+            spectral_bitrate_kbps=measurement.spectral_bitrate_kbps,
+            format=measurement.format,
+        ))
+
+    def facts(
+        self,
+        *,
+        spectral_grade: str | None,
+        spectral_bitrate_kbps: int | None,
+        format: str | None,
+    ) -> SpectralEvidenceFacts:
+        """Recombine this context with the flat measured scalars."""
+        return SpectralEvidenceFacts(
+            spectral_grade=spectral_grade,
+            codec_family=self.codec_family,
+            spectral_subject=self.spectral_subject,
+            was_converted_from=self.was_converted_from,
+            format=format,
+            storage_format=self.storage_format,
+            filetype_band=self.filetype_band,
+            cliff_hz=self.cliff_hz,
+            spectral_bitrate_kbps=spectral_bitrate_kbps,
+        )
 
 
 @dataclass(frozen=True)
@@ -893,3 +964,85 @@ def spectral_classes_comparable(
     if left.basis != "cliff_hz" and left.codec_family != right.codec_family:
         return SpectralComparability(False, "cross_codec_legacy_bucket")
     return SpectralComparability(True, "comparable_same_derivation")
+
+
+def codec_context_from_measurement(
+    measurement: AudioQualityMeasurement | None,
+    *,
+    storage_format: str | None = None,
+    filetype_band: str = "",
+) -> SpectralCodecContext:
+    """Lift a measurement's codec-resolution fields into a context.
+
+    The adapter from a persisted ``AudioQualityMeasurement`` (plus the two
+    album-level fields that live on ``AlbumQualityEvidence``) to the one
+    keyword ``full_pipeline_decision`` takes per side.
+    """
+    if measurement is None:
+        return SpectralCodecContext(
+            filetype_band=filetype_band,
+            storage_format=storage_format,
+        )
+    return SpectralCodecContext(
+        codec_family=measurement.codec_family,
+        cliff_hz=measurement.cliff_hz,
+        filetype_band=filetype_band,
+        storage_format=storage_format,
+        spectral_subject=measurement.spectral_subject,
+        was_converted_from=measurement.was_converted_from,
+    )
+
+
+def interpret_measurement(
+    measurement: AudioQualityMeasurement | None,
+    *,
+    storage_format: str | None = None,
+    filetype_band: str = "",
+    sbr_present: bool | None = None,
+) -> SpectralInterpretation:
+    """Interpret an ``AudioQualityMeasurement``'s own spectral fields.
+
+    The decision-path entry point (issue #829 Phase 5 PR2b). Every field
+    the measurement carries is a straight copy; ``storage_format`` and
+    ``filetype_band`` live on ``AlbumQualityEvidence``, so a caller that
+    holds the evidence row passes them and a caller that only holds a
+    measurement does not (the measurement's own ``format`` already carries
+    the storage-format fallback wherever the pipeline resolved one).
+
+    ``measurement is None`` — the "no existing album" shape — interprets as
+    an unknown family, i.e. it asserts nothing.
+    """
+    if measurement is None:
+        return _audit_only(None, REASON_UNKNOWN_CODEC_FAMILY)
+    return interpret_spectral_evidence(SpectralEvidenceFacts(
+        spectral_grade=measurement.spectral_grade,
+        codec_family=measurement.codec_family,
+        spectral_subject=measurement.spectral_subject,
+        was_converted_from=measurement.was_converted_from,
+        format=measurement.format,
+        storage_format=storage_format,
+        filetype_band=filetype_band,
+        cliff_hz=measurement.cliff_hz,
+        spectral_bitrate_kbps=measurement.spectral_bitrate_kbps,
+        sbr_present=sbr_present,
+    ))
+
+
+def decision_class_kbps(interpretation: SpectralInterpretation) -> int | None:
+    """The spectral class that may participate in a decision, else None.
+
+    The ONE accessor every decision seam uses instead of reading a raw
+    ``spectral_bitrate_kbps``. ``None`` means the spectral leg withholds its
+    opinion — the caller falls through to rank and the other evidence, which
+    is never a rejection and never an accusation.
+
+    A ``content_floor`` (AAC) interpretation carries an
+    ``inferred_class_kbps`` that is a LOWER bound, the opposite direction to
+    every clamp in the decision path, and is deliberately never
+    decision-grade — so it never reaches a caller through here.
+    """
+    return (
+        interpretation.inferred_class_kbps
+        if interpretation.decision_grade
+        else None
+    )

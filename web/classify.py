@@ -1248,13 +1248,25 @@ def _verdict_from_basis(basis: QualityComparisonBasis) -> str:
     """
     new_fmt = (basis.new_format or "?").upper()
     ex_fmt = (basis.existing_format or "?").upper()
-    # spectral_tiebreak (issue #813 Finding 1) carries the same clamped
-    # min(metric, spectral floor) value as the rank branch — the metric
-    # label would lie there too.
-    clamped = basis.spectral_clamped and basis.branch in ("rank", "spectral_tiebreak")
-    new_val = _basis_value_phrase(basis.new_metric, basis.new_value_kbps, clamped)
+    # Which SIDE's displayed value is a clamped min(metric, spectral class)
+    # rather than the named statistic. spectral_tiebreak (issue #813
+    # Finding 1) clamps both sides exactly like the rank branch, so the
+    # metric label would lie on both. spectral_candidate_bound (issue #911)
+    # is the asymmetric one: only the CANDIDATE is bounded by its own class
+    # — the HAVE keeps its real raw metric — so a single flag would print
+    # the candidate's class under the HAVE's metric name, or the HAVE's
+    # honest average as an unlabelled "~". Per-side is the only truthful
+    # shape here.
+    new_clamped = basis.spectral_clamped and basis.branch in (
+        "rank", "spectral_tiebreak", "spectral_candidate_bound",
+    )
+    existing_clamped = basis.spectral_clamped and basis.branch in (
+        "rank", "spectral_tiebreak",
+    )
+    new_val = _basis_value_phrase(
+        basis.new_metric, basis.new_value_kbps, new_clamped)
     ex_val = _basis_value_phrase(
-        basis.existing_metric, basis.existing_value_kbps, clamped)
+        basis.existing_metric, basis.existing_value_kbps, existing_clamped)
 
     if basis.verdict == "better":
         if basis.branch in ("metric_tiebreak", "spectral_tiebreak"):
@@ -1280,6 +1292,12 @@ def _verdict_from_basis(basis: QualityComparisonBasis) -> str:
         core = f"{new_fmt} vs {ex_fmt} — label contract, both {basis.new_rank}"
     elif basis.branch == "metric_missing":
         core = "bitrate unmeasurable"
+    elif basis.branch == "spectral_candidate_bound":
+        # The candidate's own spectral class, against the HAVE's real
+        # metric. Naming both ranks would be redundant (equivalent means
+        # they matched), but the two sides are measured differently and the
+        # phrase has to keep saying so.
+        core = f"{new_fmt} {new_val} vs {ex_val} — both {basis.new_rank}"
     else:  # metric_tiebreak
         tol = (f" (within {basis.tolerance_kbps}k)"
                if basis.tolerance_kbps is not None else "")

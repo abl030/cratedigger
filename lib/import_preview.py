@@ -80,12 +80,17 @@ from lib.quality import (
     QualityRankConfig,
     SpectralAnalysisDetail,
     SpectralDetail,
+    SpectralEvidenceFacts,
+    SpectralInterpretation,
+    SpectralMeasurement,
     TargetQualityContract,
     V0ProbeEvidence,
     classify_full_pipeline_decision,
     classify_quality_import_stages,
     compute_effective_override_bitrate,
     full_pipeline_decision,
+    interpret_measurement,
+    interpret_spectral_evidence,
     quality_gate_decision,
 )
 from lib.quality_evidence import (
@@ -107,6 +112,39 @@ from lib.v0_probe import probe_installed_album_as_v0
 from lib.validation_envelope import decode_validation_envelope
 
 logger = logging.getLogger("cratedigger")
+
+
+def _existing_spectral_interpretation(
+    *,
+    current_evidence: AlbumQualityEvidence | None,
+    measured_existing: SpectralMeasurement | None,
+    persisted_existing: SpectralAnalysisDetail,
+) -> SpectralInterpretation:
+    """Interpret the installed copy's spectral evidence in its codec's terms.
+
+    Mirrors the grade/bitrate resolution order the override used to inline:
+    linked current evidence wins, then this attempt's fresh measurement of
+    the installed files, then the persisted source-subject detail. Issue #829
+    Phase 5 PR2b: the override may only ever consume a codec-aware class, and
+    the linked-evidence branch additionally resolves the album-level context
+    (``storage_format``/``filetype_band``) the bare audit details lack.
+    """
+    if current_evidence is not None:
+        return interpret_measurement(
+            current_evidence.measurement,
+            storage_format=current_evidence.storage_format,
+            filetype_band=current_evidence.filetype_band,
+        )
+    source: SpectralMeasurement | SpectralAnalysisDetail = (
+        measured_existing if measured_existing is not None else persisted_existing
+    )
+    return interpret_spectral_evidence(SpectralEvidenceFacts(
+        spectral_grade=source.grade,
+        codec_family=source.codec_family,
+        cliff_hz=source.cliff_hz,
+        spectral_bitrate_kbps=source.bitrate_kbps,
+    ))
+
 
 _PREVIEW_MAX_DEPTH = 32
 _PREVIEW_MAX_ENTRIES = 5000
@@ -2092,33 +2130,21 @@ def measure_and_persist_candidate_evidence(
 
         # --- Harness path: measurement allows continuing ---
         existing_v0_probe: V0ProbeEvidence | None = None
-        existing_spectral = measurement.existing_spectral
-        existing_grade = (
-            existing_spectral.grade
-            if existing_spectral is not None
-            else existing_spectral_evidence.grade
-        )
-        existing_bitrate = (
-            existing_spectral.bitrate_kbps
-            if existing_spectral is not None
-            else existing_spectral_evidence.bitrate_kbps
-        )
-        if current_evidence is not None:
-            current_m = current_evidence.measurement
-            existing_grade = current_m.spectral_grade
-            existing_bitrate = current_m.spectral_bitrate_kbps
-            if current_evidence.v0_metric is not None:
-                existing_v0_probe = audit_v0_probe_from_metric(
-                    current_evidence.v0_metric
-                )
+        if current_evidence is not None and current_evidence.v0_metric is not None:
+            existing_v0_probe = audit_v0_probe_from_metric(
+                current_evidence.v0_metric
+            )
         override_min_bitrate = compute_effective_override_bitrate(
             (
                 current_evidence.measurement.min_bitrate_kbps
                 if current_evidence is not None
                 else measurement.existing_min_bitrate
             ),
-            existing_bitrate if isinstance(existing_bitrate, int) else None,
-            existing_grade if isinstance(existing_grade, str) else None,
+            _existing_spectral_interpretation(
+                current_evidence=current_evidence,
+                measured_existing=measurement.existing_spectral,
+                persisted_existing=existing_spectral_evidence,
+            ),
         )
 
         try:
@@ -2702,29 +2728,17 @@ def preview_import_from_path(
                 import_result=ImportResult(spectral=measurement.spectral_audit),
             )
 
-        existing_spectral = measurement.existing_spectral
-        existing_grade = (
-            existing_spectral.grade
-            if existing_spectral is not None
-            else existing_spectral_evidence.grade
-        )
-        existing_bitrate = (
-            existing_spectral.bitrate_kbps
-            if existing_spectral is not None
-            else existing_spectral_evidence.bitrate_kbps
-        )
-        if current_evidence is not None:
-            current_m = current_evidence.measurement
-            existing_grade = current_m.spectral_grade
-            existing_bitrate = current_m.spectral_bitrate_kbps
         override_min_bitrate = compute_effective_override_bitrate(
             (
                 current_evidence.measurement.min_bitrate_kbps
                 if current_evidence is not None
                 else measurement.existing_min_bitrate
             ),
-            existing_bitrate if isinstance(existing_bitrate, int) else None,
-            existing_grade if isinstance(existing_grade, str) else None,
+            _existing_spectral_interpretation(
+                current_evidence=current_evidence,
+                measured_existing=measurement.existing_spectral,
+                persisted_existing=existing_spectral_evidence,
+            ),
         )
 
         existing_v0_probe: V0ProbeEvidence | None = None

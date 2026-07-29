@@ -33,7 +33,16 @@ CFG = QualityRankConfig.defaults()  # bitrate_metric=avg, mp3_vbr 245/210/170/13
 
 
 class TestCompareQualityBasisBranches(unittest.TestCase):
-    """Each compare_quality branch emits a truthful, branch-aware basis."""
+    """Each compare_quality branch emits a truthful, branch-aware basis.
+
+    Every spectral world below states an authorizing ``spectral_grade`` and
+    a ``spectral_bitrate_kbps`` value ``estimate_bitrate_from_cliff`` can
+    actually emit (a ``LAME_LOWPASS`` class). Issue #829 Phase 5 PR2b made
+    both load-bearing: a spectral number carries no class without an
+    authorizing album verdict, and a value no producer emits is not a
+    legacy bucket. A world violating either silently stops exercising the
+    clamp it names (test-fidelity Rule C).
+    """
 
     # (desc, new, existing, expected-basis-fields)
     CASES: ClassVar = [
@@ -138,12 +147,12 @@ class TestCompareQualityBasisBranches(unittest.TestCase):
             ("transcode-over-transcode routes to the shared clamp, not the "
             "raw pre-check (line-189 audit)"),
             _m(avg_bitrate_kbps=150, format="MP3", is_cbr=True,
-               spectral_grade="likely_transcode", spectral_bitrate_kbps=300),
+               spectral_grade="likely_transcode", spectral_bitrate_kbps=320),
             _m(avg_bitrate_kbps=200, format="MP3", is_cbr=True,
-               spectral_grade="likely_transcode", spectral_bitrate_kbps=100),
+               spectral_grade="likely_transcode", spectral_bitrate_kbps=96),
             {"verdict": "better", "branch": "rank",
                  "new_rank": "acceptable", "existing_rank": "poor",
-                 "new_value_kbps": 150, "existing_value_kbps": 100,
+                 "new_value_kbps": 150, "existing_value_kbps": 96,
                  "spectral_clamped": True},
         ),
         (
@@ -153,12 +162,12 @@ class TestCompareQualityBasisBranches(unittest.TestCase):
             # Finding 1) — regardless of either side's own is_cbr.
             "shared-spectral clamp deciding rank shows the clamped values",
             _m(avg_bitrate_kbps=1000, format="MP3",
-               spectral_grade="genuine", spectral_bitrate_kbps=300),
+               spectral_grade="likely_transcode", spectral_bitrate_kbps=320),
             _m(avg_bitrate_kbps=500, format="MP3",
-               spectral_grade="genuine", spectral_bitrate_kbps=150),
+               spectral_grade="likely_transcode", spectral_bitrate_kbps=128),
             {"verdict": "better", "branch": "rank",
-                 "new_rank": "excellent", "existing_rank": "acceptable",
-                 "new_value_kbps": 300, "existing_value_kbps": 150,
+                 "new_rank": "transparent", "existing_rank": "acceptable",
+                 "new_value_kbps": 320, "existing_value_kbps": 128,
                  "spectral_clamped": True},
         ),
         (
@@ -176,12 +185,12 @@ class TestCompareQualityBasisBranches(unittest.TestCase):
             ("shared-spectral clamp: differing clamped values decide the "
             "same-rank tiebreak directly"),
             _m(avg_bitrate_kbps=1000, format="MP3",
-               spectral_grade="genuine", spectral_bitrate_kbps=200),
+               spectral_grade="likely_transcode", spectral_bitrate_kbps=224),
             _m(avg_bitrate_kbps=1000, format="MP3",
-               spectral_grade="genuine", spectral_bitrate_kbps=196),
+               spectral_grade="likely_transcode", spectral_bitrate_kbps=192),
             {"verdict": "better", "branch": "spectral_tiebreak",
                  "new_rank": "good", "existing_rank": "good",
-                 "new_value_kbps": 200, "existing_value_kbps": 196,
+                 "new_value_kbps": 224, "existing_value_kbps": 192,
                  "spectral_clamped": True},
         ),
         (
@@ -193,33 +202,35 @@ class TestCompareQualityBasisBranches(unittest.TestCase):
             ("shared-spectral clamp: a TRUE spectral tie still defers to "
             "the raw metric"),
             _m(avg_bitrate_kbps=288, format="MP3",
-               spectral_grade="genuine", spectral_bitrate_kbps=190),
+               spectral_grade="likely_transcode", spectral_bitrate_kbps=128),
             _m(avg_bitrate_kbps=196, format="MP3",
-               spectral_grade="genuine", spectral_bitrate_kbps=190),
+               spectral_grade="likely_transcode", spectral_bitrate_kbps=128),
             {"verdict": "better", "branch": "metric_tiebreak",
                  "new_rank": "acceptable", "existing_rank": "acceptable",
                  "new_value_kbps": 288, "existing_value_kbps": 196,
                  "spectral_clamped": True, "tolerance_kbps": 5},
         ),
         (
-            # Issue #813 Finding 1 (second sub-finding): the spectral
-            # bucket values (LAME_LOWPASS) are calibrated to the CBR band
-            # thresholds, not the more generous VBR ones. A spectral-bound
-            # clamped value classifies via CBR bands regardless of that
-            # side's own is_cbr — otherwise a VBR-tagged 245 (VBR
-            # "transparent") would outrank a CBR-tagged 300 (CBR
-            # "excellent") purely from table choice, despite 245 < 300
-            # (worse real content, per spectral evidence both sides agree
-            # is the direct signal).
+            # Issue #813 Finding 1 (second sub-finding): an MP3 class
+            # ladder is calibrated to the CBR band thresholds, not the more
+            # generous VBR ones. A spectral-bound clamped value classifies
+            # via CBR bands regardless of that side's own is_cbr —
+            # otherwise a VBR-tagged 256 (VBR "transparent") would tie a
+            # CBR-tagged 320 and fall through to a same-rank tiebreak,
+            # despite 256 < 320 (worse real content, per spectral evidence
+            # both sides agree is the direct signal). Issue #829 Phase 5
+            # PR2b narrows the forcing to MP3, the only family whose ladder
+            # that calibration describes and the only one whose rank lookup
+            # reads ``is_cbr`` at all.
             ("shared-spectral clamp: CBR bands classify a spectral-bound "
             "value even when that side is VBR"),
             _m(avg_bitrate_kbps=1000, format="MP3", is_cbr=False,
-               spectral_grade="likely_transcode", spectral_bitrate_kbps=245),
+               spectral_grade="likely_transcode", spectral_bitrate_kbps=256),
             _m(avg_bitrate_kbps=1000, format="MP3", is_cbr=True,
-               spectral_grade="likely_transcode", spectral_bitrate_kbps=300),
+               spectral_grade="likely_transcode", spectral_bitrate_kbps=320),
             {"verdict": "worse", "branch": "rank",
-                 "new_rank": "good", "existing_rank": "excellent",
-                 "new_value_kbps": 245, "existing_value_kbps": 300,
+                 "new_rank": "excellent", "existing_rank": "transparent",
+                 "new_value_kbps": 256, "existing_value_kbps": 320,
                  "spectral_clamped": True},
         ),
         (

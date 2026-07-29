@@ -2373,11 +2373,16 @@ class TestBayOfBiscayUpgradeChain(unittest.TestCase):
       Step 1 (brandlos, download_log id=3628)
         existing on disk: genuine  128k min / 172k avg (audited FLAC-less VBR)
         new download:     l.trans. 119k min / 179k avg, spectral ~160k
-        outcome: IMPORT — even though spectral grade regressed
-                 (genuine → likely_transcode) and min dropped (128 → 119),
-                 avg ticked up 172 → 179 under the default AVG metric.
+        outcome: DOWNGRADE since issue #829 Phase 5 PR2b (was IMPORT).
+                 The avg tick 172 → 179 used to carry it, because the shared
+                 clamp buried the genuine HAVE at its own 128 cliff
+                 estimate. That estimate is now withheld — a genuine album
+                 verdict authorizes no class — and the candidate is bounded
+                 by its own 160 class, which is below the HAVE's real 172.
 
-      Step 2 (Ceezles, download_log id=3631)
+      Step 2 (Ceezles, download_log id=3631) — reached in the live chain
+        because step 1 imported under the pre-PR2b rules; kept as a slice
+        because the transcode-over-transcode path it documents is unchanged
         existing on disk: l.trans. 119k min / 179k avg (what brandlos left)
         new download:     l.trans. 162k min / 225k avg, spectral ~192k
         outcome: IMPORT + quality gate DONE — avg=225 ≥ EXCELLENT threshold
@@ -2515,18 +2520,17 @@ class TestBayOfBiscayUpgradeChain(unittest.TestCase):
         )
 
         # Pin the decision logic directly. dispatch_import_core trusts the
-        # ``decision`` field in the harness-emitted JSON and does not recompute
-        # it — so without this, a regression in compare_quality()/
-        # import_quality_decision() (e.g. returning "downgrade" when min drops
-        # 128→119) could still leave the slice below green. Fail-fast here so
-        # the critique is the decision call itself, not the dispatch wiring.
+        # ``decision`` field in the harness-emitted JSON and does not
+        # recompute it, so the dispatch half below cannot catch a drift in
+        # compare_quality()/import_quality_decision(). Fail-fast here so the
+        # critique is the decision call itself, not the dispatch wiring.
         from lib.quality import import_quality_decision
         self.assertEqual(
-            import_quality_decision(new, existing).decision, "import",
-            "compare_quality must rank new above existing on AVG (179>172) "
-            "despite MIN regressing and spectral flipping to likely_transcode. "
-            "If this fails, the slice below is moot — fix the decision, not "
-            "the slice.")
+            import_quality_decision(new, existing).decision, "downgrade",
+            "a transcode candidate bounded by its own 160 class must not "
+            "displace a genuine album whose real avg is 172; the HAVE's own "
+            "128 estimate is withheld because its album verdict is genuine "
+            "(issue #829 Phase 5 PR2b)")
 
         ir = self._ir_import(new, existing)
         # Post-import, beets reflects the newly-imported files (brandlos's).
@@ -2547,34 +2551,68 @@ class TestBayOfBiscayUpgradeChain(unittest.TestCase):
             })
 
         row = db.request(42)
-        # The import itself succeeded — this is what the assertion on
-        # import_quality_decision's behavior actually checks. min_bitrate
-        # landed at 119 = brandlos's file (was 128 pre-dispatch).
-        # Note: prev_min_bitrate is not pinned here — two transitions
-        # fire in a single dispatch (imported, then wanted for the gate
-        # requeue), and the second transition overwrites prev with the
-        # post-import value. That's a known quirk of the double
-        # transition, unrelated to the decision this test pins.
+        # End to end: the genuine 128k/172avg copy survives on disk (the
+        # request's min_bitrate is untouched) and the request keeps
+        # searching. ``dispatch_import_core`` re-decides from the evidence
+        # pair rather than trusting the harness JSON, so the whole slice
+        # follows the corrected verdict.
         self.assertEqual(
-            row["min_bitrate"], 119,
-            "avg gain (172 → 179) must overrule the spectral grade "
-            "regression (genuine → likely_transcode). If min_bitrate is "
-            "still 128, import_quality_decision rejected the download — "
-            "check whether someone added a 'spectral regression blocks "
-            "import' rule.")
-        db.assert_log(self, 0, outcome="success")
-        # The gate THEN runs on the new unverified on-disk state and keeps
-        # searching. Status transitions imported → wanted in a single
-        # dispatch — but the retired upgrade-tier override must not constrain
-        # the next cycle.
-        self.assertEqual(
-            row["status"], "wanted",
-            "After the successful import, missing proof must keep the request "
-            "searching.")
+            row["min_bitrate"], 128,
+            "the genuine on-disk copy must survive a transcode candidate "
+            "whose own class (160) sits below its real avg (172)")
+        self.assertEqual(row["status"], "wanted")
         self.assertIsNone(
             row["search_filetype_override"],
-            "A transcode/provisional retained copy stays on the full search "
-            "surface; QUALITY_UPGRADE_TIERS is retired.")
+            "A rejected transcode stays on the full search surface; "
+            "QUALITY_UPGRADE_TIERS is retired.")
+
+    def test_step1_same_candidate_still_imports_over_an_unmeasured_have(self):
+        """Must-still-work: a spectral REGRESSION alone still blocks nothing.
+
+        Identical candidate, identical containers — but the HAVE carries no
+        spectral verdict at all. An unmeasured HAVE is not a known-clean
+        HAVE, so the candidate keeps its raw metric and the avg tick
+        (172 -> 179) still decides. Lesson 2 of this class survives PR2b:
+        the rule is structural, not "grade regressed -> reject".
+        """
+        new = AudioQualityMeasurement(
+            min_bitrate_kbps=119, avg_bitrate_kbps=179, median_bitrate_kbps=181,
+            format="MP3", is_cbr=False,
+            spectral_grade="likely_transcode", spectral_bitrate_kbps=160,
+            spectral_subject="source", spectral_provenance="measured",
+        )
+        unmeasured_existing = AudioQualityMeasurement(
+            min_bitrate_kbps=128, avg_bitrate_kbps=172, median_bitrate_kbps=192,
+            format="MP3", is_cbr=False,
+        )
+        from lib.quality import import_quality_decision
+        self.assertEqual(
+            import_quality_decision(new, unmeasured_existing).decision,
+            "import",
+        )
+
+        # And end to end, through the real dispatch: the AVG plumbing this
+        # class exists to document is intact — the request's min_bitrate
+        # lands on the newly-imported file's 119 (a MIN-preferring rank
+        # model would have called 128 -> 119 a downgrade), and the retained
+        # unverified copy keeps the full search surface.
+        ir = self._ir_import(new, unmeasured_existing)
+        beets_info = AlbumInfo(
+            album_id=1, track_count=16,
+            min_bitrate_kbps=119, avg_bitrate_kbps=179, median_bitrate_kbps=181,
+            format="MP3", is_cbr=False, album_path="/Beets/Velella Velella")
+        db = self._run_dispatch(
+            ir, beets_info,
+            request_overrides={
+                "min_bitrate": 128,
+                "verified_lossless": False,
+                "final_format": "mp3",
+            })
+        row = db.request(42)
+        self.assertEqual(row["min_bitrate"], 119)
+        db.assert_log(self, 0, outcome="success")
+        self.assertEqual(row["status"], "wanted")
+        self.assertIsNone(row["search_filetype_override"])
 
     def test_step2_ceezles_cannot_terminate_on_bitrate_rank(self):
         """Step 2 of the chain. Previous state is what step 1 left on disk

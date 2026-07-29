@@ -224,6 +224,7 @@ def cmd_quality(db: PipelineDB, args: argparse.Namespace) -> None:
     """Show quality state and simulate decisions for common download scenarios."""
     from lib.dispatch import load_quality_gate_state
     from lib.quality import (
+        SpectralCodecContext,
         compute_effective_override_bitrate,
         full_pipeline_decision,
         gate_rank,
@@ -371,8 +372,18 @@ def cmd_quality(db: PipelineDB, args: argparse.Namespace) -> None:
     comparable_spectral_grade = (
         spectral_grade if current is not None else None
     )
+    # Codec-aware (issue #829 Phase 5 PR2b). The context comes from the gate
+    # state, NOT from the measurement alone: only the evidence row carries
+    # ``storage_format``/``filetype_band``, and only those can fail a
+    # mixed-codec album closed. Re-deriving here would let the simulator
+    # display a class production withholds (review S6).
+    comparable_spectral_context = (
+        gate_state.spectral_context
+        if gate_state is not None and gate_state.spectral_context is not None
+        else SpectralCodecContext()
+    )
     effective_existing = compute_effective_override_bitrate(
-        comparable_min_br, comparable_current_br, comparable_spectral_grade)
+        comparable_min_br, comparable_spectral_context.interpret(current))
     override_min_bitrate = None
     if (effective_existing is not None and comparable_min_br is not None
             and effective_existing != comparable_min_br):
@@ -505,6 +516,7 @@ def cmd_quality(db: PipelineDB, args: argparse.Namespace) -> None:
             existing_avg_bitrate=avg_br,
             existing_spectral_grade=comparable_spectral_grade,
             existing_spectral_bitrate=comparable_current_br,
+            existing_spectral_context=comparable_spectral_context,
             override_min_bitrate=override_min_bitrate,
             existing_format=(
                 existing_format_hint
