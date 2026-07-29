@@ -1,4 +1,4 @@
-"""Audit: every JS suite on disk must be reached by scripts/run_tests.sh.
+"""Audit: every JS suite on disk must be reached by the canonical full suite.
 
 See issue #537. PR #531 fixed a hardcoded ``node tests/test_js_X.mjs`` list
 in ``scripts/run_tests.sh`` that had silently stopped covering three suites
@@ -26,6 +26,8 @@ import unittest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUN_TESTS_SH = os.path.join(REPO_ROOT, "scripts", "run_tests.sh")
+RUN_TEST_SUITE = os.path.join(REPO_ROOT, "scripts", "run_test_suite.py")
+RUN_JS_CHECKS = os.path.join(REPO_ROOT, "scripts", "run_js_checks.sh")
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # An explicit, hardcoded invocation: node tests/test_js_foo.mjs
@@ -89,6 +91,10 @@ class TestJsSuiteAudit(unittest.TestCase):
 
     def setUp(self) -> None:
         with open(RUN_TESTS_SH, encoding="utf-8") as f:
+            self.wrapper_text = f.read()
+        with open(RUN_TEST_SUITE, encoding="utf-8") as f:
+            self.coordinator_text = f.read()
+        with open(RUN_JS_CHECKS, encoding="utf-8") as f:
             self.script_text = f.read()
 
     def test_every_js_suite_on_disk_is_covered(self) -> None:
@@ -98,6 +104,8 @@ class TestJsSuiteAudit(unittest.TestCase):
             "no tests/test_js_*.mjs files found — the fixture set that "
             "backs this audit is gone",
         )
+        self.assertIn("scripts/run_test_suite.py", self.wrapper_text)
+        self.assertIn('"scripts/run_js_checks.sh", "unit"', self.coordinator_text)
         covered = covered_js_suite_names(self.script_text, suite_names)
         missing = sorted(suite_names - covered)
         self.assertEqual(

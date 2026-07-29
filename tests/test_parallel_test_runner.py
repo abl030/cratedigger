@@ -51,6 +51,7 @@ from scripts.run_python_tests import (
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RUNNER = REPO_ROOT / "scripts" / "run_python_tests.py"
 RUN_TESTS_SH = REPO_ROOT / "scripts" / "run_tests.sh"
+RUN_SUITE = REPO_ROOT / "scripts" / "run_test_suite.py"
 
 
 class TestModuleDiscovery(unittest.TestCase):
@@ -801,10 +802,15 @@ class TestHypothesisStatsRecorder(unittest.TestCase):
 
 class TestRunTestsWiring(unittest.TestCase):
     def test_full_suite_uses_parallel_python_runner(self) -> None:
-        source = RUN_TESTS_SH.read_text(encoding="utf-8")
-        self.assertIn("python3 scripts/run_python_tests.py", source)
-        self.assertNotIn("python3 -m unittest discover", source)
-        self.assertNotIn("python3 -m unittest tests.world_model.state_machine", source)
+        shell_source = RUN_TESTS_SH.read_text(encoding="utf-8")
+        coordinator_source = RUN_SUITE.read_text(encoding="utf-8")
+        self.assertIn("exec python3 scripts/run_test_suite.py", shell_source)
+        self.assertIn('("python3", "scripts/run_python_tests.py")', coordinator_source)
+        self.assertNotIn("python3 -m unittest discover", coordinator_source)
+        self.assertNotIn(
+            "python3 -m unittest tests.world_model.state_machine",
+            coordinator_source,
+        )
 
 
 if __name__ == "__main__":

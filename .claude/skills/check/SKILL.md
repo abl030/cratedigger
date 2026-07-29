@@ -29,14 +29,18 @@ extensions).
 scripts/run_final_gate.sh tests
 ```
 
-The command must exit zero and report `OK` with no skipped tests. Investigate
-every failure; do not carry a chat-era "known issue" exemption forward without
-current repository evidence.
+The command must exit zero and report `PASSED`. It still runs every independent
+phase after an earlier failure and prints the private failure-bundle path before
+returning its aggregate status. Investigate every indexed failure; do not carry
+a chat-era "known issue" exemption forward without current repository evidence.
 
 3. The helper prints a mode-0700 receipt path under the private runtime tmpfs before
 launching each unchanged underlying command (`nix-shell --run "pyright --threads 4"`
 or `nix-shell --run "bash scripts/run_tests.sh"`). It saves complete output in
 `output.log`, then atomically writes `terminal` only after the command exits.
+For the tests gate, the receipt also records the validated private suite-bundle
+path in `bundle`; that directory contains the typed summaries and complete
+per-phase logs.
 
 If the client detaches, recover the exact invocation from the same committed clean
 worktree:
