@@ -880,6 +880,13 @@ class FakePipelineDB:
 
     # --- import_jobs queue ---
 
+    def _is_attached_processing_owner(self, job_id: int) -> bool:
+        return any(
+            request.get("status") == "processing"
+            and request.get("active_automation_import_job_id") == job_id
+            for request in self._requests.values()
+        )
+
     def enqueue_import_job(
         self,
         job_type: str,
@@ -895,6 +902,17 @@ class FakePipelineDB:
             existing = self._get_import_job_by_dedupe_key(dedupe_key)
             if existing is not None:
                 return ImportJob.from_row(existing.to_dict(), deduped=True)
+        if job_type == IMPORT_JOB_AUTOMATION and request_id is not None:
+            for row in self._import_jobs:
+                if (
+                    row.get("job_type") == IMPORT_JOB_AUTOMATION
+                    and row.get("request_id") == request_id
+                    and row.get("status") in IMPORT_JOB_ACTIVE_STATUSES
+                ):
+                    raise ValueError(
+                        "active automation_import already exists for "
+                        f"request_id={request_id}"
+                    )
         if job_type == IMPORT_JOB_YOUTUBE and request_id is not None:
             for row in self._import_jobs:
                 if (
@@ -947,6 +965,13 @@ class FakePipelineDB:
             "beets_launch_source_path": None,
             "beets_launch_request_status": None,
             "beets_launch_snapshot_fingerprint": None,
+            "execution_invocation_id": None,
+            "execution_host_boot_id": None,
+            "execution_systemd_unit": None,
+            "execution_worker_pid": None,
+            "execution_worker_start_ticks": None,
+            "execution_beets_pid": None,
+            "execution_beets_start_ticks": None,
         }
         self._import_jobs.append(row)
         return ImportJob.from_row(copy.deepcopy(row))
@@ -1166,7 +1191,11 @@ class FakePipelineDB:
         message: str | None = None,
     ) -> ImportJob | None:
         for row in self._import_jobs:
-            if row["id"] == job_id and row.get("status") in ("queued", "running"):
+            if (
+                row["id"] == job_id
+                and row.get("status") in ("queued", "running")
+                and not self._is_attached_processing_owner(job_id)
+            ):
                 now = _utcnow()
                 row["status"] = "completed"
                 row["result"] = copy.deepcopy(result or {})
@@ -1293,6 +1322,8 @@ class FakePipelineDB:
         )
         if row is None:
             return None
+        if self._is_attached_processing_owner(job_id):
+            return None
         original = ImportJob.from_row(copy.deepcopy(row))
         if resolution == "retry":
             request = self._requests.get(int(original.request_id or 0))
@@ -1403,7 +1434,11 @@ class FakePipelineDB:
         message: str | None = None,
     ) -> ImportJob | None:
         for row in self._import_jobs:
-            if row["id"] == job_id and row.get("status") in ("queued", "running"):
+            if (
+                row["id"] == job_id
+                and row.get("status") in ("queued", "running")
+                and not self._is_attached_processing_owner(job_id)
+            ):
                 now = _utcnow()
                 row["status"] = "failed"
                 row["result"] = copy.deepcopy(result or {})
@@ -1573,6 +1608,7 @@ class FakePipelineDB:
                 row["id"] == job_id
                 and row.get("status") == "queued"
                 and row.get("preview_status") in ("waiting", "running")
+                and not self._is_attached_processing_owner(job_id)
             ):
                 now = _utcnow()
                 row["status"] = "failed"
@@ -2052,9 +2088,16 @@ class FakePipelineDB:
         if status == "replaced":
             raise ValueError(
                 "status='replaced' is owned by supersede_request_mbid")
+        if status == "processing":
+            raise ValueError(
+                "status='processing' is owned by automation handoff")
         validate_request_metadata_fields(dict(extra))
         row = self._requests.get(request_id)
-        if row is None or row.get("status") == "replaced":
+        if (
+            row is None
+            or row.get("status") == "replaced"
+            or row.get("active_automation_import_job_id") is not None
+        ):
             return False
         source_status = expected_status or str(row["status"])
         if row["status"] != source_status:
@@ -2078,6 +2121,7 @@ class FakePipelineDB:
             row is not None
             and row.get("status") == expected_status
             and row.get("status") != "replaced"
+            and row.get("active_automation_import_job_id") is None
         )
 
     def mark_imported_with_rescue(
@@ -2106,7 +2150,11 @@ class FakePipelineDB:
             )
         validate_request_metadata_fields(dict(extra))
         row = self._requests.get(request_id)
-        if row is None or row.get("status") == "replaced":
+        if (
+            row is None
+            or row.get("status") == "replaced"
+            or row.get("active_automation_import_job_id") is not None
+        ):
             return False
         source_status = expected_status or str(row["status"])
         if row["status"] != source_status:
@@ -2151,7 +2199,11 @@ class FakePipelineDB:
                 + ", ".join(unknown)
             )
         row = self._requests.get(request_id)
-        if row is None or row.get("status") == "replaced":
+        if (
+            row is None
+            or row.get("status") == "replaced"
+            or row.get("active_automation_import_job_id") is not None
+        ):
             return False
         source_status = expected_status or str(row["status"])
         if row["status"] != source_status:
@@ -3665,6 +3717,7 @@ class FakePipelineDB:
         if (
             not row
             or row.get("status") == "replaced"
+            or row.get("active_automation_import_job_id") is not None
             or (
                 expected_status is not None
                 and row.get("status") != expected_status
@@ -3980,6 +4033,9 @@ class FakePipelineDB:
         or ``*_attempts`` see the same NULL/0 defaults production
         callers get from PostgreSQL. Codex R7.
         """
+        if status == "processing":
+            raise ValueError(
+                "processing requests require an exact automation owner")
         self._assert_mb_release_id_unique(mb_release_id)
         self._next_request_id += 1
         rid = self._next_request_id
@@ -4034,6 +4090,8 @@ class FakePipelineDB:
             "current_lossless_source_v0_probe_avg_bitrate": None,
             "current_lossless_source_v0_probe_median_bitrate": None,
             "active_download_state": None,
+            # Migration 066 — exact active automation processor owner.
+            "active_automation_import_job_id": None,
             # U1 persisted-search-plans cursor fields.
             "active_plan_id": None,
             "next_plan_ordinal": 0,
@@ -4221,6 +4279,12 @@ class FakePipelineDB:
         that here so fake-backed tests cannot observe an impossible
         post-delete state where child rows survive their parent.
         """
+        request = self._requests.get(request_id)
+        if (
+            request is not None
+            and request.get("active_automation_import_job_id") is not None
+        ):
+            return
         self._requests.pop(request_id, None)
         self._tracks.pop(request_id, None)
         self.download_logs = [
@@ -4768,7 +4832,8 @@ class FakePipelineDB:
 
     def _current_wanted_total(self) -> int:
         return sum(1 for req in self._requests.values()
-                   if req.get("status") in ("wanted", "downloading"))
+                   if req.get("status") in (
+                       "wanted", "downloading", "processing"))
 
     def _dashboard_wanted_trend(self, current_wanted: int) -> dict[str, Any]:
         now = _utcnow()
@@ -5058,7 +5123,7 @@ class FakePipelineDB:
 
     def _dashboard_coverage(self, now: datetime) -> dict[str, Any]:
         """Mirror the production coverage CTEs: backlog = wanted +
-        downloading; suspects = searched-in-24h rows ordered
+        downloading + processing; suspects = searched-in-24h rows ordered
         (searches_24h DESC, searches_6h DESC, id ASC) LIMIT 12 with
         reset_24h counting the HISTORICAL ``exhausted`` outcome and
         problem_24h restricted to timeout/error/empty_query;
@@ -5070,7 +5135,7 @@ class FakePipelineDB:
         found rows exist."""
         backlog = {
             int(r["id"]): r for r in self._requests.values()
-            if r.get("status") in ("wanted", "downloading")
+            if r.get("status") in ("wanted", "downloading", "processing")
         }
 
         # One pass over search_log per request: rollup of windowed

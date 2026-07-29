@@ -818,18 +818,37 @@ class TestFakePipelineDB(unittest.TestCase):
         )
         self.assertEqual(db.status_history, [(42, "downloading")])
 
-    def test_dashboard_wanted_total_includes_downloading(self):
+    def test_dashboard_wanted_total_includes_downloading_and_processing(self):
+        from lib.import_queue import (
+            IMPORT_JOB_AUTOMATION,
+            automation_import_payload,
+        )
+
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=1, status="wanted"))
         db.seed_request(make_request_row(id=2, status="downloading"))
         db.seed_request(make_request_row(id=3, status="imported"))
+        processing_id = db.add_request(
+            "Artist",
+            "Processing",
+            "request",
+            mb_release_id="fake-dashboard-processing",
+        )
+        processing_job = db.enqueue_import_job(
+            IMPORT_JOB_AUTOMATION,
+            request_id=processing_id,
+            payload=automation_import_payload(),
+        )
+        processing = db.request(processing_id)
+        processing["status"] = "processing"
+        processing["active_automation_import_job_id"] = processing_job.id
 
         db.record_cycle_metrics(cycle_total_s=1.0)
         dashboard = db.get_pipeline_dashboard_metrics()
 
-        self.assertEqual(db.cycle_metrics[0]["wanted_total"], 2)
+        self.assertEqual(db.cycle_metrics[0]["wanted_total"], 3)
         self.assertEqual(
-            dashboard["coverage"]["wanted_trend"]["current_wanted"], 2)
+            dashboard["coverage"]["wanted_trend"]["current_wanted"], 3)
 
     def test_update_download_state_rewrites_json_state(self):
         db = FakePipelineDB()

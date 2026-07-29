@@ -265,6 +265,11 @@ class _ImportJobsMixin(_PipelineDBBase):
                 updated_at = NOW()
             WHERE id = %s
               AND status IN ('queued', 'running')
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM album_requests AS request
+                  WHERE request.active_automation_import_job_id = import_jobs.id
+              )
             RETURNING *
         """, (psycopg2.extras.Json(result or {}), message, job_id))
         row = cur.fetchone()
@@ -396,7 +401,13 @@ class _ImportJobsMixin(_PipelineDBBase):
 
         with self._atomic():
             cur = self._execute(
-                "SELECT * FROM import_jobs WHERE id = %s FOR UPDATE",
+                "SELECT * FROM import_jobs AS job "
+                "WHERE job.id = %s "
+                "AND NOT EXISTS ("
+                "    SELECT 1 FROM album_requests AS request "
+                "    WHERE request.active_automation_import_job_id = job.id"
+                ") "
+                "FOR UPDATE",
                 (job_id,),
             )
             raw = cur.fetchone()
@@ -609,6 +620,11 @@ class _ImportJobsMixin(_PipelineDBBase):
                 updated_at = NOW()
             WHERE id = %s
               AND status IN ('queued', 'running')
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM album_requests AS request
+                  WHERE request.active_automation_import_job_id = import_jobs.id
+              )
             RETURNING *
         """, (psycopg2.extras.Json(result or {}), message, error, job_id))
         row = cur.fetchone()
@@ -832,6 +848,11 @@ class _ImportJobsMixin(_PipelineDBBase):
             WHERE id = %s
               AND status = 'queued'
               AND preview_status IN ('waiting', 'running')
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM album_requests AS request
+                  WHERE request.active_automation_import_job_id = import_jobs.id
+              )
             RETURNING *
         """, (
             preview_status,

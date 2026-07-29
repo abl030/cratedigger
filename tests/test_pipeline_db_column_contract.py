@@ -33,6 +33,7 @@ import msgspec
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401 — sets TEST_DB_DSN env var
 
+from lib.import_queue import ImportJob
 from lib.pipeline_db import (
     AddRequestInput,
     AlbumRequestRow,
@@ -186,6 +187,21 @@ class TestWritePayloadColumnContract(unittest.TestCase):
             built, row_keys,
             f"builder missing={sorted(row_keys - built)} "
             f"extra={sorted(built - row_keys)}",
+        )
+
+    def test_import_job_projection_matches_table_columns_exactly(self) -> None:
+        """``ImportJob`` declares every persisted queue column exactly once."""
+        table_cols = self._table_columns("import_jobs")
+        projection_fields = {
+            field.name for field in dataclasses.fields(ImportJob)
+            if field.name != "deduped"
+        }
+        self.assertEqual(
+            projection_fields,
+            table_cols,
+            "ImportJob drifted from import_jobs: "
+            f"missing={sorted(table_cols - projection_fields)} "
+            f"stale={sorted(projection_fields - table_cols)}",
         )
 
     def test_builder_row_survives_the_runtime_validator(self) -> None:

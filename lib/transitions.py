@@ -4,9 +4,12 @@ Pure functions for transition validation. The imperative apply_transition()
 delegates to pipeline_db methods and is the single entry point for all
 state mutations.
 
-Active statuses: wanted, downloading, imported, unsearchable. ``initializing``
-is a deliberately non-runnable creation state; its publication CAS belongs
-only to ``RequestCreationService`` and is not an ordinary lifecycle edge.
+Ordinary statuses: wanted, downloading, imported, unsearchable. ``processing``
+is a processor-owned active state deliberately absent from ``RequestStatus``
+and ``VALID_TRANSITIONS``; only owner-aware database bundles may cross that
+private edge. ``initializing`` is a deliberately non-runnable creation state;
+its publication CAS belongs only to ``RequestCreationService`` and is not an
+ordinary lifecycle edge.
 Terminal audit status: replaced (no outgoing lifecycle transitions).
 """
 

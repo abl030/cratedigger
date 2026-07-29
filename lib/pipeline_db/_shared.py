@@ -41,9 +41,23 @@ DASHBOARD_WANTED_TREND_WINDOWS: tuple[tuple[str, int], ...] = (
     ("24h", 24),
     ("7d", 24 * 7),
 )
-# Operator-facing dashboard semantics: active downloads are still wanted
-# backlog, just in the acquisition sub-state.
-DASHBOARD_WANTED_BACKLOG_STATUSES: tuple[str, ...] = ("wanted", "downloading")
+# Operator-facing dashboard semantics: acquisition and processor ownership are
+# still wanted backlog, even after the download itself has completed.
+REQUEST_STATUS_PROCESSING = "processing"
+REQUEST_STATUSES: frozenset[str] = frozenset({
+    "initializing",
+    "wanted",
+    "downloading",
+    REQUEST_STATUS_PROCESSING,
+    "imported",
+    "unsearchable",
+    "replaced",
+})
+DASHBOARD_WANTED_BACKLOG_STATUSES: tuple[str, ...] = (
+    "wanted",
+    "downloading",
+    REQUEST_STATUS_PROCESSING,
+)
 
 # ``update_request_fields`` is deliberately a metadata-only compare-and-set
 # seam.  These columns either define the request's immutable identity, belong
@@ -55,6 +69,7 @@ REQUEST_METADATA_RESERVED_FIELDS: frozenset[str] = frozenset({
     "id",
     "status",
     "active_download_state",
+    "active_automation_import_job_id",
     "mb_release_id",
     "discogs_release_id",
     "source",

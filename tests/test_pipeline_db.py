@@ -71,6 +71,7 @@ def make_db():
         "peer_observations",
         "cycle_metrics",
         "bad_audio_hashes",
+        "processing_cleanup_journal",
         "import_jobs",
         "user_cooldowns",
         "source_denylist",
@@ -1088,6 +1089,49 @@ class TestImportJobQueueAPI(unittest.TestCase):
         )
         self.assertNotEqual(first.id, later.id)
 
+    def test_execution_lease_columns_round_trip_through_import_job(self):
+        from lib.import_queue import (
+            IMPORT_JOB_FORCE,
+            force_import_dedupe_key,
+            force_import_payload,
+        )
+
+        job = self.db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=self.req_id,
+            dedupe_key=force_import_dedupe_key(812),
+            payload=force_import_payload(
+                download_log_id=812,
+                failed_path="/tmp/lease-round-trip",
+                source_username="alice",
+            ),
+        )
+        self.db._execute("""
+            UPDATE import_jobs
+            SET execution_invocation_id = 'invocation-round-trip',
+                execution_host_boot_id = 'boot-round-trip',
+                execution_systemd_unit = 'cratedigger-importer.service',
+                execution_worker_pid = 1234,
+                execution_worker_start_ticks = 5678,
+                execution_beets_pid = 2345,
+                execution_beets_start_ticks = 6789
+            WHERE id = %s
+        """, (job.id,))
+        self.db.conn.commit()
+
+        stored = self.db.get_import_job(job.id)
+        assert stored is not None
+        self.assertEqual(stored.execution_invocation_id, "invocation-round-trip")
+        self.assertEqual(stored.execution_host_boot_id, "boot-round-trip")
+        self.assertEqual(
+            stored.execution_systemd_unit,
+            "cratedigger-importer.service",
+        )
+        self.assertEqual(stored.execution_worker_pid, 1234)
+        self.assertEqual(stored.execution_worker_start_ticks, 5678)
+        self.assertEqual(stored.execution_beets_pid, 2345)
+        self.assertEqual(stored.execution_beets_start_ticks, 6789)
+
     def test_malformed_force_payload_cannot_insert_or_poison_dedupe(self):
         from lib.import_queue import (
             IMPORT_JOB_FORCE,
@@ -1585,6 +1629,270 @@ class TestImportJobQueueAPI(unittest.TestCase):
             self.assertIsNone(second)
         finally:
             other.close()
+
+
+@requires_postgres
+class TestProcessingOwnerGenericWriterGuards(unittest.TestCase):
+    """Generic request/job writers fail closed on the private owner edge."""
+
+    def setUp(self) -> None:
+        self.db = make_db()
+
+    def tearDown(self) -> None:
+        self.db.close()
+
+    def _owned_real(self, suffix: str):
+        from lib.import_queue import (
+            IMPORT_JOB_AUTOMATION,
+            automation_import_dedupe_key,
+            automation_import_payload,
+        )
+
+        request_id = self.db.add_request(
+            mb_release_id=f"processing-owner-real-{suffix}",
+            artist_name="Owned",
+            album_title=suffix,
+            source="request",
+        )
+        job = self.db.enqueue_import_job(
+            IMPORT_JOB_AUTOMATION,
+            request_id=request_id,
+            dedupe_key=automation_import_dedupe_key(request_id),
+            payload=automation_import_payload(),
+        )
+        self.db._execute("""
+            UPDATE album_requests
+            SET status = 'processing',
+                active_automation_import_job_id = %s,
+                active_download_state = '{"current_path": "/processing"}'::jsonb
+            WHERE id = %s
+        """, (job.id, request_id))
+        self.db.conn.commit()
+        return request_id, job
+
+    @staticmethod
+    def _owned_fake(suffix: str):
+        from lib.import_queue import (
+            IMPORT_JOB_AUTOMATION,
+            automation_import_dedupe_key,
+            automation_import_payload,
+        )
+
+        db = FakePipelineDB()
+        request_id = db.add_request(
+            "Owned",
+            suffix,
+            "request",
+            mb_release_id=f"processing-owner-fake-{suffix}",
+        )
+        job = db.enqueue_import_job(
+            IMPORT_JOB_AUTOMATION,
+            request_id=request_id,
+            dedupe_key=automation_import_dedupe_key(request_id),
+            payload=automation_import_payload(),
+        )
+        row = db.request(request_id)
+        row["status"] = "processing"
+        row["active_automation_import_job_id"] = job.id
+        row["active_download_state"] = {"current_path": "/processing"}
+        return db, request_id, job
+
+    def test_request_metadata_status_compare_and_delete_reject_owner(self):
+        request_id, _job = self._owned_real("request-guards")
+        fake, fake_request_id, _fake_job = self._owned_fake("request-guards")
+        real_before = self.db.get_request(request_id)
+        fake_before = copy.deepcopy(fake.get_request(fake_request_id))
+
+        self.assertFalse(
+            self.db.update_request_fields(request_id, reasoning="late")
+        )
+        self.assertFalse(
+            fake.update_request_fields(fake_request_id, reasoning="late")
+        )
+        self.assertFalse(
+            self.db.update_status(
+                request_id,
+                "wanted",
+                expected_status="processing",
+            )
+        )
+        self.assertFalse(
+            fake.update_status(
+                fake_request_id,
+                "wanted",
+                expected_status="processing",
+            )
+        )
+        self.assertFalse(
+            self.db.compare_request_status(
+                request_id,
+                expected_status="processing",
+            )
+        )
+        self.assertFalse(
+            fake.compare_request_status(
+                fake_request_id,
+                expected_status="processing",
+            )
+        )
+        self.db.delete_request(request_id)
+        fake.delete_request(fake_request_id)
+
+        self.assertEqual(self.db.get_request(request_id), real_before)
+        self.assertEqual(fake.get_request(fake_request_id), fake_before)
+
+    def test_rescue_and_reset_reject_owner_with_real_fake_parity(self):
+        cases = (
+            (
+                "rescue",
+                lambda db, request_id: db.mark_imported_with_rescue(
+                    request_id,
+                    expected_status="processing",
+                    beets_distance=0.05,
+                ),
+            ),
+            (
+                "reset",
+                lambda db, request_id: db.reset_to_wanted(
+                    request_id,
+                    expected_status="processing",
+                    min_bitrate=320,
+                ),
+            ),
+        )
+        for suffix, writer in cases:
+            with self.subTest(writer=suffix):
+                request_id, _job = self._owned_real(suffix)
+                fake, fake_request_id, _fake_job = self._owned_fake(suffix)
+                real_before = self.db.get_request(request_id)
+                fake_before = copy.deepcopy(fake.get_request(fake_request_id))
+
+                self.assertFalse(writer(self.db, request_id))
+                self.assertFalse(writer(fake, fake_request_id))
+                self.assertEqual(self.db.get_request(request_id), real_before)
+                self.assertEqual(fake.get_request(fake_request_id), fake_before)
+
+    def test_generic_job_terminal_writers_reject_attached_owner(self):
+        cases = (
+            (
+                "completed",
+                lambda db, job_id: db.mark_import_job_completed(
+                    job_id,
+                    result={"unexpected": True},
+                ),
+            ),
+            (
+                "failed",
+                lambda db, job_id: db.mark_import_job_failed(
+                    job_id,
+                    error="unexpected",
+                ),
+            ),
+            (
+                "preview-failed",
+                lambda db, job_id: db.mark_import_job_preview_failed(
+                    job_id,
+                    preview_status="measurement_failed",
+                    error="unexpected",
+                ),
+            ),
+        )
+        for suffix, writer in cases:
+            with self.subTest(writer=suffix):
+                request_id, job = self._owned_real(suffix)
+                fake, fake_request_id, fake_job = self._owned_fake(suffix)
+                real_before = self.db.get_import_job(job.id)
+                fake_before = fake.get_import_job(fake_job.id)
+
+                self.assertIsNone(writer(self.db, job.id))
+                self.assertIsNone(writer(fake, fake_job.id))
+
+                self.assertEqual(self.db.get_import_job(job.id), real_before)
+                self.assertEqual(fake.get_import_job(fake_job.id), fake_before)
+                real_request = self.db.get_request(request_id)
+                fake_request = fake.get_request(fake_request_id)
+                self.assertIsNotNone(real_request)
+                self.assertIsNotNone(fake_request)
+                assert real_request is not None
+                assert fake_request is not None
+                self.assertEqual(
+                    real_request["status"],
+                    "processing",
+                )
+                self.assertEqual(
+                    fake_request["status"],
+                    "processing",
+                )
+
+    def test_generic_recovery_terminal_writer_rejects_attached_owner(self):
+        request_id, job = self._owned_real("recovery")
+        fake, fake_request_id, fake_job = self._owned_fake("recovery")
+        self.db._execute(
+            "UPDATE import_jobs SET status = 'recovery_required' WHERE id = %s",
+            (job.id,),
+        )
+        self.db.conn.commit()
+        fake_row = next(
+            row for row in fake._import_jobs if row["id"] == fake_job.id
+        )
+        fake_row["status"] = "recovery_required"
+        real_before = self.db.get_import_job(job.id)
+        fake_before = fake.get_import_job(fake_job.id)
+        real_request_before = self.db.get_request(request_id)
+        fake_request_before = copy.deepcopy(
+            fake.get_request(fake_request_id)
+        )
+
+        self.assertIsNone(
+            self.db.resolve_import_job_recovery(
+                job.id,
+                resolution="close",
+                reason="generic close must not consume an owner",
+            )
+        )
+        self.assertIsNone(
+            fake.resolve_import_job_recovery(
+                fake_job.id,
+                resolution="close",
+                reason="generic close must not consume an owner",
+            )
+        )
+
+        self.assertEqual(self.db.get_import_job(job.id), real_before)
+        self.assertEqual(fake.get_import_job(fake_job.id), fake_before)
+        self.assertEqual(self.db.get_request(request_id), real_request_before)
+        self.assertEqual(
+            fake.get_request(fake_request_id),
+            fake_request_before,
+        )
+
+    def test_generic_status_writer_cannot_enter_processing(self):
+        request_id = self.db.add_request(
+            mb_release_id="processing-owner-enter-real",
+            artist_name="Owned",
+            album_title="Enter",
+            source="request",
+        )
+        fake = FakePipelineDB()
+        fake_request_id = fake.add_request(
+            "Owned",
+            "Enter",
+            "request",
+            mb_release_id="processing-owner-enter-fake",
+        )
+
+        with self.assertRaises(ValueError):
+            self.db.update_status(request_id, "processing")
+        with self.assertRaises(ValueError):
+            fake.update_status(fake_request_id, "processing")
+        real_request = self.db.get_request(request_id)
+        fake_request = fake.get_request(fake_request_id)
+        self.assertIsNotNone(real_request)
+        self.assertIsNotNone(fake_request)
+        assert real_request is not None
+        assert fake_request is not None
+        self.assertEqual(real_request["status"], "wanted")
+        self.assertEqual(fake_request["status"], "wanted")
 
 
 @requires_postgres

@@ -52,6 +52,11 @@ from hypothesis.stateful import (
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.config import CratediggerConfig
+from lib.import_queue import (
+    IMPORT_JOB_AUTOMATION,
+    automation_import_dedupe_key,
+    automation_import_payload,
+)
 from lib.pipeline_db import (
     ConsumedAttemptInput,
     NonConsumingAttemptInput,
@@ -75,12 +80,36 @@ from lib.world_invariants import assert_replaced_row_frozen
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_active_download_state_json
 
-LEGAL_STATUSES = frozenset(
-    {"initializing", "wanted", "downloading", "imported", "unsearchable", "replaced"})
+LEGAL_STATUSES = frozenset({
+    "initializing",
+    "wanted",
+    "downloading",
+    "processing",
+    "imported",
+    "unsearchable",
+    "replaced",
+})
 
 _IDENTITY_FIELDS = ("mb_release_id", "source", "created_at")
 
 _RETRY_COUNTERS = ("search_attempts", "download_attempts", "validation_attempts")
+
+
+def attach_fake_processing_owner(
+    db: FakePipelineDB,
+    request_id: int,
+) -> int:
+    """Create the production-representable owner before entering processing."""
+    job = db.enqueue_import_job(
+        IMPORT_JOB_AUTOMATION,
+        request_id=request_id,
+        dedupe_key=automation_import_dedupe_key(request_id),
+        payload=automation_import_payload(),
+    )
+    row = db.request(request_id)
+    row["status"] = "processing"
+    row["active_automation_import_job_id"] = job.id
+    return job.id
 
 
 # ===========================================================================
@@ -117,12 +146,32 @@ def assert_identity_immutable(identity: tuple, row: dict) -> None:
 
 def assert_download_state_coherent(row: dict) -> None:
     if (
-        row["status"] not in {"downloading", "replaced"}
+        row["status"] not in {"downloading", "processing", "replaced"}
         and row.get("active_download_state")
     ):
         raise AssertionError(
             f"request {row['id']} carries active_download_state while "
             f"{row['status']!r}")
+
+
+def assert_processing_owner_equivalent(row: Mapping[str, object]) -> None:
+    """``processing`` and its exact automation-owner pointer are inseparable."""
+    is_processing = row.get("status") == "processing"
+    has_owner = row.get("active_automation_import_job_id") is not None
+    if is_processing != has_owner:
+        raise AssertionError(
+            f"request {row.get('id')} has status={row.get('status')!r} "
+            f"with owner={row.get('active_automation_import_job_id')!r}"
+        )
+
+
+def assert_processing_owner_unchanged(
+    before: Mapping[str, object],
+    after: Mapping[str, object] | None,
+) -> None:
+    """An ordinary request writer cannot mutate or delete an owned row."""
+    if after != before:
+        raise AssertionError(f"processing owner mutated: {before} -> {after}")
 
 
 def assert_replacement_linked(
@@ -228,8 +277,10 @@ class TestReadOnlyMetadataCasGenerated(unittest.TestCase):
                 "Album",
                 "request",
                 mb_release_id="read-only-cas",
-                status=status,
+                status=("wanted" if status == "processing" else status),
             )
+            if status == "processing":
+                attach_fake_processing_owner(db, request_id)
         before = copy.deepcopy(db.get_request(request_id))
         kwargs = (
             {"expected_status": expected_status}
@@ -240,6 +291,7 @@ class TestReadOnlyMetadataCasGenerated(unittest.TestCase):
         expected_applied = (
             exists
             and status != "replaced"
+            and status != "processing"
             and (
                 not include_expected_status
                 or status == expected_status
@@ -339,6 +391,161 @@ class TestWantedQualityFieldsGenerated(unittest.TestCase):
             min_bitrate=next_min_bitrate,
             prev_min_bitrate=explicit_prev_min_bitrate,
         )
+
+
+class TestProcessingOwnerGuardsGenerated(unittest.TestCase):
+    """Patrol the private processing edge through ordinary production writers."""
+
+    @staticmethod
+    def _owned_request() -> tuple[FakePipelineDB, int]:
+        db = FakePipelineDB()
+        request_id = db.add_request(
+            "Artist",
+            "Album",
+            "request",
+            mb_release_id="processing-owner-guard",
+        )
+        attach_fake_processing_owner(db, request_id)
+        row = db.request(request_id)
+        row["active_download_state"] = {"current_path": "/processing/album"}
+        return db, request_id
+
+    def test_owned_processing_row_rejects_every_generic_writer(self) -> None:
+        db, request_id = self._owned_request()
+        before = copy.deepcopy(db.request(request_id))
+
+        self.assertFalse(db.update_request_fields(request_id, reasoning="late"))
+        self.assertFalse(
+            db.update_status(
+                request_id,
+                "wanted",
+                expected_status="processing",
+            )
+        )
+        self.assertFalse(
+            db.mark_imported_with_rescue(
+                request_id,
+                expected_status="processing",
+                beets_distance=0.05,
+            )
+        )
+        self.assertFalse(
+            db.reset_to_wanted(
+                request_id,
+                expected_status="processing",
+                min_bitrate=320,
+            )
+        )
+        db.delete_request(request_id)
+        result = finalize_request(
+            db,
+            request_id,
+            RequestTransition.to_wanted(from_status="processing"),
+        )
+
+        self.assertIsInstance(result, TransitionConflict)
+        assert before is not None
+        assert_processing_owner_unchanged(
+            before,
+            copy.deepcopy(db.get_request(request_id)),
+        )
+
+    @given(
+        writer=st.sampled_from(("rescue", "reset")),
+        expected_is_current=st.booleans(),
+        value=st.integers(min_value=1, max_value=2000),
+    )
+    @example(writer="rescue", expected_is_current=True, value=5)
+    @example(writer="reset", expected_is_current=True, value=320)
+    def test_owned_processing_row_rejects_specialized_status_writers(
+        self,
+        *,
+        writer: str,
+        expected_is_current: bool,
+        value: int,
+    ) -> None:
+        db, request_id = self._owned_request()
+        before = copy.deepcopy(db.request(request_id))
+        expected_status = "processing" if expected_is_current else "wanted"
+
+        if writer == "rescue":
+            applied = db.mark_imported_with_rescue(
+                request_id,
+                expected_status=expected_status,
+                beets_distance=value / 1000,
+            )
+        else:
+            applied = db.reset_to_wanted(
+                request_id,
+                expected_status=expected_status,
+                min_bitrate=value,
+            )
+
+        self.assertFalse(applied)
+        assert_processing_owner_unchanged(
+            before,
+            copy.deepcopy(db.get_request(request_id)),
+        )
+
+    @given(
+        target=st.sampled_from(
+            ("wanted", "downloading", "imported", "unsearchable")
+        ),
+        expected_is_current=st.booleans(),
+    )
+    @example(target="wanted", expected_is_current=True)
+    def test_ordinary_transition_never_leaves_processing(
+        self,
+        *,
+        target: str,
+        expected_is_current: bool,
+    ) -> None:
+        db, request_id = self._owned_request()
+        before = copy.deepcopy(db.request(request_id))
+        source = "processing" if expected_is_current else "wanted"
+        if target == "wanted":
+            command = RequestTransition.to_wanted(from_status=source)
+        elif target == "downloading":
+            command = RequestTransition.to_downloading(
+                from_status=source,
+                state_json=make_active_download_state_json([]),
+            )
+        elif target == "imported":
+            command = RequestTransition.to_imported(from_status=source)
+        else:
+            command = RequestTransition.to_unsearchable(from_status=source)
+
+        result = finalize_request(db, request_id, command)
+
+        self.assertIsInstance(result, TransitionConflict)
+        assert before is not None
+        assert_processing_owner_unchanged(
+            before,
+            copy.deepcopy(db.get_request(request_id)),
+        )
+
+    @given(
+        status=st.sampled_from(sorted(LEGAL_STATUSES)),
+        owner=st.one_of(st.none(), st.integers(min_value=1, max_value=1000)),
+    )
+    @example(status="processing", owner=None)
+    @example(status="wanted", owner=1)
+    def test_processing_owner_equivalence_checker(
+        self,
+        *,
+        status: str,
+        owner: int | None,
+    ) -> None:
+        row = {
+            "id": 1,
+            "status": status,
+            "active_automation_import_job_id": owner,
+        }
+        if (status == "processing") == (owner is not None):
+            assert_processing_owner_equivalent(row)
+        else:
+            with self.assertRaises(AssertionError):
+                assert_processing_owner_equivalent(row)
 
 
 class TestResolverSourceStatusGenerated(unittest.TestCase):
@@ -821,6 +1028,11 @@ class RequestLifecycleMachine(RuleBasedStateMachine):
             assert_download_state_coherent(self._row(rid))
 
     @invariant()
+    def processing_status_matches_exact_owner_pointer(self) -> None:
+        for rid in self.ids:
+            assert_processing_owner_equivalent(self._row(rid))
+
+    @invariant()
     def every_replaced_row_has_a_descendant(self) -> None:
         for rid in self.frozen:
             assert_replacement_linked(
@@ -868,6 +1080,34 @@ class TestLifecycleCheckersTripOnViolations(unittest.TestCase):
             assert_download_state_coherent(
                 {"id": 1, "status": "imported",
                  "active_download_state": "{}"})
+
+    def test_trips_on_processing_without_owner_and_owner_without_processing(self):
+        with self.assertRaises(AssertionError):
+            assert_processing_owner_equivalent({
+                "id": 1,
+                "status": "processing",
+                "active_automation_import_job_id": None,
+            })
+        with self.assertRaises(AssertionError):
+            assert_processing_owner_equivalent({
+                "id": 1,
+                "status": "wanted",
+                "active_automation_import_job_id": 9,
+            })
+
+    def test_processing_owner_guard_checker_trips_on_mutation_and_delete(self):
+        before = {
+            "id": 1,
+            "status": "processing",
+            "active_automation_import_job_id": 9,
+        }
+        with self.assertRaises(AssertionError):
+            assert_processing_owner_unchanged(
+                before,
+                {**before, "status": "wanted"},
+            )
+        with self.assertRaises(AssertionError):
+            assert_processing_owner_unchanged(before, None)
 
     def test_trips_on_dropped_explicit_previous_bitrate(self):
         with self.assertRaises(AssertionError):

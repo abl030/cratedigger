@@ -8,7 +8,9 @@ import pathlib
 import shutil
 import sys
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from typing import ClassVar
 
 sys.path.append(os.path.dirname(__file__))
@@ -3356,6 +3358,30 @@ class TestDownloadLogOutcomeTaxonomySync(unittest.TestCase):
         self.assertEqual(DOWNLOAD_LOG_OUTCOMES, latest_values)
 
 
+class TestRequestStatusTaxonomySync(unittest.TestCase):
+    """The exported request vocabulary matches the latest schema check."""
+
+    def test_literal_matches_latest_album_request_status_check(self) -> None:
+        import re
+
+        from lib.pipeline_db import REQUEST_STATUSES
+
+        pattern = re.compile(
+            r"ADD CONSTRAINT album_requests_status_check\s*"
+            r"CHECK\s*\(\s*status IN\s*\(([^;]+?)\)\s*\)",
+            re.DOTALL,
+        )
+        latest_values = None
+        for path in sorted(pathlib.Path(DEFAULT_MIGRATIONS_DIR).glob("*.sql")):
+            match = pattern.search(path.read_text())
+            if match:
+                latest_values = frozenset(
+                    re.findall(r"'([a-z_]+)'", match.group(1))
+                )
+        assert latest_values is not None
+        self.assertEqual(REQUEST_STATUSES, latest_values)
+
+
 class TestPinStatusTaxonomySync(unittest.TestCase):
     """Pin the two Python status taxonomies to their latest CHECK migration."""
 
@@ -4076,6 +4102,901 @@ class TestRequestInitializingStatusMigration(unittest.TestCase):
                 cur.execute("DELETE FROM album_requests WHERE mb_release_id = '063-initializing'")
         finally:
             conn.close()
+
+
+@requires_postgres
+class TestProcessingAutomationOwnerMigration(unittest.TestCase):
+    """Migration 066 makes processing and its exact job one DB invariant."""
+
+    def setUp(self) -> None:
+        self.prefix = f"mig066-{self._testMethodName}"
+
+    def tearDown(self) -> None:
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    DELETE FROM processing_cleanup_journal
+                    WHERE request_id IN (
+                        SELECT id FROM album_requests
+                        WHERE mb_release_id LIKE %s
+                    )
+                """, (f"{self.prefix}%",))
+                cur.execute("""
+                    UPDATE album_requests
+                    SET status = 'wanted',
+                        active_automation_import_job_id = NULL
+                    WHERE mb_release_id LIKE %s
+                """, (f"{self.prefix}%",))
+                cur.execute("""
+                    DELETE FROM import_jobs
+                    WHERE request_id IN (
+                        SELECT id FROM album_requests
+                        WHERE mb_release_id LIKE %s
+                    )
+                """, (f"{self.prefix}%",))
+                cur.execute(
+                    "DELETE FROM album_requests WHERE mb_release_id LIKE %s",
+                    (f"{self.prefix}%",),
+                )
+        finally:
+            conn.close()
+
+    def _exec(self, sql: str, params: tuple = ()) -> list[tuple]:
+        conn = psycopg2.connect(TEST_DSN)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                return cur.fetchall() if cur.description is not None else []
+        finally:
+            conn.close()
+
+    def _transaction(
+        self,
+        statements: list[tuple[str, tuple]],
+    ) -> None:
+        conn = psycopg2.connect(TEST_DSN)
+        try:
+            with conn.cursor() as cur:
+                for sql, params in statements:
+                    cur.execute(sql, params)
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def _request(self, suffix: str) -> int:
+        rows = self._exec("""
+            INSERT INTO album_requests (
+                mb_release_id, artist_name, album_title, source
+            )
+            VALUES (%s, 'A', 'B', 'request')
+            RETURNING id
+        """, (f"{self.prefix}-{suffix}",))
+        return int(rows[0][0])
+
+    def _job(
+        self,
+        request_id: int,
+        *,
+        job_type: str = "automation_import",
+        status: str = "queued",
+    ) -> int:
+        rows = self._exec("""
+            INSERT INTO import_jobs (
+                job_type, status, request_id, payload, preview_status
+            )
+            VALUES (%s, %s, %s, '{}'::jsonb, 'waiting')
+            RETURNING id
+        """, (job_type, status, request_id))
+        return int(rows[0][0])
+
+    def _attach(self, request_id: int, job_id: int) -> None:
+        self._transaction([("""
+            UPDATE album_requests
+            SET status = 'processing',
+                active_automation_import_job_id = %s
+            WHERE id = %s
+        """, (job_id, request_id))])
+
+    @staticmethod
+    def _validate_and_commit_overlapping(
+        conn,
+        validated: threading.Barrier,
+    ) -> str:
+        outcome = "committed"
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SET CONSTRAINTS ALL IMMEDIATE")
+        except psycopg2.Error as exc:
+            conn.rollback()
+            outcome = str(exc.pgcode)
+        validated.wait(timeout=10)
+        if outcome == "committed":
+            try:
+                conn.commit()
+            except psycopg2.Error as exc:
+                conn.rollback()
+                outcome = str(exc.pgcode)
+        return outcome
+
+    def test_records_066_and_declares_the_new_columns(self) -> None:
+        self.assertEqual(
+            self._exec(
+                "SELECT version FROM schema_migrations WHERE version = 66"
+            ),
+            [(66,)],
+        )
+        columns = {
+            row[0]
+            for row in self._exec("""
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'import_jobs'
+            """)
+        }
+        self.assertTrue({
+            "execution_invocation_id",
+            "execution_host_boot_id",
+            "execution_systemd_unit",
+            "execution_worker_pid",
+            "execution_worker_start_ticks",
+            "execution_beets_pid",
+            "execution_beets_start_ticks",
+        }.issubset(columns))
+
+    def test_declares_deferred_owner_and_journal_constraints(self) -> None:
+        constraints = {
+            str(name): (str(kind), bool(deferrable), bool(deferred))
+            for name, kind, deferrable, deferred in self._exec("""
+                SELECT conname, contype, condeferrable, condeferred
+                FROM pg_constraint
+                WHERE conname IN (
+                    'album_requests_active_automation_owner_unique',
+                    'album_requests_active_automation_owner_fk',
+                    'processing_cleanup_journal_job_request_fk'
+                )
+            """)
+        }
+        self.assertEqual(
+            constraints,
+            {
+                "album_requests_active_automation_owner_unique":
+                    ("u", True, True),
+                "album_requests_active_automation_owner_fk":
+                    ("f", True, True),
+                "processing_cleanup_journal_job_request_fk":
+                    ("f", True, True),
+            },
+        )
+        triggers = {
+            str(name): (bool(deferrable), bool(deferred))
+            for name, deferrable, deferred in self._exec("""
+                SELECT tgname, tgdeferrable, tginitdeferred
+                FROM pg_trigger
+                WHERE NOT tgisinternal
+                  AND tgname IN (
+                      'album_requests_complete_processing_owner',
+                      'import_jobs_complete_processing_owner',
+                      'processing_cleanup_journal_exact_owner',
+                      'album_requests_cleanup_journal_exact_owner',
+                      'import_jobs_cleanup_journal_exact_owner'
+                  )
+            """)
+        }
+        self.assertEqual(
+            triggers,
+            {
+                "album_requests_complete_processing_owner": (True, True),
+                "import_jobs_complete_processing_owner": (True, True),
+                "processing_cleanup_journal_exact_owner": (True, True),
+                "album_requests_cleanup_journal_exact_owner": (True, True),
+                "import_jobs_cleanup_journal_exact_owner": (True, True),
+            },
+        )
+        indexes = self._exec("""
+            SELECT indexdef
+            FROM pg_indexes
+            WHERE schemaname = 'public'
+              AND indexname = 'one_active_automation_import_per_request'
+        """)
+        self.assertEqual(len(indexes), 1)
+        indexdef = str(indexes[0][0])
+        self.assertIn("UNIQUE INDEX", indexdef)
+        self.assertIn("job_type = 'automation_import'::text", indexdef)
+        self.assertIn(
+            "status = ANY (ARRAY['queued'::text, 'running'::text, "
+            "'recovery_required'::text])",
+            indexdef,
+        )
+
+    def test_processing_and_owner_pointer_are_equivalent(self) -> None:
+        request_id = self._request("equivalent")
+        job_id = self._job(request_id)
+        self._attach(request_id, job_id)
+        self.assertEqual(
+            self._exec("""
+                SELECT status, active_automation_import_job_id
+                FROM album_requests WHERE id = %s
+            """, (request_id,)),
+            [("processing", job_id)],
+        )
+
+        missing_owner = self._request("missing-owner")
+        with self.assertRaises(psycopg2.errors.CheckViolation):
+            self._exec(
+                "UPDATE album_requests SET status = 'processing' WHERE id = %s",
+                (missing_owner,),
+            )
+
+        stray_owner = self._request("stray-owner")
+        stray_job = self._job(stray_owner)
+        with self.assertRaises(psycopg2.errors.CheckViolation):
+            self._exec("""
+                UPDATE album_requests
+                SET active_automation_import_job_id = %s
+                WHERE id = %s
+            """, (stray_job, stray_owner))
+
+    def test_owner_must_be_same_request_active_automation_job(self) -> None:
+        request_id = self._request("owner")
+        other_request_id = self._request("other")
+        wrong_request_job = self._job(other_request_id)
+        with self.assertRaises(psycopg2.errors.ForeignKeyViolation):
+            self._attach(request_id, wrong_request_job)
+
+        wrong_type_job = self._job(request_id, job_type="force_import")
+        with self.assertRaises(psycopg2.errors.CheckViolation):
+            self._attach(request_id, wrong_type_job)
+
+        terminal_request_id = self._request("terminal")
+        terminal_job = self._job(
+            terminal_request_id,
+            status="completed",
+        )
+        with self.assertRaises(psycopg2.errors.CheckViolation):
+            self._attach(terminal_request_id, terminal_job)
+
+    def test_owner_fk_rejects_unknown_reuse_delete_and_request_drift(
+        self,
+    ) -> None:
+        request_id = self._request("fk-owner")
+        other_request_id = self._request("fk-other")
+        job_id = self._job(request_id)
+        self._attach(request_id, job_id)
+
+        with self.assertRaises(psycopg2.errors.ForeignKeyViolation):
+            self._transaction([("""
+                UPDATE album_requests
+                SET status = 'processing',
+                    active_automation_import_job_id = 2147483647
+                WHERE id = %s
+            """, (other_request_id,))])
+        with self.assertRaises(
+            (
+                psycopg2.errors.ForeignKeyViolation,
+                psycopg2.errors.UniqueViolation,
+            )
+        ):
+            self._transaction([("""
+                UPDATE album_requests
+                SET status = 'processing',
+                    active_automation_import_job_id = %s
+                WHERE id = %s
+            """, (job_id, other_request_id))])
+        with self.assertRaises(psycopg2.errors.RestrictViolation):
+            self._transaction([(
+                "DELETE FROM import_jobs WHERE id = %s",
+                (job_id,),
+            )])
+        with self.assertRaises(psycopg2.errors.ForeignKeyViolation):
+            self._transaction([(
+                "UPDATE import_jobs SET request_id = %s WHERE id = %s",
+                (other_request_id, job_id),
+            )])
+
+    def test_active_automation_uniqueness_and_atomic_terminal_bundle(self) -> None:
+        request_id = self._request("unique")
+        job_id = self._job(request_id)
+        with self.assertRaises(psycopg2.errors.UniqueViolation):
+            self._job(request_id)
+        self._attach(request_id, job_id)
+
+        with self.assertRaises(psycopg2.errors.CheckViolation):
+            self._transaction([(
+                "UPDATE import_jobs SET status = 'completed' WHERE id = %s",
+                (job_id,),
+            )])
+
+        self._transaction([
+            ("""
+                UPDATE import_jobs
+                SET status = 'completed'
+                WHERE id = %s
+            """, (job_id,)),
+            ("""
+                UPDATE album_requests
+                SET status = 'wanted',
+                    active_automation_import_job_id = NULL
+                WHERE id = %s
+            """, (request_id,)),
+        ])
+        self.assertEqual(
+            self._exec(
+                "SELECT status FROM import_jobs WHERE id = %s",
+                (job_id,),
+            ),
+            [("completed",)],
+        )
+
+    def test_ordered_retry_atomically_retargets_the_processing_owner(
+        self,
+    ) -> None:
+        request_id = self._request("retry")
+        old_job_id = self._job(request_id)
+        self._attach(request_id, old_job_id)
+        replacement_job_id = self._job(request_id, status="failed")
+
+        self._transaction([
+            (
+                "UPDATE import_jobs SET status = 'failed' WHERE id = %s",
+                (old_job_id,),
+            ),
+            (
+                "UPDATE import_jobs SET status = 'queued' WHERE id = %s",
+                (replacement_job_id,),
+            ),
+            ("""
+                UPDATE album_requests
+                SET active_automation_import_job_id = %s
+                WHERE id = %s
+            """, (replacement_job_id, request_id)),
+        ])
+        self.assertEqual(
+            self._exec("""
+                SELECT request.status,
+                       request.active_automation_import_job_id,
+                       old_job.status,
+                       replacement_job.status
+                FROM album_requests AS request
+                JOIN import_jobs AS old_job ON old_job.id = %s
+                JOIN import_jobs AS replacement_job ON replacement_job.id = %s
+                WHERE request.id = %s
+            """, (old_job_id, replacement_job_id, request_id)),
+            [("processing", replacement_job_id, "failed", "queued")],
+        )
+
+    def test_retry_retargets_existing_cleanup_journal_byte_identically(
+        self,
+    ) -> None:
+        request_id = self._request("retry-journal")
+        old_job_id = self._job(request_id)
+        self._attach(request_id, old_job_id)
+        self._exec("""
+            INSERT INTO processing_cleanup_journal (
+                job_id, request_id, revision, action, source_path,
+                source_manifest, source_manifest_hash, destination_path,
+                destination_manifest, destination_manifest_hash,
+                selected_destination_path, step_progress,
+                declared_result_status, declared_reason, evidence_revision
+            )
+            VALUES (
+                %s, %s, 7, 'move_tree', '/processing/source',
+                '[{"path": "01.flac", "size": 12}]'::jsonb, 'source-sha256',
+                '/processing/destination',
+                '[{"path": "01.flac", "size": 12}]'::jsonb,
+                'destination-sha256', '/processing/destination',
+                '{"published": true}'::jsonb, 'imported', 'accepted',
+                'evidence-v4'
+            )
+        """, (old_job_id, request_id))
+        before = self._exec("""
+            SELECT revision, action, source_path, source_manifest,
+                   source_manifest_hash, destination_path,
+                   destination_manifest, destination_manifest_hash,
+                   selected_destination_path, step_progress,
+                   declared_result_status, declared_reason, evidence_revision,
+                   completed_receipt, created_at, updated_at, completed_at
+            FROM processing_cleanup_journal
+            WHERE job_id = %s AND request_id = %s
+        """, (old_job_id, request_id))
+
+        conn = psycopg2.connect(TEST_DSN)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE import_jobs SET status = 'failed' WHERE id = %s",
+                    (old_job_id,),
+                )
+                cur.execute("""
+                    INSERT INTO import_jobs (
+                        job_type, status, request_id, payload, preview_status
+                    )
+                    VALUES (
+                        'automation_import', 'queued', %s, '{}'::jsonb,
+                        'waiting'
+                    )
+                    RETURNING id
+                """, (request_id,))
+                replacement_row = cur.fetchone()
+                self.assertIsNotNone(replacement_row)
+                assert replacement_row is not None
+                replacement_job_id = int(replacement_row[0])
+                cur.execute("""
+                    UPDATE processing_cleanup_journal
+                    SET job_id = %s
+                    WHERE job_id = %s AND request_id = %s
+                """, (replacement_job_id, old_job_id, request_id))
+                cur.execute("""
+                    UPDATE album_requests
+                    SET active_automation_import_job_id = %s
+                    WHERE id = %s
+                """, (replacement_job_id, request_id))
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+        self.assertEqual(
+            self._exec("""
+                SELECT request.status,
+                       request.active_automation_import_job_id,
+                       old_job.status,
+                       replacement_job.status
+                FROM album_requests AS request
+                JOIN import_jobs AS old_job ON old_job.id = %s
+                JOIN import_jobs AS replacement_job ON replacement_job.id = %s
+                WHERE request.id = %s
+            """, (old_job_id, replacement_job_id, request_id)),
+            [("processing", replacement_job_id, "failed", "queued")],
+        )
+        after = self._exec("""
+            SELECT revision, action, source_path, source_manifest,
+                   source_manifest_hash, destination_path,
+                   destination_manifest, destination_manifest_hash,
+                   selected_destination_path, step_progress,
+                   declared_result_status, declared_reason, evidence_revision,
+                   completed_receipt, created_at, updated_at, completed_at
+            FROM processing_cleanup_journal
+            WHERE job_id = %s AND request_id = %s
+        """, (replacement_job_id, request_id))
+        self.assertEqual(after, before)
+
+    def test_concurrent_owner_attach_and_job_terminal_cannot_both_commit(
+        self,
+    ) -> None:
+        request_id = self._request("owner-terminal-overlap")
+        job_id = self._job(request_id)
+        attach_conn = psycopg2.connect(TEST_DSN)
+        terminal_conn = psycopg2.connect(TEST_DSN)
+        try:
+            with attach_conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE album_requests
+                    SET status = 'processing',
+                        active_automation_import_job_id = %s
+                    WHERE id = %s
+                """, (job_id, request_id))
+            with terminal_conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE import_jobs SET status = 'failed' WHERE id = %s",
+                    (job_id,),
+                )
+
+            validated = threading.Barrier(2)
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [
+                    pool.submit(
+                        self._validate_and_commit_overlapping,
+                        attach_conn,
+                        validated,
+                    ),
+                    pool.submit(
+                        self._validate_and_commit_overlapping,
+                        terminal_conn,
+                        validated,
+                    ),
+                ]
+                results = [future.result(timeout=15) for future in futures]
+        finally:
+            attach_conn.close()
+            terminal_conn.close()
+
+        self.assertEqual(results.count("committed"), 1, results)
+        final = self._exec("""
+            SELECT request.status, request.active_automation_import_job_id,
+                   job.status
+            FROM album_requests AS request
+            JOIN import_jobs AS job ON job.id = %s
+            WHERE request.id = %s
+        """, (job_id, request_id))
+        self.assertIn(
+            final[0],
+            (("processing", job_id, "queued"), ("wanted", None, "failed")),
+        )
+
+    def test_concurrent_journal_insert_and_owner_terminal_cannot_both_commit(
+        self,
+    ) -> None:
+        request_id = self._request("journal-terminal-overlap")
+        job_id = self._job(request_id)
+        self._attach(request_id, job_id)
+        journal_conn = psycopg2.connect(TEST_DSN)
+        terminal_conn = psycopg2.connect(TEST_DSN)
+        try:
+            with journal_conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO processing_cleanup_journal (
+                        job_id, request_id, action, source_path,
+                        source_manifest, source_manifest_hash
+                    )
+                    VALUES (
+                        %s, %s, 'remove_tree', '/processing/album',
+                        '[]'::jsonb, 'source-sha256'
+                    )
+                """, (job_id, request_id))
+            with terminal_conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE album_requests
+                    SET status = 'wanted',
+                        active_automation_import_job_id = NULL
+                    WHERE id = %s
+                """, (request_id,))
+                cur.execute(
+                    "UPDATE import_jobs SET status = 'failed' WHERE id = %s",
+                    (job_id,),
+                )
+
+            validated = threading.Barrier(2)
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [
+                    pool.submit(
+                        self._validate_and_commit_overlapping,
+                        journal_conn,
+                        validated,
+                    ),
+                    pool.submit(
+                        self._validate_and_commit_overlapping,
+                        terminal_conn,
+                        validated,
+                    ),
+                ]
+                results = [future.result(timeout=15) for future in futures]
+        finally:
+            journal_conn.close()
+            terminal_conn.close()
+
+        self.assertEqual(results.count("committed"), 1, results)
+        final = self._exec("""
+            SELECT request.status, request.active_automation_import_job_id,
+                   job.status,
+                   (
+                       SELECT COUNT(*)
+                       FROM processing_cleanup_journal AS journal
+                       WHERE journal.request_id = request.id
+                   )
+            FROM album_requests AS request
+            JOIN import_jobs AS job ON job.id = %s
+            WHERE request.id = %s
+        """, (job_id, request_id))
+        self.assertIn(
+            final[0],
+            (
+                ("processing", job_id, "queued", 1),
+                ("wanted", None, "failed", 0),
+            ),
+        )
+
+    def test_cleanup_journal_stays_attached_until_terminal_consumption(
+        self,
+    ) -> None:
+        request_id = self._request("journal")
+        job_id = self._job(request_id)
+        self._attach(request_id, job_id)
+        insert = """
+            INSERT INTO processing_cleanup_journal (
+                job_id, request_id, action, source_path,
+                source_manifest, source_manifest_hash,
+                step_progress
+            )
+            VALUES (
+                %s, %s, 'remove_tree', '/processing/album',
+                '[]'::jsonb, 'source-sha256', '{}'::jsonb
+            )
+        """
+        self._exec(insert, (job_id, request_id))
+        with self.assertRaises(psycopg2.errors.UniqueViolation):
+            self._exec(insert, (job_id, request_id))
+
+        with self.assertRaises(psycopg2.errors.CheckViolation):
+            self._transaction([("""
+                UPDATE album_requests
+                SET status = 'wanted',
+                    active_automation_import_job_id = NULL
+                WHERE id = %s
+            """, (request_id,))])
+
+        self._transaction([
+            (
+                (
+                    "DELETE FROM processing_cleanup_journal "
+                    "WHERE job_id = %s AND request_id = %s"
+                ),
+                (job_id, request_id),
+            ),
+            (
+                "UPDATE import_jobs SET status = 'completed' WHERE id = %s",
+                (job_id,),
+            ),
+            ("""
+                UPDATE album_requests
+                SET status = 'wanted',
+                    active_automation_import_job_id = NULL
+                WHERE id = %s
+            """, (request_id,)),
+        ])
+
+        unattached_request_id = self._request("journal-unattached")
+        unattached_job_id = self._job(unattached_request_id)
+        with self.assertRaises(psycopg2.errors.CheckViolation):
+            self._exec(
+                insert,
+                (unattached_job_id, unattached_request_id),
+            )
+
+        other_request_id = self._request("journal-other")
+        other_job_id = self._job(other_request_id)
+        self._attach(other_request_id, other_job_id)
+        with self.assertRaises(psycopg2.errors.ForeignKeyViolation):
+            self._exec(insert, (job_id, other_request_id))
+
+        with self.assertRaises(psycopg2.errors.CheckViolation):
+            self._transaction([
+                (
+                    (
+                        "UPDATE import_jobs SET status = 'completed' "
+                        "WHERE id = %s"
+                    ),
+                    (other_job_id,),
+                ),
+                (
+                    insert,
+                    (other_job_id, other_request_id),
+                ),
+            ])
+
+    def test_execution_lease_shape_is_nullable_and_stage_complete(self) -> None:
+        request_id = self._request("lease")
+        rows = self._exec("""
+            INSERT INTO import_jobs (
+                job_type, status, request_id, payload, preview_status,
+                execution_invocation_id, execution_host_boot_id,
+                execution_systemd_unit, execution_worker_pid,
+                execution_worker_start_ticks
+            )
+            VALUES (
+                'force_import', 'queued', %s, '{}'::jsonb, 'waiting',
+                'invocation-a', 'boot-a', 'cratedigger-importer.service',
+                123, 456
+            )
+            RETURNING id
+        """, (request_id,))
+        job_id = int(rows[0][0])
+        self._exec("""
+            UPDATE import_jobs
+            SET execution_beets_pid = 789,
+                execution_beets_start_ticks = 987
+            WHERE id = %s
+        """, (job_id,))
+        self.assertEqual(
+            self._exec("""
+                SELECT execution_worker_pid, execution_worker_start_ticks,
+                       execution_beets_pid, execution_beets_start_ticks
+                FROM import_jobs WHERE id = %s
+            """, (job_id,)),
+            [(123, 456, 789, 987)],
+        )
+
+        with self.assertRaises(psycopg2.errors.CheckViolation):
+            self._exec("""
+                INSERT INTO import_jobs (
+                    job_type, request_id, payload, execution_invocation_id
+                )
+                VALUES ('force_import', %s, '{}'::jsonb, 'partial')
+            """, (request_id,))
+        with self.assertRaises(psycopg2.errors.CheckViolation):
+            self._exec("""
+                INSERT INTO import_jobs (
+                    job_type, request_id, payload, execution_beets_pid,
+                    execution_beets_start_ticks
+                )
+                VALUES ('force_import', %s, '{}'::jsonb, 789, 987)
+            """, (request_id,))
+        for field in (
+            "execution_invocation_id",
+            "execution_host_boot_id",
+            "execution_systemd_unit",
+        ):
+            with self.subTest(blank_lease_field=field):
+                values = {
+                    "execution_invocation_id": "invocation-b",
+                    "execution_host_boot_id": "boot-b",
+                    "execution_systemd_unit": "cratedigger-importer.service",
+                }
+                values[field] = " \t"
+                with self.assertRaises(psycopg2.errors.CheckViolation):
+                    self._exec("""
+                        INSERT INTO import_jobs (
+                            job_type, request_id, payload,
+                            execution_invocation_id, execution_host_boot_id,
+                            execution_systemd_unit, execution_worker_pid,
+                            execution_worker_start_ticks
+                        )
+                        VALUES (
+                            'force_import', %s, '{}'::jsonb, %s, %s, %s,
+                            123, 456
+                        )
+                    """, (
+                        request_id,
+                        values["execution_invocation_id"],
+                        values["execution_host_boot_id"],
+                        values["execution_systemd_unit"],
+                    ))
+
+        owner_request_id = self._request("lease-owner")
+        owner_job_id = self._job(owner_request_id)
+        self._attach(owner_request_id, owner_job_id)
+        with self.assertRaises(psycopg2.errors.CheckViolation):
+            self._exec("""
+                UPDATE import_jobs
+                SET execution_invocation_id = 'partial'
+                WHERE id = %s
+            """, (owner_job_id,))
+        self.assertEqual(
+            self._exec("""
+                SELECT request.status,
+                       request.active_automation_import_job_id,
+                       job.execution_invocation_id
+                FROM album_requests AS request
+                JOIN import_jobs AS job
+                  ON job.id = request.active_automation_import_job_id
+                WHERE request.id = %s
+            """, (owner_request_id,)),
+            [("processing", owner_job_id, None)],
+        )
+
+    def test_cleanup_journal_rejects_blank_destination_paths(self) -> None:
+        request_id = self._request("blank-destination")
+        job_id = self._job(request_id)
+        self._attach(request_id, job_id)
+        for destination_path, selected_destination_path in (
+            (" \t", "/processing/destination"),
+            ("/processing/destination", "\n"),
+        ):
+            with self.subTest(
+                destination_path=destination_path,
+                selected_destination_path=selected_destination_path,
+            ), self.assertRaises(psycopg2.errors.CheckViolation):
+                self._exec("""
+                    INSERT INTO processing_cleanup_journal (
+                        job_id, request_id, action, source_path,
+                        source_manifest, source_manifest_hash,
+                        destination_path, destination_manifest,
+                        destination_manifest_hash,
+                        selected_destination_path
+                    )
+                    VALUES (
+                        %s, %s, 'move_tree', '/processing/source',
+                        '[]'::jsonb, 'source-sha256', %s, '[]'::jsonb,
+                        'destination-sha256', %s
+                    )
+                """, (
+                    job_id,
+                    request_id,
+                    destination_path,
+                    selected_destination_path,
+                ))
+
+    def test_migration_does_not_rewrite_historical_rows_or_adopt_jobs(
+        self,
+    ) -> None:
+        name = "cratedigger_test_processing_owner_066_history"
+        dsn = _create_fresh_database(name)
+        try:
+            with tempfile.TemporaryDirectory() as migrations_dir:
+                for migration in discover_migrations(DEFAULT_MIGRATIONS_DIR):
+                    if migration.version <= 65:
+                        shutil.copy2(migration.path, migrations_dir)
+                apply_migrations(dsn, migrations_dir)
+
+                conn = psycopg2.connect(dsn)
+                conn.autocommit = True
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            INSERT INTO album_requests (
+                                mb_release_id, artist_name, album_title,
+                                source, status, active_download_state
+                            )
+                            VALUES (
+                                'mig066-history', 'A', 'B', 'request',
+                                'imported', NULL
+                            )
+                            RETURNING id
+                        """)
+                        request_row = cur.fetchone()
+                        self.assertIsNotNone(request_row)
+                        assert request_row is not None
+                        request_id = int(request_row[0])
+                        cur.execute("""
+                            INSERT INTO import_jobs (
+                                job_type, status, request_id, payload,
+                                preview_status, result, message
+                            )
+                            VALUES (
+                                'automation_import', 'completed', %s,
+                                '{}'::jsonb, 'evidence_ready', '{}'::jsonb,
+                                'historical'
+                            )
+                            RETURNING id
+                        """, (request_id,))
+                        job_row = cur.fetchone()
+                        self.assertIsNotNone(job_row)
+                        assert job_row is not None
+                        job_id = int(job_row[0])
+                        cur.execute("""
+                            SELECT status, active_download_state, updated_at
+                            FROM album_requests WHERE id = %s
+                        """, (request_id,))
+                        request_before = cur.fetchone()
+                        cur.execute("""
+                            SELECT job_type, status, request_id, payload,
+                                   preview_status, result, message, updated_at
+                            FROM import_jobs WHERE id = %s
+                        """, (job_id,))
+                        job_before = cur.fetchone()
+                finally:
+                    conn.close()
+
+                apply_migrations(dsn, DEFAULT_MIGRATIONS_DIR)
+
+                conn = psycopg2.connect(dsn)
+                conn.autocommit = True
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            SELECT status, active_download_state, updated_at
+                            FROM album_requests WHERE id = %s
+                        """, (request_id,))
+                        self.assertEqual(cur.fetchone(), request_before)
+                        cur.execute("""
+                            SELECT job_type, status, request_id, payload,
+                                   preview_status, result, message, updated_at
+                            FROM import_jobs WHERE id = %s
+                        """, (job_id,))
+                        self.assertEqual(cur.fetchone(), job_before)
+                        cur.execute("""
+                            SELECT active_automation_import_job_id
+                            FROM album_requests WHERE id = %s
+                        """, (request_id,))
+                        self.assertEqual(cur.fetchone(), (None,))
+                        cur.execute(
+                            "SELECT COUNT(*) FROM processing_cleanup_journal"
+                        )
+                        self.assertEqual(cur.fetchone(), (0,))
+                finally:
+                    conn.close()
+        finally:
+            _drop_database(name)
 
 
 @requires_postgres

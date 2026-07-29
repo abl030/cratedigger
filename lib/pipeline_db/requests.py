@@ -13,6 +13,7 @@ from lib.pipeline_db._core import _PipelineDBBase
 from lib.pipeline_db._shared import (
     BACKOFF_BASE_MINUTES,
     BACKOFF_MAX_MINUTES,
+    REQUEST_STATUS_PROCESSING,
     AddRequestInput,
     MbidCollisionError,
     RequestSpectralStateUpdate,
@@ -61,6 +62,9 @@ class _RequestsMixin(_PipelineDBBase):
         ``updated_at`` are stamped here; ``is_va_compilation`` (migration 028)
         defaults FALSE and is never re-resolved by automated paths.
         """
+        if status == REQUEST_STATUS_PROCESSING:
+            raise ValueError(
+                "processing requests require an exact automation owner")
         request = AddRequestInput(
             artist_name=artist_name, album_title=album_title, source=source,
             mb_release_id=mb_release_id, mb_release_group_id=mb_release_group_id,
@@ -446,7 +450,11 @@ class _RequestsMixin(_PipelineDBBase):
         # ``album_requests`` / ``import_jobs`` / ``download_log`` are
         # ``ON DELETE SET NULL`` so the evidence survives. The mantra:
         # "evidence is never deleted unless files change."
-        self._execute("DELETE FROM album_requests WHERE id = %s", (request_id,))
+        self._execute(
+            "DELETE FROM album_requests "
+            "WHERE id = %s AND active_automation_import_job_id IS NULL",
+            (request_id,),
+        )
         self.conn.commit()
 
 
@@ -472,7 +480,8 @@ class _RequestsMixin(_PipelineDBBase):
                 "FROM jsonb_populate_record("
                 "NULL::album_requests, %s::jsonb) AS populated "
                 "WHERE ar.id = %s AND ar.status != 'replaced' "
-                "AND ar.status = %s",
+                "AND ar.status = %s "
+                "AND ar.active_automation_import_job_id IS NULL",
                 (
                     now,
                     psycopg2.extras.Json(
@@ -489,7 +498,8 @@ class _RequestsMixin(_PipelineDBBase):
                 f"SET updated_at = %s, {assignments} "
                 "FROM jsonb_populate_record("
                 "NULL::album_requests, %s::jsonb) AS populated "
-                "WHERE ar.id = %s AND ar.status != 'replaced'",
+                "WHERE ar.id = %s AND ar.status != 'replaced' "
+                "AND ar.active_automation_import_job_id IS NULL",
                 (
                     now,
                     psycopg2.extras.Json(
@@ -535,13 +545,15 @@ class _RequestsMixin(_PipelineDBBase):
             if expected_status is not None:
                 cur = self._execute(
                     "SELECT 1 FROM album_requests "
-                    "WHERE id = %s AND status != 'replaced' AND status = %s",
+                    "WHERE id = %s AND status != 'replaced' AND status = %s "
+                    "AND active_automation_import_job_id IS NULL",
                     (request_id, expected_status),
                 )
             else:
                 cur = self._execute(
                     "SELECT 1 FROM album_requests "
-                    "WHERE id = %s AND status != 'replaced'",
+                    "WHERE id = %s AND status != 'replaced' "
+                    "AND active_automation_import_job_id IS NULL",
                     (request_id,),
                 )
             return cur.fetchone() is not None
@@ -776,7 +788,8 @@ class _RequestsMixin(_PipelineDBBase):
             return False
         cur = self._execute(
             "UPDATE album_requests SET status = status "
-            "WHERE id = %s AND status = %s AND status != 'replaced'",
+            "WHERE id = %s AND status = %s AND status != 'replaced' "
+            "AND active_automation_import_job_id IS NULL",
             (request_id, expected_status),
         )
         self.conn.commit()
@@ -794,6 +807,9 @@ class _RequestsMixin(_PipelineDBBase):
         if status == "replaced":
             raise ValueError(
                 "status='replaced' is owned by supersede_request_mbid")
+        if status == REQUEST_STATUS_PROCESSING:
+            raise ValueError(
+                "status='processing' is owned by automation handoff")
         validate_request_metadata_fields(dict(extra))
         if expected_status is None:
             observed_status = self._status_for_cas(request_id, None)
@@ -814,7 +830,8 @@ class _RequestsMixin(_PipelineDBBase):
                 "SET status = %s, active_download_state = NULL, "
                 "updated_at = %s "
                 "WHERE id = %s AND status = %s "
-                "AND status != 'replaced'",
+                "AND status != 'replaced' "
+                "AND active_automation_import_job_id IS NULL",
                 (status, now, request_id, expected_status),
             )
             if cur.rowcount <= 0:
@@ -926,7 +943,8 @@ class _RequestsMixin(_PipelineDBBase):
                 "  ELSE ar.unfindable_categorised_at END, "
                 "unfindable_category = NULL "
                 "WHERE ar.id = %s AND ar.status = %s "
-                "AND ar.status != 'replaced'",
+                "AND ar.status != 'replaced' "
+                "AND ar.active_automation_import_job_id IS NULL",
                 (now, now, now, request_id, expected_status),
             )
             if cur.rowcount <= 0:
@@ -1059,7 +1077,8 @@ class _RequestsMixin(_PipelineDBBase):
             "ELSE search_filetype_override END, "
             "priority_started_at = CASE WHEN %s THEN %s "
             "ELSE priority_started_at END "
-            "WHERE id = %s AND status = %s AND status != 'replaced'",
+            "WHERE id = %s AND status = %s AND status != 'replaced' "
+            "AND active_automation_import_job_id IS NULL",
             (
                 now,
                 clear_retry_counters,
