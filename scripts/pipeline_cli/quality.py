@@ -11,6 +11,7 @@ import argparse
 from typing import TYPE_CHECKING, TypedDict
 
 from lib import transitions
+from lib.json_narrow import json_dict
 from scripts.pipeline_cli._format import _fmt_br
 
 if TYPE_CHECKING:
@@ -106,7 +107,7 @@ def _print_decision_outcome(
     Shared by the synthetic scenario matrix and the live-candidate replay
     tier (issue #813 tooling tier) — one display path, not two.
     """
-    from lib.quality import search_tiers
+    from lib.quality import STAGE2_COUNTERFACTUAL_UNAVAILABLE, search_tiers
 
     imported = "IMPORT" if result["imported"] else "REJECT"
     parts = [imported]
@@ -127,6 +128,24 @@ def _print_decision_outcome(
     print(f"      → {', '.join(parts)} (final: {final})")
     if decision_chain:
         print(f"      chain: {decision_chain}")
+
+    # A Stage-1 spectral reject short-circuits before Stage 2 runs, so the
+    # chain above stops at ``stage1_spectral:reject`` and says nothing about
+    # whether the candidate was actually an upgrade. The decider now reports
+    # that counterfactual (issue #829 Phase 5 PR2d); it is the whole point
+    # of issue #813's disagreement question, so surface it here.
+    counterfactual = result.get("stage2_import_if_stage1_deferred")
+    if counterfactual == STAGE2_COUNTERFACTUAL_UNAVAILABLE:
+        print("      if stage 1 had deferred: stage 2 could not be evaluated")
+    elif isinstance(counterfactual, str) and counterfactual:
+        verdict = json_dict(
+            result.get("comparison_basis_if_stage1_deferred")).get("verdict")
+        scored = (
+            f", scoring the candidate {verdict}"
+            if isinstance(verdict, str) and verdict
+            else ""
+        )
+        print(f"      if stage 1 had deferred: stage2={counterfactual}{scored}")
 
     # For rejections that keep searching: simulate what happens after
     if not result["imported"] and result["keep_searching"]:
