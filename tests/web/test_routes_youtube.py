@@ -8,7 +8,8 @@ import json
 import os
 import sys
 import unittest
-from typing import ClassVar, cast
+from operator import methodcaller
+from typing import ClassVar
 from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -40,8 +41,9 @@ class TestYoutubeClientDefaultTimeoutSession(unittest.TestCase):
         for method in ("get", b"get"):
             with self.subTest(method=method), \
                     patch("requests.Session.send", autospec=True) as send:
-                session.request(
-                    cast(str, method), "https://example.invalid")
+                methodcaller(
+                    "request", method, "https://example.invalid",
+                )(session)
 
             send.assert_called_once()
             self.assertIs(send.call_args.args[0], session)
@@ -55,8 +57,9 @@ class TestYoutubeClientDefaultTimeoutSession(unittest.TestCase):
         self.assertEqual(send.call_args.args[1].method, "GÉT")
 
         with self.assertRaises(UnicodeDecodeError):
-            session.request(
-                cast(str, b"g\xc3\xa9t"), "https://example.invalid")
+            methodcaller(
+                "request", b"g\xc3\xa9t", "https://example.invalid",
+            )(session)
 
 
 

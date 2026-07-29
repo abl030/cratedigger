@@ -13,7 +13,7 @@ import unittest
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Literal, Self, cast
+from typing import Literal, Self
 from unittest.mock import patch
 
 import msgspec
@@ -50,6 +50,7 @@ _CACHED_BROWSE_ID = "MPREb-cached"
 CachePosture = Literal["absent", "empty", "nonempty"]
 OperationSite = Literal["search", "seed", "sibling", "siblings_all"]
 RequestMethod = Literal["GET", "POST"]
+JsonObject = dict[str, object]
 
 
 @dataclass(frozen=True)
@@ -68,8 +69,8 @@ class RetryObservation:
     escaped_exception: Exception | None
     attempts: int
     upsert_calls: int
-    durable_before: list[dict[str, Any]] | None
-    durable_after: list[dict[str, Any]] | None
+    durable_before: list[JsonObject] | None
+    durable_after: list[JsonObject] | None
 
 
 class _RetryHTTPServer(ThreadingHTTPServer):
@@ -86,7 +87,9 @@ class _RetryHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def _reply(self) -> None:
-        server = cast(_RetryHTTPServer, self.server)
+        server = self.server
+        if not isinstance(server, _RetryHTTPServer):
+            raise TypeError("retry handler attached to an unexpected server")
         server.attempts += 1
         server.methods.append(self.command)
         content_length = int(self.headers.get("Content-Length", "0"))
@@ -117,7 +120,15 @@ class LoopbackRetryServer(AbstractContextManager["LoopbackRetryServer"]):
 
     @property
     def url(self) -> str:
-        host, port = cast(tuple[str, int], self._server.server_address)
+        address = self._server.server_address
+        if (
+            not isinstance(address, tuple)
+            or len(address) != 2
+            or not isinstance(address[0], str)
+            or not isinstance(address[1], int)
+        ):
+            raise TypeError(f"unexpected loopback address: {address!r}")
+        host, port = address
         return f"http://{host}:{port}/youtube"
 
     @property
@@ -158,7 +169,7 @@ class _ObservedYoutubeDB(FakePipelineDB):
             release_group_identifier, source, rows)
 
 
-def _track(title: str, video_id: str) -> dict[str, Any]:
+def _track(title: str, video_id: str) -> JsonObject:
     return {
         "videoId": video_id,
         "title": title,
@@ -176,7 +187,7 @@ def _album(
     browse_id: str,
     *,
     other_versions: list[str] | None = None,
-) -> dict[str, Any]:
+) -> JsonObject:
     return FakeYTMusic.make_album_fixture(
         audio_playlist_id=f"OLAK-{browse_id}",
         title="Dr. Octagonecologyst",
@@ -218,7 +229,7 @@ class LoopbackYTClient:
         response.raise_for_status()
         raise AssertionError("retryable response unexpectedly succeeded")
 
-    def search(self, *_args: object, **_kwargs: object) -> list[dict[str, Any]]:
+    def search(self, *_args: object, **_kwargs: object) -> list[JsonObject]:
         if self._operation_site == "search":
             self._exhaust()
         return [{
@@ -234,7 +245,7 @@ class LoopbackYTClient:
             "trackCount": 1,
         }]
 
-    def get_album(self, browse_id: str) -> dict[str, Any]:
+    def get_album(self, browse_id: str) -> JsonObject:
         if self._operation_site == "seed" and browse_id == _SEED_BROWSE_ID:
             self._exhaust()
         if self._operation_site in ("sibling", "siblings_all"):
@@ -252,7 +263,7 @@ class LoopbackYTClient:
         return _album(browse_id)
 
 
-_CACHED_ROWS: list[dict[str, Any]] = [{
+_CACHED_ROWS: list[JsonObject] = [{
     "yt_browse_id": _CACHED_BROWSE_ID,
     "yt_audio_playlist_id": "OLAK-cached",
     "yt_url": "https://music.youtube.com/playlist?list=OLAK-cached",
@@ -293,7 +304,7 @@ def _distance(*, mbid: str, **_kwargs: object) -> BeetsDistanceResult:
     )
 
 
-def _mb_release() -> dict[str, Any]:
+def _mb_release() -> JsonObject:
     return {
         "id": _RELEASE,
         "title": "Dr. Octagonecologyst",
@@ -313,7 +324,7 @@ def _mb_release() -> dict[str, Any]:
     }
 
 
-def _mb_group() -> dict[str, Any]:
+def _mb_group() -> JsonObject:
     return {
         "title": "Dr. Octagonecologyst",
         "type": "Album",
@@ -510,8 +521,9 @@ class TestProductionYoutubeRetryPolicy(unittest.TestCase):
         _client, session = build_youtube_client()
         session.trust_env = False
         try:
-            adapter = cast(
-                HTTPAdapter, session.get_adapter("http://127.0.0.1/"))
+            adapter = session.get_adapter("http://127.0.0.1/")
+            if not isinstance(adapter, HTTPAdapter):
+                self.fail("shared factory mounted a non-HTTP adapter")
             self.assertEqual(adapter.max_retries.total, 3)
             self.assertEqual(
                 tuple(adapter.max_retries.status_forcelist),
@@ -560,7 +572,9 @@ class TestRetryExhaustionResolverIntegration(unittest.TestCase):
             operation_site="search",
         ))
         assert_retry_invariants(observation)
-        result = cast(YoutubeAlbumResolverResult, observation.result)
+        result = observation.result
+        if not isinstance(result, YoutubeAlbumResolverResult):
+            self.fail("resolver did not return YoutubeAlbumResolverResult")
         self.assertEqual(result.outcome, "unresolved_mirror_unavailable")
         self.assertEqual(observation.upsert_calls, 0)
         self.assertIsNone(observation.durable_after)

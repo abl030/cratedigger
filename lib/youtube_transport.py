@@ -2,11 +2,24 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import requests
     from ytmusicapi import YTMusic
+
+def _with_default_timeout[**P, R](
+    request: Callable[P, R],
+) -> Callable[P, R]:
+    def request_with_default_timeout(
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> R:
+        kwargs.setdefault("timeout", (5, 30))
+        return request(*args, **kwargs)
+
+    return request_with_default_timeout
 
 
 def build_youtube_client() -> tuple[YTMusic, requests.Session]:
@@ -16,12 +29,8 @@ def build_youtube_client() -> tuple[YTMusic, requests.Session]:
     from urllib3.util.retry import Retry
     from ytmusicapi import YTMusic
 
-    class _DefaultTimeoutSession(requests.Session):
-        def request(self, *args: Any, **kwargs: Any):
-            kwargs.setdefault("timeout", (5, 30))
-            return super().request(*args, **kwargs)
-
-    session = _DefaultTimeoutSession()
+    session = requests.Session()
+    session.request = _with_default_timeout(session.request)
     retry = Retry(
         total=3,
         backoff_factor=1.5,
