@@ -377,6 +377,20 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
               };
               users.groups.smokeping.members = [ "nginx" ];
             };
+            nginxReloadDisabled = evaluate {
+              services.cratedigger.web = {
+                hostName = "music.example.test";
+                enableInsecure = true;
+              };
+              services.nginx.enableReload = lib.mkForce false;
+            };
+            nginxRestartDisabled = evaluate {
+              services.cratedigger.web = {
+                hostName = "music.example.test";
+                enableInsecure = true;
+              };
+              systemd.services.nginx.restartIfChanged = lib.mkForce false;
+            };
           }
         '''
         result = subprocess.run(
@@ -493,6 +507,21 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
                 (world, worlds[world]),
             )
         self.assertEqual(worlds["nginxReverseUnrelatedGroup"], [])
+        self.assertTrue(
+            any(
+                "requires services.nginx.enableReload" in message
+                for message in worlds["nginxReloadDisabled"]
+            ),
+            worlds["nginxReloadDisabled"],
+        )
+        self.assertTrue(
+            any(
+                "requires systemd.services.nginx.restartIfChanged"
+                in message
+                for message in worlds["nginxRestartDisabled"]
+            ),
+            worlds["nginxRestartDisabled"],
+        )
 
     def test_injected_basic_path_cannot_render_toplevel(self) -> None:
         expression = r'''
@@ -593,6 +622,9 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
                 }) gateway.listen;
                 hostName = gateway.serverName;
                 gatewayExtra = gateway.extraConfig;
+                gatewayPolicy =
+                  system.config.environment.etc
+                    ."cratedigger/web-gateway-policy".text;
                 basicAuthFile = gateway.basicAuthFile;
                 rootBasicAuthFile = gateway.locations."/".basicAuthFile;
                 mergedBasicAuthFile =
@@ -611,6 +643,14 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
                 webUser = webService.serviceConfig.User;
                 webGroup = webService.serviceConfig.Group;
                 webStartPre = webService.serviceConfig.ExecStartPre;
+                nginxEnableReload =
+                  system.config.services.nginx.enableReload;
+                nginxRestartIfChanged = nginxService.restartIfChanged;
+                nginxAfter = nginxService.after;
+                nginxWants = nginxService.wants;
+                nginxRequires = nginxService.requires;
+                nginxUnit =
+                  system.config.systemd.units."nginx.service".text;
                 nginxGroups = nginxService.serviceConfig.SupplementaryGroups;
                 nginxUserGroups =
                   system.config.users.users.${system.config.services.nginx.user}.extraGroups;
@@ -657,6 +697,20 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
             ipv4["listen"], [{"addr": "127.0.0.1", "port": 8086}]
         )
         self.assertEqual(dual["hostName"], "music.example.test")
+        self.assertIn("gateway_mode=basic", dual["gatewayPolicy"])
+        self.assertTrue(dual["gatewayPolicy"].startswith("format=1\n"))
+        self.assertIn(
+            "gateway_credential_path=/run/secrets/cratedigger.htpasswd",
+            dual["gatewayPolicy"],
+        )
+        self.assertIn("gateway_mode=insecure", insecure["gatewayPolicy"])
+        self.assertIn(
+            "gateway_credential_path=-", insecure["gatewayPolicy"]
+        )
+        self.assertIn(
+            "gateway_marker_path=/run/cratedigger-web/gateway-policy-",
+            insecure["gatewayPolicy"],
+        )
         marker_pattern = re.compile(
             r"if \(!-f "
             r"(/run/cratedigger-web/gateway-policy-[0-9a-f]{64})\)"
@@ -749,6 +803,18 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
         self.assertIn(
             "cratedigger-render-config", insecure["webStartPre"][0]
         )
+        self.assertTrue(dual["nginxEnableReload"])
+        self.assertTrue(insecure["nginxEnableReload"])
+        self.assertTrue(alternate["nginxEnableReload"])
+        self.assertTrue(dual["nginxRestartIfChanged"])
+        self.assertTrue(insecure["nginxRestartIfChanged"])
+        self.assertTrue(alternate["nginxRestartIfChanged"])
+        self.assertIn("cratedigger-web.socket", dual["nginxAfter"])
+        self.assertIn("cratedigger-web.socket", dual["nginxWants"])
+        self.assertNotIn("cratedigger-web.socket", dual["nginxRequires"])
+        self.assertEqual(dual["nginxUnit"], ipv4["nginxUnit"])
+        self.assertEqual(dual["nginxUnit"], insecure["nginxUnit"])
+        self.assertEqual(dual["nginxUnit"], alternate["nginxUnit"])
         self.assertEqual(dual["nginxGroups"], ["cratedigger-web"])
         self.assertIn("cratedigger-web", dual["nginxUserGroups"])
         self.assertIn("cratedigger-web", dual["applicationUserGroups"])
@@ -761,6 +827,10 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
         self.assertIn("kill", dual["reload"][2])
         self.assertTrue(dual["reload"][3].startswith("+"))
         self.assertIn("cratedigger-web-gateway-finish-reload", dual["reload"][3])
+        self.assertEqual(dual["startPre"], insecure["startPre"])
+        self.assertEqual(dual["startPre"], alternate["startPre"])
+        self.assertEqual(dual["reload"], insecure["reload"])
+        self.assertEqual(dual["reload"], alternate["reload"])
         self.assertEqual(insecure["basicAuthFile"], None)
         self.assertIn("cratedigger-web-gateway-start", insecure["startPre"][0])
         self.assertIn(
@@ -918,7 +988,8 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
         )
         self.assertIn("-maxdepth 1", marker_helpers)
         self.assertIn(
-            '-name ${lib.escapeShellArg "gateway-*"}', marker_helpers
+            '-name ${lib.escapeShellArg "gateway-policy-*"}',
+            marker_helpers,
         )
         self.assertIn("-delete", marker_helpers)
         self.assertIn("-m 0440", marker_helpers)
@@ -926,8 +997,29 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
         self.assertIn(
             "-g ${lib.escapeShellArg cfg.web.accessGroup}", marker_helpers
         )
+        self.assertIn('"$gateway_marker_path"', marker_helpers)
         self.assertIn(
-            "${lib.escapeShellArg webGatewayActiveMarker}", marker_helpers
+            "gateway_marker_path=${webGatewayActiveMarker}",
+            text,
+        )
+        self.assertNotIn(
+            ". ${lib.escapeShellArg webGatewayPolicyFile}", marker_helpers
+        )
+        self.assertIn("mapfile -t policy_lines", marker_helpers)
+        self.assertIn("policy descriptor must contain exactly four lines", text)
+        self.assertIn("gateway_policy_sha256", text)
+        self.assertIn("webGatewayWriteReloadReceipt", text)
+        self.assertIn("webGatewayReadReloadReceipt", text)
+        self.assertIn("policy_sha256=", text)
+        self.assertIn("gateway_credential_sha256=", text)
+        self.assertIn("credential changed after reload validation", text)
+        self.assertIn(
+            "policy descriptor differs from the validated receipt",
+            text,
+        )
+        self.assertIn(
+            'configured_path="\'\'${1:-}"',
+            text,
         )
         self.assertIn("realpath -e", text)
         self.assertIn("runuser -u", text)

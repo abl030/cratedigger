@@ -133,7 +133,10 @@ sops.secrets."cratedigger/htpasswd" = {
   owner = "root";
   group = config.services.nginx.group;
   mode = "0440";
-  restartUnits = [ "nginx.service" ];
+  # Same-path rotations must enter nginx's validation/HUP path without
+  # stopping unrelated virtual hosts.
+  reloadUnits = [ "nginx.service" ];
+  restartUnits = [ ];
 };
 
 services.cratedigger = {
@@ -178,14 +181,29 @@ preflight under its final merged systemd `User`, `Group`, and supplementary
 groups; a downstream identity override that gains credential access fails the
 application start instead of creating a Basic-auth bypass.
 
+The module defaults `services.nginx.enableReload = true` and requires both that
+setting and `systemd.services.nginx.restartIfChanged = true`. The first
+authenticated enable or a service-identity change can therefore restart nginx
+to acquire the dedicated socket group. Authentication-policy and same-path
+secret changes keep the rendered `nginx.service` unit stable and run through
+nginx's reload unit instead. Reload preparation clears Cratedigger readiness,
+strictly parses the module-owned policy descriptor, validates the runtime
+credential, and writes a root-only receipt containing the exact descriptor and
+credential fingerprints. Readiness is published after nginx's config test and
+HUP only when the descriptor and credential remain byte-identical to that
+receipt. A failed validation leaves the existing nginx master and unrelated
+virtual hosts running, but every Cratedigger gateway route returns `503` until
+a valid reload republishes readiness.
+
 Rotate atomically; never edit the live runtime file in place:
 
 1. Create a complete replacement bcrypt `htpasswd` file in a private temporary
    directory, again using the prompting `htpasswd -cB` form.
 2. Replace only the encrypted sops value in one edit, commit the encrypted
    transaction, and deploy a signed NixOS generation that materializes the new
-   runtime secret and restarts nginx. The module validation must pass before
-   nginx serves with it.
+   runtime secret and reloads nginx. The module validation must pass before
+   Cratedigger serves with it; the nginx master and unrelated virtual hosts
+   remain running.
 3. Without putting either password in argv, a URL, or logs, use interactive
    `curl --user operator` requests to prove the replacement receives the
    expected status and the old credential receives `401`. Retain the signed
@@ -193,8 +211,10 @@ Rotate atomically; never edit the live runtime file in place:
 4. Delete the private temporary material only after the new credential and
    denial of the old credential are proven.
 
-If materialization, permissions, validation, or nginx activation fails, stop:
-unavailability is the fail-closed result. Do not switch to insecure mode to
+If materialization, permissions, validation, or nginx activation fails, stop.
+On a first authenticated start, nginx does not start. On a later policy or
+credential reload, Cratedigger returns `503` while the existing nginx master
+continues serving unrelated virtual hosts. Do not switch to insecure mode to
 finish a Basic deployment.
 
 ### Browser, header, and response isolation
@@ -286,7 +306,7 @@ back to a generation that retains Basic mode and its runtime secret. Never
 point the public proxy at legacy port `8085`, expose the Unix socket, or use
 `enableInsecure` as a production rollback. Credential rollback is a separate
 signed sops transaction: restore the prior encrypted verifier, deploy it
-through the same validation/restart path, and prove the displaced credential
+through the same validation/reload path, and prove the displaced credential
 is denied.
 
 ## Running non-root + filesystem permissions
@@ -415,7 +435,8 @@ See [`examples/cratedigger.nix`](../examples/cratedigger.nix) for the full worke
 - `nginx.service` — when web is enabled, the module adds an exact-host
   loopback gateway plus a default-reject vhost, joins nginx only to the
   dedicated web access group, and validates Basic runtime material before
-  start/reload.
+  start/reload. The module requires nginx reload support so policy and
+  credential changes validate before HUP without stopping unrelated vhosts.
 
 ### Untrusted-input service sandbox
 

@@ -904,8 +904,12 @@ credentials or be bypassed through the Python backend.
    non-empty, restrictive, readable by nginx through a separate secret
    permission, unreadable by the application and operator identities, not
    readable merely through web access group membership, and outside the store.
-   Evaluation proves only option shape; runtime proof owns
-   presence/readability.
+   Keep the nginx unit stable across authentication-policy changes. Clear
+   Cratedigger readiness before reload and republish it only from a root-only
+   receipt when the strictly parsed module-owned policy descriptor and
+   same-path credential remain byte-identical through nginx's config test and
+   HUP. Evaluation proves option/unit shape; runtime proof owns presence,
+   readability, and receipt-bound reload behavior.
 8. Update the CLI wrapper contract and first-install example to use the socket,
    hostname, gateway port, and one deliberate mode.
 9. Add structural assertions that no Python TCP target or trusted-loopback
@@ -1181,9 +1185,10 @@ health proof.
    credential material, and land it in a separate signed nixosconfig
    transaction after cutover. Deploy it through the locked fleet trigger and
    retain its signed revision, fresh upgrade invocation, exact active secret
-   generation, and nginx reload/service-health receipt. Prove the old
-   credential is denied and the replacement succeeds without printing or
-   logging either value, then complete the post-rotation health checks.
+   generation, and nginx reload/service-health receipt. Prove nginx and the
+   web application retain their InvocationIDs/MainPIDs, the old credential is
+   denied, and the replacement succeeds without printing or logging either
+   value, then complete the post-rotation health checks.
 
 #### U6C. Post-live upstream audit closure
 
@@ -1379,8 +1384,8 @@ replay the gates for an unchanged tree after push or merge.
 - After cutover and the non-rotation live probes pass, deploy the replacement
   `htpasswd` material through its own signed sops/nixosconfig transaction.
   Retain the signed revision, fresh fleet invocation, active-secret-generation
-  receipt, nginx/service health, old-credential denial, and
-  replacement-credential success.
+  receipt, stable nginx/web InvocationIDs and MainPIDs, nginx/service health,
+  old-credential denial, and replacement-credential success.
 - Only after that rotation receipt, begin U6C: land the audit closure through a
   second documentation-only Cratedigger PR, run the final gates once on that
   audit tree, and merge it with a merge commit before final issue-status
@@ -1403,8 +1408,9 @@ On doc2, capture and retain:
   discovery, and mutation routes;
 - invalid and valid Basic behavior without printing or logging the credential;
 - a separate signed sops-backed Basic rotation transaction and fleet receipt
-  proving the old credential is denied and the replacement succeeds without
-  either value appearing in output or logs;
+  proving nginx and web service identities remain stable, the old credential
+  is denied, and the replacement succeeds without either value appearing in
+  output or logs;
 - canonical Host versus IP/attacker/forwarded-host rejection;
 - authenticated exact-Origin route passage using a predeclared nonexistent or
   validation-only canary, plus cross-origin/missing-origin rejection with
@@ -1419,11 +1425,13 @@ On doc2, capture and retain:
 - the ordinary exact-source health/migration checks and a natural successor
   `cratedigger` pipeline cycle required by the repository deploy contract.
 
-If the password file is absent/unreadable, nginx validation/reload fails, the
-legacy listener remains reachable, the socket is too broad, a protected route
-is anonymous, or a rejected provenance probe dispatches, keep the public edge
-closed and fix forward before marking CD-SEC-02 complete. Nix evaluation owns
-mode shape; runtime preflight owns secret presence/readability.
+If the password file is absent/unreadable, a reload failure does not leave
+Cratedigger at `503` while keeping the existing nginx master and unrelated
+virtual hosts available, the legacy listener remains reachable, the socket is
+too broad, a protected route is anonymous, or a rejected provenance probe
+dispatches, keep the public edge closed and fix forward before marking
+CD-SEC-02 complete. Nix evaluation owns mode/unit shape; runtime preflight owns
+secret presence/readability and receipt-bound publication.
 
 ### Rollback
 

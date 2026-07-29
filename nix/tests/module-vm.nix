@@ -433,6 +433,82 @@ pkgs.testers.nixosTest {
         /run/cratedigger-test-auth/basic.htpasswd \
         /run/cratedigger-test-auth/basic-alternate.htpasswd
     '';
+    policyMutationDuringReload = pkgs.writeShellScript
+      "cratedigger-test-policy-mutation-during-reload"
+      ''
+        set -euo pipefail
+
+        trigger=/run/cratedigger-test-mutate-policy-during-reload
+        ${pkgs.coreutils}/bin/test -e "$trigger" || exit 0
+        ${pkgs.coreutils}/bin/rm -f -- "$trigger"
+        ${pkgs.coreutils}/bin/test \
+          "$(${pkgs.coreutils}/bin/stat -c '%U:%G:%a' \
+            /run/cratedigger-web/gateway-reload-receipt)" \
+          = root:root:600
+        ${pkgs.coreutils}/bin/install \
+          -o root -g root -m 0600 \
+          /etc/cratedigger/web-gateway-policy \
+          /run/cratedigger-test-policy-original
+        original_sha="$(
+          ${pkgs.coreutils}/bin/sha256sum \
+            /etc/cratedigger/web-gateway-policy \
+            | ${pkgs.coreutils}/bin/cut -d ' ' -f 1
+        )"
+        byte_count="$(
+          ${pkgs.coreutils}/bin/stat -c %s \
+            /etc/cratedigger/web-gateway-policy
+        )"
+        ${pkgs.coreutils}/bin/test "$byte_count" -gt 0
+        ${pkgs.coreutils}/bin/test \
+          "$(
+            ${pkgs.coreutils}/bin/tail -c 1 \
+              /etc/cratedigger/web-gateway-policy \
+              | ${pkgs.coreutils}/bin/od -An -tx1 \
+              | ${pkgs.coreutils}/bin/tr -d '[:space:]'
+          )" = 0a
+        mutated="$(${pkgs.coreutils}/bin/mktemp)"
+        trap '${pkgs.coreutils}/bin/rm -f -- "$mutated"' EXIT
+        ${pkgs.coreutils}/bin/head -c "$((byte_count - 1))" \
+          /etc/cratedigger/web-gateway-policy > "$mutated"
+        mutated_sha="$(
+          ${pkgs.coreutils}/bin/sha256sum "$mutated" \
+            | ${pkgs.coreutils}/bin/cut -d ' ' -f 1
+        )"
+        ${pkgs.coreutils}/bin/test "$mutated_sha" != "$original_sha"
+        ${pkgs.coreutils}/bin/test \
+          "$(${pkgs.coreutils}/bin/wc -l < "$mutated")" = 3
+        ${pkgs.coreutils}/bin/rm -f \
+          /etc/cratedigger/web-gateway-policy
+        ${pkgs.coreutils}/bin/install \
+          -o root -g root -m 0444 \
+          "$mutated" /etc/cratedigger/web-gateway-policy
+      '';
+    credentialMutationDuringReload = pkgs.writeShellScript
+      "cratedigger-test-credential-mutation-during-reload"
+      ''
+        set -euo pipefail
+
+        trigger=/run/cratedigger-test-mutate-credential-during-reload
+        ${pkgs.coreutils}/bin/test -e "$trigger" || exit 0
+        ${pkgs.coreutils}/bin/rm -f -- "$trigger"
+        ${pkgs.coreutils}/bin/test \
+          "$(${pkgs.coreutils}/bin/stat -c '%U:%G:%a' \
+            /run/cratedigger-web/gateway-reload-receipt)" \
+          = root:root:600
+        replacement="$(
+          ${pkgs.coreutils}/bin/mktemp \
+            /run/cratedigger-test-auth/basic.htpasswd.swap.XXXXXX
+        )"
+        trap '${pkgs.coreutils}/bin/rm -f -- "$replacement"' EXIT
+        ${pkgs.coreutils}/bin/install \
+          -o root -g ${config.services.nginx.group} -m 0440 \
+          /run/cratedigger-test-auth/basic-rotated.htpasswd \
+          "$replacement"
+        ${pkgs.coreutils}/bin/mv -T \
+          "$replacement" \
+          /run/cratedigger-test-auth/basic.htpasswd
+        trap - EXIT
+      '';
   in {
     imports = [ cratediggerModule ];
 
@@ -687,6 +763,14 @@ pkgs.testers.nixosTest {
         nginx = {
           after = ["cratedigger-test-basic-auth.service"];
           requires = ["cratedigger-test-basic-auth.service"];
+          # Run after nginx's ordinary config-test/HUP commands (priority
+          # 1000), but before Cratedigger's receipt-bound finish hook
+          # (mkAfter, priority 1500). The trigger is absent outside the one
+          # deterministic overlap test.
+          serviceConfig.ExecReload = lib.mkOrder 1400 [
+            "+${policyMutationDuringReload}"
+            "+${credentialMutationDuringReload}"
+          ];
         };
         # The probe is test-only and ordered after the module's config render.
         cratedigger-importer.serviceConfig.ExecStartPre =
@@ -737,6 +821,7 @@ pkgs.testers.nixosTest {
     import base64
     import json
     import re
+    import shlex
 
     def _response_header_values(raw_headers, expected_name):
         values = []
@@ -1669,6 +1754,48 @@ pkgs.testers.nixosTest {
             _print_gateway_diagnostics(label)
         assert succeeded == expect_success, (label, status, output)
 
+    def _service_runtime_identity(unit):
+        invocation = machine.succeed(
+            f"systemctl show {unit} --property=InvocationID --value"
+        ).strip()
+        main_pid = machine.succeed(
+            f"systemctl show {unit} --property=MainPID --value"
+        ).strip()
+        assert re.fullmatch(r"[0-9a-f]{32}", invocation), (
+            unit, invocation,
+        )
+        assert int(main_pid) > 1, (unit, main_pid)
+        return invocation, main_pid
+
+    def _unit_invocation(unit):
+        invocation = machine.succeed(
+            f"systemctl show {unit} --property=InvocationID --value"
+        ).strip()
+        assert re.fullmatch(r"[0-9a-f]{32}", invocation), (
+            unit, invocation,
+        )
+        return invocation
+
+    def _nginx_worker_pids():
+        main_pid = _service_runtime_identity("nginx.service")[1]
+        workers = machine.succeed(
+            f"ps --ppid {main_pid} -o pid= | sort -n"
+        ).split()
+        assert workers, main_pid
+        return tuple(workers)
+
+    def _wait_for_nginx_workers_changed(previous):
+        previous_text = "\n".join(previous)
+        machine.wait_until_succeeds(
+            "main=$(systemctl show nginx.service "
+            "--property=MainPID --value); "
+            "current=$(ps --ppid \"$main\" -o pid= | sort -n); "
+            "test -n \"$current\"; "
+            f"previous={shlex.quote(previous_text)}; "
+            "test \"$current\" != \"$previous\"",
+            timeout=10,
+        )
+
     # The empty-file branch fails a real reload closed, then a restored
     # credential can publish readiness only after nginx has accepted the new
     # policy.
@@ -1676,11 +1803,27 @@ pkgs.testers.nixosTest {
         "cp -a /run/cratedigger-test-auth/basic.htpasswd "
         "/run/cratedigger-test-auth/basic.htpasswd.good"
     )
+    invalid_nginx_identity = _service_runtime_identity("nginx.service")
+    invalid_web_identity = _service_runtime_identity(
+        "cratedigger-web.service"
+    )
+    invalid_workers = _nginx_worker_pids()
     machine.succeed(
         "install -o root -g nginx -m 0440 /dev/null "
         "/run/cratedigger-test-auth/basic.htpasswd"
     )
     _reload_nginx(False, "empty Basic credential reload")
+    assert _service_runtime_identity(
+        "nginx.service"
+    ) == invalid_nginx_identity
+    assert _service_runtime_identity(
+        "cratedigger-web.service"
+    ) == invalid_web_identity
+    assert _nginx_worker_pids() == invalid_workers
+    machine.succeed(
+        "test \"$(systemctl show nginx.service "
+        "--property=ReloadResult --value)\" = exit-code"
+    )
     _assert_cratedigger_fail_closed("empty Basic credential reload")
     machine.succeed(
         "install -o root -g nginx -m 0440 "
@@ -1688,8 +1831,77 @@ pkgs.testers.nixosTest {
         "/run/cratedigger-test-auth/basic.htpasswd"
     )
     _reload_nginx(True, "restore Basic after empty credential")
+    assert _service_runtime_identity(
+        "nginx.service"
+    ) == invalid_nginx_identity
+    assert _service_runtime_identity(
+        "cratedigger-web.service"
+    ) == invalid_web_identity
+    _wait_for_nginx_workers_changed(invalid_workers)
     _assert_gateway_marker(True)
     _assert_basic_auth_matrix()
+
+    # A same-path sops-style replacement reloads nginx without restarting the
+    # shared master or the application. The HUP replaces only nginx workers;
+    # the displaced password is denied immediately.
+    machine.succeed(
+        "${pkgs.apacheHttpd}/bin/htpasswd -bcB -C 4 "
+        "/run/cratedigger-test-auth/basic-rotated.htpasswd "
+        "test-operator rotated-password; "
+        "chown root:nginx "
+        "/run/cratedigger-test-auth/basic-rotated.htpasswd; "
+        "chmod 0440 "
+        "/run/cratedigger-test-auth/basic-rotated.htpasswd"
+    )
+    rotated_nginx_identity = _service_runtime_identity("nginx.service")
+    rotated_web_identity = _service_runtime_identity(
+        "cratedigger-web.service"
+    )
+    rotated_workers = _nginx_worker_pids()
+    machine.succeed(
+        "install -o root -g nginx -m 0440 "
+        "/run/cratedigger-test-auth/basic-rotated.htpasswd "
+        "/run/cratedigger-test-auth/basic.htpasswd"
+    )
+    _reload_nginx(True, "same-path Basic credential rotation")
+    assert _service_runtime_identity(
+        "nginx.service"
+    ) == rotated_nginx_identity
+    assert _service_runtime_identity(
+        "cratedigger-web.service"
+    ) == rotated_web_identity
+    _wait_for_nginx_workers_changed(rotated_workers)
+    machine.succeed(
+        "test \"$(curl -sS -o /dev/null -w '%{http_code}' "
+        "--user test-operator:test-password "
+        "https://music.vm.test:18443/)\" = 401; "
+        "test \"$(curl -sS -o /dev/null -w '%{http_code}' "
+        "--user test-operator:rotated-password "
+        "https://music.vm.test:18443/)\" = 200; "
+        "test \"$(curl -sS -o /dev/null -w '%{http_code}' "
+        "-H 'Host: unrelated.vm.test' "
+        "http://127.0.0.1:18087/)\" = 204"
+    )
+    restore_workers = _nginx_worker_pids()
+    machine.succeed(
+        "install -o root -g nginx -m 0440 "
+        "/run/cratedigger-test-auth/basic.htpasswd.good "
+        "/run/cratedigger-test-auth/basic.htpasswd"
+    )
+    _reload_nginx(True, "restore original Basic credential")
+    assert _service_runtime_identity(
+        "nginx.service"
+    ) == rotated_nginx_identity
+    assert _service_runtime_identity(
+        "cratedigger-web.service"
+    ) == rotated_web_identity
+    _wait_for_nginx_workers_changed(restore_workers)
+    _assert_basic_auth_matrix()
+    machine.succeed(
+        "test \"$(curl -sS -o /dev/null -w '%{http_code}' "
+        "--user test-operator:rotated-password "
+        "https://music.vm.test:18443/)\" = 401"
+    )
 
     # Test-only header recorder: temporarily replace only ExecStart while
     # retaining the production service identity, groups, sandbox, socket, and
@@ -2477,6 +2689,10 @@ pkgs.testers.nixosTest {
         ))
 
     def _switch_web_system(system_path, label):
+        nginx_identity_before = _service_runtime_identity("nginx.service")
+        reload_invocation_before = _unit_invocation(
+            "nginx-config-reload.service"
+        )
         status, output = machine.execute(
             f"${pkgs.coreutils}/bin/timeout 120s "
             f"{system_path}/bin/switch-to-configuration test"
@@ -2504,9 +2720,24 @@ pkgs.testers.nixosTest {
         assert ready_status == 0, (
             f"{label} web services did not become ready: {ready_output}"
         )
+        assert _service_runtime_identity(
+            "nginx.service"
+        ) == nginx_identity_before, label
+        reload_invocation_after = _unit_invocation(
+            "nginx-config-reload.service"
+        )
+        assert reload_invocation_after != reload_invocation_before, (
+            label,
+            reload_invocation_before,
+            reload_invocation_after,
+        )
         _assert_gateway_marker(True)
 
     def _switch_web_system_expect_failure(system_path, label):
+        nginx_identity_before = _service_runtime_identity("nginx.service")
+        reload_invocation_before = _unit_invocation(
+            "nginx-config-reload.service"
+        )
         status, output = machine.execute(
             f"${pkgs.coreutils}/bin/timeout 120s "
             f"{system_path}/bin/switch-to-configuration test"
@@ -2515,6 +2746,21 @@ pkgs.testers.nixosTest {
             print(output)
             _print_web_transition_diagnostics(label)
         assert status != 0, f"{label} unexpectedly succeeded: {output}"
+        assert _service_runtime_identity(
+            "nginx.service"
+        ) == nginx_identity_before, label
+        reload_invocation_after = _unit_invocation(
+            "nginx-config-reload.service"
+        )
+        assert reload_invocation_after != reload_invocation_before, (
+            label,
+            reload_invocation_before,
+            reload_invocation_after,
+        )
+        machine.succeed(
+            "test \"$(systemctl show nginx.service "
+            "--property=ReloadResult --value)\" = exit-code"
+        )
         _assert_cratedigger_fail_closed(label)
 
     def _web_invocation_log():
@@ -2917,6 +3163,104 @@ pkgs.testers.nixosTest {
     assert insecure_warning not in _web_invocation_log()
     _assert_loopback_socket_boundary()
     _assert_resource_headers("--user test-operator:test-password")
+
+    # Fault-qualify the receipt boundary by replacing the trusted descriptor
+    # after nginx has accepted/HUPed the config but before the finish hook.
+    # The receipt is root-only, the byte mismatch prevents publication, and
+    # restoring the exact activation-owned descriptor makes a later reload
+    # recover without restarting nginx or the application.
+    overlap_nginx_identity = _service_runtime_identity("nginx.service")
+    overlap_web_identity = _service_runtime_identity(
+        "cratedigger-web.service"
+    )
+    overlap_workers = _nginx_worker_pids()
+    machine.succeed(
+        "install -m 0600 /dev/null "
+        "/run/cratedigger-test-mutate-policy-during-reload"
+    )
+    _reload_nginx(False, "descriptor changed during nginx reload")
+    assert _service_runtime_identity(
+        "nginx.service"
+    ) == overlap_nginx_identity
+    assert _service_runtime_identity(
+        "cratedigger-web.service"
+    ) == overlap_web_identity
+    _wait_for_nginx_workers_changed(overlap_workers)
+    machine.succeed(
+        "test ! -e /run/cratedigger-web/gateway-reload-receipt"
+    )
+    _assert_cratedigger_fail_closed(
+        "descriptor changed during nginx reload"
+    )
+    machine.succeed(
+        "rm -f /etc/cratedigger/web-gateway-policy; "
+        "test \"$(stat -c '%U:%G:%a' "
+        "/run/cratedigger-test-policy-original)\" = root:root:600; "
+        "install -o root -g root -m 0444 "
+        "/run/cratedigger-test-policy-original "
+        "/etc/cratedigger/web-gateway-policy; "
+        "rm -f /run/cratedigger-test-policy-original"
+    )
+    overlap_recovery_workers = _nginx_worker_pids()
+    _reload_nginx(True, "restore exact gateway policy descriptor")
+    assert _service_runtime_identity(
+        "nginx.service"
+    ) == overlap_nginx_identity
+    assert _service_runtime_identity(
+        "cratedigger-web.service"
+    ) == overlap_web_identity
+    _wait_for_nginx_workers_changed(overlap_recovery_workers)
+    _assert_gateway_marker(True)
+    _assert_basic_auth_matrix()
+
+    # Fault-qualify the credential fingerprint in the reload receipt
+    # independently of descriptor identity. Replace the valid same-path
+    # credential atomically after HUP but before the finish hook. The parsed
+    # policy is unchanged, so only the receipt-bound credential hash can
+    # prevent publication.
+    credential_overlap_nginx_identity = _service_runtime_identity(
+        "nginx.service"
+    )
+    credential_overlap_web_identity = _service_runtime_identity(
+        "cratedigger-web.service"
+    )
+    credential_overlap_workers = _nginx_worker_pids()
+    machine.succeed(
+        "install -m 0600 /dev/null "
+        "/run/cratedigger-test-mutate-credential-during-reload"
+    )
+    _reload_nginx(False, "credential changed during nginx reload")
+    assert _service_runtime_identity(
+        "nginx.service"
+    ) == credential_overlap_nginx_identity
+    assert _service_runtime_identity(
+        "cratedigger-web.service"
+    ) == credential_overlap_web_identity
+    _wait_for_nginx_workers_changed(credential_overlap_workers)
+    machine.succeed(
+        "test ! -e /run/cratedigger-web/gateway-reload-receipt; "
+        "cmp -s /run/cratedigger-test-auth/basic.htpasswd "
+        "/run/cratedigger-test-auth/basic-rotated.htpasswd"
+    )
+    _assert_cratedigger_fail_closed(
+        "credential changed during nginx reload"
+    )
+    machine.succeed(
+        "install -o root -g nginx -m 0440 "
+        "/run/cratedigger-test-auth/basic.htpasswd.good "
+        "/run/cratedigger-test-auth/basic.htpasswd"
+    )
+    credential_recovery_workers = _nginx_worker_pids()
+    _reload_nginx(True, "restore exact Basic credential after overlap")
+    assert _service_runtime_identity(
+        "nginx.service"
+    ) == credential_overlap_nginx_identity
+    assert _service_runtime_identity(
+        "cratedigger-web.service"
+    ) == credential_overlap_web_identity
+    _wait_for_nginx_workers_changed(credential_recovery_workers)
+    _assert_gateway_marker(True)
+    _assert_basic_auth_matrix()
 
     # Exercise independent credential-validator branches through the real
     # nginx reload/start hooks. Each reload failure removes readiness only for

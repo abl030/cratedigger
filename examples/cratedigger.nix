@@ -88,9 +88,12 @@
       accessGroup = "cratedigger-web";
       # Provision this BEFORE the first switch (for example with sops-nix) as
       # a non-empty bcrypt htpasswd file owned root:nginx with mode 0440.
-      # Missing/invalid runtime material stops nginx instead of exposing the
-      # app. Never inline the plaintext or verifier, use a Nix path/store
-      # derivation, or substitute enableInsecure for a production install.
+      # Missing/invalid material blocks the first nginx start. A later invalid
+      # reload leaves the shared nginx master and unrelated vhosts running,
+      # while Cratedigger itself returns 503 until a valid reload. Configure
+      # the sops secret with reloadUnits = [ "nginx.service" ] and
+      # restartUnits = [ ]. Never inline the plaintext or verifier, use a Nix
+      # path/store derivation, or substitute enableInsecure in production.
       basicAuthFile = "/run/secrets/cratedigger.htpasswd";
     };
     # The only other current mode is deliberate insecure operation: omit

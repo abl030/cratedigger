@@ -254,6 +254,17 @@
     builtins.hashString "sha256" webGatewayPolicyIdentity;
   webGatewayActiveMarker =
     "${webRuntimeDirectory}/gateway-policy-${webGatewayPolicyFingerprint}";
+  webGatewayPolicyFile = "/etc/cratedigger/web-gateway-policy";
+  webGatewayReloadReceipt =
+    "${webRuntimeDirectory}/gateway-reload-receipt";
+  webGatewayPolicyText = ''
+    format=1
+    gateway_mode=${if webBasicEnabled then "basic" else "insecure"}
+    gateway_credential_path=${
+      if webBasicEnabled then webBasicAuthConfiguredPath else "-"
+    }
+    gateway_marker_path=${webGatewayActiveMarker}
+  '';
   webBasicAuthPathSegments =
     lib.drop 1 (lib.splitString "/" webBasicAuthConfiguredPath);
   webBasicAuthPathIsValid =
@@ -317,7 +328,7 @@
     set -euo pipefail
     set -f
 
-    configured_path=${lib.escapeShellArg webBasicAuthConfiguredPath}
+    configured_path="''${1:-}"
     nginx_user=${lib.escapeShellArg config.services.nginx.user}
     nginx_group=${lib.escapeShellArg config.services.nginx.group}
     application_user=${lib.escapeShellArg cfg.user}
@@ -328,6 +339,8 @@
       exit 1
     }
 
+    ${pkgs.coreutils}/bin/test -n "$configured_path" \
+      || fail "configured credential path is empty"
     resolved_path="$(${pkgs.coreutils}/bin/realpath -e -- "$configured_path")" \
       || fail "configured credential path does not resolve"
     case "$resolved_path" in
@@ -460,8 +473,160 @@
       ${lib.escapeShellArg webRuntimeDirectory} \
       -maxdepth 1 \
       -type f \
-      -name ${lib.escapeShellArg "gateway-*"} \
+      -name ${lib.escapeShellArg "gateway-policy-*"} \
       -delete
+  '';
+  webGatewayReadPolicy = ''
+    gateway_fail() {
+      echo "Cratedigger web gateway policy validation failed: $*" >&2
+      exit 1
+    }
+
+    gateway_mode=
+    gateway_credential_path=
+    gateway_marker_path=
+    gateway_policy_sha256=
+    policy_lines=()
+    mapfile -t policy_lines < ${lib.escapeShellArg webGatewayPolicyFile} \
+      || gateway_fail "cannot read the policy descriptor"
+    ${pkgs.coreutils}/bin/test "''${#policy_lines[@]}" = 4 \
+      || gateway_fail "policy descriptor must contain exactly four lines"
+    ${pkgs.coreutils}/bin/test "''${policy_lines[0]}" = "format=1" \
+      || gateway_fail "policy descriptor has an unsupported format"
+    case "''${policy_lines[1]}" in
+      gateway_mode=*) gateway_mode="''${policy_lines[1]#gateway_mode=}" ;;
+      *) gateway_fail "policy descriptor is missing gateway_mode" ;;
+    esac
+    case "''${policy_lines[2]}" in
+      gateway_credential_path=*)
+        gateway_credential_path="''${policy_lines[2]#gateway_credential_path=}"
+        ;;
+      *) gateway_fail "policy descriptor is missing gateway_credential_path" ;;
+    esac
+    case "''${policy_lines[3]}" in
+      gateway_marker_path=*)
+        gateway_marker_path="''${policy_lines[3]#gateway_marker_path=}"
+        ;;
+      *) gateway_fail "policy descriptor is missing gateway_marker_path" ;;
+    esac
+    case "$gateway_mode" in
+      basic)
+        ${pkgs.coreutils}/bin/printf '%s\n' "$gateway_credential_path" \
+          | ${pkgs.gnugrep}/bin/grep -Eq \
+            '^/[A-Za-z0-9._+-]+(/[A-Za-z0-9._+-]+)*$' \
+          || gateway_fail "Basic policy has an invalid credential path"
+        ;;
+      insecure)
+        ${pkgs.coreutils}/bin/test "$gateway_credential_path" = "-" \
+          || gateway_fail "insecure policy must not name a credential"
+        ;;
+      *)
+        gateway_fail "policy descriptor has an invalid mode"
+        ;;
+    esac
+    ${pkgs.coreutils}/bin/printf '%s\n' "$gateway_marker_path" \
+      | ${pkgs.gnugrep}/bin/grep -Eq \
+        '^/run/cratedigger-web/gateway-policy-[0-9a-f]{64}$' \
+      || gateway_fail "policy descriptor has an invalid marker path"
+    gateway_policy_sha256="$(
+      ${pkgs.coreutils}/bin/sha256sum \
+        ${lib.escapeShellArg webGatewayPolicyFile} \
+        | ${pkgs.coreutils}/bin/cut -d ' ' -f 1
+    )"
+  '';
+  webGatewayAssertPolicyUnchanged = ''
+    current_policy_sha256="$(
+      ${pkgs.coreutils}/bin/sha256sum \
+        ${lib.escapeShellArg webGatewayPolicyFile} \
+        | ${pkgs.coreutils}/bin/cut -d ' ' -f 1
+    )"
+    ${pkgs.coreutils}/bin/test \
+      "$current_policy_sha256" = "$gateway_policy_sha256" \
+      || gateway_fail "policy descriptor changed during validation"
+  '';
+  webGatewayFingerprintCredential = ''
+    if ${pkgs.coreutils}/bin/test "$gateway_mode" = basic; then
+      gateway_credential_sha256="$(
+        ${pkgs.coreutils}/bin/sha256sum -- "$gateway_credential_path" \
+          | ${pkgs.coreutils}/bin/cut -d ' ' -f 1
+      )"
+    else
+      gateway_credential_sha256=-
+    fi
+  '';
+  webGatewayWriteReloadReceipt = ''
+    receipt_temp="$(
+      ${pkgs.coreutils}/bin/mktemp \
+        ${lib.escapeShellArg "${webGatewayReloadReceipt}.XXXXXX"}
+    )"
+    trap '${pkgs.coreutils}/bin/rm -f -- "$receipt_temp"' EXIT
+    ${pkgs.coreutils}/bin/chown root:root "$receipt_temp"
+    ${pkgs.coreutils}/bin/chmod 0600 "$receipt_temp"
+    ${pkgs.coreutils}/bin/printf \
+      '%s\n' \
+      "format=1" \
+      "policy_sha256=$gateway_policy_sha256" \
+      "gateway_mode=$gateway_mode" \
+      "gateway_credential_path=$gateway_credential_path" \
+      "gateway_credential_sha256=$gateway_credential_sha256" \
+      "gateway_marker_path=$gateway_marker_path" \
+      > "$receipt_temp"
+    ${pkgs.coreutils}/bin/mv -T \
+      "$receipt_temp" \
+      ${lib.escapeShellArg webGatewayReloadReceipt}
+    trap - EXIT
+  '';
+  webGatewayReadReloadReceipt = ''
+    receipt_lines=()
+    mapfile -t receipt_lines < ${lib.escapeShellArg webGatewayReloadReceipt} \
+      || gateway_fail "cannot read the reload receipt"
+    ${pkgs.coreutils}/bin/test "''${#receipt_lines[@]}" = 6 \
+      || gateway_fail "reload receipt must contain exactly six lines"
+    ${pkgs.coreutils}/bin/test "''${receipt_lines[0]}" = "format=1" \
+      || gateway_fail "reload receipt has an unsupported format"
+    case "''${receipt_lines[1]}" in
+      policy_sha256=*)
+        receipt_policy_sha256="''${receipt_lines[1]#policy_sha256=}"
+        ;;
+      *) gateway_fail "reload receipt is missing policy_sha256" ;;
+    esac
+    case "''${receipt_lines[2]}" in
+      gateway_mode=*)
+        receipt_gateway_mode="''${receipt_lines[2]#gateway_mode=}"
+        ;;
+      *) gateway_fail "reload receipt is missing gateway_mode" ;;
+    esac
+    case "''${receipt_lines[3]}" in
+      gateway_credential_path=*)
+        receipt_gateway_credential_path="''${receipt_lines[3]#gateway_credential_path=}"
+        ;;
+      *) gateway_fail "reload receipt is missing gateway_credential_path" ;;
+    esac
+    case "''${receipt_lines[4]}" in
+      gateway_credential_sha256=*)
+        receipt_gateway_credential_sha256="''${receipt_lines[4]#gateway_credential_sha256=}"
+        ;;
+      *) gateway_fail "reload receipt is missing credential fingerprint" ;;
+    esac
+    case "''${receipt_lines[5]}" in
+      gateway_marker_path=*)
+        receipt_gateway_marker_path="''${receipt_lines[5]#gateway_marker_path=}"
+        ;;
+      *) gateway_fail "reload receipt is missing gateway_marker_path" ;;
+    esac
+    ${pkgs.coreutils}/bin/printf '%s\n' "$receipt_policy_sha256" \
+      | ${pkgs.gnugrep}/bin/grep -Eq '^[0-9a-f]{64}$' \
+      || gateway_fail "reload receipt has an invalid policy fingerprint"
+    case "$receipt_gateway_credential_sha256" in
+      -) ;;
+      *)
+        ${pkgs.coreutils}/bin/printf \
+          '%s\n' "$receipt_gateway_credential_sha256" \
+          | ${pkgs.gnugrep}/bin/grep -Eq '^[0-9a-f]{64}$' \
+          || gateway_fail \
+            "reload receipt has an invalid credential fingerprint"
+        ;;
+    esac
   '';
   webGatewayPublishMarker = ''
     ${pkgs.coreutils}/bin/install \
@@ -469,15 +634,19 @@
       -o root \
       -g ${lib.escapeShellArg cfg.web.accessGroup} \
       /dev/null \
-      ${lib.escapeShellArg webGatewayActiveMarker}
+      "$gateway_marker_path"
   '';
   webGatewayStartScript = pkgs.writeShellScript "cratedigger-web-gateway-start" ''
     set -euo pipefail
 
     ${webGatewayClearMarkers}
-    ${optionalString webBasicEnabled ''
-      ${webBasicAuthValidationScript}
-    ''}
+    ${pkgs.coreutils}/bin/rm -f -- \
+      ${lib.escapeShellArg webGatewayReloadReceipt}
+    ${webGatewayReadPolicy}
+    if ${pkgs.coreutils}/bin/test "$gateway_mode" = basic; then
+      ${webBasicAuthValidationScript} "$gateway_credential_path"
+    fi
+    ${webGatewayAssertPolicyUnchanged}
     ${webGatewayPublishMarker}
   '';
   webGatewayReloadPrepareScript = pkgs.writeShellScript "cratedigger-web-gateway-prepare-reload" ''
@@ -487,18 +656,54 @@
     # workers keep checking their own policy-specific marker, so publishing
     # the new policy after HUP cannot reopen a stale authentication policy.
     ${webGatewayClearMarkers}
-    ${optionalString webBasicEnabled ''
-      ${webBasicAuthValidationScript}
-    ''}
+    ${pkgs.coreutils}/bin/rm -f -- \
+      ${lib.escapeShellArg webGatewayReloadReceipt}
+    ${webGatewayReadPolicy}
+    if ${pkgs.coreutils}/bin/test "$gateway_mode" = basic; then
+      ${webBasicAuthValidationScript} "$gateway_credential_path"
+    fi
+    ${webGatewayFingerprintCredential}
+    ${webGatewayAssertPolicyUnchanged}
+    ${webGatewayWriteReloadReceipt}
   '';
   webGatewayReloadFinishScript = pkgs.writeShellScript "cratedigger-web-gateway-finish-reload" ''
     set -euo pipefail
 
+    reload_receipt=${lib.escapeShellArg webGatewayReloadReceipt}
+    trap '${pkgs.coreutils}/bin/rm -f -- "$reload_receipt"' EXIT
+    ${webGatewayReadPolicy}
+    ${webGatewayReadReloadReceipt}
+    ${pkgs.coreutils}/bin/test \
+      "$gateway_policy_sha256" = "$receipt_policy_sha256" \
+      || gateway_fail "policy descriptor differs from the validated receipt"
+    ${pkgs.coreutils}/bin/test \
+      "$gateway_mode" = "$receipt_gateway_mode" \
+      || gateway_fail "policy mode differs from the validated receipt"
+    ${pkgs.coreutils}/bin/test \
+      "$gateway_credential_path" = "$receipt_gateway_credential_path" \
+      || gateway_fail \
+        "credential path differs from the validated receipt"
+    ${pkgs.coreutils}/bin/test \
+      "$gateway_marker_path" = "$receipt_gateway_marker_path" \
+      || gateway_fail "marker path differs from the validated receipt"
+    if ${pkgs.coreutils}/bin/test "$gateway_mode" = basic; then
+      ${webBasicAuthValidationScript} "$gateway_credential_path"
+    fi
+    ${webGatewayFingerprintCredential}
+    ${pkgs.coreutils}/bin/test \
+      "$gateway_credential_sha256" \
+      = "$receipt_gateway_credential_sha256" \
+      || gateway_fail "credential changed after reload validation"
+    ${webGatewayAssertPolicyUnchanged}
     # systemd runs this only after nginx's config test and HUP both succeed.
-    # Publish only this generation's policy-specific marker. An invalid
-    # credential or nginx reload leaves every policy marker absent, while
-    # stale workers cannot observe the new generation's marker.
+    # Publish only the receipt-bound policy marker when the current descriptor
+    # and credential remain byte-identical to what reload preparation
+    # validated. Any overlap or invalid replacement leaves every marker absent.
+    gateway_marker_path="$receipt_gateway_marker_path"
     ${webGatewayPublishMarker}
+    ${pkgs.coreutils}/bin/rm -f -- \
+      ${lib.escapeShellArg webGatewayReloadReceipt}
+    trap - EXIT
   '';
   webNginxUserExtraGroups =
     config.users.users.${config.services.nginx.user}.extraGroups or [];
@@ -1851,6 +2056,14 @@ in {
         message = "services.cratedigger.web basicAuthFile and enableInsecure are mutually exclusive.";
       }
       {
+        assertion = !cfg.web.enable || config.services.nginx.enableReload;
+        message = "services.cratedigger.web requires services.nginx.enableReload = true so authentication-policy changes fail closed without stopping unrelated nginx virtual hosts.";
+      }
+      {
+        assertion = !cfg.web.enable || config.systemd.services.nginx.restartIfChanged;
+        message = "services.cratedigger.web requires systemd.services.nginx.restartIfChanged = true so the first authenticated enable and service-identity changes restart nginx to acquire the module-owned socket group.";
+      }
+      {
         assertion = !cfg.web.enable || webHostNameIsValid;
         message = "services.cratedigger.web.hostName must be a lowercase canonical DNS hostname, not an IP literal.";
       }
@@ -1911,6 +2124,10 @@ in {
     ];
 
     environment.systemPackages = [pipelineCli pipelineMigrate importerPkg previewWorkerPkg youtubeIngestWorkerPkg cratediggerBeet pkgs.postgresql];
+    environment.etc."cratedigger/web-gateway-policy" = mkIf cfg.web.enable {
+      text = webGatewayPolicyText;
+      mode = "0444";
+    };
 
     users.users = lib.mkMerge [
       (mkIf (cfg.user != "root") {
@@ -2015,6 +2232,7 @@ in {
     };
 
     services.nginx.enable = mkIf cfg.web.enable true;
+    services.nginx.enableReload = mkIf cfg.web.enable (lib.mkDefault true);
     services.nginx.virtualHosts = mkIf cfg.web.enable {
       cratedigger-auth-gateway = {
         serverName = webHostName;
@@ -2072,7 +2290,15 @@ in {
     # around nginx start/reload.
     systemd.services.nginx = mkIf cfg.web.enable {
       after = ["cratedigger-web.socket"];
-      requires = ["cratedigger-web.socket"];
+      # The socket unit is activation-managed and may be stopped/restarted by
+      # switch-to-configuration even when its effective definition is
+      # unchanged. A hard Requires= edge propagates that transient stop to the
+      # shared nginx master, defeating reload-only authentication-policy
+      # changes and taking unrelated virtual hosts down. Wants= still brings
+      # the socket up with nginx; the application retains the hard Requires=
+      # boundary and nginx returns an ordinary upstream failure during any
+      # brief socket transition.
+      wants = ["cratedigger-web.socket"];
       serviceConfig = lib.mkMerge [
         {
           SupplementaryGroups = [cfg.web.accessGroup];
@@ -2382,7 +2608,10 @@ in {
         Group = cfg.group;
         SupplementaryGroups = [cfg.web.accessGroup];
         ExecStartPre =
-          optional webBasicEnabled "+${webBasicAuthValidationScript}"
+          optional webBasicEnabled (
+            "+${webBasicAuthValidationScript} "
+            + lib.escapeShellArg webBasicAuthConfiguredPath
+          )
           ++ optional
             webBasicEnabled
             webApplicationCredentialIsolationScript

@@ -154,6 +154,12 @@ claim that doc2 currently runs this chain:
   a query: a bare dependency-free `204`. The runtime `htpasswd` target must
   remain outside `/nix/store`, exactly `root:<nginx-group> 0440`, readable by
   nginx and denied to the application and non-nginx socket identities.
+- Authentication-policy changes use nginx's reload path. Cratedigger readiness
+  is cleared before validation and republished only from a root-only receipt
+  when the module-owned policy descriptor and same-path credential remain
+  byte-identical through nginx's config test and HUP. Invalid replacement
+  material therefore leaves Cratedigger at `503` while the existing nginx
+  master and unrelated virtual hosts remain available.
 - nginx disables wholesale request-header forwarding and reconstructs the
   reviewed application request. Basic credentials, cookies, bearer/session
   tokens, forwarded identity/roles/groups, connection/framing headers, and
@@ -176,7 +182,8 @@ InvocationID, public Basic and anonymous-health probes, application
 credential/header non-observation, Unix listener/permission/unauthorized-user
 proof, browser same-origin proof, insecure-mode absence on doc2, a natural
 successor pipeline cycle, and a separate atomic sops-backed bcrypt credential
-rotation proving the replacement succeeds while the old credential is denied.
+rotation proving the nginx and web service identities remain stable, the
+replacement succeeds, and the old credential is denied.
 Only the post-live audit update may mark CD-SEC-02 complete.
 
 ### CD-SEC-14 — Destructive routes do not bind identifiers to one release (Critical)
