@@ -14,6 +14,7 @@ import logging
 import os
 import subprocess as sp
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -58,7 +59,15 @@ from lib.dispatch.types import (
     PostCommitCleanup,
     QualityGateFn,
 )
-from lib.import_queue import IMPORT_JOB_AUTOMATION
+from lib.import_execution import (
+    CancellationToken,
+    ExecutionCancelled,
+    ExecutionLeaseSnapshot,
+    OwnerSessionIdentity,
+    ProcessIdentity,
+    checkpoint_automation_owner,
+    read_process_start_ticks,
+)
 from lib.processing_paths import normalize_source_dirs
 from lib.quality import (
     AlbumQualityEvidenceDecisionFacts,
@@ -87,6 +96,440 @@ if TYPE_CHECKING:
     from lib.quality import SpectralDetail
 
 logger = logging.getLogger("cratedigger")
+
+
+@dataclass(frozen=True)
+class _RejectionDetail:
+    scenario: str
+    detail: str | None
+    error: str | None
+    duplicate_guard_path: str | None = None
+    duplicate_guard_staging_dir: str | None = None
+
+
+def _describe_rejection(
+    *,
+    decision: str,
+    import_result: ImportResult,
+    label: str,
+    mode: str,
+    path: str,
+    request_id: int,
+    cfg: CratediggerConfig | None,
+    new_bitrate: int | None,
+    previous_bitrate: int | None,
+) -> _RejectionDetail:
+    """Resolve the persisted rejection description and duplicate-guard plan."""
+    duplicate_guard_path: str | None = None
+    duplicate_guard_staging_dir: str | None = None
+    if decision == "downgrade":
+        scenario = "quality_downgrade"
+        detail = f"new {new_bitrate}kbps <= existing {previous_bitrate}kbps"
+        logger.warning("QUALITY DOWNGRADE PREVENTED: %s", label)
+    elif decision == "transcode_downgrade":
+        scenario = "transcode_downgrade"
+        detail = (
+            f"transcode {new_bitrate}kbps <= existing {previous_bitrate}kbps"
+        )
+        logger.warning(
+            "TRANSCODE REJECTED: %s at %skbps — not an upgrade",
+            label,
+            new_bitrate,
+        )
+    elif decision == "suspect_lossless_downgrade":
+        scenario = "suspect_lossless_downgrade"
+        candidate_avg = (
+            import_result.v0_probe.avg_bitrate_kbps
+            if import_result.v0_probe
+            else None
+        )
+        existing_avg = (
+            import_result.existing_v0_probe.avg_bitrate_kbps
+            if import_result.existing_v0_probe
+            else None
+        )
+        detail = (
+            f"lossless-source V0 avg {candidate_avg}kbps "
+            f"<= existing source V0 avg {existing_avg}kbps within tolerance"
+        )
+        logger.warning(
+            "SUSPECT LOSSLESS REJECTED: %s candidate_v0_avg=%s "
+            "existing_v0_avg=%s",
+            label,
+            candidate_avg,
+            existing_avg,
+        )
+    elif decision == "suspect_lossless_probe_missing":
+        scenario = "suspect_lossless_probe_missing"
+        detail = import_result.error or (
+            "suspect lossless source lacks comparable V0 probe"
+        )
+        logger.warning(
+            "SUSPECT LOSSLESS REJECTED: %s missing comparable V0 probe",
+            label,
+        )
+    elif decision == "lossless_source_locked":
+        scenario = "lossless_source_locked"
+        existing_avg = (
+            import_result.existing_v0_probe.avg_bitrate_kbps
+            if import_result.existing_v0_probe
+            else None
+        )
+        detail = import_result.error or (
+            "lossy candidate cannot override existing lossless-source "
+            f"V0 probe {existing_avg}kbps"
+        )
+        logger.warning(
+            "LOSSLESS SOURCE LOCKED: %s existing_v0_avg=%skbps",
+            label,
+            existing_avg,
+        )
+    elif decision == "duplicate_remove_guard_failed":
+        scenario = "duplicate_remove_guard_failed"
+        detail = _guard_failure_detail(import_result)
+        duplicate_guard_path = path
+        duplicate_guard_staging_dir = (
+            cfg.beets_staging_dir
+            if cfg is not None and cfg.beets_staging_dir
+            else os.path.dirname(os.path.abspath(path))
+        )
+        guard = import_result.postflight.duplicate_remove_guard
+        if guard is not None:
+            logger.error(
+                "DUPLICATE REMOVE GUARD: request_id=%s target=%s:%s "
+                "duplicates=%s candidates=%s",
+                request_id,
+                guard.target_source or "unknown",
+                guard.target_release_id,
+                guard.duplicate_count,
+                [
+                    {
+                        "beets_album_id": candidate.beets_album_id,
+                        "mb_albumid": candidate.mb_albumid,
+                        "discogs_albumid": candidate.discogs_albumid,
+                        "album_path": candidate.album_path,
+                        "item_count": candidate.item_count,
+                    }
+                    for candidate in guard.candidates
+                ],
+            )
+    else:
+        scenario = decision or "import_error"
+        detail = import_result.error
+        logger.error(
+            "%s FAILED: %s (decision=%s, error=%s)",
+            mode,
+            label,
+            decision,
+            import_result.error,
+        )
+    error = (
+        import_result.error
+        if decision
+        not in {
+            "downgrade",
+            "transcode_downgrade",
+            "suspect_lossless_downgrade",
+            "suspect_lossless_probe_missing",
+            "lossless_source_locked",
+        }
+        else None
+    )
+    return _RejectionDetail(
+        scenario=scenario,
+        detail=detail,
+        error=error,
+        duplicate_guard_path=duplicate_guard_path,
+        duplicate_guard_staging_dir=duplicate_guard_staging_dir,
+    )
+
+
+def _resolve_rejection_override(
+    db: PipelineDB,
+    *,
+    request_id: int,
+    decision: str,
+    dl_info: DownloadInfo,
+    import_result: ImportResult,
+    cfg: CratediggerConfig | None,
+) -> tuple[str | None, str | None]:
+    """Resolve a post-rejection search override without failing dispatch."""
+    current_override: str | None = None
+    narrowed_override: str | None = None
+    if decision in {"downgrade", "transcode_downgrade"}:
+        try:
+            request = db.get_request(request_id)
+            current_override = (
+                request.get("search_filetype_override") if request else None
+            )
+        except Exception:  # noqa: BLE001 - optional policy lookup
+            logger.debug(
+                "Failed to inspect search_filetype_override before "
+                "downgrade reset"
+            )
+        narrowed_override = resolve_rejection_search_override(
+            decision=decision,
+            current_override=current_override,
+            dl_info=dl_info,
+            current_measurement=import_result.current_measurement,
+            spectral_evidence_source="attempt_have_audit",
+            have_spectral_audit=import_result.spectral.existing,
+            cfg=cfg.quality_ranks if cfg is not None else None,
+        ).override
+    elif decision == "lossless_source_locked":
+        try:
+            request = db.get_request(request_id)
+            current_override = (
+                request.get("search_filetype_override") if request else None
+            )
+            narrowed_override = narrow_override_on_lossless_source_lock(
+                current_override
+            )
+        except Exception:  # noqa: BLE001 - optional policy lookup
+            logger.debug(
+                "Failed to inspect search_filetype_override before "
+                "lossless_source_locked narrow"
+            )
+    return current_override, narrowed_override
+
+
+def _denylist_reason(decision: str, new_bitrate: int | None) -> str:
+    """Canonical audit reason for a post-import source denylist."""
+    if decision == "downgrade":
+        return "quality downgrade prevented"
+    if decision == "provisional_lossless_upgrade":
+        return "provisional lossless source imported"
+    if decision.startswith("suspect_lossless"):
+        return "suspect lossless source not an upgrade"
+    if decision.startswith("transcode"):
+        return f"transcode: {new_bitrate}kbps" if new_bitrate else "transcode detected"
+    if decision == "duplicate_remove_guard_failed":
+        return "duplicate remove guard failed"
+    return f"rejected: {decision}"
+
+
+def _checkpoint_automation_owner(
+    db: PipelineDB,
+    *,
+    import_job_id: int | None,
+    execution_lease: ExecutionLeaseSnapshot | None,
+    cancellation_token: CancellationToken | None,
+    owner_session_identity: OwnerSessionIdentity | None,
+) -> None:
+    """Skip force paths; otherwise delegate the exact bundle invariant."""
+    if (
+        import_job_id is None
+        or execution_lease is None
+        or cancellation_token is None
+        or owner_session_identity is None
+    ):
+        return
+    checkpoint_automation_owner(
+        db,
+        import_job_id=import_job_id,
+        execution_lease=execution_lease,
+        cancellation_token=cancellation_token,
+        owner_session_identity=owner_session_identity,
+    )
+
+
+def _validate_automation_dispatch_authority(
+    db: PipelineDB,
+    *,
+    force: bool,
+    import_job_id: int | None,
+    execution_lease: ExecutionLeaseSnapshot | None,
+    cancellation_token: CancellationToken | None,
+    owner_session_identity: OwnerSessionIdentity | None,
+) -> None:
+    """Require the complete exact-owner bundle before automation dispatch."""
+    if execution_lease is None:
+        return
+    if (
+        force
+        or cancellation_token is None
+        or owner_session_identity is None
+        or import_job_id is None
+    ):
+        raise ValueError(
+            "automation dispatch requires lease, token, pinned session, "
+            "and import job"
+        )
+    _checkpoint_automation_owner(
+        db,
+        import_job_id=import_job_id,
+        execution_lease=execution_lease,
+        cancellation_token=cancellation_token,
+        owner_session_identity=owner_session_identity,
+    )
+
+
+def _automation_runner_hooks(
+    db: PipelineDB,
+    *,
+    import_job_id: int | None,
+    execution_lease_holder: list[ExecutionLeaseSnapshot | None],
+    cancellation_token: CancellationToken | None,
+    owner_session_identity: OwnerSessionIdentity | None,
+) -> tuple[
+    CancellationToken | None,
+    Callable[[int], None] | None,
+    Callable[[], bool] | None,
+]:
+    """Build child-recording hooks around one mutable execution lease."""
+    execution_lease = execution_lease_holder[0]
+    if execution_lease is None:
+        return None, None, None
+    assert import_job_id is not None
+    assert cancellation_token is not None
+    assert owner_session_identity is not None
+
+    def record_beets_child(pid: int) -> None:
+        current_lease = execution_lease_holder[0]
+        assert current_lease is not None
+        _checkpoint_automation_owner(
+            db,
+            import_job_id=import_job_id,
+            execution_lease=current_lease,
+            cancellation_token=cancellation_token,
+            owner_session_identity=owner_session_identity,
+        )
+        start_ticks = read_process_start_ticks(pid)
+        persisted = db.record_import_job_beets_child(
+            import_job_id,
+            expected_execution_lease=current_lease,
+            beets_pid=pid,
+            beets_start_ticks=start_ticks,
+        )
+        if persisted is None:
+            cancellation_token.cancel("beets_child_identity_persist_rejected")
+            cancellation_token.raise_if_cancelled()
+        execution_lease_holder[0] = replace(
+            current_lease,
+            beets=ProcessIdentity(pid, start_ticks),
+        )
+
+    return (
+        cancellation_token,
+        record_beets_child,
+        lambda: db._probe_owner_session(owner_session_identity).live,
+    )
+
+
+def _capture_automation_completion(
+    db: PipelineDB,
+    *,
+    import_job_id: int | None,
+    request_id: int,
+    release_id: str,
+    canonical_path: str,
+    returncode: int,
+    execution_lease: ExecutionLeaseSnapshot | None,
+) -> DispatchOutcome | None:
+    """Persist one exact child completion or return the recovery outcome."""
+    if execution_lease is None:
+        return None
+    assert import_job_id is not None
+    from lib.import_job_recovery_service import AutomationCompletionReceipt
+
+    captured = db.capture_automation_import_completion(
+        import_job_id,
+        expected_execution_lease=execution_lease,
+        receipt=AutomationCompletionReceipt(
+            job_id=import_job_id,
+            request_id=request_id,
+            release_id=release_id,
+            canonical_path=canonical_path,
+            returncode=returncode,
+            captured_at=datetime.now(UTC).isoformat(),
+        ),
+    )
+    if captured is not None:
+        return None
+    return DispatchOutcome(
+        success=False,
+        message=(
+            "Beets returned but exact completion capture conflicted; "
+            "operator recovery is required"
+        ),
+        code="beets_acknowledgement_ambiguous",
+    )
+
+
+def _should_cleanup_action_file(
+    *,
+    quality_evidence_action_file: str | None,
+    beets_launch_authorized: bool,
+    execution_lease: ExecutionLeaseSnapshot | None,
+    automation_completion_captured: bool,
+) -> bool:
+    """Whether this execution still owns cleanup of its action sidecar."""
+    return (
+        quality_evidence_action_file is not None
+        and (
+            not beets_launch_authorized
+            or execution_lease is None
+            or automation_completion_captured
+        )
+    )
+
+
+def _trigger_post_import_notifiers(
+    cfg: CratediggerConfig,
+    db: PipelineDB,
+    *,
+    import_result: ImportResult,
+    request_id: int,
+    import_job_id: int | None,
+    execution_lease: ExecutionLeaseSnapshot | None,
+    cancellation_token: CancellationToken | None,
+    owner_session_identity: OwnerSessionIdentity | None,
+) -> None:
+    """Capture historical pins, then refresh both configured media servers."""
+    from lib.util import trigger_jellyfin_scan as trigger_jellyfin
+    from lib.util import trigger_plex_scan as trigger_plex
+
+    _checkpoint_automation_owner(
+        db,
+        import_job_id=import_job_id,
+        execution_lease=execution_lease,
+        cancellation_token=cancellation_token,
+        owner_session_identity=owner_session_identity,
+    )
+    imported_path = import_result.postflight.imported_path
+    plex_original_added_at: int | None = None
+    try:
+        from lib.plex_pin_service import capture_plex_added_at_pin
+
+        plex_pin = capture_plex_added_at_pin(
+            cfg,
+            db,
+            imported_path,
+            request_id,
+        )
+        plex_original_added_at = plex_pin.original_added_at
+    except Exception:
+        logger.exception("PLEX PIN: capture wiring failed (non-fatal)")
+    trigger_plex(cfg, imported_path)
+
+    try:
+        from lib.jellyfin_pin_service import capture_jellyfin_date_created_pin
+
+        capture_jellyfin_date_created_pin(
+            cfg,
+            db,
+            imported_path,
+            request_id,
+            historical_added_at=plex_original_added_at,
+            replaced_album_paths=[
+                candidate.album_path
+                for candidate in import_result.postflight.replaced_albums
+                if candidate.album_path
+            ],
+        )
+    except Exception:
+        logger.exception("JELLYFIN PIN: capture wiring failed (non-fatal)")
+    trigger_jellyfin(cfg, imported_path)
 
 
 def _resolve_dispatch_beets_paths(
@@ -145,6 +588,9 @@ def dispatch_import_core(
     ] | None = None,
     beets_library_db_path: str | None = None,
     beets_library_root: str | None = None,
+    execution_lease: ExecutionLeaseSnapshot | None = None,
+    cancellation_token: CancellationToken | None = None,
+    owner_session_identity: OwnerSessionIdentity | None = None,
 ) -> DispatchOutcome:
     """Core import dispatch — takes plain params + PipelineDB directly.
 
@@ -158,9 +604,6 @@ def dispatch_import_core(
     Used by the auto-import flow in ``lib.download`` and by
     ``dispatch_import_from_db()`` (force-import).
     """
-    from lib.util import trigger_jellyfin_scan as _trigger_jellyfin
-    from lib.util import trigger_plex_scan as _trigger_plex
-
     source_dirs = normalize_source_dirs(source_dirs or [])
     from lib.config import read_runtime_config
 
@@ -194,6 +637,18 @@ def dispatch_import_core(
     post_commit_duplicate_guard_path: str | None = None
     post_commit_duplicate_guard_staging_dir: str | None = None
     beets_launch_authorized = False
+    automation_completion_captured = False
+    active_execution_lease = execution_lease
+    execution_lease_holder = [execution_lease]
+
+    _validate_automation_dispatch_authority(
+        db,
+        force=force,
+        import_job_id=candidate_import_job_id,
+        execution_lease=active_execution_lease,
+        cancellation_token=cancellation_token,
+        owner_session_identity=owner_session_identity,
+    )
 
     # Acquire the RELEASE (per-MBID) advisory lock for the duration of
     # the ``import_one.py`` subprocess. This is the funnel every path
@@ -264,6 +719,13 @@ def dispatch_import_core(
             # ``dispatch_import_from_db``; no state change needed
             # because the request wasn't ``downloading`` to begin
             # with.
+            if execution_lease is not None:
+                return _requeue_import_job_to_preview(
+                    db,
+                    import_job_id=candidate_import_job_id,
+                    reason="release lock contention",
+                    expected_execution_lease=active_execution_lease,
+                )
             return DispatchOutcome(
                 success=False,
                 message=("Another import is already in progress for "
@@ -325,6 +787,7 @@ def dispatch_import_core(
                         db,
                         import_job_id=candidate_import_job_id,
                         reason=reason,
+                        expected_execution_lease=active_execution_lease,
                     )
             if (
                 evidence_gate.candidate is not None
@@ -393,6 +856,7 @@ def dispatch_import_core(
                     db,
                     import_job_id=candidate_import_job_id,
                     reason=reason or "missing",
+                    expected_execution_lease=active_execution_lease,
                 )
             if evidence_gate.candidate is not None:
                 # U11: ``full_pipeline_decision_from_evidence`` is the single
@@ -512,6 +976,7 @@ def dispatch_import_core(
                 request_id=request_id,
                 release_id=mb_release_id,
                 source_path=launch_authority_path or path,
+                expected_execution_lease=active_execution_lease,
             )
             if authorized_job is None:
                 return DispatchOutcome(
@@ -524,38 +989,6 @@ def dispatch_import_core(
                 )
             beets_launch_authorized = True
 
-            # Mark the subprocess as launching on the auto-import path
-            # so the resume guard can distinguish "never started" from
-            # "may have written to beets" if this process crashes
-            # before recording the result. The DB-side method is a
-            # no-op when ``active_download_state`` is NULL (force-import
-            # path), so calling unconditionally would also be
-            # safe — we still gate to make the intent explicit.
-            # See ``docs/advisory-locks.md`` and
-            # ``lib/download.py::_import_subprocess_already_started``.
-            if authorized_job.job_type == IMPORT_JOB_AUTOMATION:
-                try:
-                    stamped = db.mark_import_subprocess_started(
-                        request_id,
-                        datetime.now(UTC).isoformat(),
-                    )
-                except Exception:
-                    logger.exception(
-                        "Failed to stamp import_subprocess_started_at "
-                        "for request %s; deferring before subprocess launch",
-                        request_id,
-                    )
-                    return DispatchOutcome(
-                        success=False,
-                        message="Could not claim request before import launch",
-                        deferred=True,
-                    )
-                if not stamped:
-                    return DispatchOutcome(
-                        success=False,
-                        message="Request state changed before import launch",
-                        deferred=True,
-                    )
             # Force-import operates on the user's only copy of the source
             # material (typically failed_imports/…). Tell the harness to keep
             # lossless originals intact until the quality decision — on
@@ -564,6 +997,17 @@ def dispatch_import_core(
             # /Incoming and does not need the flag.
             quality_rank_config_json = (
                 cfg.quality_ranks.to_json() if cfg is not None else None
+            )
+            (
+                runner_cancellation_token,
+                runner_on_spawn,
+                runner_owner_session_probe,
+            ) = _automation_runner_hooks(
+                db,
+                import_job_id=candidate_import_job_id,
+                execution_lease_holder=execution_lease_holder,
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
             )
             if run_import_fn is None:
                 run = run_import_one(
@@ -581,6 +1025,9 @@ def dispatch_import_core(
                     beets_python=beets_cfg.beets_python,
                     beets_library_db_path=effective_beets_library_db_path,
                     beets_library_root=effective_beets_library_root,
+                    cancellation_token=runner_cancellation_token,
+                    on_spawn=runner_on_spawn,
+                    owner_session_probe=runner_owner_session_probe,
                 )
             else:
                 run = run_import_fn(
@@ -598,7 +1045,30 @@ def dispatch_import_core(
                     beets_python=beets_cfg.beets_python,
                     beets_library_db_path=effective_beets_library_db_path,
                     beets_library_root=effective_beets_library_root,
+                    cancellation_token=runner_cancellation_token,
+                    on_spawn=runner_on_spawn,
+                    owner_session_probe=runner_owner_session_probe,
                 )
+            active_execution_lease = execution_lease_holder[0]
+            _checkpoint_automation_owner(
+                db,
+                import_job_id=candidate_import_job_id,
+                execution_lease=active_execution_lease,
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
+            )
+            completion_conflict = _capture_automation_completion(
+                db,
+                import_job_id=candidate_import_job_id,
+                request_id=request_id,
+                release_id=mb_release_id,
+                canonical_path=launch_authority_path or path,
+                returncode=run.returncode,
+                execution_lease=active_execution_lease,
+            )
+            if completion_conflict is not None:
+                return completion_conflict
+            automation_completion_captured = active_execution_lease is not None
             _remove_quality_evidence_action_file(quality_evidence_action_file)
             quality_evidence_action_file = None
             for line in run.stderr.strip().split("\n"):
@@ -674,6 +1144,13 @@ def dispatch_import_core(
                     if isinstance(pending, PendingImportTerminalOutcome):
                         terminal_outcome = pending
                     try:
+                        _checkpoint_automation_owner(
+                            db,
+                            import_job_id=candidate_import_job_id,
+                            execution_lease=active_execution_lease,
+                            cancellation_token=cancellation_token,
+                            owner_session_identity=owner_session_identity,
+                        )
                         post_import_evidence = _refresh_current_evidence_after_import(
                             db,
                             request_id=request_id,
@@ -686,6 +1163,8 @@ def dispatch_import_core(
                             beets_library_db_path=effective_beets_library_db_path,
                             beets_library_root=effective_beets_library_root,
                         )
+                    except ExecutionCancelled:
+                        raise
                     except Exception as exc:
                         logger.exception(
                             "Failed to refresh current quality evidence "
@@ -698,6 +1177,13 @@ def dispatch_import_core(
                             f"{type(exc).__name__}: {exc}",
                         )
                     try:
+                        _checkpoint_automation_owner(
+                            db,
+                            import_job_id=candidate_import_job_id,
+                            execution_lease=active_execution_lease,
+                            cancellation_token=cancellation_token,
+                            owner_session_identity=owner_session_identity,
+                        )
                         _write_album_sidecar_after_import(
                             db,
                             request_id=request_id,
@@ -706,6 +1192,8 @@ def dispatch_import_core(
                             beets_library_db_path=effective_beets_library_db_path,
                             beets_library_root=effective_beets_library_root,
                         )
+                    except ExecutionCancelled:
+                        raise
                     except Exception:
                         logger.exception(
                             "Failed to write verified-lossless sidecar "
@@ -733,139 +1221,37 @@ def dispatch_import_core(
                     outcome_success = True
                     outcome_message = "Import successful"
                 elif action.record_rejection:
-                    if decision == "downgrade":
-                        fail_scenario = "quality_downgrade"
-                        fail_detail: str | None = (f"new {new_br}kbps "
-                                                   f"<= existing {prev_br}kbps")
-                        logger.warning(f"QUALITY DOWNGRADE PREVENTED: {label}")
-                    elif decision == "transcode_downgrade":
-                        fail_scenario = "transcode_downgrade"
-                        fail_detail = (f"transcode {new_br}kbps "
-                                       f"<= existing {prev_br}kbps")
-                        logger.warning(f"TRANSCODE REJECTED: {label} "
-                                       f"at {new_br}kbps — not an upgrade")
-                    elif decision == "suspect_lossless_downgrade":
-                        fail_scenario = "suspect_lossless_downgrade"
-                        candidate_avg = (
-                            ir.v0_probe.avg_bitrate_kbps
-                            if ir.v0_probe else None
-                        )
-                        existing_avg = (
-                            ir.existing_v0_probe.avg_bitrate_kbps
-                            if ir.existing_v0_probe else None
-                        )
-                        fail_detail = (
-                            f"lossless-source V0 avg {candidate_avg}kbps "
-                            f"<= existing source V0 avg {existing_avg}kbps "
-                            "within tolerance"
-                        )
-                        logger.warning(
-                            f"SUSPECT LOSSLESS REJECTED: {label} "
-                            f"candidate_v0_avg={candidate_avg} "
-                            f"existing_v0_avg={existing_avg}")
-                    elif decision == "suspect_lossless_probe_missing":
-                        fail_scenario = "suspect_lossless_probe_missing"
-                        fail_detail = ir.error or (
-                            "suspect lossless source lacks comparable V0 probe"
-                        )
-                        logger.warning(
-                            f"SUSPECT LOSSLESS REJECTED: {label} "
-                            "missing comparable V0 probe")
-                    elif decision == "lossless_source_locked":
-                        fail_scenario = "lossless_source_locked"
-                        existing_avg = (
-                            ir.existing_v0_probe.avg_bitrate_kbps
-                            if ir.existing_v0_probe else None
-                        )
-                        fail_detail = ir.error or (
-                            f"lossy candidate cannot override existing "
-                            f"lossless-source V0 probe {existing_avg}kbps"
-                        )
-                        logger.warning(
-                            f"LOSSLESS SOURCE LOCKED: {label} "
-                            f"existing_v0_avg={existing_avg}kbps")
-                    elif decision == "duplicate_remove_guard_failed":
-                        fail_scenario = "duplicate_remove_guard_failed"
-                        fail_detail = _guard_failure_detail(ir)
-                        post_commit_duplicate_guard_path = path
-                        post_commit_duplicate_guard_staging_dir = (
-                            cfg.beets_staging_dir
-                            if cfg is not None and cfg.beets_staging_dir
-                            else os.path.dirname(os.path.abspath(path))
-                        )
-                        guard = ir.postflight.duplicate_remove_guard
-                        if guard is not None:
-                            logger.error(
-                                "DUPLICATE REMOVE GUARD: request_id=%s "
-                                "target=%s:%s duplicates=%s candidates=%s",
-                                request_id,
-                                guard.target_source or "unknown",
-                                guard.target_release_id,
-                                guard.duplicate_count,
-                                [
-                                    {
-                                        "beets_album_id": c.beets_album_id,
-                                        "mb_albumid": c.mb_albumid,
-                                        "discogs_albumid": c.discogs_albumid,
-                                        "album_path": c.album_path,
-                                        "item_count": c.item_count,
-                                    }
-                                    for c in guard.candidates
-                                ],
-                            )
-                    else:
-                        fail_scenario = decision or "import_error"
-                        fail_detail = ir.error
-                        logger.error(f"{mode} FAILED: {label} "
-                                     f"(decision={decision}, error={ir.error})")
-                    fail_error = (
-                        ir.error
-                        if decision not in (
-                            "downgrade",
-                            "transcode_downgrade",
-                            "suspect_lossless_downgrade",
-                            "suspect_lossless_probe_missing",
-                            "lossless_source_locked",
-                        )
-                        else None
+                    rejection = _describe_rejection(
+                        decision=decision,
+                        import_result=ir,
+                        label=label,
+                        mode=mode,
+                        path=path,
+                        request_id=request_id,
+                        cfg=cfg,
+                        new_bitrate=new_br,
+                        previous_bitrate=prev_br,
+                    )
+                    fail_scenario = rejection.scenario
+                    fail_detail = rejection.detail
+                    fail_error = rejection.error
+                    post_commit_duplicate_guard_path = (
+                        rejection.duplicate_guard_path
+                    )
+                    post_commit_duplicate_guard_staging_dir = (
+                        rejection.duplicate_guard_staging_dir
                     )
 
-                    if decision in ("downgrade", "transcode_downgrade"):
-                        try:
-                            req_row = db.get_request(request_id)
-                            current_override = req_row.get("search_filetype_override") if req_row else None
-                        except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
-                            logger.debug(
-                                "Failed to inspect search_filetype_override before downgrade reset")
-                        narrowed_override = resolve_rejection_search_override(
+                    current_override, narrowed_override = (
+                        _resolve_rejection_override(
+                            db,
+                            request_id=request_id,
                             decision=decision,
-                            current_override=current_override,
                             dl_info=dl_info,
-                            current_measurement=ir.current_measurement,
-                            spectral_evidence_source="attempt_have_audit",
-                            have_spectral_audit=ir.spectral.existing,
-                            cfg=cfg.quality_ranks if cfg is not None else None,
-                        ).override
-
-                    elif decision == "lossless_source_locked":
-                        # R7 / AE2: once the library row carries a comparable
-                        # lossless-source V0 probe, no lossy candidate can
-                        # override it. Narrow the search to lossless-only so
-                        # future cycles stop re-finding lossy candidates that
-                        # would just hit the lock again. See
-                        # docs/brainstorms/2026-05-17-propagate-source-evidence-on-transcode-requirements.md
-                        try:
-                            req_row = db.get_request(request_id)
-                            current_override = (
-                                req_row.get("search_filetype_override")
-                                if req_row else None
-                            )
-                            narrowed_override = narrow_override_on_lossless_source_lock(
-                                current_override)
-                        except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
-                            logger.debug(
-                                "Failed to inspect search_filetype_override"
-                                " before lossless_source_locked narrow")
+                            import_result=ir,
+                            cfg=cfg,
+                        )
+                    )
 
                     pending = _record_rejection_and_maybe_requeue(
                         db, request_id, dl_info,
@@ -897,18 +1283,7 @@ def dispatch_import_core(
                 # Rejections use dispatch_action; retained imports use the
                 # canonical post-import reducer for the same denylist write.
                 if should_denylist:
-                    if decision == "downgrade":
-                        reason = "quality downgrade prevented"
-                    elif decision == "provisional_lossless_upgrade":
-                        reason = "provisional lossless source imported"
-                    elif decision.startswith("suspect_lossless"):
-                        reason = "suspect lossless source not an upgrade"
-                    elif decision.startswith("transcode"):
-                        reason = f"transcode: {new_br}kbps" if new_br else "transcode detected"
-                    elif decision == "duplicate_remove_guard_failed":
-                        reason = "duplicate remove guard failed"
-                    else:
-                        reason = f"rejected: {decision}"
+                    reason = _denylist_reason(decision, new_br)
                     if (decision == "duplicate_remove_guard_failed"
                             and not usernames):
                         logger.error(
@@ -970,55 +1345,16 @@ def dispatch_import_core(
                         ),
                     )
                 if action.trigger_notifiers and cfg is not None:
-                    # Capture the album's pre-upgrade Plex addedAt BEFORE the
-                    # refresh re-stamps it, so the reconciler (5-min cycle) can
-                    # restore it and keep upgrades out of "Recently Added"
-                    # (migration 040). No-op for genuinely-new albums (not yet
-                    # in Plex) and when Plex is unconfigured; best-effort.
-                    plex_original_added_at: int | None = None
-                    try:
-                        from lib.plex_pin_service import capture_plex_added_at_pin
-                        plex_pin = capture_plex_added_at_pin(
-                            cfg, db, ir.postflight.imported_path, request_id)
-                        plex_original_added_at = plex_pin.original_added_at
-                    except Exception:
-                        logger.exception(
-                            "PLEX PIN: capture wiring failed (non-fatal)")
-                    _trigger_plex(cfg, ir.postflight.imported_path)
-                    # Same capture-before-refresh dance for Jellyfin. Plex's
-                    # preserved historical value is also the floor for
-                    # Jellyfin: a prior Jellyfin rebuild must not become the
-                    # new definition of when an old album joined the library.
-                    # (migration 046, issue #574): snapshot the album's
-                    # maximum Audio DateCreated + item ids while the
-                    # pre-upgrade items still exist, so the reconciler can
-                    # clamp any forward date bump once the update lands. No-op for
-                    # genuinely-new albums and when Jellyfin is
-                    # unconfigured; best-effort.
-                    try:
-                        from lib.jellyfin_pin_service import (
-                            capture_jellyfin_date_created_pin,
-                        )
-                        capture_jellyfin_date_created_pin(
-                            cfg,
-                            db,
-                            ir.postflight.imported_path,
-                            request_id,
-                            historical_added_at=plex_original_added_at,
-                            # After a path-changing upgrade the pre-upgrade
-                            # Jellyfin items live only at the replaced beets
-                            # albums' old paths (item identity is a path
-                            # hash) — capture falls back to them.
-                            replaced_album_paths=[
-                                c.album_path
-                                for c in ir.postflight.replaced_albums
-                                if c.album_path
-                            ],
-                        )
-                    except Exception:
-                        logger.exception(
-                            "JELLYFIN PIN: capture wiring failed (non-fatal)")
-                    _trigger_jellyfin(cfg, ir.postflight.imported_path)
+                    _trigger_post_import_notifiers(
+                        cfg,
+                        db,
+                        import_result=ir,
+                        request_id=request_id,
+                        import_job_id=candidate_import_job_id,
+                        execution_lease=active_execution_lease,
+                        cancellation_token=cancellation_token,
+                        owner_session_identity=owner_session_identity,
+                    )
                 if action.cleanup and _should_cleanup_path(scenario, action):
                     # Issue #89: force-import passes the user's
                     # ``failed_imports/…`` folder as ``path`` — cleanup is
@@ -1033,6 +1369,8 @@ def dispatch_import_core(
                     # clean — their staging dir under ``/Incoming`` is
                     # disposable by design.
                     post_commit_staged_path = path
+        except ExecutionCancelled:
+            raise
         except sp.TimeoutExpired:
             logger.error(f"{mode} TIMEOUT: {label}")
             if beets_launch_authorized:
@@ -1092,8 +1430,31 @@ def dispatch_import_core(
                 terminal_outcome = pending
             outcome_message = "Unhandled exception"
         finally:
-            _remove_quality_evidence_action_file(quality_evidence_action_file)
+            cleanup_action_file = _should_cleanup_action_file(
+                quality_evidence_action_file=quality_evidence_action_file,
+                beets_launch_authorized=beets_launch_authorized,
+                execution_lease=active_execution_lease,
+                automation_completion_captured=automation_completion_captured,
+            )
+            if cleanup_action_file:
+                _checkpoint_automation_owner(
+                    db,
+                    import_job_id=candidate_import_job_id,
+                    execution_lease=active_execution_lease,
+                    cancellation_token=cancellation_token,
+                    owner_session_identity=owner_session_identity,
+                )
+                _remove_quality_evidence_action_file(
+                    quality_evidence_action_file
+                )
 
+    _checkpoint_automation_owner(
+        db,
+        import_job_id=candidate_import_job_id,
+        execution_lease=active_execution_lease,
+        cancellation_token=cancellation_token,
+        owner_session_identity=owner_session_identity,
+    )
     return DispatchOutcome(
         success=outcome_success,
         message=outcome_message,

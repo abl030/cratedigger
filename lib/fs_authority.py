@@ -333,13 +333,19 @@ def exclusive_relative_lock(root_fd: int, name: str) -> Generator[None]:
             os.close(fd)
 
 
-def rename_relative_noreplace(parent_fd: int, source: str, destination: str) -> bool:
-    """Atomically publish one relative name without replacing a destination.
+def rename_between_directories_noreplace(
+    source_parent_fd: int,
+    source: str,
+    destination_parent_fd: int,
+    destination: str,
+) -> bool:
+    """Atomically rename one child between held directories, no replacement.
 
     Linux's ``renameat2(RENAME_NOREPLACE)`` is available on every supported
     NixOS target.  ``False`` is the only recoverable race: a winner already
-    exists and callers must reopen and validate it through their held parent
-    descriptor.  Every other errno is surfaced unchanged.
+    exists. Every other errno is surfaced unchanged. Both names are resolved
+    only beneath caller-held directory descriptors; no absolute path is
+    reopened at the mutation boundary.
     """
     source_part = _parts(source)
     destination_part = _parts(destination)
@@ -358,9 +364,9 @@ def rename_relative_noreplace(parent_fd: int, source: str, destination: str) -> 
     ]
     renameat2.restype = ctypes.c_int
     result = renameat2(
-        parent_fd,
+        source_parent_fd,
         os.fsencode(source_part[0]),
-        parent_fd,
+        destination_parent_fd,
         os.fsencode(destination_part[0]),
         _RENAME_NOREPLACE,
     )
@@ -372,7 +378,22 @@ def rename_relative_noreplace(parent_fd: int, source: str, destination: str) -> 
     raise OSError(error, os.strerror(error), source)
 
 
-def remove_relative_tree(parent_fd: int, name: str) -> None:
+def rename_relative_noreplace(parent_fd: int, source: str, destination: str) -> bool:
+    """Atomically publish one relative name without replacing a destination."""
+    return rename_between_directories_noreplace(
+        parent_fd,
+        source,
+        parent_fd,
+        destination,
+    )
+
+
+def remove_relative_tree(
+    parent_fd: int,
+    name: str,
+    *,
+    before_mutation: Callable[[], None] | None = None,
+) -> None:
     """Delete one service-owned tree via held descriptors only.
 
     Used solely for materialization transaction directories while their
@@ -390,16 +411,28 @@ def remove_relative_tree(parent_fd: int, name: str) -> None:
         raise _raise_path_error(name, exc) from exc
     try:
         with os.scandir(fd) as entries:
-            children = list(entries)
+            children = sorted(entries, key=lambda entry: entry.name)
         for entry in children:
             if entry.is_dir(follow_symlinks=False):
-                remove_relative_tree(fd, entry.name)
+                remove_relative_tree(
+                    fd,
+                    entry.name,
+                    before_mutation=before_mutation,
+                )
             else:
+                if before_mutation is not None:
+                    before_mutation()
                 os.unlink(entry.name, dir_fd=fd)
+        if before_mutation is not None:
+            before_mutation()
         os.fsync(fd)
     finally:
         os.close(fd)
+    if before_mutation is not None:
+        before_mutation()
     os.rmdir(part[0], dir_fd=parent_fd)
+    if before_mutation is not None:
+        before_mutation()
     os.fsync(parent_fd)
 
 
@@ -715,10 +748,10 @@ def copy_opened_file(
             break
         if max_bytes is not None and len(chunk) > max_bytes - copied:
             raise FilesystemAuthorityError("source grew beyond copy limit")
-        if before_write is not None:
-            before_write(len(chunk))
         view = memoryview(chunk)
         while view:
+            if before_write is not None:
+                before_write(len(view))
             try:
                 written = os.write(destination_fd, view)
             except OSError as exc:

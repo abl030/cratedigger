@@ -1207,6 +1207,7 @@ class TestAudioSnapshotMatches(unittest.TestCase):
 if TYPE_CHECKING:
     from typing import cast
 
+    from lib.import_execution import ExecutionLeaseSnapshot
     from lib.pipeline_db import PipelineDB
     from lib.quality_evidence import QualityEvidenceDB as _EvidenceDB
     from tests.fakes import FakePipelineDB as _FakeDB
@@ -1215,6 +1216,23 @@ if TYPE_CHECKING:
     # tests/test_wrong_match_cleanup_service.py for the rationale.
     _pipeline_db_satisfies_evidence_protocol: _EvidenceDB = cast("PipelineDB", None)
     _fake_db_satisfies_evidence_protocol: _EvidenceDB = cast("_FakeDB", None)
+    _execution_lease = cast("ExecutionLeaseSnapshot", None)
+    _pipeline_candidate_evidence_cas_is_bool: bool = cast(
+        "PipelineDB",
+        None,
+    ).set_import_job_candidate_evidence(
+        1,
+        2,
+        expected_execution_lease=_execution_lease,
+    )
+    _fake_candidate_evidence_cas_is_bool: bool = cast(
+        "_FakeDB",
+        None,
+    ).set_import_job_candidate_evidence(
+        1,
+        2,
+        expected_execution_lease=_execution_lease,
+    )
 
 
 class TestEvidenceDBProtocolParity(unittest.TestCase):

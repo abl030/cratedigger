@@ -13,6 +13,7 @@ import os
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
+from lib import transitions
 from lib.dispatch.core import dispatch_import_core
 from lib.dispatch.evidence_gate import (
     _download_info_from_candidate_evidence,
@@ -22,6 +23,7 @@ from lib.dispatch.manifest_guard import _guard_force_import_audio_manifest
 from lib.dispatch.quality_gate import _check_quality_gate_core
 from lib.dispatch.types import (
     DISPATCH_CODE_BAD_REQUEST,
+    DISPATCH_CODE_PROCESSING_LOCKED,
     DispatchOutcome,
     ImportAttemptResult,
 )
@@ -176,6 +178,26 @@ def _dispatch_import_from_db_locked(
     req = db.get_request(request_id)
     if not req:
         return DispatchOutcome(success=False, message=f"Request {request_id} not found")
+    processing_locked = transitions.processing_locked_conflict(
+        req,
+        request_id,
+        "force_import",
+        expected_status=str(req["status"]),
+    )
+    if processing_locked is not None:
+        owner = processing_locked.processing_owner
+        if owner is None:
+            raise RuntimeError(
+                "processing conflict is missing its exact owner"
+            )
+        return DispatchOutcome(
+            success=False,
+            message=(
+                f"Request {request_id} is owned by automation import "
+                f"job {owner.job_id}"
+            ),
+            code=DISPATCH_CODE_PROCESSING_LOCKED,
+        )
 
     mbid = req.get("mb_release_id", "")
     if not mbid:

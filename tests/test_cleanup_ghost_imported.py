@@ -1,13 +1,14 @@
 """Tests for scripts/cleanup_ghost_imported.py."""
 
 import io
+import json
 import os
 import sqlite3
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stderr
-from unittest.mock import patch
+from contextlib import redirect_stderr, redirect_stdout
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -176,6 +177,62 @@ class TestCleanupGhostImported(unittest.TestCase):
 
         self.assertEqual(ghosts, [])
         self.assertEqual([row["id"] for row in manual_review], [8])
+
+    def test_apply_reports_conditional_delete_rejection(self) -> None:
+        row = {
+            "id": 12,
+            "mb_release_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "discogs_release_id": None,
+            "artist_name": "Owned",
+            "album_title": "Preserved",
+        }
+        db = MagicMock()
+        db.get_by_status.return_value = [row]
+        db.delete_request.return_value = False
+        stdout = io.StringIO()
+
+        with BeetsDB(self.db_path) as beets, redirect_stdout(stdout):
+            result = cleanup_ghost_imported.cmd_apply(db, beets)
+
+        self.assertEqual(result, 4)
+        db.delete_request.assert_called_once_with(12)
+        self.assertIn("preserved 12", stdout.getvalue())
+        self.assertIn("deleted 0 ghost imported rows", stdout.getvalue())
+
+    def test_apply_reports_exact_processing_owner_rejection(self) -> None:
+        row = {
+            "id": 13,
+            "mb_release_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            "discogs_release_id": None,
+            "artist_name": "Owned",
+            "album_title": "Processing",
+        }
+        db = MagicMock()
+        db.get_by_status.return_value = [row]
+        db.delete_request.return_value = False
+        db.get_request.return_value = {
+            **row,
+            "status": "processing",
+            "processing_owner": {
+                "job_id": 91,
+                "status": "running",
+                "preview_status": "evidence_ready",
+            },
+        }
+        stdout = io.StringIO()
+
+        with BeetsDB(self.db_path) as beets, redirect_stdout(stdout):
+            result = cleanup_ghost_imported.cmd_apply(db, beets)
+
+        self.assertEqual(result, 4)
+        payload = json.loads(stdout.getvalue().splitlines()[0])
+        self.assertEqual(payload["reason"], "processing_locked")
+        self.assertEqual(payload["processing_owner"], {
+            "job_id": 91,
+            "status": "running",
+            "preview_status": "evidence_ready",
+        })
+        self.assertIn("deleted 0 ghost imported rows", stdout.getvalue())
 
 
 class TestDefaultDsnFailsLoud(unittest.TestCase):

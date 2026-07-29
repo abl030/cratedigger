@@ -4,6 +4,7 @@ import { awstDate, awstTime, esc } from './util.js';
 import { toggleDetail } from './pipeline.js';
 import { renderEvidenceStrip } from './history.js';
 import { renderSearchPlanButton } from './search_plan.js';
+import { processingOwnerPresentation } from './release_action_state.js';
 
 const RECENTS_HISTORY_LIMIT = 500;
 
@@ -17,7 +18,7 @@ export function setRecentsFilter(f) {
 }
 
 /**
- * Switch Recents between history, active downloads, and importer work.
+ * Switch Recents between history, active acquisition, and importer work.
  * @param {string} sub
  */
 export function setRecentsSub(sub) {
@@ -28,7 +29,7 @@ export function setRecentsSub(sub) {
 function renderRecentsSubnav() {
   return `<div class="pipeline-subtabs">
     <button class="p-btn ${state.recentsSub === 'history' ? 'active-status' : ''}" onclick="window.setRecentsSub('history')">History</button>
-    <button class="p-btn ${state.recentsSub === 'downloading' ? 'active-status' : ''}" onclick="window.setRecentsSub('downloading')">Downloading</button>
+    <button class="p-btn ${state.recentsSub === 'acquisition' ? 'active-status' : ''}" onclick="window.setRecentsSub('acquisition')">Acquisition</button>
     <button class="p-btn ${state.recentsSub === 'imports' ? 'active-status' : ''}" onclick="window.setRecentsSub('imports')">Imports</button>
     <button class="p-btn subtab-refresh" onclick="window.loadRecents()">Refresh</button>
   </div>`;
@@ -219,7 +220,7 @@ function downloadFileCounts(files) {
   return counts;
 }
 
-function downloadingSummary(item) {
+function acquisitionSummary(item) {
   if (isYoutubeIngestItem(item)) {
     const meta = item.youtube_metadata || {};
     const parts = ['YouTube'];
@@ -228,8 +229,16 @@ function downloadingSummary(item) {
     if (item.created_at) parts.push(`accepted ${awstTime(item.created_at)}`);
     return parts.join(' · ');
   }
+  const processing = processingOwnerPresentation(
+    item.status || item.pipeline_status || null,
+    item.processing_owner || null,
+  );
+  if (processing) {
+    return processing.jobId
+      ? `${processing.label} · job #${processing.jobId}`
+      : processing.label;
+  }
   const active = item.active_download_state || {};
-  const importJob = item.active_import_job || null;
   const files = Array.isArray(active.files) ? active.files : [];
   const counts = downloadFileCounts(files);
   const users = [...new Set(files.map(f => f.username).filter(Boolean))];
@@ -239,12 +248,6 @@ function downloadingSummary(item) {
   const filetype = active.filetype || item.format || 'unknown';
   const progress = counts.total ? `${counts.completed}/${counts.total} files` : 'no file state';
   const stateParts = [];
-  if (importJob) {
-    const jobState = importJob.status === 'recovery_required'
-      ? 'operator recovery required'
-      : (importJob.status === 'running' ? 'importing' : 'queued for import');
-    stateParts.push(`${jobState} #${importJob.id}`);
-  }
   if (counts.queued) stateParts.push(`${counts.queued} queued`);
   if (counts.errored) stateParts.push(`${counts.errored} errored`);
   if (active.last_progress_at) stateParts.push(`progress ${awstTime(active.last_progress_at)}`);
@@ -253,42 +256,25 @@ function downloadingSummary(item) {
   return [filetype, progress, userSummary, ...stateParts].filter(Boolean).join(' · ');
 }
 
-function downloadingItemCounts(item) {
-  if (isYoutubeIngestItem(item)) {
-    return { total: 0, completed: 0, queued: 0, errored: 0 };
-  }
-  const active = item.active_download_state || {};
-  const files = Array.isArray(active.files) ? active.files : [];
-  return downloadFileCounts(files);
-}
-
-function isWaitingForImport(item) {
-  if (isYoutubeIngestItem(item)) return false;
-  const active = item.active_download_state || {};
-  if (item.active_import_job || active.processing_started_at) return true;
-
-  const counts = downloadingItemCounts(item);
-  return counts.total > 0
-    && counts.completed >= counts.total
-    && counts.queued === 0
-    && counts.errored === 0;
-}
-
-function downloadingBadge(item) {
+function acquisitionBadge(item) {
   if (isYoutubeIngestItem(item)) return ['youtube ingest', 'badge-new'];
-  const job = item.active_import_job || null;
-  if (!job) return ['downloading', 'badge-downloading'];
-  if (job.status === 'recovery_required') return ['recovery required', 'badge-failed'];
-  if (job.status === 'running') return ['importing', 'badge-force'];
-  return ['import queued', 'badge-new'];
+  const processing = processingOwnerPresentation(
+    item.status || item.pipeline_status || null,
+    item.processing_owner || null,
+  );
+  if (processing) return [processing.label, processing.badgeClass];
+  return ['downloading', 'badge-downloading'];
 }
 
-function downloadingBorderColor(item) {
+function acquisitionBorderColor(item) {
   if (isYoutubeIngestItem(item)) return '#7a5a00';
-  const job = item.active_import_job || null;
-  if (!job) return '#1a3a5a';
-  if (job.status === 'recovery_required') return '#a33';
-  return job.status === 'running' ? '#36c' : '#1a4a2a';
+  const processing = processingOwnerPresentation(
+    item.status || item.pipeline_status || null,
+    item.processing_owner || null,
+  );
+  if (!processing) return '#1a3a5a';
+  if (processing.badgeClass === 'badge-failed') return '#a33';
+  return processing.label === 'importing' ? '#36c' : '#1a4a2a';
 }
 
 function isYoutubeIngestItem(item) {
@@ -301,49 +287,54 @@ function normalizeYoutubeIngestItem(row) {
     id: row.request_id,
     download_kind: 'youtube_ingest',
     active_download_state: null,
-    active_import_job: null,
+    processing_owner: null,
   };
 }
 
-function renderDownloadingHeader(activeCount, hiddenImportCount) {
-  const activeLabel = `${activeCount} active download${activeCount === 1 ? '' : 's'}`;
-  if (!hiddenImportCount) return `<div class="r-date-header">${activeLabel}</div>`;
-  const hiddenLabel = `${hiddenImportCount} complete/waiting for import hidden`;
-  return `<div class="r-date-header">${activeLabel} · ${hiddenLabel}</div>`;
+function renderAcquisitionHeader(activeCount) {
+  const noun = activeCount === 1 ? 'acquisition' : 'acquisitions';
+  return `<div class="r-date-header">${activeCount} active ${noun}</div>`;
 }
 
 /**
- * Render current downloading pipeline rows for the Recents tab.
+ * Render current downloader, processor, and YouTube acquisition rows.
  * @param {Array<Object>} items
  * @returns {string}
  */
-export function renderDownloadingItems(items) {
-  if (items.length === 0) return '<div class="loading">No active downloads</div>';
+export function renderAcquisitionItems(items) {
+  if (items.length === 0) return '<div class="loading">No active acquisitions</div>';
   return items.map(item => {
     const date = item.updated_at ? awstDate(item.updated_at) : awstDate(item.created_at || '');
-    const [badge, badgeClass] = downloadingBadge(item);
+    const [badge, badgeClass] = acquisitionBadge(item);
     const detailKey = isYoutubeIngestItem(item)
       ? `youtube-${item.download_log_id}`
       : String(item.id);
-    // Downloading rows are pipeline_request rows — `item.id` is the
-    // album_requests.id directly. Always render the inspector button.
+    // Request rows carry album_requests.id directly. YouTube rows retain the
+    // request id only as navigation context and never gain processing owner.
     const spBtn = renderSearchPlanButton({ pipelineId: item.id });
+    const processing = processingOwnerPresentation(
+      item.status || item.pipeline_status || null,
+      item.processing_owner || null,
+    );
+    const ownerLink = processing?.recoveryTarget && processing.jobId
+      ? `<a href="${esc(processing.recoveryTarget)}" class="processing-owner-link" onclick="event.stopPropagation()">job #${processing.jobId}</a>`
+      : '';
     const idText = isYoutubeIngestItem(item)
       ? `#${item.id} · YT #${item.download_log_id}`
       : `#${item.id}`;
     return `
-      <div class="r-item" style="border-left-color:${downloadingBorderColor(item)}" onclick="window.toggleDetail('downloading-${detailKey}', ${item.id})">
+      <div class="r-item" style="border-left-color:${acquisitionBorderColor(item)}" onclick="window.toggleDetail('acquisition-${detailKey}', ${item.id})">
         <div class="p-top">
           <div>
-            <div class="p-title">${esc(item.album_title)} <span class="badge ${badgeClass}">${badge}</span></div>
+            <div class="p-title">${esc(item.album_title)} <span class="badge ${badgeClass}">${esc(badge)}</span></div>
             <div class="p-artist">${esc(item.artist_name)}</div>
           </div>
-          <div class="p-row-actions">${spBtn}<span style="font-size:0.75em;color:#666;">${idText}</span></div>
+          <div class="p-row-actions">${ownerLink}${spBtn}<span style="font-size:0.75em;color:#666;">${idText}</span></div>
         </div>
-        <div class="p-meta"><span>${esc(downloadingSummary(item))}</span></div>
+        <div class="p-meta"><span>${esc(acquisitionSummary(item))}</span></div>
         <div class="p-meta"><span>${date}</span>${item.last_outcome ? `<span>last: ${esc(item.last_outcome)}</span>` : ''}</div>
       </div>
-      <div class="p-detail" id="downloading-${detailKey}"></div>
+      <div class="p-detail" id="acquisition-${detailKey}"></div>
     `;
   }).join('');
 }
@@ -380,23 +371,20 @@ function renderImportsHeader(jobs, counts) {
   return `<div class="r-date-header">${[windowText, ...parts].join(' · ')}</div>`;
 }
 
-async function loadDownloading() {
+async function loadAcquisition() {
   const el = document.getElementById('recents-content');
   el.innerHTML = renderRecentsSubnav() + '<div class="loading">Loading...</div>';
   try {
-    let r = await fetch(`${API}/api/pipeline/downloading`);
-    if (r.status === 404) r = await fetch(`${API}/api/pipeline/all`);
+    const r = await fetch(`${API}/api/pipeline/acquisition`);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
-    const items = data.downloading || [];
+    const items = data.acquisition || [];
     const youtubeItems = (data.youtube_ingest || []).map(normalizeYoutubeIngestItem);
-    const activeDownloads = items.filter(item => !isWaitingForImport(item));
-    const hiddenImportCount = items.length - activeDownloads.length;
     el.innerHTML = renderRecentsSubnav()
-      + renderDownloadingHeader(activeDownloads.length + youtubeItems.length, hiddenImportCount)
-      + renderDownloadingItems([...youtubeItems, ...activeDownloads]);
+      + renderAcquisitionHeader(items.length + youtubeItems.length)
+      + renderAcquisitionItems([...youtubeItems, ...items]);
   } catch (e) {
-    el.innerHTML = renderRecentsSubnav() + '<div class="loading">Failed to load downloads</div>';
+    el.innerHTML = renderRecentsSubnav() + '<div class="loading">Failed to load acquisitions</div>';
   }
 }
 
@@ -469,8 +457,8 @@ export async function loadRecents() {
     await loadImports();
     return;
   }
-  if (state.recentsSub === 'downloading') {
-    await loadDownloading();
+  if (state.recentsSub === 'acquisition') {
+    await loadAcquisition();
     return;
   }
   el.innerHTML = renderRecentsSubnav() + '<div class="loading">Loading...</div>';
@@ -496,7 +484,7 @@ export const __test__ = {
   matchRatesFromDashboardWindows,
   recentsLogUrl,
   triageLabelText,
-  renderDownloadingItems,
+  renderAcquisitionItems,
   normalizeYoutubeIngestItem,
   renderImportItems,
   renderRecentsCounts,
@@ -504,4 +492,5 @@ export const __test__ = {
   renderRecentsSubnav,
   renderRecentsItems,
   setRecentsSub,
+  loadRecents,
 };

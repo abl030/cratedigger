@@ -38,6 +38,7 @@ from tests.fakes import (
     RecordingProcessAlbum,
 )
 from tests.helpers import (
+    handoff_automation_owner,
     make_album_quality_evidence,
     make_ctx_with_fake_db,
     make_download_file,
@@ -801,6 +802,23 @@ class TestFakePipelineDB(unittest.TestCase):
         self.assertIsNotNone(row["updated_at"])
         self.assertEqual(db.recorded_attempts, [(42, "validation")])
 
+    def test_record_attempt_rejects_processing_owner_even_when_status_matches(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="processing",
+            active_automation_import_job_id=743,
+        ))
+        before = copy.deepcopy(db.request(42))
+
+        self.assertFalse(db.record_attempt(
+            42,
+            "download",
+            expected_status="processing",
+        ))
+
+        self.assertEqual(db.request(42), before)
+
     def test_set_downloading_sets_attempt_timestamps(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="wanted"))
@@ -819,11 +837,6 @@ class TestFakePipelineDB(unittest.TestCase):
         self.assertEqual(db.status_history, [(42, "downloading")])
 
     def test_dashboard_wanted_total_includes_downloading_and_processing(self):
-        from lib.import_queue import (
-            IMPORT_JOB_AUTOMATION,
-            automation_import_payload,
-        )
-
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=1, status="wanted"))
         db.seed_request(make_request_row(id=2, status="downloading"))
@@ -834,14 +847,7 @@ class TestFakePipelineDB(unittest.TestCase):
             "request",
             mb_release_id="fake-dashboard-processing",
         )
-        processing_job = db.enqueue_import_job(
-            IMPORT_JOB_AUTOMATION,
-            request_id=processing_id,
-            payload=automation_import_payload(),
-        )
-        processing = db.request(processing_id)
-        processing["status"] = "processing"
-        processing["active_automation_import_job_id"] = processing_job.id
+        handoff_automation_owner(db, processing_id)
 
         db.record_cycle_metrics(cycle_total_s=1.0)
         dashboard = db.get_pipeline_dashboard_metrics()
@@ -849,20 +855,6 @@ class TestFakePipelineDB(unittest.TestCase):
         self.assertEqual(db.cycle_metrics[0]["wanted_total"], 3)
         self.assertEqual(
             dashboard["coverage"]["wanted_trend"]["current_wanted"], 3)
-
-    def test_update_download_state_rewrites_json_state(self):
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
-
-        db.update_download_state(42, '{"filetype":"flac"}')
-
-        row = db.request(42)
-        self.assertEqual(row["status"], "downloading")
-        self.assertEqual(row["active_download_state"], {"filetype": "flac"})
-        self.assertEqual(
-            db.update_download_state_calls,
-            [(42, '{"filetype":"flac"}')],
-        )
 
     def test_update_download_state_if_downloading_guards_status(self):
         db = FakePipelineDB()
@@ -956,47 +948,6 @@ class TestFakePipelineDB(unittest.TestCase):
         self.assertIsNone(db.request(42)["active_download_state"])
         self.assertEqual(db.request(42)["download_attempts"], 3)
         self.assertEqual(db.status_history, [(42, "wanted")])
-
-    def test_update_download_state_current_path_rewrites_nested_path(self):
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=42,
-            status="downloading",
-            active_download_state={"filetype": "flac", "files": []},
-        ))
-
-        db.update_download_state_current_path(42, "/tmp/staged")
-
-        row = db.request(42)
-        self.assertEqual(row["active_download_state"]["current_path"], "/tmp/staged")
-
-    def test_update_download_state_current_path_noop_when_not_downloading(self):
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=42,
-            status="imported",
-            active_download_state=None,
-        ))
-
-        db.update_download_state_current_path(42, "/tmp/staged")
-
-        row = db.request(42)
-        self.assertEqual(row["status"], "imported")
-        self.assertIsNone(row["active_download_state"])
-
-    def test_update_download_state_current_path_noop_when_state_missing(self):
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=42,
-            status="downloading",
-            active_download_state=None,
-        ))
-
-        db.update_download_state_current_path(42, "/tmp/staged")
-
-        row = db.request(42)
-        self.assertEqual(row["status"], "downloading")
-        self.assertIsNone(row["active_download_state"])
 
     def test_update_spectral_state(self):
         db = FakePipelineDB()
@@ -1126,6 +1077,22 @@ class TestFakePipelineDB(unittest.TestCase):
         # Recent download's spectral is an audit trail, not on-disk state.
         self.assertEqual(row["last_download_spectral_grade"], "suspect")
         self.assertEqual(row["last_download_spectral_bitrate"], 192)
+
+    def test_clear_on_disk_quality_fields_rejects_processing_owner(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="processing",
+            active_automation_import_job_id=743,
+            verified_lossless=True,
+            current_spectral_grade="genuine",
+            current_spectral_bitrate=245,
+        ))
+        before = copy.deepcopy(db.request(42))
+
+        db.clear_on_disk_quality_fields(42)
+
+        self.assertEqual(db.request(42), before)
 
     def test_get_downloading(self):
         db = FakePipelineDB()
@@ -1377,7 +1344,7 @@ class TestFakePipelineDB(unittest.TestCase):
 
     def test_set_update_download_state_error_raises_and_leaves_row_untouched(self):
         """Issue #564 review: the injection seam mirrors a psycopg2 error
-        at the UPDATE — raises from BOTH state writers, records the
+        at the witnessed UPDATE, records the
         attempt, never mutates the row; other requests are unaffected."""
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -1401,15 +1368,13 @@ class TestFakePipelineDB(unittest.TestCase):
         db.set_update_download_state_error(1, boom)
 
         with self.assertRaises(RuntimeError):
-            db.update_download_state(1, '{"mutated": true}')
-        with self.assertRaises(RuntimeError):
             db.update_download_state_if_downloading(
                 1,
                 '{"filetype":"mp3","enqueued_at":"attempt-a","files":[]}',
                 expected_enqueued_at="attempt-a",
             )
 
-        # Row 1 untouched; both attempts recorded.
+        # Row 1 untouched; the attempt is recorded.
         self.assertEqual(
             db.request(1)["active_download_state"],
             {
@@ -1418,7 +1383,7 @@ class TestFakePipelineDB(unittest.TestCase):
                 "files": [],
             },
         )
-        self.assertEqual(len(db.update_download_state_calls), 2)
+        self.assertEqual(len(db.update_download_state_calls), 1)
         # Other requests still write normally.
         self.assertTrue(
             db.update_download_state_if_downloading(
@@ -3779,6 +3744,313 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         assert failed is not None
         self.assertEqual(failed.status, "failed")
 
+    def test_automation_commands_require_exact_owner_stage_and_lease(self):
+        from lib.import_execution import (
+            ExecutionLeaseSnapshot,
+            ProcessIdentity,
+        )
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            mb_release_id="fake-owner-lease",
+            status="wanted",
+        ))
+        job = handoff_automation_owner(
+            db,
+            42,
+            canonical_path="/processing/albums/fake-owner-lease",
+        )
+        preview_lease = ExecutionLeaseSnapshot(
+            host_boot_id="boot-a",
+            invocation_id="preview-a",
+            systemd_unit="cratedigger-import-preview.service",
+            worker=ProcessIdentity(pid=101, start_ticks=1001),
+        )
+        stale_preview_lease = ExecutionLeaseSnapshot(
+            host_boot_id="boot-a",
+            invocation_id="preview-stale",
+            systemd_unit="cratedigger-import-preview.service",
+            worker=ProcessIdentity(pid=102, start_ticks=1002),
+        )
+
+        self.assertIsNone(db.claim_next_import_preview_job(worker_id="no-lease"))
+        claimed_preview = db.claim_next_import_preview_job(
+            worker_id="preview",
+            execution_lease=preview_lease,
+        )
+        assert claimed_preview is not None
+        self.assertEqual(
+            claimed_preview.execution_invocation_id,
+            preview_lease.invocation_id,
+        )
+        self.assertEqual(db.requeue_stale_import_preview_jobs(
+            older_than=timedelta(seconds=-1),
+            message="heartbeat age is not automation proof",
+        ), [])
+        self.assertEqual(db.requeue_running_import_preview_jobs(
+            message="process restart is not automation proof",
+        ), [])
+        self.assertFalse(db.heartbeat_import_job_preview(
+            job.id,
+            expected_execution_lease=stale_preview_lease,
+        ))
+        self.assertFalse(db.set_import_job_candidate_evidence(
+            job.id,
+            77,
+            expected_execution_lease=stale_preview_lease,
+        ))
+        self.assertTrue(db.set_import_job_candidate_evidence(
+            job.id,
+            77,
+            expected_execution_lease=preview_lease,
+        ))
+        self.assertIsNotNone(db.mark_import_job_preview_importable(
+            job.id,
+            preview_result={"verdict": "would_import"},
+            expected_execution_lease=preview_lease,
+        ))
+
+        importer_lease = ExecutionLeaseSnapshot(
+            host_boot_id="boot-a",
+            invocation_id="importer-a",
+            systemd_unit="cratedigger-importer.service",
+            worker=ProcessIdentity(pid=201, start_ticks=2001),
+        )
+        claimed_import = db.claim_next_import_job(
+            worker_id="importer",
+            execution_lease=importer_lease,
+        )
+        assert claimed_import is not None
+        self.assertFalse(db.heartbeat_import_job(
+            job.id,
+            expected_execution_lease=preview_lease,
+        ))
+        self.assertTrue(db.heartbeat_import_job(
+            job.id,
+            expected_execution_lease=importer_lease,
+        ))
+
+        # A wrong stage/status cannot borrow even the exact execution lease.
+        db._requests[42]["status"] = "wanted"
+        self.assertFalse(db.heartbeat_import_job(
+            job.id,
+            expected_execution_lease=importer_lease,
+        ))
+        db._requests[42]["status"] = "processing"
+
+    def test_legacy_recovery_refuses_unattached_automation_audit_row(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=45,
+            mb_release_id="historical-automation",
+            status="wanted",
+        ))
+        historical = db._append_import_job(
+            "automation_import",
+            request_id=45,
+            dedupe_key="historical-automation:45",
+            payload={},
+            message="historical row",
+        )
+        row = next(
+            item for item in db._import_jobs if item["id"] == historical.id
+        )
+        row["status"] = "recovery_required"
+
+        self.assertIsNone(db.resolve_import_job_recovery(
+            historical.id,
+            resolution="close",
+            reason="legacy path must not rewrite automation",
+        ))
+        self.assertEqual(row["status"], "recovery_required")
+
+    def test_automation_launch_child_and_recovery_are_exact_lease_cas(self):
+        from lib.import_execution import (
+            ExecutionLeaseSnapshot,
+            ProcessIdentity,
+        )
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=43,
+            mb_release_id="fake-launch-lease",
+            status="wanted",
+        ))
+        job = handoff_automation_owner(
+            db,
+            43,
+            canonical_path="/processing/albums/fake-launch-lease",
+        )
+        preview_lease = ExecutionLeaseSnapshot(
+            host_boot_id="boot-a",
+            invocation_id="preview-a",
+            systemd_unit="cratedigger-import-preview.service",
+            worker=ProcessIdentity(pid=301, start_ticks=3001),
+        )
+        assert db.claim_next_import_preview_job(
+            worker_id="preview",
+            execution_lease=preview_lease,
+        ) is not None
+        evidence = make_album_quality_evidence(
+            mb_release_id="fake-launch-lease",
+            source_path="/processing/albums/fake-launch-lease",
+        )
+        db.upsert_album_quality_evidence(evidence)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        self.assertTrue(db.set_import_job_candidate_evidence(
+            job.id,
+            persisted.id,
+            expected_execution_lease=preview_lease,
+        ))
+        assert db.mark_import_job_preview_importable(
+            job.id,
+            expected_execution_lease=preview_lease,
+        ) is not None
+        importer_lease = ExecutionLeaseSnapshot(
+            host_boot_id="boot-a",
+            invocation_id="importer-a",
+            systemd_unit="cratedigger-importer.service",
+            worker=ProcessIdentity(pid=401, start_ticks=4001),
+        )
+        assert db.claim_next_import_job(
+            worker_id="importer",
+            execution_lease=importer_lease,
+        ) is not None
+        self.assertIsNotNone(db.authorize_import_job_launch(
+            job.id,
+            request_id=43,
+            release_id="fake-launch-lease",
+            source_path="/processing/albums/fake-launch-lease",
+            expected_execution_lease=importer_lease,
+        ))
+        child_row = db.record_import_job_beets_child(
+            job.id,
+            expected_execution_lease=importer_lease,
+            beets_pid=402,
+            beets_start_ticks=4002,
+        )
+        assert child_row is not None
+        full_lease = ExecutionLeaseSnapshot(
+            host_boot_id=importer_lease.host_boot_id,
+            invocation_id=importer_lease.invocation_id,
+            systemd_unit=importer_lease.systemd_unit,
+            worker=importer_lease.worker,
+            beets=ProcessIdentity(pid=402, start_ticks=4002),
+        )
+        self.assertIsNone(db.mark_import_job_recovery_required(
+            job.id,
+            reason="stale child snapshot",
+            expected_execution_lease=importer_lease,
+        ))
+        recovered = db.mark_import_job_recovery_required(
+            job.id,
+            reason="exact child snapshot",
+            expected_execution_lease=full_lease,
+        )
+        assert recovered is not None
+        self.assertEqual(recovered.status, "recovery_required")
+        self.assertIsNone(db.claim_next_import_job(
+            worker_id="must-not-replay",
+            execution_lease=importer_lease,
+        ))
+
+    def test_automation_startup_recovery_requires_exact_dead_proof(self):
+        from lib.import_execution import (
+            ExecutionLeaseSnapshot,
+            ExecutionLivenessDecision,
+            ExecutionLivenessEvidence,
+            ProcessIdentity,
+        )
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=44,
+            mb_release_id="fake-startup-recovery",
+            status="wanted",
+        ))
+        job = handoff_automation_owner(db, 44)
+        lease = ExecutionLeaseSnapshot(
+            host_boot_id="boot-old",
+            invocation_id="preview-old",
+            systemd_unit="cratedigger-import-preview.service",
+            worker=ProcessIdentity(pid=501, start_ticks=5001),
+        )
+        assert db.claim_next_import_preview_job(
+            worker_id="preview",
+            execution_lease=lease,
+        ) is not None
+
+        exact_evidence = ExecutionLivenessEvidence(
+            lease=lease,
+            current_host_boot_id="boot-new",
+            boot_error=None,
+            worker=None,
+            beets=None,
+            invocation=None,
+            cgroup=None,
+        )
+        live = ExecutionLivenessDecision(
+            status="live",
+            reason="still alive",
+            evidence=exact_evidence,
+        )
+        self.assertIsNone(db.recover_automation_import_job(
+            job.id,
+            expected_execution_lease=lease,
+            decision=live,
+            requeue_message="requeue",
+            recovery_message="operator recovery",
+        ))
+
+        stale_lease = ExecutionLeaseSnapshot(
+            host_boot_id="boot-old",
+            invocation_id="preview-other",
+            systemd_unit=lease.systemd_unit,
+            worker=lease.worker,
+        )
+        stale_dead = ExecutionLivenessDecision(
+            status="dead",
+            reason="different invocation ended",
+            evidence=ExecutionLivenessEvidence(
+                lease=stale_lease,
+                current_host_boot_id="boot-new",
+                boot_error=None,
+                worker=None,
+                beets=None,
+                invocation=None,
+                cgroup=None,
+            ),
+        )
+        self.assertIsNone(db.recover_automation_import_job(
+            job.id,
+            expected_execution_lease=lease,
+            decision=stale_dead,
+            requeue_message="requeue",
+            recovery_message="operator recovery",
+        ))
+
+        dead = ExecutionLivenessDecision(
+            status="dead",
+            reason="prior boot ended",
+            evidence=exact_evidence,
+        )
+        recovered = db.recover_automation_import_job(
+            job.id,
+            expected_execution_lease=lease,
+            decision=dead,
+            requeue_message="requeue",
+            recovery_message="operator recovery",
+        )
+        assert recovered is not None
+        self.assertEqual(recovered.status, "queued")
+        self.assertEqual(recovered.preview_status, "waiting")
+        self.assertIsNone(recovered.execution_invocation_id)
+
     def test_force_recovery_retry_restarts_preview_without_old_action_state(self):
         """Fake parity for #853's force-only recovery retry reset."""
         from lib.import_queue import IMPORT_JOB_FORCE
@@ -3915,52 +4187,6 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         assert claimed is not None
         self.assertEqual(claimed.id, queued.id)
 
-    def test_abandon_auto_import_request_guards_state_and_logs(self):
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=42,
-            status="downloading",
-            active_download_state={
-                "current_path": "/tmp/staged",
-                "import_subprocess_started_at": "2026-05-06T00:00:00+00:00",
-            },
-        ))
-
-        log_id = db.abandon_auto_import_request(
-            request_id=42,
-            current_path="/tmp/staged",
-            soulseek_username="alice",
-            filetype="flac",
-            beets_detail="abandoned",
-            outcome="failed",
-            staged_path="/tmp/staged",
-            error_message="abandoned",
-            validation_result=None,
-        )
-
-        self.assertEqual(log_id, 1)
-        self.assertEqual(db.request(42)["status"], "wanted")
-        self.assertIsNone(db.request(42)["active_download_state"])
-        self.assertEqual(db.recorded_attempts, [(42, "download")])
-        self.assertEqual(
-            db.download_logs[0].beets_scenario,
-            "abandoned_auto_import",
-        )
-
-        second = db.abandon_auto_import_request(
-            request_id=42,
-            current_path="/tmp/staged",
-            soulseek_username="alice",
-            filetype="flac",
-            beets_detail="abandoned",
-            outcome="failed",
-            staged_path="/tmp/staged",
-            error_message="abandoned",
-            validation_result=None,
-        )
-        self.assertIsNone(second)
-        self.assertEqual(len(db.download_logs), 1)
-
     def test_log_download_derives_validation_projection_like_postgres(self):
         from lib.quality import ValidationResult
 
@@ -3979,38 +4205,6 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         self.assertEqual(log.beets_distance, 0.0)
         self.assertEqual(log.beets_scenario, "untracked_audio")
         self.assertEqual(log.validation_result, validation_result)
-
-    def test_abandon_auto_import_derives_validation_projection_like_postgres(self):
-        from lib.quality import ValidationResult
-
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=42,
-            status="downloading",
-            active_download_state={
-                "current_path": "/tmp/staged",
-                "import_subprocess_started_at": "2026-05-06T00:00:00+00:00",
-            },
-        ))
-        validation_result = ValidationResult(
-            distance=0.12,
-            scenario="abandoned_auto_import",
-        ).to_json()
-        db.abandon_auto_import_request(
-            request_id=42,
-            current_path="/tmp/staged",
-            soulseek_username="alice",
-            filetype="flac",
-            beets_detail="abandoned",
-            outcome="failed",
-            staged_path="/tmp/staged",
-            error_message="abandoned",
-            validation_result=validation_result,
-        )
-
-        log = db.download_logs[0]
-        self.assertEqual(log.beets_distance, 0.12)
-        self.assertEqual(log.beets_scenario, "abandoned_auto_import")
 
     def test_log_download_derives_custom_envelope_scenario_like_postgres(self):
         db = FakePipelineDB()
@@ -5049,93 +5243,6 @@ class TestFakeRecentSuccessfulUploader(unittest.TestCase):
         db.log_download(42, soulseek_username="alice", outcome="success")
         db.log_download(42, soulseek_username=None, outcome="success")
         self.assertEqual(db.get_recent_successful_uploader(42), "alice")
-
-
-class TestFakeActiveImportJobForRequest(unittest.TestCase):
-    """Self-tests for FakePipelineDB.get_active_import_job_for_request (plan U2)."""
-
-    def _enqueue(self, db: FakePipelineDB, *, request_id: int, dedupe_key: str):
-        from lib.import_queue import IMPORT_JOB_FORCE
-        return db.enqueue_import_job(
-            IMPORT_JOB_FORCE,
-            request_id=request_id,
-            dedupe_key=dedupe_key,
-            payload={"download_log_id": 1, "failed_path": "/tmp/x"},
-        )
-
-    def test_returns_none_when_no_jobs(self):
-        db = FakePipelineDB()
-        self.assertIsNone(db.get_active_import_job_for_request(42))
-
-    def test_returns_queued_job_for_request(self):
-        db = FakePipelineDB()
-        job = self._enqueue(db, request_id=42, dedupe_key="force:42")
-        result = db.get_active_import_job_for_request(42)
-        assert result is not None
-        self.assertEqual(result.id, job.id)
-        self.assertEqual(result.status, "queued")
-
-    def test_returns_running_job_for_request(self):
-        db = FakePipelineDB()
-        self._enqueue(db, request_id=42, dedupe_key="force:42")
-        # Preview writes evidence_ready; the stored classifier verdict is audit only.
-        db.mark_import_job_preview_importable(
-            db._import_jobs[0]["id"],
-            preview_result={"verdict": "would_import"},
-            message="ok",
-        )
-        claimed = db.claim_next_import_job(worker_id="w")
-        assert claimed is not None
-        result = db.get_active_import_job_for_request(42)
-        assert result is not None
-        self.assertEqual(result.status, "running")
-        self.assertEqual(result.id, claimed.id)
-
-    def test_returns_none_for_completed_job(self):
-        db = FakePipelineDB()
-        job = self._enqueue(db, request_id=42, dedupe_key="force:42")
-        db.mark_import_job_preview_importable(
-            job.id,
-            preview_result={"verdict": "would_import"},
-            message="ok",
-        )
-        claimed = db.claim_next_import_job(worker_id="w")
-        assert claimed is not None
-        db.mark_import_job_completed(claimed.id, result={"ok": True})
-        self.assertIsNone(db.get_active_import_job_for_request(42))
-
-    def test_returns_none_for_failed_job(self):
-        db = FakePipelineDB()
-        job = self._enqueue(db, request_id=42, dedupe_key="force:42")
-        db.mark_import_job_preview_importable(
-            job.id,
-            preview_result={"verdict": "would_import"},
-            message="ok",
-        )
-        claimed = db.claim_next_import_job(worker_id="w")
-        assert claimed is not None
-        db.mark_import_job_failed(claimed.id, error="boom")
-        self.assertIsNone(db.get_active_import_job_for_request(42))
-
-    def test_returns_only_jobs_for_the_requested_request_id(self):
-        db = FakePipelineDB()
-        self._enqueue(db, request_id=42, dedupe_key="force:42")
-        self._enqueue(db, request_id=99, dedupe_key="force:99")
-        r42 = db.get_active_import_job_for_request(42)
-        r99 = db.get_active_import_job_for_request(99)
-        assert r42 is not None and r99 is not None
-        self.assertEqual(r42.request_id, 42)
-        self.assertEqual(r99.request_id, 99)
-
-    def test_returns_most_recent_job_when_multiple_active(self):
-        db = FakePipelineDB()
-        # First job with one dedupe_key
-        first = self._enqueue(db, request_id=42, dedupe_key="force:42:a")
-        second = self._enqueue(db, request_id=42, dedupe_key="force:42:b")
-        result = db.get_active_import_job_for_request(42)
-        assert result is not None
-        # Most recent by id
-        self.assertEqual(result.id, max(first.id, second.id))
 
 
 class TestFakeActiveImportJobsForWrongMatch(unittest.TestCase):
@@ -6508,32 +6615,6 @@ class TestFakePipelineDBYoutubeIngest(unittest.TestCase):
             [second],
         )
 
-    def test_list_active_youtube_rescues_returns_request_context(self):
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=42, artist_name="YT Artist", album_title="YT Album",
-            mb_release_id="yt-mbid", status="wanted",
-        ))
-        yt_id = db.insert_youtube_running(**self._payload(
-            42, browse_id="MPREb_visible",
-        ))
-
-        rows = db.list_active_youtube_rescues(limit=10)
-
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["download_log_id"], yt_id)
-        self.assertEqual(rows[0]["request_id"], 42)
-        self.assertEqual(rows[0]["artist_name"], "YT Artist")
-        self.assertEqual(rows[0]["album_title"], "YT Album")
-        self.assertEqual(rows[0]["request_status"], "wanted")
-        self.assertEqual(
-            rows[0]["youtube_metadata"]["browse_id"], "MPREb_visible")
-
-        db.update_youtube_terminal(
-            yt_id, "youtube_failed", {"reason": "operator_cancelled"},
-        )
-        self.assertEqual(db.list_active_youtube_rescues(limit=10), [])
-
     def test_read_seam_includes_source_and_youtube_metadata(self):
         db = FakePipelineDB()
         slskd_id = db.log_download(
@@ -6787,6 +6868,7 @@ class TestFakeGetPipelineOverlay(unittest.TestCase):
             "target_format": None, "min_bitrate": 900,
             "verified_lossless": False,
             "provisional_lossless": False,
+            "processing_owner": None,
         })
 
     def test_empty_mbids_short_circuits(self):

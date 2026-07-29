@@ -14,10 +14,11 @@ from lib.transitions import (
     finalize_operator_request,
     finalize_request,
     publish_initialized_request,
+    transition_conflict_payload,
     validate_transition,
 )
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_request_row
+from tests.helpers import handoff_automation_owner, make_request_row
 
 
 class TestValidateTransition(unittest.TestCase):
@@ -316,6 +317,44 @@ class TestApplyTransition(unittest.TestCase):
         assert isinstance(result, TransitionConflict)
         self.assertEqual(result.kind, TransitionConflictKind.not_found)
         self.assertIsNone(db._requests.get(999))
+
+    def test_processing_owner_returns_exact_typed_conflict(self):
+        db = self._make_db("wanted")
+        job = handoff_automation_owner(db, 1)
+        before = db.get_request(1)
+
+        result = apply_transition(
+            cast(Any, db),
+            1,
+            "wanted",
+            from_status="processing",
+        )
+
+        self.assertIsInstance(result, TransitionConflict)
+        assert isinstance(result, TransitionConflict)
+        self.assertEqual(
+            result.kind,
+            TransitionConflictKind.processing_locked,
+        )
+        self.assertIsNotNone(result.processing_owner)
+        assert result.processing_owner is not None
+        self.assertEqual(result.processing_owner.job_id, job.id)
+        self.assertEqual(
+            transition_conflict_payload(result),
+            {
+                "error": "transition_conflict",
+                "reason": "processing_locked",
+                "expected_status": "processing",
+                "actual_status": "processing",
+                "target_status": "wanted",
+                "processing_owner": {
+                    "job_id": job.id,
+                    "status": job.status,
+                    "preview_status": job.preview_status,
+                },
+            },
+        )
+        self.assertEqual(db.get_request(1), before)
 
     def test_wanted_to_unsearchable_sets_status(self):
         db = self._make_db("wanted")

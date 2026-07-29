@@ -67,6 +67,11 @@ from lib.download_processing import (
 )
 from lib.download_validation import HandleValidFn
 from lib.grab_list import DownloadFile, GrabListEntry
+from lib.import_execution import (
+    CancellationToken,
+    ExecutionLeaseSnapshot,
+    OwnerSessionIdentity,
+)
 from lib.import_preview import (
     ImportPreviewResult,
     measure_and_persist_candidate_evidence,
@@ -428,7 +433,20 @@ class TestPreviewSidecarManifestPurityPin(unittest.TestCase):
                 import_job_id: int,
                 handle_valid_fn: HandleValidFn | None = None,
                 dispatch_fn: DispatchCoreFn | None = None,
+                execution_lease: ExecutionLeaseSnapshot | None = None,
+                cancellation_token: CancellationToken | None = None,
+                owner_session_identity: OwnerSessionIdentity | None = None,
             ) -> DispatchOutcome:
+                del (
+                    album_data,
+                    ctx,
+                    import_job_id,
+                    handle_valid_fn,
+                    dispatch_fn,
+                    execution_lease,
+                    cancellation_token,
+                    owner_session_identity,
+                )
                 validate_calls.append(staged_album.current_path)
                 return DispatchOutcome(success=True, message="validate reached")
 

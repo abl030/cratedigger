@@ -270,8 +270,9 @@ masks under `/run/systemd/system`, and a timer mask does not cancel service
 starts that systemd already queued. Strict holds therefore use the tracked
 helper; never substitute `systemctl mask --runtime`, a service mask, or manual
 link cleanup. The helper fixes the authority surface to the main, unfindable,
-and metadata-gate-watchdog timer/service pairs and records only links and the
-manual metadata hold it created.
+and metadata-gate-watchdog timers plus every metadata-gate-guarded service. It
+records only the control links, manual hold, and main/YouTube start inhibitors
+it created.
 
 Run the reviewed helper on doc2 through Python stdin so the pre-switch host does
 not need this revision deployed already:
@@ -282,7 +283,11 @@ CRATEDIGGER_REPO=$(git rev-parse --show-toplevel)
 DEPLOY_HOLD="$CRATEDIGGER_REPO/scripts/cratedigger_deploy_hold.py"
 CYCLE_VERIFY="$CRATEDIGGER_REPO/scripts/verify_cratedigger_cycle.sh"
 
-# Before fleet-deploy: acquire authoritative masks and stable quiescence.
+# Before fleet-deploy: prove the independently deployed main/YouTube
+# controlled-start prerequisite, acquire authoritative masks and stable
+# quiescence, query the old live schema, and abort under the hold unless
+# automation jobs/recovery rows/staged downloading rows/malformed enqueued_at
+# witnesses are all zero.
 env -u SSH_AUTH_SOCK ssh doc2 'sudo python3 - acquire' < "$DEPLOY_HOLD"
 ```
 
@@ -298,7 +303,12 @@ Release in four evidence-gated phases. Derive `CRATEDIGGER_SOURCE` from the
 active wrapper as in step 6 before capturing either cycle:
 
 ```bash
-# All three timers remain masked for one controlled main cycle.
+# All three timers remain masked. prepare-controlled creates separate
+# receipt-owned main/YouTube inhibitors, releases the manual metadata hold,
+# explicitly starts and proves the web, preview, and importer services,
+# exercises an overlapping
+# resume-if-clear while both producers remain inactive, then removes only the
+# main inhibitor and starts one controlled main cycle. YouTube stays inhibited.
 CONTROLLED_CURSOR=$("$CYCLE_VERIFY" capture-cursor)
 env -u SSH_AUTH_SOCK ssh doc2 'sudo python3 - prepare-controlled' < "$DEPLOY_HOLD"
 CONTROLLED_ID=$(
@@ -318,11 +328,14 @@ env -u SSH_AUTH_SOCK ssh doc2 sudo python3 - finish-release "$ORDINARY_ID" < "$D
 env -u SSH_AUTH_SOCK ssh doc2 sudo python3 - complete "$ORDINARY_ID" < "$DEPLOY_HOLD"
 ```
 
-Every helper phase fails closed on an unexpected phase, pre-existing unowned
-hold/link, changed owned link, surviving job, or wrong invocation ID. On
-failure, leave the receipt and remaining masks in place and inspect the exact
-reported boundary. Rerun an interrupted `acquire`; after a failed release
-phase, return safely to the strict boundary with
+`finish-release` removes the owned YouTube inhibitor immediately before the
+final metadata-gate resume, then restores watchdog/unfindable timers. Every
+helper phase fails closed on an unexpected phase, stale downstream
+controlled-start contract, dirty old lifecycle, pre-existing unowned
+hold/link/inhibitor, changed owned object, surviving job, or wrong invocation
+ID. On failure, leave the receipt and remaining masks/inhibitors in place and
+inspect the exact reported boundary. Rerun an interrupted `acquire`; after a
+failed release phase, return safely to the strict boundary with
 `env -u SSH_AUTH_SOCK ssh doc2 'sudo python3 - recover-held' < "$DEPLOY_HOLD"` before restarting
 release. Rerun an interrupted `complete` to finish its atomic retired-receipt
 cleanup. Do not remove `/run/cratedigger-deploy-hold` or its

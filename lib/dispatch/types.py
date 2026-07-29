@@ -22,6 +22,11 @@ logger = logging.getLogger("cratedigger")
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
     from lib.import_evidence import CandidateEvidenceActionResult
+    from lib.import_execution import (
+        CancellationToken,
+        ExecutionLeaseSnapshot,
+        OwnerSessionIdentity,
+    )
     from lib.pipeline_db import DownloadLogOutcome, PipelineDB
     from lib.quality import (
         AlbumQualityEvidence,
@@ -53,6 +58,7 @@ DISPATCH_CODE_REQUEUE_FAILED = "requeue_failed"
 # misuse. The legacy direct-measurement branch that previously handled
 # this case was deleted in U4 because no production path reaches it.
 DISPATCH_CODE_BAD_REQUEST = "bad_request"
+DISPATCH_CODE_PROCESSING_LOCKED = "processing_locked"
 # Canonical terminal rejection from ``full_pipeline_decision_from_evidence``.
 # Consumers may react to this outcome, but must not re-run a parallel import
 # decision to prove it again.
@@ -152,6 +158,9 @@ class DispatchCoreFn(Protocol):
         candidate_download_log_id: int | None = None,
         prevalidated_candidate_result: CandidateEvidenceActionResult | None = None,
         quality_gate_fn: QualityGateFn = ...,
+        execution_lease: ExecutionLeaseSnapshot | None = None,
+        cancellation_token: CancellationToken | None = None,
+        owner_session_identity: OwnerSessionIdentity | None = None,
     ) -> DispatchOutcome: ...
 
 
@@ -193,6 +202,9 @@ class ImportOneRunner(Protocol):
         beets_python: str | None,
         beets_library_db_path: str | None,
         beets_library_root: str | None,
+        cancellation_token: CancellationToken | None = None,
+        on_spawn: Callable[[int], None] | None = None,
+        owner_session_probe: Callable[[], bool] | None = None,
     ) -> ImportOneRun: ...
 
 

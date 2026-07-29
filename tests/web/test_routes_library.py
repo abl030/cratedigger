@@ -19,7 +19,7 @@ from lib.beets_delete import (
     BeetsDeleteRequest,
 )
 from tests.fakes import FakeBeetsDB, FakePipelineDB
-from tests.helpers import make_request_row
+from tests.helpers import handoff_automation_owner, make_request_row
 from tests.web._harness import (
     _assert_required_fields,
     _FakeDbWebServerCase,
@@ -31,7 +31,7 @@ class _FailingDeleteDB(FakePipelineDB):
     """delete_request raises — pins purge-failure ordering (no beets
     delete may run after the pipeline purge fails)."""
 
-    def delete_request(self, request_id: int) -> None:
+    def delete_request(self, request_id: int) -> bool:
         raise RuntimeError("boom")
 
 
@@ -46,6 +46,7 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
     DETAIL_REQUIRED_FIELDS = (
         ALBUM_REQUIRED_FIELDS | {
             "artpath", "path", "tracks", "pipeline_id", "pipeline_status",
+            "processing_owner",
             "pipeline_source", "pipeline_min_bitrate",
             "search_filetype_override", "target_format", "upgrade_queued",
             "download_history",
@@ -331,6 +332,35 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(status, 400)
         self.assertIn("confirm", data["error"])
         self.assertEqual(self.delete_requests, [])
+
+    def test_beets_delete_processing_returns_exact_owner_conflict(self):
+        self.db.seed_request(make_request_row(
+            id=42,
+            status="wanted",
+            mb_release_id=self.RELEASE_ID,
+        ))
+        owner = handoff_automation_owner(self.db, 42)
+        self._configure_beets_delete_mock(None)
+
+        status, data = self._post("/api/beets/delete", {
+            "id": 7,
+            "confirm": "DELETE",
+            "purge_pipeline": True,
+            "pipeline_id": 42,
+            "release_id": self.RELEASE_ID,
+        })
+
+        self.assertEqual(status, 409)
+        self.assertEqual(data["error"], "transition_conflict")
+        self.assertEqual(data["reason"], "processing_locked")
+        self.assertEqual(data["processing_owner"], {
+            "job_id": owner.id,
+            "status": owner.status,
+            "preview_status": owner.preview_status,
+        })
+        self.assertEqual(self.delete_requests, [])
+        self.assertIsNotNone(self.beets_db.get_album_detail(7))
+        self.assertIsNotNone(self.db.get_request(42))
 
     def test_beets_delete_purges_explicit_pipeline_request(self):
         self._srv.beets_db_path = "/tmp/beets.db"

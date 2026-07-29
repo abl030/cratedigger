@@ -10,12 +10,14 @@ delete only typed-missing rows from the pipeline DB (`--apply`).
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from collections.abc import Mapping, Sequence
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from lib import transitions
 from lib.beets_db import (
     BeetsDB,
     CurrentBeetsAmbiguous,
@@ -99,23 +101,46 @@ def cmd_scan(db: PipelineDB, beets: BeetsDB) -> int:
 def cmd_apply(db: PipelineDB, beets: BeetsDB) -> int:
     rows = db.get_by_status("imported")
     ghosts, manual_review = classify_imported_rows(rows, beets)
+    deleted_count = 0
+    rejected_ids: list[int] = []
     for row in ghosts:
         request_id = row["id"]
         if not isinstance(request_id, int):
             raise TypeError(f"invalid imported request id: {request_id!r}")
-        db.delete_request(request_id)
+        if not db.delete_request(request_id):
+            rejected_ids.append(request_id)
+            current = db.get_request(request_id)
+            processing_locked = transitions.processing_locked_conflict(
+                current,
+                request_id,
+                "deleted",
+                expected_status="imported",
+            )
+            if processing_locked is not None:
+                print(json.dumps(
+                    transitions.transition_conflict_payload(
+                        processing_locked
+                    )
+                ))
+            else:
+                print(
+                    f"preserved {request_id}: conditional delete rejected "
+                    "the current request owner/state"
+                )
+            continue
+        deleted_count += 1
         print(
             f"deleted {request_id}: "
             f"{row['artist_name']} - {row['album_title']}"
         )
-    print(f"\ndeleted {len(ghosts)} ghost imported rows")
+    print(f"\ndeleted {deleted_count} ghost imported rows")
     if manual_review:
         print()
         _print_rows(
             "manual review needed (missing identity or ambiguous Beets state)",
             manual_review,
         )
-    return 0
+    return 4 if rejected_ids else 0
 
 
 def main() -> int:

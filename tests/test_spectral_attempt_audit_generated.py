@@ -343,21 +343,26 @@ def _run_candidate_snapshot_reuse_world(
     track_count: int,
 ) -> tuple[int, list[str], str | None, str | None]:
     from lib.config import CratediggerConfig
+    from lib.import_execution import (
+        CancellationToken,
+        ExecutionLeaseSnapshot,
+        ProcessIdentity,
+    )
     from lib.import_preview import ImportPreviewResult
     from lib.import_queue import (
-        IMPORT_JOB_AUTOMATION,
         IMPORT_JOB_FORCE,
-        automation_import_dedupe_key,
         force_import_dedupe_key,
         force_import_payload,
     )
     from lib.measurement import ExistingSpectralAuditLookup
     from lib.quality import (
+        ActiveDownloadState,
         AudioQualityMeasurement,
         ImportResult,
         SpectralAnalysisDetail,
     )
     from lib.quality_evidence import EvidenceBuildResult, snapshot_audio_files
+    from scripts import import_preview_worker
     from scripts.import_preview_worker import process_claimed_preview_job
     from tests.fakes import FakePipelineDB
     from tests.helpers import make_album_quality_evidence, make_request_row
@@ -461,17 +466,17 @@ def _run_candidate_snapshot_reuse_world(
                 ),
             )
         else:
-            job = db.enqueue_import_job(
-                IMPORT_JOB_AUTOMATION,
+            handoff = db.handoff_automation_import(
                 request_id=request_id,
-                dedupe_key=automation_import_dedupe_key(request_id),
-                payload={},
+                expected_enqueued_at=str(active_state["enqueued_at"]),
+                canonical_path=candidate,
+                message="generated candidate-reuse owner handoff",
             )
+            assert handoff.committed and handoff.job is not None
+            job = handoff.job
 
         action_path = candidate
         if job_mode == "force":
-            from scripts import import_preview_worker
-
             action_path = import_preview_worker._prepare_force_action_path(
                 db,
                 job,
@@ -498,7 +503,27 @@ def _run_candidate_snapshot_reuse_world(
             snapshot_fingerprint=candidate_evidence.snapshot_fingerprint,
         )
         assert stored_candidate is not None and stored_candidate.id is not None
-        db.set_import_job_candidate_evidence(job.id, stored_candidate.id)
+
+        preview_lease = (
+            ExecutionLeaseSnapshot(
+                host_boot_id="generated-candidate-reuse-boot",
+                invocation_id=f"generated-candidate-reuse-preview-{job.id}",
+                systemd_unit="cratedigger-import-preview.service",
+                worker=ProcessIdentity(pid=764, start_ticks=1),
+            )
+            if job_mode == "automation"
+            else None
+        )
+        claimed = db.claim_next_import_preview_job(
+            worker_id="generated",
+            execution_lease=preview_lease,
+        )
+        assert claimed is not None and claimed.id == job.id
+        assert db.set_import_job_candidate_evidence(
+            job.id,
+            stored_candidate.id,
+            expected_execution_lease=preview_lease,
+        )
 
         if snapshot_changed:
             changed_path = candidate if job_mode == "force" else action_path
@@ -506,8 +531,20 @@ def _run_candidate_snapshot_reuse_world(
                 b"changed-candidate-snapshot"
             )
 
-        claimed = db.claim_next_import_preview_job(worker_id="generated")
-        assert claimed is not None and claimed.id == job.id
+        automation_authority = (
+            import_preview_worker._AutomationPreviewAuthority(
+                request=db.request(request_id),
+                state=ActiveDownloadState.from_raw(
+                    db.request(request_id)["active_download_state"]
+                ),
+                canonical_path=action_path,
+            )
+            if job_mode == "automation"
+            else None
+        )
+        cancellation_token = (
+            CancellationToken() if job_mode == "automation" else None
+        )
         full_preview_calls = 0
         analyzer_roles: list[str] = []
 
@@ -574,6 +611,9 @@ def _run_candidate_snapshot_reuse_world(
             preview_fn=full_preview,
             current_evidence_loader=load_current,
             runtime_config=cfg,
+            execution_lease=preview_lease,
+            automation_authority=automation_authority,
+            cancellation_token=cancellation_token,
         )
         assert updated is not None
         preview_result = updated.preview_result or {}
@@ -646,6 +686,12 @@ def _run_dispatch_finalization_world(
     from lib.config import CratediggerConfig
     from lib.dispatch import dispatch_import_core
     from lib.dispatch.types import ImportOneRun
+    from lib.import_execution import (
+        CancellationToken,
+        ExecutionLeaseSnapshot,
+        OwnerSessionIdentity,
+        ProcessIdentity,
+    )
     from lib.quality import DownloadInfo, ImportResult, QualityComparisonBasis
     from tests.fakes import FakePipelineDB
     from tests.helpers import (
@@ -663,7 +709,11 @@ def _run_dispatch_finalization_world(
         mb_release_id="generated-mbid",
         status="downloading",
         search_filetype_override="mp3",
-        active_download_state={"files": [], "filetype": "mp3"},
+        active_download_state={
+            "files": [],
+            "filetype": "mp3",
+            "enqueued_at": "2026-07-21T00:00:00+00:00",
+        },
     ))
     cfg = CratediggerConfig(
         beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
@@ -695,7 +745,15 @@ def _run_dispatch_finalization_world(
         return result
 
     def run_import(*args: Any, **kwargs: Any) -> ImportOneRun:
-        del args, kwargs
+        del args
+        on_spawn = kwargs.pop("on_spawn", None)
+        cancellation_token = kwargs.pop("cancellation_token", None)
+        kwargs.pop("owner_session_probe", None)
+        del kwargs
+        if on_spawn is not None:
+            on_spawn(os.getpid())
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
         if mode == "timeout":
             raise sp.TimeoutExpired("import_one", 300)
         if mode == "pre_result_exception":
@@ -760,18 +818,31 @@ def _run_dispatch_finalization_world(
                 )
                 finalize_claimed_dispatch(db, claimed, outcome)
     else:
-        from lib.import_queue import IMPORT_JOB_AUTOMATION
         from lib.quality_evidence import snapshot_audio_files
 
         with tempfile.TemporaryDirectory() as source:
             with open(os.path.join(source, "01.mp3"), "wb") as handle:
                 handle.write(b"audio")
             db.request(42)["active_download_state"]["current_path"] = source
-            job = db.enqueue_import_job(
-                IMPORT_JOB_AUTOMATION,
+            handoff = db.handoff_automation_import(
                 request_id=42,
-                payload={},
+                expected_enqueued_at="2026-07-21T00:00:00+00:00",
+                canonical_path=source,
+                message="generated dispatch-finalization owner handoff",
             )
+            assert handoff.committed and handoff.job is not None
+            job = handoff.job
+            preview_lease = ExecutionLeaseSnapshot(
+                host_boot_id="generated-dispatch-finalization-boot",
+                invocation_id=f"generated-dispatch-preview-{job.id}",
+                systemd_unit="cratedigger-import-preview.service",
+                worker=ProcessIdentity(pid=9101, start_ticks=91001),
+            )
+            claimed_preview = db.claim_next_import_preview_job(
+                worker_id="generated-preview",
+                execution_lease=preview_lease,
+            )
+            assert claimed_preview is not None and claimed_preview.id == job.id
             evidence = make_album_quality_evidence(
                 mb_release_id="generated-mbid",
                 source_path=source,
@@ -783,12 +854,26 @@ def _run_dispatch_finalization_world(
                 snapshot_fingerprint=evidence.snapshot_fingerprint,
             )
             assert persisted is not None and persisted.id is not None
-            db.set_import_job_candidate_evidence(job.id, persisted.id)
-            db.mark_import_job_preview_importable(
+            assert db.set_import_job_candidate_evidence(
+                job.id,
+                persisted.id,
+                expected_execution_lease=preview_lease,
+            )
+            assert db.mark_import_job_preview_importable(
                 job.id,
                 preview_result={"ready": True},
+                expected_execution_lease=preview_lease,
             )
-            claimed = db.claim_next_import_job(worker_id="generated-importer")
+            importer_lease = ExecutionLeaseSnapshot(
+                host_boot_id="generated-dispatch-finalization-boot",
+                invocation_id=f"generated-dispatch-importer-{job.id}",
+                systemd_unit="cratedigger-importer.service",
+                worker=ProcessIdentity(pid=9102, start_ticks=91002),
+            )
+            claimed = db.claim_next_import_job(
+                worker_id="generated-importer",
+                execution_lease=importer_lease,
+            )
             assert claimed is not None and claimed.id == job.id
             with patch_dispatch_externals(), _silence_logs():
                 outcome = dispatch_import_core(
@@ -808,6 +893,9 @@ def _run_dispatch_finalization_world(
                     candidate_import_job_id=claimed.id,
                     beets_library_db_path=str(beets.library_db),
                     beets_library_root=str(beets.library_root),
+                    execution_lease=importer_lease,
+                    cancellation_token=CancellationToken(),
+                    owner_session_identity=OwnerSessionIdentity(id(db), 4242),
                 )
                 finalize_claimed_dispatch(db, claimed, outcome)
 

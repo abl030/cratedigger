@@ -9,6 +9,7 @@ control link it did not create and record itself.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import stat
@@ -18,13 +19,15 @@ import time
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, TypeGuard
 
 CONTROL_DIR = "/run/systemd/system.control"
 STATE_DIR = Path("/run/cratedigger-deploy-hold")
 STATE_STAGING_DIR = Path("/run/.cratedigger-deploy-hold.creating")
 STATE_RETIRED_DIR = Path("/run/.cratedigger-deploy-hold.retired")
-METADATA_MANUAL_HOLD = Path("/run/cratedigger-metadata-gate/holds/manual")
+METADATA_GATE_STATE_DIR = Path("/var/lib/cratedigger-metadata-gate")
+METADATA_GATE_HOLD_DIR = METADATA_GATE_STATE_DIR / "holds"
+METADATA_MANUAL_HOLD = METADATA_GATE_HOLD_DIR / "manual"
 
 MAIN_TIMER = "cratedigger.timer"
 UNFINDABLE_TIMER = "cratedigger-unfindable.timer"
@@ -34,7 +37,25 @@ TIMER_UNITS = (MAIN_TIMER, UNFINDABLE_TIMER, WATCHDOG_TIMER)
 MAIN_SERVICE = "cratedigger.service"
 UNFINDABLE_SERVICE = "cratedigger-unfindable.service"
 WATCHDOG_SERVICE = "cratedigger-metadata-gate-watchdog.service"
-SERVICE_UNITS = (MAIN_SERVICE, UNFINDABLE_SERVICE, WATCHDOG_SERVICE)
+WEB_SERVICE = "cratedigger-web.service"
+IMPORTER_SERVICE = "cratedigger-importer.service"
+PREVIEW_SERVICE = "cratedigger-import-preview-worker.service"
+YOUTUBE_SERVICE = "cratedigger-youtube-ingest.service"
+CONTROLLED_WORKER_UNITS = (WEB_SERVICE, PREVIEW_SERVICE, IMPORTER_SERVICE)
+PRODUCER_SERVICE_UNITS = (
+    MAIN_SERVICE,
+    UNFINDABLE_SERVICE,
+    WATCHDOG_SERVICE,
+    YOUTUBE_SERVICE,
+)
+SERVICE_UNITS = (*PRODUCER_SERVICE_UNITS, *CONTROLLED_WORKER_UNITS)
+
+MAIN_START_INHIBITOR = METADATA_GATE_STATE_DIR / f"inhibit-{MAIN_SERVICE}"
+YOUTUBE_START_INHIBITOR = METADATA_GATE_STATE_DIR / f"inhibit-{YOUTUBE_SERVICE}"
+START_INHIBITORS = {
+    MAIN_SERVICE: MAIN_START_INHIBITOR,
+    YOUTUBE_SERVICE: YOUTUBE_START_INHIBITOR,
+}
 
 PHASE_ACQUIRING = "acquiring"
 PHASE_HELD = "held"
@@ -47,6 +68,7 @@ _RECEIPT_FILE = "receipt"
 _PHASE_FILE = "phase"
 _MANUAL_MARKER = "owned-manual-hold"
 _LINK_MARKER_PREFIX = "owned-link-"
+_INHIBITOR_MARKER_PREFIX = "owned-inhibitor-"
 _INVOCATION_FILE = "ordinary-invocation"
 _INVOCATION_RE = re.compile(r"[0-9a-f]{32}")
 _DRAIN_TIMEOUT_SECONDS = 7200.0
@@ -56,6 +78,11 @@ _STABLE_SAMPLES = 2
 
 class DeployHoldError(RuntimeError):
     """The strict hold could not prove the requested lifecycle boundary."""
+
+
+def _is_json_object(value: object) -> TypeGuard[dict[str, object]]:
+    """Narrow decoded JSON without adding non-stdlib deploy dependencies."""
+    return isinstance(value, dict)
 
 
 @dataclass(frozen=True)
@@ -77,7 +104,29 @@ class JobState:
         return cls(job_id="", unit="", job_type="", state="")
 
 
+@dataclass(frozen=True)
+class LifecyclePreflight:
+    active_automation_jobs: int
+    recovery_required_jobs: int
+    dirty_downloading_rows: int
+    malformed_enqueued_at_rows: int
+
+    def dirty_fields(self) -> dict[str, int]:
+        return {
+            name: value
+            for name, value in (
+                ("active_automation_jobs", self.active_automation_jobs),
+                ("recovery_required_jobs", self.recovery_required_jobs),
+                ("dirty_downloading_rows", self.dirty_downloading_rows),
+                ("malformed_enqueued_at_rows", self.malformed_enqueued_at_rows),
+            )
+            if value != 0
+        }
+
+
 class DeployHoldBackend(Protocol):
+    def verify_controlled_start_contract(self) -> None: ...
+    def lifecycle_preflight(self) -> LifecyclePreflight: ...
     def ensure_control_dir(self) -> None: ...
     def receipt_exists(self) -> bool: ...
     def retired_receipt_exists(self) -> bool: ...
@@ -93,11 +142,19 @@ class DeployHoldBackend(Protocol):
     def unmark_link_owned(self, timer: str) -> None: ...
     def link_is_owned(self, timer: str) -> bool: ...
     def owned_link_units(self) -> tuple[str, ...]: ...
+    def mark_inhibitor_owned(self, service: str) -> None: ...
+    def unmark_inhibitor_owned(self, service: str) -> None: ...
+    def inhibitor_is_owned(self, service: str) -> bool: ...
+    def owned_inhibitor_units(self) -> tuple[str, ...]: ...
+    def inhibitor_exists(self, service: str) -> bool: ...
+    def create_start_inhibitor(self, service: str) -> None: ...
+    def remove_start_inhibitor(self, service: str) -> None: ...
     def write_ordinary_invocation(self, invocation_id: str) -> None: ...
     def read_ordinary_invocation(self) -> str: ...
     def clear_ordinary_invocation(self) -> None: ...
     def manual_hold_active(self) -> bool: ...
-    def metadata_gate(self, command: str) -> None: ...
+    def metadata_gate(self, command: str) -> int: ...
+    def metadata_hold_reasons(self) -> tuple[str, ...]: ...
     def control_link_target(self, timer: str) -> str | None: ...
     def create_control_mask(self, timer: str) -> None: ...
     def remove_control_mask(self, timer: str) -> None: ...
@@ -126,6 +183,263 @@ class RealSystemdBackend:
             check=check,
             capture_output=True,
             text=True,
+        )
+
+    @staticmethod
+    def _unit_file_text(unit: str) -> str:
+        RealSystemdBackend._validate_unit(unit, SERVICE_UNITS)
+        return subprocess.run(
+            ("systemctl", "cat", unit),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+
+    def verify_controlled_start_contract(self) -> None:
+        """Verify the independently deployed producer-inhibitor prerequisite."""
+        expected_conditions = {
+            MAIN_SERVICE: f"ConditionPathExists=!{MAIN_START_INHIBITOR}",
+            YOUTUBE_SERVICE: (
+                f"ConditionPathExists=!{YOUTUBE_START_INHIBITOR}"
+            ),
+        }
+        gate_paths: set[str] = set()
+        for service, condition in expected_conditions.items():
+            source = self._unit_file_text(service)
+            if source.splitlines().count(condition) != 1:
+                raise DeployHoldError(
+                    f"controlled-start prerequisite changed for {service}"
+                )
+            execution = self._run((
+                "systemctl",
+                "show",
+                service,
+                "--property=ExecCondition",
+                "--value",
+            )).stdout
+            match = re.search(r"\bpath=([^ ;]+)", execution)
+            if match is None:
+                raise DeployHoldError(
+                    f"metadata-gate ExecCondition is missing for {service}"
+                )
+            gate_paths.add(match.group(1))
+
+        if len(gate_paths) != 1:
+            raise DeployHoldError(
+                "controlled producers do not share one metadata-gate prerequisite"
+            )
+        for service in CONTROLLED_WORKER_UNITS:
+            source = self._unit_file_text(service)
+            if any(
+                str(inhibitor) in source
+                for inhibitor in START_INHIBITORS.values()
+            ):
+                raise DeployHoldError(
+                    f"controlled worker unexpectedly uses a producer inhibitor: "
+                    f"{service}"
+                )
+
+        gate_source = Path(gate_paths.pop()).read_text(encoding="utf-8")
+        expected_guarded = (
+            "guarded_units=(cratedigger.timer cratedigger.service "
+            "cratedigger-web.service cratedigger-importer.service "
+            "cratedigger-import-preview-worker.service "
+            "cratedigger-youtube-ingest.service)"
+        )
+        expected_resume = (
+            "resume_units=(cratedigger.service cratedigger.timer "
+            "cratedigger-web.service cratedigger-importer.service "
+            "cratedigger-import-preview-worker.service "
+            "cratedigger-youtube-ingest.service)"
+        )
+        if (
+            gate_source.splitlines().count(expected_guarded) != 1
+            or gate_source.splitlines().count(expected_resume) != 1
+        ):
+            raise DeployHoldError(
+                "metadata-gate guarded/resume unit contract is not the "
+                "verified controlled-start prerequisite"
+            )
+
+    @staticmethod
+    def _single_json_cell(output: str, expected_header: str) -> dict[str, object]:
+        lines = [line.strip() for line in output.splitlines() if line.strip()]
+        if (
+            len(lines) != 4
+            or lines[0] != expected_header
+            or lines[3] != "(1 row)"
+        ):
+            raise DeployHoldError(
+                f"unexpected pipeline-cli preflight output: {output!r}"
+            )
+        try:
+            value = json.loads(lines[2])
+        except json.JSONDecodeError as exc:
+            raise DeployHoldError(
+                "pipeline-cli preflight did not return JSON"
+            ) from exc
+        if not _is_json_object(value):
+            raise DeployHoldError("pipeline-cli preflight JSON is not an object")
+        return value
+
+    def _pipeline_query(self, sql: str) -> str:
+        password_file = Path("/run/secrets/cratedigger-pgpass")
+        password_lines = password_file.read_text(encoding="utf-8").splitlines()
+        passwords = [
+            line.partition("=")[2]
+            for line in password_lines
+            if line.startswith("PGPASSWORD=")
+        ]
+        if len(passwords) != 1 or not passwords[0]:
+            raise DeployHoldError(
+                "cratedigger-pgpass does not contain one PGPASSWORD value"
+            )
+        environment = os.environ.copy()
+        environment["PGPASSWORD"] = passwords[0]
+        proc = subprocess.run(
+            ("pipeline-cli", "query", "-"),
+            input=sql,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+        return proc.stdout
+
+    def lifecycle_preflight(self) -> LifecyclePreflight:
+        """Query the live old-lifecycle schema, then prove its boundary clean."""
+        schema = self._single_json_cell(
+            self._pipeline_query(
+                """
+                SELECT json_build_object(
+                    'album_requests',
+                    COALESCE(
+                        (
+                            SELECT json_agg(column_name ORDER BY column_name)
+                            FROM information_schema.columns
+                            WHERE table_schema = 'public'
+                              AND table_name = 'album_requests'
+                              AND column_name IN (
+                                  'id', 'status', 'active_download_state'
+                              )
+                        ),
+                        '[]'::json
+                    ),
+                    'import_jobs',
+                    COALESCE(
+                        (
+                            SELECT json_agg(column_name ORDER BY column_name)
+                            FROM information_schema.columns
+                            WHERE table_schema = 'public'
+                              AND table_name = 'import_jobs'
+                              AND column_name IN (
+                                  'id', 'job_type', 'status'
+                              )
+                        ),
+                        '[]'::json
+                    )
+                ) AS schema_contract
+                """
+            ),
+            "schema_contract",
+        )
+        expected_schema = {
+            "album_requests": ["active_download_state", "id", "status"],
+            "import_jobs": ["id", "job_type", "status"],
+        }
+        if schema != expected_schema:
+            raise DeployHoldError(
+                f"old-lifecycle preflight schema changed: {schema!r}"
+            )
+
+        counts = self._single_json_cell(
+            self._pipeline_query(
+                """
+                SELECT json_build_object(
+                    'active_automation_jobs',
+                    (
+                        SELECT count(*)
+                        FROM import_jobs
+                        WHERE job_type = 'automation_import'
+                          AND status IN (
+                              'queued', 'running', 'recovery_required'
+                          )
+                    ),
+                    'recovery_required_jobs',
+                    (
+                        SELECT count(*)
+                        FROM import_jobs
+                        WHERE status = 'recovery_required'
+                    ),
+                    'dirty_downloading_rows',
+                    (
+                        SELECT count(*)
+                        FROM album_requests
+                        WHERE status = 'downloading'
+                          AND (
+                              active_download_state
+                                  ? 'processing_started_at'
+                              OR NULLIF(
+                                  active_download_state->>'current_path',
+                                  ''
+                              ) IS NOT NULL
+                              OR active_download_state
+                                  ? 'import_subprocess_started_at'
+                          )
+                    ),
+                    'malformed_enqueued_at_rows',
+                    (
+                        SELECT count(*)
+                        FROM album_requests
+                        WHERE status = 'downloading'
+                          AND NOT COALESCE((
+                              active_download_state ? 'enqueued_at'
+                              AND jsonb_typeof(
+                                  active_download_state->'enqueued_at'
+                              ) = 'string'
+                              AND NULLIF(
+                                  active_download_state->>'enqueued_at',
+                                  ''
+                              ) IS NOT NULL
+                              AND pg_input_is_valid(
+                                  active_download_state->>'enqueued_at',
+                                  'timestamp with time zone'
+                              )
+                          ), FALSE)
+                    )
+                ) AS lifecycle_preflight
+                """
+            ),
+            "lifecycle_preflight",
+        )
+        expected_keys = {
+            "active_automation_jobs",
+            "recovery_required_jobs",
+            "dirty_downloading_rows",
+            "malformed_enqueued_at_rows",
+        }
+        if set(counts) != expected_keys:
+            raise DeployHoldError(
+                f"invalid lifecycle preflight counts: {counts!r}"
+            )
+
+        def count(name: str) -> int:
+            value = counts[name]
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 0
+            ):
+                raise DeployHoldError(
+                    f"invalid lifecycle preflight counts: {counts!r}"
+                )
+            return value
+
+        return LifecyclePreflight(
+            active_automation_jobs=count("active_automation_jobs"),
+            recovery_required_jobs=count("recovery_required_jobs"),
+            dirty_downloading_rows=count("dirty_downloading_rows"),
+            malformed_enqueued_at_rows=count("malformed_enqueued_at_rows"),
         )
 
     def ensure_control_dir(self) -> None:
@@ -393,6 +707,115 @@ class RealSystemdBackend:
             owned.append(timer)
         return tuple(sorted(owned))
 
+    @staticmethod
+    def _validate_inhibited_service(service: str) -> Path:
+        try:
+            return START_INHIBITORS[service]
+        except KeyError as exc:
+            raise DeployHoldError(
+                f"service outside fixed inhibitor scope: {service}"
+            ) from exc
+
+    @staticmethod
+    def _inhibitor_marker(service: str) -> str:
+        RealSystemdBackend._validate_inhibited_service(service)
+        return _INHIBITOR_MARKER_PREFIX + service
+
+    def mark_inhibitor_owned(self, service: str) -> None:
+        self._write_marker(
+            self._inhibitor_marker(service),
+            service,
+            replace=False,
+        )
+
+    def unmark_inhibitor_owned(self, service: str) -> None:
+        marker = self._inhibitor_marker(service)
+        if self._read_marker(marker) != service:
+            raise DeployHoldError(
+                f"start-inhibitor ownership marker changed: {service}"
+            )
+        self._marker_path(marker).unlink()
+
+    def inhibitor_is_owned(self, service: str) -> bool:
+        marker_name = self._inhibitor_marker(service)
+        marker = self._marker_path(marker_name)
+        if not marker.exists():
+            return False
+        return self._read_marker(marker_name) == service
+
+    def owned_inhibitor_units(self) -> tuple[str, ...]:
+        self._validate_receipt()
+        owned: list[str] = []
+        for entry in STATE_DIR.iterdir():
+            if not entry.name.startswith(_INHIBITOR_MARKER_PREFIX):
+                continue
+            service = entry.name.removeprefix(_INHIBITOR_MARKER_PREFIX)
+            self._validate_inhibited_service(service)
+            if self._read_marker(entry.name) != service:
+                raise DeployHoldError(
+                    f"start-inhibitor ownership marker changed: {service}"
+                )
+            owned.append(service)
+        return tuple(sorted(owned))
+
+    @staticmethod
+    def _validate_inhibitor_file(path: Path, service: str) -> None:
+        try:
+            info = path.lstat()
+        except FileNotFoundError as exc:
+            raise DeployHoldError(
+                f"owned start inhibitor is missing: {service}"
+            ) from exc
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != 0
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or path.read_text(encoding="utf-8") != _RECEIPT_VERSION + "\n"
+        ):
+            raise DeployHoldError(
+                f"owned start inhibitor changed for {service}"
+            )
+
+    @staticmethod
+    def _validate_metadata_gate_state_dir() -> None:
+        try:
+            info = METADATA_GATE_STATE_DIR.lstat()
+        except FileNotFoundError as exc:
+            raise DeployHoldError(
+                "metadata-gate state directory is missing"
+            ) from exc
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != 0
+            or stat.S_IMODE(info.st_mode) not in {0o700, 0o755}
+        ):
+            raise DeployHoldError(
+                "metadata-gate state directory is not root-owned mode 0700/0755"
+            )
+
+    def inhibitor_exists(self, service: str) -> bool:
+        self._validate_metadata_gate_state_dir()
+        path = self._validate_inhibited_service(service)
+        return os.path.lexists(path)
+
+    def create_start_inhibitor(self, service: str) -> None:
+        self._validate_metadata_gate_state_dir()
+        path = self._validate_inhibited_service(service)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        descriptor = os.open(path, flags, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(_RECEIPT_VERSION + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+    def remove_start_inhibitor(self, service: str) -> None:
+        self._validate_metadata_gate_state_dir()
+        path = self._validate_inhibited_service(service)
+        self._validate_inhibitor_file(path, service)
+        path.unlink()
+
     def write_ordinary_invocation(self, invocation_id: str) -> None:
         self._write_marker(_INVOCATION_FILE, invocation_id, replace=False)
 
@@ -405,9 +828,19 @@ class RealSystemdBackend:
             self._remove_marker(_INVOCATION_FILE)
 
     def manual_hold_active(self) -> bool:
-        return METADATA_MANUAL_HOLD.exists()
+        self._validate_metadata_gate_state_dir()
+        if not os.path.lexists(METADATA_MANUAL_HOLD):
+            return False
+        info = METADATA_MANUAL_HOLD.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != 0
+        ):
+            raise DeployHoldError("manual metadata hold has unsafe state")
+        return True
 
-    def metadata_gate(self, command: str) -> None:
+    def metadata_gate(self, command: str) -> int:
         commands = {
             "hold manual": ("hold", "manual"),
             "release manual": ("release", "manual"),
@@ -416,7 +849,37 @@ class RealSystemdBackend:
         args = commands.get(command)
         if args is None:
             raise DeployHoldError(f"metadata-gate command outside fixed scope: {command}")
-        self._run(("cratedigger-metadata-gate", *args))
+        proc = self._run(
+            ("cratedigger-metadata-gate", *args),
+            check=command != "resume-if-clear",
+        )
+        return proc.returncode
+
+    def metadata_hold_reasons(self) -> tuple[str, ...]:
+        self._validate_metadata_gate_state_dir()
+        try:
+            info = METADATA_GATE_HOLD_DIR.lstat()
+        except FileNotFoundError as exc:
+            raise DeployHoldError("metadata-gate holds directory is missing") from exc
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != 0
+        ):
+            raise DeployHoldError("metadata-gate holds path is not root-owned")
+        reasons: list[str] = []
+        for entry in METADATA_GATE_HOLD_DIR.iterdir():
+            entry_info = entry.lstat()
+            if (
+                not stat.S_ISREG(entry_info.st_mode)
+                or stat.S_ISLNK(entry_info.st_mode)
+                or entry_info.st_uid != 0
+            ):
+                raise DeployHoldError(
+                    f"metadata-gate hold has unsafe state: {entry.name}"
+                )
+            reasons.append(entry.name)
+        return tuple(sorted(reasons))
 
     @staticmethod
     def _control_path(timer: str) -> Path:
@@ -449,7 +912,7 @@ class RealSystemdBackend:
         self._run(("systemctl", "stop", *exact))
 
     def start_unit(self, unit: str) -> None:
-        self._validate_unit(unit, (*TIMER_UNITS, MAIN_SERVICE))
+        self._validate_unit(unit, (*TIMER_UNITS, *SERVICE_UNITS))
         args = (
             ("systemctl", "start", "--no-block", unit)
             if unit == MAIN_SERVICE
@@ -599,12 +1062,15 @@ def _assert_load_states(
             )
 
 
-def _drain_owned_services(backend: DeployHoldBackend) -> None:
+def _drain_services(
+    backend: DeployHoldBackend,
+    services: tuple[str, ...],
+) -> None:
     deadline = backend.monotonic() + _DRAIN_TIMEOUT_SECONDS
     stable_samples = 0
     while backend.monotonic() < deadline:
         safe = True
-        for service in SERVICE_UNITS:
+        for service in services:
             job = backend.job_state(service)
             if job != JobState.none():
                 if job.unit != service:
@@ -644,7 +1110,8 @@ def _verify_authoritative_hold(backend: DeployHoldBackend) -> None:
     backend.daemon_reload()
     _assert_load_states(backend, masked=TIMER_UNITS, loaded=())
     backend.stop_units(TIMER_UNITS)
-    _drain_owned_services(backend)
+    _drain_services(backend, SERVICE_UNITS)
+    _assert_no_start_inhibitors(backend)
 
 
 def _ensure_owned_manual_hold(backend: DeployHoldBackend) -> None:
@@ -658,6 +1125,98 @@ def _ensure_owned_manual_hold(backend: DeployHoldBackend) -> None:
         backend.metadata_gate("hold manual")
     if not backend.manual_hold_active():
         raise DeployHoldError("metadata gate did not establish the manual hold")
+
+
+def _assert_no_start_inhibitors(backend: DeployHoldBackend) -> None:
+    if backend.owned_inhibitor_units():
+        raise DeployHoldError("held phase retained owned producer inhibitors")
+    for service in START_INHIBITORS:
+        if backend.inhibitor_exists(service):
+            raise DeployHoldError(
+                f"unowned producer inhibitor exists for {service}"
+            )
+
+
+def _ensure_owned_start_inhibitor(
+    backend: DeployHoldBackend,
+    service: str,
+) -> None:
+    if not backend.inhibitor_is_owned(service):
+        if backend.inhibitor_exists(service):
+            raise DeployHoldError(
+                f"unowned producer inhibitor appeared for {service}"
+            )
+        backend.mark_inhibitor_owned(service)
+    if not backend.inhibitor_exists(service):
+        backend.create_start_inhibitor(service)
+    if not backend.inhibitor_exists(service):
+        raise DeployHoldError(
+            f"producer inhibitor was not established for {service}"
+        )
+
+
+def _release_owned_inhibitor(
+    backend: DeployHoldBackend,
+    service: str,
+) -> None:
+    if not backend.inhibitor_is_owned(service):
+        raise DeployHoldError(
+            f"refusing to remove unowned producer inhibitor: {service}"
+        )
+    if not backend.inhibitor_exists(service):
+        raise DeployHoldError(
+            f"owned producer inhibitor is missing: {service}"
+        )
+    backend.remove_start_inhibitor(service)
+    backend.unmark_inhibitor_owned(service)
+
+
+def _clear_owned_inhibitors(backend: DeployHoldBackend) -> None:
+    owned = set(backend.owned_inhibitor_units())
+    unexpected = owned - set(START_INHIBITORS)
+    if unexpected:
+        raise DeployHoldError(
+            f"receipt owns unknown producer inhibitors: {sorted(unexpected)!r}"
+        )
+    for service in START_INHIBITORS:
+        if service in owned:
+            if backend.inhibitor_exists(service):
+                _release_owned_inhibitor(backend, service)
+            else:
+                backend.unmark_inhibitor_owned(service)
+        elif backend.inhibitor_exists(service):
+            raise DeployHoldError(
+                f"unowned producer inhibitor exists for {service}"
+            )
+
+
+def _wait_controlled_workers_active(backend: DeployHoldBackend) -> None:
+    deadline = backend.monotonic() + _DRAIN_TIMEOUT_SECONDS
+    stable_samples = 0
+    while backend.monotonic() < deadline:
+        if reasons := backend.metadata_hold_reasons():
+            raise DeployHoldError(
+                f"metadata gate became held while starting controlled workers: "
+                f"{reasons!r}"
+            )
+        active = True
+        for service in CONTROLLED_WORKER_UNITS:
+            state = backend.unit_state(service)
+            if (
+                (state.active_state, state.sub_state) != ("active", "running")
+                or backend.job_state(service) != JobState.none()
+            ):
+                active = False
+        if active:
+            stable_samples += 1
+            if stable_samples >= _STABLE_SAMPLES:
+                return
+        else:
+            stable_samples = 0
+        backend.sleep(_POLL_SECONDS)
+    raise DeployHoldError(
+        "timed out waiting for controlled workers to become stably active"
+    )
 
 
 def _ensure_owned_control_mask(
@@ -688,11 +1247,17 @@ def _ensure_owned_control_mask(
 def acquire_hold(backend: DeployHoldBackend) -> None:
     """Create or resume an authoritative strict hold acquisition."""
     backend.ensure_control_dir()
+    backend.verify_controlled_start_contract()
     if backend.receipt_exists():
         _require_phase(backend, PHASE_ACQUIRING)
     else:
         if backend.manual_hold_active():
             raise DeployHoldError("unowned manual hold already exists")
+        for service in START_INHIBITORS:
+            if backend.inhibitor_exists(service):
+                raise DeployHoldError(
+                    f"unowned producer inhibitor already exists for {service}"
+                )
         for timer in TIMER_UNITS:
             target = backend.control_link_target(timer)
             if target is not None:
@@ -710,7 +1275,12 @@ def acquire_hold(backend: DeployHoldBackend) -> None:
     _assert_load_states(backend, masked=TIMER_UNITS, loaded=())
     backend.stop_units(TIMER_UNITS)
     _ensure_owned_manual_hold(backend)
-    _drain_owned_services(backend)
+    _drain_services(backend, SERVICE_UNITS)
+    preflight = backend.lifecycle_preflight()
+    if dirty := preflight.dirty_fields():
+        raise DeployHoldError(
+            f"old lifecycle is not clean for migration: {dirty!r}"
+        )
     backend.write_phase(PHASE_HELD)
 
 
@@ -742,7 +1312,8 @@ def recover_held(backend: DeployHoldBackend) -> None:
     _assert_load_states(backend, masked=TIMER_UNITS, loaded=())
     backend.stop_units(TIMER_UNITS)
     _ensure_owned_manual_hold(backend)
-    _drain_owned_services(backend)
+    _drain_services(backend, SERVICE_UNITS)
+    _clear_owned_inhibitors(backend)
     backend.clear_ordinary_invocation()
     backend.write_phase(PHASE_HELD)
 
@@ -751,10 +1322,26 @@ def prepare_controlled(backend: DeployHoldBackend) -> None:
     """Retain every timer mask while starting one controlled main cycle."""
     _require_phase(backend, PHASE_HELD)
     _verify_authoritative_hold(backend)
+    for service in START_INHIBITORS:
+        _ensure_owned_start_inhibitor(backend, service)
     backend.metadata_gate("release manual")
     if backend.manual_hold_active():
         raise DeployHoldError("metadata gate did not release the owned manual hold")
     backend.unmark_manual_hold_owned()
+    for service in CONTROLLED_WORKER_UNITS:
+        backend.start_unit(service)
+    _wait_controlled_workers_active(backend)
+    backend.metadata_gate("resume-if-clear")
+    if reasons := backend.metadata_hold_reasons():
+        raise DeployHoldError(
+            f"metadata gate retained holds after controlled resume: {reasons!r}"
+        )
+    _assert_owned_links(backend, TIMER_UNITS)
+    backend.daemon_reload()
+    _assert_load_states(backend, masked=TIMER_UNITS, loaded=())
+    _wait_controlled_workers_active(backend)
+    _drain_services(backend, (MAIN_SERVICE, YOUTUBE_SERVICE))
+    _release_owned_inhibitor(backend, MAIN_SERVICE)
     backend.start_unit(MAIN_SERVICE)
     backend.write_phase(PHASE_PREPARED_CONTROLLED)
 
@@ -775,7 +1362,7 @@ def open_main_timer(backend: DeployHoldBackend) -> None:
     if backend.manual_hold_is_owned() or backend.manual_hold_active():
         raise DeployHoldError("manual hold still exists before main-timer release")
     _assert_owned_links(backend, TIMER_UNITS)
-    _drain_owned_services(backend)
+    _drain_services(backend, PRODUCER_SERVICE_UNITS)
     _release_owned_link(backend, MAIN_TIMER)
     backend.daemon_reload()
     _assert_load_states(
@@ -800,6 +1387,12 @@ def finish_release(
     _require_phase(backend, PHASE_MAIN_TIMER_OPEN)
     _validate_invocation_id(ordinary_invocation)
     _assert_owned_links(backend, (UNFINDABLE_TIMER, WATCHDOG_TIMER))
+    if backend.owned_inhibitor_units() != (YOUTUBE_SERVICE,):
+        raise DeployHoldError(
+            "release requires exactly the receipt-owned YouTube inhibitor"
+        )
+    if not backend.inhibitor_exists(YOUTUBE_SERVICE):
+        raise DeployHoldError("owned YouTube inhibitor is missing before release")
     if backend.control_link_target(MAIN_TIMER) is not None:
         raise DeployHoldError("main timer control path reappeared before release")
     backend.write_ordinary_invocation(ordinary_invocation)
@@ -809,7 +1402,11 @@ def finish_release(
     _assert_load_states(backend, masked=(), loaded=TIMER_UNITS)
     for timer in (UNFINDABLE_TIMER, WATCHDOG_TIMER):
         backend.start_unit(timer)
-    backend.metadata_gate("resume-if-clear")
+    _release_owned_inhibitor(backend, YOUTUBE_SERVICE)
+    if backend.metadata_gate("resume-if-clear") != 0:
+        raise DeployHoldError(
+            "metadata gate did not resume after every boundary was released"
+        )
     for timer in TIMER_UNITS:
         state = backend.unit_state(timer)
         if state.active_state != "active":
@@ -839,6 +1436,15 @@ def complete_release(
         raise DeployHoldError("manual hold remains at release completion")
     if backend.owned_link_units():
         raise DeployHoldError("owned timer links remain at release completion")
+    if backend.owned_inhibitor_units():
+        raise DeployHoldError(
+            "owned producer inhibitors remain at release completion"
+        )
+    for service in START_INHIBITORS:
+        if backend.inhibitor_exists(service):
+            raise DeployHoldError(
+                f"producer inhibitor exists at release completion for {service}"
+            )
     for timer in TIMER_UNITS:
         target = backend.control_link_target(timer)
         if target is not None:

@@ -14,6 +14,7 @@ from lib.download_processing import (
     ProcessAlbumFn,
 )
 from lib.grab_list import GrabListEntry
+from lib.import_execution import CancellationToken
 
 if TYPE_CHECKING:
     from lib.context import CratediggerContext
@@ -29,6 +30,7 @@ class ProcessAlbumCall:
     dispatch_fn: DispatchCoreFn | None
     materialize_before_file_copy: Callable[[], None] | None
     materialize_fn: Callable[..., download_materialization.MaterializeResult] | None
+    cancellation_token: CancellationToken | None
 
 
 @dataclass
@@ -49,6 +51,7 @@ class RecordingProcessAlbum:
         dispatch_fn: DispatchCoreFn | None = None,
         materialize_before_file_copy: Callable[[], None] | None = None,
         materialize_fn: Callable[..., download_materialization.MaterializeResult] | None = None,
+        cancellation_token: CancellationToken | None = None,
     ) -> CompletionResult:
         self.calls.append(ProcessAlbumCall(
             album_data=album_data,
@@ -59,6 +62,7 @@ class RecordingProcessAlbum:
             dispatch_fn=dispatch_fn,
             materialize_before_file_copy=materialize_before_file_copy,
             materialize_fn=materialize_fn,
+            cancellation_token=cancellation_token,
         ))
         return self.outcome
 

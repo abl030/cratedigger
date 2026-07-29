@@ -13,6 +13,8 @@ from typing import Literal
 
 import msgspec
 
+from lib.pipeline_db._shared import ProcessingOwnerProjection
+
 ArtistCatalogueSource = Literal["mb", "discogs"]
 ArtistIdentityKind = Literal["work", "release"]
 ArtistStructuralType = Literal["Album", "EP", "Single"]
@@ -43,6 +45,7 @@ class ArtistCatalogueRow(msgspec.Struct, omit_defaults=True):
     library_rank: str | None = None
     pipeline_status: str | None = None
     pipeline_id: int | None = None
+    processing_owner: ProcessingOwnerProjection | None = None
 
 
 class ArtistCataloguePair(msgspec.Struct):

@@ -109,7 +109,8 @@ def overlay_release_rows_in_place(
         `in_library`, `beets_album_id`, `library_format`,
         `library_min_bitrate`, `library_avg_bitrate`, `library_rank`,
         `pipeline_status`, `pipeline_id`, `pipeline_verified_lossless`,
-        `pipeline_provisional`. Library quality fields are only set when the
+        `pipeline_provisional`, `processing_owner`. Library quality fields are
+        only set when the
         release is in the beets library AND the beets DB returned
         details for it. The identity pair derives from the request's
         linked current evidence (verified proof / unverified
@@ -162,6 +163,9 @@ def overlay_release_rows_in_place(
         pi = in_pipeline.get(rid)
         r["pipeline_status"] = pi["status"] if pi else None
         r["pipeline_id"] = pi["id"] if pi else None
+        r["processing_owner"] = (
+            pi.get("processing_owner") if pi else None
+        )
         r["pipeline_verified_lossless"] = (
             bool(pi["verified_lossless"]) if pi else False
         )

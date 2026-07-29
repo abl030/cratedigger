@@ -3,6 +3,10 @@ import { API, toast } from './state.js';
 import { esc, externalReleaseUrl, sourceLabel } from './util.js';
 import { renderReplaceButton } from './release_actions.js';
 import {
+  handleProcessingLockedConflict,
+  refetchProcessingRequest,
+} from './release_action_state.js';
+import {
   qualityRankBadgeClass,
   qualityToneClass,
   spectralGradeBadgeClass,
@@ -1053,7 +1057,7 @@ function renderEntry(e, thresholdMilli, requestId) {
       </div>
     </div>
     <div class="p-detail" id="${detailId}">
-      ${renderEntryDetail(e, job)}
+      ${renderEntryDetail(e, job, requestId)}
     </div>`;
 
   return header;
@@ -1062,9 +1066,10 @@ function renderEntry(e, thresholdMilli, requestId) {
 /**
  * Render expanded detail panel for one rejected candidate.
  * @param {Object} e - entry payload
+ * @param {number|string} requestId
  * @returns {string}
  */
-function renderEntryDetail(e, job) {
+function renderEntryDetail(e, job, requestId) {
   const c = e.candidate;
   const sourceDirs = sourceDirsForEntry(e);
 
@@ -1074,8 +1079,8 @@ function renderEntryDetail(e, job) {
     ? 'Recovery required'
     : (active ? job.status[0].toUpperCase() + job.status.slice(1) : 'Force Import');
   let html = '<div class="p-actions" style="margin-bottom:10px;">';
-  html += `<button class="p-btn" style="border-color:#6a9;color:#6a9;" ${active ? 'disabled' : ''} onclick="event.stopPropagation(); window.forceImportWrongMatch(${e.download_log_id}, this)">${importLabel}</button>`;
-  html += `<button class="p-btn delete" ${active ? 'disabled' : ''} onclick="event.stopPropagation(); window.deleteWrongMatch(${e.download_log_id}, this)">Delete</button>`;
+  html += `<button class="p-btn" data-pipeline-request-id="${requestId}" style="border-color:#6a9;color:#6a9;" ${active ? 'disabled' : ''} onclick="event.stopPropagation(); window.forceImportWrongMatch(${e.download_log_id}, this)">${importLabel}</button>`;
+  html += `<button class="p-btn delete" data-pipeline-request-id="${requestId}" ${active ? 'disabled' : ''} onclick="event.stopPropagation(); window.deleteWrongMatch(${e.download_log_id}, this)">Delete</button>`;
   html += '</div>';
 
   if (c) {
@@ -1410,6 +1415,14 @@ export async function forceImportWrongMatch(logId, btn) {
       body: JSON.stringify({download_log_id: logId}),
     });
     const data = await r.json();
+    if (await handleProcessingLockedConflict({
+      httpStatus: r.status,
+      payload: data,
+      control: btn,
+      refetch: refetchProcessingRequest,
+    })) {
+      return;
+    }
     if (data.status === 'queued') {
       btn.textContent = data.deduped ? 'Queued' : 'Queued';
       btn.style.borderColor = '#9bf';

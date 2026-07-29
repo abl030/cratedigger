@@ -29,6 +29,15 @@ function assertExcludes(haystack, needle, msg) {
   }
 }
 
+function assertEqual(actual, expected, msg) {
+  if (actual === expected) {
+    passed++;
+  } else {
+    failed++;
+    console.error(`  FAIL: ${msg} - expected '${expected}', got '${actual}'`);
+  }
+}
+
 console.log('renderImportItems() consumes the server-classified display contract');
 {
   const html = __test__.renderImportItems([{
@@ -54,10 +63,12 @@ console.log('renderImportItems() consumes the server-classified display contract
 
 console.log('renderRecentsSubnav() refreshes the active recents subtab');
 {
-  state.recentsSub = 'downloading';
+  state.recentsSub = 'acquisition';
   const html = __test__.renderRecentsSubnav();
   assertContains(html, 'window.setRecentsSub(\'history\')', 'history tab rendered');
-  assertContains(html, 'window.setRecentsSub(\'downloading\')', 'downloading tab rendered');
+  assertContains(html, 'window.setRecentsSub(\'acquisition\')', 'acquisition tab rendered');
+  assertContains(html, '>Acquisition<', 'request lifecycle subtab has ownership-neutral name');
+  assertExcludes(html, '>Downloading<', 'old transfer-only label is gone');
   assertContains(html, 'window.setRecentsSub(\'imports\')', 'imports tab rendered');
   assertContains(html, '>Imports<', 'ambiguous Queue label is gone');
   assertContains(html, 'window.loadRecents()', 'refresh reloads current recents subtab');
@@ -240,10 +251,12 @@ console.log('renderImportItems() surfaces failed force-import source cleanup');
     'cleanup path is escaped in chip hover text');
 }
 
-console.log('renderDownloadingItems() shows current file progress and user');
+console.log('renderAcquisitionItems() shows current transfer progress and user');
 {
-  const html = __test__.renderDownloadingItems([{
+  const html = __test__.renderAcquisitionItems([{
     id: 81,
+    status: 'downloading',
+    processing_owner: null,
     created_at: '2026-05-05T10:00:00+00:00',
     updated_at: '2026-05-05T12:30:00+00:00',
     album_title: 'Ocean Songs',
@@ -277,10 +290,12 @@ console.log('renderDownloadingItems() shows current file progress and user');
   assertContains(html, 'last: timeout', 'last outcome rendered');
 }
 
-console.log('renderDownloadingItems() escapes current download fields');
+console.log('renderAcquisitionItems() escapes current download fields');
 {
-  const html = __test__.renderDownloadingItems([{
+  const html = __test__.renderAcquisitionItems([{
     id: 82,
+    status: 'downloading',
+    processing_owner: null,
     created_at: '2026-05-05T10:00:00+00:00',
     album_title: '<album>',
     artist_name: '<artist>',
@@ -296,7 +311,7 @@ console.log('renderDownloadingItems() escapes current download fields');
   assertExcludes(html, '<album>', 'raw album is not rendered');
 }
 
-console.log('renderDownloadingItems() shows active YouTube ingest rows');
+console.log('renderAcquisitionItems() shows active YouTube ingest rows without processor ownership');
 {
   const row = __test__.normalizeYoutubeIngestItem({
     download_log_id: 301,
@@ -309,13 +324,89 @@ console.log('renderDownloadingItems() shows active YouTube ingest rows');
       expected_track_count: 2,
     },
   });
-  const html = __test__.renderDownloadingItems([row]);
+  const html = __test__.renderAcquisitionItems([row]);
+  assertEqual(row.processing_owner, null, 'YouTube normalization cannot grant processing ownership');
   assertContains(html, 'YT Album', 'YT album title rendered');
   assertContains(html, 'YT Artist', 'YT artist rendered');
   assertContains(html, 'youtube ingest', 'YouTube ingest badge rendered');
   assertContains(html, 'YouTube · 2 tracks · browse MPREb_yt',
     'YouTube ingest summary rendered');
   assertContains(html, '#202 · YT #301', 'request and download log ids rendered');
+}
+
+console.log('renderAcquisitionItems() consumes only the exact processing owner');
+{
+  const html = __test__.renderAcquisitionItems([{
+    id: 203,
+    status: 'processing',
+    created_at: '2026-07-29T01:00:00+00:00',
+    updated_at: '2026-07-29T01:05:00+00:00',
+    album_title: 'Exact Owner',
+    artist_name: 'The Apartments',
+    active_download_state: {
+      processing_started_at: '2026-07-29T01:01:00+00:00',
+      files: [{ username: 'stale-peer', last_state: 'Completed, Succeeded' }],
+    },
+    active_import_job: {
+      id: 9999,
+      status: 'running',
+      preview_status: 'evidence_ready',
+    },
+    processing_owner: {
+      job_id: 304,
+      status: 'queued',
+      preview_status: 'running',
+    },
+  }]);
+  assertContains(html, 'previewing', 'badge comes from durable owner state');
+  assertContains(html, 'job #304', 'summary names exact owner');
+  assertContains(html, '/api/import-jobs/304/recovery', 'row links exact owner recovery detail');
+  assertExcludes(html, '#9999', 'latest-job fallback is ignored');
+  assertExcludes(html, 'waiting for import', 'processing_started_at path inference is ignored');
+}
+
+console.log('loadRecents() consumes the combined Acquisition route without changing context');
+{
+  const oldDocument = globalThis.document;
+  const oldFetch = globalThis.fetch;
+  const content = { innerHTML: '' };
+  const calls = [];
+  globalThis.document = {
+    getElementById(id) {
+      return id === 'recents-content' ? content : null;
+    },
+  };
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          acquisition: [{
+            id: 205,
+            status: 'processing',
+            album_title: 'Acquiring',
+            artist_name: 'Owner',
+            created_at: '2026-07-29T02:00:00+00:00',
+            processing_owner: {
+              job_id: 306,
+              status: 'queued',
+              preview_status: 'evidence_ready',
+            },
+          }],
+          youtube_ingest: [],
+        };
+      },
+    };
+  };
+  state.recentsSub = 'acquisition';
+  await __test__.loadRecents();
+  assertEqual(calls.join(','), '/api/pipeline/acquisition', 'only combined route is fetched');
+  assertContains(content.innerHTML, 'waiting to import', 'processing acquisition is rendered');
+  assertEqual(state.recentsSub, 'acquisition', 'active subview is preserved');
+  globalThis.document = oldDocument;
+  globalThis.fetch = oldFetch;
 }
 
 console.log('renderRecentsItems() shows bad-extension postflight warning chip');

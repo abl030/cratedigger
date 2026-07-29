@@ -173,17 +173,6 @@ class TestFindOrphanedDownloads(unittest.TestCase):
         action = suggest_repair(issue)
         self.assertEqual(action.action, "manual_review")
 
-    def test_suggest_repair_auto_abandon_import(self):
-        issue = OrphanInfo(
-            request_id=1,
-            issue_type="auto_abandon_import",
-            detail="auto-abandonable request-scoped auto-import",
-        )
-        action = suggest_repair(issue)
-        self.assertEqual(action.action, "wait_for_automatic_recovery")
-        self.assertIn("quarantine", action.detail)
-
-
 class TestFindSlskdOrphans(unittest.TestCase):
     """Inverse orphan direction (#278), ledger-positive since #571 PR 3:
     a live slskd transfer is only ever an orphan when it's IN

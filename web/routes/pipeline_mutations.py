@@ -40,9 +40,17 @@ finalize_request = transitions.finalize_operator_request
 from lib.force_import_service import (
     FORCE_IMPORT_HTTP_STATUS,
     RESULT_DOWNLOAD_LOG_MISSING,
+    RESULT_PROCESSING_LOCKED,
     RESULT_QUEUED,
     RESULT_REQUEST_MISSING,
     enqueue_force_import,
+)
+from lib.pipeline_delete_service import (
+    PipelineDeleteApplied,
+    PipelineDeleteDescendantConflict,
+    PipelineDeleteLockContended,
+    PipelineDeleteNotFound,
+    delete_pipeline_request,
 )
 from lib.quality import (
     QUALITY_LOSSLESS,
@@ -105,13 +113,7 @@ def _transition_applied_or_respond(
         if result.kind is transitions.TransitionConflictKind.not_found
         else 409
     )
-    h._json({
-        "error": "transition_conflict",
-        "reason": result.kind.value,
-        "expected_status": result.expected_status,
-        "actual_status": result.actual_status,
-        "target_status": result.target_status,
-    }, status=status)
+    h._json(transitions.transition_conflict_payload(result), status=status)
     return False
 
 
@@ -127,7 +129,13 @@ def _request_fields_applied_or_respond(
     if applied:
         return True
     row = db.get_request(request_id)
-    return _transition_applied_or_respond(h, transitions.TransitionConflict(
+    processing_locked = transitions.processing_locked_conflict(
+        row,
+        request_id,
+        expected_status,
+        expected_status=expected_status,
+    )
+    conflict = processing_locked or transitions.TransitionConflict(
         request_id=request_id,
         target_status=expected_status,
         kind=(
@@ -137,7 +145,8 @@ def _request_fields_applied_or_respond(
         ),
         expected_status=expected_status,
         actual_status=None if row is None else str(row["status"]),
-    ))
+    )
+    return _transition_applied_or_respond(h, conflict)
 
 
 def _initializing_mutation_rejected(h: RouteHandler, req: Mapping[str, object]) -> bool:
@@ -887,6 +896,20 @@ def post_pipeline_force_import(h: RouteHandler, body: dict[str, object]) -> None
             FORCE_IMPORT_HTTP_STATUS[result.outcome],
         )
         return
+    if result.outcome == RESULT_PROCESSING_LOCKED:
+        owner = transitions.processing_owner_payload(result.processing_owner)
+        if owner is None:
+            raise RuntimeError(
+                "processing-locked force import is missing its exact owner"
+            )
+        h._json({
+            "error": RESULT_PROCESSING_LOCKED,
+            "reason": RESULT_PROCESSING_LOCKED,
+            "request_id": result.request_id,
+            "processing_owner": owner,
+            "detail": result.detail,
+        }, status=FORCE_IMPORT_HTTP_STATUS[result.outcome])
+        return
     if result.outcome != RESULT_QUEUED:
         h._error(
             result.detail or f"Files not found or unauthorized at: {result.failed_path}",
@@ -922,51 +945,29 @@ def post_pipeline_delete(h: RouteHandler, body: dict[str, object]) -> None:
         return
     s = _server()
     req_id = req_body.id
-    db = s._db()
-    req = db.get_request(int(req_id))
-    if not req:
+    result = delete_pipeline_request(s._db(), int(req_id))
+    if isinstance(result, PipelineDeleteNotFound):
         h._error("Not found", 404)
         return
-    # ``album_requests.replaces_request_id`` uses ON DELETE RESTRICT
-    # (migration 023) so a descendant Replace blocks deletion of the
-    # frozen ancestor. Surface 409 with the descendant chain rather
-    # than letting psycopg2 raise a 500 from the FK violation.
-    descendant = db.get_request_by_replaces_request_id(int(req_id))
-    if descendant is not None:
-        descendant_ids: list[int] = []
-        cursor = descendant
-        while cursor is not None:
-            descendant_ids.append(int(cursor["id"]))
-            cursor = db.get_request_by_replaces_request_id(int(cursor["id"]))
+    if isinstance(result, PipelineDeleteLockContended):
+        h._json({
+            "error": "destructive_operation_busy",
+            "scope": "request",
+        }, status=409)
+        return
+    if isinstance(result, PipelineDeleteDescendantConflict):
         h._json({
             "error": (
                 f"request {req_id} is referenced by a superseding "
                 "request — delete descendants first"
             ),
-            "descendant_request_ids": descendant_ids,
+            "descendant_request_ids": list(result.descendant_request_ids),
         }, status=409)
         return
-    import psycopg2.errors
-    try:
-        db.delete_request(int(req_id))
-    except psycopg2.errors.ForeignKeyViolation as exc:
-        # Defensive — a descendant landed between the read above and
-        # the delete. Re-walk the chain so the operator gets the same
-        # 409 response shape.
-        descendant_ids = []
-        descendant = db.get_request_by_replaces_request_id(int(req_id))
-        cursor = descendant
-        while cursor is not None:
-            descendant_ids.append(int(cursor["id"]))
-            cursor = db.get_request_by_replaces_request_id(int(cursor["id"]))
-        h._json({
-            "error": (
-                f"request {req_id} is referenced by a superseding "
-                f"request — delete descendants first ({exc})"
-            ),
-            "descendant_request_ids": descendant_ids,
-        }, status=409)
+    if isinstance(result, transitions.TransitionConflict):
+        _transition_applied_or_respond(h, result)
         return
+    assert isinstance(result, PipelineDeleteApplied)
     h._json({"status": "ok", "id": req_id})
 
 

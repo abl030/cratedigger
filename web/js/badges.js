@@ -18,6 +18,7 @@
 import { pipelineStore, pipelineStoreKey } from './state.js';
 import { esc, qualityLabelShort } from './util.js';
 import { qualityRankBadgeClass } from './quality_palette.js';
+import { processingOwnerPresentation } from './release_action_state.js';
 
 /**
  * @typedef {Object} BadgeItem
@@ -34,7 +35,8 @@ import { qualityRankBadgeClass } from './quality_palette.js';
  *   matters: Opus 128 is transparent, MP3 128 is poor — same bitrate,
  *   different rank).
  * @property {string|null|undefined} [pipeline_status]
- *   'wanted' | 'downloading' | 'imported' | 'unsearchable' | null
+ *   'wanted' | 'downloading' | 'processing' | 'imported' | 'unsearchable' | null
+ * @property {import('./release_action_state.js').ProcessingOwnerProjection|null} [processing_owner]
  * @property {boolean} [pipeline_verified_lossless] - The tracked install
  *   carries a verified-lossless proof (terminal quality identity).
  * @property {boolean} [pipeline_provisional] - The tracked install is an
@@ -52,6 +54,10 @@ export function renderStatusBadges(item) {
   const key = item.id ? pipelineStoreKey(item.id) : '';
   const stored = key ? pipelineStore.get(key) : null;
   const pStatus = stored ? stored.status : (item.pipeline_status || null);
+  const owner = stored
+    ? stored.processing_owner
+    : (item.processing_owner || null);
+  const processing = processingOwnerPresentation(pStatus, owner);
 
   let html = '';
   if (item.in_library) {
@@ -76,6 +82,9 @@ export function renderStatusBadges(item) {
   }
   if (pStatus === 'wanted') html += '<span class="badge badge-wanted">wanted</span>';
   if (pStatus === 'downloading') html += '<span class="badge badge-downloading">downloading</span>';
+  if (processing) {
+    html += `<span class="badge ${processing.badgeClass}" title="${esc(processing.lockReason)}">${esc(processing.label)}</span>`;
+  }
   if (pStatus === 'imported') html += '<span class="badge badge-imported">imported</span>';
   if (pStatus === 'unsearchable') html += '<span class="badge badge-unsearchable">unsearchable</span>';
   return html;

@@ -52,11 +52,6 @@ from hypothesis.stateful import (
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.config import CratediggerConfig
-from lib.import_queue import (
-    IMPORT_JOB_AUTOMATION,
-    automation_import_dedupe_key,
-    automation_import_payload,
-)
 from lib.pipeline_db import (
     ConsumedAttemptInput,
     NonConsumingAttemptInput,
@@ -78,7 +73,10 @@ from lib.transitions import (
 )
 from lib.world_invariants import assert_replaced_row_frozen
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_active_download_state_json
+from tests.helpers import (
+    handoff_automation_owner,
+    make_active_download_state_json,
+)
 
 LEGAL_STATUSES = frozenset({
     "initializing",
@@ -100,16 +98,7 @@ def attach_fake_processing_owner(
     request_id: int,
 ) -> int:
     """Create the production-representable owner before entering processing."""
-    job = db.enqueue_import_job(
-        IMPORT_JOB_AUTOMATION,
-        request_id=request_id,
-        dedupe_key=automation_import_dedupe_key(request_id),
-        payload=automation_import_payload(),
-    )
-    row = db.request(request_id)
-    row["status"] = "processing"
-    row["active_automation_import_job_id"] = job.id
-    return job.id
+    return handoff_automation_owner(db, request_id).id
 
 
 # ===========================================================================
@@ -412,7 +401,7 @@ class TestProcessingOwnerGuardsGenerated(unittest.TestCase):
 
     def test_owned_processing_row_rejects_every_generic_writer(self) -> None:
         db, request_id = self._owned_request()
-        before = copy.deepcopy(db.request(request_id))
+        before = copy.deepcopy(db.get_request(request_id))
 
         self.assertFalse(db.update_request_fields(request_id, reasoning="late"))
         self.assertFalse(
@@ -436,6 +425,12 @@ class TestProcessingOwnerGuardsGenerated(unittest.TestCase):
                 min_bitrate=320,
             )
         )
+        self.assertFalse(db.record_attempt(
+            request_id,
+            "download",
+            expected_status="processing",
+        ))
+        db.clear_on_disk_quality_fields(request_id)
         db.delete_request(request_id)
         result = finalize_request(
             db,
@@ -465,7 +460,7 @@ class TestProcessingOwnerGuardsGenerated(unittest.TestCase):
         value: int,
     ) -> None:
         db, request_id = self._owned_request()
-        before = copy.deepcopy(db.request(request_id))
+        before = copy.deepcopy(db.get_request(request_id))
         expected_status = "processing" if expected_is_current else "wanted"
 
         if writer == "rescue":
@@ -501,7 +496,7 @@ class TestProcessingOwnerGuardsGenerated(unittest.TestCase):
         expected_is_current: bool,
     ) -> None:
         db, request_id = self._owned_request()
-        before = copy.deepcopy(db.request(request_id))
+        before = copy.deepcopy(db.get_request(request_id))
         source = "processing" if expected_is_current else "wanted"
         if target == "wanted":
             command = RequestTransition.to_wanted(from_status=source)
@@ -889,16 +884,12 @@ class RequestLifecycleMachine(RuleBasedStateMachine):
         rid = data.draw(st.sampled_from(sorted(self.frozen)), label="frozen row")
         snapshot = copy.deepcopy(self._row(rid))
 
-        if self.db.update_download_state(
+        if self.db.update_download_state_if_downloading(
             rid,
             make_active_download_state_json([]),
-            expected_status="downloading",
+            expected_enqueued_at="2026-07-01T00:00:00+00:00",
         ):
             raise AssertionError("late download-state write thawed replaced row")
-        if self.db.update_download_state_current_path(rid, "/late/path"):
-            raise AssertionError("late path write thawed replaced row")
-        if self.db.mark_import_subprocess_started(rid, "late"):
-            raise AssertionError("late import stamp thawed replaced row")
         if self.db.set_request_current_evidence(
             rid,
             999,

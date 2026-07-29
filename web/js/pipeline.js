@@ -5,7 +5,16 @@ import { renderDownloadHistoryItem } from './history.js';
 import {
   renderBeetsTrackRow, renderExpectedTrackRow, renderDetailRow, renderExternalLinkRow, toggleExpand,
 } from './render_primitives.js';
-import { renderBadRipButton, renderReplaceButton } from './release_actions.js';
+import {
+  renderBadRipButton,
+  renderProcessingLockedControl,
+  renderReplaceButton,
+} from './release_actions.js';
+import {
+  buildReleaseActionState,
+  handleProcessingLockedConflict,
+  processingOwnerPresentation,
+} from './release_action_state.js';
 import { renderSearchPlanDetail } from './search_plan.js';
 import { loadLongTail, renderLongTailBody } from './long_tail.js';
 import { restoreLongTailConsoles } from './long_tail_console.js';
@@ -197,19 +206,28 @@ function renderPipelineNav() {
  * Render lifecycle actions without offering an invalid search-stop edge.
  * @param {string|number} requestId
  * @param {string} status
+ * @param {unknown} processingOwner
  * @returns {string}
  */
-function renderPipelineStatusButtons(requestId, status) {
+function renderPipelineStatusButtons(requestId, status, processingOwner = null) {
+  const processing = processingOwnerPresentation(status, processingOwner);
+  if (processing) {
+    return renderProcessingLockedControl(processing, Number(requestId), {
+      className: 'p-btn active-status',
+      descriptionSuffix: 'pipeline-status',
+    });
+  }
   const downloading = status === 'downloading'
     ? '<button class="p-btn active-status" disabled aria-disabled="true">downloading</button>'
     : '';
+  const requestAttr = ` data-pipeline-request-id="${requestId}"`;
   const canSetUnsearchable = status === 'wanted' || status === 'unsearchable';
   const unsearchable = canSetUnsearchable
-    ? `<button class="p-btn ${status === 'unsearchable' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.updateStatus(${requestId}, 'unsearchable')">unsearchable</button>`
+    ? `<button class="p-btn ${status === 'unsearchable' ? 'active-status' : ''}"${requestAttr} onclick="event.stopPropagation(); window.updateStatus(${requestId}, 'unsearchable')">unsearchable</button>`
     : '<button class="p-btn" disabled aria-disabled="true">unsearchable</button>';
   return `${downloading}
-      <button class="p-btn ${status === 'wanted' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.updateStatus(${requestId}, 'wanted')">wanted</button>
-      <button class="p-btn ${status === 'imported' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.updateStatus(${requestId}, 'imported')">imported</button>
+      <button class="p-btn ${status === 'wanted' ? 'active-status' : ''}"${requestAttr} onclick="event.stopPropagation(); window.updateStatus(${requestId}, 'wanted')">wanted</button>
+      <button class="p-btn ${status === 'imported' ? 'active-status' : ''}"${requestAttr} onclick="event.stopPropagation(); window.updateStatus(${requestId}, 'imported')">imported</button>
       ${unsearchable}`;
 }
 
@@ -278,10 +296,22 @@ export async function toggleDetail(elId, requestId) {
     // Status change buttons
     html += `<div class="p-actions">
       <span class="p-detail-label" style="line-height:28px;">Status:</span>
-      ${renderPipelineStatusButtons(id, req.status)}`;
+      ${renderPipelineStatusButtons(id, req.status, req.processing_owner ?? null)}`;
+    const releaseId = req.mb_release_id || req.discogs_release_id || '';
+    const actionState = buildReleaseActionState({
+      id: releaseId,
+      in_library: data.current_library?.state === 'unique',
+      beets_album_id: data.current_library?.album_id ?? null,
+      pipeline_status: req.status,
+      pipeline_id: Number(id),
+      processing_owner: req.processing_owner ?? null,
+      artist: req.artist_name || '',
+      album: req.album_title || '',
+      track_count: tracks.length,
+    });
     // Bad-rip reuses the library renderer — pipelineId + releaseId are all
     // it needs from state. Hidden when either is absent (issue #188).
-    html += renderBadRipButton(/** @type {any} */ ({pipelineId: id, releaseId: req.mb_release_id}), {
+    html += renderBadRipButton(actionState, {
       className: 'p-btn delete',
       stopPropagation: true,
     });
@@ -296,10 +326,23 @@ export async function toggleDetail(elId, requestId) {
         sourceRequestId: id,
         releaseGroupId: req.mb_release_group_id || null,
         sourceLabel: `${req.artist_name || ''} — ${req.album_title || ''}`,
+        processingState: actionState,
       }, { className: 'p-btn', stopPropagation: true });
     }
-    html += `<button class="p-btn delete" onclick="event.stopPropagation(); window.deleteRequest(${id})">delete</button>
-    </div>`;
+    if (actionState.processingPresentation) {
+      html += renderProcessingLockedControl(
+        actionState.processingPresentation,
+        actionState.pipelineId,
+        {
+          className: 'p-btn delete',
+          label: 'delete',
+          descriptionSuffix: 'pipeline-delete',
+        },
+      );
+    } else {
+      html += `<button class="p-btn delete" data-pipeline-request-id="${id}" onclick="event.stopPropagation(); window.deleteRequest(${id})">delete</button>`;
+    }
+    html += '</div>';
 
     target.innerHTML = html;
   }, { errorText: 'Failed to load details' });
@@ -360,6 +403,12 @@ export async function deleteRequest(id) {
       body: JSON.stringify({id}),
     });
     const data = await r.json();
+    if (await handleProcessingLockedConflict({
+      httpStatus: r.status,
+      payload: data,
+    })) {
+      return;
+    }
     if (data.status === 'ok') {
       toast(`Deleted #${id}`);
       loadPipeline();
@@ -383,6 +432,12 @@ export async function updateStatus(id, newStatus) {
       body: JSON.stringify({id, status: newStatus}),
     });
     const data = await r.json();
+    if (await handleProcessingLockedConflict({
+      httpStatus: r.status,
+      payload: data,
+    })) {
+      return;
+    }
     if (data.status === 'ok') {
       toast(`#${id} → ${newStatus}`);
       loadPipeline();

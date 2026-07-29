@@ -161,14 +161,16 @@ that audit trail.
 - `status TEXT` — `initializing` is a provisional, non-runnable direct-creation
   state. Its publication to `wanted` is a service-owned compare-and-set after
   canonical tracks, field-resolution audit, and an initial plan outcome are persisted.
-  Active vocabulary: `wanted`, `downloading`, `imported`, `unsearchable`;
-  terminal audit vocabulary: `replaced`. `unsearchable` is an
-  explicit operator-owned search stop and is independent of source cleanup.
+  Active vocabulary: `wanted`, `downloading`, `processing`, `imported`,
+  `unsearchable`; terminal audit vocabulary: `replaced`. `processing` is the
+  private processor-owned interval between an exact download-incarnation
+  handoff and one terminal automation outcome. `unsearchable` is an explicit
+  operator-owned search stop and is independent of source cleanup.
   Ordinary transitions are fail-closed and use SQL compare-and-set against the
   exact observed/declared source status. `replaced` has no outgoing edge and is
   created only by the one-way `supersede_request_mbid` transaction.
 
-  The explicit operator transition graph has 11 edges (none out of
+  The explicit operator transition graph still has 11 edges (none out of
   `initializing`): `wanted → downloading/unsearchable/imported/wanted`; `downloading → wanted/imported`; `imported →
   wanted/imported`; and `unsearchable → wanted/imported/unsearchable`.
   `downloading → unsearchable` cannot abandon an active transfer, and
@@ -177,6 +179,14 @@ that audit trail.
   true no-ops: they do not change `updated_at` or any other byte. There is no
   `downloading → downloading` edge because acquiring download ownership must
   remain an explicit compare-and-set operation.
+
+  `downloading → processing` is not part of that generic graph. The
+  automation handoff owns it and atomically attaches the new job; exact-owner
+  terminal commands privately perform `processing → wanted|imported`.
+  Recovery retry remains in `processing` while atomically replacing the
+  ambiguous owner job. Generic lifecycle, intent, quality, replacement,
+  force-import, ban/delete, and library-delete actions return
+  `processing_locked` instead of mutating an owned request.
 
   Once a row becomes `replaced`, its lifecycle, retry counters, scheduler
   fields, active download metadata, evidence pointer, and active search-plan
@@ -206,9 +216,18 @@ that audit trail.
   Event classification additionally requires a parseable current witness and a
   completion occurrence at or after it; post-event polling admits only exact
   `(request_id, enqueued_at)` pairs captured before the transfer snapshot.
-  Ownership of downstream processing, filesystem actions, importer work, and
-  terminal side effects is deliberately not granted by this PR1 witness and
-  remains issue #898 PR2.
+  The witnessed handoff preserves this JSONB as immutable
+  attempt/manifest provenance while entering `processing`. It stamps the
+  canonical path and `processing_started_at` before the transaction commits,
+  but neither path nor timestamp is authority. Poll/event/timeout code stops
+  at that boundary.
+- `active_automation_import_job_id INTEGER` — exact processor owner. A deferred
+  unique/FK/constraint-trigger bundle requires this pointer iff
+  `status='processing'`, requires the named row to belong to this request, and
+  requires that row to be an active `automation_import` job (`queued`,
+  `running`, or `recovery_required`). Historical terminal jobs are never
+  adopted. The owner pointer and `active_download_state` are cleared together
+  only by the exact-owner terminal transaction.
 
 ## `download_log` — quality-tracking fields
 
@@ -229,13 +248,11 @@ that audit trail.
 - `youtube_metadata JSONB` — YT-specific audit payload added by migration 037. Nullable; populated only for `source='youtube'` rows. Typed at the read seam as `lib.youtube_ingest_service.YoutubeIngestMetadata: msgspec.Struct`. Carries `yt_url`, `browse_id`, `audio_playlist_id`, optional `expected_track_count`, `resolver_mapping_id`, `per_track_video_ids`, and terminal-state fields (`reason`, `stderr_excerpt`, `observed_track_count`).
 - **Partial unique index `one_youtube_running_per_request` ON `download_log (request_id) WHERE source = 'youtube' AND outcome = 'youtube_running'`** — added by migration 037. Enforces idempotency at the DB layer: at most one in-flight YT rescue per `request_id` at any time. Application-level pre-insert checks would race; this index is atomic. Once the row transitions to a terminal `youtube_success` / `youtube_failed`, the index admits the next submission.
 
-Interrupted request auto-import cleanup uses `outcome='failed'` with
-`beets_scenario='abandoned_auto_import'` and a readable
-`error_message`. This is an interruption audit row, not a source
-rejection: cooldown lookback excludes this scenario, and the cleanup
-does not write denylist, wrong-match, or bad-audio evidence. The audit
-row and `downloading` to `wanted` reset are committed together only when
-the request still owns the same `active_download_state.current_path`.
+Historical interrupted request auto-import cleanup rows use
+`outcome='failed'` with `beets_scenario='abandoned_auto_import'` and a readable
+`error_message`. Current exact-owner processing no longer writes this scenario;
+the old rows remain readable interruption evidence rather than source
+rejections, denylist decisions, wrong matches, or bad-audio evidence.
 
 Audio-integrity failures split at the evidence boundary:
 
@@ -295,6 +312,15 @@ Key fields:
   parallel active YouTube import for the same request.
 - `attempts`, `worker_id`, `started_at`, `heartbeat_at`, `completed_at` —
   claim and recovery metadata.
+- `execution_invocation_id`, `execution_host_boot_id`,
+  `execution_systemd_unit`, `execution_worker_pid`, and
+  `execution_worker_start_ticks` — complete persisted identity of the execution
+  that currently claimed an automation owner. The optional
+  `execution_beets_pid`/`execution_beets_start_ticks` pair records the exact
+  authorized child. These fields support positive live/dead/unknown evidence;
+  they never grant ownership. Same-boot death requires absence of the exact
+  unit/invocation, PID/start-ticks identities, and cgroup. Probe errors or
+  contradictory facts are unknown and do not requeue.
 - `expected_request_status` — the request status captured atomically when the
   job is enqueued. Launch authorization compares the live request row with
   this stored precondition; the importer cannot make the check tautological by
@@ -326,34 +352,40 @@ Key fields:
 - `importable_at TIMESTAMPTZ` — set when preview produces `evidence_ready`; the
   serial importer claims only queued `evidence_ready` jobs.
 
-On importer startup, a pre-existing `running` job is reset to `queued` only
-when `beets_launch_authorized_at IS NULL`, proving the prior process had not
-crossed the Beets launch fence. A marked job becomes `recovery_required` and
-waits for the operator. `pipeline-cli import-job-recovery` (or
-`POST /api/import-jobs/{id}/recovery`) can then close it without replay, or—if
-the operator has established that the mutation was not applied—close the
-ambiguous operation and mint a fresh job ID. Retry is refused if the recorded
-release, request status, source path, or candidate snapshot authority changed
-during inspection. The importer also holds a DB advisory singleton lock while
-it runs, so an accidentally-started second worker exits instead of recovering
-a live worker's job.
+On importer/preview startup, a pre-existing automation execution changes only
+after the shared liveness probe positively proves its persisted execution
+dead. A dead pre-launch exact owner can requeue the same job. Once launch was
+authorized, the same owner becomes/remains `recovery_required`; missing or
+stale heartbeat alone is never death proof. A live or unknown execution is
+untouched. The importer also holds the DB advisory singleton lock, so an
+accidentally started second worker exits instead of recovering a live worker's
+job.
+
+`GET /api/import-jobs/{id}/recovery` and
+`pipeline-cli import-job-recovery show JOB_ID` expose one
+`AutomationRecoveryDetail`: the exact owner/request/release/path, launch and
+lease snapshot, live/dead/unknown transcript, typed completion and exact
+library observations, cleanup state, close eligibility, and an opaque evidence
+revision. Retry/close submit that revision and re-observe before a locked CAS.
+Retry fails the ambiguous job, inserts a fresh job, byte-preservingly retargets
+any cleanup journal, and updates the request owner last. Close never infers
+whether Beets applied the import: the operator declares `wanted` or `imported`,
+provides a non-empty reason, and exact cleanup must complete before the shared
+terminal bundle clears ownership. Force-import and YouTube recovery retain
+their existing semantics.
 
 Covered job-backed terminal outcomes cross one DB transaction boundary. This
 includes force-import and validated automation dispatch outcomes, automation's
 local `Completed` / `CompletionFailed` fallbacks, and request-backed preview
-measurement failures. Their request transition (including retry-attempt
-accounting), mandatory `download_log` audit, source denylist/cooldown writes,
-and terminal `import_jobs` update commit together through the typed commands in
-`lib/terminal_outcomes.py`. A request-transition conflict or job
-compare-and-set conflict rolls back the entire bundle; callers must not perform
-a second job finalization. Direct/no-job poller transitions retain their
-existing non-queue behavior and are outside this job-owned transaction.
-Destructive staged-folder, duplicate-guard quarantine, and disambiguation
-cleanup returned by dispatch are performed only after that terminal commit.
-The cleanup description is process-local and best-effort: a crash after the
-terminal acknowledgement may leave harmless filesystem debris, but a failed
-or rolled-back acknowledgement cannot erase the source needed for operator
-recovery.
+measurement failures. Force/YouTube jobs retain their prior request semantics.
+For automation owners, processor cleanup first completes under the still
+attached owner; the terminal command verifies that exact owner and consumes
+the completed/no-op cleanup receipt while its request transition, owner/state
+clear, retry accounting, mandatory `download_log` audit, source
+denylist/cooldown writes, and exact job terminalization commit together through
+`lib/terminal_outcomes.py`. A request, owner, receipt, or job CAS conflict
+rolls the whole bundle back. The terminal commit is the final processor-owned
+step; there is no authorized post-terminal cleanup.
 
 Async preview workers run outside the beets mutation lane. They claim queued
 jobs with `preview_status='waiting'`, call the no-mutation import preview path,
@@ -373,6 +405,35 @@ Do not bulk-convert those rows; that would restore preview-decision authority.
 The Recents Imports endpoint lists active `queued`, `running`, and
 `recovery_required` jobs; terminal `completed`/`failed` rows remain durable
 audit history and must not be rendered as live queue work.
+
+## `processing_cleanup_journal` — exact-owner filesystem intent
+
+One active automation owner may have one journal row keyed by
+`(job_id, request_id)`. Deferred integrity triggers require the journal, job,
+and request pointer to describe the same active processing owner.
+
+- `revision` is the monotonic checkpoint CAS.
+- `action` is one deterministic processor action: exact source-tree removal,
+  exact quarantine rename, or a typed no-op after positive absence proof.
+- `source_path`, `source_manifest`, and `source_manifest_hash` freeze the
+  authorized source bytes before the first cleanup mutation.
+- `destination_path`, destination manifest/hash, and
+  `selected_destination_path` freeze quarantine collision selection before
+  rename; retries never allocate a different target.
+- `step_progress` records idempotent unlink/rmdir/rename progress. Every
+  mutation is bracketed by the pinned owner-session cancellation check and a
+  journal CAS.
+- `declared_result_status`, `declared_reason`, and `evidence_revision` persist
+  a recovery-close declaration across interruption.
+- `completed_receipt` and `completed_at` are both present or both absent. The
+  terminal transaction consumes only a typed completed/no-op receipt matching
+  the exact owner and pending outcome.
+
+Cleanup locks rows in the global request → request jobs by ID → journals by
+job ID order. Recovery retry may change only the journal's owner `job_id` and
+revision; paths, manifests, progress, declaration, and receipt remain
+byte-identical. A cleanup failure retains the request owner and journal for
+death-proven recovery rather than clearing authority or writing a second audit.
 
 ## `download_log.import_result` JSONB
 
@@ -437,7 +498,7 @@ WHERE beets_scenario IN ('no_choose_match', 'validation_error')
 ORDER BY id DESC LIMIT 20;
 ```
 
-For `abandoned_auto_import` audit rows, `validation_result.failed_path`
+For historical `abandoned_auto_import` audit rows, `validation_result.failed_path`
 points at the prefixed failed-import folder when a leftover staged
 directory existed. A missing staged directory may produce the same audit
 scenario without a `validation_result` body; `error_message` remains the

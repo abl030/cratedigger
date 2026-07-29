@@ -10,9 +10,13 @@ from __future__ import annotations
 import os
 import subprocess as sp
 import sys
+import tempfile
+import threading
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from lib.dispatch.types import ImportOneRun
+from lib.import_execution import CancellationToken, MonitoredProcessGroup
 from lib.quality import parse_import_result
 from lib.util import beets_subprocess_env
 
@@ -123,6 +127,9 @@ def run_import_one(
     beets_library_db_path: str | None = None,
     beets_library_root: str | None = None,
     timeout: int = 1800,
+    cancellation_token: CancellationToken | None = None,
+    on_spawn: Callable[[int], None] | None = None,
+    owner_session_probe: Callable[[], bool] | None = None,
 ) -> ImportOneRun:
     """Run import_one.py and parse its ImportResult sentinel."""
     cmd = build_import_one_command(
@@ -144,25 +151,86 @@ def run_import_one(
         beets_library_db_path=beets_library_db_path,
         beets_library_root=beets_library_root,
     )
-    result = sp.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        errors="replace",
-        timeout=timeout,
-        env=beets_subprocess_env(
-            beets_config_dir=beets_config_dir,
-            beets_python=beets_python,
-            beets_library_db_path=beets_library_db_path,
-            beets_library_root=beets_library_root,
-        ),
-        check=False,
+    env = beets_subprocess_env(
+        beets_config_dir=beets_config_dir,
+        beets_python=beets_python,
+        beets_library_db_path=beets_library_db_path,
+        beets_library_root=beets_library_root,
     )
-    stdout = result.stdout or ""
-    stderr = result.stderr or ""
+    if (
+        cancellation_token is None
+        and on_spawn is None
+        and owner_session_probe is None
+    ):
+        result = sp.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=timeout,
+            env=env,
+            check=False,
+        )
+        returncode = int(result.returncode)
+        stdout = result.stdout or ""
+        stderr = result.stderr or ""
+    else:
+        if cancellation_token is None:
+            raise ValueError(
+                "spawn callbacks and owner-session probes require cancellation"
+            )
+        cancellation_token.raise_if_cancelled()
+        timed_out = threading.Event()
+        termination_errors: list[BaseException] = []
+        with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
+            process = sp.Popen(
+                cmd,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                env=env,
+                start_new_session=True,
+            )
+            monitored = MonitoredProcessGroup(process)
+            try:
+                if on_spawn is not None:
+                    on_spawn(monitored.pid)
+            except BaseException:
+                monitored.terminate_and_wait()
+                raise
+
+            def expire() -> None:
+                timed_out.set()
+                try:
+                    monitored.terminate_and_wait()
+                except BaseException as exc:  # noqa: BLE001 - cross-thread handoff
+                    termination_errors.append(exc)
+
+            timer = threading.Timer(timeout, expire)
+            timer.daemon = True
+            timer.start()
+            try:
+                returncode = monitored.wait(
+                    cancellation_token,
+                    owner_session_probe=owner_session_probe,
+                )
+            finally:
+                timer.cancel()
+                timer.join()
+            if termination_errors:
+                raise termination_errors[0]
+            # Owner/session cancellation is the stronger safety signal when it
+            # races the timeout callback. The process group has already been
+            # terminated and waited either way; preserve the ownership cause.
+            cancellation_token.raise_if_cancelled()
+            if timed_out.is_set():
+                raise sp.TimeoutExpired(cmd=cmd, timeout=timeout)
+            stdout_file.seek(0)
+            stderr_file.seek(0)
+            stdout = stdout_file.read().decode("utf-8", "replace")
+            stderr = stderr_file.read().decode("utf-8", "replace")
     return ImportOneRun(
         command=tuple(cmd),
-        returncode=int(result.returncode),
+        returncode=returncode,
         stdout=stdout,
         stderr=stderr,
         import_result=parse_import_result(stdout),

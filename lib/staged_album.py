@@ -6,7 +6,9 @@ import logging
 import os
 import shutil
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
+
+from lib.import_execution import CancellationToken, ExecutionCancelled
 
 if TYPE_CHECKING:
     from lib.grab_list import DownloadFile, GrabListEntry
@@ -15,15 +17,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger("cratedigger")
 
 
-class SupportsCurrentPathUpdate(Protocol):
-    """Minimal DB seam for persisting ``active_download_state.current_path``."""
-
-    def update_download_state_current_path(
-        self,
-        request_id: int,
-        current_path: str | None,
-    ) -> bool:
-        ...
+def _checkpoint(cancellation_token: CancellationToken | None) -> None:
+    if cancellation_token is not None:
+        cancellation_token.raise_if_cancelled()
 
 
 def staged_filename(file: DownloadFile) -> str:
@@ -60,55 +56,55 @@ class StagedAlbum:
         for file in files:
             file.import_path = self.import_path_for(file)
 
-    def persist_current_path(
-        self,
-        db: SupportsCurrentPathUpdate | None,
-    ) -> None:
-        if self.request_id is None or db is None:
-            return
-        if not db.update_download_state_current_path(
-            self.request_id,
-            self.current_path,
-        ):
-            raise RuntimeError(
-                f"request {self.request_id} no longer owns downloading state"
-            )
-
     def move_to(
         self,
         dest: str,
-        db: SupportsCurrentPathUpdate | None = None,
+        *,
+        cancellation_token: CancellationToken | None = None,
     ) -> str:
-        """Move album contents into ``dest`` and persist the new location."""
+        """Move album contents without inferring lifecycle ownership from path."""
+        if cancellation_token is not None:
+            return self._move_to_cancellable(dest, cancellation_token)
+
         source = os.path.abspath(self.current_path)
         target = os.path.abspath(dest)
         target_preexisted = os.path.isdir(target)
 
         if source == target:
             self.current_path = target
-            self.persist_current_path(db)
             return self.current_path
 
         moved_entries: list[tuple[str, str]] = []
         try:
+            _checkpoint(cancellation_token)
             os.makedirs(target, exist_ok=True)
             for entry in os.listdir(source):
                 source_entry = os.path.join(source, entry)
                 target_entry = os.path.join(target, entry)
+                _checkpoint(cancellation_token)
                 shutil.move(source_entry, target_entry)
                 moved_entries.append((source_entry, target_entry))
             self.current_path = target
-            self.persist_current_path(db)
+            _checkpoint(cancellation_token)
             shutil.rmtree(source, ignore_errors=True)
             return self.current_path
+        except ExecutionCancelled:
+            # Fail-stop ownership deliberately leaves any completed atomic
+            # moves in place. Recovery reconciles them from durable evidence;
+            # rollback would itself be a forbidden post-cancellation mutation.
+            raise
         except Exception as exc:
             rollback_failures: list[tuple[str, str]] = []
             if moved_entries:
+                _checkpoint(cancellation_token)
                 os.makedirs(source, exist_ok=True)
                 for source_entry, target_entry in reversed(moved_entries):
                     if os.path.exists(target_entry):
                         try:
+                            _checkpoint(cancellation_token)
                             shutil.move(target_entry, source_entry)
+                        except ExecutionCancelled:
+                            raise
                         except Exception:
                             rollback_failures.append((source_entry, target_entry))
                             logger.exception(
@@ -116,8 +112,84 @@ class StagedAlbum:
                                 target_entry,
                                 source_entry,
                             )
-            elif not target_preexisted and os.path.isdir(target) and not os.listdir(target):
+            elif (
+                not target_preexisted
+                and os.path.isdir(target)
+                and not os.listdir(target)
+            ):
+                _checkpoint(cancellation_token)
                 shutil.rmtree(target, ignore_errors=True)
+            self.current_path = source
+            if rollback_failures:
+                first_source, first_target = rollback_failures[0]
+                raise RuntimeError(
+                    "Failed to roll back staged move cleanly after a staging "
+                    f"error: {first_target} -> {first_source}"
+                ) from exc
+            raise
+
+    def _move_to_cancellable(
+        self,
+        dest: str,
+        cancellation_token: CancellationToken,
+    ) -> str:
+        """Move with atomic same-filesystem mutations and no hidden fallback."""
+        source = os.path.abspath(self.current_path)
+        target = os.path.abspath(dest)
+        target_preexisted = os.path.isdir(target)
+
+        if source == target:
+            self.current_path = target
+            return self.current_path
+
+        moved_entries: list[tuple[str, str]] = []
+        try:
+            _checkpoint(cancellation_token)
+            if not target_preexisted:
+                # A missing parent is a configuration/recovery error. Avoid
+                # os.makedirs: it can perform several uncheckpointed writes.
+                os.mkdir(target)
+            for entry in sorted(os.listdir(source)):
+                source_entry = os.path.join(source, entry)
+                target_entry = os.path.join(target, entry)
+                _checkpoint(cancellation_token)
+                # Never inherit shutil.move's cross-filesystem recursive
+                # copy/delete fallback while processor ownership is monitored.
+                os.rename(source_entry, target_entry)
+                moved_entries.append((source_entry, target_entry))
+            self.current_path = target
+            _checkpoint(cancellation_token)
+            os.rmdir(source)
+            return self.current_path
+        except ExecutionCancelled:
+            # Completed atomic renames are durable recovery evidence. A stale
+            # worker must not roll them back or remove either partial tree.
+            raise
+        except Exception as exc:
+            rollback_failures: list[tuple[str, str]] = []
+            _checkpoint(cancellation_token)
+            for source_entry, target_entry in reversed(moved_entries):
+                if os.path.exists(target_entry):
+                    try:
+                        _checkpoint(cancellation_token)
+                        os.rename(target_entry, source_entry)
+                    except ExecutionCancelled:
+                        raise
+                    except Exception:
+                        rollback_failures.append((source_entry, target_entry))
+                        logger.exception(
+                            "Failed to roll back staged move %s -> %s",
+                            target_entry,
+                            source_entry,
+                        )
+            if (
+                not moved_entries
+                and not target_preexisted
+                and os.path.isdir(target)
+                and not os.listdir(target)
+            ):
+                _checkpoint(cancellation_token)
+                os.rmdir(target)
             self.current_path = source
             if rollback_failures:
                 first_source, first_target = rollback_failures[0]

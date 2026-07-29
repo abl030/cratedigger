@@ -31,11 +31,7 @@ from lib.download_recovery import (
     find_blocked_processing_path_issues,
     find_blocked_recovery_issues,
 )
-from lib.pipeline_db import (
-    ADVISORY_LOCK_NAMESPACE_RELEASE,
-    PipelineDB,
-    release_id_to_lock_key,
-)
+from lib.pipeline_db import PipelineDB
 from lib.processing_paths import directory_has_entries, processing_albums_dir
 from lib.repair import (
     OrphanInfo,
@@ -146,58 +142,6 @@ def _dedupe_issues(issues: list[OrphanInfo]) -> list[OrphanInfo]:
     return deduped
 
 
-def _auto_import_in_progress(
-    db: _RepairDB,
-    request_id: int,
-    mb_release_id: str | None,
-) -> bool | None:
-    """Return True when another session currently holds the release lock."""
-    if not mb_release_id:
-        return False
-    try:
-        cur = db._execute(
-            """
-            SELECT EXISTS (
-                SELECT 1
-                FROM pg_locks
-                WHERE locktype = 'advisory'
-                  AND classid = %s
-                  AND objid = %s
-                  AND objsubid = 2
-                  AND mode = 'ExclusiveLock'
-                  AND granted
-                  AND database = (
-                      SELECT oid
-                      FROM pg_database
-                      WHERE datname = current_database()
-                  )
-            ) AS held
-            """,
-            (
-                ADVISORY_LOCK_NAMESPACE_RELEASE,
-                release_id_to_lock_key(mb_release_id),
-            ),
-        )
-        row = cur.fetchone()
-        if isinstance(row, dict):
-            return bool(row.get("held"))
-        if row:
-            return bool(row[0])
-        return False
-    except Exception as e:  # noqa: BLE001 - boundary converts or isolates collaborator failures
-        print(
-            "  slskd: could not probe auto-import lock for "
-            f"request {request_id}: {e}",
-        )
-        return None
-
-
-def _blocked_processing_issue_type(detail: str) -> str:
-    if "auto-abandonable request-scoped auto-import" in detail:
-        return "auto_abandon_import"
-    return "blocked_post_move"
-
-
 def _collect_issues(
     db: _RepairDB,
     slskd_host: str | None,
@@ -257,7 +201,7 @@ def _collect_issues(
             blocked_processing_path_issues = [
                 OrphanInfo(
                     request_id=issue.request_id,
-                    issue_type=_blocked_processing_issue_type(issue.detail),
+                    issue_type="blocked_post_move",
                     detail=issue.detail,
                 )
                 for issue in find_blocked_processing_path_issues(
@@ -266,13 +210,6 @@ def _collect_issues(
                     staging_dir=cfg.beets_staging_dir,
                     canonical_root=processing_albums_dir(cfg.processing_dir),
                     has_entries=directory_has_entries,
-                    auto_import_in_progress=(
-                        lambda request_id, mb_release_id: _auto_import_in_progress(
-                            db,
-                            request_id,
-                            mb_release_id,
-                        )
-                    ),
                 )
             ]
         except Exception as e:  # noqa: BLE001 - boundary converts or isolates collaborator failures

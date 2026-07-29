@@ -11,7 +11,7 @@ import json
 import os
 import tempfile
 import types
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import UTC, datetime
@@ -22,6 +22,7 @@ import msgspec
 import requests
 
 from lib.grab_list import DownloadFile, GrabListEntry
+from lib.import_queue import ImportJob
 from lib.quality import (
     EVIDENCE_PROVENANCE_MEASURED,
     EVIDENCE_SUBJECT_INSTALLED,
@@ -366,12 +367,26 @@ def make_audio_corrupt_validation_report(
 
 def finalize_claimed_dispatch(db: Any, job: Any, outcome: Any) -> Any:
     """Apply a direct dispatch result through the production queue owner."""
-    from scripts.importer import process_claimed_job
+    from lib.import_execution import CancellationToken, OwnerSessionIdentity
+    from lib.import_queue import IMPORT_JOB_AUTOMATION
+    from scripts.importer import _execution_lease_from_job, process_claimed_job
 
+    authority: dict[str, Any] = {}
+    if job.job_type == IMPORT_JOB_AUTOMATION:
+        execution_lease = _execution_lease_from_job(job)
+        assert execution_lease is not None, (
+            "automation fixture must claim with an importer execution lease"
+        )
+        authority = {
+            "execution_lease": execution_lease,
+            "cancellation_token": CancellationToken(),
+            "owner_session_identity": OwnerSessionIdentity(id(db), 4242),
+        }
     return process_claimed_job(
         db,
         job,
         execute_fn=lambda *_args, **_kwargs: outcome,
+        **authority,
     )
 
 
@@ -622,6 +637,56 @@ def make_active_download_state_json(
         enqueued_at="2026-07-01T00:00:00+00:00",
         files=files,
     ).to_json()
+
+
+def handoff_automation_owner(
+    db: Any,
+    request_id: int,
+    *,
+    state: ActiveDownloadState | Mapping[str, Any] | str | None = None,
+    canonical_path: str | None = None,
+    message: str = "test automation owner handoff",
+) -> ImportJob:
+    """Create a production-representable automation owner for tests.
+
+    Tests must never bypass the sole lifecycle edge by inserting an
+    ``automation_import`` job or assigning the owner pointer directly. This
+    helper performs the real ``wanted -> downloading -> processing`` transcript
+    through ``set_downloading`` and ``handoff_automation_import``.
+    """
+    active_state = (
+        ActiveDownloadState(
+            filetype="flac",
+            enqueued_at="2026-07-01T00:00:00+00:00",
+            files=[],
+        )
+        if state is None
+        else ActiveDownloadState.from_raw(state)
+    )
+    path = (
+        canonical_path
+        or active_state.current_path
+        or f"/processing/albums/request-{request_id}"
+    )
+    if not db.set_downloading(
+        request_id,
+        active_state.to_json(),
+        expected_status="wanted",
+    ):
+        raise AssertionError(
+            f"request {request_id} could not enter downloading for handoff"
+        )
+    result = db.handoff_automation_import(
+        request_id=request_id,
+        expected_enqueued_at=active_state.enqueued_at,
+        canonical_path=path,
+        message=message,
+    )
+    if not result.committed or result.job is None:
+        raise AssertionError(
+            f"request {request_id} handoff failed: {result.outcome}"
+        )
+    return result.job
 
 
 def make_evidence(

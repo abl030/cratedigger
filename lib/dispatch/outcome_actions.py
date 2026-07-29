@@ -47,6 +47,7 @@ from lib.quality import (
     resolve_rejection_search_override,
 )
 from lib.terminal_outcomes import (
+    AutomationTerminalAuthority,
     PendingImportTerminalOutcome,
     PreviewTerminalOutcome,
     TerminalCooldown,
@@ -605,6 +606,7 @@ def _record_preview_measurement_failed(
     import_result: ImportResult | None = None,
     preview_result: dict[str, object] | None = None,
     requeue_to_wanted: bool = True,
+    automation_terminal_authority: AutomationTerminalAuthority | None = None,
 ) -> int:
     """Preview-side measurement_failed entry point (U4).
 
@@ -648,7 +650,13 @@ def _record_preview_measurement_failed(
         request_id=request_id,
         import_job_id=import_job_id,
         request_transition=(
-            transitions.RequestTransition.to_wanted()
+            transitions.RequestTransition.to_wanted(
+                from_status=(
+                    "processing"
+                    if automation_terminal_authority is not None
+                    else None
+                ),
+            )
             if requeue_to_wanted
             else None
         ),
@@ -671,6 +679,7 @@ def _record_preview_measurement_failed(
         message=payload.detail,
         error=payload.reason,
         denylists=(),
+        automation=automation_terminal_authority,
     ))
     return result.download_log_id
 

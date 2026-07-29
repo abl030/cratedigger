@@ -25,7 +25,11 @@ from tests.test_pipeline_db import TEST_DSN, requires_postgres
 from tests.test_terminal_outcomes import (
     FaultInjectingPipelineDB,
     InjectedTerminalWriteFailure,
+    _prepare_automation_preview_terminal_command,
+    _prepare_automation_terminal_command,
+    _seed_running_automation_preview,
     _seed_running_import,
+    _snapshot,
 )
 
 
@@ -36,6 +40,30 @@ class TerminalSnapshot:
     denylist_present: bool
     attempt_recorded: bool
     job_terminal: bool
+
+
+@dataclass(frozen=True)
+class AutomationTerminalSnapshot:
+    request_released: bool
+    audit_present: bool
+    job_terminal: bool
+    cleanup_consumed: bool
+
+
+def assert_automation_terminal_snapshot_all_or_none(
+    snapshot: AutomationTerminalSnapshot,
+) -> None:
+    """Reject every owner-terminal world except unchanged or complete."""
+    values = (
+        snapshot.request_released,
+        snapshot.audit_present,
+        snapshot.job_terminal,
+        snapshot.cleanup_consumed,
+    )
+    if any(values) and not all(values):
+        raise AssertionError(
+            f"partial automation terminal outcome: {snapshot!r}"
+        )
 
 
 def assert_terminal_snapshot_all_or_none(
@@ -436,10 +464,168 @@ class TestTerminalOutcomeGenerated(unittest.TestCase):
                     with self.assertRaises(AssertionError):
                         assert_terminal_snapshot_all_or_none(before, after)
 
+    def test_automation_checker_rejects_known_bad_owner_first_world(
+        self,
+    ) -> None:
+        known_bad = AutomationTerminalSnapshot(
+            request_released=True,
+            audit_present=False,
+            job_terminal=False,
+            cleanup_consumed=False,
+        )
+        with self.assertRaisesRegex(
+            AssertionError,
+            "partial automation terminal outcome",
+        ):
+            assert_automation_terminal_snapshot_all_or_none(known_bad)
+
 
 
 @requires_postgres
 class TestProductionTerminalOutcomeGenerated(unittest.TestCase):
+    @given(
+        fail_after=st.one_of(
+            st.none(),
+            st.sampled_from((1, 2, 3, 4, 5, 6)),
+        ),
+    )
+    def test_automation_terminal_transaction_is_unchanged_or_complete(
+        self,
+        fail_after: int | None,
+    ) -> None:
+        assert TEST_DSN is not None
+        seed, request_id, job_id = _seed_running_import(
+            automation_state=True,
+            cooldown_username="cooldown-peer",
+        )
+        command = _prepare_automation_terminal_command(
+            seed,
+            request_id,
+            job_id,
+        )
+        before = _snapshot(seed, request_id, job_id)
+        seed.close()
+
+        writer: PipelineDB
+        if fail_after is None:
+            writer = PipelineDB(TEST_DSN)
+        else:
+            writer = FaultInjectingPipelineDB(
+                TEST_DSN,
+                fail_after_write=fail_after,
+            )
+        try:
+            if fail_after is None:
+                writer.persist_import_terminal_outcome(command)
+            else:
+                with self.assertRaises(InjectedTerminalWriteFailure):
+                    writer.persist_import_terminal_outcome(command)
+        finally:
+            writer.close()
+
+        observer = PipelineDB(TEST_DSN)
+        try:
+            after = _snapshot(observer, request_id, job_id)
+        finally:
+            observer.close()
+        if fail_after is not None:
+            self.assertEqual(after, before)
+            return
+        request = after["request"]
+        job = after["job"]
+        counts = after["counts"]
+        before_counts = before["counts"]
+        assert (
+            isinstance(request, dict)
+            and isinstance(job, dict)
+            and isinstance(counts, dict)
+            and isinstance(before_counts, dict)
+        )
+        snapshot = AutomationTerminalSnapshot(
+            request_released=(
+                request["status"] == "imported"
+                and request["active_automation_import_job_id"] is None
+                and request["active_download_state"] is None
+            ),
+            audit_present=counts["logs"] == before_counts["logs"] + 1,
+            job_terminal=job["status"] == "completed",
+            cleanup_consumed=counts["cleanup_journals"] == 0,
+        )
+        assert_automation_terminal_snapshot_all_or_none(snapshot)
+        self.assertEqual(
+            snapshot,
+            AutomationTerminalSnapshot(True, True, True, True),
+        )
+
+    @given(
+        fail_after=st.one_of(
+            st.none(),
+            st.sampled_from((1, 2, 3, 4)),
+        ),
+    )
+    def test_automation_preview_transaction_is_unchanged_or_complete(
+        self,
+        fail_after: int | None,
+    ) -> None:
+        assert TEST_DSN is not None
+        seed, request_id, job_id = _seed_running_automation_preview()
+        command = _prepare_automation_preview_terminal_command(
+            seed,
+            request_id,
+            job_id,
+        )
+        before = _snapshot(seed, request_id, job_id)
+        seed.close()
+        writer: PipelineDB
+        if fail_after is None:
+            writer = PipelineDB(TEST_DSN)
+        else:
+            writer = FaultInjectingPipelineDB(
+                TEST_DSN,
+                fail_after_write=fail_after,
+            )
+        try:
+            if fail_after is None:
+                writer.persist_preview_terminal_outcome(command)
+            else:
+                with self.assertRaises(InjectedTerminalWriteFailure):
+                    writer.persist_preview_terminal_outcome(command)
+        finally:
+            writer.close()
+        observer = PipelineDB(TEST_DSN)
+        try:
+            after = _snapshot(observer, request_id, job_id)
+        finally:
+            observer.close()
+        if fail_after is not None:
+            self.assertEqual(after, before)
+            return
+        request = after["request"]
+        job = after["job"]
+        counts = after["counts"]
+        before_counts = before["counts"]
+        assert (
+            isinstance(request, dict)
+            and isinstance(job, dict)
+            and isinstance(counts, dict)
+            and isinstance(before_counts, dict)
+        )
+        snapshot = AutomationTerminalSnapshot(
+            request_released=(
+                request["status"] == "wanted"
+                and request["active_automation_import_job_id"] is None
+                and request["active_download_state"] is None
+            ),
+            audit_present=counts["logs"] == before_counts["logs"] + 1,
+            job_terminal=job["status"] == "failed",
+            cleanup_consumed=counts["cleanup_journals"] == 0,
+        )
+        assert_automation_terminal_snapshot_all_or_none(snapshot)
+        self.assertEqual(
+            snapshot,
+            AutomationTerminalSnapshot(True, True, True, True),
+        )
+
     def test_real_transaction_is_unchanged_or_complete(self) -> None:
         for fail_after in (None, 1, 2, 3, 4, 5):
             with self.subTest(fail_after=fail_after):

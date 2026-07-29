@@ -10,25 +10,33 @@ and end-to-end through
 ``tests/test_integration_slices.py::TestSpectralPropagationSlice``.
 """
 import atexit
+import copy
+import hashlib
 import logging
 import os
 import shutil
 import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 from unittest.mock import MagicMock, patch
 
 from lib.download_materialization import (
     Materialized,
     MaterializeFailed,
-    MaterializeGuarded,
 )
-from lib.download_recovery import ProcessingPathKind, ProcessingPathLocation
+from lib.import_execution import (
+    CancellationToken,
+    ExecutionLeaseSnapshot,
+    OwnerSessionIdentity,
+    ProcessIdentity,
+)
 from lib.pipeline_db import AlbumRequestRow, TransferLedgerRow
 from lib.slskd_client import TransferSnapshot
 from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
 from tests.helpers import (
+    handoff_automation_owner,
     make_album_quality_evidence,
     make_ctx_with_fake_db,
     make_download_directory,
@@ -159,12 +167,23 @@ class TestPostRejectionWrongMatchTriage(unittest.TestCase):
             outcome="rejected",
             validation_result={"scenario": "wrong_match", "failed_path": "/tmp/source"},
         )
-        job = db.enqueue_import_job(
-            "automation_import",
-            request_id=1,
-            payload={},
+        job = handoff_automation_owner(db, 1)
+        preview_lease = ExecutionLeaseSnapshot(
+            host_boot_id="download-test-boot",
+            invocation_id="download-test-preview",
+            systemd_unit="cratedigger-import-preview-worker.service",
+            worker=ProcessIdentity(pid=4044, start_ticks=44),
         )
-        db.set_import_job_candidate_evidence(job.id, 44)
+        claimed = db.claim_next_import_preview_job(
+            worker_id="download-test-preview",
+            execution_lease=preview_lease,
+        )
+        assert claimed is not None and claimed.id == job.id
+        self.assertTrue(db.set_import_job_candidate_evidence(
+            job.id,
+            44,
+            expected_execution_lease=preview_lease,
+        ))
         ctx = make_ctx_with_fake_db(db)
 
         with patch("lib.wrong_match_cleanup_service.cleanup_wrong_match") as cleanup:
@@ -414,22 +433,12 @@ class TestDownloadMaterializationExtraction(unittest.TestCase):
     """Materialization and recovery have one focused owning module."""
 
     MATERIALIZATION_NAMES: ClassVar = {
-        "ABANDONED_AUTO_IMPORT_SCENARIO",
         "Materialized",
         "MaterializeFailed",
         "MaterializeGuarded",
         "MaterializeResult",
-        "_is_request_scoped_auto_import_path",
         "_attempt_fingerprint_for",
         "classify_staged_album_location",
-        "_log_post_move_resume_blocked",
-        "_request_import_subprocess_started",
-        "_import_subprocess_already_started",
-        "_probe_abandon_path_liveness",
-        "_restore_abandoned_auto_import",
-        "_commit_abandoned_auto_import",
-        "_abandon_interrupted_auto_import",
-        "_abandon_request_scoped_auto_import",
         "_evaluate_staged_path_readiness",
         "_materialize_processing_dir",
     }
@@ -1268,7 +1277,7 @@ class TestTransferLedgerWriteAheadOrdering(unittest.TestCase):
         self.assertEqual(db.record_transfer_enqueue_calls, [])
 
 class TestGrabMostWanted(unittest.TestCase):
-    """grab_most_wanted enqueues and persists state, no blocking monitor."""
+    """grab_most_wanted summarizes worker-owned enqueue results."""
 
     def test_no_albums_returns_zero(self):
         from lib.download import grab_most_wanted
@@ -1305,8 +1314,8 @@ class TestGrabMostWanted(unittest.TestCase):
         count = grab_most_wanted([], search_fn, ctx)
         self.assertEqual(count, 1)
 
-    def test_sets_downloading_status(self):
-        """After enqueue, album_requests.status = 'downloading'."""
+    def test_does_not_claim_download_ownership(self):
+        """The search worker must have claimed before reporting the result."""
         from lib.download import grab_most_wanted
         entry = make_grab_list_entry(
             album_id=1,
@@ -1331,41 +1340,9 @@ class TestGrabMostWanted(unittest.TestCase):
         search_fn = MagicMock(return_value=({1: entry}, [], []))
         grab_most_wanted([], search_fn, ctx)
         row = fake_db.request(42)
-        self.assertEqual(row["status"], "downloading")
-        self.assertEqual(fake_db.status_history, [(42, "downloading")])
-
-    def test_writes_active_download_state(self):
-        """JSONB written with correct structure."""
-        import json
-
-        from lib.download import grab_most_wanted
-        entry = make_grab_list_entry(
-            album_id=1,
-            filetype="mp3 v0",
-            title="T",
-            artist="A",
-            year="2020",
-            mb_release_id="mbid",
-            db_request_id=42,
-            db_source="request",
-            files=[make_download_file(
-                filename="u\\M\\01.mp3",
-                id="tid-1",
-                file_dir="u\\M",
-                username="user1",
-                size=5000000,
-            )],
-        )
-        fake_db = FakePipelineDB()
-        fake_db.seed_request(make_request_row(id=42, status="wanted"))
-        ctx = make_ctx_with_fake_db(fake_db)
-        search_fn = MagicMock(return_value=({1: entry}, [], []))
-        grab_most_wanted([], search_fn, ctx)
-        state_raw = fake_db.request(42)["active_download_state"]
-        assert isinstance(state_raw, str)
-        state = json.loads(state_raw)
-        self.assertEqual(state["filetype"], "mp3 v0")
-        self.assertEqual(len(state["files"]), 1)
+        self.assertEqual(row["status"], "wanted")
+        self.assertIsNone(row["active_download_state"])
+        self.assertEqual(fake_db.status_history, [])
 
     def test_no_blocking_monitor(self):
         """grab_most_wanted returns immediately without blocking."""
@@ -2031,8 +2008,20 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
                 import_job_id: int,
                 handle_valid_fn: HandleValidFn | None = None,
                 dispatch_fn: DispatchCoreFn | None = None,
+                execution_lease: ExecutionLeaseSnapshot | None = None,
+                cancellation_token: CancellationToken | None = None,
+                owner_session_identity: OwnerSessionIdentity | None = None,
             ) -> DispatchOutcome | None:
-                del album_data, staged_album, ctx, handle_valid_fn, dispatch_fn
+                del (
+                    album_data,
+                    staged_album,
+                    ctx,
+                    handle_valid_fn,
+                    dispatch_fn,
+                    execution_lease,
+                    cancellation_token,
+                    owner_session_identity,
+                )
                 validate_calls.append(import_job_id)
                 return stub_outcome
 
@@ -2242,19 +2231,16 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             self.assertEqual(file.import_path, resumed_file)
             self.assertTrue(os.path.exists(resumed_file))
 
-    def test_persists_canonical_current_path_for_fresh_materialization(self):
-        """The first local materialization must persist the canonical path to DB."""
+    def test_fresh_materialization_does_not_write_request_lifecycle_path(self):
+        """Only the handoff publishes lifecycle paths; materialization is local."""
         import tempfile
 
         from lib.download_processing import Completed, process_completed_album
         from lib.processing_paths import attempt_fingerprint
         with tempfile.TemporaryDirectory() as tmpdir:
             fake_db = FakePipelineDB()
-            fake_db.seed_request(make_request_row(
-                id=42,
-                status="downloading",
-                active_download_state={"filetype": "mp3", "files": []},
-            ))
+            fake_db.seed_request(make_request_row(id=42))
+            before = copy.deepcopy(fake_db.get_request(42))
             source_dir = os.path.join(tmpdir, "downloads", "Music")
             os.makedirs(source_dir)
             source_file = os.path.join(source_dir, "01 - Track.mp3")
@@ -2283,123 +2269,15 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
 
             fp = attempt_fingerprint([("user1", "user1\\Music\\01 - Track.mp3")])
             self.assertIsInstance(result, Completed)
+            self.assertEqual(fake_db.get_request(42), before)
             self.assertEqual(
-                fake_db.request(42)["active_download_state"]["current_path"],
+                album.import_folder,
                 os.path.join(
                     cfg.processing_dir,
                     "albums",
                     f"Artist - Album (2024) [{fp}]",
                 ),
             )
-
-    @patch("lib.beets.beets_validate")
-    def test_returns_none_for_post_move_auto_import_retry(
-        self,
-        mock_beets_validate,
-    ):
-        """Post-move auto-import retries must stop before re-dispatch."""
-        import tempfile
-
-        from lib.download_processing import CompletionDeferred, process_completed_album
-        from lib.processing_paths import stage_to_ai_path
-        from lib.quality import ValidationResult
-        with tempfile.TemporaryDirectory() as tmpdir:
-            staging_root = os.path.join(tmpdir, "staging")
-            resumed_path = stage_to_ai_path(
-                artist="Artist",
-                title="Album",
-                staging_dir=staging_root,
-                request_id=42,
-                auto_import=True,
-            )
-            os.makedirs(resumed_path)
-            with open(os.path.join(resumed_path, "01 - Track.mp3"), "w") as f:
-                f.write("fake audio")
-
-            album = make_grab_list_entry(
-                files=[make_download_file(
-                    filename="user1\\Music\\01 - Track.mp3",
-                    file_dir="user1\\Music",
-                )],
-                artist="Artist",
-                title="Album",
-                year="2024",
-                mb_release_id="test-mbid",
-                db_request_id=42,
-                db_source="request",
-            )
-            album.import_folder = resumed_path
-            ctx = _make_ctx()
-            cfg = cast(Any, ctx.cfg)
-            cfg.slskd_download_dir = os.path.join(tmpdir, "downloads")
-            cfg.beets_staging_dir = staging_root
-            cfg.beets_validation_enabled = True
-            cfg.beets_tracking_file = os.path.join(tmpdir, "beets-tracking.jsonl")
-            os.makedirs(cfg.slskd_download_dir, exist_ok=True)
-            mock_beets_validate.return_value = ValidationResult(
-                valid=True,
-                distance=0.05,
-                scenario="strong_match",
-            )
-
-            from tests.fakes import RecordingDispatchCore
-            dispatch = RecordingDispatchCore()
-            with self.assertLogs("cratedigger", level="ERROR") as logs:
-                result = process_completed_album(
-                    album, ctx, import_job_id=1,
-                    dispatch_fn=dispatch,
-                )
-
-            self.assertIsInstance(result, CompletionDeferred)
-            self.assertEqual(dispatch.calls, [])
-            self.assertIn("POST-MOVE RESUME BLOCKED", "\n".join(logs.output))
-
-    def test_request_scoped_staged_path_without_request_id_blocks_manual_recovery(
-        self,
-    ):
-        """Request-scoped auto-import staging without request id must stay blocked."""
-        import tempfile
-
-        from lib.download_processing import CompletionDeferred, process_completed_album
-        from lib.processing_paths import stage_to_ai_path
-        with tempfile.TemporaryDirectory() as tmpdir:
-            staging_root = os.path.join(tmpdir, "staging")
-            resumed_path = stage_to_ai_path(
-                artist="Artist",
-                title="Album",
-                staging_dir=staging_root,
-                request_id=42,
-                auto_import=True,
-            )
-            os.makedirs(resumed_path)
-            with open(os.path.join(resumed_path, "01 - Track.mp3"), "w") as f:
-                f.write("fake audio")
-
-            album = make_grab_list_entry(
-                files=[make_download_file(
-                    filename="user1\\Music\\01 - Track.mp3",
-                    file_dir="user1\\Music",
-                )],
-                artist="Artist",
-                title="Album",
-                year="2024",
-                mb_release_id="",
-                db_request_id=None,
-                db_source="request",
-            )
-            album.import_folder = resumed_path
-            ctx = _make_ctx()
-            cfg = cast(Any, ctx.cfg)
-            cfg.slskd_download_dir = os.path.join(tmpdir, "downloads")
-            cfg.beets_staging_dir = staging_root
-            cfg.beets_validation_enabled = False
-            os.makedirs(cfg.slskd_download_dir, exist_ok=True)
-
-            with self.assertLogs("cratedigger", level="ERROR") as logs:
-                result = process_completed_album(album, ctx, import_job_id=1)
-
-            self.assertIsInstance(result, CompletionDeferred)
-            self.assertIn("missing db_request_id", "\n".join(logs.output))
 
     def test_post_validation_staged_path_without_request_id_still_resumes(
         self,
@@ -2447,56 +2325,6 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
 
             self.assertIsInstance(result, Completed)
             self.assertEqual(album.files[0].import_path, resumed_file)
-
-    @patch("lib.beets.beets_validate")
-    def test_returns_none_for_legacy_shared_staged_retry(
-        self,
-        mock_beets_validate,
-    ):
-        """Legacy shared staged retries must stop before validation reruns."""
-        import tempfile
-
-        from lib.download_processing import CompletionDeferred, process_completed_album
-        with tempfile.TemporaryDirectory() as tmpdir:
-            staging_root = os.path.join(tmpdir, "staging")
-            resumed_path = os.path.join(staging_root, "Artist", "Album")
-            os.makedirs(resumed_path)
-            with open(os.path.join(resumed_path, "01 - Track.mp3"), "w") as f:
-                f.write("fake audio")
-
-            album = make_grab_list_entry(
-                files=[make_download_file(
-                    filename="user1\\Music\\01 - Track.mp3",
-                    file_dir="user1\\Music",
-                )],
-                artist="Artist",
-                title="Album",
-                year="2024",
-                mb_release_id="test-mbid",
-                db_request_id=42,
-                db_source="request",
-            )
-            album.import_folder = resumed_path
-            ctx = _make_ctx()
-            cfg = cast(Any, ctx.cfg)
-            cfg.slskd_download_dir = os.path.join(tmpdir, "downloads")
-            cfg.beets_staging_dir = staging_root
-            cfg.beets_validation_enabled = True
-            cfg.beets_tracking_file = os.path.join(tmpdir, "beets-tracking.jsonl")
-            os.makedirs(cfg.slskd_download_dir, exist_ok=True)
-
-            from tests.fakes import RecordingDispatchCore
-            dispatch = RecordingDispatchCore()
-            with self.assertLogs("cratedigger", level="ERROR") as logs:
-                result = process_completed_album(
-                    album, ctx, import_job_id=1,
-                    dispatch_fn=dispatch,
-                )
-
-            self.assertIsInstance(result, CompletionDeferred)
-            mock_beets_validate.assert_not_called()
-            self.assertEqual(dispatch.calls, [])
-            self.assertIn("legacy shared staged path", "\n".join(logs.output))
 
     def test_returns_false_when_persisted_current_path_missing_dir(self):
         """Resume must fail closed when the persisted directory no longer exists."""
@@ -2755,11 +2583,9 @@ class TestEventPathMaterialization(unittest.TestCase):
         # completion or cursor gap) — hard failure with diagnostics, no
         # guessing at on-disk locations.
         #
-        # Issue #868 I2: this is the live request-8889 shape (14
-        # consecutive preflight refusals before its grace expired). It
-        # must NOT share a reason with the stale-stamp case below — slskd
-        # never told us where the file landed, which is a different
-        # operator problem from a stamp pointing at nothing.
+        # Issue #868 I2: slskd never told us where the file landed. It must
+        # NOT share a reason with the stale-stamp case below, which is a
+        # different operator problem from a stamp pointing at nothing.
         import tempfile
 
         from lib.download_processing import CompletionFailed, process_completed_album
@@ -2784,10 +2610,7 @@ class TestEventPathMaterialization(unittest.TestCase):
             self.assertIn("reason=event_path_never_stamped", joined)
 
     def test_repeated_unstamped_preflight_reports_the_same_reason(self):
-        """Issue #868: request 8889 refused 14 times in a row before its
-        materialize grace expired. The reason must be STABLE across
-        retries — an unstable reason would make the persisted evidence
-        depend on which cycle happened to expire."""
+        """Repeated processor executions report one stable refusal reason."""
         import tempfile
 
         from lib.download_processing import CompletionFailed, process_completed_album
@@ -3230,74 +3053,17 @@ class TestPreMatchRejectRecordsNullDistance(unittest.TestCase):
         self.assertTrue(vr.failed_path)
 
 
-class TestMaterializeFailureAction(unittest.TestCase):
-    """Pure decision table for the poller's materialize-failure escape.
-
-    Cases pin the ownership-protocol tags (#474): ``MaterializeGuarded``
-    (historical bare ``None``) always "leave"s regardless of age;
-    ``MaterializeFailed`` (historical bare ``False``) "retry"s within
-    the grace window and "reset"s past it; ``Materialized`` (historical
-    bare ``True``) also "leave"s — callers only invoke this function
-    after already excluding the success case, but the no-op answer must
-    still hold so a future caller that skips the exclusion check fails
-    safe rather than auto-resetting a successful materialization.
-    """
-
-    NOW = datetime(2026, 7, 2, 12, 0, 0, tzinfo=UTC)
-    OLD = (NOW - timedelta(hours=2)).isoformat()
-    FRESH = (NOW - timedelta(minutes=5)).isoformat()
-
-    CASES: ClassVar = [
-        ("guarded_fresh_leaves",
-         MaterializeGuarded(detail="release_lock_held"), FRESH, "leave"),
-        ("guarded_old_leaves_manual_recovery_alone",
-         MaterializeGuarded(detail="release_lock_held"), OLD, "leave"),
-        ("materialized_leaves_as_no_op_safety_net",
-         Materialized(), OLD, "leave"),
-        ("failed_fresh_retries",
-         MaterializeFailed(reason="staged_path_missing"), FRESH, "retry"),
-        ("failed_old_resets",
-         MaterializeFailed(reason="staged_path_missing"), OLD, "reset"),
-        ("failed_no_start_retries",
-         MaterializeFailed(reason="staged_path_missing"), None, "retry"),
-        ("failed_unparseable_start_retries",
-         MaterializeFailed(reason="staged_path_missing"), "not-a-date", "retry"),
-        ("naive_timestamp_treated_utc",
-         MaterializeFailed(reason="staged_path_missing"),
-         (NOW - timedelta(hours=2)).replace(tzinfo=None).isoformat(), "reset"),
-    ]
-
-    def test_decision_table(self):
-        from lib.download import materialize_failure_action
-        for desc, materialized, started, expected in self.CASES:
-            with self.subTest(desc=desc):
-                self.assertEqual(
-                    materialize_failure_action(
-                        materialized, started, self.NOW),
-                    expected)
 
 
 class TestEvaluateStagedPathReadiness(unittest.TestCase):
-    """Pure decision table for the ONE shared "staged path safe to resume"
-    decision (issue #509) — previously duplicated between
-    ``_materialize_processing_dir`` and
-    ``lib.download._processing_path_ready_for_importer``, which had
-    drifted (a missing ``blocks_auto_import_dispatch`` guard on the
-    poller side, and two different ways of reading subprocess-start
-    evidence). Both callers now route through
-    ``_evaluate_staged_path_readiness``; this table pins its branches
-    directly, independent of either caller's own reaction to the tag.
-    """
+    """Already-staged inputs are validated only against their manifest."""
 
-    def _seed_and_build(
+    def _build(
         self,
         tmpdir: str,
         *,
-        kind: ProcessingPathKind,
         dir_exists: bool,
         files_present: bool,
-        subprocess_started_at: str | None,
-        seed_row: bool = True,
         request_id: int = 1,
     ):
         from lib.staged_album import StagedAlbum
@@ -3317,114 +3083,42 @@ class TestEvaluateStagedPathReadiness(unittest.TestCase):
             os.makedirs(os.path.dirname(dest), exist_ok=True)
             with open(dest, "w") as fp:
                 fp.write("fake audio")
-        location = ProcessingPathLocation(path=current_path, kind=kind)
-
-        db = FakePipelineDB()
-        if seed_row:
-            state = {
-                "filetype": "flac",
-                "enqueued_at": _utc_now_iso(),
-                "processing_started_at": _utc_now_iso(),
-                "current_path": current_path,
-                "import_subprocess_started_at": subprocess_started_at,
-                "files": [
-                    {"username": "user1", "filename": "user1\\Music\\01 - Track.flac",
-                     "file_dir": "user1\\Music", "size": 1000},
-                ],
-            }
-            db.seed_request(make_request_row(
-                id=request_id,
-                status="downloading",
-                mb_release_id="test-mbid-509",
-                active_download_state=state,
-            ))
-        return entry, staged_album, location, db
+        return entry, staged_album
 
     CASES: ClassVar = [
-        # (desc, kind, dir_exists, files_present, subprocess_started_at,
-        #  seed_row, expected_type, expected_attr)
-        ("post_validation_dir_missing_not_blocked",
-         "request_scoped_post_validation_staged", False, False, None, True,
-         MaterializeFailed, "staged_path_missing"),
-        ("post_validation_files_present_ready",
-         "request_scoped_post_validation_staged", True, True, None, True,
-         Materialized, None),
-        ("post_validation_files_missing_not_blocked",
-         "request_scoped_post_validation_staged", True, False, None, True,
-         MaterializeFailed, "staged_path_missing_tracked_files"),
-        ("legacy_shared_dir_missing_not_blocked_by_post_move_guard",
-         "legacy_shared_staged", False, False, None, True,
-         MaterializeFailed, "staged_path_missing"),
-        ("legacy_shared_files_present_dispatch_blocked_when_subprocess_true",
-         "legacy_shared_staged", True, True, _utc_now_iso(), True,
-         MaterializeGuarded, "auto_import_dispatch_blocked_post_move"),
-        ("legacy_shared_files_present_allowed_when_subprocess_false",
-         "legacy_shared_staged", True, True, None, True,
-         Materialized, None),
-        ("auto_import_staged_dir_missing_not_blocked_when_subprocess_false",
-         "request_scoped_auto_import_staged", False, False, None, True,
-         MaterializeFailed, "staged_path_missing"),
-        ("auto_import_staged_subprocess_unknown_guards_immediately",
-         "request_scoped_auto_import_staged", False, False, None, False,
-         MaterializeGuarded, "ownership_unverifiable_request_scoped_staged"),
-        ("auto_import_staged_files_missing_not_blocked_when_subprocess_false",
-         "request_scoped_auto_import_staged", True, False, None, True,
-         MaterializeFailed, "staged_path_missing_tracked_files"),
-        ("auto_import_staged_files_present_ready_when_subprocess_false",
-         "request_scoped_auto_import_staged", True, True, None, True,
-         Materialized, None),
+        ("directory_missing", False, False, MaterializeFailed, "staged_path_missing"),
+        ("manifest_complete", True, True, Materialized, None),
+        (
+            "tracked_file_missing",
+            True,
+            False,
+            MaterializeFailed,
+            "staged_path_missing_tracked_files",
+        ),
     ]
 
     def test_decision_table(self):
-        for (desc, kind, dir_exists, files_present, subprocess_started_at,
-             seed_row, expected_type, expected_attr) in self.CASES:
+        for (
+            desc,
+            dir_exists,
+            files_present,
+            expected_type,
+            expected_reason,
+        ) in self.CASES:
             with self.subTest(desc=desc), tempfile.TemporaryDirectory() as tmpdir:
                 from lib.download_materialization import (
                     _evaluate_staged_path_readiness,
                 )
-                entry, staged_album, location, db = self._seed_and_build(
+                entry, staged_album = self._build(
                     tmpdir,
-                    kind=kind,
                     dir_exists=dir_exists,
                     files_present=files_present,
-                    subprocess_started_at=subprocess_started_at,
-                    seed_row=seed_row,
                 )
-                result = _evaluate_staged_path_readiness(
-                    entry, staged_album, location, db,
-                )
+                result = _evaluate_staged_path_readiness(entry, staged_album)
                 self.assertIsInstance(result, expected_type)
-                if expected_attr is not None:
-                    if isinstance(result, MaterializeFailed):
-                        self.assertEqual(result.reason, expected_attr)
-                    elif isinstance(result, MaterializeGuarded):
-                        self.assertEqual(result.detail, expected_attr)
-                    else:
-                        self.fail(
-                            f"result {result!r} has no reason/detail "
-                            "to compare")
-
-    def test_abandon_success_resets_via_shared_decision(self):
-        """kind=auto-import-staged + subprocess started + abandon commits
-        cleanly: the shared decision reports a handled stop, and the DB row
-        is already reset exactly once."""
-        from lib.download_materialization import _evaluate_staged_path_readiness
-        with tempfile.TemporaryDirectory() as tmpdir:
-            entry, staged_album, location, db = self._seed_and_build(
-                tmpdir,
-                kind="request_scoped_auto_import_staged",
-                dir_exists=True,
-                files_present=False,
-                subprocess_started_at=_utc_now_iso(),
-            )
-            result = _evaluate_staged_path_readiness(
-                entry, staged_album, location, db,
-            )
-            self.assertIsInstance(result, MaterializeGuarded)
-            assert isinstance(result, MaterializeGuarded)
-            self.assertEqual(result.detail, "abandoned_interrupted_auto_import")
-            self.assertEqual(db.request(1)["status"], "wanted")
-            self.assertEqual(db.status_history, [(1, "wanted")])
+                if expected_reason is not None:
+                    assert isinstance(result, MaterializeFailed)
+                    self.assertEqual(result.reason, expected_reason)
 
 
 def _fail_file(*, last_state=None, last_exception=None):
@@ -3917,7 +3611,7 @@ class TestHarvestTerminalTransferEvidence(unittest.TestCase):
         with self.assertLogs("cratedigger", level=logging.INFO) as captured:
             harvest_terminal_transfer_evidence(ctx)
 
-        self.assertEqual(db.request(1), installed_b_rows[0])
+        self.assertEqual(db.get_request(1), installed_b_rows[0])
         harvested_second = db.request(2)["active_download_state"]["files"][0]
         self.assertEqual(harvested_second["last_state"], "Completed, Errored")
         self.assertEqual(
@@ -4331,7 +4025,8 @@ class TestPollActiveDownloads(unittest.TestCase):
 
         poll_active_downloads(ctx)
 
-        current = fake_db.request(1)
+        current = fake_db.get_request(1)
+        assert current is not None
         self.assertEqual(current["status"], "downloading")
         self.assertEqual(current, installed_b_rows[0])
         self.assertEqual(
@@ -4352,6 +4047,87 @@ class TestPollActiveDownloads(unittest.TestCase):
         self.assertEqual(slskd.transfers.enqueue_calls, [])
         self.assertEqual(slskd.transfers.cancel_download_calls, [])
         self.assertTrue(os.path.isfile(local_path))
+
+    def test_handoff_between_poll_persist_and_failure_effect_blocks_effect(self):
+        """A committed processor owner wins over timeout and file-retry effects."""
+        from lib.download import poll_active_downloads
+
+        for verdict in ("timeout", "retry"):
+            with self.subTest(verdict=verdict):
+                row = self._make_downloading_row()
+                witness = row["active_download_state"]["enqueued_at"]
+                if verdict == "retry":
+                    row["active_download_state"]["files"].append({
+                        "username": "user1",
+                        "filename": "user1\\Music\\02.flac",
+                        "file_dir": "user1\\Music",
+                        "size": 30000000,
+                    })
+
+                class HandoffAfterPollPersistDB(FakePipelineDB):
+                    def update_download_state_if_downloading(
+                        self,
+                        request_id: int,
+                        state_json: str,
+                        *,
+                        expected_enqueued_at: str,
+                    ) -> bool:
+                        applied = super().update_download_state_if_downloading(
+                            request_id,
+                            state_json,
+                            expected_enqueued_at=expected_enqueued_at,
+                        )
+                        if applied:
+                            handoff = self.handoff_automation_import(
+                                request_id=request_id,
+                                expected_enqueued_at=expected_enqueued_at,
+                                canonical_path="/processing/albums/owned",
+                                message="concurrent winner",
+                            )
+                            if not handoff.committed:
+                                raise AssertionError(handoff.outcome)
+                        return applied
+
+                files = [{
+                    "filename": "user1\\Music\\01.flac",
+                    "id": "tid-1",
+                    "state": "Completed, Rejected",
+                    "exception": "rejected",
+                    "bytesTransferred": 0,
+                    "requestedAt": witness,
+                }]
+                if verdict == "retry":
+                    files.append({
+                        "filename": "user1\\Music\\02.flac",
+                        "id": "tid-2",
+                        "state": "InProgress",
+                        "bytesTransferred": 1,
+                        "requestedAt": witness,
+                    })
+                slskd = FakeSlskdAPI(downloads=[{
+                    "username": "user1",
+                    "directories": [{
+                        "directory": "user1\\Music",
+                        "files": files,
+                    }],
+                }])
+                ctx, fake_db = self._make_poll_ctx(
+                    downloading_rows=[row],
+                    fake_db=HandoffAfterPollPersistDB(),
+                    slskd=slskd,
+                )
+
+                poll_active_downloads(ctx)
+
+                self.assertEqual(fake_db.request(1)["status"], "processing")
+                self.assertEqual(
+                    len(fake_db.list_import_jobs(request_id=1)),
+                    1,
+                )
+                self.assertEqual(fake_db.download_logs, [])
+                self.assertEqual(fake_db.cooldowns_applied, [])
+                self.assertEqual(slskd.transfers.enqueue_calls, [])
+                self.assertEqual(slskd.transfers.cancel_download_calls, [])
 
     def _download_state(self, fake_db: FakePipelineDB, request_id: int = 1):
         state = fake_db.request(request_id)["active_download_state"]
@@ -4520,7 +4296,7 @@ class TestPollActiveDownloads(unittest.TestCase):
 
                 poll_active_downloads(ctx)
 
-                self.assertEqual(fake_db.request(1), installed_rows[0])
+                self.assertEqual(fake_db.get_request(1), installed_rows[0])
                 self._assert_no_poll_effects(fake_db, slskd)
 
     def test_poll_refresh_failure_skips_every_row(self):
@@ -4893,7 +4669,7 @@ class TestPollActiveDownloads(unittest.TestCase):
 
                 poll_active_downloads(ctx)
 
-                self.assertEqual(fake_db.request(1), installed_b_rows[0])
+                self.assertEqual(fake_db.get_request(1), installed_b_rows[0])
                 cursor = fake_db.get_slskd_event_cursor()
                 assert cursor is not None
                 self.assertEqual(
@@ -5003,7 +4779,7 @@ class TestPollActiveDownloads(unittest.TestCase):
         self.assertEqual(fake_db.download_logs, [])
 
     def test_poll_active_all_complete(self):
-        """1 downloading album, all files complete → enqueues importer job."""
+        """Completion publishes one exact owner before any file mutation."""
         from lib.download import poll_active_downloads
         from lib.import_queue import IMPORT_JOB_AUTOMATION
         row = self._make_downloading_row()
@@ -5023,278 +4799,130 @@ class TestPollActiveDownloads(unittest.TestCase):
             }],
         )
 
+        source_path = fake_db.request(1)[
+            "active_download_state"
+        ]["files"][0]["local_path"]
+
         poll_active_downloads(ctx)
 
         self.assertGreaterEqual(len(fake_db.update_download_state_calls), 1)
-        self.assertEqual(fake_db.request(1)["status"], "downloading")
+        request = fake_db.request(1)
+        self.assertEqual(request["status"], "processing")
+        self.assertIsNotNone(request["active_automation_import_job_id"])
         self.assertIsNotNone(self._download_state(fake_db)["current_path"])
+        self.assertIsNotNone(
+            self._download_state(fake_db)["processing_started_at"],
+        )
         jobs = fake_db.list_import_jobs()
         self.assertEqual(len(jobs), 1)
         self.assertEqual(jobs[0].job_type, IMPORT_JOB_AUTOMATION)
         self.assertEqual(jobs[0].request_id, 1)
+        self.assertEqual(
+            request["active_automation_import_job_id"],
+            jobs[0].id,
+        )
+        self.assertEqual(jobs[0].expected_request_status, "processing")
+        self.assertTrue(os.path.isfile(source_path))
 
-    def test_poll_completed_unstamped_within_grace_retries_next_cycle(self):
-        """A completed album whose files never got stamped stays
-        'downloading' while the materialize grace window is open — the
-        DownloadFileComplete event may still be ingested next cycle
-        (completion-vs-event-write race)."""
+    def test_crash_after_handoff_leaves_target_absent_and_source_byte_exact(
+        self,
+    ):
+        """The downloader publishes ownership without touching either tree."""
         from lib.download import poll_active_downloads
+        from lib.processing_paths import (
+            canonical_folder_for_row,
+            processing_albums_dir,
+        )
+
+        enqueued_at = _utc_now_iso()
         row = self._make_downloading_row(state_dict={
             "filetype": "flac",
-            "enqueued_at": _utc_now_iso(),
+            "enqueued_at": enqueued_at,
             "files": [
-                {"username": "user1", "filename": "user1\\Music\\01.flac",
-                 "file_dir": "user1\\Music", "size": 30000000,
-                 "local_path": None},
+                {
+                    "username": "user1",
+                    "filename": "user1\\Music\\01.flac",
+                    "file_dir": "user1\\Music",
+                    "size": 10,
+                },
+                {
+                    "username": "user1",
+                    "filename": "user1\\Music\\02.flac",
+                    "file_dir": "user1\\Music",
+                    "size": 20,
+                },
             ],
         })
-        ctx, fake_db = self._make_poll_ctx(
+        ctx, db = self._make_poll_ctx(
             downloading_rows=[row],
             slskd_downloads=[{
                 "username": "user1",
-                "directories": [{"directory": "user1\\Music", "files": [{
-                    "filename": "user1\\Music\\01.flac",
-                    "id": "tid-1",
-                    "state": "Completed, Succeeded",
-                    "bytesTransferred": 30000000,
-                }]}],
+                "directories": [{
+                    "directory": "user1\\Music",
+                    "files": [
+                        {
+                            "filename": "user1\\Music\\01.flac",
+                            "id": "one",
+                            "state": "Completed, Succeeded",
+                            "bytesTransferred": 10,
+                            "requestedAt": enqueued_at,
+                        },
+                        {
+                            "filename": "user1\\Music\\02.flac",
+                            "id": "two",
+                            "state": "Completed, Succeeded",
+                            "bytesTransferred": 20,
+                            "requestedAt": enqueued_at,
+                        },
+                    ],
+                }],
             }],
         )
+        state = self._download_state(db)
+        source_paths = [
+            file["local_path"]
+            for file in state["files"]
+        ]
+
+        def source_manifest() -> dict[str, str]:
+            return {
+                os.path.basename(path): hashlib.sha256(
+                    Path(path).read_bytes(),
+                ).hexdigest()
+                for path in source_paths
+            }
+
+        before_manifest = source_manifest()
+        entry = make_grab_list_entry(
+            artist=row["artist_name"],
+            title=row["album_title"],
+            year=str(row["year"]),
+            db_request_id=1,
+            files=[
+                make_download_file(
+                    username=file["username"],
+                    filename=file["filename"],
+                    file_dir=file["file_dir"],
+                    size=file["size"],
+                )
+                for file in state["files"]
+            ],
+        )
+        target = canonical_folder_for_row(
+            entry,
+            processing_albums_dir(ctx.cfg.processing_dir),
+        )
+        self.assertFalse(os.path.exists(target))
 
         poll_active_downloads(ctx)
 
-        self.assertEqual(fake_db.request(1)["status"], "downloading")
-        self.assertEqual(fake_db._import_jobs, [])
-        self.assertEqual(fake_db.download_logs, [])
-
-    def test_poll_completed_unstamped_past_grace_resets_to_wanted(self):
-        """Once the grace window expires with the file still unstamped
-        (event permanently lost: pre-bootstrap completion or cursor gap),
-        the request self-heals via re-download instead of retrying the
-        materialize forever. Issue #822 item 4: this reset applies the
-        standard user cooldown, exactly consistent with the
-        retry/timeout paths (``_timeout_album``) -- a future phantom-
-        complete mechanism must not be free to loop with the same peer
-        at zero cost.
-        Authority: "to the cooldown issue, yes apply the cooldown." —
-        https://github.com/abl030/cratedigger/issues/822#issuecomment-5042163957
-        """
-        from lib.download import poll_active_downloads
-        old = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
-        row = self._make_downloading_row(state_dict={
-            "filetype": "flac",
-            "enqueued_at": old,
-            "last_progress_at": _utc_now_iso(),
-            "processing_started_at": old,
-            "files": [
-                {"username": "user1", "filename": "user1\\Music\\01.flac",
-                 "file_dir": "user1\\Music", "size": 30000000,
-                 "local_path": None,
-                 "last_state": "Completed, Succeeded",
-                 "bytes_transferred": 30000000},
-            ],
-        })
-        ctx, fake_db = self._make_poll_ctx(
-            downloading_rows=[row],
-            slskd_downloads=[{
-                "username": "user1",
-                "directories": [{"directory": "user1\\Music", "files": [{
-                    "filename": "user1\\Music\\01.flac",
-                    "id": "tid-1",
-                    "state": "Completed, Succeeded",
-                    "bytesTransferred": 30000000,
-                }]}],
-            }],
-        )
-
-        with self.assertLogs("cratedigger", level=logging.ERROR) as logs:
-            poll_active_downloads(ctx)
-
-        self.assertEqual(fake_db.request(1)["status"], "wanted")
-        self.assertEqual(fake_db._import_jobs, [])
-        self.assertEqual(len(fake_db.download_logs), 1)
-        self.assertEqual(fake_db.download_logs[0].outcome, "failed")
-        self.assertIn("MATERIALIZE GRACE EXPIRED", "\n".join(logs.output))
-        # Issue #822 item 4: the standard user cooldown is applied on
-        # this reset, same as the retry/timeout paths.
-        self.assertEqual(fake_db.cooldowns_applied, ["user1"])
-        # Issue #868 I1: the reset row records WHY the materialize never
-        # succeeded. ``error_message`` stays the operator-facing grace
-        # sentence; the machine reason rides alongside it, so 48 rows in
-        # 21 days are no longer one indistinguishable message.
-        self.assertEqual(
-            fake_db.download_logs[0].beets_detail, "event_path_never_stamped",
-        )
-        self.assertIn(
-            "could not be materialized",
-            fake_db.download_logs[0].error_message or "",
-        )
-
-    def test_grace_expiry_rows_distinguish_never_stamped_from_gone_from_disk(self):
-        """Issue #868 I1/I2: two grace expiries with different causes
-        must be tellable apart from the persisted row alone.
-
-        Before the split both wrote the identical ``error_message`` and no
-        cause at all, so the 2026-07-22 expiries were unrecoverable after
-        the journal rolled.
-        """
-        from lib.download import poll_active_downloads
-
-        old = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
-        details: list[str | None] = []
-        for stamp_is_stale in (False, True):
-            row = self._make_downloading_row(state_dict={
-                "filetype": "flac",
-                "enqueued_at": old,
-                "last_progress_at": _utc_now_iso(),
-                "processing_started_at": old,
-                "files": [
-                    {"username": "user1",
-                     "filename": "user1\\Music\\01.flac",
-                     "file_dir": "user1\\Music", "size": 30000000,
-                     "local_path": None,
-                     "last_state": "Completed, Succeeded",
-                     "bytes_transferred": 30000000},
-                ],
-            })
-            ctx, fake_db = self._make_poll_ctx(
-                downloading_rows=[row],
-                slskd_downloads=[{
-                    "username": "user1",
-                    "directories": [{"directory": "user1\\Music", "files": [{
-                        "filename": "user1\\Music\\01.flac",
-                        "id": "tid-1",
-                        "state": "Completed, Succeeded",
-                        "bytesTransferred": 30000000,
-                    }]}],
-                }],
-            )
-            if stamp_is_stale:
-                # A stamp INSIDE the authority root naming a file that is
-                # no longer there — the event feed did its job, the bytes
-                # went away afterwards.
-                seeded = fake_db.request(1)["active_download_state"]
-                assert isinstance(seeded, dict)
-                seeded["files"][0]["local_path"] = os.path.join(
-                    ctx.cfg.slskd_download_dir, "Music", "vanished.flac")
-
-            poll_active_downloads(ctx)
-
-            self.assertEqual(fake_db.request(1)["status"], "wanted")
-            self.assertEqual(len(fake_db.download_logs), 1)
-            details.append(fake_db.download_logs[0].beets_detail)
-
-        self.assertEqual(
-            details, ["event_path_never_stamped", "event_path_gone_from_disk"],
-        )
-
-    def test_materialize_failure_defers_v1_refresh_until_after_wanted(self):
-        from lib.beets_db import AlbumInfo
-        from lib.download import poll_active_downloads
-        from lib.quality import AlbumQualityV0Metric, AudioQualityMeasurement
-        from lib.quality_evidence import snapshot_audio_files
-        from tests.fakes import FakeBeetsDB
-
-        old = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
-        row = self._make_downloading_row(state_dict={
-            "filetype": "flac",
-            "enqueued_at": old,
-            "last_progress_at": _utc_now_iso(),
-            "processing_started_at": old,
-            "files": [{
-                "username": "user1",
-                "filename": "user1\\Music\\01.flac",
-                "file_dir": "user1\\Music",
-                "size": 30000000,
-                "local_path": None,
-                "last_state": "Completed, Succeeded",
-                "bytes_transferred": 30000000,
-            }],
-        })
-        ctx, fake_db = self._make_poll_ctx(
-            downloading_rows=[row],
-            slskd_downloads=[{
-                "username": "user1",
-                "directories": [{"directory": "user1\\Music", "files": [{
-                    "filename": "user1\\Music\\01.flac",
-                    "id": "tid-1",
-                    "state": "Completed, Succeeded",
-                    "bytesTransferred": 30000000,
-                }]}],
-            }],
-        )
-        source = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, source, ignore_errors=True)
-        with open(os.path.join(source, "01.m4a"), "wb") as handle:
-            handle.write(b"materialize-failure current bytes")
-        cast(Any, ctx.cfg).beets_directory = source
-        legacy = make_album_quality_evidence(
-            mb_release_id="test-mbid-1",
-            source_path=source,
-            files=snapshot_audio_files(source),
-            measurement=AudioQualityMeasurement(
-                min_bitrate_kbps=256,
-                avg_bitrate_kbps=256,
-                median_bitrate_kbps=256,
-                format="AAC",
-                is_cbr=True,
-                spectral_grade="genuine",
-                spectral_bitrate_kbps=96,
-            ),
-            lineage_version=1,
-            v0_metric=AlbumQualityV0Metric(
-                min_bitrate_kbps=259,
-                avg_bitrate_kbps=267,
-                median_bitrate_kbps=269,
-                subject="installed",
-            ),
-        )
-        fake_db.upsert_album_quality_evidence(legacy)
-        stored = fake_db.find_album_quality_evidence(
-            mb_release_id=legacy.mb_release_id,
-            snapshot_fingerprint=legacy.snapshot_fingerprint,
-        )
-        assert stored is not None and stored.id is not None
-        fake_db.set_request_current_evidence(1, stored.id)
-        fake_beets = FakeBeetsDB()
-        fake_beets.set_album_info("test-mbid-1", AlbumInfo(
-            album_id=1,
-            track_count=1,
-            min_bitrate_kbps=256,
-            avg_bitrate_kbps=256,
-            median_bitrate_kbps=256,
-            is_cbr=True,
-            album_path=source,
-            format="AAC",
-        ))
-        original_resolve_current_release = fake_beets.resolve_current_release
-        beets_statuses: list[str] = []
-
-        def resolve_current_release(*args: Any, **kwargs: Any):
-            beets_statuses.append(str(fake_db.request(1)["status"]))
-            return original_resolve_current_release(*args, **kwargs)
-
-        with patch(
-            "lib.beets_db.BeetsDB", lambda **_kwargs: fake_beets,
-        ), patch.object(
-            fake_beets,
-            "resolve_current_release",
-            side_effect=resolve_current_release,
-        ):
-            poll_active_downloads(ctx)
-
-        self.assertEqual(beets_statuses, ["downloading", "wanted"])
-        self.assertEqual(fake_db.request(1)["status"], "wanted")
-        current = fake_db.load_album_quality_evidence_by_id(stored.id)
-        assert current is not None
-        self.assertEqual(current.lineage_version, 4)
-        self.assertEqual(current.measured_at, stored.measured_at)
-        log_row = fake_db.get_log(limit=1)[0]
-        self.assertTrue(log_row["_current_evidence_is_pre_attempt"])
-        self.assertEqual(log_row["_current_evidence_format"], "AAC")
+        self.assertEqual(db.request(1)["status"], "processing")
+        self.assertEqual(len(db.list_import_jobs(request_id=1)), 1)
+        self.assertFalse(os.path.exists(target))
+        self.assertEqual(source_manifest(), before_manifest)
 
     def test_poll_active_all_complete_uses_async_preview_gate(self):
-        """Completed automation downloads are materialized before preview."""
+        """Completion publishes a queued preview owner without materializing."""
         from lib.download import poll_active_downloads
 
         row = self._make_downloading_row()
@@ -5320,7 +4948,15 @@ class TestPollActiveDownloads(unittest.TestCase):
         self.assertEqual(len(jobs), 1)
         self.assertEqual(jobs[0].preview_status, "waiting")
         self.assertIsNone(jobs[0].preview_message)
-        claimed = fake_db.claim_next_import_preview_job(worker_id="preview")
+        claimed = fake_db.claim_next_import_preview_job(
+            worker_id="preview",
+            execution_lease=ExecutionLeaseSnapshot(
+                host_boot_id="download-test-boot",
+                invocation_id="download-test-preview",
+                systemd_unit="cratedigger-import-preview-worker.service",
+                worker=ProcessIdentity(pid=5200, start_ticks=52),
+            ),
+        )
         assert claimed is not None
         self.assertEqual(claimed.id, jobs[0].id)
 
@@ -5347,9 +4983,14 @@ class TestPollActiveDownloads(unittest.TestCase):
         poll_active_downloads(ctx)
 
         self.assertGreaterEqual(len(fake_db.update_download_state_calls), 1)
-        self.assertEqual(fake_db.request(1)["status"], "downloading")
-        self.assertIsNotNone(fake_db.request(1)["active_download_state"])
-        self.assertEqual(len(fake_db.list_import_jobs()), 1)
+        request = fake_db.request(1)
+        jobs = fake_db.list_import_jobs()
+        self.assertEqual(request["status"], "processing")
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(
+            request["active_automation_import_job_id"],
+            jobs[0].id,
+        )
 
     def test_poll_active_timeout(self):
         """No byte/state progress for stalled_timeout → cancel, log, reset to wanted."""
@@ -5563,8 +5204,14 @@ class TestPollActiveDownloads(unittest.TestCase):
         poll_active_downloads(ctx)
 
         self.assertEqual(fake_db.download_logs, [])
-        self.assertEqual(fake_db.request(1)["status"], "downloading")
-        self.assertEqual(len(fake_db.list_import_jobs()), 1)
+        request = fake_db.request(1)
+        jobs = fake_db.list_import_jobs()
+        self.assertEqual(request["status"], "processing")
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(
+            request["active_automation_import_job_id"],
+            jobs[0].id,
+        )
 
     def test_poll_active_restored_completed_success_queues_importer(self):
         """Persisted success remains complete after slskd drops removed rows."""
@@ -5601,11 +5248,17 @@ class TestPollActiveDownloads(unittest.TestCase):
         poll_active_downloads(ctx)
 
         self.assertEqual(fake_db.download_logs, [])
-        self.assertEqual(fake_db.status_history, [])
+        self.assertEqual(fake_db.status_history, [(1, "processing")])
         self.assertEqual(fake_db.cooldowns_applied, [])
         self.assertEqual(fake_db.denylist, [])
-        self.assertEqual(fake_db.request(1)["status"], "downloading")
-        self.assertEqual(len(fake_db.list_import_jobs(request_id=1)), 1)
+        request = fake_db.request(1)
+        jobs = fake_db.list_import_jobs(request_id=1)
+        self.assertEqual(request["status"], "processing")
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(
+            request["active_automation_import_job_id"],
+            jobs[0].id,
+        )
 
     def test_poll_ignores_stale_terminal_transfer_before_claim(self):
         """A new claim must not bind to an older includeRemoved terminal transfer."""
@@ -6229,6 +5882,69 @@ class TestPollActiveDownloads(unittest.TestCase):
         persisted = self._download_state(fake_db)
         self.assertEqual(persisted["files"][2]["retry_count"], 1)
 
+    def test_retry_lock_contention_preserves_budget_and_has_no_slskd_effect(
+        self,
+    ):
+        """IMPORT contention cannot count a retry that was never attempted."""
+        from lib.download import poll_active_downloads
+
+        enqueued_at = _utc_now_iso()
+        row = self._make_downloading_row(state_dict={
+            "filetype": "flac",
+            "enqueued_at": enqueued_at,
+            "files": [
+                {
+                    "username": "user1",
+                    "filename": "user1\\Music\\01.flac",
+                    "file_dir": "user1\\Music",
+                    "size": 100,
+                    "retry_count": 2,
+                },
+                {
+                    "username": "user1",
+                    "filename": "user1\\Music\\02.flac",
+                    "file_dir": "user1\\Music",
+                    "size": 100,
+                },
+            ],
+        })
+        slskd = FakeSlskdAPI(downloads=[{
+            "username": "user1",
+            "directories": [{
+                "directory": "user1\\Music",
+                "files": [
+                    {
+                        "filename": "user1\\Music\\01.flac",
+                        "id": "failed",
+                        "state": "Completed, Errored",
+                        "requestedAt": enqueued_at,
+                    },
+                    {
+                        "filename": "user1\\Music\\02.flac",
+                        "id": "progress",
+                        "state": "InProgress",
+                        "bytesTransferred": 1,
+                        "requestedAt": enqueued_at,
+                    },
+                ],
+            }],
+        }])
+        ctx, db = self._make_poll_ctx(
+            downloading_rows=[row],
+            fake_db=FakePipelineDB(),
+            slskd=slskd,
+        )
+        db.set_advisory_lock_result(False)
+        before = copy.deepcopy(db.get_request(1))
+
+        poll_active_downloads(ctx)
+
+        self.assertEqual(db.get_request(1), before)
+        self.assertEqual(db.update_download_state_calls, [])
+        self.assertEqual(slskd.transfers.enqueue_calls, [])
+        self.assertEqual(slskd.transfers.cancel_download_calls, [])
+        self.assertEqual(db.list_import_jobs(request_id=1), [])
+
     def test_poll_active_get_all_downloads_api_error_waits_for_next_cycle(self):
         """Transient bulk-download API failures must not be treated as vanished transfers."""
         from lib.download import poll_active_downloads
@@ -6247,8 +5963,8 @@ class TestPollActiveDownloads(unittest.TestCase):
         self.assertEqual(fake_db.request(1)["status"], "downloading")
         self.assertEqual(fake_db.status_history, [])
 
-    def test_poll_active_completion_queues_and_persists_processing_state(self):
-        """Completion should leave persisted state for the importer to resume."""
+    def test_poll_active_completion_publishes_exact_processing_owner(self):
+        """Completion atomically publishes the job, owner, path, and state."""
         from lib.download import poll_active_downloads
         from lib.processing_paths import attempt_fingerprint
         row = self._make_downloading_row()
@@ -6271,8 +5987,10 @@ class TestPollActiveDownloads(unittest.TestCase):
         poll_active_downloads(ctx)
 
         self.assertEqual(fake_db.download_logs, [])
-        self.assertEqual(fake_db.status_history, [])
+        self.assertEqual(fake_db.status_history, [(1, "processing")])
         self.assertEqual(len(fake_db.update_download_state_calls), 1)
+        request = fake_db.request(1)
+        self.assertEqual(request["status"], "processing")
         persisted = self._download_state(fake_db)
         self.assertIsNotNone(persisted["processing_started_at"])
         self.assertIsNotNone(persisted["current_path"])
@@ -6281,928 +5999,34 @@ class TestPollActiveDownloads(unittest.TestCase):
             persisted["current_path"].endswith(
                 f"Test Artist - Test Album (2020) [{fp}]")
         )
-        self.assertEqual(len(fake_db.list_import_jobs(request_id=1)), 1)
-
-    def test_poll_resume_processing_queues_persisted_current_path(self):
-        """Resume path keeps the post-move directory for the importer."""
-        import tempfile
-
-        from lib.download import poll_active_downloads
-        from lib.processing_paths import stage_to_ai_path
-        with tempfile.TemporaryDirectory() as tmpdir:
-            staging_root = os.path.join(tmpdir, "staging")
-            current_path = stage_to_ai_path(
-                artist="Test Artist",
-                title="Test Album",
-                staging_dir=staging_root,
-                request_id=1,
-                auto_import=False,
-            )
-            os.makedirs(current_path)
-            with open(os.path.join(current_path, "01.flac"), "w") as fp:
-                fp.write("audio")
-            row = self._make_downloading_row(state_dict={
-                "filetype": "flac",
-                "enqueued_at": _utc_now_iso(),
-                "processing_started_at": _utc_now_iso(),
-                "current_path": current_path,
-                "files": [
-                    {"username": "user1", "filename": "user1\\Music\\01.flac",
-                     "file_dir": "user1\\Music", "size": 30000000},
-                ],
-            })
-            ctx, _fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
-            cfg = cast(Any, ctx.cfg)
-            cfg.beets_staging_dir = staging_root
-
-            poll_active_downloads(ctx)
-
-            self.assertEqual(
-                _fake_db.request(1)["active_download_state"]["current_path"],
-                current_path,
-            )
-            self.assertEqual(len(_fake_db.list_import_jobs(request_id=1)), 1)
-
-    def test_poll_legacy_processing_row_uses_canonical_fallback(self):
-        """Legacy mid-processing rows without current_path still resume canonically."""
-        import tempfile
-
-        from lib.download import poll_active_downloads
-        from lib.processing_paths import attempt_fingerprint, canonical_processing_path
-        with tempfile.TemporaryDirectory() as tmpdir:
-            downloads_root = os.path.join(tmpdir, "downloads")
-            processing_dir = _private_processing_dir(tmpdir)
-            os.makedirs(downloads_root)
-            files = [
-                {"username": "user1", "filename": "user1\\Music\\01.flac",
-                 "file_dir": "user1\\Music", "size": 30000000},
-            ]
-            fp = attempt_fingerprint([(f["username"], f["filename"]) for f in files])
-            canonical_path = canonical_processing_path(
-                artist="Test Artist",
-                title="Test Album",
-                year="2020",
-                slskd_download_dir=os.path.join(processing_dir, "albums"),
-                attempt_fingerprint=fp,
-            )
-            os.makedirs(canonical_path)
-            with open(os.path.join(canonical_path, "01.flac"), "w") as fp_handle:
-                fp_handle.write("audio")
-            row = self._make_downloading_row(state_dict={
-                "filetype": "flac",
-                "enqueued_at": _utc_now_iso(),
-                "processing_started_at": _utc_now_iso(),
-                "files": files,
-            })
-            ctx, _fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
-            cfg = cast(Any, ctx.cfg)
-            cfg.slskd_download_dir = downloads_root
-            cfg.processing_dir = processing_dir
-
-            poll_active_downloads(ctx)
-
-            self.assertEqual(
-                _fake_db.request(1)["active_download_state"]["current_path"],
-                canonical_path,
-            )
-            self.assertEqual(len(_fake_db.update_download_state_calls), 1)
-            self.assertEqual(
-                _fake_db.update_download_state_current_path_calls,
-                [],
-            )
-            self.assertEqual(len(_fake_db.list_import_jobs(request_id=1)), 1)
-
-    def test_poll_mid_processing_row_uses_request_scoped_staging_fallback(self):
-        """Move/persist crashes should recover from request-scoped staged dirs."""
-        import tempfile
-
-        from lib.download import poll_active_downloads
-        from lib.processing_paths import stage_to_ai_path
-        with tempfile.TemporaryDirectory() as tmpdir:
-            staging_root = os.path.join(tmpdir, "staging")
-            staged_path = stage_to_ai_path(
-                artist="Test Artist",
-                title="Test Album",
-                staging_dir=staging_root,
-                request_id=1,
-                auto_import=True,
-            )
-            os.makedirs(staged_path)
-            with open(os.path.join(staged_path, "01.flac"), "w") as fp:
-                fp.write("audio")
-
-            row = self._make_downloading_row(state_dict={
-                "filetype": "flac",
-                "enqueued_at": _utc_now_iso(),
-                "processing_started_at": _utc_now_iso(),
-                "files": [
-                    {"username": "user1", "filename": "user1\\Music\\01.flac",
-                     "file_dir": "user1\\Music", "size": 30000000},
-                ],
-            })
-            ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
-            cfg = cast(Any, ctx.cfg)
-            cfg.slskd_download_dir = os.path.join(tmpdir, "downloads")
-            cfg.beets_staging_dir = staging_root
-
-            poll_active_downloads(ctx)
-
-            self.assertEqual(
-                fake_db.request(1)["active_download_state"]["current_path"],
-                staged_path,
-            )
-            self.assertEqual(fake_db.status_history, [])
-            self.assertEqual(len(fake_db.list_import_jobs(request_id=1)), 1)
-
-    def test_poll_stale_canonical_current_path_uses_request_scoped_staging_fallback(
-        self,
-    ):
-        """A stale canonical current_path must recover to the staged location."""
-        import tempfile
-
-        from lib.download import poll_active_downloads
-        from lib.processing_paths import (
-            attempt_fingerprint,
-            canonical_processing_path,
-            stage_to_ai_path,
+        jobs = fake_db.list_import_jobs(request_id=1)
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(
+            request["active_automation_import_job_id"],
+            jobs[0].id,
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
-            downloads_root = os.path.join(tmpdir, "downloads")
-            processing_dir = _private_processing_dir(tmpdir)
-            staging_root = os.path.join(tmpdir, "staging")
-            files = [
-                {"username": "user1", "filename": "user1\\Music\\01.flac",
-                 "file_dir": "user1\\Music", "size": 30000000},
-            ]
-            fp = attempt_fingerprint([(f["username"], f["filename"]) for f in files])
-            # current_path IS the real (fp'd) canonical location — it's
-            # just stale/empty on disk, which is what should trigger the
-            # staged-recovery fallback below.
-            canonical_path = canonical_processing_path(
-                artist="Test Artist",
-                title="Test Album",
-                year="2020",
-                slskd_download_dir=os.path.join(processing_dir, "albums"),
-                attempt_fingerprint=fp,
-            )
-            staged_path = stage_to_ai_path(
-                artist="Test Artist",
-                title="Test Album",
-                staging_dir=staging_root,
-                request_id=1,
-                auto_import=True,
-            )
-            os.makedirs(staged_path)
-            with open(os.path.join(staged_path, "01.flac"), "w") as fp_handle:
-                fp_handle.write("audio")
 
-            row = self._make_downloading_row(state_dict={
-                "filetype": "flac",
-                "enqueued_at": _utc_now_iso(),
-                "processing_started_at": _utc_now_iso(),
-                "current_path": canonical_path,
-                "files": files,
-            })
-            ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
-            cfg = cast(Any, ctx.cfg)
-            cfg.slskd_download_dir = downloads_root
-            cfg.processing_dir = processing_dir
-            cfg.beets_staging_dir = staging_root
 
-            poll_active_downloads(ctx)
 
-            self.assertEqual(
-                fake_db.request(1)["active_download_state"]["current_path"],
-                staged_path,
-            )
-            self.assertEqual(len(fake_db.list_import_jobs(request_id=1)), 1)
 
-    def test_poll_legacy_processing_row_blocks_on_ambiguous_staged_dir(self):
-        """Legacy rows must not guess a shared staged dir as current_path."""
-        import tempfile
 
-        from lib.download import poll_active_downloads
-        with tempfile.TemporaryDirectory() as tmpdir:
-            staging_root = os.path.join(tmpdir, "staging")
-            staged_path = os.path.join(staging_root, "Test Artist", "Test Album")
-            os.makedirs(staged_path)
-            with open(os.path.join(staged_path, "01.flac"), "w") as fp:
-                fp.write("audio")
 
-            row = self._make_downloading_row(state_dict={
-                "filetype": "flac",
-                "enqueued_at": _utc_now_iso(),
-                "processing_started_at": _utc_now_iso(),
-                "files": [
-                    {"username": "user1", "filename": "user1\\Music\\01.flac",
-                     "file_dir": "user1\\Music", "size": 30000000},
-                ],
-            })
-            ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
-            cfg = cast(Any, ctx.cfg)
-            cfg.slskd_download_dir = os.path.join(tmpdir, "downloads")
-            cfg.beets_staging_dir = staging_root
 
-            with self.assertLogs("cratedigger", level="ERROR") as logs:
-                poll_active_downloads(ctx)
 
-            self.assertEqual(fake_db.request(1)["status"], "downloading")
-            self.assertIsNone(fake_db.request(1)["active_download_state"].get("current_path"))
-            self.assertEqual(len(fake_db.update_download_state_calls), 1)
-            self.assertIn(
-                "LEGACY STAGED RESUME BLOCKED",
-                "\n".join(logs.output),
-            )
 
-    def test_poll_legacy_processing_row_blocks_when_canonical_and_legacy_stage_both_exist(self):
-        """Split legacy state must not pick one side and requeue the other."""
-        import tempfile
 
-        from lib.download import poll_active_downloads
-        from lib.processing_paths import attempt_fingerprint
-        with tempfile.TemporaryDirectory() as tmpdir:
-            processing_dir = _private_processing_dir(tmpdir)
-            files = [
-                {"username": "user1", "filename": "user1\\Music\\01.flac",
-                 "file_dir": "user1\\Music", "size": 30000000},
-            ]
-            fp = attempt_fingerprint([(f["username"], f["filename"]) for f in files])
-            canonical_path = os.path.join(
-                processing_dir, "albums",
-                f"Test Artist - Test Album (2020) [{fp}]")
-            os.makedirs(canonical_path)
-            with open(os.path.join(canonical_path, "01.flac"), "w") as fp_handle:
-                fp_handle.write("audio")
 
-            staging_root = os.path.join(tmpdir, "staging")
-            staged_path = os.path.join(staging_root, "Test Artist", "Test Album")
-            os.makedirs(staged_path)
-            with open(os.path.join(staged_path, "01.flac"), "w") as fp_handle:
-                fp_handle.write("audio")
 
-            row = self._make_downloading_row(state_dict={
-                "filetype": "flac",
-                "enqueued_at": _utc_now_iso(),
-                "processing_started_at": _utc_now_iso(),
-                "files": files,
-            })
-            ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
-            cfg = cast(Any, ctx.cfg)
-            cfg.slskd_download_dir = os.path.join(tmpdir, "downloads")
-            cfg.processing_dir = processing_dir
-            cfg.beets_staging_dir = staging_root
 
-            with self.assertLogs("cratedigger", level="ERROR") as logs:
-                poll_active_downloads(ctx)
 
-            self.assertEqual(fake_db.request(1)["status"], "downloading")
-            self.assertIsNone(fake_db.request(1)["active_download_state"].get("current_path"))
-            self.assertEqual(len(fake_db.update_download_state_calls), 1)
-            self.assertIn("MID-PROCESS RESUME BLOCKED", "\n".join(logs.output))
 
-    def test_poll_missing_persisted_current_path_resets_to_wanted(self):
-        """Missing persisted staging dirs should fail closed back to wanted."""
-        import tempfile
 
-        from lib.download import poll_active_downloads
-        with tempfile.TemporaryDirectory() as tmpdir:
-            row = self._make_downloading_row(state_dict={
-                "filetype": "opus",
-                "enqueued_at": _utc_now_iso(),
-                "processing_started_at": _utc_now_iso(),
-                "current_path": os.path.join(tmpdir, "missing"),
-                "files": [
-                    {"username": "user1", "filename": "user1\\Music\\01.flac",
-                     "file_dir": "user1\\Music", "size": 30000000},
-                ],
-            })
-            ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
 
-            poll_active_downloads(ctx)
 
-            self.assertEqual(fake_db.request(1)["status"], "wanted")
-            self._assert_pre_enqueue_failure_event(
-                fake_db,
-                reason="staged_path_missing",
-                filetype="opus",
-                expected_verdict=(
-                    "The staged download folder could not be accessed before "
-                    "import (possible filesystem error); requeued"
-                ),
-            )
 
-    def test_poll_missing_canonical_processing_path_queues_importer(self):
-        """Missing canonical path can be pre-materialization, not post-move loss."""
-        import tempfile
-
-        from lib.download import poll_active_downloads
-        from lib.processing_paths import attempt_fingerprint, canonical_processing_path
-        with tempfile.TemporaryDirectory() as tmpdir:
-            download_root = os.path.join(tmpdir, "downloads")
-            processing_dir = _private_processing_dir(tmpdir)
-            source_dir = os.path.join(download_root, "Music")
-            os.makedirs(source_dir)
-            source_path = os.path.join(source_dir, "01.flac")
-            with open(source_path, "wb") as fp:
-                fp.write(b"test audio")
-            files = [
-                {"username": "user1", "filename": "user1\\Music\\01.flac",
-                 "file_dir": "user1\\Music", "size": 30000000,
-                 "local_path": source_path},
-            ]
-            fp = attempt_fingerprint([(f["username"], f["filename"]) for f in files])
-            current_path = canonical_processing_path(
-                artist="Test Artist",
-                title="Test Album",
-                year="2020",
-                slskd_download_dir=os.path.join(processing_dir, "albums"),
-                attempt_fingerprint=fp,
-            )
-            row = self._make_downloading_row(state_dict={
-                "filetype": "flac",
-                "enqueued_at": _utc_now_iso(),
-                "processing_started_at": _utc_now_iso(),
-                "current_path": current_path,
-                "files": files,
-            })
-            ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
-            cfg = cast(Any, ctx.cfg)
-            cfg.slskd_download_dir = download_root
-            cfg.processing_dir = processing_dir
-
-            poll_active_downloads(ctx)
-
-            self.assertEqual(fake_db.request(1)["status"], "downloading")
-            self.assertEqual(fake_db.status_history, [])
-            self.assertEqual(len(fake_db.list_import_jobs(request_id=1)), 1)
-
-    def test_poll_canonical_dir_present_file_missing_defers_to_grace_not_reset(self):
-        """Issue #509 third divergence (intentional, safer): canonical
-        current_path, dir EXISTS but the tracked file is absent AND
-        unstamped.
-
-        OLD ``_processing_path_ready_for_importer`` reached its
-        missing-files branch and IMMEDIATELY reset the request to
-        'wanted'. The unified gate short-circuits ``kind == 'canonical'``
-        -> ready and lets ``_materialize_processing_dir`` own the
-        decision. The materializer refuses the incomplete private
-        destination rather than merging fresh files into it. So the
-        request stays 'downloading' — NOT a wrongful immediate reset —
-        and requires a deliberate recovery. This case is only reachable
-        via manual FS interference / an exquisitely-timed partial move
-        (``StagedAlbum.move_to`` rmtrees the source and repoints
-        current_path in the normal flow).
-        """
-        import tempfile
-
-        from lib.download import poll_active_downloads
-        from lib.processing_paths import attempt_fingerprint, canonical_processing_path
-        with tempfile.TemporaryDirectory() as tmpdir:
-            download_root = os.path.join(tmpdir, "downloads")
-            processing_dir = _private_processing_dir(tmpdir)
-            os.makedirs(download_root)
-            files = [
-                {"username": "user1", "filename": "user1\\Music\\01.flac",
-                 "file_dir": "user1\\Music", "size": 30000000,
-                 # Unstamped: no event-stamped local_path, so
-                 # materialize cannot recover -> event_path_never_stamped.
-                 "local_path": None},
-            ]
-            fp = attempt_fingerprint([(f["username"], f["filename"]) for f in files])
-            canonical_path = canonical_processing_path(
-                artist="Test Artist",
-                title="Test Album",
-                year="2020",
-                slskd_download_dir=os.path.join(processing_dir, "albums"),
-                attempt_fingerprint=fp,
-            )
-            # Dir EXISTS (empty) but the tracked file is absent.
-            os.makedirs(canonical_path)
-            row = self._make_downloading_row(state_dict={
-                "filetype": "flac",
-                "enqueued_at": _utc_now_iso(),
-                "processing_started_at": _utc_now_iso(),
-                "current_path": canonical_path,
-                "files": files,
-            })
-            ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
-            cfg = cast(Any, ctx.cfg)
-            cfg.slskd_download_dir = download_root
-            cfg.processing_dir = processing_dir
-
-            poll_active_downloads(ctx)
-
-            # Stays downloading within grace — NOT reset to wanted.
-            self.assertEqual(fake_db.request(1)["status"], "downloading")
-            self.assertEqual(fake_db.status_history, [])
-            # Materialize failed within grace -> no job enqueued, no reset.
-            self.assertEqual(len(fake_db.list_import_jobs(request_id=1)), 0)
-            self.assertEqual(fake_db.download_logs, [])
-
-    def test_poll_canonical_file_missing_gate_and_materialize_agree(self):
-        """Parity for the #509 third divergence: on the exact
-        canonical-dir-present / file-missing / unstamped fixture, the
-        poller's gate (``_processing_path_ready_for_importer``) and
-        ``_materialize_processing_dir`` AGREE — neither does an immediate
-        reset. The gate reports ready (delegating the real decision), and
-        materialize returns a guarded result. The request row is left
-        'downloading' by both.
-        """
-        import tempfile
-
-        from lib.download import (
-            _processing_path_ready_for_importer,
-        )
-        from lib.download_materialization import (
-            MaterializeGuarded,
-            _materialize_processing_dir,
-        )
-        from lib.download_reconstruction import reconstruct_grab_list_entry
-        from lib.processing_paths import attempt_fingerprint, canonical_processing_path
-        from lib.quality import ActiveDownloadState
-        from lib.staged_album import StagedAlbum
-        with tempfile.TemporaryDirectory() as tmpdir:
-            download_root = os.path.join(tmpdir, "downloads")
-            processing_dir = _private_processing_dir(tmpdir)
-            os.makedirs(download_root)
-            files = [
-                {"username": "user1", "filename": "user1\\Music\\01.flac",
-                 "file_dir": "user1\\Music", "size": 30000000,
-                 "local_path": None},
-            ]
-            fp = attempt_fingerprint([(f["username"], f["filename"]) for f in files])
-            canonical_path = canonical_processing_path(
-                artist="Test Artist",
-                title="Test Album",
-                year="2020",
-                slskd_download_dir=os.path.join(processing_dir, "albums"),
-                attempt_fingerprint=fp,
-            )
-            os.makedirs(canonical_path)
-            row = self._make_downloading_row(state_dict={
-                "filetype": "flac",
-                "enqueued_at": _utc_now_iso(),
-                "processing_started_at": _utc_now_iso(),
-                "current_path": canonical_path,
-                "files": files,
-            })
-            ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
-            cfg = cast(Any, ctx.cfg)
-            cfg.slskd_download_dir = download_root
-            cfg.processing_dir = processing_dir
-
-            raw = fake_db.request(1)["active_download_state"]
-            assert isinstance(raw, dict)
-            state = ActiveDownloadState.from_raw(raw)
-            entry = reconstruct_grab_list_entry(fake_db.request(1), state)
-
-            # Gate: canonical short-circuit -> ready, and it does NOT reset.
-            ready = _processing_path_ready_for_importer(
-                entry, 1, state, fake_db, ctx)
-            self.assertTrue(ready)
-            self.assertEqual(fake_db.request(1)["status"], "downloading")
-
-            # Materialize on the same fixture: it refuses the incomplete
-            # private destination rather than adding to it, again without
-            # an immediate reset.
-            assert state.current_path is not None
-            staged_album = StagedAlbum.from_entry(
-                entry, default_path=state.current_path)
-            result = _materialize_processing_dir(entry, staged_album, ctx)
-            self.assertIsInstance(result, MaterializeGuarded)
-            assert isinstance(result, MaterializeGuarded)
-            self.assertEqual(result.detail, "incomplete_or_unsafe_canonical")
-            self.assertEqual(fake_db.request(1)["status"], "downloading")
-
-    def test_poll_post_move_staged_path_without_validation_queues(self):
-        """Staged retries are queued for importer ownership."""
-        import tempfile
-
-        from lib.download import poll_active_downloads
-        from lib.processing_paths import stage_to_ai_path
-        with tempfile.TemporaryDirectory() as tmpdir:
-            staging_root = os.path.join(tmpdir, "staging")
-            resumed_path = stage_to_ai_path(
-                artist="Test Artist",
-                title="Test Album",
-                staging_dir=staging_root,
-                request_id=1,
-                auto_import=False,
-            )
-            os.makedirs(resumed_path)
-            with open(os.path.join(resumed_path, "01.flac"), "w") as fp:
-                fp.write("audio")
-
-            row = self._make_downloading_row(state_dict={
-                "filetype": "flac",
-                "enqueued_at": _utc_now_iso(),
-                "processing_started_at": _utc_now_iso(),
-                "current_path": resumed_path,
-                "files": [
-                    {"username": "user1", "filename": "user1\\Music\\01.flac",
-                     "file_dir": "user1\\Music", "size": 30000000},
-                ],
-            })
-            ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
-            cfg = cast(Any, ctx.cfg)
-            cfg.beets_staging_dir = staging_root
-
-            poll_active_downloads(ctx)
-
-            self.assertEqual(fake_db.request(1)["status"], "downloading")
-            self.assertEqual(fake_db.status_history, [])
-            self.assertEqual(len(fake_db.list_import_jobs(request_id=1)), 1)
-            self.assertEqual(
-                fake_db.request(1)["active_download_state"]["current_path"],
-                resumed_path,
-            )
-
-    def test_poll_post_move_staged_path_with_missing_file_abandons_and_resets(self):
-        """Subprocess-started auto-import residue is abandoned for redownload."""
-        import tempfile
-
-        from lib.download import poll_active_downloads
-        from lib.processing_paths import stage_to_ai_path
-        with tempfile.TemporaryDirectory() as tmpdir:
-            staging_root = os.path.join(tmpdir, "staging")
-            resumed_path = stage_to_ai_path(
-                artist="Test Artist",
-                title="Test Album",
-                staging_dir=staging_root,
-                request_id=1,
-                auto_import=True,
-            )
-            os.makedirs(resumed_path)
-
-            row = self._make_downloading_row(state_dict={
-                "filetype": "flac",
-                "enqueued_at": _utc_now_iso(),
-                "processing_started_at": _utc_now_iso(),
-                "import_subprocess_started_at": _utc_now_iso(),
-                "current_path": resumed_path,
-                "files": [
-                    {"username": "user1", "filename": "user1\\Music\\01.flac",
-                     "file_dir": "user1\\Music", "size": 30000000},
-                ],
-            })
-            ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
-            cfg = cast(Any, ctx.cfg)
-            cfg.beets_staging_dir = staging_root
-
-            with self.assertLogs("cratedigger", level="WARNING") as logs:
-                poll_active_downloads(ctx)
-
-            self.assertEqual(fake_db.request(1)["status"], "wanted")
-            self.assertEqual(fake_db.status_history, [(1, "wanted")])
-            self.assertIsNone(fake_db.request(1)["active_download_state"])
-            failed_parent = os.path.join(
-                os.path.dirname(resumed_path),
-                "failed_imports",
-            )
-            self.assertTrue(os.path.isdir(failed_parent))
-            moved = os.listdir(failed_parent)
-            self.assertEqual(len(moved), 1)
-            self.assertTrue(moved[0].startswith("abandoned_auto_import"))
-            self.assertEqual(len(fake_db.download_logs), 1)
-            fake_db.assert_log(
-                self,
-                0,
-                outcome="failed",
-                beets_scenario="abandoned_auto_import",
-            )
-            self.assertIn(
-                "Abandoned interrupted auto-import",
-                fake_db.download_logs[0].error_message or "",
-            )
-            self.assertEqual(fake_db.denylist, [])
-            self.assertEqual(fake_db.cooldowns_applied, [])
-            self.assertNotIn("Unhandled exception", "\n".join(logs.output))
-
-    def test_poll_subprocess_started_auto_import_waits_for_active_manual_job(self):
-        """Any active import job owns the request, not just automation jobs."""
-        import tempfile
-
-        from lib.download import poll_active_downloads
-        from lib.import_queue import IMPORT_JOB_FORCE
-        from lib.processing_paths import stage_to_ai_path
-        with tempfile.TemporaryDirectory() as tmpdir:
-            staging_root = os.path.join(tmpdir, "staging")
-            resumed_path = stage_to_ai_path(
-                artist="Test Artist",
-                title="Test Album",
-                staging_dir=staging_root,
-                request_id=1,
-                auto_import=True,
-            )
-            os.makedirs(resumed_path)
-            with open(os.path.join(resumed_path, "01.opus"), "w") as fp:
-                fp.write("converted audio")
-
-            row = self._make_downloading_row(state_dict={
-                "filetype": "flac",
-                "enqueued_at": _utc_now_iso(),
-                "processing_started_at": _utc_now_iso(),
-                "import_subprocess_started_at": _utc_now_iso(),
-                "current_path": resumed_path,
-                "files": [
-                    {"username": "user1", "filename": "user1\\Music\\01.flac",
-                     "file_dir": "user1\\Music", "size": 30000000},
-                ],
-            })
-            ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
-            cfg = cast(Any, ctx.cfg)
-            cfg.beets_staging_dir = staging_root
-            fake_db.enqueue_import_job(
-                IMPORT_JOB_FORCE,
-                request_id=1,
-                dedupe_key="manual:1",
-                payload={"download_log_id": 1, "failed_path": resumed_path},
-            )
-
-            poll_active_downloads(ctx)
-
-            self.assertEqual(fake_db.request(1)["status"], "downloading")
-            self.assertTrue(os.path.exists(resumed_path))
-            self.assertEqual(fake_db.download_logs, [])
-            self.assertEqual(fake_db.status_history, [])
-
-    def test_poll_abandon_waits_when_release_lock_is_held(self):
-        """A held release lock means a live importer still owns the path."""
-        import tempfile
-
-        from lib.download import poll_active_downloads
-        from lib.processing_paths import stage_to_ai_path
-        with tempfile.TemporaryDirectory() as tmpdir:
-            staging_root = os.path.join(tmpdir, "staging")
-            resumed_path = stage_to_ai_path(
-                artist="Test Artist",
-                title="Test Album",
-                staging_dir=staging_root,
-                request_id=1,
-                auto_import=True,
-            )
-            os.makedirs(resumed_path)
-
-            row = self._make_downloading_row(state_dict={
-                "filetype": "flac",
-                "enqueued_at": _utc_now_iso(),
-                "processing_started_at": _utc_now_iso(),
-                "import_subprocess_started_at": _utc_now_iso(),
-                "current_path": resumed_path,
-                "files": [
-                    {"username": "user1", "filename": "user1\\Music\\01.flac",
-                     "file_dir": "user1\\Music", "size": 30000000},
-                ],
-            })
-            ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
-            cfg = cast(Any, ctx.cfg)
-            cfg.beets_staging_dir = staging_root
-            fake_db.set_advisory_lock_result(False)
-
-            poll_active_downloads(ctx)
-
-            self.assertEqual(fake_db.request(1)["status"], "downloading")
-            self.assertTrue(os.path.exists(resumed_path))
-            self.assertEqual(fake_db.download_logs, [])
-            self.assertEqual(fake_db.status_history, [])
-
-    def test_poll_abandon_rolls_back_move_when_db_guard_fails(self):
-        """If the guarded DB commit loses ownership, restore the staged dir."""
-        import tempfile
-
-        from lib.download import poll_active_downloads
-        from lib.processing_paths import stage_to_ai_path
-        with tempfile.TemporaryDirectory() as tmpdir:
-            staging_root = os.path.join(tmpdir, "staging")
-            resumed_path = stage_to_ai_path(
-                artist="Test Artist",
-                title="Test Album",
-                staging_dir=staging_root,
-                request_id=1,
-                auto_import=True,
-            )
-            os.makedirs(resumed_path)
-
-            row = self._make_downloading_row(state_dict={
-                "filetype": "flac",
-                "enqueued_at": _utc_now_iso(),
-                "processing_started_at": _utc_now_iso(),
-                "import_subprocess_started_at": _utc_now_iso(),
-                "current_path": resumed_path,
-                "files": [
-                    {"username": "user1", "filename": "user1\\Music\\01.flac",
-                     "file_dir": "user1\\Music", "size": 30000000},
-                ],
-            })
-            ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
-            cfg = cast(Any, ctx.cfg)
-            cfg.beets_staging_dir = staging_root
-            fake_db.abandon_auto_import_request = lambda **_kwargs: None
-
-            poll_active_downloads(ctx)
-
-            self.assertEqual(fake_db.request(1)["status"], "downloading")
-            self.assertTrue(os.path.exists(resumed_path))
-            self.assertEqual(fake_db.download_logs, [])
-            self.assertEqual(fake_db.status_history, [])
-
-    def test_poll_abandon_blocks_when_path_liveness_is_unknown(self):
-        """Stat errors are not treated as confirmed missing staged paths."""
-        import tempfile
-
-        from lib.download import poll_active_downloads
-        from lib.processing_paths import stage_to_ai_path
-        with tempfile.TemporaryDirectory() as tmpdir:
-            staging_root = os.path.join(tmpdir, "staging")
-            resumed_path = stage_to_ai_path(
-                artist="Test Artist",
-                title="Test Album",
-                staging_dir=staging_root,
-                request_id=1,
-                auto_import=True,
-            )
-            os.makedirs(resumed_path)
-
-            row = self._make_downloading_row(state_dict={
-                "filetype": "flac",
-                "enqueued_at": _utc_now_iso(),
-                "processing_started_at": _utc_now_iso(),
-                "import_subprocess_started_at": _utc_now_iso(),
-                "current_path": resumed_path,
-                "files": [
-                    {"username": "user1", "filename": "user1\\Music\\01.flac",
-                     "file_dir": "user1\\Music", "size": 30000000},
-                ],
-            })
-            ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
-            cfg = cast(Any, ctx.cfg)
-            cfg.beets_staging_dir = staging_root
-            real_stat = os.stat
-
-            def stat_or_fail(path, *args, **kwargs):
-                if path == resumed_path:
-                    raise OSError("mount unavailable")
-                return real_stat(path, *args, **kwargs)
-
-            with patch("lib.download_materialization.os.stat", side_effect=stat_or_fail):
-                poll_active_downloads(ctx)
-
-            self.assertEqual(fake_db.request(1)["status"], "downloading")
-            self.assertTrue(os.path.exists(resumed_path))
-            self.assertEqual(fake_db.download_logs, [])
-            self.assertEqual(fake_db.status_history, [])
-
-    def test_poll_post_move_auto_import_path_with_missing_dir_abandons_and_resets(self):
-        """Missing subprocess-started auto-import staging dir is retryable."""
-        import tempfile
-
-        from lib.download import poll_active_downloads
-        from lib.processing_paths import stage_to_ai_path
-        with tempfile.TemporaryDirectory() as tmpdir:
-            staging_root = os.path.join(tmpdir, "staging")
-            resumed_path = stage_to_ai_path(
-                artist="Test Artist",
-                title="Test Album",
-                staging_dir=staging_root,
-                request_id=1,
-                auto_import=True,
-            )
-
-            row = self._make_downloading_row(state_dict={
-                "filetype": "flac",
-                "enqueued_at": _utc_now_iso(),
-                "processing_started_at": _utc_now_iso(),
-                "import_subprocess_started_at": _utc_now_iso(),
-                "current_path": resumed_path,
-                "files": [
-                    {"username": "user1", "filename": "user1\\Music\\01.flac",
-                     "file_dir": "user1\\Music", "size": 30000000},
-                ],
-            })
-            ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
-            cfg = cast(Any, ctx.cfg)
-            cfg.beets_staging_dir = staging_root
-
-            poll_active_downloads(ctx)
-
-            self.assertEqual(fake_db.request(1)["status"], "wanted")
-            self.assertIn((1, "wanted"), fake_db.status_history)
-            self.assertIsNone(fake_db.request(1)["active_download_state"])
-            self.assertEqual(len(fake_db.download_logs), 1)
-            fake_db.assert_log(
-                self,
-                0,
-                outcome="failed",
-                beets_scenario="abandoned_auto_import",
-            )
-            self.assertIsNone(fake_db.download_logs[0].validation_result)
-
-    def test_poll_post_move_staged_missing_file_resets_when_subprocess_never_started(self):
-        """Counterpart: when ``import_subprocess_started_at`` is None,
-        a missing file at the staged path is just stale residue from a
-        crash before subprocess launch. Reset to ``wanted`` so the
-        request can be re-searched. This is the recovery path the
-        2026-05-04 wedge was missing.
-        """
-        import tempfile
-
-        from lib.download import poll_active_downloads
-        from lib.processing_paths import stage_to_ai_path
-        with tempfile.TemporaryDirectory() as tmpdir:
-            staging_root = os.path.join(tmpdir, "staging")
-            resumed_path = stage_to_ai_path(
-                artist="Test Artist",
-                title="Test Album",
-                staging_dir=staging_root,
-                request_id=1,
-                auto_import=True,
-            )
-            os.makedirs(resumed_path)
-            # No file present at the bound import path — file is missing.
-            row = self._make_downloading_row(state_dict={
-                "filetype": "flac",
-                "enqueued_at": _utc_now_iso(),
-                "processing_started_at": _utc_now_iso(),
-                # NO ``import_subprocess_started_at`` — subprocess
-                # never launched. This is the legacy wedge shape.
-                "current_path": resumed_path,
-                "files": [
-                    {"username": "user1", "filename": "user1\\Music\\01.flac",
-                     "file_dir": "user1\\Music", "size": 30000000},
-                ],
-            })
-            ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
-            cfg = cast(Any, ctx.cfg)
-            cfg.beets_staging_dir = staging_root
-
-            poll_active_downloads(ctx)
-
-            self.assertEqual(
-                fake_db.request(1)["status"], "wanted",
-                "Subprocess never launched + missing files = stale "
-                "crash residue; must reset to wanted, not block forever.",
-            )
-            self._assert_pre_enqueue_failure_event(
-                fake_db,
-                reason="staged_path_missing_tracked_files",
-                filetype="flac",
-                expected_verdict=(
-                    "Tracked files in the staged download folder could not be "
-                    "accessed before import (possible filesystem error); "
-                    "requeued"
-                ),
-            )
-
-    def test_poll_legacy_wedge_row_with_files_present_resumes_via_shared_decision(self):
-        """Counterpart to the missing-file case above: when the tracked
-        file IS present and the subprocess never launched, the poller's
-        readiness gate must permit resume — proving it shares the exact
-        "2026-05-04 wedge" verdict with ``_materialize_processing_dir``
-        (pinned directly, through the OTHER caller, by
-        ``TestPostMoveResumeBlockGuard.test_legacy_wedge_permits_retry``
-        in tests/test_integration_slices.py). Issue #509: before the
-        unification this was reachable through the poller path too, but
-        via a second, independently-written copy of the same guard.
-        """
-        import tempfile
-
-        from lib.download import poll_active_downloads
-        from lib.processing_paths import stage_to_ai_path
-        with tempfile.TemporaryDirectory() as tmpdir:
-            staging_root = os.path.join(tmpdir, "staging")
-            resumed_path = stage_to_ai_path(
-                artist="Test Artist",
-                title="Test Album",
-                staging_dir=staging_root,
-                request_id=1,
-                auto_import=True,
-            )
-            os.makedirs(resumed_path)
-            with open(os.path.join(resumed_path, "01.flac"), "w") as fp:
-                fp.write("audio")
-            row = self._make_downloading_row(state_dict={
-                "filetype": "flac",
-                "enqueued_at": _utc_now_iso(),
-                "processing_started_at": _utc_now_iso(),
-                # NO ``import_subprocess_started_at`` — legacy wedge shape.
-                "current_path": resumed_path,
-                "files": [
-                    {"username": "user1", "filename": "user1\\Music\\01.flac",
-                     "file_dir": "user1\\Music", "size": 30000000},
-                ],
-            })
-            ctx, fake_db = self._make_poll_ctx(downloading_rows=[row], slskd_downloads=[])
-            cfg = cast(Any, ctx.cfg)
-            cfg.beets_staging_dir = staging_root
-
-            poll_active_downloads(ctx)
-
-            self.assertEqual(fake_db.request(1)["status"], "downloading")
-            self.assertEqual(fake_db.status_history, [])
-            self.assertEqual(len(fake_db.list_import_jobs(request_id=1)), 1)
 
     def test_poll_no_redownload_window(self):
-        """Album stays 'downloading' while queued for importer."""
+        """Completion cannot reopen wanted between downloader and processor."""
         from lib.download import poll_active_downloads
         row = self._make_downloading_row()
         ctx, fake_db = self._make_poll_ctx(
@@ -7225,8 +6049,14 @@ class TestPollActiveDownloads(unittest.TestCase):
 
         self.assertGreaterEqual(len(fake_db.update_download_state_calls), 1)
         self.assertNotIn((1, "wanted"), fake_db.status_history)
-        self.assertEqual(fake_db.request(1)["status"], "downloading")
-        self.assertEqual(len(fake_db.list_import_jobs(request_id=1)), 1)
+        request = fake_db.request(1)
+        jobs = fake_db.list_import_jobs(request_id=1)
+        self.assertEqual(request["status"], "processing")
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(
+            request["active_automation_import_job_id"],
+            jobs[0].id,
+        )
 
     def test_poll_overlong_album_title_truncates_and_processes(self):
         """Overlong artist/title now truncates to ext4's 255-byte limit.
@@ -7466,7 +6296,7 @@ class TestBuildActiveDownloadState(unittest.TestCase):
         self.assertEqual(parsed.tzinfo, UTC)
         self.assertEqual(state.last_progress_at, state.enqueued_at)
 
-    def test_uses_import_folder_as_current_path(self):
+    def test_initial_state_has_no_processor_owned_path(self):
         from lib.download import build_active_download_state
         from lib.grab_list import DownloadFile, GrabListEntry
         entry = GrabListEntry(
@@ -7485,7 +6315,7 @@ class TestBuildActiveDownloadState(unittest.TestCase):
             ],
         )
         state = build_active_download_state(entry)
-        self.assertEqual(state.current_path, "/tmp/staged/A/T")
+        self.assertIsNone(state.current_path)
 
 
 class TestReconstructGrabListEntry(unittest.TestCase):
@@ -8101,6 +6931,40 @@ class TestConvergeSlskdOrphans(unittest.TestCase):
         cancelled_ids = {c.id for c in slskd.transfers.cancel_download_calls}
         self.assertEqual(cancelled_ids, {"t-owned", "t-orphan"})
 
+    def test_processing_owner_does_not_back_a_live_transfer(self):
+        from lib.download import build_active_download_state
+        from lib.slskd_transfers import converge_slskd_orphans
+
+        slskd = self._seed_slskd()
+        fake_db = FakePipelineDB()
+        fake_db.seed_request(make_request_row(id=1, status="wanted"))
+        state = build_active_download_state(make_grab_list_entry(files=[
+            make_download_file(
+                username="peer1",
+                filename=self.OWNED_FILE,
+                file_dir="Music\\Owned",
+            ),
+        ]))
+        handoff_automation_owner(fake_db, 1, state=state.to_json())
+        fake_db.record_transfer_enqueue([
+            TransferLedgerRow(
+                request_id=1,
+                username="peer1",
+                filename=self.OWNED_FILE,
+            ),
+        ])
+        fake_db.confirm_transfer_enqueue("peer1", self.OWNED_FILE)
+        ctx = make_ctx_with_fake_db(fake_db, slskd=slskd)
+
+        cancelled = converge_slskd_orphans(ctx)
+
+        self.assertEqual(fake_db.get_downloading(), [])
+        self.assertEqual(cancelled, 1)
+        self.assertEqual(
+            [call.id for call in slskd.transfers.cancel_download_calls],
+            ["t-owned"],
+        )
+
     def test_ledgered_transfer_self_healed_to_wanted_is_still_cancelled(self):
         """Edge case pinned per the #571 PR 3 brief: a ledgered transfer
         whose request already self-healed back to `wanted` (e.g. after a
@@ -8452,6 +7316,24 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
     helpers, bounded per cycle so failure bursts never balloon the loop.
     """
 
+    WITNESS = "2026-07-29T00:00:00+00:00"
+
+    def _seed_downloading(
+        self,
+        db: FakePipelineDB,
+        **overrides: Any,
+    ) -> None:
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={
+                "filetype": "flac",
+                "enqueued_at": self.WITNESS,
+                "files": [],
+            },
+            **overrides,
+        ))
+
     def _recorder(self, outcome: str = "enriched", error: Exception | None = None):
         calls: list[int] = []
 
@@ -8595,7 +7477,7 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
     def test_timeout_album_runs_enrichment_and_failure_bookkeeping(self):
         from lib.download import _timeout_album
         db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
+        self._seed_downloading(db)
         ctx = make_ctx_with_fake_db(db)
         calls: list[int] = []
 
@@ -8616,6 +7498,7 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
                 42,
                 "stalled",
                 ctx,
+                expected_enqueued_at=self.WITNESS,
                 prepare_fn=prepare,
                 enrich_fn=enrich,
             )
@@ -8670,7 +7553,7 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
             handle.write(b"garbage bytes: ffmpeg will fail fast on these")
 
         db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
+        self._seed_downloading(db)
         evidence = make_album_quality_evidence(
             mb_release_id="mb-uuid",
             source_path=source,
@@ -8708,7 +7591,13 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
         with patch("lib.download.cancel_and_delete"), patch(
             "lib.beets_db.BeetsDB", lambda **_kwargs: fake_beets,
         ):
-            _timeout_album(self._entry(), 42, "stalled", ctx)
+            _timeout_album(
+                self._entry(),
+                42,
+                "stalled",
+                ctx,
+                expected_enqueued_at=self.WITNESS,
+            )
 
         persisted = db.load_album_quality_evidence_by_id(stored.id)
         assert persisted is not None
@@ -8730,11 +7619,7 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
             handle.write(b"garbage bytes: analyzers fail fast")
 
         db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=42,
-            mb_release_id="mb-uuid",
-            status="downloading",
-        ))
+        self._seed_downloading(db, mb_release_id="mb-uuid")
         fake_beets = FakeBeetsDB()
         fake_beets.set_album_info("mb-uuid", AlbumInfo(
             album_id=1,
@@ -8754,7 +7639,13 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
         with patch("lib.download.cancel_and_delete"), patch(
             "lib.beets_db.BeetsDB", lambda **_kwargs: fake_beets,
         ):
-            _timeout_album(self._entry(), 42, "stalled", ctx)
+            _timeout_album(
+                self._entry(),
+                42,
+                "stalled",
+                ctx,
+                expected_enqueued_at=self.WITNESS,
+            )
 
         evidence_id = db.get_request_current_evidence_id(42)
         self.assertIsNotNone(evidence_id)
@@ -8779,11 +7670,7 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
             handle.write(b"legacy current-library bytes")
 
         db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=42,
-            mb_release_id="mb-uuid",
-            status="downloading",
-        ))
+        self._seed_downloading(db, mb_release_id="mb-uuid")
         legacy = make_album_quality_evidence(
             mb_release_id="mb-uuid",
             source_path=source,
@@ -8842,7 +7729,13 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
             "resolve_current_release",
             side_effect=resolve_current_release,
         ):
-            _timeout_album(self._entry(), 42, "stalled", ctx)
+            _timeout_album(
+                self._entry(),
+                42,
+                "stalled",
+                ctx,
+                expected_enqueued_at=self.WITNESS,
+            )
 
         self.assertEqual(beets_statuses, ["downloading", "wanted"])
         self.assertEqual(db.request(42)["status"], "wanted")

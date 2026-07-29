@@ -9,10 +9,12 @@ and _check_quality_gate_core run for real, not patched.
 """
 
 import configparser
+import json
 import os
 import shutil
 import tempfile
 import unittest
+from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager
 from types import SimpleNamespace
 from typing import Any, Never, Self, cast
@@ -23,9 +25,16 @@ import psycopg2
 from lib.beets_db import AlbumInfo
 from lib.config import CratediggerConfig
 from lib.grab_list import GrabListEntry
+from lib.import_execution import (
+    CancellationToken,
+    ExecutionLeaseSnapshot,
+    OwnerSessionIdentity,
+    ProcessIdentity,
+)
 from lib.quality import (
     IMPORT_RESULT_SENTINEL,
     QUALITY_UPGRADE_TIERS,
+    ActiveDownloadState,
     AudioQualityMeasurement,
     ConversionInfo,
     DownloadInfo,
@@ -41,16 +50,17 @@ from tests.fakes import (
     FakePipelineDB,
     FakePipelineDBSource,
     FakeSlskdAPI,
-    RecordingProcessAlbum,
 )
 from tests.helpers import (
     RecordingQualityGate,
     finalize_claimed_dispatch,
+    handoff_automation_owner,
     hermetic_beets_config_defaults,
     make_album_quality_evidence,
     make_audio_corrupt_validation_report,
     make_ctx_with_fake_db,
     make_download_file,
+    make_grab_list_entry,
     make_import_result,
     make_request_row,
     make_requests_http_error,
@@ -72,6 +82,17 @@ def tearDownModule() -> None:
 
 
 _HARNESS = "/nix/store/fake/harness/run_beets_harness.sh"
+
+
+def _preview_execution_lease(
+    invocation_id: str = "test-preview",
+) -> ExecutionLeaseSnapshot:
+    return ExecutionLeaseSnapshot(
+        host_boot_id="test-boot",
+        invocation_id=invocation_id,
+        systemd_unit="cratedigger-import-preview-worker.service",
+        worker=ProcessIdentity(pid=7001, start_ticks=70001),
+    )
 
 
 def _preview_worker_config(
@@ -112,6 +133,7 @@ def _seed_candidate_for_download_log(db, log_id: int, *, mb_release_id: str,
 
 
 def _seed_candidate_for_import_job(db, job_id: int, *, mb_release_id: str,
+                                   expected_execution_lease=None,
                                    **kwargs):
     evidence = make_album_quality_evidence(mb_release_id=mb_release_id, **kwargs)
     db.upsert_album_quality_evidence(evidence)
@@ -120,7 +142,14 @@ def _seed_candidate_for_import_job(db, job_id: int, *, mb_release_id: str,
         snapshot_fingerprint=evidence.snapshot_fingerprint,
     )
     assert persisted is not None and persisted.id is not None
-    db.set_import_job_candidate_evidence(job_id, persisted.id)
+    if expected_execution_lease is None:
+        db.set_import_job_candidate_evidence(job_id, persisted.id)
+    else:
+        db.set_import_job_candidate_evidence(
+            job_id,
+            persisted.id,
+            expected_execution_lease=expected_execution_lease,
+        )
     return persisted
 
 
@@ -140,7 +169,7 @@ def _seed_current_for_request(db, request_id: int, *, mb_release_id: str,
 def _claim_dispatch_job(db, *, request_id: int, mb_release_id: str,
                         source_path: str, force: bool = False):
     """Give a direct dispatch slice the same launch authority as production."""
-    from lib.import_queue import IMPORT_JOB_AUTOMATION, IMPORT_JOB_FORCE
+    from lib.import_queue import IMPORT_JOB_FORCE
     from lib.quality_evidence import snapshot_audio_files
 
     os.makedirs(source_path, exist_ok=True)
@@ -150,30 +179,109 @@ def _claim_dispatch_job(db, *, request_id: int, mb_release_id: str,
             handle.write(b"audio")
         files = snapshot_audio_files(source_path)
 
-    if not force:
+    preview_lease: ExecutionLeaseSnapshot | None = None
+    if force:
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=request_id,
+            payload={"download_log_id": 1, "failed_path": source_path},
+        )
+    else:
         request = db.request(request_id)
-        active_state = dict(request.get("active_download_state") or {})
-        active_state["current_path"] = source_path
-        request["active_download_state"] = active_state
-    job = db.enqueue_import_job(
-        IMPORT_JOB_FORCE if force else IMPORT_JOB_AUTOMATION,
-        request_id=request_id,
-        payload={"download_log_id": 1, "failed_path": source_path} if force else {},
-    )
+        db.seed_request({
+            **request,
+            "status": "wanted",
+            "active_download_state": None,
+            "active_automation_import_job_id": None,
+        })
+        job = handoff_automation_owner(
+            db,
+            request_id,
+            state={
+                "filetype": "mp3",
+                "enqueued_at": "2026-07-29T00:00:00+00:00",
+                "current_path": source_path,
+                "files": [],
+            },
+            canonical_path=source_path,
+        )
+        preview_lease = _preview_execution_lease(
+            f"integration-preview-{job.id}"
+        )
+        assert db.claim_next_import_preview_job(
+            worker_id="integration-preview",
+            execution_lease=preview_lease,
+        ) is not None
     _seed_candidate_for_import_job(
         db,
         job.id,
         mb_release_id=mb_release_id,
         source_path=source_path,
         files=files,
+        expected_execution_lease=preview_lease,
     )
     db.mark_import_job_preview_importable(
         job.id,
         preview_result={"ready": True},
+        expected_execution_lease=preview_lease,
     )
-    claimed = db.claim_next_import_job(worker_id="integration-dispatch")
+    execution_lease = (
+        None
+        if force
+        else ExecutionLeaseSnapshot(
+            host_boot_id="test-boot",
+            invocation_id=f"integration-importer-{job.id}",
+            systemd_unit="cratedigger-importer.service",
+            worker=ProcessIdentity(pid=7002, start_ticks=70002),
+        )
+    )
+    claimed = db.claim_next_import_job(
+        worker_id="integration-dispatch",
+        execution_lease=execution_lease,
+    )
     assert claimed is not None and claimed.id == job.id
-    return claimed
+    return claimed, execution_lease
+
+
+def _owned_test_runner(**kwargs):
+    """Persist synthetic child proof before exercising the patched run seam."""
+    from lib.dispatch.subprocess_runner import run_import_one
+
+    return _run_as_owned_test_child(run_import_one, kwargs)
+
+
+def _run_as_owned_test_child(
+    run_import_fn: Callable[..., Any],
+    kwargs: dict[str, Any],
+):
+    on_spawn = kwargs.pop("on_spawn", None)
+    cancellation_token = kwargs.pop("cancellation_token", None)
+    kwargs.pop("owner_session_probe", None)
+    if on_spawn is not None:
+        on_spawn(os.getpid())
+    if cancellation_token is not None:
+        cancellation_token.raise_if_cancelled()
+    return run_import_fn(**kwargs)
+
+
+def _automation_dispatch_kwargs(
+    db: FakePipelineDB,
+    execution_lease: ExecutionLeaseSnapshot | None,
+    *,
+    run_import_fn: Callable[..., Any] | None = None,
+) -> dict[str, Any]:
+    if execution_lease is None:
+        return {}
+    owned_runner = _owned_test_runner
+    if run_import_fn is not None:
+        def owned_runner(**kwargs):
+            return _run_as_owned_test_child(run_import_fn, kwargs)
+    return {
+        "execution_lease": execution_lease,
+        "cancellation_token": CancellationToken(),
+        "owner_session_identity": OwnerSessionIdentity(id(db), 4242),
+        "run_import_fn": owned_runner,
+    }
 
 
 def _download_ownership_cfg() -> CratediggerConfig:
@@ -690,7 +798,7 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
                 ),
                 verified_lossless_proof=ir.verified_lossless_proof,
             )
-            claimed = _claim_dispatch_job(
+            claimed, execution_lease = _claim_dispatch_job(
                 db,
                 request_id=42,
                 mb_release_id="mbid-123",
@@ -726,6 +834,7 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
                             candidate=candidate
                         )
                     ),
+                    **_automation_dispatch_kwargs(db, execution_lease),
                 )
                 finalize_claimed_dispatch(db, claimed, outcome)
         finally:
@@ -1573,7 +1682,7 @@ class TestLosslessSourceLockedSlice(unittest.TestCase):
 
         tmpdir = tempfile.mkdtemp()
         try:
-            claimed = _claim_dispatch_job(
+            claimed, execution_lease = _claim_dispatch_job(
                 db,
                 request_id=42,
                 mb_release_id="mbid-123",
@@ -1597,6 +1706,7 @@ class TestLosslessSourceLockedSlice(unittest.TestCase):
                                      filename="01 - Track.mp3")],
                     cfg=cfg,
                     candidate_import_job_id=claimed.id,
+                    **_automation_dispatch_kwargs(db, execution_lease),
                 )
                 finalize_claimed_dispatch(db, claimed, outcome)
         finally:
@@ -1679,7 +1789,7 @@ class TestDispatchNoJsonResult(unittest.TestCase):
 
         tmpdir = tempfile.mkdtemp()
         try:
-            claimed = _claim_dispatch_job(
+            claimed, execution_lease = _claim_dispatch_job(
                 db,
                 request_id=42,
                 mb_release_id="mbid-123",
@@ -1696,9 +1806,13 @@ class TestDispatchNoJsonResult(unittest.TestCase):
                     dl_info=DownloadInfo(username="user1"),
                     cfg=cfg,
                     attempt_spectral_audit=audit,
-                    run_import_fn=parsed_import,
                     quality_gate_fn=lambda **kwargs: None,
                     candidate_import_job_id=claimed.id,
+                    **_automation_dispatch_kwargs(
+                        db,
+                        execution_lease,
+                        run_import_fn=parsed_import,
+                    ),
                 )
                 finalize_claimed_dispatch(db, claimed, outcome)
         finally:
@@ -1742,7 +1856,7 @@ class TestDispatchNoJsonResult(unittest.TestCase):
                 attempted=True, grade="genuine"),
         )
         try:
-            claimed = _claim_dispatch_job(
+            claimed, execution_lease = _claim_dispatch_job(
                 db,
                 request_id=42,
                 mb_release_id="mbid-123",
@@ -1763,6 +1877,7 @@ class TestDispatchNoJsonResult(unittest.TestCase):
                     cfg=cfg,
                     attempt_spectral_audit=audit,
                     candidate_import_job_id=claimed.id,
+                    **_automation_dispatch_kwargs(db, execution_lease),
                 )
                 finalize_claimed_dispatch(db, claimed, outcome)
         finally:
@@ -1772,7 +1887,7 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         recovered = db.get_import_job(claimed.id)
         assert recovered is not None
         self.assertEqual(recovered.status, "recovery_required")
-        self.assertEqual(db.request(42)["status"], "downloading")
+        self.assertEqual(db.request(42)["status"], "processing")
         self.assertEqual(db.download_logs, [])
         self.assertIsNone(db.claim_next_import_job(
             worker_id="automatic-replay"))
@@ -1804,7 +1919,7 @@ class TestDispatchNoJsonResult(unittest.TestCase):
             def timeout_import(*args: Any, **kwargs: Any) -> ImportOneRun:
                 raise sp.TimeoutExpired("import_one", 300)
 
-            claimed = _claim_dispatch_job(
+            claimed, execution_lease = _claim_dispatch_job(
                 db,
                 request_id=42,
                 mb_release_id="mbid-123",
@@ -1821,8 +1936,12 @@ class TestDispatchNoJsonResult(unittest.TestCase):
                     dl_info=DownloadInfo(username="user1"),
                     cfg=cfg,
                     attempt_spectral_audit=audit,
-                    run_import_fn=timeout_import,
                     candidate_import_job_id=claimed.id,
+                    **_automation_dispatch_kwargs(
+                        db,
+                        execution_lease,
+                        run_import_fn=timeout_import,
+                    ),
                 )
                 finalize_claimed_dispatch(db, claimed, outcome)
         finally:
@@ -1831,7 +1950,7 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         recovered = db.get_import_job(claimed.id)
         assert recovered is not None
         self.assertEqual(recovered.status, "recovery_required")
-        self.assertEqual(db.request(42)["status"], "downloading")
+        self.assertEqual(db.request(42)["status"], "processing")
         self.assertEqual(db.download_logs, [])
         self.assertIsNone(db.claim_next_import_job(
             worker_id="automatic-replay"))
@@ -1861,7 +1980,7 @@ class TestDispatchNoJsonResult(unittest.TestCase):
 
         tmpdir = tempfile.mkdtemp()
         try:
-            claimed = _claim_dispatch_job(
+            claimed, execution_lease = _claim_dispatch_job(
                 db,
                 request_id=42,
                 mb_release_id="mbid-123",
@@ -1878,8 +1997,12 @@ class TestDispatchNoJsonResult(unittest.TestCase):
                     dl_info=DownloadInfo(username="user1"),
                     cfg=cfg,
                     attempt_spectral_audit=audit,
-                    run_import_fn=failed_import,
                     candidate_import_job_id=claimed.id,
+                    **_automation_dispatch_kwargs(
+                        db,
+                        execution_lease,
+                        run_import_fn=failed_import,
+                    ),
                 )
                 finalize_claimed_dispatch(db, claimed, outcome)
         finally:
@@ -1888,7 +2011,7 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         recovered = db.get_import_job(claimed.id)
         assert recovered is not None
         self.assertEqual(recovered.status, "recovery_required")
-        self.assertEqual(db.request(42)["status"], "downloading")
+        self.assertEqual(db.request(42)["status"], "processing")
         self.assertEqual(db.download_logs, [])
         self.assertIsNone(db.claim_next_import_job(
             worker_id="automatic-replay"))
@@ -1947,7 +2070,7 @@ class TestDispatchNoJsonResult(unittest.TestCase):
 
         tmpdir = tempfile.mkdtemp()
         try:
-            claimed = _claim_dispatch_job(
+            claimed, execution_lease = _claim_dispatch_job(
                 db,
                 request_id=42,
                 mb_release_id="mbid-123",
@@ -1964,9 +2087,13 @@ class TestDispatchNoJsonResult(unittest.TestCase):
                     dl_info=DownloadInfo(username="user1"),
                     cfg=cfg,
                     attempt_spectral_audit=audit,
-                    run_import_fn=parsed_import,
                     quality_gate_fn=failed_quality_gate,
                     candidate_import_job_id=claimed.id,
+                    **_automation_dispatch_kwargs(
+                        db,
+                        execution_lease,
+                        run_import_fn=parsed_import,
+                    ),
                 )
                 finalize_claimed_dispatch(db, claimed, outcome)
         finally:
@@ -1975,7 +2102,7 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         recovered = db.get_import_job(claimed.id)
         assert recovered is not None
         self.assertEqual(recovered.status, "recovery_required")
-        self.assertEqual(db.request(42)["status"], "downloading")
+        self.assertEqual(db.request(42)["status"], "processing")
         self.assertEqual(db.download_logs, [])
         self.assertIsNone(db.claim_next_import_job(
             worker_id="automatic-replay"))
@@ -2440,7 +2567,7 @@ class TestBayOfBiscayUpgradeChain(unittest.TestCase):
                 source_path="/Beets/Velella Velella",
                 measurement=ir.current_measurement,
             )
-            claimed = _claim_dispatch_job(
+            claimed, execution_lease = _claim_dispatch_job(
                 db,
                 request_id=42,
                 mb_release_id="mbid-biscay",
@@ -2468,6 +2595,7 @@ class TestBayOfBiscayUpgradeChain(unittest.TestCase):
                         candidate=candidate,
                         current=current,
                     ),
+                    **_automation_dispatch_kwargs(db, execution_lease),
                 )
                 finalize_claimed_dispatch(db, claimed, outcome)
         finally:
@@ -2896,7 +3024,7 @@ class TestReleaseLockContention(unittest.TestCase):
                 ),
                 verified_lossless_proof=ir.verified_lossless_proof,
             )
-            claimed = _claim_dispatch_job(
+            claimed, execution_lease = _claim_dispatch_job(
                 db,
                 request_id=42,
                 mb_release_id=self.MBID,
@@ -2925,6 +3053,7 @@ class TestReleaseLockContention(unittest.TestCase):
                             candidate=candidate
                         )
                     ),
+                    **_automation_dispatch_kwargs(db, execution_lease),
                 )
                 finalize_claimed_dispatch(db, claimed, outcome)
         finally:
@@ -3136,7 +3265,7 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
         namespaces_used = {ns for ns, _key in db.advisory_lock_calls}
         self.assertNotIn(ADVISORY_LOCK_NAMESPACE_RELEASE, namespaces_used)
 
-    def test_auto_path_persists_current_path_after_staging(self):
+    def test_auto_staging_does_not_rewrite_request_lifecycle_path(self):
         from lib import download_validation as validation_mod
         from lib.pipeline_db import (
             ADVISORY_LOCK_NAMESPACE_RELEASE,
@@ -3218,9 +3347,20 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
 
             original_move_to = StagedAlbum.move_to
 
-            def checked_move_to(album, dest, db=None):
+            def checked_move_to(
+                album,
+                dest,
+                db=None,
+                *,
+                cancellation_token=None,
+            ):
                 self.assertTrue(move_saw_release_lock)
-                return original_move_to(album, dest, db)
+                return original_move_to(
+                    album,
+                    dest,
+                    db,
+                    cancellation_token=cancellation_token,
+                )
 
             dispatch = RecordingDispatchCore()
             with patch.object(
@@ -3253,9 +3393,8 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(staged_path, "01 - Track.mp3")))
             self.assertFalse(os.path.exists(processing_dir))
             self.assertFalse(move_saw_release_lock)
-            self.assertEqual(
+            self.assertIsNone(
                 db.request(42)["active_download_state"]["current_path"],
-                staged_path,
             )
             self.assertEqual(len(dispatch.calls), 1)
             self.assertEqual(dispatch.calls[0].path, staged_path)
@@ -3333,280 +3472,6 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
             assert outcome is not None
             self.assertTrue(outcome.success)
             mock_dispatch.assert_called_once()
-
-
-class TestRunCompletedProcessingOutcomeBranching(unittest.TestCase):
-    """The ``process_completed_album`` return ownership seam (#474 tagged
-    ``CompletionResult``: ``Completed`` / ``CompletionFailed`` /
-    ``CompletionDispatched`` / ``CompletionDeferred``).
-
-    Pre-#133 this was a 2-way ``bool``: True → flip to ``imported``,
-    False → reset to ``wanted``. That binary misclassified release-
-    lock contention (commit 43e83e8 C1 — silently flipped to
-    ``imported``). Commit 2's fix papered over the bug by having
-    ``dispatch_import_core`` eagerly reset the row to ``wanted``;
-    Codex R3 P2/P3 then flagged that the reset clobbered spectral
-    state and staged files.
-
-    The proper seam separates local non-dispatch success/failure,
-    deferred retry, and dispatch queue summaries onto distinct tags.
-    These tests pin the branching at ``_run_completed_processing`` so a
-    future refactor can't silently collapse dispatch ownership into
-    fallback status transitions.
-    """
-
-    def _ctx(self, db: FakePipelineDB):
-        from tests.helpers import make_ctx_with_fake_db
-        return make_ctx_with_fake_db(db)
-
-    def _entry(self):
-        from tests.helpers import make_grab_list_entry
-        return make_grab_list_entry()
-
-    def _state(self):
-        from lib.quality import ActiveDownloadState
-        return ActiveDownloadState(
-            filetype="mp3", enqueued_at="2026-04-20T00:00:00+00:00",
-            files=[])
-
-    def test_deferred_outcome_leaves_status_downloading(self):
-        """``process_completed_album`` returning ``CompletionDeferred`` must
-        NOT touch the request's status. The next ``poll_active_downloads``
-        cycle will re-enter via status='downloading'.
-        """
-        from lib import download as dl_mod
-        from lib.download_processing import CompletionDeferred
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=42, status="downloading",
-            current_spectral_grade="genuine",
-            current_spectral_bitrate=245))
-        process_album = RecordingProcessAlbum(outcome=CompletionDeferred(
-            detail="release_lock_contention",
-        ))
-        dl_mod._run_completed_processing(
-            self._entry(), 42, self._state(), db, self._ctx(db),
-            import_job_id=1,
-            process_album_fn=process_album,
-        )
-        self.assertEqual(
-            [call.import_job_id for call in process_album.calls],
-            [1],
-        )
-        self.assertEqual(db.request(42)["status"], "downloading")
-        # Spectral untouched.
-        self.assertEqual(
-            db.request(42)["current_spectral_grade"], "genuine")
-        # No status-history transitions recorded — we didn't call
-        # apply_transition at all.
-        self.assertEqual(db.status_history, [])
-
-    def test_completed_outcome_flips_to_imported(self):
-        """Happy path: ``process_completed_album`` returns ``Completed`` and
-        status was 'downloading' → flip to 'imported'."""
-        from lib import download as dl_mod
-        from lib.download_processing import Completed
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
-        process_album = RecordingProcessAlbum(outcome=Completed())
-        result = dl_mod._run_completed_processing(
-            self._entry(), 42, self._state(), db, self._ctx(db),
-            import_job_id=1,
-            process_album_fn=process_album,
-        )
-        self.assertEqual(
-            [call.import_job_id for call in process_album.calls],
-            [1],
-        )
-        assert isinstance(result, Completed)
-        self.assertEqual(db.request(42)["status"], "imported")
-        self.assertIsNone(result.terminal_outcome)
-        self.assertEqual(db.download_logs, [])
-
-    def test_completion_failed_resets_to_wanted_with_attempt(self):
-        """Failure: ``process_completed_album`` returns ``CompletionFailed``
-        → reset to 'wanted' with an attempt increment (genuine failure
-        DOES deserve a backoff-scored attempt)."""
-        from lib import download as dl_mod
-        from lib.download_processing import CompletionFailed
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
-        process_album = RecordingProcessAlbum(outcome=CompletionFailed(
-            reason="staged_path_missing",
-        ))
-        result = dl_mod._run_completed_processing(
-            self._entry(), 42, self._state(), db, self._ctx(db),
-            import_job_id=1,
-            process_album_fn=process_album,
-        )
-        self.assertEqual(
-            [call.import_job_id for call in process_album.calls],
-            [1],
-        )
-        assert isinstance(result, CompletionFailed)
-        self.assertEqual(db.request(42)["status"], "wanted")
-        self.assertIsNone(result.terminal_outcome)
-        self.assertEqual(db.download_logs, [])
-
-    def test_completion_failed_after_inner_rejection_does_not_double_transition(self):
-        """If ``process_completed_album`` already requeued the row, the outer
-        ``CompletionFailed`` branch must not apply a second
-        reset-to-wanted transition.
-        """
-        from collections.abc import Callable
-
-        from lib import download as dl_mod
-        from lib import download_materialization, download_validation, transitions
-        from lib.context import CratediggerContext
-        from lib.dispatch import DispatchCoreFn
-        from lib.download_processing import CompletionFailed, CompletionResult
-
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
-
-        def reject_inside_process(
-            album_data: GrabListEntry,
-            ctx: CratediggerContext,
-            *,
-            import_job_id: int,
-            validate_fn: download_validation.ValidateFn | None = None,
-            handle_valid_fn: download_validation.HandleValidFn | None = None,
-            dispatch_fn: DispatchCoreFn | None = None,
-            materialize_before_file_copy: Callable[[], None] | None = None,
-            materialize_fn: Callable[..., download_materialization.MaterializeResult] | None = None,
-        ) -> CompletionResult:
-            del album_data, ctx, import_job_id
-            del validate_fn, handle_valid_fn, dispatch_fn
-            del materialize_before_file_copy, materialize_fn
-            transitions.finalize_request(
-                cast(Any, db),
-                42,
-                transitions.RequestTransition.to_wanted(
-                    from_status="downloading",
-                ),
-            )
-            return CompletionFailed(reason="beets_validation_rejected")
-
-        dl_mod._run_completed_processing(
-            self._entry(),
-            42,
-            self._state(),
-            db,
-            self._ctx(db),
-            import_job_id=1,
-            process_album_fn=reject_inside_process,
-        )
-
-        self.assertEqual(db.request(42)["status"], "wanted")
-        self.assertEqual(db.status_history, [(42, "wanted")])
-
-    def test_dispatch_outcome_does_not_drive_fallback_transition(self):
-        """Dispatch summaries are queue results, not fallback status
-        transitions — ``CompletionDispatched`` passes the wrapped
-        ``DispatchOutcome`` straight through untouched."""
-        from lib import download as dl_mod
-        from lib.dispatch import DispatchOutcome
-        from lib.download_processing import CompletionDispatched
-
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
-        dispatch_outcome = DispatchOutcome(
-            success=False,
-            message="Pre-import gate rejected",
-        )
-
-        process_album = RecordingProcessAlbum(outcome=CompletionDispatched(
-            outcome=dispatch_outcome,
-        ))
-        result = dl_mod._run_completed_processing(
-            self._entry(),
-            42,
-            self._state(),
-            db,
-            self._ctx(db),
-            import_job_id=1,
-            process_album_fn=process_album,
-        )
-
-        assert isinstance(result, CompletionDispatched)
-        self.assertEqual(
-            [call.import_job_id for call in process_album.calls],
-            [1],
-        )
-        self.assertIs(result.outcome, dispatch_outcome)
-        self.assertEqual(db.request(42)["status"], "downloading")
-        self.assertEqual(db.status_history, [])
-
-    def test_real_process_completed_album_success_flips_to_imported(self):
-        """Integration slice: no DI stub — the REAL ``process_completed_album``
-        (materialize + validation-disabled path) runs through
-        ``_run_completed_processing`` end to end, and the ``Completed`` tag
-        it returns drives the status flip to 'imported'."""
-        from lib import download as dl_mod
-        from tests.helpers import make_download_file
-
-        with (
-            tempfile.TemporaryDirectory() as tmpdir,
-            tempfile.TemporaryDirectory() as processing_dir,
-        ):
-            os.makedirs(os.path.join(processing_dir, "albums"), mode=0o700)
-            src_dir = os.path.join(tmpdir, "source_dir")
-            os.makedirs(src_dir)
-            src_file = os.path.join(src_dir, "01 - Track.mp3")
-            with open(src_file, "w") as f:
-                f.write("fake audio")
-
-            files = [make_download_file(
-                filename="source_dir\\01 - Track.mp3",
-                file_dir="source_dir",
-            )]
-            files[0].local_path = src_file
-            entry = self._entry()
-            entry.files = files
-            entry.mb_release_id = ""
-
-            db = FakePipelineDB()
-            db.seed_request(make_request_row(id=42, status="downloading"))
-            ctx = self._ctx(db)
-            ctx.cfg.slskd_download_dir = tmpdir
-            ctx.cfg.processing_dir = processing_dir
-            ctx.cfg.beets_validation_enabled = False
-
-            result = dl_mod._run_completed_processing(
-                entry, 42, self._state(), db, ctx, import_job_id=1,
-            )
-
-        from lib.download_processing import Completed
-        self.assertIsInstance(result, Completed)
-        self.assertEqual(db.request(42)["status"], "imported")
-
-    def test_default_process_album_fn_honors_patched_download_processing(self):
-        """Regression guard (#536): with no ``process_album_fn`` override,
-        ``_run_completed_processing`` must resolve ``process_completed_album``
-        from ``lib.download_processing`` at call time. Before #536 that
-        default was captured once via a from-import at ``lib.download``
-        import time, so patching the leaf seam here — the same seam
-        production tests already patch elsewhere — silently had no effect
-        on this call site.
-        """
-        from lib import download as dl_mod
-        from lib.download_processing import Completed
-
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
-
-        with patch(
-            "lib.download_processing.process_completed_album",
-            return_value=Completed(),
-        ) as patched:
-            result = dl_mod._run_completed_processing(
-                self._entry(), 42, self._state(), db, self._ctx(db),
-                import_job_id=1,
-            )
-
-        patched.assert_called_once()
-        self.assertIsInstance(result, Completed)
-        self.assertEqual(db.request(42)["status"], "imported")
 
 
 class TestBadAudioHashSlice(unittest.TestCase):
@@ -4528,418 +4393,6 @@ class TestSearchExhaustionResetsCounterSlice(unittest.TestCase):
         # Re-queued request is back in the wanted pool.
         wanted_ids = [r["id"] for r in db.get_wanted()]
         self.assertIn(rid, wanted_ids)
-
-
-class TestImportSubprocessStartedFlag(unittest.TestCase):
-    """``dispatch_import_core`` must mark
-    ``ActiveDownloadState.import_subprocess_started_at`` immediately
-    before launching ``run_import_one`` on the auto-import path. The
-    flag is the witness the resume guard checks to decide whether the
-    subprocess might have written to beets — without setting it here,
-    the guard never blocks a real recovery situation, and the wedge
-    fix becomes a one-way ratchet that loses the safety property.
-    """
-
-    def test_flag_set_before_subprocess_launch_on_auto_import(self):
-        from lib.dispatch import dispatch_import_core
-        from lib.dispatch.types import EvidenceImportGate
-        from lib.quality import ActiveDownloadState
-        from lib.quality_evidence import snapshot_audio_files
-
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=42, status="downloading",
-            mb_release_id="mbid-123",
-        ))
-        # Seed the state the auto path would have produced before
-        # reaching this dispatch call.
-        existing = ActiveDownloadState(
-            filetype="flac",
-            enqueued_at="2026-05-04T10:00:00+00:00",
-            files=[],
-            processing_started_at="2026-05-04T10:01:00+00:00",
-            current_path="/tmp/staged/Test/Album",
-        )
-        db.update_download_state(42, existing.to_json())
-
-        ir = make_import_result(decision="import", new_min_bitrate=320)
-        beets_info = AlbumInfo(
-            album_id=1, track_count=10, min_bitrate_kbps=320,
-            avg_bitrate_kbps=320, format="MP3",
-            is_cbr=True, album_path="/Beets/Test")
-        cfg = CratediggerConfig(
-            beets_harness_path=_HARNESS,
-            pipeline_db_enabled=True,
-        )
-        dl_info = DownloadInfo(username="user1")
-        stdout = _make_stdout(ir)
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            claimed = _claim_dispatch_job(
-                db,
-                request_id=42,
-                mb_release_id="mbid-123",
-                source_path=tmpdir,
-            )
-            candidate = make_album_quality_evidence(
-                mb_release_id="mbid-123",
-                source_path=tmpdir,
-                files=snapshot_audio_files(tmpdir),
-            )
-            with patch_dispatch_externals() as ext, \
-                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
-
-                # Capture the persisted state at the moment
-                # ``run_import_one`` (= ``ext.run``) is invoked.
-                captured: dict[str, ActiveDownloadState | None] = {
-                    "at_subprocess": None,
-                }
-
-                def _record_state(*_args: Any, **_kwargs: Any):
-                    raw = db.request(42)["active_download_state"]
-                    if raw is None:
-                        captured["at_subprocess"] = None
-                    else:
-                        captured["at_subprocess"] = (
-                            ActiveDownloadState.from_dict(raw)
-                            if isinstance(raw, dict)
-                            else ActiveDownloadState.from_json(str(raw))
-                        )
-                    return MagicMock(returncode=0, stdout=stdout, stderr="")
-
-                ext.run.side_effect = _record_state
-
-                outcome = dispatch_import_core(
-                    path=tmpdir,
-                    mb_release_id="mbid-123",
-                    request_id=42,
-                    label="Test Artist - Test Album",
-                    beets_harness_path=_HARNESS,
-                    db=db,  # type: ignore[arg-type]
-                    dl_info=dl_info,
-                    distance=0.05,
-                    scenario="auto_import",
-                    files=[MagicMock(username="user1",
-                                     filename="01 - Track.mp3")],
-                    cfg=cfg,
-                    candidate_import_job_id=claimed.id,
-                    evidence_gate_fn=lambda *_args, **_kwargs: EvidenceImportGate(
-                        candidate=candidate,
-                    ),
-                )
-                finalize_claimed_dispatch(db, claimed, outcome)
-
-        state_at_subprocess = captured["at_subprocess"]
-        self.assertIsNotNone(
-            state_at_subprocess,
-            "active_download_state was None when subprocess launched — "
-            "the auto path must preserve state through dispatch.",
-        )
-        assert state_at_subprocess is not None
-        self.assertIsNotNone(
-            state_at_subprocess.import_subprocess_started_at,
-            "import_subprocess_started_at must be set BEFORE "
-            "run_import_one launches; otherwise a crash mid-subprocess "
-            "would leave the resume guard unable to distinguish "
-            "'subprocess never ran' from 'subprocess wrote to beets'.",
-        )
-
-    def test_flag_not_touched_on_force_import_path(self):
-        """Force/manual paths operate on ``failed_imports/...`` and do
-        not own ``active_download_state``. Mutating the flag here would
-        be cross-cutting state corruption — the request row that
-        eventually owns ``active_download_state`` for the same MBID
-        must not be polluted by an unrelated force-import.
-        """
-        from lib.dispatch import dispatch_import_core
-        from lib.quality import ActiveDownloadState
-
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=42, status="unsearchable",
-            mb_release_id="mbid-123",
-        ))
-        existing = ActiveDownloadState(
-            filetype="flac",
-            enqueued_at="2026-05-04T10:00:00+00:00",
-            files=[],
-            processing_started_at=None,
-            import_subprocess_started_at=None,
-        )
-        db.update_download_state(42, existing.to_json())
-
-        ir = make_import_result(decision="import", new_min_bitrate=320)
-        beets_info = AlbumInfo(
-            album_id=1, track_count=10, min_bitrate_kbps=320,
-            avg_bitrate_kbps=320, format="MP3",
-            is_cbr=True, album_path="/Beets/Test")
-        cfg = CratediggerConfig(
-            beets_harness_path=_HARNESS,
-            pipeline_db_enabled=True,
-        )
-        dl_info = DownloadInfo(username="user1")
-        stdout = _make_stdout(ir)
-
-        with tempfile.TemporaryDirectory() as tmpdir, patch_dispatch_externals() as ext, \
-                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
-            ext.run.return_value = MagicMock(
-                returncode=0, stdout=stdout, stderr="")
-            dispatch_import_core(
-                path=tmpdir,
-                mb_release_id="mbid-123",
-                request_id=42,
-                label="Test Artist - Test Album",
-                force=True,
-                beets_harness_path=_HARNESS,
-                db=db,  # type: ignore[arg-type]
-                dl_info=dl_info,
-                distance=0.05,
-                scenario="force_import",
-                files=[MagicMock(username="user1",
-                                 filename="01 - Track.mp3")],
-                cfg=cfg,
-            )
-
-        raw = db.request(42)["active_download_state"]
-        if raw is None:
-            return  # Force/manual cleared the state — also acceptable.
-        state = (
-            ActiveDownloadState.from_dict(raw)
-            if isinstance(raw, dict)
-            else ActiveDownloadState.from_json(str(raw))
-        )
-        self.assertIsNone(
-            state.import_subprocess_started_at,
-            "Force-import path must not flip the auto-path resume flag.",
-        )
-
-
-class TestPostMoveResumeBlockGuard(unittest.TestCase):
-    """The wedge from 2026-05-04: requests stuck in ``downloading`` for
-    a week because a previous attempt left files at the request-scoped
-    auto-import staged path but never launched ``import_one.py``. The
-    resume guard couldn't distinguish "subprocess never ran" from
-    "subprocess may have started" and blocked retry forever — every
-    cycle requeued an importer job that failed in <50ms with
-    ``POST-MOVE RESUME BLOCKED``. 5788 failed jobs accumulated.
-
-    Fix: ``ActiveDownloadState.import_subprocess_started_at`` flag is
-    set immediately before ``run_import_one(...)`` on the auto path. The
-    resume guard now permits retry when the flag is None (subprocess
-    never launched, safe) and blocks when set (subprocess may have
-    written to beets, manual recovery required).
-
-    Tests pin the relaxed guard so future refactors can't reintroduce
-    the trap.
-    """
-
-    def _make_state(self, *, current_path: str,
-                    import_subprocess_started_at: str | None):
-        from lib.quality import ActiveDownloadState
-        return ActiveDownloadState(
-            filetype="flac",
-            enqueued_at="2026-04-27T13:36:28+00:00",
-            files=[],
-            last_progress_at="2026-04-27T14:00:38+00:00",
-            processing_started_at="2026-04-27T14:00:38+00:00",
-            import_subprocess_started_at=import_subprocess_started_at,
-            current_path=current_path,
-        )
-
-    def _setup_wedged_request(self, tmpdir: str, *,
-                              import_subprocess_started_at: str | None):
-        """Build a wedge-shaped state: files at the auto-import staged
-        path, ``processing_started_at`` set. Caller decides whether the
-        ``import_subprocess_started_at`` flag is set (block) or not (retry).
-        """
-        from lib.processing_paths import stage_to_ai_path
-        from tests.helpers import (
-            make_ctx_with_fake_db,
-            make_download_file,
-            make_grab_list_entry,
-        )
-
-        request_id = 1984
-        artist = "MxPx"
-        title = "Plans Within Plans"
-        staging_dir = os.path.join(tmpdir, "staging")
-        slskd_dir = os.path.join(tmpdir, "slskd")
-        os.makedirs(staging_dir)
-        os.makedirs(slskd_dir)
-        staged_path = stage_to_ai_path(
-            artist=artist,
-            title=title,
-            staging_dir=staging_dir,
-            request_id=request_id,
-            auto_import=True,
-        )
-        os.makedirs(staged_path)
-        # The wedge requires both: dir present AND tracked files present
-        # at their bind-target locations. Otherwise the guard at line
-        # 1644-1690 (missing dir / missing files) fires for a different
-        # reason. We construct a single tracked file so the test
-        # confirms the dispatch guard, not the missing-files guard.
-        track_path = os.path.join(staged_path, "01 - Aces Up.flac")
-        with open(track_path, "w") as fp:
-            fp.write("fake audio")
-
-        cfg = CratediggerConfig(
-            beets_harness_path=_HARNESS,
-            pipeline_db_enabled=True,
-            beets_validation_enabled=True,
-            beets_distance_threshold=0.15,
-            beets_staging_dir=staging_dir,
-            slskd_download_dir=slskd_dir,
-            beets_tracking_file=os.path.join(tmpdir, "beets-tracking.jsonl"),
-        )
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=request_id,
-            status="downloading",
-            artist_name=artist,
-            album_title=title,
-            year=2012,
-            mb_release_id="2c5a5a0b-095d-434b-af15-b23e6fbc5ad9",
-        ))
-        ctx = make_ctx_with_fake_db(db, cfg=cfg)
-        entry = make_grab_list_entry(
-            album_id=request_id,
-            files=[make_download_file(
-                filename="user1\\Music\\01 - Aces Up.flac",
-                file_dir="user1\\Music",
-            )],
-            artist=artist,
-            title=title,
-            year="2012",
-            mb_release_id="2c5a5a0b-095d-434b-af15-b23e6fbc5ad9",
-            db_source="request",
-            db_request_id=request_id,
-        )
-        # Bind the import paths so the file actually lives where
-        # `_processing_path_ready_for_importer` will look for it.
-        from lib.staged_album import StagedAlbum
-        sa = StagedAlbum.from_entry(entry, default_path=staged_path)
-        sa.bind_import_paths(entry.files)
-        # Ensure the bound destination exists.
-        for file in entry.files:
-            dst = file.import_path
-            assert dst is not None
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            if not os.path.exists(dst):
-                with open(dst, "w") as fp:
-                    fp.write("fake audio")
-        state = self._make_state(
-            current_path=staged_path,
-            import_subprocess_started_at=import_subprocess_started_at,
-        )
-        # Persist state into the FakePipelineDB so guards that read
-        # back via ``db.get_request`` see the same flag the test built.
-        db.update_download_state(request_id, state.to_json())
-        return entry, request_id, state, db, ctx, staged_path
-
-    def test_legacy_wedge_permits_retry(self):
-        """Legacy state (``processing_started_at`` set, no
-        ``import_subprocess_started_at``): the wedge guard MUST permit
-        retry. This is the recovery path for the 3 albums wedged on
-        2026-05-04 — the fix unwedges them automatically on the next
-        cycle.
-
-        Exercises ``_materialize_processing_dir`` (the actual fire site
-        seen in production logs at ``lib/download.py:583``).
-        """
-        from lib.download_materialization import (
-            Materialized,
-            _materialize_processing_dir,
-        )
-        from lib.staged_album import StagedAlbum
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            entry, _, _, _, ctx, staged_path = self._setup_wedged_request(
-                tmpdir, import_subprocess_started_at=None)
-            staged_album = StagedAlbum.from_entry(
-                entry, default_path=staged_path)
-            result = _materialize_processing_dir(
-                entry, staged_album, ctx)
-
-        self.assertIsInstance(
-            result, Materialized,
-            "Legacy wedged row (subprocess never launched) must "
-            "materialize the existing files for retry. Returning "
-            "MaterializeGuarded perpetuates the 2026-05-04 wedge: every "
-            "cycle requeues a job that fails in <50ms with POST-MOVE "
-            "RESUME BLOCKED.",
-        )
-        # And ``import_folder`` must be wired to the staged path so the
-        # downstream tag-write/beets-validate sequence picks the files up.
-        self.assertEqual(entry.import_folder, staged_path)
-
-    def test_subprocess_started_abandons_and_resets(self):
-        """Once ``import_subprocess_started_at`` is set, the wedge guard
-        must not retry the same staged folder. It abandons the local
-        attempt, preserves leftover files under failed_imports, and
-        resets the request for a clean redownload.
-        """
-        from lib.download_materialization import (
-            MaterializeGuarded,
-            _materialize_processing_dir,
-        )
-        from lib.staged_album import StagedAlbum
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            entry, request_id, _, _, ctx, staged_path = self._setup_wedged_request(
-                tmpdir,
-                import_subprocess_started_at="2026-04-27T14:00:39+00:00")
-            staged_album = StagedAlbum.from_entry(
-                entry, default_path=staged_path)
-            result = _materialize_processing_dir(
-                entry, staged_album, ctx)
-
-            failed_parent = os.path.join(
-                os.path.dirname(staged_path),
-                "failed_imports",
-            )
-            moved = os.listdir(failed_parent)
-
-        self.assertIsInstance(
-            result,
-            MaterializeGuarded,
-            "Subprocess-started residue must not retry in place; it should "
-            "abandon and let the next search/download cycle own recovery.",
-        )
-        assert isinstance(result, MaterializeGuarded)
-        self.assertEqual(result.detail, "abandoned_interrupted_auto_import")
-        self.assertEqual(
-            ctx.pipeline_db_source._get_db().request(request_id)["status"],
-            "wanted",
-        )
-        self.assertEqual(len(moved), 1)
-        self.assertTrue(moved[0].startswith("abandoned_auto_import"))
-
-    def test_readiness_gate_agrees_with_materialize_on_legacy_wedge(self):
-        """Issue #509: the poller's pre-enqueue gate
-        (``_processing_path_ready_for_importer``) and
-        ``_materialize_processing_dir`` above now share ONE decision
-        (``_evaluate_staged_path_readiness``). Same wedge shape
-        (subprocess never launched) through the OTHER caller must reach
-        the same verdict: ready, not blocked.
-        """
-        from lib.download import _processing_path_ready_for_importer
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            entry, request_id, state, db, ctx, _staged_path = (
-                self._setup_wedged_request(
-                    tmpdir, import_subprocess_started_at=None))
-
-            ready = _processing_path_ready_for_importer(
-                entry, request_id, state, db, ctx)
-
-        self.assertTrue(
-            ready,
-            "Legacy wedged row (subprocess never launched) must be "
-            "reported ready by the poller's own gate too — it shares "
-            "the materialize path's decision now.",
-        )
-        self.assertEqual(db.request(request_id)["status"], "downloading")
 
 
 class TestSearchWatchdogSlice(unittest.TestCase):
@@ -6215,10 +5668,6 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
         )
 
     def test_automation_job_with_valid_evidence_skips_materialization(self):
-        from lib.import_queue import (
-            IMPORT_JOB_AUTOMATION,
-            automation_import_dedupe_key,
-        )
         from lib.quality import SpectralAnalysisDetail, SpectralDetail
         from scripts import import_preview_worker
 
@@ -6228,7 +5677,6 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
             db = FakePipelineDB()
             db.seed_request(make_request_row(
                 id=42,
-                status="downloading",
                 active_download_state={
                     "filetype": "flac",
                     "enqueued_at": "2026-04-25T00:00:00+00:00",
@@ -6241,15 +5689,30 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                     }],
                 },
             ))
-            db.enqueue_import_job(
-                IMPORT_JOB_AUTOMATION,
-                request_id=42,
-                dedupe_key=automation_import_dedupe_key(42),
-                payload={},
+            handoff_automation_owner(
+                db,
+                42,
+                state=db.request(42)["active_download_state"],
+                canonical_path=staged,
             )
-            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            lease = _preview_execution_lease()
+            claimed = db.claim_next_import_preview_job(
+                worker_id="preview",
+                execution_lease=lease,
+            )
             assert claimed is not None
-            self._seed_evidence_for_import_job(db, claimed.id, staged)
+            authority = import_preview_worker._AutomationPreviewAuthority(
+                request=db.request(42),
+                state=ActiveDownloadState.from_raw(
+                    db.request(42)["active_download_state"]
+                ),
+                canonical_path=staged,
+            )
+            self._seed_evidence_for_import_job(
+                import_preview_worker._AutomationPreviewDB(db, lease),
+                claimed.id,
+                staged,
+            )
 
             sentinels = {
                 "preview_called": False,
@@ -6302,6 +5765,9 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                     cast(Any, db),
                     claimed,
                     spectral_detail_analyzer=analyze,
+                    execution_lease=lease,
+                    automation_authority=authority,
+                    cancellation_token=CancellationToken(),
                 )
 
             self.assertEqual(
@@ -6447,9 +5913,52 @@ class TestRecordPreviewMeasurementFailedSlice(unittest.TestCase):
     cannot write an ownerless audit and raises before any state change.
     """
 
+    @staticmethod
+    def _automation_terminal_authority(
+        db: FakePipelineDB,
+        job,
+        *,
+        source_path: str,
+    ):
+        from lib.dispatch.types import DispatchOutcome, PostCommitCleanup
+        from lib.import_execution import (
+            CancellationToken,
+            OwnerSessionIdentity,
+        )
+        from lib.terminal_outcomes import AutomationTerminalAuthority
+        from scripts.importer import _complete_automation_processing_cleanup
+
+        lease = _preview_execution_lease(f"measurement-preview-{job.id}")
+        claimed = db.claim_next_import_preview_job(
+            worker_id="measurement-preview",
+            execution_lease=lease,
+        )
+        assert claimed is not None and claimed.id == job.id
+        token = CancellationToken()
+        owner = OwnerSessionIdentity(id(db), 4242)
+        cleanup_receipt = _complete_automation_processing_cleanup(
+            db,
+            claimed,
+            DispatchOutcome(
+                success=False,
+                message="preview measurement failed",
+                post_commit_cleanup=PostCommitCleanup(
+                    staged_path=source_path,
+                ),
+            ),
+            execution_lease=lease,
+            cancellation_token=token,
+            owner_session_identity=owner,
+        )
+        return AutomationTerminalAuthority(
+            expected_job_status="queued",
+            expected_preview_status="running",
+            expected_execution_lease=lease,
+            cleanup_receipt=cleanup_receipt,
+        )
+
     def test_measurement_failed_persists_without_denylisting_source(self):
         from lib.dispatch import _record_preview_measurement_failed
-        from lib.import_queue import IMPORT_JOB_AUTOMATION, automation_import_payload
         from lib.quality import (
             AudioToolDiagnostic,
             AudioValidationReport,
@@ -6458,13 +5967,14 @@ class TestRecordPreviewMeasurementFailedSlice(unittest.TestCase):
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(
-            id=42, status="downloading",
+            id=42,
             artist_name="Test", album_title="Album",
         ))
-        job = db.enqueue_import_job(
-            IMPORT_JOB_AUTOMATION,
-            request_id=42,
-            payload=automation_import_payload(),
+        source_path = "/Incoming/auto-import/Test - Album"
+        job = handoff_automation_owner(
+            db,
+            42,
+            canonical_path=source_path,
         )
         # Move job to 'running' to mimic an importer claim — or rather,
         # the preview worker scenario where the job was claimed by preview.
@@ -6473,7 +5983,7 @@ class TestRecordPreviewMeasurementFailedSlice(unittest.TestCase):
         payload = MeasurementFailure(
             reason="snapshot_stale",
             detail="audio snapshot mismatch after retry",
-            source_path="/Incoming/auto-import/Test - Album",
+            source_path=source_path,
             audio_validation=AudioValidationReport(
                 outcome="measurement_failed",
                 diagnostics=[
@@ -6491,6 +6001,13 @@ class TestRecordPreviewMeasurementFailedSlice(unittest.TestCase):
             request_id=42,
             import_job_id=job.id,
             payload=payload,
+            automation_terminal_authority=(
+                self._automation_terminal_authority(
+                    db,
+                    job,
+                    source_path=source_path,
+                )
+            ),
         )
 
         # (a) download_log row
@@ -6528,71 +6045,38 @@ class TestRecordPreviewMeasurementFailedSlice(unittest.TestCase):
         assert job_row is not None
         self.assertEqual(job_row.status, "failed")
 
-    def test_request_not_found_subcase_raises_without_finalize(self):
-        """request_id=None: the audit row CANNOT be written
-        (download_log.request_id is NOT NULL — the fake used to accept
-        None where production raised NotNullViolation; test-fidelity
-        Rule A). The helper raises an explicit ValueError instead, and
-        neither finalize_request, the log write, nor the denylist fire."""
-        from lib.dispatch import _record_preview_measurement_failed
-        from lib.import_queue import IMPORT_JOB_AUTOMATION, automation_import_payload
-        from lib.quality import MeasurementFailure
-
-        db = FakePipelineDB()
-        # No request seeded. Enqueue an orphan job (request_id is set on
-        # the job itself but no album_requests row matches).
-        job = db.enqueue_import_job(
-            IMPORT_JOB_AUTOMATION,
-            request_id=None,
-            payload=automation_import_payload(),
-        )
-
-        payload = MeasurementFailure(
-            reason="request_not_found",
-            detail="album_request 999 not found",
-            source_path="",
-        )
-
-        # Spy on finalize_request to prove it is NOT called.
-        with patch("lib.dispatch.outcome_actions.finalize_request") as mock_finalize:
-            with self.assertRaises(ValueError):
-                _record_preview_measurement_failed(
-                    cast(Any, db),
-                    request_id=None,
-                    import_job_id=job.id,
-                    payload=payload,
-                )
-            mock_finalize.assert_not_called()
-
-        # No audit row, no denylist — the raise happens before both.
-        self.assertEqual(len(db.download_logs), 0)
-        self.assertEqual(len(db.denylist), 0)
-
     def test_source_vanished_no_denylist_when_username_unknown(self):
         """source_vanished + no source_username → no denylist write.
         Request and job still finalize normally."""
         from lib.dispatch import _record_preview_measurement_failed
-        from lib.import_queue import IMPORT_JOB_AUTOMATION, automation_import_payload
         from lib.quality import MeasurementFailure
 
         db = FakePipelineDB()
-        db.seed_request(make_request_row(id=7, status="downloading"))
-        job = db.enqueue_import_job(
-            IMPORT_JOB_AUTOMATION,
-            request_id=7,
-            payload=automation_import_payload(),
+        db.seed_request(make_request_row(id=7))
+        source_path = "/Incoming/auto-import/Album"
+        job = handoff_automation_owner(
+            db,
+            7,
+            canonical_path=source_path,
         )
 
         payload = MeasurementFailure(
             reason="source_vanished",
             detail="ffmpeg ENOENT",
-            source_path="/Incoming/auto-import/Album",
+            source_path=source_path,
         )
         _record_preview_measurement_failed(
             cast(Any, db),
             request_id=7,
             import_job_id=job.id,
             payload=payload,
+            automation_terminal_authority=(
+                self._automation_terminal_authority(
+                    db,
+                    job,
+                    source_path=source_path,
+                )
+            ),
         )
 
         self.assertEqual(len(db.denylist), 0)
@@ -7622,36 +7106,46 @@ class TestU7RecoverySweepSlice(unittest.TestCase):
         """Insert a request + a stuck uncertain import_jobs row. Returns
         (request_id, import_job_id)."""
         self._mbids.append(mbid)
-        self._exec("""
-            INSERT INTO album_requests (mb_release_id, artist_name, album_title, source)
-            VALUES (%s, 'Test Artist', 'Test Album', 'request')
-        """, (mbid,))
-        rid = self._query(
-            "SELECT id FROM album_requests WHERE mb_release_id = %s",
-            (mbid,),
-        )[0][0]
+        rid = self.db.add_request(
+            mb_release_id=mbid,
+            artist_name="Test Artist",
+            album_title="Test Album",
+            source="request",
+        )
+        enqueued_at = "2026-07-29T00:00:00+00:00"
+        self.assertTrue(self.db.set_downloading(
+            rid,
+            json.dumps({
+                "filetype": "flac",
+                "enqueued_at": enqueued_at,
+                "current_path": "/processing/albums/u7-stuck",
+                "files": [],
+            }),
+            expected_status="wanted",
+        ))
+        handoff = self.db.handoff_automation_import(
+            request_id=rid,
+            expected_enqueued_at=enqueued_at,
+            canonical_path="/processing/albums/u7-stuck",
+            message="u7 recovery fixture handoff",
+        )
+        assert handoff.job is not None
+        job_id = handoff.job.id
         # Mimic a real pre-deploy stuck row — uncertain with verdict result,
         # message, worker_id, and lifecycle timestamps populated.
         self._exec("""
-            INSERT INTO import_jobs (
-                job_type, status, request_id, payload,
-                preview_status, preview_result, preview_message,
-                preview_error, preview_worker_id,
-                preview_started_at, preview_heartbeat_at,
-                preview_completed_at, importable_at
-            )
-            VALUES (
-                'automation_import', 'queued', %s, '{}'::jsonb,
-                'uncertain', '{"verdict": "uncertain"}'::jsonb,
-                'pre-U7 stuck preview verdict',
-                NULL, 'pre-U7-worker',
-                NOW(), NOW(), NOW(), NOW()
-            )
-        """, (rid,))
-        job_id = self._query(
-            "SELECT id FROM import_jobs WHERE request_id = %s",
-            (rid,),
-        )[0][0]
+            UPDATE import_jobs
+            SET preview_status = 'uncertain',
+                preview_result = '{"verdict": "uncertain"}'::jsonb,
+                preview_message = 'pre-U7 stuck preview verdict',
+                preview_error = NULL,
+                preview_worker_id = 'pre-U7-worker',
+                preview_started_at = NOW(),
+                preview_heartbeat_at = NOW(),
+                preview_completed_at = NOW(),
+                importable_at = NOW()
+            WHERE id = %s
+        """, (job_id,))
         return rid, job_id
 
     def test_ae8_stuck_uncertain_job_recovers_through_real_claim_query(self):
@@ -7699,8 +7193,10 @@ class TestU7RecoverySweepSlice(unittest.TestCase):
         self.assertIsNone(importable_at)
 
         # Now the live preview-worker claim query must select this row.
+        execution_lease = _preview_execution_lease("u7-test-preview")
         claimed = self.db.claim_next_import_preview_job(
             worker_id="u7-test-worker",
+            execution_lease=execution_lease,
         )
         # There may be other 'waiting' jobs from parallel tests in a shared
         # DSN; if so we keep claiming until we find ours, but the contract is
@@ -7716,6 +7212,7 @@ class TestU7RecoverySweepSlice(unittest.TestCase):
                 break
             claimed = self.db.claim_next_import_preview_job(
                 worker_id="u7-test-worker",
+                execution_lease=execution_lease,
             )
         self.assertTrue(
             found,
@@ -7728,6 +7225,270 @@ class TestU7RecoverySweepSlice(unittest.TestCase):
             (job_id,),
         )
         self.assertEqual(running, [("running", "u7-test-worker")])
+
+
+class TestProcessingOwnerPostgresFilesystemSlice(unittest.TestCase):
+    """Real PostgreSQL and filesystem lifecycle from publish to terminal."""
+
+    _MBID = "integration-processing-owner-terminal"
+
+    def setUp(self) -> None:
+        from lib.pipeline_db import PipelineDB
+
+        self.db = PipelineDB(_u7_test_dsn())
+        self.addCleanup(self.db.close)
+        self._delete_fixture()
+        self.addCleanup(self._delete_fixture)
+
+    def _delete_fixture(self) -> None:
+        conn = psycopg2.connect(_u7_test_dsn())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE import_jobs
+                    SET status = 'failed'
+                    WHERE request_id IN (
+                        SELECT id
+                        FROM album_requests
+                        WHERE mb_release_id = %s
+                    )
+                      AND job_type = 'automation_import'
+                      AND status IN (
+                          'queued', 'running', 'recovery_required'
+                      )
+                    """,
+                    (self._MBID,),
+                )
+                cur.execute(
+                    """
+                    UPDATE album_requests
+                    SET status = 'wanted',
+                        active_automation_import_job_id = NULL
+                    WHERE mb_release_id = %s
+                    """,
+                    (self._MBID,),
+                )
+                cur.execute(
+                    "DELETE FROM album_requests WHERE mb_release_id = %s",
+                    (self._MBID,),
+                )
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def test_materialize_unlink_and_terminal_commit_share_exact_owner(self) -> None:
+        from album_source import DatabaseSource
+        from lib import transitions
+        from lib.context import CratediggerContext
+        from lib.dispatch import DispatchOutcome
+        from lib.dispatch.types import PostCommitCleanup
+        from lib.download_materialization import (
+            Materialized,
+            _materialize_processing_dir,
+        )
+        from lib.pipeline_db import PipelineDB
+        from lib.processing_paths import (
+            canonical_folder_for_row,
+            processing_albums_dir,
+        )
+        from lib.quality import ActiveDownloadFileState
+        from lib.quality_evidence import snapshot_audio_files
+        from lib.terminal_outcomes import (
+            AutomationTerminalAuthority,
+            ImportJobTerminal,
+            ImportTerminalOutcome,
+            TerminalDownloadAudit,
+        )
+        from scripts import importer
+
+        with tempfile.TemporaryDirectory() as root:
+            slskd_root = os.path.join(root, "slskd")
+            processing_root = os.path.join(root, "processing")
+            os.makedirs(slskd_root, mode=0o700)
+            os.makedirs(processing_root, mode=0o700)
+            os.makedirs(
+                os.path.join(processing_root, "albums"),
+                mode=0o700,
+            )
+            source_dir = os.path.join(slskd_root, "peer", "Album")
+            os.makedirs(source_dir)
+            source_path = os.path.join(source_dir, "01.flac")
+            with open(source_path, "wb") as handle:
+                handle.write(b"exact source bytes")
+
+            request_id = self.db.add_request(
+                mb_release_id=self._MBID,
+                artist_name="Integration Artist",
+                album_title="Integration Album",
+                source="request",
+            )
+            download_file = make_download_file(
+                filename="peer\\Album\\01.flac",
+                file_dir="peer\\Album",
+                username="peer",
+                size=os.path.getsize(source_path),
+                bitRate=None,
+            )
+            download_file.local_path = source_path
+            album = make_grab_list_entry(
+                files=[download_file],
+                filetype="flac",
+                artist="Integration Artist",
+                title="Integration Album",
+                mb_release_id=self._MBID,
+                db_request_id=request_id,
+                db_source="request",
+            )
+            cfg = CratediggerConfig(
+                slskd_download_dir=slskd_root,
+                processing_dir=processing_root,
+                pipeline_db_enabled=True,
+                pipeline_db_dsn=str(_u7_test_dsn()),
+            )
+            source = DatabaseSource(
+                str(_u7_test_dsn()),
+                musicbrainz_ws2_base=cfg.musicbrainz_api_base,
+                discogs_api_base=cfg.discogs_api_base,
+                borrowed_db=cast(PipelineDB, self.db),
+            )
+            ctx = CratediggerContext(
+                cfg=cfg,
+                slskd=FakeSlskdAPI(),
+                pipeline_db_source=source,
+            )
+            canonical_path = canonical_folder_for_row(
+                album,
+                processing_albums_dir(processing_root),
+            )
+            enqueued_at = "2026-07-29T00:00:00+00:00"
+            state = ActiveDownloadState(
+                filetype="flac",
+                enqueued_at=enqueued_at,
+                files=[
+                    ActiveDownloadFileState(
+                        username="peer",
+                        filename="peer\\Album\\01.flac",
+                        file_dir="peer\\Album",
+                        size=os.path.getsize(source_path),
+                        local_path=source_path,
+                    ),
+                ],
+            )
+            self.assertTrue(
+                self.db.set_downloading(
+                    request_id,
+                    state.to_json(),
+                    expected_status="wanted",
+                )
+            )
+            handoff = self.db.handoff_automation_import(
+                request_id=request_id,
+                expected_enqueued_at=enqueued_at,
+                canonical_path=canonical_path,
+                message="real integration owner handoff",
+            )
+            assert handoff.job is not None
+            job = handoff.job
+
+            staged = StagedAlbum.from_entry(
+                album,
+                default_path=canonical_path,
+            )
+            materialized = _materialize_processing_dir(album, staged, ctx)
+
+            self.assertIsInstance(materialized, Materialized)
+            self.assertFalse(os.path.exists(source_path))
+            self.assertEqual(os.listdir(canonical_path), ["01.flac"])
+
+            preview_lease = _preview_execution_lease(
+                f"integration-real-preview-{job.id}"
+            )
+            self.assertIsNotNone(
+                self.db._claim_automation_import_preview_job(
+                    job.id,
+                    request_id=request_id,
+                    worker_id="integration-real-preview",
+                    execution_lease=preview_lease,
+                )
+            )
+            _seed_candidate_for_import_job(
+                self.db,
+                job.id,
+                mb_release_id=self._MBID,
+                source_path=canonical_path,
+                files=snapshot_audio_files(canonical_path),
+                expected_execution_lease=preview_lease,
+            )
+            self.db.mark_import_job_preview_importable(
+                job.id,
+                preview_result={"ready": True},
+                expected_execution_lease=preview_lease,
+            )
+            importer_lease = ExecutionLeaseSnapshot(
+                host_boot_id="integration-boot",
+                invocation_id=f"integration-real-importer-{job.id}",
+                systemd_unit="cratedigger-importer.service",
+                worker=ProcessIdentity(7302, 73002),
+            )
+            claimed = self.db._claim_automation_import_job(
+                job.id,
+                request_id=request_id,
+                worker_id="integration-real-importer",
+                execution_lease=importer_lease,
+            )
+            assert claimed is not None
+            token = CancellationToken()
+            with self.db._pin_owner_session(token) as owner_session:
+                cleanup_receipt = (
+                    importer._complete_automation_processing_cleanup(
+                        self.db,
+                        claimed,
+                        DispatchOutcome(
+                            success=True,
+                            message="integration import complete",
+                            post_commit_cleanup=PostCommitCleanup(
+                                staged_path=canonical_path,
+                            ),
+                        ),
+                        execution_lease=importer_lease,
+                        cancellation_token=token,
+                        owner_session_identity=owner_session,
+                    )
+                )
+            result = self.db.persist_import_terminal_outcome(
+                ImportTerminalOutcome(
+                    request_id=request_id,
+                    import_job_id=job.id,
+                    initial_transition=transitions.RequestTransition.to_imported(
+                        from_status="processing",
+                        verified_lossless=True,
+                    ),
+                    audit=TerminalDownloadAudit(outcome="success"),
+                    job=ImportJobTerminal(
+                        status="completed",
+                        result={"success": True},
+                        message="integration import complete",
+                    ),
+                    successful_terminal_acceptance=True,
+                    automation=AutomationTerminalAuthority(
+                        expected_job_status="running",
+                        expected_preview_status=claimed.preview_status,
+                        expected_execution_lease=importer_lease,
+                        cleanup_receipt=cleanup_receipt,
+                    ),
+                )
+            )
+
+            request = self.db.get_request(request_id)
+            assert request is not None
+            self.assertEqual(request["status"], "imported")
+            self.assertIsNone(request["active_automation_import_job_id"])
+            self.assertEqual(result.job.status, "completed")
+            self.assertFalse(os.path.exists(canonical_path))
 
 
 class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):

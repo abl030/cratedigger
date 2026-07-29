@@ -5,9 +5,16 @@
  * Action handlers remain window-bound globals defined elsewhere.
  */
 
-import { jsArg } from './util.js';
+import { esc, jsArg } from './util.js';
+import {
+  processingDescriptionId,
+  suppressProcessingAction,
+} from './release_action_state.js';
 
 /** @typedef {import('./release_action_state.js').ReleaseActionState} ReleaseActionState */
+/** @typedef {import('./release_action_state.js').ProcessingOwnerPresentation} ProcessingOwnerPresentation */
+
+export { suppressProcessingAction };
 
 /**
  * @typedef {Object} AcquireActionButtonOptions
@@ -50,6 +57,44 @@ function buttonStyle(opts, key) {
 }
 
 /**
+ * Render one focusable, inert action and its visible owner explanation.
+ *
+ * @param {ProcessingOwnerPresentation} presentation
+ * @param {number|null} requestId
+ * @param {Object} [opts]
+ * @param {string} [opts.className]
+ * @param {string} [opts.style]
+ * @param {string} [opts.label]
+ * @param {string} [opts.descriptionSuffix]
+ * @returns {string}
+ */
+export function renderProcessingLockedControl(
+  presentation,
+  requestId,
+  opts = {},
+) {
+  const suffix = opts.descriptionSuffix || 'action';
+  const descriptionId = processingDescriptionId(
+    requestId,
+    presentation.jobId,
+    suffix,
+  );
+  const className = opts.className || 'btn';
+  const style = opts.style ? ` style="${opts.style}"` : '';
+  const label = opts.label || presentation.label;
+  const requestAttr = requestId
+    ? ` data-pipeline-request-id="${requestId}"`
+    : '';
+  const recovery = presentation.recoveryTarget
+    ? ` <a href="${esc(presentation.recoveryTarget)}" data-processing-recovery-link="true" onclick="event.stopPropagation()">Recovery details</a>`
+    : '';
+  return `<span class="processing-lock">
+    <button class="${className}"${style}${requestAttr} data-processing-locked="true" aria-disabled="true" aria-describedby="${descriptionId}" onclick="return window.suppressProcessingAction(event)" onkeydown="return window.suppressProcessingAction(event)">${esc(label)}</button>
+    <span class="processing-lock-reason" id="${descriptionId}">${esc(presentation.lockReason)}${recovery}</span>
+  </span>`;
+}
+
+/**
  * Render the shared acquire action button from a release action state.
  *
  * @param {ReleaseActionState} state
@@ -58,12 +103,26 @@ function buttonStyle(opts, key) {
  */
 export function renderAcquireActionButton(state, opts = {}) {
   const stopPropagation = opts.stopPropagation ? 'event.stopPropagation(); ' : '';
+  if (state.processingPresentation) {
+    return renderProcessingLockedControl(
+      state.processingPresentation,
+      state.pipelineId,
+      {
+        className: buttonClass(opts, 'disabledClassName', 'btn btn-add'),
+        style: opts.disabledStyle || opts.style || '',
+        descriptionSuffix: 'acquire',
+      },
+    );
+  }
+  const requestAttr = state.pipelineId
+    ? ` data-pipeline-request-id="${state.pipelineId}"`
+    : '';
 
   if (state.acquireKind === 'remove_request' && state.pipelineId) {
     const label = opts.removeLabel || 'Remove request';
     const className = buttonClass(opts, 'removeClassName', 'btn');
     const style = buttonStyle(opts, 'removeStyle');
-    return `<button class="${className}"${style} onclick="${stopPropagation}window.disambRemove(${state.pipelineId}, this)">${label}</button>`;
+    return `<button class="${className}"${style}${requestAttr} onclick="${stopPropagation}window.disambRemove(${state.pipelineId}, this)">${label}</button>`;
   }
 
   if (state.acquireKind === 'upgrade' && state.releaseId) {
@@ -71,7 +130,7 @@ export function renderAcquireActionButton(state, opts = {}) {
     const label = opts.upgradeLabel || 'Upgrade';
     const className = buttonClass(opts, 'upgradeClassName', 'btn btn-add');
     const style = buttonStyle(opts, 'upgradeStyle');
-    return `<button class="${className}"${style} onclick="${stopPropagation}window.upgradeAlbum(${releaseArg}, this)">${label}</button>`;
+    return `<button class="${className}"${style}${requestAttr} onclick="${stopPropagation}window.upgradeAlbum(${releaseArg}, this)">${label}</button>`;
   }
 
   if (state.acquireKind === 'add' && state.releaseId) {
@@ -79,7 +138,7 @@ export function renderAcquireActionButton(state, opts = {}) {
     const label = opts.addLabel || 'Add request';
     const className = buttonClass(opts, 'addClassName', 'btn btn-add');
     const style = buttonStyle(opts, 'addStyle');
-    return `<button class="${className}"${style} onclick="${stopPropagation}window.addRelease(${releaseArg}, this)">${label}</button>`;
+    return `<button class="${className}"${style}${requestAttr} onclick="${stopPropagation}window.addRelease(${releaseArg}, this)">${label}</button>`;
   }
 
   if (opts.hideDisabled) {
@@ -113,6 +172,20 @@ export function renderRemoveFromBeetsButton(state, opts = {}) {
   const enabledStyle = opts.enabledStyle ? ` style="${opts.enabledStyle}"` : '';
   const disabledStyle = opts.disabledStyle ? ` style="${opts.disabledStyle}"` : '';
 
+  if (state.processingPresentation) {
+    if (opts.hideDisabled) return '';
+    return renderProcessingLockedControl(
+      state.processingPresentation,
+      state.pipelineId,
+      {
+        className,
+        style: opts.disabledStyle || '',
+        label,
+        descriptionSuffix: 'remove-beets',
+      },
+    );
+  }
+
   if (!state.canRemoveBeets && opts.hideDisabled) {
     return '';
   }
@@ -120,9 +193,12 @@ export function renderRemoveFromBeetsButton(state, opts = {}) {
   const artistArg = jsArg(state.artist);
   const albumArg = jsArg(state.album);
   const releaseArg = jsArg(state.releaseId);
+  const requestAttr = state.pipelineId
+    ? ` data-pipeline-request-id="${state.pipelineId}"`
+    : '';
 
   return state.canRemoveBeets
-    ? `<button class="${className}"${enabledStyle} onclick="${stopPropagation}window.confirmDeleteBeets(${state.beetsAlbumId}, ${artistArg}, ${albumArg}, ${state.trackCount}, ${state.pipelineId ?? 'null'}, ${releaseArg})">${label}</button>`
+    ? `<button class="${className}"${enabledStyle}${requestAttr} onclick="${stopPropagation}window.confirmDeleteBeets(${state.beetsAlbumId}, ${artistArg}, ${albumArg}, ${state.trackCount}, ${state.pipelineId ?? 'null'}, ${releaseArg})">${label}</button>`
     : `<button class="${className}"${disabledStyle} disabled>${label}</button>`;
 }
 
@@ -148,9 +224,20 @@ export function renderBadRipButton(state, opts = {}) {
   if (!state.pipelineId || !state.releaseId) return '';
   const className = opts.className || 'btn';
   const label = opts.label || 'Bad rip';
+  if (state.processingPresentation) {
+    return renderProcessingLockedControl(
+      state.processingPresentation,
+      state.pipelineId,
+      {
+        className,
+        label,
+        descriptionSuffix: 'bad-rip',
+      },
+    );
+  }
   const stopPropagation = opts.stopPropagation ? 'event.stopPropagation(); ' : '';
   const releaseArg = jsArg(state.releaseId);
-  return `<button class="${className}" onclick="${stopPropagation}window.banSource(${state.pipelineId}, ${releaseArg})">${label}</button>`;
+  return `<button class="${className}" data-pipeline-request-id="${state.pipelineId}" onclick="${stopPropagation}window.banSource(${state.pipelineId}, ${releaseArg})">${label}</button>`;
 }
 
 /**
@@ -178,6 +265,7 @@ export function renderBadRipButton(state, opts = {}) {
  * @param {string|null} [args.releaseGroupId]  // null → picker lazy-resolves
  * @param {string} [args.sourceLabel]
  * @param {string} [args.targetLabel]
+ * @param {ReleaseActionState|null} [args.processingState]
  * @param {Object} [opts]
  * @param {boolean} [opts.enabled]  // inverted-mode enable flag
  * @param {string} [opts.className]
@@ -191,6 +279,18 @@ export function renderReplaceButton(args, opts = {}) {
   const label = opts.label || 'Replace';
   const style = opts.style ? ` style="${opts.style}"` : '';
   const stopPropagation = opts.stopPropagation ? 'event.stopPropagation(); ' : '';
+  if (args.processingState?.processingPresentation) {
+    return renderProcessingLockedControl(
+      args.processingState.processingPresentation,
+      args.processingState.pipelineId,
+      {
+        className,
+        style: opts.style || '',
+        label,
+        descriptionSuffix: 'replace',
+      },
+    );
+  }
 
   if (args.mode === 'standard') {
     if (!args.sourceRequestId) return '';
@@ -200,7 +300,7 @@ export function renderReplaceButton(args, opts = {}) {
     // picker's ``in`` checks behave correctly.
     const sourceArg = jsArg(args.sourceLabel || '');
     const rgArg = args.releaseGroupId ? jsArg(args.releaseGroupId) : 'null';
-    return `<button class="${className}"${style} onclick="${stopPropagation}window.openReplacePicker({sourceRequestId: ${args.sourceRequestId}, releaseGroupId: ${rgArg}, sourceLabel: ${sourceArg}})">${label}</button>`;
+    return `<button class="${className}"${style} data-pipeline-request-id="${args.sourceRequestId}" onclick="${stopPropagation}window.openReplacePicker({sourceRequestId: ${args.sourceRequestId}, releaseGroupId: ${rgArg}, sourceLabel: ${sourceArg}})">${label}</button>`;
   }
 
   // Inverted mode.
@@ -229,6 +329,18 @@ export function renderActionToolbar(state, opts = {}) {
     ? 'padding:2px 8px;font-size:0.7em;'
     : 'padding:4px 10px;font-size:0.78em;';
   const baseStyle = `${sizeStyle}white-space:nowrap;`;
+  if (state.processingPresentation) {
+    const locked = renderProcessingLockedControl(
+      state.processingPresentation,
+      state.pipelineId,
+      {
+        className: 'btn',
+        style: baseStyle,
+        descriptionSuffix: 'toolbar',
+      },
+    );
+    return `<span class="action-toolbar" style="display:inline-flex;gap:4px;flex-wrap:wrap;">${locked}</span>`;
+  }
   const acquireBtn = renderAcquireActionButton(state, {
     addStyle: baseStyle,
     upgradeStyle: baseStyle,

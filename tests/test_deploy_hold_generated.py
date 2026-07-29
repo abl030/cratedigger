@@ -10,13 +10,17 @@ from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
 from scripts.cratedigger_deploy_hold import (
+    CONTROLLED_WORKER_UNITS,
     MAIN_SERVICE,
     MAIN_TIMER,
     PHASE_COMPLETE_PENDING,
     PHASE_HELD,
     SERVICE_UNITS,
     TIMER_UNITS,
+    YOUTUBE_SERVICE,
+    DeployHoldError,
     JobState,
+    LifecyclePreflight,
     acquire_hold,
     complete_release,
     finish_release,
@@ -47,6 +51,8 @@ def assert_held_invariants(backend: FakeDeployHoldBackend) -> None:
             raise AssertionError(f"service {service} still has a job")
         if service in backend.control_links:
             raise AssertionError(f"service {service} was masked")
+    if backend.owned_inhibitors or backend.inhibitor_files:
+        raise AssertionError("strict hold retained a producer inhibitor")
 
 
 def assert_release_invariants(
@@ -59,6 +65,8 @@ def assert_release_invariants(
         raise AssertionError("completed release retained the manual hold")
     if backend.control_links or backend.owned_links:
         raise AssertionError("completed release retained a control link")
+    if backend.inhibitor_files or backend.owned_inhibitors:
+        raise AssertionError("completed release retained a producer inhibitor")
     for timer in TIMER_UNITS:
         state = backend.unit_state(timer)
         if state.load_state != "loaded" or state.active_state != "active":
@@ -99,6 +107,38 @@ def job_worlds(
 
 
 class TestGeneratedHoldLifecycle(unittest.TestCase):
+    @given(
+        counts=st.tuples(
+            st.integers(min_value=0, max_value=3),
+            st.integers(min_value=0, max_value=3),
+            st.integers(min_value=0, max_value=3),
+            st.integers(min_value=0, max_value=3),
+        ).filter(lambda values: any(values)),
+    )
+    @example(counts=(1, 0, 0, 0))
+    @example(counts=(0, 1, 0, 0))
+    @example(counts=(0, 0, 1, 0))
+    @example(counts=(0, 0, 0, 1))
+    def test_any_dirty_old_lifecycle_shape_aborts_under_the_hold(
+        self,
+        counts: tuple[int, int, int, int],
+    ) -> None:
+        backend = FakeDeployHoldBackend(
+            lifecycle_preflight=LifecyclePreflight(*counts),
+        )
+
+        with self.assertRaisesRegex(
+            DeployHoldError,
+            "old lifecycle is not clean",
+        ):
+            acquire_hold(backend)
+
+        self.assertTrue(backend.receipt)
+        self.assertEqual(backend.phase, "acquiring")
+        self.assertTrue(backend.manual_hold)
+        self.assertEqual(backend.owned_links, set(TIMER_UNITS))
+        self.assertEqual(backend.inhibitor_files, set())
+
     def test_atomic_receipt_publication_retry_precedes_hold_mutation(self) -> None:
         for interrupt_publication in (False, True):
             with self.subTest(interrupt_publication=interrupt_publication):
@@ -240,7 +280,7 @@ class TestGeneratedHoldLifecycle(unittest.TestCase):
         assert_release_invariants(backend, invocation_id)
         self.assertEqual(
             backend.started_units,
-            [MAIN_SERVICE, *TIMER_UNITS],
+            [*CONTROLLED_WORKER_UNITS, MAIN_SERVICE, *TIMER_UNITS],
         )
 
 
@@ -273,6 +313,22 @@ class TestHoldInvariantCheckersKnownBad(unittest.TestCase):
         backend.phase = PHASE_COMPLETE_PENDING
         backend.control_links[MAIN_TIMER] = "/dev/null"
         backend.owned_links.add(MAIN_TIMER)
+
+        with self.assertRaises(AssertionError):
+            assert_release_invariants(backend, "a" * 32)
+
+    def test_held_checker_rejects_a_retained_producer_inhibitor(self) -> None:
+        backend = FakeDeployHoldBackend()
+        acquire_hold(backend)
+        backend.inhibitor_files.add(YOUTUBE_SERVICE)
+
+        with self.assertRaises(AssertionError):
+            assert_held_invariants(backend)
+
+    def test_release_checker_rejects_a_retained_owned_inhibitor(self) -> None:
+        backend = FakeDeployHoldBackend()
+        backend.inhibitor_files.add(YOUTUBE_SERVICE)
+        backend.owned_inhibitors.add(YOUTUBE_SERVICE)
 
         with self.assertRaises(AssertionError):
             assert_release_invariants(backend, "a" * 32)

@@ -2,9 +2,9 @@
 
 Codifies ``.claude/rules/test-fidelity.md`` § "Rule A — Production-shape write
 contract" as an executable rule. When a new ``upsert_* / add_* / update_* /
-record_* / set_* / mark_*`` method ships without a corresponding round-trip
-test in ``tests/test_pipeline_db.py``, this audit fails and CI blocks the
-merge.
+record_* / set_* / mark_* / handoff_*`` method ships without a corresponding
+round-trip test in ``tests/test_pipeline_db.py``, this audit fails and CI
+blocks the merge.
 
 Round 2 P0-1 motivated the rule: ``upsert_youtube_album_mapping`` silently
 dropped ``album_title`` because the INSERT column list didn't include it and
@@ -40,6 +40,7 @@ WRITE_METHOD_PREFIXES = (
     "record_",
     "set_",
     "mark_",
+    "handoff_",
 )
 
 
@@ -62,8 +63,6 @@ ALLOWLIST: dict[str, str] = {
         "status transition only",
     "mark_import_job_preview_importable":
         "status transition only",
-    "mark_import_subprocess_started":
-        "status transition only",
     "mark_imported_with_rescue":
         "status transition + rescue timestamp",
     "record_attempt":
@@ -80,10 +79,6 @@ ALLOWLIST: dict[str, str] = {
         "status transition only",
     "set_unfindable_category":
         "single-column write",
-    "update_download_state":
-        "single-column status update",
-    "update_download_state_current_path":
-        "single-column path update",
     "update_download_state_if_downloading":
         "real-PG whole-state round-trip and rejection parity in "
         "TestDownloadingStatus::"
@@ -146,6 +141,9 @@ ALLOWLIST: dict[str, str] = {
         "round-trip via raw SELECT on slskd_transfer_ledger; tested in "
         "TestTransferLedgerRoundTrip::"
         "test_record_transfer_enqueue_round_trip_preserves_every_field",
+    "record_import_job_beets_child":
+        "round-trip via get_import_job; tested in TestAutomationImportHandoff::"
+        "test_record_import_job_beets_child_round_trip_preserves_exact_execution_columns",
 }
 
 
@@ -202,6 +200,8 @@ def _find_round_trip_tests_for_method(method_name: str,
     elif method_name.startswith(("record_", "mark_")):
         suffix = method_name.split("_", 1)[1]
         read_candidates.update({f"get_{suffix}", f"list_{suffix}"})
+    elif method_name == "handoff_automation_import":
+        read_candidates.update({"get_request", "list_import_jobs"})
 
     hits: list[str] = []
     for node in ast.walk(tree):

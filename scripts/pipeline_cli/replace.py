@@ -10,6 +10,7 @@ import argparse
 import json
 from typing import TYPE_CHECKING
 
+from lib import transitions
 from scripts.pipeline_cli._format import _json_default
 
 if TYPE_CHECKING:
@@ -68,7 +69,17 @@ def cmd_replace(db: MbidReplaceDB, args: argparse.Namespace) -> int:
         "error_message": result.error_message,
         "reason": result.reason,
         "warnings": list(result.warnings),
+        "processing_owner": transitions.processing_owner_payload(
+            result.processing_owner
+        ),
     }
+    if (
+        result.reason
+        == transitions.TransitionConflictKind.processing_locked.value
+    ):
+        payload["error"] = (
+            transitions.TransitionConflictKind.processing_locked.value
+        )
     if getattr(args, "json", False):
         print(json.dumps(payload, indent=2, sort_keys=True,
                          default=_json_default))
@@ -83,6 +94,13 @@ def cmd_replace(db: MbidReplaceDB, args: argparse.Namespace) -> int:
             print(f"  Descendant id:     {result.descendant_request_id}")
         if result.reason is not None:
             print(f"  Reason:            {result.reason}")
+        if result.processing_owner is not None:
+            print(
+                "  Processing owner:  "
+                f"job {result.processing_owner.job_id} "
+                f"({result.processing_owner.status}/"
+                f"{result.processing_owner.preview_status})"
+            )
         if result.error_message:
             print(f"  Error message:     {result.error_message}")
         if result.warnings:

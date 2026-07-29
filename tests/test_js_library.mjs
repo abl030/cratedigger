@@ -329,7 +329,7 @@ console.log('Library quality controls — generated critical-character property 
 console.log('Library status controls disable invalid unsearchable transitions');
 {
   const imported = libraryDetail('release-id', 'imported');
-  assertContains(imported, "class=\"p-btn active-status\" onclick=\"event.stopPropagation(); window.setLibQuality(&quot;release-id&quot;, 'imported', null)\">imported</button>", 'imported remains visibly current');
+  assertContains(imported, "class=\"p-btn active-status\" data-pipeline-request-id=\"1712\" onclick=\"event.stopPropagation(); window.setLibQuality(&quot;release-id&quot;, 'imported', null)\">imported</button>", 'imported remains visibly current and conflict-addressable');
   assertExcludes(imported, "window.setLibQuality(&quot;release-id&quot;, 'unsearchable'", 'imported cannot invoke unsearchable');
   assertContains(imported, 'disabled aria-disabled="true">unsearchable</button>', 'invalid imported stop is disabled');
 
@@ -337,6 +337,23 @@ console.log('Library status controls disable invalid unsearchable transitions');
   assertContains(downloading, 'disabled aria-disabled="true">downloading</button>', 'downloading remains visibly current');
   assertExcludes(downloading, "window.setLibQuality(&quot;release-id&quot;, 'unsearchable'", 'downloading cannot invoke unsearchable');
   assertContains(downloading, 'disabled aria-disabled="true">unsearchable</button>', 'invalid downloading stop is disabled');
+
+  const processing = libraryDetail('release-id', 'processing', {
+    processing_owner: {
+      job_id: 1713,
+      status: 'queued',
+      preview_status: 'evidence_ready',
+    },
+  });
+  assertContains(processing, 'aria-disabled="true"', 'processing controls expose disabled semantics');
+  assertContains(processing, 'aria-describedby=', 'processing controls name visible explanation');
+  assertContains(processing, 'job #1713 is waiting to import', 'processing explanation names exact owner');
+  assertContains(processing, '/api/import-jobs/1713/recovery', 'processing links exact recovery detail');
+  assertExcludes(processing, ' disabled', 'processing controls remain focusable');
+  assertExcludes(processing, 'window.setLibQuality', 'processing controls cannot mutate lifecycle');
+  assertExcludes(processing, 'window.setIntent', 'processing intent remains locked');
+  assertExcludes(processing, 'window.confirmDeleteBeets', 'processing beets deletion remains locked');
+  assertExcludes(processing, 'window.banSource', 'processing source ban remains locked');
 
   const wanted = libraryDetail('release-id', 'wanted');
   assertContains(wanted, "window.setLibQuality(&quot;release-id&quot;, 'unsearchable', null)", 'wanted may become unsearchable');

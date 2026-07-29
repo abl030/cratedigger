@@ -7,16 +7,21 @@ from pathlib import Path
 
 from scripts.cratedigger_deploy_hold import (
     CONTROL_DIR,
+    CONTROLLED_WORKER_UNITS,
     MAIN_SERVICE,
     MAIN_TIMER,
+    METADATA_MANUAL_HOLD,
     PHASE_COMPLETE_PENDING,
     PHASE_HELD,
     PHASE_MAIN_TIMER_OPEN,
     PHASE_PREPARED_CONTROLLED,
     SERVICE_UNITS,
+    START_INHIBITORS,
     TIMER_UNITS,
+    YOUTUBE_SERVICE,
     DeployHoldError,
     JobState,
+    LifecyclePreflight,
     UnitState,
     acquire_hold,
     complete_release,
@@ -159,6 +164,40 @@ class TestAcquireAuthoritativeHold(unittest.TestCase):
         with self.assertRaisesRegex(DeployHoldError, "expected phase"):
             acquire_hold(backend)
 
+    def test_stale_controlled_start_prerequisite_fails_before_mutation(
+        self,
+    ) -> None:
+        backend = FakeDeployHoldBackend(
+            controlled_start_contract_current=False,
+        )
+
+        with self.assertRaisesRegex(
+            DeployHoldError,
+            "controlled-start prerequisite changed",
+        ):
+            acquire_hold(backend)
+
+        self.assertFalse(backend.receipt)
+        self.assertEqual(backend.events, [])
+
+    def test_dirty_old_lifecycle_stays_authoritatively_acquiring(self) -> None:
+        backend = FakeDeployHoldBackend(
+            lifecycle_preflight=LifecyclePreflight(1, 0, 0, 0),
+        )
+
+        with self.assertRaisesRegex(
+            DeployHoldError,
+            "active_automation_jobs",
+        ):
+            acquire_hold(backend)
+
+        self.assertTrue(backend.receipt)
+        self.assertEqual(backend.phase, "acquiring")
+        self.assertTrue(backend.manual_hold)
+        self.assertEqual(backend.control_links, {
+            timer: "/dev/null" for timer in TIMER_UNITS
+        })
+
 
 class TestHeldVerification(unittest.TestCase):
     def test_verify_held_is_repeatable_after_switch(self) -> None:
@@ -193,7 +232,27 @@ class TestStagedRelease(unittest.TestCase):
         self.assertEqual(self.backend.phase, PHASE_PREPARED_CONTROLLED)
         self.assertFalse(self.backend.manual_hold)
         self.assertFalse(self.backend.owned_manual_hold)
-        self.assertEqual(self.backend.started_units, [MAIN_SERVICE])
+        self.assertEqual(
+            self.backend.started_units,
+            [*CONTROLLED_WORKER_UNITS, MAIN_SERVICE],
+        )
+        self.assertEqual(
+            self.backend.owned_inhibitors,
+            {YOUTUBE_SERVICE},
+        )
+        self.assertEqual(
+            self.backend.inhibitor_files,
+            {YOUTUBE_SERVICE},
+        )
+        self.assertIn(("metadata-gate", "resume-if-clear"), self.backend.events)
+        release_index = self.backend.events.index(
+            ("metadata-gate", "release manual")
+        )
+        for service in START_INHIBITORS:
+            self.assertLess(
+                self.backend.events.index(("inhibitor-create", service)),
+                release_index,
+            )
         self.assertEqual(self.backend.owned_links, set(TIMER_UNITS))
 
         # PR1 verifies the controlled invocation before this transition.
@@ -202,7 +261,10 @@ class TestStagedRelease(unittest.TestCase):
         self.assertNotIn(MAIN_TIMER, self.backend.owned_links)
         self.assertNotIn(MAIN_TIMER, self.backend.control_links)
         self.assertEqual(self.backend.unit_state(MAIN_TIMER).load_state, "loaded")
-        self.assertEqual(self.backend.started_units, [MAIN_SERVICE, MAIN_TIMER])
+        self.assertEqual(
+            self.backend.started_units,
+            [*CONTROLLED_WORKER_UNITS, MAIN_SERVICE, MAIN_TIMER],
+        )
         for timer in TIMER_UNITS:
             if timer != MAIN_TIMER:
                 self.assertEqual(self.backend.unit_state(timer).load_state, "masked")
@@ -213,10 +275,12 @@ class TestStagedRelease(unittest.TestCase):
         self.assertEqual(self.backend.ordinary_invocation, INVOCATION)
         self.assertEqual(self.backend.owned_links, set())
         self.assertEqual(self.backend.control_links, {})
+        self.assertEqual(self.backend.inhibitor_files, set())
+        self.assertEqual(self.backend.owned_inhibitors, set())
         self.assertIn(("metadata-gate", "resume-if-clear"), self.backend.events)
         self.assertEqual(
             self.backend.started_units,
-            [MAIN_SERVICE, *TIMER_UNITS],
+            [*CONTROLLED_WORKER_UNITS, MAIN_SERVICE, *TIMER_UNITS],
         )
 
         # PR1 verify-exact proves this same invocation before completion.
@@ -262,6 +326,55 @@ class TestStagedRelease(unittest.TestCase):
         with self.assertRaisesRegex(DeployHoldError, "expected phase"):
             open_main_timer(self.backend)
 
+    def test_prepare_rejects_an_unowned_producer_inhibitor(self) -> None:
+        self.backend.inhibitor_files.add(MAIN_SERVICE)
+
+        with self.assertRaisesRegex(
+            DeployHoldError,
+            "unowned producer inhibitor",
+        ):
+            prepare_controlled(self.backend)
+
+        self.assertTrue(self.backend.manual_hold)
+
+    def test_prepare_fails_fast_if_a_dependency_hold_appears(self) -> None:
+        self.backend.other_metadata_holds.add("dependency")
+
+        with self.assertRaisesRegex(
+            DeployHoldError,
+            "metadata gate became held",
+        ):
+            prepare_controlled(self.backend)
+
+        self.assertEqual(
+            self.backend.owned_inhibitors,
+            set(START_INHIBITORS),
+        )
+        self.assertEqual(
+            self.backend.inhibitor_files,
+            set(START_INHIBITORS),
+        )
+
+    def test_recovery_removes_only_receipt_owned_inhibitors(self) -> None:
+        prepare_controlled(self.backend)
+
+        recover_held(self.backend)
+
+        self.assertEqual(self.backend.inhibitor_files, set())
+        self.assertEqual(self.backend.owned_inhibitors, set())
+        self.backend.assert_default_held()
+
+    def test_recovery_clears_an_unmaterialized_owned_inhibitor_intent(
+        self,
+    ) -> None:
+        self.backend.mark_inhibitor_owned(MAIN_SERVICE)
+
+        recover_held(self.backend)
+
+        self.assertEqual(self.backend.inhibitor_files, set())
+        self.assertEqual(self.backend.owned_inhibitors, set())
+        self.backend.assert_default_held()
+
     def test_recover_held_reestablishes_every_boundary_from_release(self) -> None:
         prepare_controlled(self.backend)
         open_main_timer(self.backend)
@@ -287,12 +400,20 @@ class TestStagedRelease(unittest.TestCase):
 
 class TestFixedAuthoritySurface(unittest.TestCase):
     def test_only_system_control_timer_paths_can_be_owned(self) -> None:
+        self.assertEqual(
+            str(METADATA_MANUAL_HOLD),
+            "/var/lib/cratedigger-metadata-gate/holds/manual",
+        )
         for timer in TIMER_UNITS:
             self.assertTrue(timer.endswith(".timer"))
             self.assertEqual(f"{CONTROL_DIR}/{timer}".split("/")[-1], timer)
         for service in SERVICE_UNITS:
             self.assertTrue(service.endswith(".service"))
             self.assertNotIn(service, TIMER_UNITS)
+        self.assertEqual(set(START_INHIBITORS), {
+            MAIN_SERVICE,
+            YOUTUBE_SERVICE,
+        })
 
     def test_deploy_skill_uses_tracked_hold_and_cycle_boundaries(self) -> None:
         helper = REPO_ROOT / "scripts" / "cratedigger_deploy_hold.py"

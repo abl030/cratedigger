@@ -14,6 +14,7 @@ import msgspec
 from lib import transitions
 from lib.config import CratediggerConfig
 from lib.dispatch.quality_gate import QualityGatePlan
+from lib.dispatch.types import DISPATCH_CODE_PROCESSING_LOCKED
 from lib.import_evidence import (
     ActionEvidenceProvenance,
     CandidateEvidenceActionResult,
@@ -25,6 +26,7 @@ from tests.fakes import FakePipelineDB
 from tests.helpers import (
     RecordingQualityGate,
     finalize_claimed_dispatch,
+    handoff_automation_owner,
     make_album_quality_evidence,
     make_import_result,
     make_request_row,
@@ -948,6 +950,40 @@ class TestDispatchFromDbAdvisoryLock(unittest.TestCase):
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_locked_reread_rejects_a_processing_owner_before_any_effect(self):
+        from lib.dispatch import dispatch_import_from_db
+
+        db = self._seed_db()
+        db.request(42)["status"] = "wanted"
+        force_job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            payload={"download_log_id": 1, "failed_path": "/not-opened"},
+        )
+        owner = handoff_automation_owner(db, 42)
+        before = db.get_request(42)
+
+        with patch(
+            "lib.dispatch.entry_points.ensure_candidate_evidence_for_action",
+            side_effect=AssertionError("evidence lookup reached"),
+        ):
+            result = dispatch_import_from_db(
+                db,  # type: ignore[arg-type]
+                request_id=42,
+                failed_path="/not-opened",
+                import_job_id=force_job.id,
+                cfg=CratediggerConfig(
+                    beets_harness_path="/nix/store/fake/harness",
+                    pipeline_db_enabled=True,
+                ),
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.code, DISPATCH_CODE_PROCESSING_LOCKED)
+        self.assertIn(f"automation import job {owner.id}", result.message)
+        self.assertEqual(db.get_request(42), before)
+        self.assertEqual(db.download_logs, [])
 
 
 class TestDispatchFromDbRuntimeConfigSeam(unittest.TestCase):

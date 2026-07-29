@@ -9,7 +9,7 @@ from __future__ import annotations
 import copy
 import urllib.error
 import uuid
-from typing import NotRequired, TypedDict, TypeGuard
+from typing import NotRequired, TypedDict, TypeGuard, cast
 
 import msgspec
 
@@ -23,6 +23,8 @@ from lib.artist_catalogue import (
 # replace the constants with auto-generated Mock attributes.
 from lib.artist_compare import annotate_in_library, merge_discographies
 from lib.banding import current_library_bitrate
+from lib.json_narrow import is_str_object_dict
+from lib.pipeline_db._shared import ProcessingOwnerProjection
 from lib.release_identity import (
     ReleaseIdentity,
     normalize_release_id,
@@ -78,7 +80,12 @@ def get_library_artist(h: RouteHandler, params: dict[str, list[str]]) -> None:
 # Badge priority when several requests map to one release group — show
 # the most active state.
 _PIPELINE_BADGE_PRIORITY = {
-    "downloading": 0, "wanted": 1, "unsearchable": 2, "imported": 3}
+    "processing": 0,
+    "downloading": 1,
+    "wanted": 2,
+    "unsearchable": 3,
+    "imported": 4,
+}
 
 
 ArtistPipelineKey = tuple[str, str, str]
@@ -98,10 +105,30 @@ class _PipelineHit(TypedDict):
 
     status: str
     id: int
+    processing_owner: dict[str, object] | None
     _prio: int
 
 
 ArtistPipelineMap = dict[ArtistPipelineKey, _PipelineHit]
+
+
+def _catalogue_payload(value: object) -> object:
+    """Serialize catalogue structs with an explicit nullable owner field."""
+    payload: object = msgspec.to_builtins(value)
+
+    def stamp(node: object) -> None:
+        if isinstance(node, dict):
+            row = cast("dict[str, object]", node)
+            if "source" in row and "identity_kind" in row:
+                row.setdefault("processing_owner", None)
+            for child in row.values():
+                stamp(child)
+        elif isinstance(node, list):
+            for child in cast("list[object]", node):
+                stamp(child)
+
+    stamp(payload)
+    return payload
 
 
 def _artist_pipeline_map(name: str, mb_artist_id: str = "") -> ArtistPipelineMap:
@@ -125,7 +152,13 @@ def _artist_pipeline_map(name: str, mb_artist_id: str = "") -> ArtistPipelineMap
         if status == "replaced":
             continue
         prio = _PIPELINE_BADGE_PRIORITY.get(status, 9)
-        hit: _PipelineHit = {"status": status, "id": row["id"], "_prio": prio}
+        owner = dict(row).get("processing_owner")
+        hit: _PipelineHit = {
+            "status": status,
+            "id": row["id"],
+            "processing_owner": owner if isinstance(owner, dict) else None,
+            "_prio": prio,
+        }
         release_identity = ReleaseIdentity.from_fields(
             row.get("mb_release_id"), row.get("discogs_release_id"),
         )
@@ -156,6 +189,12 @@ def _apply_rg_pipeline_overlay(
         if hit:
             row.pipeline_status = hit["status"]
             row.pipeline_id = hit["id"]
+            owner = hit["processing_owner"]
+            row.processing_owner = (
+                msgspec.convert(owner, type=ProcessingOwnerProjection)
+                if owner is not None
+                else None
+            )
 
 
 def get_artist(h: RouteHandler, params: dict[str, list[str]], artist_id: str) -> None:
@@ -203,7 +242,7 @@ def get_artist(h: RouteHandler, params: dict[str, list[str]], artist_id: str) ->
         by_identity = _artist_pipeline_map(name, artist_id)
         _apply_rg_pipeline_overlay(rgs, by_identity)
     h._json({
-        "release_groups": msgspec.to_builtins(rgs),
+        "release_groups": _catalogue_payload(rgs),
         "ungrouped_releases": [],
     })
 
@@ -224,6 +263,7 @@ class _DisambiguatePressing(TypedDict):
     beets_album_id: NotRequired[int | None]
     pipeline_status: NotRequired[str | None]
     pipeline_id: NotRequired[int | None]
+    processing_owner: NotRequired[dict[str, object] | None]
     library_format: NotRequired[str]
     library_min_bitrate: NotRequired[int]
     library_avg_bitrate: NotRequired[int]
@@ -254,6 +294,7 @@ class _DisambiguateReleaseGroup(TypedDict):
     library_status: NotRequired[str | None]
     pipeline_status: NotRequired[str | None]
     pipeline_id: NotRequired[int | None]
+    processing_owner: NotRequired[dict[str, object] | None]
     library_format: NotRequired[str]
     library_min_bitrate: NotRequired[int]
     library_avg_bitrate: NotRequired[int]
@@ -351,16 +392,22 @@ def _overlay_disambiguate(skeleton: _DisambiguateSkeleton) -> _DisambiguateSkele
         )
         rg_pip_status: str | None = None
         rg_pip_id: int | None = None
+        rg_processing_owner: dict[str, object] | None = None
         for rid in rg["release_ids"]:
             pip = in_pipeline.get(rid)
             if pip:
                 status_raw = pip.get("status")
                 id_raw = pip.get("id")
+                owner_raw = pip.get("processing_owner")
                 rg_pip_status = status_raw if isinstance(status_raw, str) else None
                 rg_pip_id = id_raw if isinstance(id_raw, int) else None
+                rg_processing_owner = (
+                    owner_raw if is_str_object_dict(owner_raw) else None
+                )
                 break
         rg["pipeline_status"] = rg_pip_status
         rg["pipeline_id"] = rg_pip_id
+        rg["processing_owner"] = rg_processing_owner
 
         lib_mbids = [p["release_id"] for p in rg["pressings"]
                      if p["release_id"] in in_library]
@@ -389,9 +436,14 @@ def _overlay_disambiguate(skeleton: _DisambiguateSkeleton) -> _DisambiguateSkele
                     p_status_raw if isinstance(p_status_raw, str) else None
                 )
                 p["pipeline_id"] = p_id_raw if isinstance(p_id_raw, int) else None
+                p_owner_raw = p_pip.get("processing_owner")
+                p["processing_owner"] = (
+                    p_owner_raw if isinstance(p_owner_raw, dict) else None
+                )
             else:
                 p["pipeline_status"] = None
                 p["pipeline_id"] = None
+                p["processing_owner"] = None
             pq: dict[str, object] = quality.get(rid) or {}
             if pq:
                 fmt_raw = pq.get("beets_format")
@@ -480,6 +532,9 @@ def get_release(h: RouteHandler, params: dict[str, list[str]], release_id: str) 
     req = srv._db().get_request_by_release_id(normalized_id)
     data["pipeline_status"] = req["status"] if req else None
     data["pipeline_id"] = req["id"] if req else None
+    data["processing_owner"] = (
+        dict(req).get("processing_owner") if req else None
+    )
     # Include beets track info + album id + on-disk quality if in library
     b = srv._beets_db()
     if data["in_library"] and b:
@@ -537,8 +592,8 @@ def get_discogs_artist(h: RouteHandler, params: dict[str, list[str]], artist_id:
     h._json({
         "artist_id": artist_id,
         "artist_name": artist_name,
-        "release_groups": msgspec.to_builtins(works),
-        "ungrouped_releases": msgspec.to_builtins(ungrouped),
+        "release_groups": _catalogue_payload(works),
+        "ungrouped_releases": _catalogue_payload(ungrouped),
     })
 
 
@@ -558,6 +613,9 @@ def get_discogs_release(h: RouteHandler, params: dict[str, list[str]], release_i
     req = srv._db().get_request_by_release_id(normalized_id)
     data["pipeline_status"] = req["status"] if req else None
     data["pipeline_id"] = req["id"] if req else None
+    data["processing_owner"] = (
+        dict(req).get("processing_owner") if req else None
+    )
     b = srv._beets_db()
     if data["in_library"] and b:
         beets_ids = b.get_album_ids_by_mbids([normalized_id])
@@ -747,7 +805,10 @@ def get_artist_compare(h: RouteHandler, params: dict[str, list[str]]) -> None:
     skeleton = msgspec.convert(cached, type=ArtistCompareSkeleton)
     response = _overlay_compare(skeleton, name, mbid)
     mb_artist, discogs_artist = _canonical_artist_labels(mbid, discogs_id)
-    payload = msgspec.to_builtins(response)
+    raw_payload = _catalogue_payload(response)
+    if not isinstance(raw_payload, dict):
+        raise TypeError("artist compare response must serialize to an object")
+    payload = cast("dict[str, object]", raw_payload)
     payload["mb_artist"] = mb_artist
     payload["discogs_artist"] = discogs_artist
     h._json(payload)

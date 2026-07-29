@@ -13,7 +13,10 @@ from typing import Any, cast
 from unittest.mock import ANY, MagicMock, patch
 
 import msgspec
+from hypothesis import given
+from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401
 from lib.config import CratediggerConfig
 from lib.dispatch import (
     DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
@@ -25,6 +28,13 @@ from lib.download_processing import (
     CompletionDispatched,
     CompletionFailed,
 )
+from lib.import_execution import (
+    CancellationToken,
+    ExecutionCancelled,
+    ExecutionLeaseSnapshot,
+    OwnerSessionIdentity,
+    ProcessIdentity,
+)
 from lib.import_preview import ImportPreviewResult
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
@@ -34,12 +44,12 @@ from lib.import_queue import (
     ForceImportPayload,
     ImportJob,
     YoutubeImportPayload,
-    automation_import_dedupe_key,
     force_import_dedupe_key,
     force_import_payload,
     validate_payload,
 )
 from lib.quality import (
+    ActiveDownloadState,
     AudioQualityMeasurement,
     ImportResult,
     ValidationResult,
@@ -48,6 +58,7 @@ from lib.quality_evidence import snapshot_audio_files
 from lib.staged_album import StagedAlbum
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import (
+    handoff_automation_owner,
     hermetic_beets_config_defaults,
     make_album_quality_evidence,
     make_ctx_with_fake_db,
@@ -57,6 +68,28 @@ from tests.helpers import (
 
 _HERMETIC_BEETS_DEFAULTS: AbstractContextManager[tuple[str, str]] | None = None
 _HERMETIC_BEETS_PAIR: tuple[str, str] | None = None
+
+
+def _preview_execution_lease(
+    invocation_id: str = "test-preview",
+) -> ExecutionLeaseSnapshot:
+    return ExecutionLeaseSnapshot(
+        host_boot_id="test-boot",
+        invocation_id=invocation_id,
+        systemd_unit="cratedigger-import-preview-worker.service",
+        worker=ProcessIdentity(pid=7001, start_ticks=70001),
+    )
+
+
+def _importer_execution_lease(
+    invocation_id: str = "test-importer",
+) -> ExecutionLeaseSnapshot:
+    return ExecutionLeaseSnapshot(
+        host_boot_id="test-boot",
+        invocation_id=invocation_id,
+        systemd_unit="cratedigger-importer.service",
+        worker=ProcessIdentity(pid=7002, start_ticks=70002),
+    )
 
 
 def setUpModule() -> None:
@@ -86,6 +119,7 @@ def _seed_candidate_for_download_log(db, log_id: int, *, mb_release_id: str,
 
 
 def _seed_candidate_for_import_job(db, job_id: int, *, mb_release_id: str,
+                                   expected_execution_lease=None,
                                    **kwargs):
     evidence = make_album_quality_evidence(mb_release_id=mb_release_id, **kwargs)
     db.upsert_album_quality_evidence(evidence)
@@ -94,7 +128,14 @@ def _seed_candidate_for_import_job(db, job_id: int, *, mb_release_id: str,
         snapshot_fingerprint=evidence.snapshot_fingerprint,
     )
     assert persisted is not None and persisted.id is not None
-    db.set_import_job_candidate_evidence(job_id, persisted.id)
+    if expected_execution_lease is None:
+        db.set_import_job_candidate_evidence(job_id, persisted.id)
+    else:
+        db.set_import_job_candidate_evidence(
+            job_id,
+            persisted.id,
+            expected_execution_lease=expected_execution_lease,
+        )
     return persisted
 
 
@@ -290,18 +331,27 @@ class TestAutomationEvidenceReuse(unittest.TestCase):
         db.seed_request(make_request_row(
             id=42,
             mb_release_id="mbid-123",
-            status="downloading",
         ))
-        job = db.enqueue_import_job(
-            IMPORT_JOB_AUTOMATION,
-            request_id=42,
-            dedupe_key=automation_import_dedupe_key(42),
-            payload={},
-        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             with open(os.path.join(tmpdir, "01 - Track.mp3"), "wb") as handle:
                 handle.write(b"audio")
+            job = handoff_automation_owner(
+                db,
+                42,
+                state={
+                    "filetype": "mp3",
+                    "enqueued_at": "2026-07-29T00:00:00+00:00",
+                    "current_path": tmpdir,
+                    "files": [],
+                },
+                canonical_path=tmpdir,
+            )
+            preview_lease = _preview_execution_lease("reuse-preview")
+            assert db.claim_next_import_preview_job(
+                worker_id="preview",
+                execution_lease=preview_lease,
+            ) is not None
             _seed_candidate_for_import_job(
                 db, job.id,
                 mb_release_id="mbid-123",
@@ -316,7 +366,19 @@ class TestAutomationEvidenceReuse(unittest.TestCase):
                 codec="mp3",
                 container="mp3",
                 storage_format="MP3",
+                expected_execution_lease=preview_lease,
             )
+            assert db.mark_import_job_preview_importable(
+                job.id,
+                preview_result={"ready": True},
+                expected_execution_lease=preview_lease,
+            ) is not None
+            execution_lease = _importer_execution_lease("reuse-importer")
+            claimed = db.claim_next_import_job(
+                worker_id="importer",
+                execution_lease=execution_lease,
+            )
+            assert claimed is not None and claimed.id == job.id
             cfg = CratediggerConfig(
                 beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
                 beets_distance_threshold=0.15,
@@ -348,13 +410,19 @@ class TestAutomationEvidenceReuse(unittest.TestCase):
                     album_data,
                     staged_album,
                     ctx,
-                    import_job_id=job.id,
+                    import_job_id=claimed.id,
+                    cancellation_token=CancellationToken(),
+                    execution_lease=execution_lease,
+                    owner_session_identity=OwnerSessionIdentity(id(db), 4242),
                 )
 
         assert result is not None
         self.assertTrue(result.success)
         handle_valid.assert_called_once()
-        self.assertEqual(handle_valid.call_args.kwargs["import_job_id"], job.id)
+        self.assertEqual(
+            handle_valid.call_args.kwargs["import_job_id"],
+            claimed.id,
+        )
 
     def test_stale_previewed_automation_evidence_fails_before_preimport(self):
         from lib.download_validation import _process_beets_validation
@@ -364,14 +432,8 @@ class TestAutomationEvidenceReuse(unittest.TestCase):
         db.seed_request(make_request_row(
             id=42,
             mb_release_id="mbid-123",
-            status="downloading",
         ))
-        job = db.enqueue_import_job(
-            IMPORT_JOB_AUTOMATION,
-            request_id=42,
-            dedupe_key=automation_import_dedupe_key(42),
-            payload={},
-        )
+        job = handoff_automation_owner(db, 42)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             track = os.path.join(tmpdir, "01 - Track.mp3")
@@ -432,6 +494,9 @@ class TestAutomationEvidenceReuse(unittest.TestCase):
                 ) = None,
                 quality_gate_fn: QualityGateFn | None = None,
                 dispatch_fn: DispatchCoreFn | None = None,
+                cancellation_token: CancellationToken | None = None,
+                execution_lease: ExecutionLeaseSnapshot | None = None,
+                owner_session_identity: OwnerSessionIdentity | None = None,
             ) -> DispatchOutcome | None:
                 del (
                     album_data,
@@ -441,6 +506,9 @@ class TestAutomationEvidenceReuse(unittest.TestCase):
                     prevalidated_candidate_result,
                     quality_gate_fn,
                     dispatch_fn,
+                    cancellation_token,
+                    execution_lease,
+                    owner_session_identity,
                 )
                 handle_valid_calls.append(import_job_id)
                 return None
@@ -623,11 +691,27 @@ class TestImporterWorker(unittest.TestCase):
             else:
                 os.mkdir(action_path, 0o700)
             payload = {**payload, "action_path": action_path}
-        updated = db.mark_import_job_preview_importable(
-            job.id,
-            preview_result=payload,
-            message="ready",
-        )
+        if job.job_type == IMPORT_JOB_AUTOMATION:
+            preview_lease = _preview_execution_lease(
+                f"prepare-import-{job.id}"
+            )
+            claimed = db.claim_next_import_preview_job(
+                worker_id="preview",
+                execution_lease=preview_lease,
+            )
+            assert claimed is not None and claimed.id == job.id
+            updated = db.mark_import_job_preview_importable(
+                job.id,
+                preview_result=payload,
+                message="ready",
+                expected_execution_lease=preview_lease,
+            )
+        else:
+            updated = db.mark_import_job_preview_importable(
+                job.id,
+                preview_result=payload,
+                message="ready",
+            )
         assert updated is not None
         return updated
 
@@ -1752,7 +1836,6 @@ class TestImporterWorker(unittest.TestCase):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=42,
-            status="downloading",
             active_download_state={
                 "filetype": "flac",
                 "enqueued_at": "2026-04-25T00:00:00+00:00",
@@ -1764,14 +1847,17 @@ class TestImporterWorker(unittest.TestCase):
                 }],
             },
         ))
-        job = db.enqueue_import_job(
-            IMPORT_JOB_AUTOMATION,
-            request_id=42,
-            dedupe_key=automation_import_dedupe_key(42),
-            payload={},
+        job = handoff_automation_owner(
+            db,
+            42,
+            state=db.request(42)["active_download_state"],
         )
         self._mark_importable(db, job)
-        claimed = db.claim_next_import_job(worker_id="worker")
+        lease = _importer_execution_lease("reconstruct-state")
+        claimed = db.claim_next_import_job(
+            worker_id="worker",
+            execution_lease=lease,
+        )
         assert claimed is not None
 
         with patch(
@@ -1782,6 +1868,9 @@ class TestImporterWorker(unittest.TestCase):
                 cast(Any, db),
                 claimed,
                 ctx=object(),
+                execution_lease=lease,
+                cancellation_token=CancellationToken(),
+                owner_session_identity=cast(Any, object()),
             )
 
         processing.assert_called_once()
@@ -1795,7 +1884,6 @@ class TestImporterWorker(unittest.TestCase):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=42,
-            status="downloading",
             active_download_state={
                 "filetype": "flac",
                 "enqueued_at": "2026-04-25T00:00:00+00:00",
@@ -1807,14 +1895,17 @@ class TestImporterWorker(unittest.TestCase):
                 }],
             },
         ))
-        job = db.enqueue_import_job(
-            IMPORT_JOB_AUTOMATION,
-            request_id=42,
-            dedupe_key=automation_import_dedupe_key(42),
-            payload={},
+        job = handoff_automation_owner(
+            db,
+            42,
+            state=db.request(42)["active_download_state"],
         )
         self._mark_importable(db, job)
-        claimed = db.claim_next_import_job(worker_id="worker")
+        lease = _importer_execution_lease("dispatch-success")
+        claimed = db.claim_next_import_job(
+            worker_id="worker",
+            execution_lease=lease,
+        )
         assert claimed is not None
 
         with patch(
@@ -1826,6 +1917,9 @@ class TestImporterWorker(unittest.TestCase):
                 cast(Any, db),
                 claimed,
                 ctx=object(),
+                execution_lease=lease,
+                cancellation_token=CancellationToken(),
+                owner_session_identity=cast(Any, object()),
             )
 
         self.assertEqual(processing.call_args.kwargs["import_job_id"], job.id)
@@ -1846,7 +1940,6 @@ class TestImporterWorker(unittest.TestCase):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=42,
-            status="downloading",
             active_download_state={
                 "filetype": "flac",
                 "enqueued_at": "2026-04-25T00:00:00+00:00",
@@ -1858,14 +1951,17 @@ class TestImporterWorker(unittest.TestCase):
                 }],
             },
         ))
-        job = db.enqueue_import_job(
-            IMPORT_JOB_AUTOMATION,
-            request_id=42,
-            dedupe_key=automation_import_dedupe_key(42),
-            payload={},
+        job = handoff_automation_owner(
+            db,
+            42,
+            state=db.request(42)["active_download_state"],
         )
         self._mark_importable(db, job)
-        claimed = db.claim_next_import_job(worker_id="worker")
+        lease = _importer_execution_lease("deferred-detail")
+        claimed = db.claim_next_import_job(
+            worker_id="worker",
+            execution_lease=lease,
+        )
         assert claimed is not None
 
         with patch(
@@ -1877,6 +1973,9 @@ class TestImporterWorker(unittest.TestCase):
                 db,  # pyright: ignore[reportArgumentType]
                 claimed,
                 ctx=object(),
+                execution_lease=lease,
+                cancellation_token=CancellationToken(),
+                owner_session_identity=cast(Any, object()),
             )
 
         assert updated is not None
@@ -1896,7 +1995,6 @@ class TestImporterWorker(unittest.TestCase):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=42,
-            status="downloading",
             active_download_state={
                 "filetype": "flac",
                 "enqueued_at": "2026-04-25T00:00:00+00:00",
@@ -1908,14 +2006,17 @@ class TestImporterWorker(unittest.TestCase):
                 }],
             },
         ))
-        job = db.enqueue_import_job(
-            IMPORT_JOB_AUTOMATION,
-            request_id=42,
-            dedupe_key=automation_import_dedupe_key(42),
-            payload={},
+        job = handoff_automation_owner(
+            db,
+            42,
+            state=db.request(42)["active_download_state"],
         )
         self._mark_importable(db, job)
-        claimed = db.claim_next_import_job(worker_id="worker")
+        lease = _importer_execution_lease("failed-reason")
+        claimed = db.claim_next_import_job(
+            worker_id="worker",
+            execution_lease=lease,
+        )
         assert claimed is not None
 
         with patch(
@@ -1926,6 +2027,9 @@ class TestImporterWorker(unittest.TestCase):
                 db,  # pyright: ignore[reportArgumentType]
                 claimed,
                 ctx=object(),
+                execution_lease=lease,
+                cancellation_token=CancellationToken(),
+                owner_session_identity=cast(Any, object()),
             )
 
         assert updated is not None
@@ -1941,7 +2045,6 @@ class TestImporterWorker(unittest.TestCase):
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=42,
-            status="downloading",
             active_download_state={
                 "filetype": "flac",
                 "enqueued_at": "2026-04-25T00:00:00+00:00",
@@ -1953,14 +2056,17 @@ class TestImporterWorker(unittest.TestCase):
                 }],
             },
         ))
-        job = db.enqueue_import_job(
-            IMPORT_JOB_AUTOMATION,
-            request_id=42,
-            dedupe_key=automation_import_dedupe_key(42),
-            payload={},
+        job = handoff_automation_owner(
+            db,
+            42,
+            state=db.request(42)["active_download_state"],
         )
         self._mark_importable(db, job)
-        claimed = db.claim_next_import_job(worker_id="worker")
+        lease = _importer_execution_lease("dispatch-failure")
+        claimed = db.claim_next_import_job(
+            worker_id="worker",
+            execution_lease=lease,
+        )
         assert claimed is not None
 
         with patch(
@@ -1972,6 +2078,9 @@ class TestImporterWorker(unittest.TestCase):
                 cast(Any, db),
                 claimed,
                 ctx=object(),
+                execution_lease=lease,
+                cancellation_token=CancellationToken(),
+                owner_session_identity=cast(Any, object()),
             )
 
         assert updated is not None
@@ -1980,103 +2089,504 @@ class TestImporterWorker(unittest.TestCase):
         self.assertEqual(updated.error, "Pre-import gate rejected")
         self.assertEqual(self._result(updated)["success"], False)
 
-    def test_requeued_automation_job_abandons_interrupted_auto_import(self):
-        from lib.processing_paths import stage_to_ai_path
+
+class TestAutomationImporterOwnership(unittest.TestCase):
+    def _importable_owner(
+        self,
+        db: FakePipelineDB,
+        *,
+        request_id: int = 42,
+    ) -> ImportJob:
+        db.seed_request(make_request_row(
+            id=request_id,
+            active_download_state={
+                "filetype": "flac",
+                "enqueued_at": "2026-07-29T00:00:00+00:00",
+                "current_path": f"/processing/albums/request-{request_id}",
+                "files": [],
+            },
+        ))
+        job = handoff_automation_owner(
+            db,
+            request_id,
+            state=db.request(request_id)["active_download_state"],
+        )
+        preview_lease = _preview_execution_lease(
+            f"importer-owner-{request_id}"
+        )
+        claimed = db.claim_next_import_preview_job(
+            worker_id="preview",
+            execution_lease=preview_lease,
+        )
+        assert claimed is not None
+        ready = db.mark_import_job_preview_importable(
+            job.id,
+            preview_result={"ready": True},
+            expected_execution_lease=preview_lease,
+        )
+        assert ready is not None
+        return ready
+
+    def test_pins_before_import_and_uses_same_session_for_release(self) -> None:
+        from lib.pipeline_db import (
+            ADVISORY_LOCK_NAMESPACE_IMPORT,
+            ADVISORY_LOCK_NAMESPACE_RELEASE,
+        )
         from scripts import importer
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            staging_root = os.path.join(tmpdir, "staging")
-            slskd_root = os.path.join(tmpdir, "slskd")
-            os.makedirs(staging_root)
-            os.makedirs(slskd_root)
-            staged_path = stage_to_ai_path(
-                artist="Test Artist",
-                title="Test Album",
-                staging_dir=staging_root,
-                request_id=42,
-                auto_import=True,
-            )
-            os.makedirs(staged_path)
-            with open(os.path.join(staged_path, "01.opus"), "w") as fp:
-                fp.write("converted audio")
+        db = FakePipelineDB()
+        setattr(db, "dsn", "postgresql://fake")  # noqa: B010
+        self._importable_owner(db)
+        lease = _importer_execution_lease("lock-trace")
+        trace: list[str] = []
 
+        class StageSession:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(db, name)
+
+            @contextmanager
+            def _pin_owner_session(self, token: CancellationToken):
+                token.raise_if_cancelled()
+                trace.append("pin-enter")
+                try:
+                    yield OwnerSessionIdentity(id(self), 4242)
+                finally:
+                    trace.append("pin-exit")
+
+            @contextmanager
+            def advisory_lock(self, namespace: int, key: int):
+                trace.append(f"lock-enter:{namespace}:{key}")
+                try:
+                    yield True
+                finally:
+                    trace.append(f"lock-exit:{namespace}:{key}")
+
+            def close(self) -> None:
+                self.closed = True
+                trace.append("close")
+
+        stage = StageSession()
+
+        def execute(
+            stage_db: Any,
+            _job: ImportJob,
+            **authority: Any,
+        ) -> DispatchOutcome:
+            self.assertIs(stage_db, stage)
+            self.assertEqual(authority["execution_lease"], lease)
+            self.assertIsInstance(
+                authority["cancellation_token"],
+                CancellationToken,
+            )
+            runtime = importer._build_runtime_context(
+                stage_db,
+                borrow_session=True,
+            )
+            self.assertIs(runtime.pipeline_db_source._get_db(), stage)
+            runtime.pipeline_db_source.close()
+            self.assertFalse(stage.closed)
+            with stage_db.advisory_lock(
+                ADVISORY_LOCK_NAMESPACE_RELEASE,
+                99,
+            ) as acquired:
+                self.assertTrue(acquired)
+            return DispatchOutcome(False, "prelaunch defer", deferred=True)
+
+        result = importer.run_once(
+            cast(Any, db),
+            worker_id="importer",
+            stage_db_factory=lambda _dsn: stage,
+            execution_lease_factory=lambda **_kwargs: lease,
+            execute_fn=execute,
+        )
+
+        self.assertIsNone(result)
+        stored = db.get_import_job(1)
+        assert stored is not None
+        self.assertEqual((stored.status, stored.preview_status), (
+            "queued",
+            "waiting",
+        ))
+        self.assertEqual(trace, [
+            "pin-enter",
+            f"lock-enter:{ADVISORY_LOCK_NAMESPACE_IMPORT}:42",
+            f"lock-enter:{ADVISORY_LOCK_NAMESPACE_RELEASE}:99",
+            f"lock-exit:{ADVISORY_LOCK_NAMESPACE_RELEASE}:99",
+            f"lock-exit:{ADVISORY_LOCK_NAMESPACE_IMPORT}:42",
+            "pin-exit",
+            "close",
+        ])
+
+    def test_wrong_owner_stops_before_execution(self) -> None:
+        from scripts import importer
+
+        db = FakePipelineDB()
+        setattr(db, "dsn", "postgresql://fake")  # noqa: B010
+        self._importable_owner(db)
+        lease = _importer_execution_lease("wrong-owner")
+
+        class StageSession:
+            def __getattr__(self, name: str) -> Any:
+                return getattr(db, name)
+
+            @contextmanager
+            def _pin_owner_session(self, token: CancellationToken):
+                token.raise_if_cancelled()
+                yield OwnerSessionIdentity(id(self), 4242)
+
+            @contextmanager
+            def advisory_lock(self, _namespace: int, _key: int):
+                yield True
+
+            def close(self) -> None:
+                return None
+
+        execute = MagicMock()
+
+        def stage_factory(_dsn: str) -> StageSession:
+            db._requests[42]["active_automation_import_job_id"] = 999
+            return StageSession()
+
+        result = importer.run_once(
+            cast(Any, db),
+            worker_id="importer",
+            stage_db_factory=stage_factory,
+            execution_lease_factory=lambda **_kwargs: lease,
+            execute_fn=execute,
+        )
+
+        self.assertIsNone(result)
+        execute.assert_not_called()
+        stored = db.get_import_job(1)
+        assert stored is not None
+        self.assertEqual(stored.status, "running")
+
+    def test_import_lock_contention_performs_zero_lifecycle_writes(self) -> None:
+        from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_IMPORT
+        from scripts import importer
+
+        db = FakePipelineDB()
+        setattr(db, "dsn", "postgresql://fake")  # noqa: B010
+        self._importable_owner(db)
+        lease = _importer_execution_lease("import-lock-contention")
+        writes: list[str] = []
+
+        class StageSession:
+            def __getattr__(self, name: str) -> Any:
+                if name in {
+                    "requeue_import_job_for_preview",
+                    "mark_import_job_recovery_required",
+                    "mark_import_job_failed",
+                }:
+                    def forbidden_write(*_args: Any, **_kwargs: Any) -> None:
+                        writes.append(name)
+                    return forbidden_write
+                return getattr(db, name)
+
+            @contextmanager
+            def _pin_owner_session(self, token: CancellationToken):
+                token.raise_if_cancelled()
+                yield OwnerSessionIdentity(id(self), 4242)
+
+            @contextmanager
+            def advisory_lock(self, namespace: int, _key: int):
+                self.assert_import_namespace(namespace)
+                yield False
+
+            @staticmethod
+            def assert_import_namespace(namespace: int) -> None:
+                if namespace != ADVISORY_LOCK_NAMESPACE_IMPORT:
+                    raise AssertionError(f"unexpected lock namespace {namespace}")
+
+            def close(self) -> None:
+                return None
+
+        execute = MagicMock()
+        result = importer.run_once(
+            cast(Any, db),
+            worker_id="importer",
+            stage_db_factory=lambda _dsn: StageSession(),
+            execution_lease_factory=lambda **_kwargs: lease,
+            execute_fn=execute,
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(writes, [])
+        execute.assert_not_called()
+        stored = db.get_import_job(1)
+        assert stored is not None
+        self.assertEqual(stored.status, "running")
+        self.assertEqual(importer._execution_lease_from_job(stored), lease)
+
+    def test_owner_session_cancellation_fail_stops_without_requeue(self) -> None:
+        from scripts import importer
+
+        db = FakePipelineDB()
+        setattr(db, "dsn", "postgresql://fake")  # noqa: B010
+        self._importable_owner(db)
+        lease = _importer_execution_lease("session-loss")
+
+        class StageSession:
+            def __getattr__(self, name: str) -> Any:
+                return getattr(db, name)
+
+            @contextmanager
+            def _pin_owner_session(self, token: CancellationToken):
+                token.raise_if_cancelled()
+                yield OwnerSessionIdentity(id(self), 4242)
+
+            @contextmanager
+            def advisory_lock(self, _namespace: int, _key: int):
+                yield True
+
+            def close(self) -> None:
+                return None
+
+        def lose_session(
+            _db: Any,
+            _job: ImportJob,
+            **authority: Any,
+        ) -> DispatchOutcome:
+            token = cast(CancellationToken, authority["cancellation_token"])
+            token.cancel("owner_session_lost")
+            token.raise_if_cancelled()
+            raise AssertionError("unreachable")
+
+        with self.assertRaises(ExecutionCancelled):
+            importer.run_once(
+                cast(Any, db),
+                worker_id="importer",
+                stage_db_factory=lambda _dsn: StageSession(),
+                execution_lease_factory=lambda **_kwargs: lease,
+                execute_fn=lose_session,
+            )
+
+        stored = db.get_import_job(1)
+        assert stored is not None
+        self.assertEqual(stored.status, "running")
+        self.assertEqual(stored.preview_status, "evidence_ready")
+
+    def test_startup_recovery_requires_exact_dead_importer_lease(self) -> None:
+        from lib.import_execution import (
+            ExecutionLivenessEvidence,
+        )
+        from scripts import importer
+
+        class Probe:
+            def __init__(self, evidence: ExecutionLivenessEvidence) -> None:
+                self.evidence = evidence
+
+            def observe(
+                self,
+                lease: ExecutionLeaseSnapshot,
+            ) -> ExecutionLivenessEvidence:
+                self_outer.assertEqual(lease, expected_lease)
+                return self.evidence
+
+        self_outer = self
+        db = FakePipelineDB()
+        self._importable_owner(db)
+        expected_lease = _importer_execution_lease("startup-recovery")
+        claimed = db.claim_next_import_job(
+            worker_id="old-importer",
+            execution_lease=expected_lease,
+        )
+        assert claimed is not None
+
+        unknown = ExecutionLivenessEvidence(
+            lease=expected_lease,
+            current_host_boot_id=None,
+            boot_error=None,
+            worker=None,
+            beets=None,
+            invocation=None,
+            cgroup=None,
+            probe_error="systemd unavailable",
+        )
+        dead = ExecutionLivenessEvidence(
+            lease=expected_lease,
+            current_host_boot_id="replacement-boot",
+            boot_error=None,
+            worker=None,
+            beets=None,
+            invocation=None,
+            cgroup=None,
+        )
+
+        self.assertEqual(
+            importer.recover_abandoned_running_jobs(
+                cast(Any, db),
+                liveness_probe=Probe(unknown),
+            ),
+            [],
+        )
+        still_running = db.get_import_job(claimed.id)
+        assert still_running is not None
+        self.assertEqual(still_running.status, "running")
+
+        recovered = importer.recover_abandoned_running_jobs(
+            cast(Any, db),
+            liveness_probe=Probe(dead),
+        )
+        self.assertEqual(len(recovered), 1)
+        self.assertEqual(recovered[0].id, claimed.id)
+        self.assertEqual(recovered[0].status, "queued")
+
+    def test_production_completion_chain_receives_exact_cancellation_authority(
+        self,
+    ) -> None:
+        from scripts import importer
+
+        db = FakePipelineDB()
+        setattr(db, "dsn", "postgresql://fake")  # noqa: B010
+        self._importable_owner(db)
+        lease = _importer_execution_lease("token-chain")
+        claimed = db.claim_next_import_job(
+            worker_id="importer",
+            execution_lease=lease,
+        )
+        assert claimed is not None
+        token = CancellationToken()
+        identity = OwnerSessionIdentity(id(db), 4242)
+
+        with patch(
+            "lib.download._run_completed_processing",
+            return_value=CompletionDeferred("test boundary"),
+        ) as processing:
+            outcome = importer.execute_automation_import_job(
+                cast(Any, db),
+                claimed,
+                execution_lease=lease,
+                cancellation_token=token,
+                owner_session_identity=identity,
+            )
+
+        self.assertTrue(outcome.deferred)
+        self.assertIs(
+            processing.call_args.kwargs["cancellation_token"],
+            token,
+        )
+        self.assertEqual(
+            processing.call_args.kwargs["execution_lease"],
+            lease,
+        )
+        self.assertEqual(
+            processing.call_args.kwargs["owner_session_identity"],
+            identity,
+        )
+
+    def test_validation_forwards_token_to_dispatch_without_drop(self) -> None:
+        from lib.download_validation import _handle_valid_result
+
+        with tempfile.TemporaryDirectory() as root:
+            source = os.path.join(root, "processing-album")
+            os.mkdir(source)
+            with open(os.path.join(source, "01.flac"), "wb") as handle:
+                handle.write(b"audio")
+            staging = os.path.join(root, "incoming")
+            os.mkdir(staging)
+            os.makedirs(os.path.join(staging, "auto-import", "Artist"))
             db = FakePipelineDB()
             db.seed_request(make_request_row(
                 id=42,
-                status="downloading",
-                artist_name="Test Artist",
-                album_title="Test Album",
-                year=2020,
-                mb_release_id="test-mbid",
+                mb_release_id="mbid-123",
                 active_download_state={
                     "filetype": "flac",
-                    "enqueued_at": "2026-04-25T00:00:00+00:00",
-                    "processing_started_at": "2026-04-25T00:10:00+00:00",
-                    "import_subprocess_started_at": "2026-04-25T00:11:00+00:00",
-                    "current_path": staged_path,
-                    "files": [{
-                        "username": "alice",
-                        "filename": "Artist\\Album\\01.flac",
-                        "file_dir": "Artist\\Album",
-                        "size": 123,
-                    }],
+                    "enqueued_at": "2026-07-29T00:00:00+00:00",
+                    "current_path": source,
+                    "files": [],
                 },
             ))
-            job = db.enqueue_import_job(
-                IMPORT_JOB_AUTOMATION,
-                request_id=42,
-                dedupe_key=automation_import_dedupe_key(42),
-                payload={},
+            job = handoff_automation_owner(
+                db,
+                42,
+                state=db.request(42)["active_download_state"],
+                canonical_path=source,
             )
-            self._mark_importable(db, job)
-            claimed = db.claim_next_import_job(worker_id="old-worker")
+            preview_lease = _preview_execution_lease("token-preview")
+            assert db.claim_next_import_preview_job(
+                worker_id="preview",
+                execution_lease=preview_lease,
+            ) is not None
+            assert db.mark_import_job_preview_importable(
+                job.id,
+                preview_result={"ready": True},
+                expected_execution_lease=preview_lease,
+            ) is not None
+            lease = _importer_execution_lease("token-dispatch")
+            claimed = db.claim_next_import_job(
+                worker_id="importer",
+                execution_lease=lease,
+            )
             assert claimed is not None
-
-            recovered = importer.recover_abandoned_running_jobs(cast(Any, db))
-            self.assertEqual([job.id for job in recovered], [claimed.id])
-
-            processing_parent = tempfile.mkdtemp(
-                prefix="cratedigger-import-queue-processing-")
-            self.addCleanup(shutil.rmtree, processing_parent, ignore_errors=True)
-            processing_dir = os.path.join(processing_parent, "processing")
-            os.mkdir(processing_dir, 0o700)
-            os.mkdir(os.path.join(processing_dir, "albums"), 0o700)
-            os.mkdir(os.path.join(processing_dir, "preview"), 0o700)
-            cfg = type("Cfg", (), {
-                "slskd_download_dir": slskd_root,
-                "beets_staging_dir": staging_root,
-                "beets_validation_enabled": False,
-                "processing_dir": processing_dir,
-            })()
-            ctx = make_ctx_with_fake_db(db, cfg=cfg)
-            updated = importer.run_once(cast(Any, db), worker_id="new-worker", ctx=ctx)
-
-            assert updated is not None
-            self.assertEqual(updated.status, "failed")
-            self.assertEqual(db.request(42)["status"], "wanted")
-            self.assertEqual(db.get_active_import_job_for_request(42), None)
-            self.assertFalse(os.path.exists(staged_path))
-            failed_parent = os.path.join(os.path.dirname(staged_path), "failed_imports")
-            moved = os.listdir(failed_parent)
-            self.assertEqual(len(moved), 1)
-            self.assertTrue(moved[0].startswith("abandoned_auto_import"))
-            self.assertTrue(os.path.exists(os.path.join(
-                failed_parent,
-                moved[0],
-                "01.opus",
-            )))
-            self.assertEqual(len(db.download_logs), 1)
-            db.assert_log(
-                self,
-                0,
-                outcome="failed",
-                beets_scenario="abandoned_auto_import",
+            token = CancellationToken()
+            identity = OwnerSessionIdentity(id(db), 4242)
+            ctx = make_ctx_with_fake_db(
+                db,
+                cfg=CratediggerConfig(
+                    beets_staging_dir=staging,
+                    pipeline_db_enabled=True,
+                ),
             )
-            self.assertEqual(db.denylist, [])
-            self.assertEqual(db.cooldowns_applied, [])
+            album = make_grab_list_entry(
+                album_id=42,
+                artist="Artist",
+                title="Album",
+                mb_release_id="mbid-123",
+                db_source="request",
+                db_request_id=42,
+            )
+            observed: dict[str, Any] = {}
+
+            def dispatch(**kwargs: Any) -> DispatchOutcome:
+                observed.update(kwargs)
+                return DispatchOutcome(False, "test defer", deferred=True)
+
+            outcome = _handle_valid_result(
+                album,
+                ValidationResult(
+                    valid=True,
+                    distance=0.01,
+                    scenario="strong_match",
+                ),
+                StagedAlbum(current_path=source, request_id=42),
+                ctx,
+                import_job_id=claimed.id,
+                dispatch_fn=dispatch,
+                cancellation_token=token,
+                execution_lease=lease,
+                owner_session_identity=identity,
+            )
+
+        assert outcome is not None
+        self.assertIs(observed["cancellation_token"], token)
+        self.assertEqual(observed["execution_lease"], lease)
+        self.assertEqual(observed["owner_session_identity"], identity)
 
 
 class TestImportPreviewWorker(unittest.TestCase):
+    def test_execution_lease_unit_matches_nix_service(self) -> None:
+        """Recovery probes must address the exact deployed systemd unit."""
+        from scripts import import_preview_worker
+
+        module_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            "nix",
+            "module.nix",
+        )
+        with open(module_path, encoding="utf-8") as handle:
+            module_text = handle.read()
+        service_name = import_preview_worker.PREVIEW_SYSTEMD_UNIT.removesuffix(
+            ".service"
+        )
+        self.assertIn(
+            f"systemd.services.{service_name} =",
+            module_text,
+        )
+
     def test_terminal_force_preview_failure_reclaims_unpublished_stale_action(self):
         """A failed preview owns and removes a stale action left by its retry."""
         from lib.import_preview import force_action_copy_path
@@ -2330,7 +2840,6 @@ class TestImportPreviewWorker(unittest.TestCase):
             db = FakePipelineDB()
             db.seed_request(make_request_row(
                 id=42,
-                status="downloading",
                 active_download_state={
                     "filetype": "flac",
                     "enqueued_at": "2026-04-25T00:00:00+00:00",
@@ -2343,14 +2852,25 @@ class TestImportPreviewWorker(unittest.TestCase):
                     }],
                 },
             ))
-            db.enqueue_import_job(
-                IMPORT_JOB_AUTOMATION,
-                request_id=42,
-                dedupe_key=automation_import_dedupe_key(42),
-                payload={},
+            handoff_automation_owner(
+                db,
+                42,
+                state=db.request(42)["active_download_state"],
+                canonical_path=staged,
             )
-            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            lease = _preview_execution_lease()
+            claimed = db.claim_next_import_preview_job(
+                worker_id="preview",
+                execution_lease=lease,
+            )
             assert claimed is not None
+            authority = import_preview_worker._AutomationPreviewAuthority(
+                request=db.request(42),
+                state=ActiveDownloadState.from_raw(
+                    db.request(42)["active_download_state"]
+                ),
+                canonical_path=staged,
+            )
 
             preview_result = self._preview(
                 "would_import",
@@ -2358,23 +2878,38 @@ class TestImportPreviewWorker(unittest.TestCase):
                 source_path=staged,
             )
 
-            def fake_preview(*args: Any, **kwargs: Any) -> ImportPreviewResult:
-                self._seed_job_candidate_evidence(db, claimed.id, staged)
+            def fake_preview(
+                preview_db: Any,
+                *args: Any,
+                **kwargs: Any,
+            ) -> ImportPreviewResult:
+                self._seed_job_candidate_evidence(
+                    preview_db,
+                    claimed.id,
+                    staged,
+                )
                 return preview_result
 
             with patch(
                 "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
                 side_effect=fake_preview,
             ) as preview:
-                updated = import_preview_worker.process_claimed_preview_job(db, claimed)
+                updated = import_preview_worker.process_claimed_preview_job(
+                    db,
+                    claimed,
+                    execution_lease=lease,
+                    automation_authority=authority,
+                    cancellation_token=CancellationToken(),
+                )
 
             preview.assert_called_once_with(
-                db,
+                ANY,
                 request_id=42,
                 path=staged,
                 force=False,
                 download_log_id=None,
                 import_job_id=claimed.id,
+                cancellation_token=ANY,
             )
             assert updated is not None
             self.assertEqual(updated.preview_status, "evidence_ready")
@@ -2388,7 +2923,6 @@ class TestImportPreviewWorker(unittest.TestCase):
             db = FakePipelineDB()
             db.seed_request(make_request_row(
                 id=42,
-                status="downloading",
                 active_download_state={
                     "filetype": "flac",
                     "enqueued_at": "2026-04-25T00:00:00+00:00",
@@ -2401,15 +2935,33 @@ class TestImportPreviewWorker(unittest.TestCase):
                     }],
                 },
             ))
-            db.enqueue_import_job(
-                IMPORT_JOB_AUTOMATION,
-                request_id=42,
-                dedupe_key=automation_import_dedupe_key(42),
-                payload={},
+            handoff_automation_owner(
+                db,
+                42,
+                state=db.request(42)["active_download_state"],
+                canonical_path=staged,
             )
-            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            lease = _preview_execution_lease()
+            claimed = db.claim_next_import_preview_job(
+                worker_id="preview",
+                execution_lease=lease,
+            )
             assert claimed is not None
-            self._seed_job_candidate_evidence(db, claimed.id, staged)
+            authority = import_preview_worker._AutomationPreviewAuthority(
+                request=db.request(42),
+                state=ActiveDownloadState.from_raw(
+                    db.request(42)["active_download_state"]
+                ),
+                canonical_path=staged,
+            )
+            self._seed_job_candidate_evidence(
+                cast(
+                    Any,
+                    import_preview_worker._AutomationPreviewDB(db, lease),
+                ),
+                claimed.id,
+                staged,
+            )
 
             with patch(
                 "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
@@ -2422,16 +2974,475 @@ class TestImportPreviewWorker(unittest.TestCase):
                 updated = import_preview_worker.process_claimed_preview_job(
                     db,
                     claimed,
+                    execution_lease=lease,
+                    automation_authority=authority,
+                    cancellation_token=CancellationToken(),
                 )
 
             assert updated is not None
             self.assertEqual(updated.status, "queued")
             self.assertEqual(updated.preview_status, "evidence_ready")
             self.assertIsNone(updated.preview_error)
-            self.assertIsNotNone(db.get_active_import_job_for_request(42))
-            claimed_for_import = db.claim_next_import_job(worker_id="importer")
+            self.assertEqual(
+                db.request(42)["active_automation_import_job_id"],
+                updated.id,
+            )
+            claimed_for_import = db.claim_next_import_job(
+                worker_id="importer",
+                execution_lease=_preview_execution_lease("test-importer"),
+            )
             assert claimed_for_import is not None
             self.assertEqual(claimed_for_import.id, updated.id)
+
+    def test_automation_run_once_resumes_handoff_under_dedicated_locked_session(self):
+        """A crash-after-handoff job resumes once under its pinned owner session."""
+        from scripts import import_preview_worker
+
+        class StageSession:
+            def __init__(
+                self,
+                inner: FakePipelineDB,
+                trace: list[str],
+                *,
+                acquire: bool,
+            ) -> None:
+                self._inner = inner
+                self._trace = trace
+                self._acquire = acquire
+                self._pinned = False
+                self._lock_held = False
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self._inner, name)
+
+            @contextmanager
+            def advisory_lock(self, namespace: int, key: int):
+                if not self._pinned:
+                    raise AssertionError("IMPORT lock used an unpinned session")
+                self._trace.append(f"lock-enter:{namespace}:{key}")
+                self._lock_held = self._acquire
+                try:
+                    yield self._acquire
+                finally:
+                    self._lock_held = False
+                    self._trace.append(f"lock-exit:{namespace}:{key}")
+
+            @contextmanager
+            def _pin_owner_session(self, token: CancellationToken):
+                token.raise_if_cancelled()
+                self._pinned = True
+                self._trace.append("pin-enter")
+                try:
+                    yield object()
+                finally:
+                    self._trace.append("pin-exit")
+                    self._pinned = False
+
+            def set_import_job_candidate_evidence(
+                self,
+                *args: Any,
+                **kwargs: Any,
+            ) -> bool:
+                if not self._pinned or not self._lock_held:
+                    raise AssertionError(
+                        "evidence commit escaped the pinned IMPORT lock"
+                    )
+                self._trace.append("commit:evidence")
+                return self._inner.set_import_job_candidate_evidence(
+                    *args,
+                    **kwargs,
+                )
+
+            def mark_import_job_preview_importable(
+                self,
+                *args: Any,
+                **kwargs: Any,
+            ) -> ImportJob | None:
+                if not self._pinned or not self._lock_held:
+                    raise AssertionError(
+                        "preview commit escaped the pinned IMPORT lock"
+                    )
+                self._trace.append("commit:preview")
+                return self._inner.mark_import_job_preview_importable(
+                    *args,
+                    **kwargs,
+                )
+
+            def close(self) -> None:
+                self._trace.append("close")
+
+        with tempfile.TemporaryDirectory() as canonical_path:
+            with open(os.path.join(canonical_path, "01.flac"), "wb") as handle:
+                handle.write(b"audio")
+            db = FakePipelineDB()
+            setattr(db, "dsn", "postgresql://fake")  # noqa: B010
+            db.seed_request(make_request_row(
+                id=42,
+                active_download_state={
+                    "filetype": "flac",
+                    "enqueued_at": "2026-04-25T00:00:00+00:00",
+                    "current_path": canonical_path,
+                    "files": [{
+                        "username": "alice",
+                        "filename": "Artist\\Album\\01.flac",
+                        "file_dir": "Artist\\Album",
+                        "size": 123,
+                    }],
+                },
+            ))
+            job = handoff_automation_owner(
+                db,
+                42,
+                state=db.request(42)["active_download_state"],
+                canonical_path=canonical_path,
+            )
+            lease = _preview_execution_lease("resume-handoff")
+            trace: list[str] = []
+            blocked_trace: list[str] = []
+            captured_units: list[str] = []
+            persisted_claim_leases: list[tuple[str | None, str | None]] = []
+
+            def capture_lease(
+                *,
+                systemd_unit: str,
+            ) -> ExecutionLeaseSnapshot:
+                captured_units.append(systemd_unit)
+                return lease
+
+            def preview(
+                preview_db: Any,
+                *args: Any,
+                **kwargs: Any,
+            ) -> ImportPreviewResult:
+                claimed = claimed_holder["job"]
+                persisted = db.get_import_job(claimed.id)
+                assert persisted is not None
+                persisted_claim_leases.append((
+                    persisted.execution_invocation_id,
+                    persisted.execution_systemd_unit,
+                ))
+                # A second worker seeing the same claimed job cannot enter the
+                # request's IMPORT critical section and therefore cannot
+                # measure or commit it.
+                duplicate = import_preview_worker._process_automation_claim(
+                    claimed,
+                    dsn="postgresql://fake",
+                    execution_lease=lease,
+                    heartbeat_interval=3600,
+                    runtime_config=CratediggerConfig(),
+                    stage_db_factory=lambda _dsn: StageSession(
+                        db, blocked_trace, acquire=False,
+                    ),
+                    heartbeat_db_factory=lambda _dsn: db,
+                )
+                self.assertIsNone(duplicate)
+                self._seed_job_candidate_evidence(
+                    preview_db,
+                    claimed.id,
+                    canonical_path,
+                )
+                return self._preview(
+                    "would_import",
+                    reason="import",
+                    source_path=canonical_path,
+                )
+
+            # ``run_once`` owns the initial claim; retain its exact row for the
+            # nested duplicate-attempt proof above.
+            claimed_holder: dict[str, ImportJob] = {}
+
+            def stage_factory(_dsn: str) -> StageSession:
+                stored = db.get_import_job(job.id)
+                assert stored is not None
+                claimed_holder["job"] = stored
+                return StageSession(db, trace, acquire=True)
+
+            with (
+                patch(
+                    "scripts.import_preview_worker.canonical_folder_for_row",
+                    return_value=canonical_path,
+                ),
+                patch(
+                    "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
+                    side_effect=preview,
+                ),
+            ):
+                updated = import_preview_worker.run_once(
+                    db,
+                    worker_id="preview",
+                    heartbeat_interval=3600,
+                    runtime_config=CratediggerConfig(),
+                    stage_db_factory=stage_factory,
+                    heartbeat_db_factory=lambda _dsn: db,
+                    execution_lease_factory=capture_lease,
+                )
+
+        assert updated is not None
+        self.assertEqual(updated.preview_status, "evidence_ready")
+        self.assertEqual(
+            captured_units,
+            [import_preview_worker.PREVIEW_SYSTEMD_UNIT],
+        )
+        self.assertEqual(
+            persisted_claim_leases,
+            [(lease.invocation_id, lease.systemd_unit)],
+        )
+        self.assertEqual(
+            trace,
+            [
+                "pin-enter",
+                f"lock-enter:{import_preview_worker.ADVISORY_LOCK_NAMESPACE_IMPORT}:42",
+                "commit:evidence",
+                "commit:preview",
+                f"lock-exit:{import_preview_worker.ADVISORY_LOCK_NAMESPACE_IMPORT}:42",
+                "pin-exit",
+                "close",
+            ],
+        )
+        self.assertEqual(
+            blocked_trace,
+            [
+                "pin-enter",
+                f"lock-enter:{import_preview_worker.ADVISORY_LOCK_NAMESPACE_IMPORT}:42",
+                f"lock-exit:{import_preview_worker.ADVISORY_LOCK_NAMESPACE_IMPORT}:42",
+                "pin-exit",
+                "close",
+            ],
+        )
+
+    def test_automation_wrong_owner_stops_before_filesystem_or_measurement(self):
+        from scripts import import_preview_worker
+
+        class StageSession:
+            def __init__(self, inner: FakePipelineDB) -> None:
+                self._inner = inner
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self._inner, name)
+
+            @contextmanager
+            def _pin_owner_session(self, token: CancellationToken):
+                token.raise_if_cancelled()
+                yield object()
+
+            def close(self) -> None:
+                return None
+
+        with tempfile.TemporaryDirectory() as canonical_path:
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(id=42))
+            job = handoff_automation_owner(
+                db,
+                42,
+                state={
+                    "filetype": "flac",
+                    "enqueued_at": "2026-04-25T00:00:00+00:00",
+                    "current_path": canonical_path,
+                    "files": [{
+                        "username": "alice",
+                        "filename": "Artist\\Album\\01.flac",
+                        "file_dir": "Artist\\Album",
+                        "size": 123,
+                    }],
+                },
+                canonical_path=canonical_path,
+            )
+            lease = _preview_execution_lease("wrong-owner")
+            claimed = db.claim_next_import_preview_job(
+                worker_id="preview",
+                execution_lease=lease,
+            )
+            assert claimed is not None
+            db._requests[42]["active_automation_import_job_id"] = job.id + 1
+
+            with (
+                patch(
+                    "lib.download_materialization._materialize_processing_dir",
+                ) as materialize,
+                patch(
+                    "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
+                ) as measure,
+            ):
+                updated = import_preview_worker._process_automation_claim(
+                    claimed,
+                    dsn="postgresql://fake",
+                    execution_lease=lease,
+                    heartbeat_interval=3600,
+                    runtime_config=CratediggerConfig(),
+                    stage_db_factory=lambda _dsn: StageSession(db),
+                    heartbeat_db_factory=lambda _dsn: db,
+                )
+
+        self.assertIsNone(updated)
+        materialize.assert_not_called()
+        measure.assert_not_called()
+
+    def test_automation_pinned_session_loss_before_lock_is_fail_stop(self):
+        """Known-bad reconnect between pin and IMPORT lock cannot run preview."""
+        from lib.pipeline_db._core import OwnerSessionLost
+        from scripts import import_preview_worker
+
+        class LostStageSession:
+            def __init__(self, inner: FakePipelineDB) -> None:
+                self._inner = inner
+                self._pinned = False
+                self._token: CancellationToken | None = None
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self._inner, name)
+
+            @contextmanager
+            def _pin_owner_session(self, token: CancellationToken):
+                token.raise_if_cancelled()
+                self._pinned = True
+                self._token = token
+                try:
+                    yield object()
+                finally:
+                    self._pinned = False
+
+            @contextmanager
+            def advisory_lock(self, namespace: int, key: int):
+                del namespace, key
+                if not self._pinned or self._token is None:
+                    raise AssertionError(
+                        "known-bad lock-before-pin ordering returned"
+                    )
+                self._token.cancel("owner_session_lost_before_import_lock")
+                raise OwnerSessionLost(
+                    "pinned backend died before IMPORT lock acquisition"
+                )
+                yield False  # pragma: no cover - contextmanager shape only
+
+            def close(self) -> None:
+                return None
+
+        with tempfile.TemporaryDirectory() as canonical_path:
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(id=42))
+            handoff_automation_owner(
+                db,
+                42,
+                state={
+                    "filetype": "flac",
+                    "enqueued_at": "2026-04-25T00:00:00+00:00",
+                    "current_path": canonical_path,
+                    "files": [{
+                        "username": "alice",
+                        "filename": "Artist\\Album\\01.flac",
+                        "file_dir": "Artist\\Album",
+                        "size": 123,
+                    }],
+                },
+                canonical_path=canonical_path,
+            )
+            lease = _preview_execution_lease("lost-before-lock")
+            claimed = db.claim_next_import_preview_job(
+                worker_id="preview",
+                execution_lease=lease,
+            )
+            assert claimed is not None
+
+            with (
+                patch(
+                    "lib.download_materialization._materialize_processing_dir",
+                ) as materialize,
+                patch(
+                    "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
+                ) as measure,
+                self.assertRaises(OwnerSessionLost),
+            ):
+                import_preview_worker._process_automation_claim(
+                    claimed,
+                    dsn="postgresql://fake",
+                    execution_lease=lease,
+                    heartbeat_interval=3600,
+                    runtime_config=CratediggerConfig(),
+                    stage_db_factory=lambda _dsn: LostStageSession(db),
+                    heartbeat_db_factory=lambda _dsn: db,
+                )
+
+        stored = db.get_import_job(claimed.id)
+        assert stored is not None
+        self.assertEqual(stored.preview_status, "running")
+        self.assertEqual(
+            stored.execution_invocation_id,
+            lease.invocation_id,
+        )
+        materialize.assert_not_called()
+        measure.assert_not_called()
+
+    def test_automation_session_loss_during_materialization_blocks_later_mutation(self):
+        from scripts import import_preview_worker
+
+        with tempfile.TemporaryDirectory() as root:
+            canonical_path = os.path.join(root, "processing", "albums", "album")
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(id=42))
+            handoff_automation_owner(
+                db,
+                42,
+                state={
+                    "filetype": "flac",
+                    "enqueued_at": "2026-04-25T00:00:00+00:00",
+                    "current_path": canonical_path,
+                    "files": [{
+                        "username": "alice",
+                        "filename": "Artist\\Album\\01.flac",
+                        "file_dir": "Artist\\Album",
+                        "size": 123,
+                    }],
+                },
+                canonical_path=canonical_path,
+            )
+            lease = _preview_execution_lease("session-loss")
+            claimed = db.claim_next_import_preview_job(
+                worker_id="preview",
+                execution_lease=lease,
+            )
+            assert claimed is not None
+            authority = import_preview_worker._AutomationPreviewAuthority(
+                request=db.request(42),
+                state=ActiveDownloadState.from_raw(
+                    db.request(42)["active_download_state"]
+                ),
+                canonical_path=canonical_path,
+            )
+            token = CancellationToken()
+
+            def lose_session(*args: Any, **kwargs: Any) -> None:
+                self.assertIs(kwargs["cancellation_token"], token)
+                token.cancel("owner_session_lost")
+                token.raise_if_cancelled()
+
+            with (
+                patch(
+                    "lib.download_materialization._materialize_processing_dir",
+                    side_effect=lose_session,
+                ) as materialize,
+                patch(
+                    "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
+                ) as measure,
+                self.assertRaises(ExecutionCancelled),
+            ):
+                import_preview_worker.process_claimed_preview_job(
+                    db,
+                    claimed,
+                    runtime_config=CratediggerConfig(
+                        slskd_download_dir=root,
+                        processing_dir=os.path.join(root, "processing"),
+                    ),
+                    execution_lease=lease,
+                    automation_authority=authority,
+                    cancellation_token=token,
+                )
+
+            stored = db.get_import_job(claimed.id)
+            assert stored is not None
+            self.assertEqual(stored.preview_status, "running")
+            self.assertIsNone(stored.candidate_evidence_id)
+            materialize.assert_called_once()
+            measure.assert_not_called()
 
     def test_evidence_readiness_fallback_preserves_collected_audit(self):
         from lib.quality import SpectralAnalysisDetail, SpectralDetail
@@ -2599,6 +3610,138 @@ class TestImportPreviewWorker(unittest.TestCase):
         self.assertEqual(
             recovered.preview_message,
             import_preview_worker.STALE_PREVIEW_MESSAGE,
+        )
+
+    def test_automation_startup_recovery_requires_exact_dead_execution(self):
+        from lib.import_execution import (
+            CgroupObservation,
+            ExecutionLivenessEvidence,
+            InvocationObservation,
+            ProcessObservation,
+        )
+        from scripts import import_preview_worker
+
+        class Probe:
+            def __init__(
+                self,
+                expected_lease: ExecutionLeaseSnapshot,
+                evidence: ExecutionLivenessEvidence,
+            ) -> None:
+                self.expected_lease = expected_lease
+                self.evidence = evidence
+
+            def observe(
+                self,
+                lease: ExecutionLeaseSnapshot,
+            ) -> ExecutionLivenessEvidence:
+                if lease != self.expected_lease:
+                    raise AssertionError("startup probe received wrong lease")
+                return self.evidence
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42))
+        handoff_automation_owner(db, 42)
+        lease = _preview_execution_lease("startup-recovery")
+        claimed = db.claim_next_import_preview_job(
+            worker_id="old-preview",
+            execution_lease=lease,
+        )
+        assert claimed is not None
+
+        live = ExecutionLivenessEvidence(
+            lease=lease,
+            current_host_boot_id=lease.host_boot_id,
+            boot_error=None,
+            worker=ProcessObservation(
+                identity=lease.worker,
+                state="exact",
+                observed_start_ticks=lease.worker.start_ticks,
+                cgroup_path=(
+                    "/system.slice/cratedigger-import-preview-worker.service"
+                ),
+                reason="exact worker",
+            ),
+            beets=None,
+            invocation=InvocationObservation(
+                state="exact",
+                stored_invocation_id=lease.invocation_id,
+                observed_invocation_id=lease.invocation_id,
+                control_group=(
+                    "/system.slice/cratedigger-import-preview-worker.service"
+                ),
+                reason="exact invocation",
+                active_state="active",
+                sub_state="running",
+            ),
+            cgroup=CgroupObservation(
+                state="exact",
+                path="/system.slice/cratedigger-import-preview-worker.service",
+                member_pids=(lease.worker.pid,),
+                reason="exact cgroup",
+            ),
+        )
+        unknown = ExecutionLivenessEvidence(
+            lease=lease,
+            current_host_boot_id=None,
+            boot_error=None,
+            worker=None,
+            beets=None,
+            invocation=None,
+            cgroup=None,
+            probe_error="systemd unavailable",
+        )
+        dead = ExecutionLivenessEvidence(
+            lease=lease,
+            current_host_boot_id="new-boot",
+            boot_error=None,
+            worker=None,
+            beets=None,
+            invocation=None,
+            cgroup=None,
+        )
+
+        for evidence in (live, unknown):
+            with self.subTest(status=evidence.probe_error or "live"):
+                recovered = import_preview_worker.recover_running_preview_jobs(
+                    cast(Any, db),
+                    liveness_probe=Probe(lease, evidence),
+                )
+                self.assertEqual(recovered, [])
+                stored = db.get_import_job(claimed.id)
+                assert stored is not None
+                self.assertEqual(stored.preview_status, "running")
+                self.assertEqual(
+                    stored.execution_invocation_id,
+                    lease.invocation_id,
+                )
+
+        recovered = import_preview_worker.recover_running_preview_jobs(
+            cast(Any, db),
+            liveness_probe=Probe(lease, dead),
+        )
+        self.assertEqual([job.id for job in recovered], [claimed.id])
+        stored = db.get_import_job(claimed.id)
+        assert stored is not None
+        self.assertEqual(stored.preview_status, "waiting")
+        self.assertIsNone(stored.execution_invocation_id)
+
+        # The periodic age sweep is deliberately non-automation even after
+        # the row has been claimed again under a new exact lease.
+        reclaimed = db.claim_next_import_preview_job(
+            worker_id="new-preview",
+            execution_lease=_preview_execution_lease("new-preview"),
+        )
+        assert reclaimed is not None
+        self.assertEqual(
+            import_preview_worker.recover_abandoned_preview_jobs(
+                cast(Any, db),
+                older_than=timedelta(seconds=-1),
+            ),
+            [],
+        )
+        self.assertEqual(
+            db.get_import_job(reclaimed.id).preview_status,  # type: ignore[union-attr]
+            "running",
         )
 
     def test_confident_reject_fails_job_without_denylisting_source(self):
@@ -3634,7 +4777,6 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             db = FakePipelineDB()
             db.seed_request(make_request_row(
                 id=42,
-                status="downloading",
                 active_download_state={
                     "filetype": "flac",
                     "enqueued_at": "2026-04-25T00:00:00+00:00",
@@ -3647,15 +4789,33 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                     }],
                 },
             ))
-            db.enqueue_import_job(
-                IMPORT_JOB_AUTOMATION,
-                request_id=42,
-                dedupe_key=automation_import_dedupe_key(42),
-                payload={},
+            handoff_automation_owner(
+                db,
+                42,
+                state=db.request(42)["active_download_state"],
+                canonical_path=staged,
             )
-            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            lease = _preview_execution_lease()
+            claimed = db.claim_next_import_preview_job(
+                worker_id="preview",
+                execution_lease=lease,
+            )
             assert claimed is not None
-            self._seed_evidence_for_job(db, claimed.id, staged)
+            authority = import_preview_worker._AutomationPreviewAuthority(
+                request=db.request(42),
+                state=ActiveDownloadState.from_raw(
+                    db.request(42)["active_download_state"]
+                ),
+                canonical_path=staged,
+            )
+            self._seed_evidence_for_job(
+                cast(
+                    Any,
+                    import_preview_worker._AutomationPreviewDB(db, lease),
+                ),
+                claimed.id,
+                staged,
+            )
 
             candidate_audit_calls: list[str] = []
 
@@ -3677,6 +4837,9 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                     db,
                     claimed,
                     spectral_detail_analyzer=analyze,
+                    execution_lease=lease,
+                    automation_authority=authority,
+                    cancellation_token=CancellationToken(),
                 )
 
         preview.assert_not_called()
@@ -4733,7 +5896,8 @@ class TestFrontGateSourcePathYoutubeImport(unittest.TestCase):
         })
 
         result = import_preview_worker._front_gate_source_path(
-            db, job,
+            db,
+            job,
         )
 
         self.assertEqual(result, "/Incoming/auto-import/Artist - Album")
@@ -4775,8 +5939,17 @@ class TestFrontGateSourcePathYoutubeImport(unittest.TestCase):
             ),
         })
 
+        authority = import_preview_worker._AutomationPreviewAuthority(
+            request=db.request(42),
+            state=ActiveDownloadState.from_raw(
+                db.request(42)["active_download_state"]
+            ),
+            canonical_path="/slskd/Test Artist - Test Album",
+        )
         result = import_preview_worker._front_gate_source_path(
-            db, job,
+            db,
+            job,
+            automation_authority=authority,
         )
 
         # Returns the payload path, not the active_download_state path.
@@ -4812,11 +5985,87 @@ class TestFrontGateSourcePathYoutubeImport(unittest.TestCase):
             "payload": {},
         })
 
+        authority = import_preview_worker._AutomationPreviewAuthority(
+            request=db.request(42),
+            state=ActiveDownloadState.from_raw(
+                db.request(42)["active_download_state"]
+            ),
+            canonical_path="/slskd/Test Artist - Test Album",
+        )
         result = import_preview_worker._front_gate_source_path(
-            db, job,
+            db,
+            job,
+            automation_authority=authority,
         )
 
         self.assertEqual(result, "/slskd/Test Artist - Test Album")
+
+    @given(
+        leaf=st.text(
+            alphabet="abcdefghijklmnopqrstuvwxyz0123456789-_",
+            min_size=1,
+            max_size=24,
+        ),
+        authority_captured=st.booleans(),
+    )
+    def test_automation_front_gate_generated_never_derives_owner_path(
+        self,
+        leaf: str,
+        authority_captured: bool,
+    ) -> None:
+        """Known-bad path derivation loses to the captured owner snapshot."""
+        from lib.import_queue import ImportJob, automation_import_dedupe_key
+        from scripts import import_preview_worker
+
+        current_path = f"/processing/albums/{leaf}"
+        state = ActiveDownloadState.from_raw({
+            "filetype": "flac",
+            "enqueued_at": "2026-04-25T00:00:00+00:00",
+            "current_path": current_path,
+            "files": [{
+                "username": "alice",
+                "filename": "Artist\\Album\\01.flac",
+                "file_dir": "Artist\\Album",
+                "size": 123,
+            }],
+        })
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="processing",
+            active_download_state=msgspec.to_builtins(state),
+        ))
+        job = ImportJob.from_row({
+            "id": 1,
+            "job_type": IMPORT_JOB_AUTOMATION,
+            "status": "queued",
+            "request_id": 42,
+            "dedupe_key": automation_import_dedupe_key(42),
+            "payload": {},
+        })
+        authority = (
+            import_preview_worker._AutomationPreviewAuthority(
+                request=db.request(42),
+                state=state,
+                canonical_path=current_path,
+            )
+            if authority_captured
+            else None
+        )
+
+        actual = import_preview_worker._front_gate_source_path(
+            db,
+            job,
+            automation_authority=authority,
+        )
+        expected = current_path if authority_captured else None
+        self.assertEqual(actual, expected)
+        if not authority_captured:
+            # Fault injection for the removed behavior: rereading/deriving the
+            # row path would have authorized a filesystem read without the
+            # lock-and-session snapshot.
+            owner_blind_mutant = state.current_path
+            self.assertNotEqual(actual, owner_blind_mutant)
 
     def test_youtube_job_malformed_payload_is_rejected_before_front_gate(self):
         """The preview worker only receives a decoded YT payload struct."""

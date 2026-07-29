@@ -14,7 +14,7 @@ import logging
 import os
 import re
 import zlib
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -58,6 +58,76 @@ DASHBOARD_WANTED_BACKLOG_STATUSES: tuple[str, ...] = (
     "downloading",
     REQUEST_STATUS_PROCESSING,
 )
+ACQUISITION_REQUEST_STATUSES: tuple[str, ...] = (
+    "downloading",
+    REQUEST_STATUS_PROCESSING,
+)
+
+
+class ProcessingOwnerProjection(msgspec.Struct, frozen=True):
+    """Exact automation owner exposed on request-shaped API payloads."""
+
+    job_id: int
+    status: str
+    preview_status: str
+
+
+# Every request presentation query uses these exact aliases and joins only
+# through ``album_requests.active_automation_import_job_id``.  Keeping the
+# projection here prevents browse/library/search routes from reconstructing an
+# owner from a latest job or a path.
+REQUEST_PRESENTATION_SELECT = """
+    request_row.*,
+    processing_owner_job.id AS _processing_owner_job_id,
+    processing_owner_job.status AS _processing_owner_status,
+    processing_owner_job.preview_status AS _processing_owner_preview_status
+"""
+REQUEST_PRESENTATION_FROM = """
+    FROM album_requests request_row
+    LEFT JOIN import_jobs processing_owner_job
+      ON processing_owner_job.id =
+         request_row.active_automation_import_job_id
+"""
+
+
+def processing_owner_payload(
+    row: Mapping[str, object],
+) -> dict[str, object] | None:
+    """Build the one exact-owner request projection.
+
+    Non-processing requests always expose ``None``, even if a malformed row
+    retains a stale pointer. A processing request must carry a joined owner
+    matching its durable pointer; refusing malformed state is safer than
+    presenting an inferred or unrelated job.
+    """
+    if row.get("status") != REQUEST_STATUS_PROCESSING:
+        return None
+
+    active_job_id = row.get("active_automation_import_job_id")
+    joined_job_id = row.get("_processing_owner_job_id")
+    owner_status = row.get("_processing_owner_status")
+    preview_status = row.get("_processing_owner_preview_status")
+    if (
+        not isinstance(active_job_id, int)
+        or isinstance(active_job_id, bool)
+        or not isinstance(joined_job_id, int)
+        or isinstance(joined_job_id, bool)
+        or joined_job_id != active_job_id
+        or not isinstance(owner_status, str)
+        or not isinstance(preview_status, str)
+    ):
+        raise RuntimeError(
+            "processing request is missing its exact joined automation owner"
+        )
+    payload: dict[str, object] = msgspec.to_builtins(
+        ProcessingOwnerProjection(
+            job_id=joined_job_id,
+            status=owner_status,
+            preview_status=preview_status,
+        )
+    )
+    return payload
+
 
 # ``update_request_fields`` is deliberately a metadata-only compare-and-set
 # seam.  These columns either define the request's immutable identity, belong

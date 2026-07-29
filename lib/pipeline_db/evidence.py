@@ -4,6 +4,7 @@ from typing import Any
 
 import msgspec
 
+from lib.import_execution import ExecutionLeaseSnapshot
 from lib.pipeline_db._core import _PipelineDBBase
 from lib.quality import (
     AlbumQualityEvidence,
@@ -726,12 +727,57 @@ class _EvidenceMixin(_PipelineDBBase):
         self,
         import_job_id: int,
         evidence_id: int | None,
-    ) -> None:
-        self._execute(
-            "UPDATE import_jobs SET candidate_evidence_id = %s WHERE id = %s",
-            (evidence_id, int(import_job_id)),
+        *,
+        expected_execution_lease: ExecutionLeaseSnapshot | None = None,
+    ) -> bool:
+        """Bind preview evidence only while the exact producer owns the job."""
+        lease = expected_execution_lease
+        if lease is not None and lease.beets is not None:
+            return False
+        cur = self._execute(
+            """
+            UPDATE import_jobs AS job
+            SET candidate_evidence_id = %s,
+                updated_at = NOW()
+            WHERE job.id = %s
+              AND (
+                  job.job_type <> 'automation_import'
+                  OR (
+                      %s IS NOT NULL
+                      AND job.status = 'queued'
+                      AND job.preview_status = 'running'
+                      AND EXISTS (
+                          SELECT 1
+                          FROM album_requests AS request
+                          WHERE request.id = job.request_id
+                            AND request.status = 'processing'
+                            AND request.active_automation_import_job_id = job.id
+                      )
+                      AND job.execution_invocation_id = %s
+                      AND job.execution_host_boot_id = %s
+                      AND job.execution_systemd_unit = %s
+                      AND job.execution_worker_pid = %s
+                      AND job.execution_worker_start_ticks = %s
+                      AND job.execution_beets_pid IS NULL
+                      AND job.execution_beets_start_ticks IS NULL
+                  )
+              )
+            RETURNING job.id
+            """,
+            (
+                evidence_id,
+                int(import_job_id),
+                lease.invocation_id if lease is not None else None,
+                lease.invocation_id if lease is not None else None,
+                lease.host_boot_id if lease is not None else None,
+                lease.systemd_unit if lease is not None else None,
+                lease.worker.pid if lease is not None else None,
+                lease.worker.start_ticks if lease is not None else None,
+            ),
         )
+        persisted = cur.fetchone() is not None
         self.conn.commit()
+        return persisted
 
 
     def set_download_log_candidate_evidence(

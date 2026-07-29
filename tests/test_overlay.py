@@ -40,10 +40,12 @@ class TestOverlayReleaseRowsInPlace(unittest.TestCase):
                       return_value={
                           "queued": {"id": 21, "status": "wanted",
                                      "verified_lossless": False,
-                                     "provisional_lossless": True},
+                                     "provisional_lossless": True,
+                                     "processing_owner": None},
                           "both": {"id": 22, "status": "queued",
                                    "verified_lossless": True,
-                                   "provisional_lossless": False},
+                                   "provisional_lossless": False,
+                                   "processing_owner": None},
                       }), \
                 patch("web.server._beets_db", return_value=mock_beets):
             overlay_release_rows_in_place(rows, [str(r["id"]) for r in rows])
@@ -65,6 +67,7 @@ class TestOverlayReleaseRowsInPlace(unittest.TestCase):
         self.assertEqual(by_id["queued"]["pipeline_id"], 21)
         self.assertFalse(by_id["queued"]["pipeline_verified_lossless"])
         self.assertTrue(by_id["queued"]["pipeline_provisional"])
+        self.assertIsNone(by_id["queued"]["processing_owner"])
         self.assertFalse(by_id["held"]["pipeline_verified_lossless"])
         self.assertFalse(by_id["held"]["pipeline_provisional"])
 
@@ -82,6 +85,7 @@ class TestOverlayReleaseRowsInPlace(unittest.TestCase):
         self.assertIsNone(by_id["neither"]["beets_album_id"])
         self.assertIsNone(by_id["neither"]["pipeline_status"])
         self.assertIsNone(by_id["neither"]["pipeline_id"])
+        self.assertIsNone(by_id["neither"]["processing_owner"])
 
         self.assertEqual(by_id["bad-quality"]["library_format"], "")
         self.assertEqual(by_id["bad-quality"]["library_min_bitrate"], 0)

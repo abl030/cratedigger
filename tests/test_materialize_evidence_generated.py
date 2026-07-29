@@ -9,12 +9,6 @@ around them.
 Invariants under patrol
 -----------------------
 
-**I1 — a materialize failure never resets a request uncaused.** The
-reason reaches the journal at every failure site, and every reset writes
-a ``download_log`` row carrying that reason. The pre-enqueue gate writes
-its two staged-path failures peer-neutrally because no peer verdict was
-involved.
-
 **I2 — distinguishable outcomes never collapse.** "slskd never stamped a
 location", "the stamp points at nothing", "the name failed containment"
 and "the storage layer refused the open" are four different operator
@@ -37,17 +31,14 @@ as the other — including the shapes that fail at ``open`` before an
 of an exception's message text, so no reason can be truncated by a
 message that happens to contain a colon.
 
-**I5 — the lifecycle is unchanged by the split.** The status transition,
-the cooldown, and the grace/retry decision depend on the failure TAG and
-the grace window, never on which reason string the failure carries.
-
 The properties drive REAL production functions
 (``lib.fs_authority._raise_path_error``,
 ``lib.download_materialization._materialize_processing_dir`` /
-``source_preflight_reason`` / ``materialize_authority_reason``,
-``lib.download._enqueue_completed_processing``) against a real temporary
-filesystem and a real ``FakePipelineDB``. Nothing this repo owns is
-mocked: the writer, the guard and the persister all run for real.
+``source_preflight_reason`` / ``materialize_authority_reason``) against
+a real temporary filesystem and a real ``FakePipelineDB``. Nothing this
+repo owns is mocked: the writer, the guard and the persister all run for
+real. Request lifecycle ownership is tested at the processor boundary;
+the downloader no longer materializes or applies a grace-window reset.
 
 Profiles and promotion policy: tests/_hypothesis_profiles.py and
 docs/generated-testing.md.
@@ -61,20 +52,12 @@ import socket
 import tempfile
 import unittest
 import unittest.mock
-from collections.abc import Sequence
-from datetime import UTC, datetime, timedelta
 
 from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.config import CratediggerConfig
-from lib.download import (
-    PROCESSING_MATERIALIZE_GRACE_S,
-    _enqueue_completed_processing,
-    _processing_path_ready_for_importer,
-    materialize_failure_action,
-)
 from lib.download_materialization import (
     REASON_EVENT_PATH_GONE_FROM_DISK,
     REASON_EVENT_PATH_NEVER_STAMPED,
@@ -94,17 +77,12 @@ from lib.download_materialization import (
     REASON_UNSAFE_SOURCE_PATH,
     Materialized,
     MaterializeFailed,
-    MaterializeGuarded,
-    _evaluate_staged_path_readiness,
     _fsync_private_directory,
     _materialize_processing_dir,
     materialize_authority_reason,
     shared_download_root_reason,
     source_preflight_reason,
 )
-from lib.download_reconstruction import reconstruct_grab_list_entry
-from lib.download_recovery import ProcessingPathLocation
-from lib.failure_presentation import FailureEvidence, present_failure
 from lib.fs_authority import (
     CopyDestinationWriteError,
     FilesystemAuthorityError,
@@ -117,15 +95,12 @@ from lib.grab_list import DownloadFile
 from lib.processing_paths import (
     canonical_folder_for_row,
     processing_albums_dir,
-    stage_to_ai_path,
 )
-from lib.quality import ActiveDownloadFileState, ActiveDownloadState
 from lib.staged_album import StagedAlbum
 from tests.fakes import FakePipelineDB
 from tests.helpers import (
     make_ctx_with_fake_db,
     make_grab_list_entry,
-    make_request_row,
 )
 from tests.test_path_authority import assert_publication_invariant
 
@@ -225,94 +200,6 @@ def assert_reason_partition_invariant(
         raise AssertionError(
             f"non-storage reason {reason!r} was built from errno {errno_symbol!r}",
         )
-
-
-def assert_lifecycle_unchanged_by_reason(
-    *,
-    reason: str,
-    grace_expired: bool,
-    status: str,
-    cooldowns_applied: list[str],
-    log_outcomes: list[str | None],
-    persisted_details: list[str | None],
-) -> None:
-    """The reason decides the EVIDENCE, never the lifecycle (I1 + I5).
-
-    Expired grace always resets to ``wanted`` with one cooldown and one
-    ``failed`` row carrying the reason; an open grace window always
-    leaves the row alone with no audit at all — whatever the reason is.
-
-    I1 is scoped to THIS grace-window path. The poller's pre-enqueue gate
-    has its own generated property below: its reset writes one peer-neutral
-    failed row carrying the staged-path reason.
-    """
-    if not grace_expired:
-        if status != "downloading":
-            raise AssertionError(
-                f"open grace window transitioned to {status!r}",
-            )
-        if cooldowns_applied or log_outcomes:
-            raise AssertionError(
-                "open grace window applied a cooldown or wrote an audit row",
-            )
-        return
-    if status != "wanted":
-        raise AssertionError(f"expired grace left status {status!r}, expected wanted")
-    if cooldowns_applied != ["user1"]:
-        raise AssertionError(
-            f"expired grace applied cooldowns {cooldowns_applied!r}, expected ['user1']",
-        )
-    if log_outcomes != ["failed"]:
-        raise AssertionError(
-            f"expired grace wrote outcomes {log_outcomes!r}, expected ['failed']",
-        )
-    if persisted_details != [reason]:
-        raise AssertionError(
-            f"expired grace persisted {persisted_details!r}, expected [{reason!r}] "
-            "— a reset without a recoverable cause",
-        )
-
-
-def check_pre_enqueue_reset_evidence(
-    *,
-    reason: str,
-    filetype: str,
-    event: (
-        tuple[str | None, str | None, str | None, str | None, str | None]
-        | None
-    ),
-    verdict: str | None,
-) -> str | None:
-    """Return why the reset evidence/copy is wrong, or ``None``."""
-    expected_event = ("failed", None, filetype, reason, reason)
-    if event != expected_event:
-        return f"pre-enqueue reset event {event!r}, expected {expected_event!r}"
-    lowered = (verdict or "").casefold()
-    if "possible filesystem error" not in lowered:
-        return f"pre-enqueue copy hid filesystem uncertainty: {verdict!r}"
-    for false_claim in ("missing", "disappeared", "deleted"):
-        if false_claim in lowered:
-            return f"pre-enqueue copy asserted {false_claim!r}: {verdict!r}"
-    if "peer" in lowered:
-        return f"pre-enqueue copy attributed the failure to a peer: {verdict!r}"
-    return None
-
-
-def check_abandonment_handled_once(
-    result: Materialized | MaterializeFailed | MaterializeGuarded,
-    transitions: Sequence[tuple[int, str]],
-    audits: Sequence[tuple[str | None, str | None]],
-) -> str | None:
-    """Return why successful abandonment could fall through, or ``None``."""
-    if not isinstance(result, MaterializeGuarded):
-        return f"successful abandonment returned {result!r}, allowing reset fallthrough"
-    if result.detail != "abandoned_interrupted_auto_import":
-        return f"successful abandonment returned detail {result.detail!r}"
-    if transitions != [(1, "wanted")]:
-        return f"successful abandonment transitioned {transitions!r}"
-    if audits != [("failed", "abandoned_auto_import")]:
-        return f"successful abandonment audited {audits!r}"
-    return None
 
 
 # ============================================================================
@@ -786,253 +673,6 @@ class TestGeneratedMaterializeFailureReasons(unittest.TestCase):
 # ============================================================================
 
 
-class TestGeneratedMaterializeLifecycle(unittest.TestCase):
-    def test_reason_changes_the_evidence_not_the_lifecycle(self) -> None:
-        for world in _FAILING_WORLDS:
-            for grace_expired in (False, True):
-                with self.subTest(
-                    world=world,
-                    grace_expired=grace_expired,
-                ):
-                    self._assert_reason_changes_only_evidence(
-                        world=world,
-                        grace_expired=grace_expired,
-                    )
-
-    def _assert_reason_changes_only_evidence(
-        self, world: str, grace_expired: bool,
-    ) -> None:
-        """Drives the REAL poller enqueue path: real materialize, real
-        grace arbitration, real transition, real audit write."""
-        now = datetime.now(UTC)
-        started = (
-            now - timedelta(seconds=PROCESSING_MATERIALIZE_GRACE_S + 600)
-            if grace_expired
-            else now
-        )
-        with tempfile.TemporaryDirectory() as parent:
-            built = _build_world(parent, world, "track")
-            album = make_grab_list_entry(
-                files=[built.file], artist="Artist", title="Album", year="2020",
-                db_request_id=1, mb_release_id="")
-            db = FakePipelineDB()
-            db.seed_request(make_request_row(id=1, status="downloading"))
-            ctx = make_ctx_with_fake_db(db, cfg=built.cfg)
-            # The HAVE-evidence enrichment is a different subsystem; zero
-            # budget short-circuits it without stubbing anything.
-            ctx.evidence_enrichment_budget = 0
-            state = ActiveDownloadState(
-                filetype="mp3",
-                enqueued_at=started.isoformat(),
-                files=[],
-                processing_started_at=started.isoformat(),
-            )
-            try:
-                job = _enqueue_completed_processing(album, 1, state, db, ctx)
-            finally:
-                built.close()
-
-            self.assertIsNone(job)
-            assert_lifecycle_unchanged_by_reason(
-                reason=_WORLD_REASONS[world],
-                grace_expired=grace_expired,
-                status=db.request(1)["status"],
-                cooldowns_applied=list(db.cooldowns_applied),
-                log_outcomes=[row.outcome for row in db.download_logs],
-                persisted_details=[row.beets_detail for row in db.download_logs],
-            )
-
-    @given(reason=st.text(min_size=0, max_size=64), age_seconds=st.integers(
-        min_value=0, max_value=PROCESSING_MATERIALIZE_GRACE_S * 3))
-    def test_grace_arbitration_ignores_the_reason_string(
-        self, reason: str, age_seconds: int,
-    ) -> None:
-        """I5 at the decision itself: only the tag and the clock matter."""
-        now = datetime.now(UTC)
-        started = (now - timedelta(seconds=age_seconds)).isoformat()
-        expected = "reset" if age_seconds > PROCESSING_MATERIALIZE_GRACE_S else "retry"
-        self.assertEqual(
-            materialize_failure_action(MaterializeFailed(reason=reason), started, now),
-            expected,
-        )
-        # The same clock, a guarded tag: never auto-reset, whatever the age.
-        self.assertEqual(
-            materialize_failure_action(MaterializeGuarded(detail=reason), started, now),
-            "leave",
-        )
-        self.assertEqual(
-            materialize_failure_action(Materialized(), started, now),
-            "leave",
-        )
-
-
-def _staged_gate_world(
-    parent: str,
-    *,
-    filetype: str,
-    path_state: str,
-    subprocess_started_at: str | None,
-):
-    """Build one persisted staged-path world and reconstruct its entry."""
-    built = _build_world(parent, "healthy", "track")
-    current_path = stage_to_ai_path(
-        artist="Artist",
-        title="Album",
-        staging_dir=built.cfg.beets_staging_dir,
-        request_id=1,
-        auto_import=True,
-    )
-    now = datetime.now(UTC).isoformat()
-    state = ActiveDownloadState(
-        filetype=filetype,
-        enqueued_at=now,
-        files=[
-            ActiveDownloadFileState(
-                username=built.file.username,
-                filename=built.file.filename,
-                file_dir=built.file.file_dir,
-                size=built.file.size,
-                local_path=built.file.local_path,
-            ),
-        ],
-        processing_started_at=now,
-        import_subprocess_started_at=subprocess_started_at,
-        current_path=current_path,
-    )
-    db = FakePipelineDB()
-    db.seed_request(make_request_row(
-        id=1,
-        status="downloading",
-        artist_name="Artist",
-        album_title="Album",
-        year=2020,
-        source="request",
-        active_download_state=state.to_json(),
-    ))
-    entry = reconstruct_grab_list_entry(db.request(1), state)
-    if path_state != "directory_missing":
-        os.makedirs(current_path)
-    if path_state == "present":
-        staged = StagedAlbum.from_entry(entry, default_path=current_path)
-        staged.bind_import_paths(entry.files)
-        for file in entry.files:
-            assert file.import_path is not None
-            with open(file.import_path, "wb") as handle:
-                handle.write(b"audio")
-    ctx = make_ctx_with_fake_db(db, cfg=built.cfg)
-    return built, current_path, entry, state, db, ctx
-
-
-class TestGeneratedPreEnqueueFailureHistory(unittest.TestCase):
-    @given(
-        failure=st.sampled_from(("directory", "tracked_file")),
-        filetype=st.sampled_from(("flac", "mp3 v0", "opus")),
-    )
-    @example(failure="directory", filetype="opus")
-    @example(failure="tracked_file", filetype="flac")
-    @settings(deadline=None, max_examples=6)
-    def test_reset_is_a_single_peer_neutral_visible_event(
-        self,
-        failure: str,
-        filetype: str,
-    ) -> None:
-        """Drive the real readiness classifier, transition, writer and presenter."""
-        with tempfile.TemporaryDirectory() as parent:
-            built, _, entry, state, db, ctx = _staged_gate_world(
-                parent,
-                filetype=filetype,
-                path_state=(
-                    "directory_missing"
-                    if failure == "directory"
-                    else "tracked_file_missing"
-                ),
-                subprocess_started_at=None,
-            )
-            reason = (
-                "staged_path_missing"
-                if failure == "directory"
-                else "staged_path_missing_tracked_files"
-            )
-            try:
-                ready = _processing_path_ready_for_importer(
-                    entry, 1, state, db, ctx,
-                )
-            finally:
-                built.close()
-
-            self.assertFalse(ready)
-            self.assertEqual(db.request(1)["status"], "wanted")
-            self.assertEqual(db.status_history, [(1, "wanted")])
-            self.assertEqual(db.cooldowns_applied, [])
-            self.assertEqual(db.list_import_jobs(request_id=1), [])
-            self.assertEqual(len(db.download_logs), 1)
-            row = db.download_logs[0]
-            presentation = present_failure(FailureEvidence(
-                outcome=row.outcome or "",
-                soulseek_username=row.soulseek_username,
-                error_message=row.error_message,
-                beets_detail=row.beets_detail,
-            ))
-            violation = check_pre_enqueue_reset_evidence(
-                reason=reason,
-                filetype=filetype,
-                event=(
-                    row.outcome,
-                    row.soulseek_username,
-                    row.filetype,
-                    row.beets_detail,
-                    row.error_message,
-                ),
-                verdict=presentation.verdict,
-            )
-            self.assertIsNone(violation, violation)
-
-    @given(
-        path_present=st.booleans(),
-        filetype=st.sampled_from(("flac", "mp3 v0", "opus")),
-    )
-    @example(path_present=True, filetype="flac")
-    @settings(deadline=None, max_examples=6)
-    def test_successful_abandonment_is_a_handled_stop(
-        self,
-        path_present: bool,
-        filetype: str,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as parent:
-            built, current_path, entry, _, db, _ = _staged_gate_world(
-                parent,
-                filetype=filetype,
-                path_state="present" if path_present else "directory_missing",
-                subprocess_started_at="2026-07-27T00:00:00+00:00",
-            )
-            staged = StagedAlbum.from_entry(entry, default_path=current_path)
-            location = ProcessingPathLocation(
-                path=current_path,
-                kind="request_scoped_auto_import_staged",
-            )
-            try:
-                result = _evaluate_staged_path_readiness(
-                    entry, staged, location, db,
-                )
-            finally:
-                built.close()
-
-            violation = check_abandonment_handled_once(
-                result,
-                list(db.status_history),
-                [
-                    (row.outcome, row.beets_scenario)
-                    for row in db.download_logs
-                ],
-            )
-            self.assertIsNone(violation, violation)
-
-
-# ============================================================================
-# Known-bad self-tests — a checker that never trips proves nothing
-# ============================================================================
-
-
 class TestMaterializeEvidenceCheckersTripOnViolations(unittest.TestCase):
     def test_partition_checker_rejects_a_storage_errno_called_containment(self) -> None:
         with self.assertRaises(AssertionError):
@@ -1078,91 +718,6 @@ class TestMaterializeEvidenceCheckersTripOnViolations(unittest.TestCase):
                 expected_family="storage",
                 errno_symbol="ESTALE",
             )
-
-    def test_lifecycle_checker_rejects_a_reset_with_no_recoverable_cause(self) -> None:
-        with self.assertRaises(AssertionError):
-            assert_lifecycle_unchanged_by_reason(
-                reason=REASON_EVENT_PATH_NEVER_STAMPED,
-                grace_expired=True,
-                status="wanted",
-                cooldowns_applied=["user1"],
-                log_outcomes=["failed"],
-                persisted_details=[None],
-            )
-
-    def test_lifecycle_checker_rejects_a_dropped_cooldown(self) -> None:
-        with self.assertRaises(AssertionError):
-            assert_lifecycle_unchanged_by_reason(
-                reason=REASON_EVENT_PATH_NEVER_STAMPED,
-                grace_expired=True,
-                status="wanted",
-                cooldowns_applied=[],
-                log_outcomes=["failed"],
-                persisted_details=[REASON_EVENT_PATH_NEVER_STAMPED],
-            )
-
-    def test_lifecycle_checker_rejects_a_reset_inside_the_grace_window(self) -> None:
-        with self.assertRaises(AssertionError):
-            assert_lifecycle_unchanged_by_reason(
-                reason=REASON_EVENT_PATH_NEVER_STAMPED,
-                grace_expired=False,
-                status="wanted",
-                cooldowns_applied=[],
-                log_outcomes=[],
-                persisted_details=[],
-            )
-
-    def test_pre_enqueue_checker_rejects_missing_persistence_and_false_copy(
-        self,
-    ) -> None:
-        event = (
-            "failed", None, "flac", "staged_path_missing",
-            "staged_path_missing",
-        )
-        good_copy = (
-            "The staged download folder could not be accessed before import "
-            "(possible filesystem error); requeued"
-        )
-        for observed, verdict in (
-            (None, good_copy),
-            (event, "The staged download folder disappeared before import"),
-        ):
-            with self.subTest(event=observed, verdict=verdict):
-                self.assertIsNotNone(check_pre_enqueue_reset_evidence(
-                    reason="staged_path_missing",
-                    filetype="flac",
-                    event=observed,
-                    verdict=verdict,
-                ))
-
-    def test_abandonment_checker_rejects_fallthrough_and_duplicate_reset(
-        self,
-    ) -> None:
-        handled = MaterializeGuarded(
-            detail="abandoned_interrupted_auto_import",
-        )
-        audit = [("failed", "abandoned_auto_import")]
-        for result, transitions, audits in (
-            (
-                MaterializeFailed(
-                    reason="abandoned_interrupted_auto_import",
-                ),
-                [(1, "wanted")],
-                audit,
-            ),
-            (handled, [(1, "wanted"), (1, "wanted")], audit),
-            (handled, [(1, "wanted")], []),
-        ):
-            with self.subTest(
-                result=result,
-                transitions=transitions,
-                audits=audits,
-            ):
-                self.assertIsNotNone(check_abandonment_handled_once(
-                    result,
-                    transitions,
-                    audits,
-                ))
 
     def test_leg_checker_rejects_a_root_refusal_blamed_on_one_file(self) -> None:
         """The exact D1 defect: the share refused, but the reason names a

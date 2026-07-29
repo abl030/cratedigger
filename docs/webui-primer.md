@@ -41,6 +41,8 @@ Browser → https://music.ablz.au
 | `/api/release/<mbid>` | GET | Full release details with tracks |
 | `/api/pipeline/add` | POST | Add a release to the pipeline DB `{"mb_release_id": "..."}` or `{"discogs_release_id": "..."}` |
 | `/api/pipeline/status` | GET | Pipeline DB status counts + wanted list |
+| `/api/pipeline/acquisition` | GET | Combined active downloading/processing requests plus active YouTube rescue rows; each processing request names its exact owner |
+| `/api/pipeline/downloading` | GET | Transfer-owner-only downloading requests; processing is deliberately excluded |
 | `/api/pipeline/<id>` | GET | Single request details |
 | `/api/pipeline/force-import` | POST | Queue force-import for a rejected download `{"download_log_id": N}`; returns `202` + job id |
 | `/api/wrong-matches` | GET | Group rejected downloads by release for triage |
@@ -52,7 +54,8 @@ Browser → https://music.ablz.au
 | `/api/import-jobs` | GET | List recent import queue jobs |
 | `/api/import-jobs/timeline` | GET | List active queued/running/recovery-required import jobs in importer order, with server-classified display fields |
 | `/api/import-jobs/<id>` | GET | Poll a single import queue job |
-| `/api/import-jobs/<id>/recovery` | POST | Explicitly close an ambiguous Beets operation or authorize a fresh retry after inspection |
+| `/api/import-jobs/<id>/recovery` | GET | Inspect exact automation recovery evidence, liveness, cleanup progress, and opaque revision |
+| `/api/import-jobs/<id>/recovery` | POST | Revision-bound explicit close (`wanted|imported`) or fresh retry of an ambiguous automation owner |
 | `/api/library/artist?name=...` | GET | Albums by artist from beets library (MB vs Discogs source) |
 | `/api/discogs/search?q=...` | GET | Search Discogs mirror (artist or release mode via `type=` param) |
 | `/api/discogs/artist/<id>` | GET | Artist's normalized catalogue identities, including exact masterless releases (via mirror `/masters/all` + `/appearances`) |
@@ -86,7 +89,8 @@ Browser → https://music.ablz.au
   never establish ownership and a Discogs master never inherits ownership
   from one of its child pressings. Missing = ordinary own-work
   release groups the beets library doesn't hold; In flight =
-  requests currently `downloading`. `wanted` is ambient after the full-library
+  requests currently `downloading` or processor-owned `processing`. `wanted`
+  is ambient after the full-library
   backfill and stays a badge; `unsearchable` is a stopped request, not active
   work. Appearances, promo-only,
   unofficial-only, and unknown-provenance rows all remain visible inside Other
@@ -168,11 +172,25 @@ Browser → https://music.ablz.au
   poll `import_jobs`, so long beets imports do not block the web request.
   Failed queued force-imports remove the reviewed wrong-match source from the
   actionable list while preserving the failed job/download audit.
-- **Recents Imports subview** — Recents has History, Downloading, and Imports
-  subviews. Imports shows active jobs in beets-import order. The server
+- **Recents Acquisition + Imports subviews** — Recents has History,
+  Acquisition, and Imports subviews. Acquisition combines downloading and
+  processing requests with the separate active YouTube-rescue feed; it does
+  not broaden the transfer-owner-only downloading endpoint. A processing row
+  links to its recorded owner job, never a latest-job/path inference. Imports
+  shows active jobs in beets-import order. The server
   classifies each job into the same `badge` / `badge_class` / `border_color` /
   `summary` display contract as Recents history, while raw preview/import
   states remain visible as forensic metadata.
+- **Processing action lock** — every request-shaped payload used by badges and
+  actions carries `processing_owner: {job_id, status, preview_status}` or null.
+  One presentation table maps that durable owner stage to queued for preview,
+  previewing, waiting to import, importing, or needs recovery. Mutating controls
+  remain focusable with `aria-disabled="true"` and a visible
+  `aria-describedby` explanation; pointer, Enter, and Space do nothing. A
+  typed stale-click conflict locks immediately, announces through `aria-live`,
+  and refetches only that request while preserving tab/filter/expansion,
+  scroll, and focus. A failed refetch keeps the lock and exposes an accessible
+  retry.
 - **Recents evidence schema (#575 PR2)** — History list rows carry a compact
   monospace `IN … HAVE …` evidence strip (measured incoming bitrate/spectral/
   V0 probe vs on-disk at download time); rows with no measurements (download-

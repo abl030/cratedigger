@@ -183,6 +183,8 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     affected_request_ids INTEGER[] := ARRAY[]::INTEGER[];
+    affected_job_ids INTEGER[] := ARRAY[]::INTEGER[];
+    affected_job_id INTEGER;
 BEGIN
     IF TG_OP <> 'INSERT' THEN
         affected_request_ids := array_append(
@@ -205,6 +207,72 @@ BEGIN
         );
     END IF;
     PERFORM enforce_processing_request_integrity(affected_request_ids);
+    IF TG_TABLE_NAME = 'import_jobs' THEN
+        IF TG_OP <> 'INSERT' THEN
+            affected_job_ids := array_append(
+                affected_job_ids,
+                (to_jsonb(OLD)->>'id')::INTEGER
+            );
+        END IF;
+        IF TG_OP <> 'DELETE' THEN
+            affected_job_ids := array_append(
+                affected_job_ids,
+                (to_jsonb(NEW)->>'id')::INTEGER
+            );
+        END IF;
+    ELSE
+        IF TG_OP <> 'INSERT' THEN
+            affected_job_ids := array_append(
+                affected_job_ids,
+                (to_jsonb(OLD)->>'active_automation_import_job_id')::INTEGER
+            );
+        END IF;
+        IF TG_OP <> 'DELETE' THEN
+            affected_job_ids := array_append(
+                affected_job_ids,
+                (to_jsonb(NEW)->>'active_automation_import_job_id')::INTEGER
+            );
+        END IF;
+    END IF;
+
+    FOR affected_job_id IN
+        SELECT DISTINCT job_id
+        FROM unnest(affected_job_ids) AS job_id
+        WHERE job_id IS NOT NULL
+        ORDER BY job_id
+    LOOP
+        -- The request-scoped validator above locks request -> jobs. Re-read
+        -- every affected owner afterwards so clearing the pointer, or an
+        -- FK-driven request_id = NULL, cannot leave an active automation job
+        -- detached.
+        PERFORM job.id
+        FROM import_jobs AS job
+        WHERE job.id = affected_job_id
+        FOR UPDATE;
+
+        IF EXISTS (
+            SELECT 1
+            FROM import_jobs AS job
+            LEFT JOIN album_requests AS request
+              ON request.id = job.request_id
+            WHERE job.id = affected_job_id
+              AND job.job_type = 'automation_import'
+              AND job.status IN ('queued', 'running', 'recovery_required')
+              AND (
+                  job.request_id IS NULL
+                  OR request.id IS NULL
+                  OR request.status <> 'processing'
+                  OR request.active_automation_import_job_id
+                     IS DISTINCT FROM job.id
+              )
+        ) THEN
+            RAISE EXCEPTION
+                'active automation job must own its exact processing request'
+                USING
+                    ERRCODE = '23514',
+                    CONSTRAINT = 'complete_processing_owner';
+        END IF;
+    END LOOP;
     IF TG_OP = 'DELETE' THEN
         RETURN OLD;
     END IF;
@@ -279,6 +347,22 @@ CREATE TABLE processing_cleanup_journal (
             (completed_receipt IS NULL AND completed_at IS NULL)
             OR
             (completed_receipt IS NOT NULL AND completed_at IS NOT NULL)
+        ),
+    CONSTRAINT processing_cleanup_journal_declaration_complete
+        CHECK (
+            (
+                declared_result_status IS NULL
+                AND declared_reason IS NULL
+                AND evidence_revision IS NULL
+            )
+            OR
+            (
+                declared_result_status IS NOT NULL
+                AND declared_reason IS NOT NULL
+                AND declared_reason !~ '^[[:space:]]*$'
+                AND evidence_revision IS NOT NULL
+                AND evidence_revision !~ '^[[:space:]]*$'
+            )
         )
 );
 

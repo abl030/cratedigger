@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import msgspec
 
@@ -71,6 +71,28 @@ IMPORT_JOB_PREVIEW_FAILURE_STATUSES = frozenset({
 IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES = frozenset({
     IMPORT_JOB_PREVIEW_EVIDENCE_READY,
 })
+
+AutomationHandoffOutcome = Literal[
+    "committed",
+    "lock_unavailable",
+    "request_missing",
+    "not_downloading",
+    "missing_state",
+    "witness_mismatch",
+    "owner_conflict",
+]
+
+
+@dataclass(frozen=True)
+class AutomationHandoffResult:
+    """Tagged result of the sole downloader-to-automation-owner transition."""
+
+    outcome: AutomationHandoffOutcome
+    job: ImportJob | None = None
+
+    @property
+    def committed(self) -> bool:
+        return self.outcome == "committed"
 
 
 _PositiveInt = Annotated[int, msgspec.Meta(gt=0)]

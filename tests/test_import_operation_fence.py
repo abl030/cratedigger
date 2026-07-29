@@ -3,15 +3,25 @@
 from __future__ import annotations
 
 import os
+import signal
 import tempfile
+import threading
+import time
 import unittest
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from lib.config import CratediggerConfig
 from lib.dispatch import DispatchOutcome
 from lib.dispatch.types import PostCommitCleanup
 from lib.import_evidence import ensure_candidate_evidence_for_action
+from lib.import_execution import (
+    CancellationToken,
+    ExecutionCancelled,
+    ExecutionLeaseSnapshot,
+    MonitoredProcessGroup,
+    ProcessIdentity,
+)
 from lib.import_job_recovery_service import resolve_import_job_recovery
 from lib.import_preview import force_action_copy_path
 from lib.import_queue import (
@@ -20,7 +30,6 @@ from lib.import_queue import (
     IMPORT_JOB_RECOVERY_REQUIRED,
     IMPORT_JOB_YOUTUBE,
     ForceImportPayload,
-    automation_import_dedupe_key,
     force_import_dedupe_key,
     force_import_payload,
     youtube_import_payload,
@@ -35,8 +44,143 @@ from lib.terminal_outcomes import (
     TerminalOutcomeResult,
 )
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_album_quality_evidence, make_request_row
+from tests.helpers import (
+    handoff_automation_owner,
+    make_album_quality_evidence,
+    make_request_row,
+)
 from tests.test_pipeline_db import TEST_DSN, make_db, requires_postgres
+
+
+class TestOwnedImportSubprocessRunner(unittest.TestCase):
+    def test_child_identity_callback_completes_before_wait(self) -> None:
+        from lib.dispatch.subprocess_runner import run_import_one
+
+        token = CancellationToken()
+        events: list[str] = []
+        monitored = MagicMock()
+        monitored.pid = 4321
+
+        def wait(
+            observed_token: CancellationToken,
+            *,
+            owner_session_probe: Any,
+        ) -> int:
+            self.assertIs(observed_token, token)
+            self.assertEqual(events, ["spawn:4321"])
+            self.assertTrue(owner_session_probe())
+            events.append("wait")
+            return 0
+
+        monitored.wait.side_effect = wait
+        with (
+            patch("lib.dispatch.subprocess_runner.sp.Popen"),
+            patch(
+                "lib.dispatch.subprocess_runner.MonitoredProcessGroup",
+                return_value=monitored,
+            ),
+        ):
+            run_import_one(
+                path="/tmp/source",
+                mb_release_id="release-1",
+                beets_harness_path="/tmp/harness/run",
+                cancellation_token=token,
+                on_spawn=lambda pid: events.append(f"spawn:{pid}"),
+                owner_session_probe=lambda: True,
+            )
+
+        self.assertEqual(events, ["spawn:4321", "wait"])
+
+    def test_spawn_callback_failure_terminates_before_propagating(self) -> None:
+        from lib.dispatch.subprocess_runner import run_import_one
+
+        monitored = MagicMock()
+        monitored.pid = 4321
+
+        def reject_child(_pid: int) -> None:
+            raise RuntimeError("child lease CAS rejected")
+
+        with (
+            patch("lib.dispatch.subprocess_runner.sp.Popen"),
+            patch(
+                "lib.dispatch.subprocess_runner.MonitoredProcessGroup",
+                return_value=monitored,
+            ),
+            self.assertRaisesRegex(RuntimeError, "child lease CAS rejected"),
+        ):
+            run_import_one(
+                path="/tmp/source",
+                mb_release_id="release-1",
+                beets_harness_path="/tmp/harness/run",
+                cancellation_token=CancellationToken(),
+                on_spawn=reject_child,
+            )
+
+        monitored.terminate_and_wait.assert_called_once_with()
+        monitored.wait.assert_not_called()
+
+    def test_owner_cancellation_wins_when_timeout_also_fires(self) -> None:
+        from lib.dispatch.subprocess_runner import run_import_one
+
+        token = CancellationToken()
+        monitored = MagicMock()
+        monitored.pid = 4321
+
+        def wait(*_args: Any, **_kwargs: Any) -> int:
+            token.cancel("owner_session_lost")
+            time.sleep(0.02)
+            return -15
+
+        monitored.wait.side_effect = wait
+        with (
+            patch("lib.dispatch.subprocess_runner.sp.Popen"),
+            patch(
+                "lib.dispatch.subprocess_runner.MonitoredProcessGroup",
+                return_value=monitored,
+            ),
+            self.assertRaisesRegex(ExecutionCancelled, "owner_session_lost"),
+        ):
+            run_import_one(
+                path="/tmp/source",
+                mb_release_id="release-1",
+                beets_harness_path="/tmp/harness/run",
+                timeout=0,
+                cancellation_token=token,
+            )
+
+        monitored.terminate_and_wait.assert_called()
+
+    def test_concurrent_termination_is_serialized_and_idempotent(self) -> None:
+        process = MagicMock()
+        process.pid = 4321
+        process.poll.return_value = -15
+        process.wait.return_value = -15
+        monitored = MonitoredProcessGroup(process)
+        barrier = threading.Barrier(3)
+        results: list[int] = []
+
+        def terminate() -> None:
+            barrier.wait()
+            results.append(monitored.terminate_and_wait())
+
+        threads = [threading.Thread(target=terminate) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        with patch(
+            "lib.import_execution.os.killpg",
+            side_effect=ProcessLookupError,
+        ) as killpg:
+            barrier.wait()
+            for thread in threads:
+                thread.join(timeout=1.0)
+
+        self.assertEqual(results, [-15, -15])
+        term_calls = [
+            call for call in killpg.call_args_list
+            if call.args == (4321, signal.SIGTERM)
+        ]
+        self.assertEqual(len(term_calls), 1)
+        process.wait.assert_called_once()
 
 
 def _seed_candidate(
@@ -45,6 +189,7 @@ def _seed_candidate(
     *,
     release_id: str,
     source_path: str,
+    expected_execution_lease: ExecutionLeaseSnapshot | None = None,
 ) -> str:
     evidence = make_album_quality_evidence(
         mb_release_id=release_id,
@@ -56,8 +201,81 @@ def _seed_candidate(
         snapshot_fingerprint=evidence.snapshot_fingerprint,
     )
     assert persisted is not None and persisted.id is not None
-    db.set_import_job_candidate_evidence(job_id, persisted.id)
+    if expected_execution_lease is None:
+        db.set_import_job_candidate_evidence(job_id, persisted.id)
+    else:
+        db.set_import_job_candidate_evidence(
+            job_id,
+            persisted.id,
+            expected_execution_lease=expected_execution_lease,
+        )
     return evidence.snapshot_fingerprint
+
+
+def _claim_automation_job(
+    db: FakePipelineDB,
+    *,
+    release_id: str,
+    source_path: str,
+    preview_result: dict[str, Any] | None = None,
+) -> tuple[Any, ExecutionLeaseSnapshot]:
+    request = db.request(42)
+    active_state = dict(request.get("active_download_state") or {})
+    active_state.update({
+        "current_path": source_path,
+        "filetype": active_state.get("filetype") or "flac",
+        "enqueued_at": (
+            active_state.get("enqueued_at")
+            or "2026-07-29T00:00:00+00:00"
+        ),
+        "files": active_state.get("files") or [],
+    })
+    db.seed_request({
+        **request,
+        "status": "wanted",
+        "active_download_state": None,
+        "active_automation_import_job_id": None,
+    })
+    job = handoff_automation_owner(
+        db,
+        42,
+        state=active_state,
+        canonical_path=source_path,
+    )
+    preview_lease = ExecutionLeaseSnapshot(
+        host_boot_id="operation-fence-boot",
+        invocation_id=f"operation-preview-{job.id}",
+        systemd_unit="cratedigger-import-preview-worker.service",
+        worker=ProcessIdentity(8501, 85001),
+    )
+    assert db.claim_next_import_preview_job(
+        worker_id="preview",
+        execution_lease=preview_lease,
+    ) is not None
+    _seed_candidate(
+        db,
+        job.id,
+        release_id=release_id,
+        source_path=source_path,
+        expected_execution_lease=preview_lease,
+    )
+    assert db.mark_import_job_preview_importable(
+        job.id,
+        preview_result=preview_result or {"ready": True},
+        expected_execution_lease=preview_lease,
+    ) is not None
+    importer_lease = ExecutionLeaseSnapshot(
+        host_boot_id="operation-fence-boot",
+        invocation_id=f"operation-importer-{job.id}",
+        systemd_unit="cratedigger-importer.service",
+        worker=ProcessIdentity(8502, 85002),
+    )
+    claimed = db.claim_next_import_job(
+        worker_id="worker",
+        execution_lease=importer_lease,
+    )
+    assert claimed is not None
+    return claimed, importer_lease
 
 
 class TestImportOperationFence(unittest.TestCase):
@@ -370,31 +588,22 @@ class TestImportOperationFence(unittest.TestCase):
             status="downloading",
             active_download_state={"current_path": source_path, "files": []},
         ))
-        job = db.enqueue_import_job(
-            IMPORT_JOB_AUTOMATION,
-            request_id=42,
-            dedupe_key=automation_import_dedupe_key(42),
-            payload={},
-        )
-        _seed_candidate(
+        claimed, execution_lease = _claim_automation_job(
             db,
-            job.id,
             release_id="release-42",
             source_path=source_path,
         )
-        db.mark_import_job_preview_importable(job.id, preview_result={"ready": True})
-        claimed = db.claim_next_import_job(worker_id="worker")
-        assert claimed is not None
 
         authorized = db.authorize_import_job_launch(
             claimed.id,
             request_id=42,
             release_id="release-42",
             source_path=source_path,
+            expected_execution_lease=execution_lease,
         )
 
         assert authorized is not None
-        self.assertEqual(authorized.beets_launch_request_status, "downloading")
+        self.assertEqual(authorized.beets_launch_request_status, "processing")
 
     def test_operator_retry_closes_ambiguous_operation_and_mints_new_job(self) -> None:
         db, recovery = self._force_recovery_job()
@@ -447,33 +656,45 @@ class TestImportOperationFence(unittest.TestCase):
                         if job_type == IMPORT_JOB_AUTOMATION else None
                     ),
                 ))
-                job = db.enqueue_import_job(
-                    job_type,
-                    request_id=42,
-                    dedupe_key=f"{job_type}:recovery-preview",
-                    payload=payload,
-                )
-                _seed_candidate(
-                    db,
-                    job.id,
-                    release_id="release-42",
-                    source_path=source_path,
-                )
                 preview_result = {"verdict": "would_import", "sentinel": job_type}
-                db.mark_import_job_preview_importable(
-                    job.id, preview_result=preview_result,
-                )
-                claimed = db.claim_next_import_job(worker_id="worker")
-                assert claimed is not None
+                execution_lease: ExecutionLeaseSnapshot | None = None
+                if job_type == IMPORT_JOB_AUTOMATION:
+                    claimed, execution_lease = _claim_automation_job(
+                        db,
+                        release_id="release-42",
+                        source_path=source_path,
+                        preview_result=preview_result,
+                    )
+                else:
+                    job = db.enqueue_import_job(
+                        job_type,
+                        request_id=42,
+                        dedupe_key=f"{job_type}:recovery-preview",
+                        payload=payload,
+                    )
+                    _seed_candidate(
+                        db,
+                        job.id,
+                        release_id="release-42",
+                        source_path=source_path,
+                    )
+                    db.mark_import_job_preview_importable(
+                        job.id, preview_result=preview_result,
+                    )
+                    claimed = db.claim_next_import_job(worker_id="worker")
+                    assert claimed is not None
                 candidate_evidence_id = claimed.candidate_evidence_id
                 assert db.authorize_import_job_launch(
                     claimed.id,
                     request_id=42,
                     release_id="release-42",
                     source_path=source_path,
+                    expected_execution_lease=execution_lease,
                 ) is not None
                 recovery = db.mark_import_job_recovery_required(
-                    claimed.id, reason="ambiguous operation",
+                    claimed.id,
+                    reason="ambiguous operation",
+                    expected_execution_lease=execution_lease,
                 )
                 assert recovery is not None
 
@@ -484,6 +705,10 @@ class TestImportOperationFence(unittest.TestCase):
                     reason="Operator reconciled external mutation",
                 )
 
+                if job_type == IMPORT_JOB_AUTOMATION:
+                    self.assertEqual(result.outcome, "authority_changed")
+                    self.assertIsNone(result.retry_job)
+                    continue
                 assert result.retry_job is not None
                 self.assertEqual(result.retry_job.preview_result, preview_result)
                 self.assertEqual(result.retry_job.candidate_evidence_id, candidate_evidence_id)
@@ -813,7 +1038,7 @@ class TestImportOperationFence(unittest.TestCase):
 
             self.assertTrue(os.path.exists(staged_path))
 
-    def test_automation_retry_clears_legacy_request_launch_guard(self) -> None:
+    def test_automation_recovery_stays_attached_to_exact_owner(self) -> None:
         db = FakePipelineDB()
         source_path = "/incoming/Artist - Album [request-42]"
         db.seed_request(make_request_row(
@@ -826,30 +1051,22 @@ class TestImportOperationFence(unittest.TestCase):
                 "import_subprocess_started_at": "2026-07-20T01:02:03+00:00",
             },
         ))
-        job = db.enqueue_import_job(
-            IMPORT_JOB_AUTOMATION,
-            request_id=42,
-            dedupe_key=automation_import_dedupe_key(42),
-            payload={},
-        )
-        _seed_candidate(
+        claimed, execution_lease = _claim_automation_job(
             db,
-            job.id,
             release_id="release-42",
             source_path=source_path,
         )
-        db.mark_import_job_preview_importable(job.id, preview_result={"ready": True})
-        claimed = db.claim_next_import_job(worker_id="worker")
-        assert claimed is not None
         assert db.authorize_import_job_launch(
             claimed.id,
             request_id=42,
             release_id="release-42",
             source_path=source_path,
+            expected_execution_lease=execution_lease,
         ) is not None
         recovery = db.mark_import_job_recovery_required(
             claimed.id,
             reason="crash",
+            expected_execution_lease=execution_lease,
         )
         assert recovery is not None
 
@@ -860,9 +1077,10 @@ class TestImportOperationFence(unittest.TestCase):
             reason="Confirmed Beets did not apply the import",
         )
 
-        self.assertEqual(result.outcome, "retry_queued")
+        self.assertEqual(result.outcome, "authority_changed")
+        self.assertIsNone(result.retry_job)
         state = db.request(42)["active_download_state"]
-        self.assertNotIn("import_subprocess_started_at", state)
+        self.assertIn("import_subprocess_started_at", state)
 
 
 @requires_postgres

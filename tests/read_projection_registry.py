@@ -38,7 +38,12 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from lib.pipeline_db import PersistedDistance, PersistedTrack, PersistedYoutubeRow
+from lib.pipeline_db import (
+    CleanupJournalIntent,
+    PersistedDistance,
+    PersistedTrack,
+    PersistedYoutubeRow,
+)
 
 # A seeder takes a db (real ``PipelineDB`` or ``FakePipelineDB``), seeds
 # identical state, calls ONE read method, and returns the projected rows
@@ -150,6 +155,86 @@ def _seed_get_request_by_replaces_request_id(db: Any) -> "list[dict[str, Any]]":
         new_tracks=[],
     )
     return _one(db.get_request_by_replaces_request_id(old_id))
+
+
+def _seed_get_acquisition(db: Any) -> "list[dict[str, Any]]":
+    request_id = db.add_request(
+        "Parity Artist",
+        "Parity Processing Album",
+        "request",
+        mb_release_id="acquisition-parity",
+    )
+    enqueued_at = "2026-07-29T00:00:00+00:00"
+    assert db.set_downloading(
+        request_id,
+        (
+            '{"filetype":"flac",'
+            f'"enqueued_at":"{enqueued_at}",'
+            '"files":[]}'
+        ),
+        expected_status="wanted",
+    )
+    handoff = db.handoff_automation_import(
+        request_id=request_id,
+        expected_enqueued_at=enqueued_at,
+        canonical_path="/processing/albums/acquisition-parity",
+        message="read projection parity",
+    )
+    assert handoff.committed and handoff.job is not None
+    db.insert_youtube_running(
+        request_id=request_id,
+        browse_id="acquisition-parity",
+        audio_playlist_id=None,
+        yt_url="https://music.youtube.com/playlist?list=acquisition-parity",
+        expected_track_count=1,
+    )
+    payload = db.get_acquisition()
+    return [
+        *payload["acquisition"],
+        *payload["youtube_ingest"],
+    ]
+
+
+def _seed_get_processing_cleanup_journal(
+    db: Any,
+) -> "list[dict[str, Any]]":
+    request_id = db.add_request(
+        "Parity Artist",
+        "Parity Cleanup Album",
+        "request",
+        mb_release_id="cleanup-journal-parity",
+    )
+    enqueued_at = "2026-07-29T00:00:01+00:00"
+    assert db.set_downloading(
+        request_id,
+        (
+            '{"filetype":"flac",'
+            f'"enqueued_at":"{enqueued_at}",'
+            '"files":[]}'
+        ),
+        expected_status="wanted",
+    )
+    handoff = db.handoff_automation_import(
+        request_id=request_id,
+        expected_enqueued_at=enqueued_at,
+        canonical_path="/processing/albums/cleanup-journal-parity",
+        message="cleanup journal read projection parity",
+    )
+    assert handoff.committed and handoff.job is not None
+    db.create_processing_cleanup_journal(
+        request_id=request_id,
+        job_id=handoff.job.id,
+        intent=CleanupJournalIntent(
+            action="no_op",
+            source_path="/processing/albums/cleanup-journal-parity",
+            source_manifest=({"path": "01.flac", "size": 12},),
+            source_manifest_hash="cleanup-journal-parity-hash",
+        ),
+    )
+    return _one(db.get_processing_cleanup_journal(
+        request_id=request_id,
+        job_id=handoff.job.id,
+    ))
 
 
 def _seed_get_wanted(db: Any) -> "list[dict[str, Any]]":
@@ -342,24 +427,6 @@ def _seed_search_requests(db: Any) -> "list[dict[str, Any]]":
     return list(db.search_requests("Parity"))
 
 
-# --- import_jobs projection ------------------------------------------------
-
-def _seed_get_active_import_job_for_request(db: Any) -> "list[dict[str, Any]]":
-    from lib.import_queue import IMPORT_JOB_FORCE
-
-    rid = db.add_request(
-        "Parity Artist", "Parity Album", "request",
-        mb_release_id="activejob-parity")
-    db.enqueue_import_job(
-        IMPORT_JOB_FORCE,
-        request_id=rid,
-        dedupe_key=f"manual:{rid}",
-        payload={"download_log_id": 1, "failed_path": "/tmp/parity"},
-    )
-    job = db.get_active_import_job_for_request(rid)
-    return _one(job.to_dict() if job is not None else None)
-
-
 # --- youtube_album_mappings projection ------------------------------------
 
 def _youtube_mapping_row(**overrides: Any) -> PersistedYoutubeRow:
@@ -455,6 +522,9 @@ PARITY_REGISTRY: dict[str, Seeder] = {
     "get_request_by_release_id": _seed_get_request_by_release_id,
     "get_request_by_replaces_request_id":
         _seed_get_request_by_replaces_request_id,
+    "get_acquisition": _seed_get_acquisition,
+    "get_processing_cleanup_journal":
+        _seed_get_processing_cleanup_journal,
     "get_wanted": _seed_get_wanted,
     "get_by_status": _seed_get_by_status,
     "search_requests": _seed_search_requests,
@@ -479,9 +549,6 @@ PARITY_REGISTRY: dict[str, Seeder] = {
     "get_search_history_page": _seed_get_search_history_page,
     "get_search_plan_stats_history": _seed_get_search_plan_stats_history,
     "get_legacy_search_log_summary": _seed_get_legacy_search_log_summary,
-    # import_jobs projection.
-    "get_active_import_job_for_request":
-        _seed_get_active_import_job_for_request,
     # youtube_album_mappings projection.
     "find_youtube_album_mapping_for_release":
         _seed_find_youtube_album_mapping_for_release,
@@ -532,6 +599,9 @@ ALLOWLIST: dict[str, str] = {
         "list[ImportJob] — typed dataclass rows, no dict projection",
     "list_import_job_timeline":
         "list[ImportJob] — typed dataclass rows, no dict projection",
+    "list_automation_import_jobs_for_startup_recovery":
+        "list[ImportJob] — exact processing-owner typed dataclass rows, "
+        "no dict projection",
     "list_import_jobs":
         "list[ImportJob] — typed dataclass rows, no dict projection",
     "list_search_plan_classification_for_requests":

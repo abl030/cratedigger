@@ -9,6 +9,7 @@ import socket
 import sys
 import threading
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -24,9 +25,20 @@ if REPO_ROOT not in sys.path:
 
 from lib.config import CratediggerConfig, read_runtime_config
 from lib.dispatch import _record_preview_measurement_failed
+from lib.dispatch.types import DispatchOutcome, PostCommitCleanup
 from lib.import_evidence import (
     CANDIDATE_STATUS_REUSED,
     ensure_candidate_evidence_for_action,
+)
+from lib.import_execution import (
+    CancellationToken,
+    ExecutionCancelled,
+    ExecutionLeaseSnapshot,
+    ExecutionLivenessProbe,
+    OwnerSessionIdentity,
+    ProcessIdentity,
+    capture_execution_lease,
+    probe_execution_liveness,
 )
 from lib.import_preview import (
     PREVIEW_VERDICT_EVIDENCE_READY,
@@ -62,7 +74,12 @@ from lib.measurement import (
     existing_spectral_resolver_for_config,
     spectral_detail_from_persisted_source,
 )
-from lib.pipeline_db import DEFAULT_DSN, PipelineDB
+from lib.pipeline_db import (
+    ADVISORY_LOCK_NAMESPACE_IMPORT,
+    DEFAULT_DSN,
+    PipelineDB,
+)
+from lib.pipeline_db._core import OwnerSessionLost
 from lib.processing_paths import canonical_folder_for_row, processing_albums_dir
 from lib.quality import (
     ActiveDownloadState,
@@ -75,6 +92,7 @@ from lib.quality_evidence import (
     EvidenceBuildResult,
     load_candidate_evidence_for_source,
 )
+from lib.terminal_outcomes import AutomationTerminalAuthority
 from lib.validation_envelope import decode_validation_envelope
 
 logger = logging.getLogger("cratedigger-import-preview-worker")
@@ -83,9 +101,68 @@ RESTART_PREVIEW_MESSAGE = "Preview worker restarted while job was running; retry
 PREVIEW_HEARTBEAT_INTERVAL_SECONDS = 30.0
 PREVIEW_STALE_RECOVERY_INTERVAL_SECONDS = 60.0
 PREVIEW_STALE_AGE = timedelta(minutes=15)
+PREVIEW_SYSTEMD_UNIT = "cratedigger-import-preview-worker.service"
 
 FailureHavePrepareFn = Callable[..., str]
 FailureHaveEnrichFn = Callable[..., str]
+
+
+class AutomationPreviewTerminalHandoffRequired(RuntimeError):
+    """U4 boundary: automation terminal outcomes need one owner bundle."""
+
+
+@dataclass(frozen=True)
+class _AutomationPreviewAuthority:
+    request: dict[str, Any]
+    state: ActiveDownloadState
+    canonical_path: str
+
+
+class _AutomationPreviewDB:
+    """Lease-aware adapter over the exact pinned automation DB session."""
+
+    def __init__(
+        self,
+        db: Any,
+        execution_lease: ExecutionLeaseSnapshot,
+    ) -> None:
+        self._db = db
+        self._execution_lease = execution_lease
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._db, name)
+
+    def set_import_job_candidate_evidence(
+        self,
+        import_job_id: int,
+        evidence_id: int | None,
+    ) -> bool:
+        return bool(self._db.set_import_job_candidate_evidence(
+            import_job_id,
+            evidence_id,
+            expected_execution_lease=self._execution_lease,
+        ))
+
+    def mark_import_job_preview_importable(
+        self,
+        import_job_id: int,
+        **kwargs: Any,
+    ) -> ImportJob | None:
+        return self._db.mark_import_job_preview_importable(
+            import_job_id,
+            expected_execution_lease=self._execution_lease,
+            **kwargs,
+        )
+
+    def mark_import_job_preview_failed(
+        self,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        del args, kwargs
+        raise AutomationPreviewTerminalHandoffRequired(
+            "automation preview failure requires the U4 owner terminal bundle"
+        )
 
 
 def _resolve_runtime_config(
@@ -183,28 +260,6 @@ def _cleanup_terminal_preview_force_action(
     return terminal_job
 
 
-def derive_canonical_import_folder(
-    row: dict[str, Any],
-    state: ActiveDownloadState,
-) -> str:
-    """Cheaply derive the canonical automation import folder.
-
-    Computes the same path ``_materialize_automation_preview_path`` would
-    settle on, without performing any filesystem materialization. Used by
-    the preview-worker front-gate to test stored candidate evidence's
-    snapshot against the current source location before deciding whether
-    to skip measurement.
-    """
-    from lib.config import read_runtime_config
-    from lib.download_reconstruction import reconstruct_grab_list_entry
-
-    cfg = read_runtime_config()
-    entry = reconstruct_grab_list_entry(row, state)
-    if entry.import_folder:
-        return entry.import_folder
-    return canonical_folder_for_row(entry, processing_albums_dir(cfg.processing_dir))
-
-
 class _PreviewDBSource:
     """Minimal ``PipelineDBSource`` for preview materialization.
 
@@ -238,14 +293,73 @@ class _PreviewDBSource:
         raise AssertionError("preview materialization does not own the DB")
 
 
-def _materialize_automation_preview_path(
+def _automation_authority_snapshot(
     db: Any,
-    request_id: int,
-    row: dict[str, Any],
-    state: ActiveDownloadState,
+    job: ImportJob,
+    execution_lease: ExecutionLeaseSnapshot,
+    *,
+    runtime_config: CratediggerConfig | None = None,
+) -> _AutomationPreviewAuthority | None:
+    """Reread one exact processing owner without touching the filesystem."""
+    from lib.download_reconstruction import reconstruct_grab_list_entry
+
+    if job.request_id is None:
+        return None
+    stored_job = db.get_import_job(job.id)
+    try:
+        request = db.get_request(job.request_id)
+    except RuntimeError:
+        # The processing projection rejects a dangling exact-owner join.
+        # Treat that as stale authority and stop before filesystem access.
+        return None
+    if (
+        stored_job is None
+        or request is None
+        or stored_job.job_type != IMPORT_JOB_AUTOMATION
+        or stored_job.status != "queued"
+        or stored_job.preview_status != "running"
+        or request.get("status") != "processing"
+        or request.get("active_automation_import_job_id") != job.id
+        or stored_job.execution_invocation_id != execution_lease.invocation_id
+        or stored_job.execution_host_boot_id != execution_lease.host_boot_id
+        or stored_job.execution_systemd_unit != execution_lease.systemd_unit
+        or stored_job.execution_worker_pid != execution_lease.worker.pid
+        or stored_job.execution_worker_start_ticks
+        != execution_lease.worker.start_ticks
+        or stored_job.execution_beets_pid is not None
+        or stored_job.execution_beets_start_ticks is not None
+    ):
+        return None
+    try:
+        state = ActiveDownloadState.from_raw(request.get("active_download_state"))
+    except ValueError:
+        return None
+    if not state.current_path or not state.files:
+        return None
+    cfg = _resolve_runtime_config(runtime_config)
+    entry = reconstruct_grab_list_entry(request, state)
+    expected_canonical = canonical_folder_for_row(
+        entry,
+        processing_albums_dir(cfg.processing_dir),
+    )
+    if os.path.abspath(state.current_path) != os.path.abspath(expected_canonical):
+        return None
+    return _AutomationPreviewAuthority(
+        request=request,
+        state=state,
+        canonical_path=expected_canonical,
+    )
+
+
+def _materialize_automation_authority(
+    db: Any,
+    job: ImportJob,
+    authority: _AutomationPreviewAuthority,
+    *,
+    runtime_config: CratediggerConfig | None,
+    cancellation_token: CancellationToken,
 ) -> str:
-    """Ensure automation preview has the same stable folder importer uses."""
-    from lib.config import read_runtime_config
+    """Resume only the persisted exact manifest into its persisted path."""
     from lib.context import CratediggerContext
     from lib.download_materialization import (
         Materialized,
@@ -254,29 +368,52 @@ def _materialize_automation_preview_path(
     from lib.download_reconstruction import reconstruct_grab_list_entry
     from lib.staged_album import StagedAlbum
 
-    cfg = read_runtime_config()
-    entry = reconstruct_grab_list_entry(row, state)
-    canonical_path = derive_canonical_import_folder(row, state)
-    if entry.import_folder is None:
-        entry.import_folder = canonical_path
+    cancellation_token.raise_if_cancelled()
+    cfg = _resolve_runtime_config(runtime_config)
+    if os.path.isdir(authority.canonical_path):
+        cancellation_token.raise_if_cancelled()
+        return authority.canonical_path
+    entry = reconstruct_grab_list_entry(
+        authority.request,
+        authority.state,
+    )
+    staged_album = StagedAlbum.from_entry(
+        entry,
+        default_path=authority.canonical_path,
+    )
+    if os.path.abspath(staged_album.current_path) != os.path.abspath(
+        authority.canonical_path
+    ):
+        raise RuntimeError("persisted automation path is not canonical")
     ctx = CratediggerContext(
         cfg=cfg,
         slskd=None,
         pipeline_db_source=_PreviewDBSource(db),
     )
-    staged_album = StagedAlbum.from_entry(
+    materialized = _materialize_processing_dir(
         entry,
-        default_path=canonical_path,
+        staged_album,
+        ctx,
+        cancellation_token=cancellation_token,
     )
-    materialized = _materialize_processing_dir(entry, staged_album, ctx)
     if not isinstance(materialized, Materialized):
         raise RuntimeError(  # noqa: TRY004 - state-machine outcome, not caller type
-            f"Album request {request_id} could not be materialized for preview"
+            f"Album request {job.request_id} could not be materialized for preview"
         )
-    return staged_album.current_path
+    cancellation_token.raise_if_cancelled()
+    if os.path.abspath(staged_album.current_path) != os.path.abspath(
+        authority.canonical_path
+    ):
+        raise RuntimeError("automation materialization changed canonical path")
+    return authority.canonical_path
 
 
-def _front_gate_source_path(db: Any, job: ImportJob) -> str | None:
+def _front_gate_source_path(
+    db: Any,
+    job: ImportJob,
+    *,
+    automation_authority: _AutomationPreviewAuthority | None = None,
+) -> str | None:
     """Cheap source-path derivation for the candidate-evidence front-gate.
 
     Returns the path the evidence snapshot would have captured, or ``None``
@@ -295,30 +432,10 @@ def _front_gate_source_path(db: Any, job: ImportJob) -> str | None:
             raise AssertionError("youtube_import payload type mismatch")
         return job.payload.staged_path
     if job.job_type == IMPORT_JOB_AUTOMATION:
-        if job.request_id is None:
+        del db
+        if automation_authority is None:
             return None
-        row = db.get_request(job.request_id)
-        if not row:
-            return None
-        state_raw = row.get("active_download_state")
-        if state_raw is None:
-            return None
-        try:
-            state = ActiveDownloadState.from_raw(state_raw)
-        except ValueError:
-            return None
-        if state.current_path:
-            return state.current_path
-        try:
-            return derive_canonical_import_folder(row, state)
-        except Exception:
-            logger.debug(
-                "front-gate path derivation failed for job %s; "
-                "falling through to measurement",
-                job.id,
-                exc_info=True,
-            )
-            return None
+        return automation_authority.canonical_path
     return None
 
 
@@ -330,7 +447,12 @@ class _DownloadLogEntryReader(Protocol):
 
 
 class _ImportPreviewJobClaimer(Protocol):
-    def claim_next_import_preview_job(self, *, worker_id: str) -> ImportJob | None: ...
+    def claim_next_import_preview_job(
+        self,
+        *,
+        worker_id: str,
+        execution_lease: ExecutionLeaseSnapshot | None = None,
+    ) -> ImportJob | None: ...
 
 
 def _force_download_log_failed_path(
@@ -429,6 +551,8 @@ def _front_gate_check(
     *,
     runtime_config: CratediggerConfig | None = None,
     candidate_evidence_loader: Callable[..., EvidenceBuildResult] | None = None,
+    automation_authority: _AutomationPreviewAuthority | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> tuple[EvidenceBuildResult | None, str | None, str | None]:
     """Run the cheap candidate-evidence front-gate for ``job``.
 
@@ -465,6 +589,8 @@ def _front_gate_check(
             ):
                 db.set_import_job_candidate_evidence(job.id, result.evidence.id)
             return result, raw_path, action_path
+        except (ExecutionCancelled, OwnerSessionLost):
+            raise
         except Exception:
             logger.debug(
                 "force front-gate isolation failed for job %s; falling through",
@@ -476,7 +602,13 @@ def _front_gate_check(
             # was not available; only the evidence-reuse optimization failed.
             return None, raw_path, None
 
-    source_path = _front_gate_source_path(db, job)
+    if cancellation_token is not None:
+        cancellation_token.raise_if_cancelled()
+    source_path = _front_gate_source_path(
+        db,
+        job,
+        automation_authority=automation_authority,
+    )
     if not source_path:
         return None, None, None
     try:
@@ -486,6 +618,8 @@ def _front_gate_check(
             download_log_id=_download_log_id_from_job(job),
             import_job_id=job.id,
         )
+    except (ExecutionCancelled, OwnerSessionLost):
+        raise
     except Exception:
         logger.debug(
             "front-gate evidence load failed for job %s; "
@@ -494,10 +628,19 @@ def _front_gate_check(
             exc_info=True,
         )
         return None, source_path, None
+    if cancellation_token is not None:
+        cancellation_token.raise_if_cancelled()
     return result, source_path, None
 
 
-def _preview_input(db: Any, job: ImportJob) -> dict[str, Any]:
+def _preview_input(
+    db: Any,
+    job: ImportJob,
+    *,
+    runtime_config: CratediggerConfig | None = None,
+    automation_authority: _AutomationPreviewAuthority | None = None,
+    cancellation_token: CancellationToken | None = None,
+) -> dict[str, Any]:
     if job.request_id is None:
         raise ValueError("Import job has no request_id")
 
@@ -505,20 +648,18 @@ def _preview_input(db: Any, job: ImportJob) -> dict[str, Any]:
         raise ValueError("Force import preview inputs are resolved from download_log")
 
     if job.job_type == IMPORT_JOB_AUTOMATION:
-        row = db.get_request(job.request_id)
-        if not row:
-            raise ValueError(f"Album request {job.request_id} not found")
-        state = ActiveDownloadState.from_raw(row.get("active_download_state"))
-        if not state.current_path or not os.path.isdir(state.current_path):
-            state.current_path = _materialize_automation_preview_path(
-                db,
-                job.request_id,
-                row,
-                state,
-            )
+        if automation_authority is None or cancellation_token is None:
+            raise ValueError("automation preview requires exact owner authority")
+        path = _materialize_automation_authority(
+            db,
+            job,
+            automation_authority,
+            runtime_config=runtime_config,
+            cancellation_token=cancellation_token,
+        )
         return {
             "request_id": job.request_id,
-            "path": state.current_path,
+            "path": path,
             "force": False,
             "download_log_id": None,
         }
@@ -546,6 +687,8 @@ def execute_preview_job(
     runtime_config: CratediggerConfig | None = None,
     prepared_force_action_path: str | None = None,
     prepared_force_source_path: str | None = None,
+    automation_authority: _AutomationPreviewAuthority | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> ImportPreviewResult:
     if job.job_type == IMPORT_JOB_FORCE:
         if job.request_id is None:
@@ -569,10 +712,17 @@ def execute_preview_job(
             repair_fn=lambda _path: None,
         )
         return msgspec.structs.replace(result, action_path=action_path)
-    preview_input = _preview_input(db, job)
+    preview_input = _preview_input(
+        db,
+        job,
+        runtime_config=runtime_config,
+        automation_authority=automation_authority,
+        cancellation_token=cancellation_token,
+    )
     return measure_and_persist_candidate_evidence(
         db,
         import_job_id=job.id,
+        cancellation_token=cancellation_token,
         **preview_input,
     )
 
@@ -585,6 +735,9 @@ def _handle_measurement_failed(
     prepare_failure_have_fn: FailureHavePrepareFn | None = None,
     enrich_failure_have_fn: FailureHaveEnrichFn | None = None,
     runtime_config: CratediggerConfig | None = None,
+    execution_lease: ExecutionLeaseSnapshot | None = None,
+    cancellation_token: CancellationToken | None = None,
+    owner_session_identity: OwnerSessionIdentity | None = None,
 ) -> ImportJob | None:
     """Persist a measurement failure through one DB-owned terminal bundle.
 
@@ -658,6 +811,41 @@ def _handle_measurement_failed(
                     exc_info=True,
                 )
 
+    automation_terminal_authority = None
+    if job.job_type == IMPORT_JOB_AUTOMATION:
+        if (
+            execution_lease is None
+            or cancellation_token is None
+            or owner_session_identity is None
+        ):
+            raise AutomationPreviewTerminalHandoffRequired(
+                "automation preview terminal outcome lacks exact authority"
+            )
+        from scripts.importer import (
+            _complete_automation_processing_cleanup,
+        )
+
+        cleanup_receipt = _complete_automation_processing_cleanup(
+            db,
+            job,
+            DispatchOutcome(
+                success=False,
+                message=payload.detail,
+                post_commit_cleanup=PostCommitCleanup(
+                    staged_path=payload.source_path or None,
+                ),
+            ),
+            execution_lease=execution_lease,
+            cancellation_token=cancellation_token,
+            owner_session_identity=owner_session_identity,
+        )
+        automation_terminal_authority = AutomationTerminalAuthority(
+            expected_job_status="queued",
+            expected_preview_status="running",
+            expected_execution_lease=execution_lease,
+            cleanup_receipt=cleanup_receipt,
+        )
+
     _record_preview_measurement_failed(
         db,
         request_id=job.request_id,
@@ -666,6 +854,7 @@ def _handle_measurement_failed(
         import_result=result.import_result,
         preview_result=preview_payload,
         requeue_to_wanted=job.job_type == IMPORT_JOB_AUTOMATION,
+        automation_terminal_authority=automation_terminal_authority,
     )
 
     if prepared_outcome == "ready" and configured_runtime is not None:
@@ -708,7 +897,21 @@ def process_claimed_preview_job(
     enrich_failure_have_fn: FailureHaveEnrichFn | None = None,
     current_evidence_loader: Callable[..., EvidenceBuildResult] | None = None,
     runtime_config: CratediggerConfig | None = None,
+    execution_lease: ExecutionLeaseSnapshot | None = None,
+    automation_authority: _AutomationPreviewAuthority | None = None,
+    cancellation_token: CancellationToken | None = None,
+    owner_session_identity: OwnerSessionIdentity | None = None,
 ) -> ImportJob | None:
+    if job.job_type == IMPORT_JOB_AUTOMATION:
+        if (
+            execution_lease is None
+            or automation_authority is None
+            or cancellation_token is None
+        ):
+            return None
+        cancellation_token.raise_if_cancelled()
+        db = _AutomationPreviewDB(db, execution_lease)
+
     def handle_measurement_failed(result: ImportPreviewResult) -> ImportJob | None:
         terminal = _handle_measurement_failed(
             db,
@@ -717,6 +920,9 @@ def process_claimed_preview_job(
             prepare_failure_have_fn=prepare_failure_have_fn,
             enrich_failure_have_fn=enrich_failure_have_fn,
             runtime_config=runtime_config,
+            execution_lease=execution_lease,
+            cancellation_token=cancellation_token,
+            owner_session_identity=owner_session_identity,
         )
         return _cleanup_terminal_preview_force_action(
             job,
@@ -756,6 +962,8 @@ def process_claimed_preview_job(
         db,
         job,
         runtime_config=runtime_config,
+        automation_authority=automation_authority,
+        cancellation_token=cancellation_token,
     )
     if (
         front_gate_result is not None
@@ -822,6 +1030,8 @@ def process_claimed_preview_job(
                 preserve_have_source = preserve_existing_source_spectral(
                     current_evidence,
                 )
+            except (ExecutionCancelled, OwnerSessionLost):
+                raise
             except Exception as exc:
                 logger.exception(
                     "Unable to load reused HAVE evidence for request %s",
@@ -849,6 +1059,8 @@ def process_claimed_preview_job(
                 audit_resolver = lambda _release_id: failed_lookup
             else:
                 audit_resolver = existing_spectral_resolver_for_config(audit_cfg)
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
         audit, have_lookup = collect_release_attempt_spectral_audit(
             front_gate_action or front_gate_source,
             mb_release_id,
@@ -868,6 +1080,8 @@ def process_claimed_preview_job(
                 front_gate_result.evidence.measurement.spectral_bitrate_kbps,
             ),
         )
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
         # The reuse fast path skips measurement but must still make its
         # HAVE scan durable BEFORE the importer decides — an audit-only
         # scan left the decision spectrally blind (download_log 37206).
@@ -887,6 +1101,8 @@ def process_claimed_preview_job(
                     measured_existing=audit.existing,
                     measured_existing_path=have_lookup.path,
                 )
+            except (ExecutionCancelled, OwnerSessionLost):
+                raise
             except Exception:
                 logger.exception(
                     "Unable to persist reused-path HAVE spectral for "
@@ -908,6 +1124,8 @@ def process_claimed_preview_job(
             job.id,
             front_gate_result.evidence.id,
         )
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
         return db.mark_import_job_preview_importable(
             job.id,
             preview_result=reused_payload,
@@ -924,7 +1142,11 @@ def process_claimed_preview_job(
                 runtime_config=runtime_config,
                 prepared_force_action_path=front_gate_action,
                 prepared_force_source_path=front_gate_source,
+                automation_authority=automation_authority,
+                cancellation_token=cancellation_token,
             )
+    except (ExecutionCancelled, OwnerSessionLost):
+        raise
     except Exception as exc:
         logger.exception("Import job %s preview crashed", job.id)
         # Worker-mode preview should not raise — but if it does, route the
@@ -965,6 +1187,8 @@ def process_claimed_preview_job(
             result,
         )
         if evidence_ready:
+            if cancellation_token is not None:
+                cancellation_token.raise_if_cancelled()
             return db.mark_import_job_preview_importable(
                 job.id,
                 preview_result=preview_payload,
@@ -1026,15 +1250,24 @@ def preview_heartbeat_loop(
     stop: threading.Event,
     interval: float = PREVIEW_HEARTBEAT_INTERVAL_SECONDS,
     db_factory: Any | None = None,
+    expected_execution_lease: ExecutionLeaseSnapshot | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> None:
     """Heartbeat a running preview from its own DB session."""
     factory = db_factory or PipelineDB
     db = factory(dsn)
     try:
         while not stop.wait(interval):
-            if not db.heartbeat_import_job_preview(job_id):
+            if not db.heartbeat_import_job_preview(
+                job_id,
+                expected_execution_lease=expected_execution_lease,
+            ):
+                if cancellation_token is not None:
+                    cancellation_token.cancel("preview_heartbeat_rejected")
                 return
     except Exception:
+        if cancellation_token is not None:
+            cancellation_token.cancel("preview_heartbeat_failed")
         logger.warning("Preview heartbeat failed for job %s", job_id, exc_info=True)
     finally:
         close = getattr(db, "close", None)
@@ -1048,6 +1281,11 @@ def process_claimed_preview_job_with_heartbeat(
     *,
     heartbeat_interval: float = PREVIEW_HEARTBEAT_INTERVAL_SECONDS,
     runtime_config: CratediggerConfig | None = None,
+    execution_lease: ExecutionLeaseSnapshot | None = None,
+    automation_authority: _AutomationPreviewAuthority | None = None,
+    cancellation_token: CancellationToken | None = None,
+    owner_session_identity: OwnerSessionIdentity | None = None,
+    heartbeat_db_factory: Any | None = None,
 ) -> ImportJob | None:
     dsn = getattr(db, "dsn", None)
     if not dsn:
@@ -1055,6 +1293,10 @@ def process_claimed_preview_job_with_heartbeat(
             db,
             job,
             runtime_config=runtime_config,
+            execution_lease=execution_lease,
+            automation_authority=automation_authority,
+            cancellation_token=cancellation_token,
+            owner_session_identity=owner_session_identity,
         )
 
     stop = threading.Event()
@@ -1065,7 +1307,9 @@ def process_claimed_preview_job_with_heartbeat(
             "job_id": job.id,
             "stop": stop,
             "interval": heartbeat_interval,
-            "db_factory": PipelineDB,
+            "db_factory": heartbeat_db_factory or PipelineDB,
+            "expected_execution_lease": execution_lease,
+            "cancellation_token": cancellation_token,
         },
         daemon=True,
         name=f"preview-heartbeat-{job.id}",
@@ -1076,10 +1320,62 @@ def process_claimed_preview_job_with_heartbeat(
             db,
             job,
             runtime_config=runtime_config,
+            execution_lease=execution_lease,
+            automation_authority=automation_authority,
+            cancellation_token=cancellation_token,
+            owner_session_identity=owner_session_identity,
         )
     finally:
         stop.set()
         heartbeat_thread.join(timeout=5.0)
+
+
+def _process_automation_claim(
+    job: ImportJob,
+    *,
+    dsn: str,
+    execution_lease: ExecutionLeaseSnapshot,
+    heartbeat_interval: float,
+    runtime_config: CratediggerConfig | None,
+    stage_db_factory: Any,
+    heartbeat_db_factory: Any,
+) -> ImportJob | None:
+    """Run one automation preview under its exact dedicated owner session."""
+    if job.request_id is None:
+        return None
+    stage_db = stage_db_factory(dsn)
+    token = CancellationToken()
+    try:
+        with stage_db._pin_owner_session(
+            token
+        ) as owner_session_identity, stage_db.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_IMPORT,
+            job.request_id,
+        ) as acquired:
+            if not acquired:
+                return None
+            authority = _automation_authority_snapshot(
+                stage_db,
+                job,
+                execution_lease,
+                runtime_config=runtime_config,
+            )
+            if authority is None:
+                return None
+            token.raise_if_cancelled()
+            return process_claimed_preview_job_with_heartbeat(
+                stage_db,
+                job,
+                heartbeat_interval=heartbeat_interval,
+                runtime_config=runtime_config,
+                execution_lease=execution_lease,
+                automation_authority=authority,
+                cancellation_token=token,
+                owner_session_identity=owner_session_identity,
+                heartbeat_db_factory=heartbeat_db_factory,
+            )
+    finally:
+        stage_db.close()
 
 
 def run_once(
@@ -1088,16 +1384,45 @@ def run_once(
     worker_id: str,
     heartbeat_interval: float = PREVIEW_HEARTBEAT_INTERVAL_SECONDS,
     runtime_config: CratediggerConfig | None = None,
+    stage_db_factory: Any | None = None,
+    heartbeat_db_factory: Any | None = None,
+    execution_lease_factory: Callable[..., ExecutionLeaseSnapshot] | None = None,
 ) -> ImportJob | None:
-    job = db.claim_next_import_preview_job(worker_id=worker_id)
+    capture = execution_lease_factory or capture_execution_lease
+    try:
+        execution_lease = capture(systemd_unit=PREVIEW_SYSTEMD_UNIT)
+    except ValueError:
+        # Non-systemd development runs may still process Force/YouTube jobs.
+        # Automation remains invisible to claim without a complete lease.
+        execution_lease = None
+    job = db.claim_next_import_preview_job(
+        worker_id=worker_id,
+        execution_lease=execution_lease,
+    )
     if job is None:
         return None
     logger.info("Claimed import preview job %s (%s)", job.id, job.job_type)
+    if job.job_type == IMPORT_JOB_AUTOMATION:
+        if execution_lease is None:
+            return None
+        dsn = getattr(db, "dsn", None)
+        if not dsn:
+            return None
+        return _process_automation_claim(
+            job,
+            dsn=str(dsn),
+            execution_lease=execution_lease,
+            heartbeat_interval=heartbeat_interval,
+            runtime_config=runtime_config,
+            stage_db_factory=stage_db_factory or PipelineDB,
+            heartbeat_db_factory=heartbeat_db_factory or PipelineDB,
+        )
     return process_claimed_preview_job_with_heartbeat(
         db,
         job,
         heartbeat_interval=heartbeat_interval,
         runtime_config=runtime_config,
+        heartbeat_db_factory=heartbeat_db_factory,
     )
 
 
@@ -1112,21 +1437,87 @@ def recover_abandoned_preview_jobs(
     )
 
 
-def recover_running_preview_jobs(db: PipelineDB) -> list[ImportJob]:
+def _execution_lease_from_job(
+    job: ImportJob,
+) -> ExecutionLeaseSnapshot | None:
+    values = (
+        job.execution_invocation_id,
+        job.execution_host_boot_id,
+        job.execution_systemd_unit,
+        job.execution_worker_pid,
+        job.execution_worker_start_ticks,
+    )
+    if any(value is None for value in values):
+        return None
+    assert job.execution_invocation_id is not None
+    assert job.execution_host_boot_id is not None
+    assert job.execution_systemd_unit is not None
+    assert job.execution_worker_pid is not None
+    assert job.execution_worker_start_ticks is not None
+    child = (
+        ProcessIdentity(
+            job.execution_beets_pid,
+            job.execution_beets_start_ticks,
+        )
+        if (
+            job.execution_beets_pid is not None
+            and job.execution_beets_start_ticks is not None
+        )
+        else None
+    )
+    return ExecutionLeaseSnapshot(
+        host_boot_id=job.execution_host_boot_id,
+        invocation_id=job.execution_invocation_id,
+        systemd_unit=job.execution_systemd_unit,
+        worker=ProcessIdentity(
+            job.execution_worker_pid,
+            job.execution_worker_start_ticks,
+        ),
+        beets=child,
+    )
+
+
+def recover_running_preview_jobs(
+    db: PipelineDB,
+    *,
+    liveness_probe: ExecutionLivenessProbe | None = None,
+) -> list[ImportJob]:
     """Requeue every preview job left running by a previous worker process.
 
-    Called once at startup. Systemd guarantees a single preview-worker
-    process; if any ``preview_status='running'`` rows exist when this
-    process starts, the previous owner is dead and the rows are
-    orphaned regardless of how recently their heartbeats fired. This
-    is the importer's ``recover_abandoned_running_jobs`` pattern,
-    mirrored for the preview lane. The periodic
-    ``preview_recovery_loop`` keeps using the 15-minute heartbeat
-    threshold for the running-system safety net.
+    Called once at startup. Legacy Force/YouTube jobs retain immediate
+    same-process recovery. Automation is requeued only when the shared
+    execution probe proves the exact persisted lease dead; live, unknown,
+    incomplete, or mismatched evidence leaves the row untouched. The periodic
+    stale sweep remains legacy-only.
     """
-    return db.requeue_running_import_preview_jobs(
+    recovered = db.requeue_running_import_preview_jobs(
         message=RESTART_PREVIEW_MESSAGE,
     )
+    for job in db.list_automation_import_jobs_for_startup_recovery():
+        if (
+            job.status != "queued"
+            or job.preview_status != "running"
+        ):
+            continue
+        lease = _execution_lease_from_job(job)
+        if lease is None:
+            continue
+        decision = probe_execution_liveness(
+            lease,
+            probe=liveness_probe,
+        )
+        recovered_job = db.recover_automation_import_job(
+            job.id,
+            expected_execution_lease=lease,
+            decision=decision,
+            requeue_message=RESTART_PREVIEW_MESSAGE,
+            recovery_message=(
+                "Preview execution ended after launch; operator recovery required"
+            ),
+        )
+        if recovered_job is not None:
+            recovered.append(recovered_job)
+    return recovered
 
 
 def preview_recovery_loop(

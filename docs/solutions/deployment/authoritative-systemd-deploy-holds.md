@@ -19,8 +19,9 @@ metadata previously caused systemd to terminate the active cycle.
 
 `scripts/cratedigger_deploy_hold.py` owns the strict lifecycle. It accepts no
 unit names and never masks a service. Its fixed trigger timers are the main,
-unfindable, and metadata-gate-watchdog timers; its fixed drain set is their
-three services.
+unfindable, and metadata-gate-watchdog timers; its fixed drain set is every
+metadata-gate-guarded Cratedigger service, including web, preview, importer,
+and YouTube ingest.
 
 Acquisition creates exact `/dev/null` links under
 `/run/systemd/system.control`, proves every timer is `LoadState=masked`, stops
@@ -28,8 +29,11 @@ the timers, cancels only exact `start/waiting` jobs, lets running oneshots
 finish naturally, and requires two consecutive inactive/job-free samples.
 An exact service already in a job-free terminal `failed` state is reset to
 `inactive/dead` before those stable samples; running work is never reset.
-The helper records intent before creating its manual metadata hold and each
-link in a root-owned mode-0700 receipt under
+Before publishing a receipt, the helper verifies the separately deployed
+downstream contract: main and YouTube have their exact independent start
+inhibitors, web/preview/importer do not, and the metadata gate's guarded/resume
+sets include YouTube. The helper records intent before creating its manual
+metadata hold and each link/inhibitor in a root-owned mode-0700 receipt under
 `/run/cratedigger-deploy-hold`; an interrupted `acquire` can therefore be
 rerun without adopting unrelated state. Initial publication and final
 retirement of that receipt are atomic directory renames; reserved partial
@@ -38,11 +42,23 @@ safe for the same command to finish after interruption. A
 pre-existing hold/link or a changed owned link is an error; release never
 guesses ownership.
 
+Once stable quiescence is established and before migration, acquisition queries
+the live schema through read-only `pipeline-cli query`. It aborts under the
+authoritative hold unless active automation jobs, every recovery-required job,
+staged/launch-marked downloading rows, and missing/malformed PR1
+`enqueued_at` witnesses are all zero. The helper performs no migration,
+cleanup, or lifecycle repair.
+
 Recovery is deliberately staged:
 
-1. keep all timer masks while one controlled main cycle is started and verified;
+1. keep all timer masks, create receipt-owned main and YouTube start
+   inhibitors, release the manual gate, explicitly start and prove
+   web/preview/importer, and exercise an overlapping `resume-if-clear` while
+   both producers remain inactive; then remove only the main inhibitor and
+   start one controlled main cycle;
 2. open only the main timer and capture its ordinary successor;
-3. restore the watchdog and unfindable timers and resume the metadata gate;
+3. restore the watchdog and unfindable timers, remove the owned YouTube
+   inhibitor immediately before resuming the metadata gate;
 4. clear the receipt only after the exact ordinary successor verifies.
 
 `scripts/verify_cratedigger_cycle.sh` owns invocation capture and terminal
@@ -52,8 +68,9 @@ the hold receipt; the hold helper does not reimplement journal verification.
 If a release phase fails, stop. Leave the receipt and remaining owned masks in
 place, inspect the named phase and exact link/job state, and run
 `recover-held` to re-mask all three timers, restore the manual gate, drain exact
-jobs, and return to the held phase before restarting release. Rerun an
+jobs, remove only receipt-owned unchanged producer inhibitors, and return to
+the held phase before restarting release. Rerun an
 interrupted `acquire` directly; rerun an interrupted `complete` when its
 retired-receipt cleanup is pending. Do not remove receipt markers or
-`system.control` links by hand: doing so discards the ownership evidence that
-makes recovery safe.
+`system.control` links or metadata-gate inhibitor files by hand: doing so
+discards the ownership evidence that makes recovery safe.

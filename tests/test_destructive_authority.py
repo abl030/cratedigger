@@ -24,7 +24,6 @@ from lib.beets_delete import (
 from lib.destructive_release_service import (
     BanSourceBeetsAmbiguous,
     BanSourceCleanupIncomplete,
-    BanSourceImporterBusy,
     BanSourceLockContended,
     BanSourceReleaseMismatch,
     BanSourceRequest,
@@ -32,7 +31,6 @@ from lib.destructive_release_service import (
     BanSourceTransitionConflict,
     DeleteAlbumAuthorityMismatch,
     DeleteBeetsAmbiguous,
-    DeleteImporterBusy,
     DeleteIncomplete,
     DeleteLockContended,
     DeleteReleaseMismatch,
@@ -41,7 +39,6 @@ from lib.destructive_release_service import (
     ban_source,
     delete_release_from_library,
 )
-from lib.import_queue import IMPORT_JOB_AUTOMATION
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_IMPORT,
     ADVISORY_LOCK_NAMESPACE_RELEASE,
@@ -52,7 +49,7 @@ from lib.release_identity import ReleaseIdentity
 from lib.transitions import TransitionConflict, TransitionConflictKind
 from tests.beets_world import BeetsWorld, BeetsWorldRelease
 from tests.fakes import FakeBeetsDB, FakePipelineDB
-from tests.helpers import make_request_row
+from tests.helpers import handoff_automation_owner, make_request_row
 from tests.test_pipeline_db import TEST_DSN, make_db, requires_postgres
 
 RELEASE_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -83,7 +80,11 @@ class TestBanSourceAuthority(unittest.TestCase):
         ))
         self.beets = FakeBeetsDB()
 
-    def _assert_no_mutation(self) -> None:
+    def _assert_no_mutation(
+        self,
+        *,
+        expected_status: str = "imported",
+    ) -> None:
         self.assertEqual(self.db.denylist, [])
         self.assertEqual(self.db.bad_audio_hashes, [])
         self.assertEqual(self.db.download_logs, [])
@@ -92,7 +93,7 @@ class TestBanSourceAuthority(unittest.TestCase):
         row = self.db.get_request(41)
         self.assertIsNotNone(row)
         assert row is not None
-        self.assertEqual(row["status"], "imported")
+        self.assertEqual(row["status"], expected_status)
 
     def test_ab_identifier_mismatch_is_zero_mutation(self) -> None:
         result = ban_source(
@@ -128,11 +129,8 @@ class TestBanSourceAuthority(unittest.TestCase):
     def test_job_claimed_after_release_lock_is_rechecked_under_lock(self) -> None:
         def acquire(namespace: int, _key: int) -> bool:
             if namespace == ADVISORY_LOCK_NAMESPACE_RELEASE:
-                self.db.enqueue_import_job(
-                    IMPORT_JOB_AUTOMATION,
-                    request_id=41,
-                    dedupe_key="automation_import:request:41",
-                )
+                self.db.request(41)["status"] = "wanted"
+                handoff_automation_owner(self.db, 41)
             return True
 
         self.db.set_advisory_lock_result(acquire)
@@ -143,8 +141,13 @@ class TestBanSourceAuthority(unittest.TestCase):
             request=BanSourceRequest(request_id=41),
         )
 
-        self.assertIsInstance(result, BanSourceImporterBusy)
-        self._assert_no_mutation()
+        self.assertIsInstance(result, BanSourceTransitionConflict)
+        assert isinstance(result, BanSourceTransitionConflict)
+        self.assertEqual(
+            result.conflict.kind,
+            TransitionConflictKind.processing_locked,
+        )
+        self._assert_no_mutation(expected_status="processing")
 
     def test_dual_canonical_request_identity_fails_closed(self) -> None:
         self.db.seed_request(make_request_row(
@@ -452,11 +455,8 @@ class TestLibraryDeleteAuthority(unittest.TestCase):
     def test_job_claimed_after_release_lock_is_rechecked_under_lock(self) -> None:
         def acquire(namespace: int, _key: int) -> bool:
             if namespace == ADVISORY_LOCK_NAMESPACE_RELEASE:
-                self.db.enqueue_import_job(
-                    IMPORT_JOB_AUTOMATION,
-                    request_id=41,
-                    dedupe_key="automation_import:request:41",
-                )
+                self.db.request(41)["status"] = "wanted"
+                handoff_automation_owner(self.db, 41)
             return True
 
         self.db.set_advisory_lock_result(acquire)
@@ -467,7 +467,12 @@ class TestLibraryDeleteAuthority(unittest.TestCase):
             request=DeleteRequest(album_id=7),
         )
 
-        self.assertIsInstance(result, DeleteImporterBusy)
+        self.assertIsInstance(result, TransitionConflict)
+        assert isinstance(result, TransitionConflict)
+        self.assertEqual(
+            result.kind,
+            TransitionConflictKind.processing_locked,
+        )
         self._assert_no_mutation()
 
     def test_dual_canonical_album_identity_fails_closed_in_every_pipeline_world(
@@ -490,11 +495,6 @@ class TestLibraryDeleteAuthority(unittest.TestCase):
                         mb_release_id=DISCOGS_A,
                         discogs_release_id=DISCOGS_A,
                     ))
-                    db.enqueue_import_job(
-                        IMPORT_JOB_AUTOMATION,
-                        request_id=42,
-                        dedupe_key="automation_import:request:42",
-                    )
                 beets = FakeBeetsDB()
                 beets.set_album_detail(7, {
                     **_album(),
@@ -886,13 +886,9 @@ class TestDestructiveAuthorityRealPostgres(unittest.TestCase):
             "request",
             mb_release_id=DISCOGS_A,
             discogs_release_id=DISCOGS_A,
-            status="imported",
+            status="wanted",
         )
-        db1.enqueue_import_job(
-            IMPORT_JOB_AUTOMATION,
-            request_id=request_id,
-            dedupe_key=f"automation_import:request:{request_id}",
-        )
+        handoff_automation_owner(db1, request_id)
         beets = FakeBeetsDB()
         beets.set_album_detail(7, {
             **_album(release_id=DISCOGS_A),
@@ -935,7 +931,12 @@ class TestDestructiveAuthorityRealPostgres(unittest.TestCase):
                 )
             finally:
                 db2.close()
-            self.assertIsInstance(busy, DeleteImporterBusy)
+            self.assertIsInstance(busy, TransitionConflict)
+            assert isinstance(busy, TransitionConflict)
+            self.assertEqual(
+                busy.kind,
+                TransitionConflictKind.processing_locked,
+            )
             self.assertIsNotNone(db1.get_request(request_id))
             self.assertIsNotNone(beets.get_album_detail(7))
         finally:

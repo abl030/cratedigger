@@ -1204,8 +1204,36 @@ class TestRecoverStuckPreviewUncertainJobsSchema(unittest.TestCase):
         )[0][0]
 
     def _cleanup_request(self, rid: int) -> None:
-        # CASCADE on album_requests.id → import_jobs cleans up associated jobs.
-        self._exec("DELETE FROM album_requests WHERE id = %s", (rid,))
+        # Terminalize and detach an exact automation owner in the same
+        # transaction before the request delete cascades its audit jobs.
+        conn = psycopg2.connect(TEST_DSN)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE import_jobs
+                    SET status = 'failed'
+                    WHERE request_id = %s
+                      AND job_type = 'automation_import'
+                      AND status IN (
+                          'queued', 'running', 'recovery_required'
+                      )
+                """, (rid,))
+                cur.execute("""
+                    UPDATE album_requests
+                    SET status = 'wanted',
+                        active_automation_import_job_id = NULL
+                    WHERE id = %s
+                """, (rid,))
+                cur.execute(
+                    "DELETE FROM album_requests WHERE id = %s",
+                    (rid,),
+                )
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def test_schema_migrations_records_020(self):
         rows = self._query(
@@ -1218,22 +1246,30 @@ class TestRecoverStuckPreviewUncertainJobsSchema(unittest.TestCase):
         rid = self._make_request("mig020-flip-mbid")
         try:
             self._exec("""
-                INSERT INTO import_jobs (
-                    job_type, status, request_id, payload,
-                    preview_status, preview_result, preview_message,
-                    preview_error, preview_worker_id,
-                    preview_started_at, preview_heartbeat_at,
-                    preview_completed_at, importable_at
+                WITH new_job AS (
+                    INSERT INTO import_jobs (
+                        job_type, status, request_id, payload,
+                        preview_status, preview_result, preview_message,
+                        preview_error, preview_worker_id,
+                        preview_started_at, preview_heartbeat_at,
+                        preview_completed_at, importable_at
+                    )
+                    VALUES (
+                        'automation_import', 'queued', %s, '{}'::jsonb,
+                        'uncertain', '{"verdict": "uncertain"}'::jsonb,
+                        'pre-U7 stuck reason',
+                        'pre-U7 stuck error', 'pre-U7-worker',
+                        NOW(), NOW(),
+                        NOW(), NOW()
+                    )
+                    RETURNING id
                 )
-                VALUES (
-                    'automation_import', 'queued', %s, '{}'::jsonb,
-                    'uncertain', '{"verdict": "uncertain"}'::jsonb,
-                    'pre-U7 stuck reason',
-                    'pre-U7 stuck error', 'pre-U7-worker',
-                    NOW(), NOW(),
-                    NOW(), NOW()
-                )
-            """, (rid,))
+                UPDATE album_requests AS request
+                SET status = 'processing',
+                    active_automation_import_job_id = new_job.id
+                FROM new_job
+                WHERE request.id = %s
+            """, (rid, rid))
             affected = self._exec_with_rowcount(self._RECOVERY_SWEEP_SQL)
             self.assertEqual(affected, 1)
             rows = self._query("""
@@ -1268,13 +1304,22 @@ class TestRecoverStuckPreviewUncertainJobsSchema(unittest.TestCase):
         rid = self._make_request("mig020-idem-mbid")
         try:
             self._exec("""
-                INSERT INTO import_jobs (
-                    job_type, status, request_id, payload, preview_status
+                WITH new_job AS (
+                    INSERT INTO import_jobs (
+                        job_type, status, request_id, payload, preview_status
+                    )
+                    VALUES (
+                        'automation_import', 'queued', %s,
+                        '{}'::jsonb, 'uncertain'
+                    )
+                    RETURNING id
                 )
-                VALUES (
-                    'automation_import', 'queued', %s, '{}'::jsonb, 'uncertain'
-                )
-            """, (rid,))
+                UPDATE album_requests AS request
+                SET status = 'processing',
+                    active_automation_import_job_id = new_job.id
+                FROM new_job
+                WHERE request.id = %s
+            """, (rid, rid))
             first = self._exec_with_rowcount(self._RECOVERY_SWEEP_SQL)
             self.assertEqual(first, 1)
             second = self._exec_with_rowcount(self._RECOVERY_SWEEP_SQL)
@@ -4113,7 +4158,6 @@ class TestProcessingAutomationOwnerMigration(unittest.TestCase):
 
     def tearDown(self) -> None:
         conn = psycopg2.connect(TEST_DSN)
-        conn.autocommit = True
         try:
             with conn.cursor() as cur:
                 cur.execute("""
@@ -4122,6 +4166,16 @@ class TestProcessingAutomationOwnerMigration(unittest.TestCase):
                         SELECT id FROM album_requests
                         WHERE mb_release_id LIKE %s
                     )
+                """, (f"{self.prefix}%",))
+                cur.execute("""
+                    UPDATE import_jobs
+                    SET status = 'failed'
+                    WHERE job_type = 'automation_import'
+                      AND status IN ('queued', 'running', 'recovery_required')
+                      AND request_id IN (
+                          SELECT id FROM album_requests
+                          WHERE mb_release_id LIKE %s
+                      )
                 """, (f"{self.prefix}%",))
                 cur.execute("""
                     UPDATE album_requests
@@ -4140,6 +4194,10 @@ class TestProcessingAutomationOwnerMigration(unittest.TestCase):
                     "DELETE FROM album_requests WHERE mb_release_id LIKE %s",
                     (f"{self.prefix}%",),
                 )
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
@@ -4193,6 +4251,26 @@ class TestProcessingAutomationOwnerMigration(unittest.TestCase):
             VALUES (%s, %s, %s, '{}'::jsonb, 'waiting')
             RETURNING id
         """, (job_type, status, request_id))
+        return int(rows[0][0])
+
+    def _owner(self, request_id: int) -> int:
+        rows = self._exec("""
+            WITH new_job AS (
+                INSERT INTO import_jobs (
+                    job_type, status, request_id, payload, preview_status
+                )
+                VALUES (
+                    'automation_import', 'queued', %s, '{}'::jsonb, 'waiting'
+                )
+                RETURNING id
+            )
+            UPDATE album_requests AS request
+            SET status = 'processing',
+                active_automation_import_job_id = new_job.id
+            FROM new_job
+            WHERE request.id = %s
+            RETURNING new_job.id
+        """, (request_id, request_id))
         return int(rows[0][0])
 
     def _attach(self, request_id: int, job_id: int) -> None:
@@ -4317,8 +4395,7 @@ class TestProcessingAutomationOwnerMigration(unittest.TestCase):
 
     def test_processing_and_owner_pointer_are_equivalent(self) -> None:
         request_id = self._request("equivalent")
-        job_id = self._job(request_id)
-        self._attach(request_id, job_id)
+        job_id = self._owner(request_id)
         self.assertEqual(
             self._exec("""
                 SELECT status, active_automation_import_job_id
@@ -4335,7 +4412,7 @@ class TestProcessingAutomationOwnerMigration(unittest.TestCase):
             )
 
         stray_owner = self._request("stray-owner")
-        stray_job = self._job(stray_owner)
+        stray_job = self._job(stray_owner, job_type="force_import")
         with self.assertRaises(psycopg2.errors.CheckViolation):
             self._exec("""
                 UPDATE album_requests
@@ -4346,7 +4423,7 @@ class TestProcessingAutomationOwnerMigration(unittest.TestCase):
     def test_owner_must_be_same_request_active_automation_job(self) -> None:
         request_id = self._request("owner")
         other_request_id = self._request("other")
-        wrong_request_job = self._job(other_request_id)
+        wrong_request_job = self._owner(other_request_id)
         with self.assertRaises(psycopg2.errors.ForeignKeyViolation):
             self._attach(request_id, wrong_request_job)
 
@@ -4367,8 +4444,7 @@ class TestProcessingAutomationOwnerMigration(unittest.TestCase):
     ) -> None:
         request_id = self._request("fk-owner")
         other_request_id = self._request("fk-other")
-        job_id = self._job(request_id)
-        self._attach(request_id, job_id)
+        job_id = self._owner(request_id)
 
         with self.assertRaises(psycopg2.errors.ForeignKeyViolation):
             self._transaction([("""
@@ -4400,12 +4476,114 @@ class TestProcessingAutomationOwnerMigration(unittest.TestCase):
                 (other_request_id, job_id),
             )])
 
+    def test_active_automation_job_cannot_be_orphaned_from_its_request(
+        self,
+    ) -> None:
+        request_id = self._request("orphan-owner")
+        job_id = self._owner(request_id)
+
+        with self.assertRaises(psycopg2.errors.CheckViolation):
+            self._transaction([(
+                "DELETE FROM album_requests WHERE id = %s",
+                (request_id,),
+            )])
+        with self.assertRaises((
+            psycopg2.errors.CheckViolation,
+            psycopg2.errors.ForeignKeyViolation,
+        )):
+            self._transaction([(
+                "UPDATE import_jobs SET request_id = NULL WHERE id = %s",
+                (job_id,),
+            )])
+
+        self.assertEqual(
+            self._exec("""
+                SELECT request.status,
+                       request.active_automation_import_job_id,
+                       job.request_id,
+                       job.status
+                FROM album_requests AS request
+                JOIN import_jobs AS job ON job.id = %s
+                WHERE request.id = %s
+            """, (job_id, request_id)),
+            [("processing", job_id, request_id, "queued")],
+        )
+
+    def test_active_automation_insert_requires_atomic_owner_attachment(
+        self,
+    ) -> None:
+        request_id = self._request("orphan-insert")
+
+        with self.assertRaises(psycopg2.errors.CheckViolation) as caught:
+            self._job(request_id)
+
+        self.assertEqual(
+            caught.exception.diag.constraint_name,
+            "complete_processing_owner",
+        )
+        self.assertEqual(
+            self._exec("""
+                SELECT status, active_automation_import_job_id
+                FROM album_requests
+                WHERE id = %s
+            """, (request_id,)),
+            [("wanted", None)],
+        )
+        self.assertEqual(
+            self._exec("""
+                SELECT COUNT(*)
+                FROM import_jobs
+                WHERE request_id = %s
+                  AND job_type = 'automation_import'
+            """, (request_id,)),
+            [(0,)],
+        )
+
+    def test_terminal_automation_update_requires_atomic_owner_attachment(
+        self,
+    ) -> None:
+        request_id = self._request("orphan-reactivation")
+        job_id = self._owner(request_id)
+        self._transaction([
+            (
+                "UPDATE import_jobs SET status = 'failed' WHERE id = %s",
+                (job_id,),
+            ),
+            ("""
+                UPDATE album_requests
+                SET status = 'wanted',
+                    active_automation_import_job_id = NULL
+                WHERE id = %s
+            """, (request_id,)),
+        ])
+
+        with self.assertRaises(psycopg2.errors.CheckViolation) as caught:
+            self._exec(
+                "UPDATE import_jobs SET status = 'queued' WHERE id = %s",
+                (job_id,),
+            )
+
+        self.assertEqual(
+            caught.exception.diag.constraint_name,
+            "complete_processing_owner",
+        )
+        self.assertEqual(
+            self._exec("""
+                SELECT request.status,
+                       request.active_automation_import_job_id,
+                       job.status
+                FROM album_requests AS request
+                JOIN import_jobs AS job ON job.id = %s
+                WHERE request.id = %s
+            """, (job_id, request_id)),
+            [("wanted", None, "failed")],
+        )
+
     def test_active_automation_uniqueness_and_atomic_terminal_bundle(self) -> None:
         request_id = self._request("unique")
-        job_id = self._job(request_id)
+        job_id = self._owner(request_id)
         with self.assertRaises(psycopg2.errors.UniqueViolation):
             self._job(request_id)
-        self._attach(request_id, job_id)
 
         with self.assertRaises(psycopg2.errors.CheckViolation):
             self._transaction([(
@@ -4438,8 +4616,7 @@ class TestProcessingAutomationOwnerMigration(unittest.TestCase):
         self,
     ) -> None:
         request_id = self._request("retry")
-        old_job_id = self._job(request_id)
-        self._attach(request_id, old_job_id)
+        old_job_id = self._owner(request_id)
         replacement_job_id = self._job(request_id, status="failed")
 
         self._transaction([
@@ -4475,8 +4652,7 @@ class TestProcessingAutomationOwnerMigration(unittest.TestCase):
         self,
     ) -> None:
         request_id = self._request("retry-journal")
-        old_job_id = self._job(request_id)
-        self._attach(request_id, old_job_id)
+        old_job_id = self._owner(request_id)
         self._exec("""
             INSERT INTO processing_cleanup_journal (
                 job_id, request_id, revision, action, source_path,
@@ -4569,66 +4745,11 @@ class TestProcessingAutomationOwnerMigration(unittest.TestCase):
         """, (replacement_job_id, request_id))
         self.assertEqual(after, before)
 
-    def test_concurrent_owner_attach_and_job_terminal_cannot_both_commit(
-        self,
-    ) -> None:
-        request_id = self._request("owner-terminal-overlap")
-        job_id = self._job(request_id)
-        attach_conn = psycopg2.connect(TEST_DSN)
-        terminal_conn = psycopg2.connect(TEST_DSN)
-        try:
-            with attach_conn.cursor() as cur:
-                cur.execute("""
-                    UPDATE album_requests
-                    SET status = 'processing',
-                        active_automation_import_job_id = %s
-                    WHERE id = %s
-                """, (job_id, request_id))
-            with terminal_conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE import_jobs SET status = 'failed' WHERE id = %s",
-                    (job_id,),
-                )
-
-            validated = threading.Barrier(2)
-
-            with ThreadPoolExecutor(max_workers=2) as pool:
-                futures = [
-                    pool.submit(
-                        self._validate_and_commit_overlapping,
-                        attach_conn,
-                        validated,
-                    ),
-                    pool.submit(
-                        self._validate_and_commit_overlapping,
-                        terminal_conn,
-                        validated,
-                    ),
-                ]
-                results = [future.result(timeout=15) for future in futures]
-        finally:
-            attach_conn.close()
-            terminal_conn.close()
-
-        self.assertEqual(results.count("committed"), 1, results)
-        final = self._exec("""
-            SELECT request.status, request.active_automation_import_job_id,
-                   job.status
-            FROM album_requests AS request
-            JOIN import_jobs AS job ON job.id = %s
-            WHERE request.id = %s
-        """, (job_id, request_id))
-        self.assertIn(
-            final[0],
-            (("processing", job_id, "queued"), ("wanted", None, "failed")),
-        )
-
     def test_concurrent_journal_insert_and_owner_terminal_cannot_both_commit(
         self,
     ) -> None:
         request_id = self._request("journal-terminal-overlap")
-        job_id = self._job(request_id)
-        self._attach(request_id, job_id)
+        job_id = self._owner(request_id)
         journal_conn = psycopg2.connect(TEST_DSN)
         terminal_conn = psycopg2.connect(TEST_DSN)
         try:
@@ -4700,8 +4821,7 @@ class TestProcessingAutomationOwnerMigration(unittest.TestCase):
         self,
     ) -> None:
         request_id = self._request("journal")
-        job_id = self._job(request_id)
-        self._attach(request_id, job_id)
+        job_id = self._owner(request_id)
         insert = """
             INSERT INTO processing_cleanup_journal (
                 job_id, request_id, action, source_path,
@@ -4746,7 +4866,10 @@ class TestProcessingAutomationOwnerMigration(unittest.TestCase):
         ])
 
         unattached_request_id = self._request("journal-unattached")
-        unattached_job_id = self._job(unattached_request_id)
+        unattached_job_id = self._job(
+            unattached_request_id,
+            status="failed",
+        )
         with self.assertRaises(psycopg2.errors.CheckViolation):
             self._exec(
                 insert,
@@ -4754,8 +4877,7 @@ class TestProcessingAutomationOwnerMigration(unittest.TestCase):
             )
 
         other_request_id = self._request("journal-other")
-        other_job_id = self._job(other_request_id)
-        self._attach(other_request_id, other_job_id)
+        other_job_id = self._owner(other_request_id)
         with self.assertRaises(psycopg2.errors.ForeignKeyViolation):
             self._exec(insert, (job_id, other_request_id))
 
@@ -4853,8 +4975,7 @@ class TestProcessingAutomationOwnerMigration(unittest.TestCase):
                     ))
 
         owner_request_id = self._request("lease-owner")
-        owner_job_id = self._job(owner_request_id)
-        self._attach(owner_request_id, owner_job_id)
+        owner_job_id = self._owner(owner_request_id)
         with self.assertRaises(psycopg2.errors.CheckViolation):
             self._exec("""
                 UPDATE import_jobs
@@ -4876,8 +4997,7 @@ class TestProcessingAutomationOwnerMigration(unittest.TestCase):
 
     def test_cleanup_journal_rejects_blank_destination_paths(self) -> None:
         request_id = self._request("blank-destination")
-        job_id = self._job(request_id)
-        self._attach(request_id, job_id)
+        job_id = self._owner(request_id)
         for destination_path, selected_destination_path in (
             (" \t", "/processing/destination"),
             ("/processing/destination", "\n"),
@@ -4905,6 +5025,49 @@ class TestProcessingAutomationOwnerMigration(unittest.TestCase):
                     destination_path,
                     selected_destination_path,
                 ))
+
+    def test_cleanup_journal_recovery_declaration_is_all_or_none(self) -> None:
+        request_id = self._request("declaration")
+        job_id = self._owner(request_id)
+        insert = """
+            INSERT INTO processing_cleanup_journal (
+                job_id, request_id, action, source_path,
+                source_manifest, source_manifest_hash,
+                declared_result_status, declared_reason, evidence_revision
+            )
+            VALUES (
+                %s, %s, 'no_op', '/processing/missing',
+                '[]'::jsonb, 'source-sha256', %s, %s, %s
+            )
+        """
+        for declaration in (
+            ("wanted", None, None),
+            (None, "operator reason", None),
+            (None, None, "evidence-v1"),
+            ("imported", " \t", "evidence-v1"),
+            ("wanted", "operator reason", "\n"),
+        ):
+            with self.subTest(
+                declaration=declaration,
+            ), self.assertRaises(psycopg2.errors.CheckViolation):
+                self._exec(
+                    insert,
+                    (job_id, request_id, *declaration),
+                )
+
+        self._exec(
+            insert,
+            (job_id, request_id, None, None, None),
+        )
+        self.assertEqual(
+            self._exec("""
+                SELECT declared_result_status, declared_reason,
+                       evidence_revision
+                FROM processing_cleanup_journal
+                WHERE job_id = %s AND request_id = %s
+            """, (job_id, request_id)),
+            [(None, None, None)],
+        )
 
     def test_migration_does_not_rewrite_historical_rows_or_adopt_jobs(
         self,

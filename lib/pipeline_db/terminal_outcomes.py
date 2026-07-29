@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
-from datetime import UTC, datetime
-from typing import Any
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from typing import Any, Protocol, cast
 
+import msgspec
 import psycopg2.extras
 
 from lib import transitions
+from lib.import_execution import ExecutionLeaseSnapshot
 from lib.import_queue import ImportJob, validate_preview_failure_status
 from lib.pipeline_db._core import _PipelineDBBase
 from lib.pipeline_db._shared import (
@@ -17,8 +21,14 @@ from lib.pipeline_db._shared import (
     _msgspec_json_dumps,
     validate_request_metadata_fields,
 )
+from lib.pipeline_db.cleanup_journal import (
+    CleanupJournalConflict,
+    ProcessingCleanupJournalRow,
+    _LockedCleanupScope,
+)
 from lib.pipeline_db.rows import AlbumRequestRow, album_request_row
 from lib.terminal_outcomes import (
+    AutomationTerminalAuthority,
     ImportTerminalOutcome,
     PreviewTerminalOutcome,
     TerminalCooldown,
@@ -26,12 +36,66 @@ from lib.terminal_outcomes import (
     TerminalDownloadAudit,
     TerminalOutcomeResult,
     operator_search_stop_is_current,
+    validate_automation_terminal_declaration,
 )
 from lib.validation_envelope import derive_validation_log_columns
 
 
 class ImportJobTerminalConflict(RuntimeError):
     """The owned import job was no longer active at terminal commit time."""
+
+
+AUTOMATION_COMPLETION_RESULT_KEY = "automation_completion"
+PROCESSING_CLEANUP_AUDIT_KEY = "processing_cleanup"
+PROCESSING_CLEANUP_RESULT_KEY = "processing_cleanup"
+
+
+class _CleanupTerminalScope(Protocol):
+    def _lock_processing_cleanup_scope(
+        self,
+        cur: Any,
+        *,
+        request_id: int,
+    ) -> _LockedCleanupScope: ...
+
+    def _require_exact_processing_owner(
+        self,
+        scope: _LockedCleanupScope,
+        *,
+        request_id: int,
+        job_id: int,
+    ) -> None: ...
+
+    def _get_processing_cleanup_journal_locked(
+        self,
+        *,
+        request_id: int,
+        job_id: int,
+        scope: _LockedCleanupScope,
+    ) -> ProcessingCleanupJournalRow | None: ...
+
+
+def _lease_values(
+    lease: ExecutionLeaseSnapshot | None,
+) -> tuple[object, ...]:
+    if lease is None:
+        return (None, None, None, None, None, None, None)
+    return (
+        lease.invocation_id,
+        lease.host_boot_id,
+        lease.systemd_unit,
+        lease.worker.pid,
+        lease.worker.start_ticks,
+        None if lease.beets is None else lease.beets.pid,
+        None if lease.beets is None else lease.beets.start_ticks,
+    )
+
+
+def _receipt_builtins(receipt: object) -> dict[str, object]:
+    return msgspec.convert(
+        msgspec.to_builtins(receipt),
+        type=dict[str, object],
+    )
 
 
 class _TransactionalTransitionsDB:
@@ -402,6 +466,95 @@ class _TransactionalTransitionsDB:
 class _TerminalOutcomesMixin(_PipelineDBBase):
     """Persist terminal domain outcomes with one explicit transaction."""
 
+    def capture_automation_import_completion(
+        self,
+        job_id: int,
+        *,
+        expected_execution_lease: ExecutionLeaseSnapshot,
+        receipt: object,
+    ) -> ImportJob | None:
+        """Persist exact child completion before any post-Beets effect.
+
+        The receipt is evidence, never authority.  The UPDATE therefore
+        compares the complete current processing owner, importer stage,
+        launch fence, canonical path/release, and worker/child lease.  An
+        identical replay is idempotent; a different receipt cannot overwrite
+        the first captured completion.
+        """
+        if expected_execution_lease.beets is None:
+            return None
+        from lib.import_job_recovery_service import (
+            AutomationCompletionReceipt,
+            automation_completion_result_patch,
+        )
+
+        try:
+            typed_receipt = msgspec.convert(
+                msgspec.to_builtins(receipt),
+                type=AutomationCompletionReceipt,
+                strict=True,
+            )
+            patch = automation_completion_result_patch(typed_receipt)
+        except (TypeError, ValueError, msgspec.ValidationError):
+            return None
+        if typed_receipt.job_id != job_id:
+            return None
+        lease = _lease_values(expected_execution_lease)
+        receipt_json = patch[AUTOMATION_COMPLETION_RESULT_KEY]
+        cur = self._execute(
+            """
+            UPDATE import_jobs AS job
+            SET result = COALESCE(job.result, '{}'::jsonb) || %s::jsonb,
+                updated_at = NOW()
+            FROM album_requests AS request
+            WHERE job.id = %s
+              AND job.request_id = %s
+              AND job.job_type = 'automation_import'
+              AND job.status = 'running'
+              AND job.preview_status = 'evidence_ready'
+              AND job.completed_at IS NULL
+              AND job.beets_launch_authorized_at IS NOT NULL
+              AND job.beets_launch_release_id = %s
+              AND job.beets_launch_source_path = %s
+              AND request.id = job.request_id
+              AND request.status = 'processing'
+              AND request.active_automation_import_job_id = job.id
+              AND request.active_download_state ->> 'current_path' = %s
+              AND job.execution_invocation_id = %s
+              AND job.execution_host_boot_id = %s
+              AND job.execution_systemd_unit = %s
+              AND job.execution_worker_pid = %s
+              AND job.execution_worker_start_ticks = %s
+              AND job.execution_beets_pid = %s
+              AND job.execution_beets_start_ticks = %s
+              AND (
+                  NOT (COALESCE(job.result, '{}'::jsonb) ? %s)
+                  OR job.result -> %s = %s::jsonb
+              )
+            RETURNING job.*
+            """,
+            (
+                psycopg2.extras.Json(
+                    patch,
+                    dumps=_msgspec_json_dumps,
+                ),
+                job_id,
+                typed_receipt.request_id,
+                typed_receipt.release_id,
+                typed_receipt.canonical_path,
+                typed_receipt.canonical_path,
+                *lease,
+                AUTOMATION_COMPLETION_RESULT_KEY,
+                AUTOMATION_COMPLETION_RESULT_KEY,
+                psycopg2.extras.Json(
+                    receipt_json,
+                    dumps=_msgspec_json_dumps,
+                ),
+            ),
+        )
+        row = cur.fetchone()
+        return ImportJob.from_row(dict(row)) if row is not None else None
+
     def _terminal_outcome_write_boundary(self, index: int, label: str) -> None:
         """Post-write fault-injection seam; production deliberately does nothing."""
         del index, label
@@ -650,13 +803,427 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
         boundary("cooldown")
         return True
 
+    def _require_automation_terminal_scope(
+        self,
+        cur: Any,
+        *,
+        request_id: int,
+        job_id: int,
+        authority: AutomationTerminalAuthority,
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        cleanup_db = cast(_CleanupTerminalScope, self)
+        scope = cleanup_db._lock_processing_cleanup_scope(
+            cur,
+            request_id=request_id,
+        )
+        try:
+            cleanup_db._require_exact_processing_owner(
+                scope,
+                request_id=request_id,
+                job_id=job_id,
+            )
+        except CleanupJournalConflict as exc:
+            raise ImportJobTerminalConflict(str(exc)) from exc
+        cur.execute(
+            """
+            SELECT *
+            FROM album_requests
+            WHERE id = %s
+            """,
+            (request_id,),
+        )
+        request_raw = cur.fetchone()
+        cur.execute(
+            """
+            SELECT *
+            FROM import_jobs
+            WHERE id = %s AND request_id = %s
+            """,
+            (job_id, request_id),
+        )
+        job_raw = cur.fetchone()
+        if request_raw is None or job_raw is None:
+            raise ImportJobTerminalConflict(
+                "automation terminal owner disappeared under lock"
+            )
+        request = dict(request_raw)
+        job = dict(job_raw)
+        if (
+            job["job_type"] != "automation_import"
+            or job["status"] != authority.expected_job_status
+            or job["preview_status"] != authority.expected_preview_status
+            or job["completed_at"] is not None
+        ):
+            raise ImportJobTerminalConflict(
+                f"automation job {job_id} no longer has the exact terminal stage"
+            )
+        actual_lease = (
+            job["execution_invocation_id"],
+            job["execution_host_boot_id"],
+            job["execution_systemd_unit"],
+            job["execution_worker_pid"],
+            job["execution_worker_start_ticks"],
+            job["execution_beets_pid"],
+            job["execution_beets_start_ticks"],
+        )
+        if actual_lease != _lease_values(authority.expected_execution_lease):
+            raise ImportJobTerminalConflict(
+                f"automation job {job_id} execution lease changed"
+            )
+
+        journal = cleanup_db._get_processing_cleanup_journal_locked(
+            request_id=request_id,
+            job_id=job_id,
+            scope=scope,
+        )
+        expected_cleanup = _receipt_builtins(authority.cleanup_receipt)
+        if (
+            journal is None
+            or journal["completed_at"] is None
+            or journal["completed_receipt"] is None
+            or _receipt_builtins(journal["completed_receipt"])
+            != expected_cleanup
+            or journal["declared_result_status"]
+            != authority.declared_result_status
+            or journal["declared_reason"] != authority.declared_reason
+            or journal["evidence_revision"] != authority.evidence_revision
+        ):
+            raise ImportJobTerminalConflict(
+                f"automation job {job_id} cleanup receipt is not exact"
+            )
+
+        raw_result = job["result"]
+        result = msgspec.convert(
+            raw_result or {},
+            type=dict[str, object],
+        )
+        completion = authority.completion_receipt
+        if completion is not None:
+            completion_builtins = _receipt_builtins(completion)
+            if (
+                result.get(AUTOMATION_COMPLETION_RESULT_KEY)
+                != completion_builtins
+            ):
+                raise ImportJobTerminalConflict(
+                    f"automation job {job_id} completion receipt changed"
+                )
+        elif (
+            authority.expected_job_status == "running"
+            and authority.expected_preview_status == "evidence_ready"
+            and job["beets_launch_authorized_at"] is not None
+        ):
+            raise ImportJobTerminalConflict(
+                f"automation job {job_id} lacks its completion receipt"
+            )
+        return request, job
+
+    @staticmethod
+    def _automation_audit(
+        audit: TerminalDownloadAudit,
+        authority: AutomationTerminalAuthority,
+    ) -> TerminalDownloadAudit:
+        raw = audit.validation_result
+        if raw is None or raw == "":
+            payload: dict[str, object] = {}
+        else:
+            decoded = json.loads(raw)
+            if not isinstance(decoded, dict):
+                raise ValueError(
+                    "automation validation audit must be a JSON object"
+                )
+            payload = msgspec.convert(decoded, type=dict[str, object])
+        cleanup = _receipt_builtins(authority.cleanup_receipt)
+        existing = payload.get(PROCESSING_CLEANUP_AUDIT_KEY)
+        if existing is not None and existing != cleanup:
+            raise ValueError("validation audit contains another cleanup receipt")
+        payload[PROCESSING_CLEANUP_AUDIT_KEY] = cleanup
+        return replace(
+            audit,
+            validation_result=_msgspec_json_dumps(payload),
+        )
+
+    def _automation_job_result(
+        self,
+        *,
+        existing: object,
+        terminal: dict[str, object],
+        authority: AutomationTerminalAuthority,
+    ) -> dict[str, object]:
+        merged = msgspec.convert(
+            existing or {},
+            type=dict[str, object],
+        )
+        merged.update(msgspec.convert(
+            terminal,
+            type=dict[str, object],
+        ))
+        merged[PROCESSING_CLEANUP_RESULT_KEY] = _receipt_builtins(
+            authority.cleanup_receipt
+        )
+        if authority.completion_receipt is not None:
+            completion = _receipt_builtins(authority.completion_receipt)
+            existing_completion = merged.get(AUTOMATION_COMPLETION_RESULT_KEY)
+            if (
+                existing_completion is not None
+                and existing_completion != completion
+            ):
+                raise ImportJobTerminalConflict(
+                    "terminal result conflicts with completion receipt"
+                )
+            merged[AUTOMATION_COMPLETION_RESULT_KEY] = completion
+        return merged
+
+    def _finish_processing_request_last(
+        self,
+        *,
+        request: dict[str, object],
+        request_id: int,
+        job_id: int,
+        request_transitions: tuple[transitions.RequestTransition, ...],
+        boundary: Callable[[str], None],
+    ) -> tuple[transitions.TransitionApplied, ...]:
+        if not request_transitions:
+            raise ImportJobTerminalConflict(
+                "automation terminal outcome has no private request edge"
+            )
+        virtual_status = "processing"
+        applied: list[transitions.TransitionApplied] = []
+        fields: dict[str, object] = {}
+
+        def counter_value(name: str) -> int:
+            value = request.get(name)
+            if value is None:
+                return 0
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ImportJobTerminalConflict(
+                    f"automation request counter {name} is invalid"
+                )
+            return value
+
+        counters = {
+            name: counter_value(name)
+            for name in (
+                "search_attempts",
+                "download_attempts",
+                "validation_attempts",
+            )
+        }
+        retry_state_changed = False
+        attempt_backoff_minutes: int | None = None
+        imported_seen = False
+        for index, transition in enumerate(request_transitions):
+            if transition.target_status not in {"wanted", "imported"}:
+                raise ValueError(
+                    "automation terminal edge must end wanted or imported"
+                )
+            if transition.from_status is not None:
+                allowed_sources = {virtual_status}
+                if index == 0:
+                    allowed_sources.add("downloading")
+                if transition.from_status not in allowed_sources:
+                    raise ImportJobTerminalConflict(
+                        "automation terminal transition source changed"
+                    )
+            previous = virtual_status
+            if transition.target_status == "wanted":
+                counters = {
+                    "search_attempts": 0,
+                    "download_attempts": 0,
+                    "validation_attempts": 0,
+                }
+                retry_state_changed = True
+                attempt_backoff_minutes = None
+            if transition.attempt_type is not None:
+                if transition.attempt_type not in {
+                    "search",
+                    "download",
+                    "validation",
+                }:
+                    raise ValueError(
+                        f"Unknown attempt type: {transition.attempt_type!r}"
+                    )
+                counter = f"{transition.attempt_type}_attempts"
+                prior_attempts = counters[counter]
+                counters[counter] += 1
+                retry_state_changed = True
+                attempt_backoff_minutes = min(
+                    BACKOFF_BASE_MINUTES * (2 ** prior_attempts),
+                    BACKOFF_MAX_MINUTES,
+                )
+            transition_fields = dict(transition.fields)
+            validate_request_metadata_fields(transition_fields)
+            if (
+                "min_bitrate" in transition_fields
+                and "prev_min_bitrate" not in transition_fields
+            ):
+                fields["prev_min_bitrate"] = fields.get(
+                    "min_bitrate",
+                    request.get("min_bitrate"),
+                )
+            fields.update(transition_fields)
+            imported_seen = (
+                imported_seen or transition.target_status == "imported"
+            )
+            virtual_status = transition.target_status
+            applied.append(transitions.TransitionApplied(
+                request_id=request_id,
+                from_status=previous,
+                target_status=virtual_status,
+            ))
+
+        now = datetime.now(UTC)
+        next_retry_after = (
+            now + timedelta(minutes=attempt_backoff_minutes)
+            if attempt_backoff_minutes is not None
+            else None
+        )
+        if fields:
+            assignments = ", ".join(
+                f"{key} = populated.{key}" for key in sorted(fields)
+            )
+            cur = self._execute(
+                f"""
+                UPDATE album_requests AS request
+                SET {assignments}
+                FROM jsonb_populate_record(
+                    NULL::album_requests, %s::jsonb
+                ) AS populated
+                WHERE request.id = %s
+                  AND request.status = 'processing'
+                  AND request.active_automation_import_job_id = %s
+                RETURNING request.id
+                """,
+                (
+                    psycopg2.extras.Json(
+                        fields,
+                        dumps=_msgspec_json_dumps,
+                    ),
+                    request_id,
+                    job_id,
+                ),
+            )
+            if cur.fetchone() is None:
+                raise ImportJobTerminalConflict(
+                    "automation processing owner changed before metadata write"
+                )
+            boundary("request.processing_metadata")
+
+        cur = self._execute(
+            """
+            UPDATE album_requests AS request
+            SET status = %s,
+                active_automation_import_job_id = NULL,
+                active_download_state = NULL,
+                search_attempts = %s,
+                download_attempts = %s,
+                validation_attempts = %s,
+                next_retry_after = CASE
+                    WHEN %s THEN %s
+                    ELSE request.next_retry_after
+                END,
+                last_attempt_at = CASE
+                    WHEN %s THEN %s
+                    ELSE request.last_attempt_at
+                END,
+                rescued_at = CASE
+                    WHEN %s
+                     AND request.unfindable_category IS NOT NULL
+                     AND request.rescued_at IS NULL
+                    THEN %s
+                    ELSE request.rescued_at
+                END,
+                prior_unfindable_category = CASE
+                    WHEN %s
+                     AND request.unfindable_category IS NOT NULL
+                     AND request.rescued_at IS NULL
+                    THEN request.unfindable_category
+                    ELSE request.prior_unfindable_category
+                END,
+                unfindable_categorised_at = CASE
+                    WHEN %s
+                     AND request.unfindable_category IS NOT NULL
+                    THEN %s
+                    ELSE request.unfindable_categorised_at
+                END,
+                unfindable_category = CASE
+                    WHEN %s THEN NULL
+                    ELSE request.unfindable_category
+                END,
+                updated_at = %s
+            WHERE request.id = %s
+              AND request.status = 'processing'
+              AND request.active_automation_import_job_id = %s
+            RETURNING request.id
+            """,
+            (
+                virtual_status,
+                counters["search_attempts"],
+                counters["download_attempts"],
+                counters["validation_attempts"],
+                retry_state_changed,
+                next_retry_after,
+                retry_state_changed,
+                now if attempt_backoff_minutes is not None else None,
+                imported_seen,
+                now,
+                imported_seen,
+                imported_seen,
+                now,
+                imported_seen,
+                now,
+                request_id,
+                job_id,
+            ),
+        )
+        if cur.fetchone() is None:
+            raise ImportJobTerminalConflict(
+                "automation processing owner changed before final request write"
+            )
+        boundary(f"request.processing_to_{virtual_status}")
+        return tuple(applied)
+
+    def _consume_processing_cleanup_journal(
+        self,
+        *,
+        request_id: int,
+        job_id: int,
+        boundary: Callable[[str], None],
+    ) -> None:
+        cur = self._execute(
+            """
+            DELETE FROM processing_cleanup_journal
+            WHERE request_id = %s
+              AND job_id = %s
+              AND completed_receipt IS NOT NULL
+              AND completed_at IS NOT NULL
+            RETURNING job_id
+            """,
+            (request_id, job_id),
+        )
+        if cur.fetchone() is None:
+            raise ImportJobTerminalConflict(
+                "automation cleanup journal was not consumable"
+            )
+        boundary("processing_cleanup.consumed")
+
     def _persist_terminal_import_job(
         self,
         command: ImportTerminalOutcome,
         boundary: Callable[[str], None],
+        *,
+        existing_result: object = None,
     ) -> ImportJob:
         job = command.job
         completed = job.status == "completed"
+        result = (
+            job.result
+            if command.automation is None
+            else self._automation_job_result(
+                existing=existing_result,
+                terminal=job.result,
+                authority=command.automation,
+            )
+        )
         cur = self._execute(
             """
             UPDATE import_jobs
@@ -668,16 +1235,49 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                 updated_at = NOW()
             WHERE id = %s
               AND request_id = %s
-              AND status IN ('queued', 'running')
+              AND (
+                  (
+                      %s::text IS NULL
+                      AND status IN ('queued', 'running')
+                  )
+                  OR (
+                      %s::text IS NOT NULL
+                      AND status = %s
+                      AND preview_status IS NOT DISTINCT FROM %s
+                  )
+              )
             RETURNING *
             """,
             (
                 job.status,
-                psycopg2.extras.Json(job.result),
+                psycopg2.extras.Json(
+                    result,
+                    dumps=_msgspec_json_dumps,
+                ),
                 job.message,
                 None if completed else job.error,
                 command.import_job_id,
                 command.request_id,
+                (
+                    None
+                    if command.automation is None
+                    else command.automation.expected_job_status
+                ),
+                (
+                    None
+                    if command.automation is None
+                    else command.automation.expected_job_status
+                ),
+                (
+                    None
+                    if command.automation is None
+                    else command.automation.expected_job_status
+                ),
+                (
+                    None
+                    if command.automation is None
+                    else command.automation.expected_preview_status
+                ),
             ),
         )
         row = cur.fetchone()
@@ -693,6 +1293,8 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
         self,
         command: ImportTerminalOutcome,
     ) -> TerminalOutcomeResult:
+        if command.automation is not None:
+            return self._persist_automation_import_terminal_outcome(command)
         boundary = self._boundary_emitter()
         applied: list[transitions.TransitionApplied] = []
         cooled: set[str] = set()
@@ -766,10 +1368,81 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
             cooled_down_users=frozenset(cooled),
         )
 
+    def _persist_automation_import_terminal_outcome(
+        self,
+        command: ImportTerminalOutcome,
+    ) -> TerminalOutcomeResult:
+        authority = command.automation
+        assert authority is not None
+        validate_automation_terminal_declaration(command)
+        boundary = self._boundary_emitter()
+        cooled: set[str] = set()
+        request_transitions = tuple(
+            transition
+            for transition in (
+                command.initial_transition,
+                *command.post_audit_transitions,
+            )
+            if transition is not None
+        )
+        with self._atomic():
+            with self.conn.cursor(
+                cursor_factory=psycopg2.extras.RealDictCursor,
+            ) as cur:
+                request, job_row = self._require_automation_terminal_scope(
+                    cur,
+                    request_id=command.request_id,
+                    job_id=command.import_job_id,
+                    authority=authority,
+                )
+            audit = self._automation_audit(command.audit, authority)
+            download_log_id = self._insert_terminal_download_audit(
+                command.request_id,
+                command.import_job_id,
+                audit,
+                boundary,
+            )
+            for entry in command.denylists:
+                if self._persist_terminal_denylist(
+                    command.request_id,
+                    entry,
+                    boundary,
+                ):
+                    cooled.add(entry.username)
+            for entry in command.cooldowns:
+                if self._persist_terminal_cooldown(entry, boundary):
+                    cooled.add(entry.username)
+            job = self._persist_terminal_import_job(
+                command,
+                boundary,
+                existing_result=job_row["result"],
+            )
+            self._consume_processing_cleanup_journal(
+                request_id=command.request_id,
+                job_id=command.import_job_id,
+                boundary=boundary,
+            )
+            applied = self._finish_processing_request_last(
+                request=request,
+                request_id=command.request_id,
+                job_id=command.import_job_id,
+                request_transitions=request_transitions,
+                boundary=boundary,
+            )
+            self.conn.commit()
+        return TerminalOutcomeResult(
+            download_log_id=download_log_id,
+            job=job,
+            transitions=applied,
+            cooled_down_users=frozenset(cooled),
+        )
+
     def persist_preview_terminal_outcome(
         self,
         command: PreviewTerminalOutcome,
     ) -> TerminalOutcomeResult:
+        if command.automation is not None:
+            return self._persist_automation_preview_terminal_outcome(command)
         validate_preview_failure_status(command.preview_status)
         boundary = self._boundary_emitter()
         cooled: set[str] = set()
@@ -852,5 +1525,117 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
             download_log_id=download_log_id,
             job=job,
             transitions=tuple(applied),
+            cooled_down_users=frozenset(cooled),
+        )
+
+    def _persist_automation_preview_terminal_outcome(
+        self,
+        command: PreviewTerminalOutcome,
+    ) -> TerminalOutcomeResult:
+        validate_preview_failure_status(command.preview_status)
+        authority = command.automation
+        assert authority is not None
+        boundary = self._boundary_emitter()
+        cooled: set[str] = set()
+        request_transitions = (
+            ()
+            if command.request_transition is None
+            else (command.request_transition,)
+        )
+        with self._atomic():
+            with self.conn.cursor(
+                cursor_factory=psycopg2.extras.RealDictCursor,
+            ) as cur:
+                request, job_row = self._require_automation_terminal_scope(
+                    cur,
+                    request_id=command.request_id,
+                    job_id=command.import_job_id,
+                    authority=authority,
+                )
+            audit = self._automation_audit(command.audit, authority)
+            download_log_id = self._insert_terminal_download_audit(
+                command.request_id,
+                command.import_job_id,
+                audit,
+                boundary,
+            )
+            for entry in command.denylists:
+                if self._persist_terminal_denylist(
+                    command.request_id,
+                    entry,
+                    boundary,
+                ):
+                    cooled.add(entry.username)
+            result = self._automation_job_result(
+                existing=job_row["result"],
+                terminal={"preview": command.preview_result},
+                authority=authority,
+            )
+            cur = self._execute(
+                """
+                UPDATE import_jobs
+                SET status = 'failed',
+                    preview_status = %s,
+                    preview_result = %s,
+                    preview_message = %s,
+                    preview_error = %s,
+                    result = %s,
+                    message = %s,
+                    error = %s,
+                    preview_completed_at = NOW(),
+                    completed_at = NOW(),
+                    preview_worker_id = NULL,
+                    preview_heartbeat_at = NULL,
+                    updated_at = NOW()
+                WHERE id = %s
+                  AND request_id = %s
+                  AND status = %s
+                  AND preview_status IS NOT DISTINCT FROM %s
+                RETURNING *
+                """,
+                (
+                    command.preview_status,
+                    psycopg2.extras.Json(
+                        command.preview_result,
+                        dumps=_msgspec_json_dumps,
+                    ),
+                    command.message,
+                    command.error,
+                    psycopg2.extras.Json(
+                        result,
+                        dumps=_msgspec_json_dumps,
+                    ),
+                    command.message,
+                    command.error,
+                    command.import_job_id,
+                    command.request_id,
+                    authority.expected_job_status,
+                    authority.expected_preview_status,
+                ),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise ImportJobTerminalConflict(
+                    f"preview job {command.import_job_id} changed after lock"
+                )
+            boundary("import_job.preview_failed")
+            job = ImportJob.from_row(dict(row))
+            self._consume_processing_cleanup_journal(
+                request_id=command.request_id,
+                job_id=command.import_job_id,
+                boundary=boundary,
+            )
+            applied = self._finish_processing_request_last(
+                request=request,
+                request_id=command.request_id,
+                job_id=command.import_job_id,
+                request_transitions=request_transitions,
+                boundary=boundary,
+            )
+            self.conn.commit()
+        return TerminalOutcomeResult(
+            download_log_id=download_log_id,
+            job=job,
+            transitions=applied,
             cooled_down_users=frozenset(cooled),
         )

@@ -124,15 +124,22 @@ class TestLibraryAlbumDetailService(unittest.TestCase):
     def test_build_library_album_detail_overlays_pipeline_state_and_history(self) -> None:
         detail = build_library_album_detail(
             detail_row=_beets_detail(),
-            pipeline_request=make_request_row(
-                id=42,
-                mb_release_id=RELEASE_ID,
-                status="wanted",
-                source="request",
-                min_bitrate=320,
-                search_filetype_override="flac",
-                target_format="lossless",
-            ),
+            pipeline_request={
+                **make_request_row(
+                    id=42,
+                    mb_release_id=RELEASE_ID,
+                    status="processing",
+                    source="request",
+                    min_bitrate=320,
+                    search_filetype_override="flac",
+                    target_format="lossless",
+                ),
+                "processing_owner": {
+                    "job_id": 9,
+                    "status": "queued",
+                    "preview_status": "waiting",
+                },
+            },
             download_history=[_history_row(
                 import_result={
                     "version": 2,
@@ -149,12 +156,15 @@ class TestLibraryAlbumDetailService(unittest.TestCase):
         )
 
         self.assertEqual(detail.pipeline_id, 42)
-        self.assertEqual(detail.pipeline_status, "wanted")
+        self.assertEqual(detail.pipeline_status, "processing")
+        owner = detail.processing_owner
+        assert owner is not None
+        self.assertEqual(owner.job_id, 9)
         self.assertEqual(detail.pipeline_source, "request")
         self.assertEqual(detail.pipeline_min_bitrate, 320)
         self.assertEqual(detail.search_filetype_override, "flac")
         self.assertEqual(detail.target_format, "lossless")
-        self.assertTrue(detail.upgrade_queued)
+        self.assertFalse(detail.upgrade_queued)
         self.assertEqual(len(detail.download_history), 1)
         self.assertEqual(detail.download_history[0].soulseek_username, "testuser")
         self.assertEqual(detail.download_history[0].beets_scenario, "strong_match")

@@ -12,6 +12,7 @@ from lib.force_import_service import (
     FORCE_IMPORT_HTTP_STATUS,
     RESULT_DOWNLOAD_LOG_MISSING,
     RESULT_FAILED_PATH_MISSING,
+    RESULT_PROCESSING_LOCKED,
     RESULT_QUEUED,
     RESULT_REQUEST_MBID_MISSING,
     RESULT_REQUEST_MISSING,
@@ -21,7 +22,7 @@ from lib.force_import_service import (
 )
 from lib.import_queue import ForceImportPayload, force_import_dedupe_key
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_request_row
+from tests.helpers import handoff_automation_owner, make_request_row
 
 
 class TestForceImportService(unittest.TestCase):
@@ -38,6 +39,25 @@ class TestForceImportService(unittest.TestCase):
         ):
             self.assertEqual(FORCE_IMPORT_EXIT_CODE[outcome], 3)
             self.assertEqual(FORCE_IMPORT_HTTP_STATUS[outcome], 422)
+        self.assertEqual(FORCE_IMPORT_EXIT_CODE[RESULT_PROCESSING_LOCKED], 4)
+        self.assertEqual(FORCE_IMPORT_HTTP_STATUS[RESULT_PROCESSING_LOCKED], 409)
+
+    def test_processing_owner_is_rejected_before_filesystem_or_enqueue(self) -> None:
+        db, cfg, staging, log_id = self._world()
+        album = os.path.join(staging, "failed_imports", "owned", "Album")
+        os.makedirs(album)
+        self._set_path(db, log_id, album)
+        job = handoff_automation_owner(db, 867)
+        before = db.get_request(867)
+
+        result = enqueue_force_import(db, cfg, log_id)
+
+        self.assertEqual(result.outcome, RESULT_PROCESSING_LOCKED)
+        self.assertIsNotNone(result.processing_owner)
+        assert result.processing_owner is not None
+        self.assertEqual(result.processing_owner.job_id, job.id)
+        self.assertEqual(db.get_request(867), before)
+        self.assertEqual(db.list_import_jobs(), [job])
     def _world(self) -> tuple[FakePipelineDB, SimpleNamespace, str, int]:
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)

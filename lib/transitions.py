@@ -27,7 +27,10 @@ from typing import (
     runtime_checkable,
 )
 
+from lib.json_narrow import is_str_object_dict
+
 if TYPE_CHECKING:
+    from lib.pipeline_db._shared import ProcessingOwnerProjection
     from lib.pipeline_db.rows import AlbumRequestRow
 
 
@@ -115,6 +118,7 @@ class TransitionConflictKind(str, Enum):
     not_found = "not_found"
     invalid_edge = "invalid_edge"
     stale_source = "stale_source"
+    processing_locked = "processing_locked"
 
 
 @dataclass(frozen=True)
@@ -131,9 +135,89 @@ class TransitionConflict:
     kind: TransitionConflictKind
     expected_status: str | None
     actual_status: str | None
+    processing_owner: ProcessingOwnerProjection | None = None
 
 
 type TransitionResult = TransitionApplied | TransitionConflict
+
+
+def processing_owner_payload(
+    owner: ProcessingOwnerProjection | None,
+) -> dict[str, object] | None:
+    """Serialize the exact owner identically across API and CLI conflicts."""
+    if owner is None:
+        return None
+    return {
+        "job_id": owner.job_id,
+        "status": owner.status,
+        "preview_status": owner.preview_status,
+    }
+
+
+def transition_conflict_payload(
+    conflict: TransitionConflict,
+) -> dict[str, object]:
+    """Return the shared wire payload for one lifecycle conflict."""
+    payload: dict[str, object] = {
+        "error": "transition_conflict",
+        "reason": conflict.kind.value,
+        "expected_status": conflict.expected_status,
+        "actual_status": conflict.actual_status,
+        "target_status": conflict.target_status,
+    }
+    owner = processing_owner_payload(conflict.processing_owner)
+    if owner is not None:
+        payload["processing_owner"] = owner
+    return payload
+
+
+def processing_locked_conflict(
+    row: Mapping[str, object] | None,
+    request_id: int,
+    target_status: str,
+    *,
+    expected_status: str | None = None,
+) -> TransitionConflict | None:
+    """Return the canonical exact-owner conflict for a processing row.
+
+    Request readers validate and attach the exact joined owner projection.
+    This helper converts that wire projection back to its one typed shape so
+    every operator service can return the same conflict without inferring an
+    owner from paths or a latest import job.
+    """
+    if row is None or row.get("status") != "processing":
+        return None
+    owner = row.get("processing_owner")
+    if not is_str_object_dict(owner):
+        raise TypeError(
+            "processing request is missing its exact owner projection"
+        )
+    from lib.pipeline_db._shared import ProcessingOwnerProjection
+
+    job_id = owner.get("job_id")
+    owner_status = owner.get("status")
+    preview_status = owner.get("preview_status")
+    if (
+        not isinstance(job_id, int)
+        or isinstance(job_id, bool)
+        or not isinstance(owner_status, str)
+        or not isinstance(preview_status, str)
+    ):
+        raise TypeError(
+            "processing request has a malformed exact owner projection"
+        )
+    return TransitionConflict(
+        request_id=request_id,
+        target_status=target_status,
+        kind=TransitionConflictKind.processing_locked,
+        expected_status=expected_status,
+        actual_status="processing",
+        processing_owner=ProcessingOwnerProjection(
+            job_id=job_id,
+            status=owner_status,
+            preview_status=preview_status,
+        ),
+    )
 
 
 def publish_initialized_request(
@@ -528,8 +612,17 @@ def finalize_operator_request(
     to use ``finalize_request`` and treats the same conflict as a hard stop.
     """
     current = transition
+    preflight = db.get_request(request_id)
+    locked = processing_locked_conflict(
+        preflight,
+        request_id,
+        current.target_status,
+        expected_status=current.from_status,
+    )
+    if locked is not None:
+        return locked
     if current.from_status is None:
-        row = db.get_request(request_id)
+        row = preflight
         if row is None:
             return TransitionConflict(
                 request_id=request_id,
@@ -563,7 +656,12 @@ def finalize_operator_request(
                 )
             else:
                 refreshed = db.get_request(request_id)
-                result = TransitionConflict(
+                result = processing_locked_conflict(
+                    refreshed,
+                    request_id,
+                    current.target_status,
+                    expected_status=current.from_status,
+                ) or TransitionConflict(
                     request_id=request_id,
                     target_status=current.target_status,
                     kind=(
@@ -686,6 +784,14 @@ def apply_transition(
             expected_status=expected_status,
             actual_status=None,
         )
+    locked = processing_locked_conflict(
+        row,
+        request_id,
+        to_status,
+        expected_status=expected_status,
+    )
+    if locked is not None:
+        return locked
     current = row["status"]
     assert isinstance(current, str)
     if expected_status is not None and current != expected_status:
@@ -724,7 +830,12 @@ def apply_transition(
         if applied:
             return TransitionApplied(request_id, from_status, to_status)
         refreshed = db.get_request(request_id)
-        return TransitionConflict(
+        return processing_locked_conflict(
+            refreshed,
+            request_id,
+            to_status,
+            expected_status=from_status,
+        ) or TransitionConflict(
             request_id=request_id,
             target_status=to_status,
             kind=(TransitionConflictKind.not_found

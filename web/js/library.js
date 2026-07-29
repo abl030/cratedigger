@@ -1,8 +1,18 @@
 // @ts-check
 import { API, state, toast, updatePipelineStatus } from './state.js';
 import { esc, jsArg, overrideToIntent, normalizeReleaseId } from './util.js';
-import { buildReleaseActionState } from './release_action_state.js';
-import { renderActionToolbar, renderAcquireActionButton, renderRemoveFromBeetsButton, renderBadRipButton } from './release_actions.js';
+import {
+  buildReleaseActionState,
+  handleProcessingLockedConflict,
+  processingOwnerPresentation,
+} from './release_action_state.js';
+import {
+  renderActionToolbar,
+  renderAcquireActionButton,
+  renderRemoveFromBeetsButton,
+  renderBadRipButton,
+  renderProcessingLockedControl,
+} from './release_actions.js';
 import { renderStatusBadges } from './badges.js';
 import { renderDownloadHistoryItem } from './history.js';
 import {
@@ -65,6 +75,7 @@ export function renderLibraryAlbumRow(a) {
     beets_album_id: beetsAlbumId,
     pipeline_status: a.pipeline_status || null,
     pipeline_id: pipelineId,
+    processing_owner: a.processing_owner ?? null,
     artist: a.artist || '',
     album: a.album || '',
     track_count: a.track_count || 0,
@@ -79,6 +90,7 @@ export function renderLibraryAlbumRow(a) {
     library_avg_bitrate: a.avg_bitrate ? Math.floor(a.avg_bitrate / 1000) : 0,
     library_rank: a.library_rank,
     pipeline_status: a.pipeline_status,
+    processing_owner: a.processing_owner ?? null,
   });
   return `
     <div class="lib-item" onclick="${detailToggle}">
@@ -178,24 +190,52 @@ export function renderLibraryDetailBody(data, id) {
     // Pipeline controls (status + quality override)
     if (releaseId && data.pipeline_id) {
       const pStatus = data.pipeline_status || '';
+      const processing = processingOwnerPresentation(
+        pStatus,
+        data.processing_owner ?? null,
+      );
       html += `<div class="p-actions" style="margin-top:10px;">
         <span class="p-detail-label" style="line-height:28px;">Status:</span>
-        ${renderLibraryStatusButtons(releaseArg, pStatus)}
-      </div>`;
-      html += `<div class="p-actions" style="margin-top:6px;">
-        <span class="p-detail-label" style="line-height:28px;">Min bitrate:</span>
-        <input type="number" id="lib-minbr-${id}" value="" placeholder="${data.pipeline_min_bitrate || ''}" style="width:60px;padding:2px 6px;background:#222;color:#eee;border:1px solid #444;border-radius:4px;font-size:0.8em;" onclick="event.stopPropagation()">
-        <button class="p-btn" onclick="event.stopPropagation(); var v=document.getElementById('lib-minbr-${id}').value; if(v) window.setLibQuality(${releaseArg}, null, parseInt(v))">Set</button>
-        <button class="p-btn" onclick="event.stopPropagation(); window.setLibQuality(${releaseArg}, 'imported', null)">Accept</button>
+        ${renderLibraryStatusButtons(
+          releaseArg,
+          pStatus,
+          data.processing_owner ?? null,
+          data.pipeline_id,
+        )}
       </div>`;
       const currentIntent = overrideToIntent(data.target_format);
-      html += `<div class="p-actions" style="margin-top:6px;">
-        <span class="p-detail-label" style="line-height:28px;">Intent:</span>
-        <select id="lib-intent-${id}" style="padding:2px 6px;background:#222;color:#eee;border:1px solid #444;border-radius:4px;font-size:0.8em;" onclick="event.stopPropagation()" onchange="event.stopPropagation(); window.setIntent(${data.pipeline_id}, this.value)">
-          <option value="default"${currentIntent === 'default' ? ' selected' : ''}>Default</option>
-          <option value="lossless"${currentIntent === 'lossless' ? ' selected' : ''}>Lossless</option>
-        </select>
-      </div>`;
+      if (processing) {
+        html += `<div class="p-actions" style="margin-top:6px;">
+          <span class="p-detail-label" style="line-height:28px;">Min bitrate:</span>
+          ${renderProcessingLockedControl(processing, data.pipeline_id, {
+            className: 'p-btn',
+            label: 'Set',
+            descriptionSuffix: 'library-quality',
+          })}
+        </div>`;
+        html += `<div class="p-actions" style="margin-top:6px;">
+          <span class="p-detail-label" style="line-height:28px;">Intent:</span>
+          ${renderProcessingLockedControl(processing, data.pipeline_id, {
+            className: 'p-btn',
+            label: currentIntent === 'lossless' ? 'Lossless' : 'Default',
+            descriptionSuffix: 'library-intent',
+          })}
+        </div>`;
+      } else {
+        html += `<div class="p-actions" style="margin-top:6px;">
+          <span class="p-detail-label" style="line-height:28px;">Min bitrate:</span>
+          <input type="number" id="lib-minbr-${id}" value="" placeholder="${data.pipeline_min_bitrate || ''}" style="width:60px;padding:2px 6px;background:#222;color:#eee;border:1px solid #444;border-radius:4px;font-size:0.8em;" onclick="event.stopPropagation()">
+          <button class="p-btn" data-pipeline-request-id="${data.pipeline_id}" onclick="event.stopPropagation(); var v=document.getElementById('lib-minbr-${id}').value; if(v) window.setLibQuality(${releaseArg}, null, parseInt(v))">Set</button>
+          <button class="p-btn" data-pipeline-request-id="${data.pipeline_id}" onclick="event.stopPropagation(); window.setLibQuality(${releaseArg}, 'imported', null)">Accept</button>
+        </div>`;
+        html += `<div class="p-actions" style="margin-top:6px;">
+          <span class="p-detail-label" style="line-height:28px;">Intent:</span>
+          <select id="lib-intent-${id}" data-pipeline-request-id="${data.pipeline_id}" style="padding:2px 6px;background:#222;color:#eee;border:1px solid #444;border-radius:4px;font-size:0.8em;" onclick="event.stopPropagation()" onchange="event.stopPropagation(); window.setIntent(${data.pipeline_id}, this.value)">
+            <option value="default"${currentIntent === 'default' ? ' selected' : ''}>Default</option>
+            <option value="lossless"${currentIntent === 'lossless' ? ' selected' : ''}>Lossless</option>
+          </select>
+        </div>`;
+      }
     }
     const actionState = buildReleaseActionState({
       id: releaseId || '',
@@ -203,6 +243,7 @@ export function renderLibraryDetailBody(data, id) {
       beets_album_id: id,
       pipeline_status: data.pipeline_status || null,
       pipeline_id: data.pipeline_id || null,
+      processing_owner: data.processing_owner ?? null,
       artist: data.artist || '',
       album: data.album || '',
       track_count: data.tracks ? data.tracks.length : 0,
@@ -239,19 +280,36 @@ export function renderLibraryDetailBody(data, id) {
  * Render lifecycle actions without offering an invalid search-stop edge.
  * @param {string} releaseArg - HTML-safe JavaScript string literal.
  * @param {string} status
+ * @param {unknown} processingOwner
+ * @param {number|null} pipelineId
  * @returns {string}
  */
-function renderLibraryStatusButtons(releaseArg, status) {
+function renderLibraryStatusButtons(
+  releaseArg,
+  status,
+  processingOwner = null,
+  pipelineId = null,
+) {
+  const processing = processingOwnerPresentation(status, processingOwner);
+  if (processing) {
+    return renderProcessingLockedControl(processing, pipelineId, {
+      className: 'p-btn active-status',
+      descriptionSuffix: 'library-status',
+    });
+  }
   const downloading = status === 'downloading'
     ? '<button class="p-btn active-status" disabled aria-disabled="true">downloading</button>'
     : '';
+  const requestAttr = pipelineId
+    ? ` data-pipeline-request-id="${pipelineId}"`
+    : '';
   const canSetUnsearchable = status === 'wanted' || status === 'unsearchable';
   const unsearchable = canSetUnsearchable
-    ? `<button class="p-btn ${status === 'unsearchable' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.setLibQuality(${releaseArg}, 'unsearchable', null)">unsearchable</button>`
+    ? `<button class="p-btn ${status === 'unsearchable' ? 'active-status' : ''}"${requestAttr} onclick="event.stopPropagation(); window.setLibQuality(${releaseArg}, 'unsearchable', null)">unsearchable</button>`
     : '<button class="p-btn" disabled aria-disabled="true">unsearchable</button>';
   return `${downloading}
-        <button class="p-btn ${status === 'wanted' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.setLibQuality(${releaseArg}, 'wanted', null)">wanted</button>
-        <button class="p-btn ${status === 'imported' ? 'active-status' : ''}" onclick="event.stopPropagation(); window.setLibQuality(${releaseArg}, 'imported', null)">imported</button>
+        <button class="p-btn ${status === 'wanted' ? 'active-status' : ''}"${requestAttr} onclick="event.stopPropagation(); window.setLibQuality(${releaseArg}, 'wanted', null)">wanted</button>
+        <button class="p-btn ${status === 'imported' ? 'active-status' : ''}"${requestAttr} onclick="event.stopPropagation(); window.setLibQuality(${releaseArg}, 'imported', null)">imported</button>
         ${unsearchable}`;
 }
 
@@ -303,6 +361,13 @@ export async function banSource(requestId, mbid) {
       body: JSON.stringify({request_id: requestId, mb_release_id: mbid, confirm: 'BAN'}),
     });
     const data = await r.json();
+    if (await handleProcessingLockedConflict({
+      httpStatus: r.status,
+      payload: data,
+      releaseId: mbid,
+    })) {
+      return;
+    }
     if (r.status === 409 && data.error === 'importer_busy') {
       toast('Importer is busy with this album — try again in a moment.', true);
       return;
@@ -351,6 +416,13 @@ export async function setLibQuality(mbid, status, minBitrate, detailId) {
       body: JSON.stringify(body),
     });
     const data = await r.json();
+    if (await handleProcessingLockedConflict({
+      httpStatus: r.status,
+      payload: data,
+      releaseId,
+    })) {
+      return;
+    }
     if (data.status === 'ok') {
       const parts = [];
       if (status) parts.push(status);
@@ -384,6 +456,14 @@ export async function upgradeAlbum(mbid, btn) {
       body: JSON.stringify({mb_release_id: releaseId}),
     });
     const data = await r.json();
+    if (await handleProcessingLockedConflict({
+      httpStatus: r.status,
+      payload: data,
+      control: btn,
+      releaseId,
+    })) {
+      return;
+    }
     if (data.status === 'upgrade_queued') {
       btn.textContent = 'Queued';
       btn.style.borderColor = '#6a9';
@@ -415,6 +495,12 @@ export async function setIntent(pipelineId, intent) {
       body: JSON.stringify({id: pipelineId, intent}),
     });
     const data = await r.json();
+    if (await handleProcessingLockedConflict({
+      httpStatus: r.status,
+      payload: data,
+    })) {
+      return;
+    }
     if (data.status === 'ok') {
       const msg = data.requeued ? `Intent: ${intent} (requeued)` : `Intent: ${intent}`;
       toast(msg);
@@ -544,6 +630,14 @@ export async function executeBeetsDeletion(id, btn, pipelineId = null, releaseId
       }),
     });
     const data = await r.json();
+    if (await handleProcessingLockedConflict({
+      httpStatus: r.status,
+      payload: data,
+      control: btn,
+      releaseId,
+    })) {
+      return;
+    }
     document.querySelector('.confirm-overlay')?.remove();
     const display = describeBeetsDeletion(data);
     if (data.status === 'ok') {

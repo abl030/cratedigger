@@ -77,6 +77,7 @@ class ReleaseGroupInfo:
     library_status: str | None = None
     pipeline_status: str | None = None
     pipeline_id: int | None = None
+    processing_owner: dict[str, object] | None = None
 
 
 _REMASTER_RE = re.compile(

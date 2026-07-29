@@ -43,7 +43,7 @@ class OverlayBeetsDB(Protocol):
 
 
 def serialize_row(row: Mapping[str, object]) -> dict[str, object]:
-    """Serialize a DB row dict — convert datetime objects to ISO strings."""
+    """Serialize a presented DB row, preserving its exact owner projection."""
     result: dict[str, object] = {}
     for k, v in row.items():
         result[k] = v.isoformat() if isinstance(v, (datetime, date)) else v

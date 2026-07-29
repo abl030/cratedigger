@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
+from lib import transitions
 from lib.fs_authority import (
     FilesystemAuthorityError,
     open_configured_quarantine_directory,
@@ -19,6 +20,7 @@ from lib.processing_paths import normalize_source_dirs
 from lib.validation_envelope import decode_validation_envelope
 
 if TYPE_CHECKING:
+    from lib.pipeline_db._shared import ProcessingOwnerProjection
     from lib.pipeline_db.rows import AlbumRequestRow, DownloadLogWithEvidenceRow
 
 
@@ -28,6 +30,7 @@ RESULT_REQUEST_MISSING = "request_missing"
 RESULT_REQUEST_MBID_MISSING = "request_mbid_missing"
 RESULT_FAILED_PATH_MISSING = "failed_path_missing"
 RESULT_UNAUTHORIZED_PATH = "unauthorized_path"
+RESULT_PROCESSING_LOCKED = "processing_locked"
 
 FORCE_IMPORT_EXIT_CODE = {
     RESULT_QUEUED: 0,
@@ -36,6 +39,7 @@ FORCE_IMPORT_EXIT_CODE = {
     RESULT_REQUEST_MBID_MISSING: 3,
     RESULT_FAILED_PATH_MISSING: 3,
     RESULT_UNAUTHORIZED_PATH: 3,
+    RESULT_PROCESSING_LOCKED: 4,
 }
 FORCE_IMPORT_HTTP_STATUS = {
     RESULT_QUEUED: 202,
@@ -44,6 +48,7 @@ FORCE_IMPORT_HTTP_STATUS = {
     RESULT_REQUEST_MBID_MISSING: 422,
     RESULT_FAILED_PATH_MISSING: 422,
     RESULT_UNAUTHORIZED_PATH: 422,
+    RESULT_PROCESSING_LOCKED: 409,
 }
 
 
@@ -71,6 +76,7 @@ class ForceImportEnqueueResult:
     failed_path: str | None = None
     detail: str | None = None
     job: ImportJob | None = None
+    processing_owner: ProcessingOwnerProjection | None = None
 
 
 def enqueue_force_import(
@@ -92,6 +98,28 @@ def enqueue_force_import(
     if request is None:
         return ForceImportEnqueueResult(
             RESULT_REQUEST_MISSING, download_log_id, request_id=request_id,
+        )
+    processing_locked = transitions.processing_locked_conflict(
+        request,
+        request_id,
+        "force_import",
+        expected_status=str(request["status"]),
+    )
+    if processing_locked is not None:
+        owner = processing_locked.processing_owner
+        if owner is None:
+            raise RuntimeError(
+                "processing conflict is missing its exact owner"
+            )
+        return ForceImportEnqueueResult(
+            RESULT_PROCESSING_LOCKED,
+            download_log_id,
+            request_id=request_id,
+            detail=(
+                f"request {request_id} is owned by automation import job "
+                f"{owner.job_id}"
+            ),
+            processing_owner=owner,
         )
     if not request.get("mb_release_id"):
         return ForceImportEnqueueResult(

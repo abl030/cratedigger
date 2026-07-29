@@ -29,7 +29,11 @@ import scripts.pipeline_cli.album_requests as pipeline_cli_album_requests
 import scripts.pipeline_cli.long_tail as pipeline_cli_long_tail
 from scripts import pipeline_cli
 from tests.fakes import FakeBeetsDB, FakePipelineDB
-from tests.helpers import make_album_quality_evidence, make_request_row
+from tests.helpers import (
+    handoff_automation_owner,
+    make_album_quality_evidence,
+    make_request_row,
+)
 from tests.test_beets_db import _create_test_db, _insert_album
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
@@ -566,6 +570,33 @@ class TestCmdSet(unittest.TestCase):
         self.assertEqual(rc, 4)
         self.assertEqual(db.request(8)["status"], "imported")
 
+    def test_processing_status_change_reports_exact_owner_exit_4(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=10,
+            status="wanted",
+            artist_name="A",
+            album_title="B",
+        ))
+        owner = handoff_automation_owner(db, 10)
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout):
+            rc = pipeline_cli.cmd_set(
+                cast(Any, db),
+                MagicMock(id=10, status="unsearchable"),
+            )
+
+        self.assertEqual(rc, 4)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["reason"], "processing_locked")
+        self.assertEqual(payload["processing_owner"], {
+            "job_id": owner.id,
+            "status": owner.status,
+            "preview_status": owner.preview_status,
+        })
+        self.assertEqual(db.request(10)["status"], "processing")
+
     @patch("builtins.print")
     @patch("scripts.pipeline_cli.album_requests.finalize_request")
     def test_set_routes_dynamic_status_through_shared_finalizer(
@@ -687,8 +718,317 @@ class TestCmdImportJobRecovery(unittest.TestCase):
 
         self.assertEqual(rc, 4)
 
+    def test_show_prints_same_typed_recovery_result(self) -> None:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=43,
+            status="wanted",
+            mb_release_id="75dbf62e-7dd2-4ddc-b57b-9bad1758b6b0",
+        ))
+        job = handoff_automation_owner(
+            db,
+            43,
+            canonical_path="/processing/cli-recovery",
+        )
+        args = SimpleNamespace(
+            recovery_action="show",
+            job_id=job.id,
+            beets_db=None,
+            beets_directory=None,
+        )
+        stdout = io.StringIO()
+
+        with (
+            patch.object(
+                db,
+                "get_processing_cleanup_journal",
+                lambda *, request_id, job_id: None,
+                create=True,
+            ),
+            patch(
+                "scripts.pipeline_cli.imports._open_recovery_beets",
+                side_effect=FileNotFoundError("beets unavailable"),
+            ),
+            redirect_stdout(stdout),
+        ):
+            rc = pipeline_cli.cmd_import_job_recovery(
+                cast(Any, db),
+                cast(Any, args),
+            )
+
+        self.assertEqual(rc, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["outcome"], "ok")
+        self.assertEqual(payload["detail"]["owner_stage"]["job_id"], job.id)
+        self.assertEqual(
+            payload["detail"]["exact_library"]["status"],
+            "unavailable",
+        )
+        self.assertEqual(
+            payload["detail"]["cleanup_journal"]["status"],
+            "missing",
+        )
+        self.assertTrue(
+            payload["detail"]["evidence_revision"].startswith("sha256:")
+        )
+
+    def test_parser_exposes_forward_only_show_retry_close_verbs(self) -> None:
+        from scripts.pipeline_cli.routes_meta import _build_parser
+
+        parser, _, _ = _build_parser()
+        shown = parser.parse_args(["import-job-recovery", "show", "41"])
+        retried = parser.parse_args([
+            "import-job-recovery",
+            "retry",
+            "41",
+            "--reason",
+            "not applied",
+            "--evidence-revision",
+            "sha256:retry",
+        ])
+        closed = parser.parse_args([
+            "import-job-recovery",
+            "close",
+            "41",
+            "--reason",
+            "reconciled",
+            "--evidence-revision",
+            "sha256:close",
+            "--result-status",
+            "imported",
+        ])
+
+        self.assertEqual((shown.recovery_action, shown.job_id), ("show", 41))
+        self.assertEqual(
+            (
+                retried.recovery_action,
+                retried.job_id,
+                retried.evidence_revision,
+            ),
+            ("retry", 41, "sha256:retry"),
+        )
+        self.assertEqual(
+            (
+                closed.recovery_action,
+                closed.job_id,
+                closed.evidence_revision,
+                closed.result_status,
+            ),
+            ("close", 41, "sha256:close", "imported"),
+        )
+
+    def test_automation_actions_require_revision_and_explicit_close_result(
+        self,
+    ) -> None:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=44,
+            status="wanted",
+            mb_release_id="75dbf62e-7dd2-4ddc-b57b-9bad1758b6b0",
+        ))
+        job = handoff_automation_owner(
+            db,
+            44,
+            canonical_path="/processing/cli-action",
+        )
+        retry_args = SimpleNamespace(
+            recovery_action="retry",
+            job_id=job.id,
+            reason="missing evidence",
+            evidence_revision=None,
+            beets_db=None,
+            beets_directory=None,
+        )
+        close_args = SimpleNamespace(
+            recovery_action="close",
+            job_id=job.id,
+            reason="missing result",
+            evidence_revision="sha256:stale",
+            result_status=None,
+            beets_db=None,
+            beets_directory=None,
+        )
+        with patch(
+            "scripts.pipeline_cli.imports._open_recovery_beets",
+            side_effect=FileNotFoundError("beets unavailable"),
+        ):
+            with redirect_stderr(io.StringIO()) as retry_error:
+                retry_rc = pipeline_cli.cmd_import_job_recovery(
+                    cast(Any, db),
+                    cast(Any, retry_args),
+                )
+            with redirect_stderr(io.StringIO()) as close_error:
+                close_rc = pipeline_cli.cmd_import_job_recovery(
+                    cast(Any, db),
+                    cast(Any, close_args),
+                )
+        self.assertEqual(retry_rc, 2)
+        self.assertIn("evidence", retry_error.getvalue())
+        self.assertEqual(close_rc, 2)
+        self.assertIn("result_status", close_error.getvalue())
+
+    def test_automation_stale_revision_prints_refreshed_typed_detail(
+        self,
+    ) -> None:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=45,
+            status="wanted",
+            mb_release_id="75dbf62e-7dd2-4ddc-b57b-9bad1758b6b0",
+        ))
+        job = handoff_automation_owner(
+            db,
+            45,
+            canonical_path="/processing/cli-stale",
+        )
+        args = SimpleNamespace(
+            recovery_action="close",
+            job_id=job.id,
+            reason="stale observation",
+            evidence_revision="sha256:stale",
+            result_status="wanted",
+            beets_db=None,
+            beets_directory=None,
+        )
+        stderr = io.StringIO()
+        with (
+            patch.object(
+                db,
+                "get_processing_cleanup_journal",
+                lambda *, request_id, job_id: None,
+                create=True,
+            ),
+            patch(
+                "scripts.pipeline_cli.imports._open_recovery_beets",
+                side_effect=FileNotFoundError("beets unavailable"),
+            ),
+            redirect_stderr(stderr),
+        ):
+            rc = pipeline_cli.cmd_import_job_recovery(
+                cast(Any, db),
+                cast(Any, args),
+            )
+        self.assertEqual(rc, 4)
+        payload = json.loads(stderr.getvalue())
+        self.assertEqual(payload["outcome"], "evidence_changed")
+        self.assertEqual(payload["detail"]["owner_stage"]["job_id"], job.id)
+        self.assertTrue(
+            payload["detail"]["evidence_revision"].startswith("sha256:")
+        )
+
+    def test_automation_retry_with_journal_reports_recovery_required_success(
+        self,
+    ) -> None:
+        from lib.import_job_recovery_service import (
+            get_automation_recovery_detail,
+        )
+        from lib.pipeline_db.cleanup_journal import CleanupJournalIntent
+        from lib.processing_cleanup import cleanup_manifest_hash
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=46,
+            status="wanted",
+            mb_release_id="75dbf62e-7dd2-4ddc-b57b-9bad1758b6b0",
+        ))
+        job = handoff_automation_owner(
+            db,
+            46,
+            canonical_path="/processing/cli-retained-cleanup",
+        )
+        next(row for row in db._import_jobs if row["id"] == job.id)[
+            "status"
+        ] = "recovery_required"
+        db.create_processing_cleanup_journal(
+            request_id=46,
+            job_id=job.id,
+            intent=CleanupJournalIntent(
+                action="no_op",
+                source_path="/processing/cli-retained-cleanup",
+                source_manifest=(),
+                source_manifest_hash=cleanup_manifest_hash(()),
+            ),
+        )
+        observed = get_automation_recovery_detail(db, None, job.id)
+        assert observed.detail is not None
+        args = SimpleNamespace(
+            recovery_action="retry",
+            job_id=job.id,
+            reason="retain unresolved cleanup",
+            evidence_revision=observed.detail.evidence_revision,
+            result_status=None,
+            beets_db=None,
+            beets_directory=None,
+        )
+        stdout = io.StringIO()
+
+        with (
+            patch(
+                "scripts.pipeline_cli.imports._open_recovery_beets",
+                side_effect=FileNotFoundError("beets unavailable"),
+            ),
+            redirect_stdout(stdout),
+        ):
+            rc = pipeline_cli.cmd_import_job_recovery(
+                cast(Any, db),
+                cast(Any, args),
+            )
+
+        self.assertEqual(rc, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["outcome"], "retry_recovery_required")
+        self.assertEqual(payload["retry_job"]["status"], "recovery_required")
+
 
 class TestCmdForceImport(unittest.TestCase):
+    def test_processing_owner_conflict_is_typed_and_exit_four(self) -> None:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=123,
+            status="wanted",
+            mb_release_id="mbid-123",
+            artist_name="Artist",
+            album_title="Album",
+        ))
+        log_id = db.log_download(
+            request_id=123,
+            outcome="rejected",
+            validation_result={},
+        )
+        owner = handoff_automation_owner(db, 123)
+        stdout = io.StringIO()
+
+        with (
+            patch(
+                "lib.config.read_runtime_config",
+                return_value=MagicMock(),
+            ),
+            redirect_stdout(stdout),
+        ):
+            rc = pipeline_cli.cmd_force_import(
+                db,
+                argparse.Namespace(download_log_id=log_id),
+            )
+
+        self.assertEqual(rc, 4)
+        self.assertEqual(json.loads(stdout.getvalue()), {
+            "error": "processing_locked",
+            "reason": "processing_locked",
+            "request_id": 123,
+            "processing_owner": {
+                "job_id": owner.id,
+                "status": owner.status,
+                "preview_status": owner.preview_status,
+            },
+            "detail": (
+                f"request 123 is owned by automation import job {owner.id}"
+            ),
+        })
+        self.assertEqual(
+            [job.id for job in db.list_import_jobs()],
+            [owner.id],
+        )
+
     @patch("builtins.print")
     def test_force_import_passes_source_username_to_queue(self, _mock_print):
         from lib.import_queue import IMPORT_JOB_FORCE, force_import_dedupe_key
@@ -1632,6 +1972,7 @@ class TestCmdQuery(unittest.TestCase):
         connection_a = DeadConnection()
         db = PipelineDB.__new__(PipelineDB)
         db.conn = connection_a
+        db._owner_session_pin = None
         args = argparse.Namespace(
             sql="DELETE FROM album_requests", json=False, write=False, confirm=None,
         )
@@ -1790,6 +2131,23 @@ class TestCmdStatusShowsDownloading(unittest.TestCase):
         self.assertIn("downloading", counts)
         self.assertEqual(counts["downloading"], 1)
 
+    def test_status_prints_processing_count(self):
+        db = MagicMock()
+        db.count_by_status.return_value = {
+            "wanted": 2,
+            "processing": 3,
+        }
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout):
+            pipeline_cli_album_requests.cmd_status(
+                db,
+                argparse.Namespace(),
+            )
+
+        self.assertIn("processing", stdout.getvalue())
+        self.assertIn("3", stdout.getvalue())
+
     def test_show_displays_active_download_state(self):
         """pipeline-cli show renders active_download_state for downloading albums."""
         import json
@@ -1819,6 +2177,34 @@ class TestCmdSetIntent(unittest.TestCase):
 
         self.assertEqual(result, 4)
         self.assertEqual(db.request(791)["status"], "initializing")
+
+    def test_processing_intent_reports_exact_owner_exit_4(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=792,
+            status="wanted",
+            artist_name="A",
+            album_title="B",
+            target_format=None,
+        ))
+        owner = handoff_automation_owner(db, 792)
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout):
+            result = pipeline_cli.cmd_set_intent(
+                db,
+                MagicMock(id=792, intent="lossless"),
+            )
+
+        self.assertEqual(result, 4)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["reason"], "processing_locked")
+        self.assertEqual(payload["processing_owner"], {
+            "job_id": owner.id,
+            "status": owner.status,
+            "preview_status": owner.preview_status,
+        })
+        self.assertIsNone(db.request(792)["target_format"])
     """Tests for cmd_set_intent — lossless-on-disk toggle."""
 
     @patch("builtins.print")
@@ -2037,6 +2423,62 @@ class TestCmdRepairSpectral(unittest.TestCase):
             self.assertIsNone(repaired["current_spectral_bitrate"])
         finally:
             os.unlink(cfg_path)
+
+    def test_repair_spectral_rechecks_processing_owner_under_import_lock(self):
+        candidate_cur = MagicMock()
+        candidate_cur.fetchall.return_value = [{
+            "id": 42,
+            "artist_name": "Artist",
+            "album_title": "Album",
+            "min_bitrate": 207,
+            "current_spectral_grade": "genuine",
+            "current_spectral_bitrate": 96,
+            "last_download_spectral_bitrate": None,
+            "last_download_spectral_grade": None,
+            "verified_lossless": False,
+        }]
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="wanted",
+            mb_release_id="repair-processing-owner",
+            artist_name="Artist",
+            album_title="Album",
+            current_spectral_grade="genuine",
+            current_spectral_bitrate=96,
+        ))
+        db.queue_execute_results(candidate_cur)
+        owner_id: int | None = None
+        injected = False
+
+        def acquire(_namespace: int, _key: int) -> bool:
+            nonlocal injected, owner_id
+            if not injected:
+                injected = True
+                owner_id = handoff_automation_owner(db, 42).id
+            return True
+
+        db.set_advisory_lock_result(acquire)
+        stdout = io.StringIO()
+        with patch(
+            "scripts.pipeline_cli.quality._load_runtime_rank_config",
+            return_value=MagicMock(),
+        ), redirect_stdout(stdout):
+            result = pipeline_cli.cmd_repair_spectral(
+                cast(Any, db),
+                MagicMock(dry_run=False),
+            )
+
+        self.assertEqual(result, 4)
+        payload = json.loads(stdout.getvalue().strip().splitlines()[-1])
+        self.assertEqual(payload["reason"], "processing_locked")
+        self.assertEqual(payload["processing_owner"], {
+            "job_id": owner_id,
+            "status": "queued",
+            "preview_status": "waiting",
+        })
+        self.assertEqual(db.request(42)["status"], "processing")
+        self.assertEqual(len(db.execute_calls), 1)
 
 
 def _invoke_cmd_quality(
@@ -3985,6 +4427,32 @@ class TestCmdReplace(unittest.TestCase):
                 rc, _ = self._run(mock_outcome=outcome)
                 self.assertEqual(rc, 4)
 
+    def test_processing_locked_json_carries_exact_owner(self):
+        from lib.pipeline_db._shared import ProcessingOwnerProjection
+
+        rc, out = self._run(
+            mock_outcome="wrong_state",
+            mock_kwargs={
+                "reason": "processing_locked",
+                "processing_owner": ProcessingOwnerProjection(
+                    job_id=73,
+                    status="running",
+                    preview_status="evidence_ready",
+                ),
+            },
+            json_out=True,
+        )
+
+        self.assertEqual(rc, 4)
+        payload = json.loads(out)
+        self.assertEqual(payload["error"], "processing_locked")
+        self.assertEqual(payload["reason"], "processing_locked")
+        self.assertEqual(payload["processing_owner"], {
+            "job_id": 73,
+            "status": "running",
+            "preview_status": "evidence_ready",
+        })
+
     def test_exit_5_on_transient_and_mirror_unconfigured(self):
         # mirror_unconfigured (Discogs mirror not set up) shares exit 5
         # with transient — both are service-unavailable/retryable.
@@ -5376,6 +5844,36 @@ class TestDestructiveCliAdapters(unittest.TestCase):
         self.assertEqual(payload["album_ids"], [7, 8])
         self.assertEqual(db.denylist, [])
 
+    def test_ban_source_processing_returns_exact_owner_exit_4(self) -> None:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=41,
+            status="wanted",
+            mb_release_id=RELEASE_A,
+        ))
+        owner = handoff_automation_owner(db, 41)
+        args = SimpleNamespace(
+            request_id=41,
+            release_id=RELEASE_A,
+            beets_db=self.beets_path,
+            beets_directory=self.tmpdir.name,
+        )
+        output = io.StringIO()
+
+        with self._env(), redirect_stdout(output):
+            rc = pipeline_cli.cmd_ban_source(db, args)
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(rc, 4)
+        self.assertEqual(payload["error"], "transition_conflict")
+        self.assertEqual(payload["reason"], "processing_locked")
+        self.assertEqual(payload["processing_owner"], {
+            "job_id": owner.id,
+            "status": owner.status,
+            "preview_status": owner.preview_status,
+        })
+        self.assertEqual(db.denylist, [])
+
     def test_ban_source_incomplete_reports_resulting_searchability(self) -> None:
         from lib.beets_delete import BeetsDeleteFailed
 
@@ -5441,6 +5939,38 @@ class TestDestructiveCliAdapters(unittest.TestCase):
             json.loads(output.getvalue())["error"],
             "destructive_operation_busy",
         )
+        self.assertIsNotNone(db.get_request(41))
+
+    def test_library_delete_processing_returns_exact_owner_exit_4(self) -> None:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=41,
+            status="wanted",
+            mb_release_id=RELEASE_A,
+        ))
+        owner = handoff_automation_owner(db, 41)
+        args = SimpleNamespace(
+            album_id=7,
+            purge_pipeline=True,
+            pipeline_id=41,
+            release_id=RELEASE_A,
+            beets_db=self.beets_path,
+            beets_directory=self.tmpdir.name,
+        )
+        output = io.StringIO()
+
+        with self._env(), redirect_stdout(output):
+            rc = pipeline_cli.cmd_library_delete(db, args)
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(rc, 4)
+        self.assertEqual(payload["error"], "transition_conflict")
+        self.assertEqual(payload["reason"], "processing_locked")
+        self.assertEqual(payload["processing_owner"], {
+            "job_id": owner.id,
+            "status": owner.status,
+            "preview_status": owner.preview_status,
+        })
         self.assertIsNotNone(db.get_request(41))
 
     def test_library_delete_ambiguous_identity_returns_state_exit_4(self) -> None:

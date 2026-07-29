@@ -207,7 +207,7 @@ def _run_capture_progress(world: dict) -> dict:
     )
     result = reduce_poll_cycle(
         state,
-        PollCycleSnapshot(files=[snapshot], completion_current_path="/canonical"),
+        PollCycleSnapshot(files=[snapshot]),
         now,
         PollCycleConfig(
             remote_queue_timeout=10_000,
@@ -297,9 +297,6 @@ def _snapshot_shape(snapshot: PollCycleSnapshot) -> object:
 
 
 _REDUCER_PHASES = (
-    "import_gate",
-    "processing_recovery",
-    "processing_blocked",
     "fresh_vanished",
     "old_vanished",
     "progress",
@@ -343,26 +340,7 @@ def _run_reducer_purity(world: dict[str, Any]) -> None:
         bytes_transferred=world["prev_bytes"] + 1,
     )])
 
-    if phase == "import_gate":
-        snapshot = PollCycleSnapshot(
-            active_import_job_id=17,
-            active_import_job_status="running",
-            processing_blocked_reason="multiple_populated_paths",
-        )
-        expected = PollCycleDecision.wait_import_job
-    elif phase == "processing_recovery":
-        state.processing_started_at = "2026-01-01T00:09:00+00:00"
-        state.current_path = "/old"
-        snapshot = PollCycleSnapshot(processing_current_path="/recovered")
-        expected = PollCycleDecision.processing
-    elif phase == "processing_blocked":
-        state.processing_started_at = "2026-01-01T00:09:00+00:00"
-        state.current_path = "/old"
-        snapshot = PollCycleSnapshot(
-            processing_blocked_reason="legacy_shared_only",
-        )
-        expected = PollCycleDecision.wait_processing_recovery
-    elif phase == "fresh_vanished":
+    if phase == "fresh_vanished":
         state.enqueued_at = "2026-01-01T00:09:30+00:00"
         snapshot = PollCycleSnapshot(files=[PollFileSnapshot()])
         expected = PollCycleDecision.wait_fresh_vanished
@@ -398,7 +376,6 @@ def _run_reducer_purity(world: dict[str, Any]) -> None:
                 state="Completed, Succeeded",
                 bytes_transferred=1_000_000,
             )],
-            completion_current_path="/canonical",
         )
         expected = PollCycleDecision.complete
 
@@ -1103,7 +1080,7 @@ def _820_run_stale_shadow_world(world: dict) -> PollCycleDecision:
     now = _820_BOUNDARY + timedelta(seconds=max(world["post_offset"], 0) + 60)
     result = reduce_poll_cycle(
         state,
-        PollCycleSnapshot(files=[snapshot], completion_current_path="/canon"),
+        PollCycleSnapshot(files=[snapshot]),
         now,
         PollCycleConfig(
             remote_queue_timeout=1_000_000, stalled_timeout=1_000_000,

@@ -20,6 +20,7 @@ from lib.slskd_events import (
     ingest_download_file_events,
 )
 from tests.fakes import FakePipelineDB, FakeSlskdAPI
+from tests.helpers import handoff_automation_owner
 from tests.helpers import (
     make_active_download_file_state as _file_state,
 )
@@ -354,6 +355,40 @@ class TestIngestStamping(SlskdEventIngestCase):
 
         self.assertEqual(result.requests_updated, 0)
         self.assertIsNone(self.file_local_path())
+
+    def test_processing_row_is_not_updated(self):
+        state = ActiveDownloadState(
+            filetype="flac",
+            enqueued_at="2026-07-01T00:00:00+00:00",
+            files=[_file_state()],
+        )
+        self.db.seed_request({
+            "id": 1,
+            "status": "wanted",
+            "artist_name": "Artist",
+            "album_title": "Album",
+        })
+        handoff_automation_owner(self.db, 1, state=state.to_json())
+        before = copy.deepcopy(self.db.request(1)["active_download_state"])
+        self.slskd.events.set_events([
+            self.event(
+                id="ev-1", timestamp="2026-07-01T10:00:00.0000000Z",
+                data=_file_complete_data(
+                    username="peer1",
+                    filename="music\\Artist\\Album\\01 track.flac",
+                    local_filename="/dl/Album/01 track.flac")),
+            self.event(
+                id="ev-cursor", timestamp="2026-07-01T00:00:00.0000000Z"),
+        ])
+
+        result = ingest_download_file_events(self.db, self.slskd)
+
+        self.assertEqual(self.db.get_downloading(), [])
+        self.assertEqual(result.requests_updated, 0)
+        self.assertEqual(
+            self.db.request(1)["active_download_state"],
+            before,
+        )
 
     def test_second_run_with_advanced_cursor_is_idempotent(self):
         self.seed_downloading()

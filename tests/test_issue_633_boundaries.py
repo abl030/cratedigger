@@ -54,6 +54,7 @@ class TestProcessAlbumProtocolBoundary(unittest.TestCase):
                 "dispatch_fn",
                 "materialize_before_file_copy",
                 "materialize_fn",
+                "cancellation_token",
             ],
         )
         self.assertEqual(
@@ -65,6 +66,7 @@ class TestProcessAlbumProtocolBoundary(unittest.TestCase):
                 "DispatchCoreFn | None",
                 "Callable[[], None] | None",
                 "Callable[..., download_materialization.MaterializeResult] | None",
+                "CancellationToken | None",
             ],
         )
         self.assertEqual(_annotation(call.returns), "CompletionResult")

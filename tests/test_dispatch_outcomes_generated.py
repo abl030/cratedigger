@@ -58,6 +58,12 @@ import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.config import CratediggerConfig
 from lib.dispatch import DispatchOutcome
 from lib.dispatch.types import _PREIMPORT_FACT_REJECT_DECISIONS, ImportAttemptResult
+from lib.import_execution import (
+    CancellationToken,
+    ExecutionLeaseSnapshot,
+    OwnerSessionIdentity,
+    ProcessIdentity,
+)
 from lib.quality import (
     QUALITY_DECISION_IMPORT_STAGE_DECISIONS,
     QUALITY_DECISION_REJECT_STAGE_DECISIONS,
@@ -68,6 +74,8 @@ from lib.quality_evidence import snapshot_audio_files
 from tests.beets_world import BeetsWorld
 from tests.fakes import DownloadLogRow, FakePipelineDB
 from tests.helpers import (
+    finalize_claimed_dispatch,
+    handoff_automation_owner,
     make_album_quality_evidence,
     make_download_file,
     make_grab_list_entry,
@@ -104,7 +112,6 @@ _AUTOMATIC_RETAINED_ACTIONS = {
     "transcode_first": ("wanted", None, True),
 }
 _REJECTION_WRITERS = (
-    "atomic_abandon",
     "database_source",
     "evidence_decision",
     "dispatch_rejection",
@@ -118,6 +125,38 @@ _HAVE_ANALYSIS_FAILURES = (
     "snapshot changed during analysis",
     "RuntimeError: analyser crashed",
 )
+
+
+def _preview_lease(job_id: int) -> ExecutionLeaseSnapshot:
+    return ExecutionLeaseSnapshot(
+        host_boot_id="generated-dispatch-boot",
+        invocation_id=f"generated-dispatch-preview-{job_id}",
+        systemd_unit="cratedigger-import-preview-worker.service",
+        worker=ProcessIdentity(9101, 91001),
+    )
+
+
+def _importer_lease(job_id: int) -> ExecutionLeaseSnapshot:
+    return ExecutionLeaseSnapshot(
+        host_boot_id="generated-dispatch-boot",
+        invocation_id=f"generated-dispatch-importer-{job_id}",
+        systemd_unit="cratedigger-importer.service",
+        worker=ProcessIdentity(9102, 91002),
+    )
+
+
+def _owned_test_runner(**kwargs: Any) -> Any:
+    """Persist synthetic child proof before exercising the patched run seam."""
+    from lib.dispatch.subprocess_runner import run_import_one
+
+    on_spawn = kwargs.pop("on_spawn", None)
+    cancellation_token = kwargs.pop("cancellation_token", None)
+    kwargs.pop("owner_session_probe", None)
+    if on_spawn is not None:
+        on_spawn(os.getpid())
+    if cancellation_token is not None:
+        cancellation_token.raise_if_cancelled()
+    return run_import_one(**kwargs)
 
 
 def _full_dispatch_config() -> CratediggerConfig:
@@ -191,6 +230,10 @@ def _run_dispatch(
     fed through the ``parse_import_result`` seam."""
     from lib.dispatch import dispatch_import_core
 
+    # Automation owns a request until one terminal wanted/imported outcome;
+    # caller-owned "retain current status" worlds belong to force import.
+    force = force or not world.requeue_on_failure
+
     ir = None
     if world.mode == "decision":
         assert world.decision is not None and world.new_min_bitrate is not None
@@ -214,25 +257,48 @@ def _run_dispatch(
         del queued  # retained argument for existing generated call sites
         db = FakePipelineDB()
         db.seed_request(make_request_row(
-            id=42, status=initial_status, mb_release_id="mbid-generated",
+            id=42,
+            status=initial_status if force else "wanted",
+            mb_release_id="mbid-generated",
             min_bitrate=180, current_spectral_bitrate=128,
             active_download_state={
                 "files": [],
                 "filetype": "mp3",
+                "enqueued_at": "2026-07-29T00:00:00+00:00",
                 "current_path": tmpdir,
-            },
+            } if force else None,
         ))
         from lib.import_evidence import (
             ActionEvidenceProvenance,
             CandidateEvidenceActionResult,
         )
-        from lib.import_queue import IMPORT_JOB_AUTOMATION, IMPORT_JOB_FORCE
+        from lib.import_queue import IMPORT_JOB_FORCE
 
-        job = db.enqueue_import_job(
-            IMPORT_JOB_FORCE if force else IMPORT_JOB_AUTOMATION,
-            request_id=42,
-            payload={"download_log_id": 1, "failed_path": tmpdir} if force else {},
-        )
+        preview_lease: ExecutionLeaseSnapshot | None = None
+        if force:
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                payload={"download_log_id": 1, "failed_path": tmpdir},
+            )
+        else:
+            job = handoff_automation_owner(
+                db,
+                42,
+                state={
+                    "files": [],
+                    "filetype": "mp3",
+                    "enqueued_at": "2026-07-29T00:00:00+00:00",
+                    "current_path": tmpdir,
+                },
+                canonical_path=tmpdir,
+            )
+            preview_lease = _preview_lease(job.id)
+            claimed_preview = db.claim_next_import_preview_job(
+                worker_id="generated-dispatch-preview",
+                execution_lease=preview_lease,
+            )
+            assert claimed_preview is not None
         with open(os.path.join(tmpdir, "01 - Track.mp3"), "wb") as handle:
             handle.write(b"generated fixture audio")
         evidence = make_album_quality_evidence(
@@ -246,12 +312,21 @@ def _run_dispatch(
             snapshot_fingerprint=evidence.snapshot_fingerprint,
         )
         assert persisted is not None and persisted.id is not None
-        db.set_import_job_candidate_evidence(job.id, persisted.id)
-        db.mark_import_job_preview_importable(
+        assert db.set_import_job_candidate_evidence(
+            job.id,
+            persisted.id,
+            expected_execution_lease=preview_lease,
+        )
+        assert db.mark_import_job_preview_importable(
             job.id,
             preview_result={"ready": True},
+            expected_execution_lease=preview_lease,
         )
-        claimed = db.claim_next_import_job(worker_id="generated-dispatch")
+        execution_lease = None if force else _importer_lease(job.id)
+        claimed = db.claim_next_import_job(
+            worker_id="generated-dispatch",
+            execution_lease=execution_lease,
+        )
         assert claimed is not None
         import_job_id = claimed.id
         candidate_result = CandidateEvidenceActionResult(
@@ -284,20 +359,38 @@ def _run_dispatch(
                 prevalidated_candidate_result=candidate_result,
                 beets_library_db_path=str(beets.library_db),
                 beets_library_root=str(beets.library_root),
+                execution_lease=execution_lease,
+                cancellation_token=(
+                    CancellationToken()
+                    if execution_lease is not None
+                    else None
+                ),
+                owner_session_identity=(
+                    OwnerSessionIdentity(id(db), 4242)
+                    if execution_lease is not None
+                    else None
+                ),
+                run_import_fn=(
+                    _owned_test_runner
+                    if execution_lease is not None
+                    else None
+                ),
             )
         if result.terminal_outcome is not None:
             from lib.terminal_outcomes import ImportJobTerminal
 
-            db.persist_import_terminal_outcome(
-                result.terminal_outcome.with_job(ImportJobTerminal(
-                    status="completed" if result.success else "failed",
-                    result={"success": result.success},
-                    message=result.message,
-                    error=None if result.success else result.message,
-                ))
-            )
+            if force:
+                db.persist_import_terminal_outcome(
+                    result.terminal_outcome.with_job(ImportJobTerminal(
+                        status="completed" if result.success else "failed",
+                        result={"success": result.success},
+                        message=result.message,
+                        error=None if result.success else result.message,
+                    ))
+                )
+            else:
+                finalize_claimed_dispatch(db, claimed, result)
         else:
-            from tests.helpers import finalize_claimed_dispatch
             finalize_claimed_dispatch(db, claimed, result)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -449,24 +542,6 @@ def _run_rejection_writer(
         )
         return db
 
-    if writer == "atomic_abandon":
-        db.request(42)["active_download_state"] = {
-            "current_path": "/tmp/generated-staged",
-            "import_subprocess_started_at": "2026-07-11T00:00:00+00:00",
-        }
-        db.abandon_auto_import_request(
-            request_id=42,
-            current_path="/tmp/generated-staged",
-            soulseek_username="generated-user",
-            filetype="flac",
-            beets_detail="generated reject",
-            outcome="failed",
-            staged_path="/tmp/generated-staged",
-            error_message="generated reject",
-            validation_result=validation_result.to_json(),
-        )
-        return db
-
     if writer == "request_auto_import":
         album = make_grab_list_entry(
             artist="Generated Artist",
@@ -562,9 +637,13 @@ def _run_have_analysis_abort(
     db = FakePipelineDB()
     db.seed_request(make_request_row(
         id=42,
-        status="unsearchable" if mode == "force" else "downloading",
+        status="unsearchable" if mode == "force" else "wanted",
         search_filetype_override=search_override,
-        active_download_state={"files": [], "filetype": "flac"},
+        active_download_state=(
+            {"files": [], "filetype": "flac"}
+            if mode == "force"
+            else None
+        ),
     ))
     current_result = CurrentEvidenceActionResult(
         evidence=None,
@@ -585,7 +664,14 @@ def _run_have_analysis_abort(
         "force": "force_import",
     }[mode]
 
-    with tempfile.TemporaryDirectory() as tmpdir:
+    with tempfile.TemporaryDirectory() as root:
+        processing_dir = os.path.join(root, "processing")
+        if mode == "auto":
+            os.makedirs(os.path.join(processing_dir, "albums"))
+            tmpdir = os.path.join(processing_dir, "albums", "request-42")
+            os.mkdir(tmpdir)
+        else:
+            tmpdir = root
         with open(os.path.join(tmpdir, "01 - Track.mp3"), "wb") as handle:
             handle.write(b"generated HAVE fixture")
         payload = (
@@ -593,11 +679,31 @@ def _run_have_analysis_abort(
             if mode == "auto"
             else {"download_log_id": 1, "failed_path": tmpdir}
         )
-        job = db.enqueue_import_job(
-            job_type,
-            request_id=42,
-            payload=payload,
-        )
+        preview_lease: ExecutionLeaseSnapshot | None = None
+        if mode == "auto":
+            job = handoff_automation_owner(
+                db,
+                42,
+                state={
+                    "files": [],
+                    "filetype": "flac",
+                    "enqueued_at": "2026-07-29T00:00:00+00:00",
+                    "current_path": tmpdir,
+                },
+                canonical_path=tmpdir,
+            )
+            preview_lease = _preview_lease(job.id)
+            claimed_preview = db.claim_next_import_preview_job(
+                worker_id="generated-have-preview",
+                execution_lease=preview_lease,
+            )
+            assert claimed_preview is not None
+        else:
+            job = db.enqueue_import_job(
+                job_type,
+                request_id=42,
+                payload=payload,
+            )
         candidate = make_album_quality_evidence(
             mb_release_id="generated-have-analysis-mbid",
             source_path=tmpdir,
@@ -609,7 +715,25 @@ def _run_have_analysis_abort(
             snapshot_fingerprint=candidate.snapshot_fingerprint,
         )
         assert persisted is not None and persisted.id is not None
-        db.set_import_job_candidate_evidence(job.id, persisted.id)
+        assert db.set_import_job_candidate_evidence(
+            job.id,
+            persisted.id,
+            expected_execution_lease=preview_lease,
+        )
+        execution_lease: ExecutionLeaseSnapshot | None = None
+        claimed = None
+        if mode == "auto":
+            assert db.mark_import_job_preview_importable(
+                job.id,
+                preview_result={"ready": True},
+                expected_execution_lease=preview_lease,
+            )
+            execution_lease = _importer_lease(job.id)
+            claimed = db.claim_next_import_job(
+                worker_id="generated-have-importer",
+                execution_lease=execution_lease,
+            )
+            assert claimed is not None
         candidate_result = CandidateEvidenceActionResult(
             evidence=persisted,
             provenance=ActionEvidenceProvenance(
@@ -628,7 +752,11 @@ def _run_have_analysis_abort(
                 db=db,  # type: ignore[arg-type]
                 dl_info=DownloadInfo(filetype="flac", username=username),
                 scenario=scenario,
-                cfg=_full_dispatch_config(),
+                cfg=CratediggerConfig(
+                    beets_harness_path=_HARNESS,
+                    pipeline_db_enabled=True,
+                    processing_dir=processing_dir,
+                ),
                 requeue_on_failure=mode == "auto",
                 candidate_import_job_id=job.id,
                 prevalidated_candidate_result=candidate_result,
@@ -636,18 +764,33 @@ def _run_have_analysis_abort(
                 current_evidence_loader=(
                     lambda *_args, **_kwargs: current_result
                 ),
+                execution_lease=execution_lease,
+                cancellation_token=(
+                    CancellationToken()
+                    if execution_lease is not None
+                    else None
+                ),
+                owner_session_identity=(
+                    OwnerSessionIdentity(id(db), 4242)
+                    if execution_lease is not None
+                    else None
+                ),
             )
     if outcome.terminal_outcome is None:
         raise AssertionError("HAVE-analysis abort did not build a terminal outcome")
     db.set_cooldown_result(cooldown_verdict)
-    db.persist_import_terminal_outcome(outcome.terminal_outcome.with_job(
-        ImportJobTerminal(
-            status="failed",
-            error=outcome.message,
-            result={"success": False},
-            message=outcome.message,
-        )
-    ))
+    if mode == "auto":
+        assert claimed is not None
+        finalize_claimed_dispatch(db, claimed, outcome)
+    else:
+        db.persist_import_terminal_outcome(outcome.terminal_outcome.with_job(
+            ImportJobTerminal(
+                status="failed",
+                error=outcome.message,
+                result={"success": False},
+                message=outcome.message,
+            )
+        ))
     return db
 
 
@@ -678,16 +821,24 @@ def assert_dispatch_outcome_matches_routing(
     landed in the DB — for the no-JSON crash path AND every known decision
     string.
     """
+    from lib.import_queue import IMPORT_JOB_AUTOMATION
+
     status = db.request(42)["status"]
 
     if world.mode == "no_json":
         if db.download_logs:
             raise AssertionError(
                 "no-JSON ambiguity wrote a terminal download audit")
-        if status != "downloading":
-            raise AssertionError(
-                f"no-JSON ambiguity left status={status!r}, want 'downloading'")
         job = db.get_import_job(1)
+        expected_status = (
+            "processing"
+            if job is not None and job.job_type == IMPORT_JOB_AUTOMATION
+            else "downloading"
+        )
+        if status != expected_status:
+            raise AssertionError(
+                f"no-JSON ambiguity left status={status!r}, "
+                f"want {expected_status!r}")
         if job is None or job.status != "recovery_required":
             raise AssertionError(
                 "no-JSON ambiguity did not stop in recovery_required")

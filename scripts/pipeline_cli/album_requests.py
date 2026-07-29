@@ -302,13 +302,7 @@ def _transition_applied_or_report(
     """Print the CLI twin of the HTTP transition-conflict payload."""
     if not isinstance(result, transitions.TransitionConflict):
         return True
-    print(json.dumps({
-        "error": "transition_conflict",
-        "reason": result.kind.value,
-        "expected_status": result.expected_status,
-        "actual_status": result.actual_status,
-        "target_status": result.target_status,
-    }))
+    print(json.dumps(transitions.transition_conflict_payload(result)))
     return False
 
 
@@ -323,7 +317,13 @@ def _request_fields_applied_or_report(
     if applied:
         return True
     row = db.get_request(request_id)
-    return _transition_applied_or_report(transitions.TransitionConflict(
+    processing_locked = transitions.processing_locked_conflict(
+        row,
+        request_id,
+        expected_status,
+        expected_status=expected_status,
+    )
+    conflict = processing_locked or transitions.TransitionConflict(
         request_id=request_id,
         target_status=expected_status,
         kind=(
@@ -333,7 +333,8 @@ def _request_fields_applied_or_report(
         ),
         expected_status=expected_status,
         actual_status=None if row is None else str(row["status"]),
-    ))
+    )
+    return _transition_applied_or_report(conflict)
 
 VALID_STATUSES = ["wanted", "imported", "unsearchable"]
 
@@ -605,7 +606,14 @@ def cmd_status(db: _AlbumRequestsDB, args: argparse.Namespace) -> None:
         return
     total = sum(counts.values())
     print(f"  Pipeline DB status ({total} total):\n")
-    for status in ["initializing", "wanted", "downloading", "imported", "unsearchable"]:
+    for status in [
+        "initializing",
+        "wanted",
+        "downloading",
+        "processing",
+        "imported",
+        "unsearchable",
+    ]:
         c = counts.get(status, 0)
         if c > 0:
             print(f"    {status:15s} {c:4d}")

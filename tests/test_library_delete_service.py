@@ -591,7 +591,7 @@ class TestDeleteReleaseFromLibrary(unittest.TestCase):
                         if acquired:
                             self.active_locks -= 1
 
-            def delete_request(self, request_id: int) -> None:
+            def delete_request(self, request_id: int) -> bool:
                 raise RuntimeError(f"planted PG failure for {request_id}")
 
         self._seed_album()

@@ -18,11 +18,10 @@ audit state, and mark jobs `evidence_ready` for the serial worker's final
 action-time evidence check. Historical `would_import` rows remain display/audit
 data only and are not runnable.
 
-Outstanding follow-up: after the preview-gated queue has run in production,
-inventory IMPORT/RELEASE lock call sites and remove any lock whose only
-remaining purpose was cross-entrypoint beets import ownership. Until then, keep
-the locks as defensive guards around the existing dispatch internals. Tracking
-issue: <https://github.com/abl030/cratedigger/issues/169>.
+IMPORT/RELEASE are now part of the processing-owner correctness boundary, not
+merely defensive queue-era guards. Do not remove or narrow them as queue
+cleanup: the exact session, ordering, and owner rereads are what fence
+filesystem/Beets work from recovery and operator invalidators.
 
 This doc is the single source of truth for namespaces, keys, ordering,
 and reentrancy. Add a new lock only after reading the rules below and
@@ -55,7 +54,7 @@ namespace, second is the per-lock key.
 
 | Namespace | Constant | Hex | ASCII | Key | Scope |
 |---|---|---|---|---|---|
-| Per-request import | `ADVISORY_LOCK_NAMESPACE_IMPORT` | `0x46494D50` | "FIMP" | `request_id` | Force-import double-click protection |
+| Per-request import | `ADVISORY_LOCK_NAMESPACE_IMPORT` | `0x46494D50` | "FIMP" | `request_id` | Exact processing-owner session and operator invalidator fence |
 | Per-release pipeline | `ADVISORY_LOCK_NAMESPACE_RELEASE` | `0x52454C45` | "RELE" | `release_id_to_lock_key(mb_release_id)` | Cross-process same-MBID serialisation |
 | Importer worker | `ADVISORY_LOCK_NAMESPACE_IMPORTER` | `0x51554555` | "QUEU" | `1` | One importer process drains the beets-mutating lane |
 | Per-request plan | `ADVISORY_LOCK_NAMESPACE_PLAN` | `0x504C414E` | "PLAN" | `request_id` | Search-plan generation / supersession serialisation |
@@ -81,10 +80,14 @@ on the same `request_id`, writing duplicate `download_log` rows and
 running `import_one.py` twice against the same files. The second caller
 would crash or produce bogus state.
 
-**Scope**: Held by `dispatch_import_from_db` inside the importer worker.
-Web and CLI force-import paths no longer call this directly; they dedupe at
-`import_jobs` enqueue time. Keep this lock until a follow-up cleanup proves the
-queue invariant fully replaces the old double-click protection.
+**Scope**: The witnessed automation handoff acquires IMPORT before creating the
+owner. Preview and importer each use a dedicated non-pooled `PipelineDB`
+session and retain IMPORT from the first durable owner recheck through every
+filesystem/Beets mutation and the stage/terminal commit. Replace, force-import,
+ban-source, request-backed library delete, direct pipeline delete, generic
+lifecycle/intent/quality mutations, and owner recovery use the same lock before
+their authoritative reread. A processing owner therefore makes every
+incompatible action a typed, zero-mutation `processing_locked` conflict.
 
 **Key**: The raw `request_id` (int4 auto-increment on
 `album_requests.id` — fits trivially in an int4 lock key).
@@ -105,10 +108,11 @@ query then picks up the *other* process's newly-inserted beets row as
 "the album we just imported" and `beet remove -d`-es it — the wrong
 album's files vanish.
 
-**Scope**: Held for the duration of every `import_one.py` subprocess
-— that is, in every path that runs the harness. `dispatch_import_core`
-is the funnel; both the auto path and the force-import path go through
-it. It also serializes direct request creation in `RequestCreationService`:
+**Scope**: Held for the duration of every `import_one.py` subprocess and its
+release-specific filesystem/terminal work. `dispatch_import_core` is the
+funnel. Automation acquires RELEASE inside its already-pinned IMPORT session;
+force and other request-backed destructive paths use the same order. It also
+serializes direct request creation in `RequestCreationService`:
 Add and new-row Upgrade hold the exact release lock while rechecking identity,
 persisting their provisional row, and nesting the per-request PLAN lock before
 the final publication CAS.
@@ -180,170 +184,71 @@ queue.
 
 ## Acquisition order
 
-Force-import paths hold both locks at once. **IMPORT is outer, RELEASE
-is inner.** Always. A reverse nesting would risk a cross-process
-deadlock if two flows acquire in opposite order, but because RELEASE is
-taken by the same session further down the call graph and no other
-call site acquires both locks, in practice there is only one ordering
-to follow and it's the one in the code:
+Any request-backed operation that needs both locks uses **IMPORT outer,
+RELEASE inner**, on one pinned database session:
+
+```
+AUTOMATION PREVIEW / IMPORT / RECOVERY
+  └─ acquire IMPORT(request_id)                                ← pinned session
+      └─ re-read exact processing owner and execution lease
+      └─ acquire RELEASE(release_id_to_lock_key(release_id))
+          └─ filesystem / validation / Beets / cleanup
+          └─ exact-owner stage or terminal commit
+```
+
+The handoff itself takes IMPORT before its locked
+`downloading + enqueued_at` CAS and commits the owner before any filesystem
+effect. Preview and importer never reconnect inside the owner scope: their
+runtime context borrows the same `PipelineDB`, an owner-session watchdog checks
+that exact connection, and cancellation prevents each next mutation if the
+session is lost. The persisted execution lease is liveness evidence only; the
+request's owner pointer remains the authority.
 
 Destructive operator actions follow the same order. Ban-source always has a
-pipeline request and therefore takes IMPORT(request_id) then RELEASE(release
-id). Library-delete derives the exact release from the beets album id; when a
-pipeline row exists it takes IMPORT then RELEASE, and when no pipeline row
-exists it takes RELEASE only. Both services re-read their server-owned
-identity and recheck active import jobs after the locks are acquired, then hold
-the locks across hashing, beets/filesystem deletion, pipeline cleanup and
-audit writes. Contention is a 409 / CLI exit 4 with zero mutation.
+pipeline request and therefore takes IMPORT then RELEASE. Library-delete takes
+IMPORT then RELEASE when a request exists, and RELEASE only for a library-only
+album. Replace, force-import, direct pipeline delete, lifecycle/intent/quality
+changes, and recovery all acquire IMPORT before the durable owner reread.
+Authority rejection is a 409 / CLI exit 4 with zero filesystem, audit, job, or
+request mutation.
 
-```
-FORCE (dispatch_import_from_db)
-  └─ acquire IMPORT(request_id)                                ← outer
-      └─ _dispatch_import_from_db_locked
-          └─ dispatch_import_core
-              └─ acquire RELEASE(release_id_to_lock_key(mbid)) ← inner
-                  └─ import_one.py subprocess
-```
+Inside a processing transaction, row locks have their own fixed order:
+request, every job for that request in ID order, then cleanup journals in job
+ID order. This lets deferred owner/journal integrity triggers serialize with
+handoff, terminalization, and recovery retry instead of validating an unlocked
+snapshot.
 
-The auto path only holds RELEASE, and acquires it at
-`_handle_valid_result` *before* `StagedAlbum.move_to(...)` runs (Codex PR #136 R4
-P1 — see below). `_handle_valid_result` now calls
-`dispatch_import_core` directly; its inner acquisition of the same
-RELEASE key is therefore just a no-op reentrant acquire against the
-outer lock already held by the auto path:
+Recovery follows four asymmetric crash cases:
 
-```
-AUTO (_handle_valid_result in lib/download_validation.py)
-  └─ acquire RELEASE(release_id_to_lock_key(mbid))             ← outer
-      └─ staged_album.move_to(...)                             ← moves files + current_path
-      └─ dispatch_import_core
-          └─ acquire RELEASE(...)                              ← reentrant no-op
-              └─ import_one.py subprocess
-```
+1. Before launch authorization, a positively dead execution may requeue the
+   same exact owner.
+2. After authorization but before spawn, the conservative marker requires
+   operator recovery.
+3. During/after Beets or a rolled-back terminal bundle, the same owner remains
+   `recovery_required`; neither heartbeat age nor path/library inference can
+   authorize replay.
+4. After the terminal bundle commits, the owner is cleared, cleanup receipt
+   consumed, and the job is terminal.
 
-**Why RELEASE outer at `_handle_valid_result`, not at
-`dispatch_import_core`?** The staged move now mutates both filesystem
-state (`slskd_download_dir/<import_folder>/` →
-`beets_staging_dir/<mode>/<artist>/<album> [request-N]`) and
-`active_download_state.current_path`. The staged path is request-scoped
-and branch-scoped (`auto-import/` vs `post-validation/`) so crash
-recovery can tell whether a row may already have launched an import
-subprocess, and two same-name editions can never collide on the same
-persisted `current_path`. Acquiring RELEASE first still keeps
-contention as a true no-op: no directory churn, no extra JSONB write,
-and no cross-process ambiguity about which local path currently owns the
-album. On contention, files stay where `process_completed_album`
-expects them and the next cycle simply re-enters with the same
-`current_path`.
-
-If the process dies after moving into `beets_staging_dir`, the persisted
-staging root tells the next poll whether the row is on the
-`auto-import/` or `post-validation/` branch. The
-`active_download_state.import_subprocess_started_at` flag distinguishes
-two cases for `auto-import/` retries:
-
-- **Flag is `None`** — files were moved to the staged path but
-  `import_one.py` was never launched. Beets has not been touched. The
-  resume guard permits retry: the next cycle re-enters
-  `process_completed_album`, runs `beets_validate` against the staged
-  files, and dispatches as normal.
-- **Flag is set** — `dispatch_import_core` set this stamp immediately
-  before launching `run_import_one(...)`. The subprocess may have
-  written to beets before crashing, so rerunning the same staged folder
-  is unsafe and would risk a double-import. If no live import job owns
-  the row and the RELEASE lock can be acquired, runtime recovery
-  abandons the local attempt instead: it moves any remaining
-  request-scoped staged folder under a sibling
-  `failed_imports/abandoned_auto_import ...` folder, writes a
-  non-rejection `download_log.outcome='failed'` audit row with
-  `beets_scenario='abandoned_auto_import'`, resets the request to
-  `wanted`, and lets the next normal search/download cycle retry. The
-  reset and audit row are committed through a guarded ownership check on
-  the still-`downloading` row and matching `active_download_state`
-  current path; if that guard fails after the filesystem move, the move
-  is rolled back. The audit row is excluded from source-cooldown
-  accounting and does not create denylist, wrong-match, or bad-file
-  evidence.
-
-First deploy smoke for this policy: request #1034 (Phil Spector - Back
-to Mono) should leave `downloading` on the next poll/importer cycle
-without manual filesystem or database edits. If its staged directory
-still exists, it should be preserved under an
-`abandoned_auto_import` failed-import folder; `ImaginaryEndings` should
-not be denylisted or cooled down by the cleanup.
-
-`post-validation/` retries re-enter normally regardless because
-`StagedAlbum.move_to(...)` is idempotent when the album is already at
-the staged destination. For blocked auto-import rows (flag set),
-operator recovery should inspect the staged path and either finish the
-import manually or reset the request explicitly.
-
-The import job is now the stronger operation fence. Enqueue captures the
-expected request status. Under the release lock, the importer atomically
-compares that stored precondition with the live row and records the exact
-release, observed request status, source path, and candidate snapshot
-immediately before Beets may start. Recovery follows
-four deliberately asymmetric crash cases:
-
-1. Crash before launch authorization commits: Beets was not allowed to start,
-   so startup may requeue the same job.
-2. Crash after authorization but before subprocess spawn: the marker is
-   conservative and startup stops at `recovery_required`.
-3. Crash while Beets runs, after it returns, or while its terminal PostgreSQL
-   bundle rolls back: startup also stops at `recovery_required`; code does not
-   infer whether the library mutation landed.
-4. Terminal bundle commits: the job is `completed` or `failed` and startup has
-   nothing to recover.
-
-Only an explicit operator resolution can leave case 2 or 3. A retry closes the
-ambiguous operation and creates a new job ID after rechecking the recorded
-authority; it never reclaims the possibly-applied operation.
-
-Filesystem convergence is sequenced after the PostgreSQL terminal
-acknowledgement. Dispatch may describe staged-folder removal, duplicate-guard
-quarantine, or disambiguation cleanup, but the importer performs it only after
-the request/audit/job transaction commits. The description is intentionally
-not a durable outbox: a crash after acknowledgement can leave debris for later
-operator cleanup, while a missing acknowledgement preserves the source for
-inspection.
-
-The 2026-05-04 wedge (5788 failed import_jobs, 3 albums stuck in
-`downloading` since Apr 27) was caused by the absence of this flag:
-the original guard fired regardless of whether the subprocess had
-launched, trapping rows after a crash that occurred between the staged
-move and the subprocess spawn. The flag is the necessary witness that
-makes the guard precise.
-
-To list candidate blocked rows, query for `status='downloading'` entries
-whose persisted `current_path` already points at your staging root:
-
-```bash
-pipeline-cli query - <<'SQL'
-SELECT id,
-       artist_name,
-       album_title,
-       active_download_state->>'current_path' AS current_path
-FROM album_requests
-WHERE status = 'downloading'
-  AND active_download_state->>'current_path' LIKE '<beets_staging_dir>%';
-SQL
-```
+Explicit retry proves the old execution dead and atomically mints/retargets a
+fresh job. Explicit close declares `wanted` or `imported` and completes the
+exact manifest journal before the shared terminal transaction. Cleanup is
+therefore inside the owner boundary, not best-effort work after authority has
+been cleared.
 
 ## Contention behaviour
 
 All acquires are non-blocking via `pg_try_advisory_lock`. On
 contention:
 
-- **IMPORT contention** (force-import): log `SKIPPED: request N —
-  another import is already in progress` and return a
-  `DispatchOutcome(success=False, message=...)` so the UI surfaces a
-  "try again shortly" toast. The second caller writes nothing.
-- **RELEASE contention** (auto): log `AUTO-IMPORT DEFERRED` and return
-  `DispatchOutcome(deferred=True)`. `_run_completed_processing`
-  branches on `deferred` and preserves the `downloading` status with
-  its `active_download_state` intact — the next cycle idempotently
-  re-enters `process_completed_album` and retries exactly where we
-  stopped. Codex PR #136 R3 P2/P3.
+- **IMPORT contention**: the downloader handoff leaves the exact
+  `downloading + enqueued_at` incarnation untouched; an existing processor or
+  operator action returns a typed busy/conflict result with no filesystem,
+  request, job, audit, or policy write.
+- **RELEASE contention** (automation owner): the same exact owning job
+  requeues under its still-live execution and the request remains
+  `processing`; it is never terminalized or detached merely because another
+  request targets the release.
 - **RELEASE contention** (force-import): log `FORCE-IMPORT SKIPPED`,
   return `DispatchOutcome(success=False,
   deferred=False)`, no state mutated. Same UI message as IMPORT
@@ -361,40 +266,32 @@ times; two releases are needed. Two *different* sessions never both
 hold the same lock — the second caller's `pg_try_advisory_lock`
 returns false.
 
-Cratedigger exploits this in the auto path: `_handle_valid_result`
-acquires RELEASE, `dispatch_import_core` acquires it again
-(reentrantly), the inner release is a no-op, the outer release is the
-real one. The design keeps `dispatch_import_core`'s lock scope correct
-for the force-import path (where it IS the first acquisition) without
-double-gating the auto path.
-
-**Scope**: reentrancy is per-session, not per-process. A single
-Cratedigger process does hold multiple `PipelineDB` instances in
-practice — the auto pipeline has `phase1_source` and `phase2_source`
-each owning their own session, `album_source.py` lazily opens another,
-and the web server opens yet one more. Every `advisory_lock()` call
-must go through the same `PipelineDB` instance as its matching outer
-acquire for the reentrant no-op to apply. The auto path and the
-force-import path both thread the same
-`ctx.pipeline_db_source._get_db()` / `db` reference from the outer
-acquire down into `dispatch_import_core`, so they stay within one
-session. If a future change opens a fresh `PipelineDB` for the inner
-acquire, the second `pg_try_advisory_lock` comes from a different
-session and returns False — revisit the ordering rules.
+**Scope**: reentrancy is per-session, not per-process. Processing code must
+therefore thread its dedicated pinned `PipelineDB` through the runtime context
+and dispatch/terminal layers. A lazy `AlbumSource` connection, pooled
+replacement, or reconnect after watchdog failure is a different session:
+IMPORT/RELEASE may then contend with the still-live owner rather than nest, and
+the code must fail-stop. Runtime contexts borrow the pinned session and never
+close it; the outer preview/importer scope owns closure after all locks and
+watchdogs have stopped.
 
 ## Call-site index
 
 | Path | File | Function | Namespace | Key expression |
 |---|---|---|---|---|
-| Auto-import outer | `lib/download_validation.py` | `_handle_valid_result` | RELEASE | `release_id_to_lock_key(album_data.mb_release_id)` |
-| Auto + force-import inner | `lib/dispatch/core.py` | `dispatch_import_core` | RELEASE | `release_id_to_lock_key(mb_release_id)` |
+| Witnessed automation handoff | `lib/pipeline_db/import_jobs.py` | `PipelineDB.handoff_automation_import` | IMPORT | `request_id` |
+| Automation preview owner scope | `scripts/import_preview_worker.py` | `_process_automation_claim` | IMPORT then RELEASE in the borrowed runtime path | `request_id`; `release_id_to_lock_key(release_id)` |
+| Automation importer owner scope | `scripts/importer.py` | `_process_automation_claim` | IMPORT then RELEASE | `request_id`; `release_id_to_lock_key(release_id)` |
+| Automation recovery close | `lib/import_job_recovery_service.py` | `apply_automation_recovery_action` | IMPORT then RELEASE | `request_id`; `release_id_to_lock_key(release_id)` |
+| Auto + force-import dispatch | `lib/dispatch/core.py` | `dispatch_import_core` | RELEASE | `release_id_to_lock_key(mb_release_id)` |
 | Direct Add / new-row Upgrade | `lib/request_creation_service.py` | `RequestCreationService.create_or_resume` | RELEASE then PLAN | `release_id_to_lock_key(creation.release_id)`; `request_id` |
 | Force-import outer | `lib/dispatch/entry_points.py` | `dispatch_import_from_db` | IMPORT | `request_id` |
 | Ban-source destructive action | `lib/destructive_release_service.py` | `ban_source` | IMPORT then RELEASE | `request_id`; `release_id_to_lock_key(server release id)` |
 | Library-delete destructive action | `lib/destructive_release_service.py` | `delete_release_from_library` | IMPORT then RELEASE, or RELEASE only without a pipeline row; ambiguous dual or malformed-nonempty album identity rejects before locks | server-derived pipeline request id; `release_id_to_lock_key(server release id)` |
 | Replace operator action | `lib/mbid_replace_service.py` | `MbidReplaceService.replace_request_mbid` | IMPORT | `request_id` |
+| Direct pipeline delete | `lib/pipeline_delete_service.py` | `delete_pipeline_request` | IMPORT | `request_id` |
 | Importer worker singleton | `scripts/importer.py` | `main` | IMPORTER | `1` |
-| Import queue dedupe | `lib/pipeline_db/` | `enqueue_import_job` | unique index | `dedupe_key` |
+| Import queue dedupe/owner commands | `lib/pipeline_db/import_jobs.py` | enqueue, claim, heartbeat, recovery, terminal helpers | unique index and IMPORT | `dedupe_key`; `request_id` |
 | Plan generation | `lib/search_plan_service.py` | `SearchPlanService.generate_for_new_request` / `generate_for_request` | PLAN | `request_id` |
 | Wrong-match cleanup | `lib/wrong_match_cleanup_service.py` | `cleanup_wrong_match` | WMCL | `wrong_match_cleanup_lock_key(request_id, download_log_id, resolved_path)` |
 

@@ -75,9 +75,11 @@ console.log('synthesizeMasterlessRow() — overlay fields survive the synthesis'
     beets_album_id: null,
     pipeline_status: 'wanted',
     pipeline_id: 8838,
+    processing_owner: null,
   });
   assertEqual(row.pipeline_status, 'wanted', 'pipeline_status forwarded');
   assertEqual(row.pipeline_id, 8838, 'pipeline_id forwarded');
+  assertEqual(row.processing_owner, null, 'non-processing owner null forwarded');
   assertEqual(row.in_library, false, 'in_library forwarded');
   assertEqual(row.beets_album_id, null, 'beets_album_id forwarded');
   assertEqual(row.id, '8317023', 'id kept');
@@ -85,6 +87,34 @@ console.log('synthesizeMasterlessRow() — overlay fields survive the synthesis'
   assertEqual(row.format, 'CD', 'formats joined');
   assertEqual(row.track_count, 10, 'track count derived');
   assertEqual(row.status, 'Official', 'status kept');
+}
+
+console.log('synthesizeMasterlessRow() — exact processing owner survives synthesis');
+{
+  const owner = {
+    job_id: 8839,
+    status: 'queued',
+    preview_status: 'running',
+  };
+  const row = synthesizeMasterlessRow({
+    id: '8317024',
+    title: 'Processing pressing',
+    tracks: [],
+    formats: [],
+    in_library: false,
+    pipeline_status: 'processing',
+    pipeline_id: 8840,
+    processing_owner: owner,
+  });
+  assertEqual(row.processing_owner, owner, 'processing_owner object is forwarded unchanged');
+  const html = renderPressingRow(row, {
+    artistName: 'Deloris',
+    parentRgId: null,
+    canReplace: true,
+  });
+  assertContains(html, 'previewing', 'pressing action consumes canonical owner label');
+  assertContains(html, '/api/import-jobs/8839/recovery', 'pressing links exact owner recovery detail');
+  assertExcludes(html, 'window.disambRemove', 'processing pressing cannot remove request');
 }
 
 console.log('synthesizeMasterlessRow() — in-library payload keeps quality fields');

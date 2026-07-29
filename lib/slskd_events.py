@@ -16,14 +16,12 @@ whose occurrence is not before that incarnation's enqueue witness.
 
 Phase 3 is active: the stamped ``local_path`` is the ONLY source of
 file locations. ``process_completed_album`` hard-fails an unstamped
-file (grep key ``EVENT-PATH MISSING``); the poller retries within a
-grace window (benign completion-vs-event-write race) and self-heals to
-re-download past it.
+file (grep key ``EVENT-PATH MISSING``); the exact processor owner handles
+the failure without path inference.
 
 Failure isolation: the caller wraps ingestion in try/except — an events
-API outage stamps nothing that cycle and never blocks polling; affected
-completions ride the materialize grace window until the next successful
-ingest.
+API outage stamps nothing that cycle and never blocks the downloader's
+ownership handoff. Processor source-path validation remains authoritative.
 """
 
 from __future__ import annotations
@@ -51,8 +49,8 @@ EVENT_PAGE_LIMIT = 500
 # Bounds one cycle's catch-up scan at 10k events (~ a very heavy day on
 # doc2). If the cursor is not found within the cap the scan stops, the
 # cursor still advances to the newest event, and ``cursor_gap=True`` is
-# reported — older unprocessed completions stay unstamped and ride the
-# materialize grace window (self-heal to re-download past it).
+# reported. Older unprocessed completions stay unstamped; the exact processor
+# owner then enforces the source-path contract and recovery policy.
 MAX_EVENT_PAGES = 20
 
 
@@ -419,8 +417,8 @@ def ingest_download_file_events(
             logger.warning(
                 "SLSKD EVENTS: cursor-gap fail-open after %d "
                 "current-incarnation write(s) lost their witness; advancing "
-                "to the newest collected event and relying on materialization "
-                "self-heal for omitted history",
+                "to the newest collected event; processor source-path "
+                "validation remains authoritative for omitted history",
                 stamp_result.lost_current_incarnation_writes,
             )
         db.upsert_slskd_event_cursor(newest.id, newest.timestamp)

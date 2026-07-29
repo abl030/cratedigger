@@ -1,0 +1,12 @@
+{
+  "request": {
+    "id": 203,
+    "mb_release_id": "11111111-2222-3333-4444-555555555555",
+    "status": "processing",
+    "processing_owner": {
+      "job_id": 304,
+      "status": "queued",
+      "preview_status": "evidence_ready"
+    }
+  }
+}

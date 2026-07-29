@@ -18,7 +18,7 @@ from urllib.request import Request, urlopen
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from lib.import_queue import ForceImportPayload
-from tests.helpers import make_request_row
+from tests.helpers import handoff_automation_owner, make_request_row
 from tests.web._harness import (
     _DEFAULT_WRONG_MATCH_VALIDATION,
     _assert_required_fields,
@@ -1474,6 +1474,36 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self.assertEqual(data["deleted"], 0)
         self.assertEqual(data["remaining"], 2)
         self.assertIn({"download_log_id": 100, "reason": "unauthorized_path"}, data["skipped"])
+        self.mock_manual_cleanup.assert_not_called()
+
+    def test_converge_processing_skip_carries_exact_owner_and_retains_202(self):
+        self._seed_wrong_match(
+            download_log_id=103,
+            request_id=42,
+            username="u1",
+            failed_path="/fi/owned",
+            distance=0.167,
+            mb_release_id="mb-42",
+        )
+        owner = handoff_automation_owner(self.db, 42)
+
+        status, data = self._post("/api/wrong-matches/converge", {
+            "request_id": 42,
+            "threshold_milli": 180,
+        })
+
+        self.assertEqual(status, 202)
+        self.assertEqual(data["queued"], 0)
+        self.assertEqual(data["remaining"], 1)
+        self.assertEqual(data["skipped"], [{
+            "download_log_id": 103,
+            "reason": "processing_locked",
+            "processing_owner": {
+                "job_id": owner.id,
+                "status": owner.status,
+                "preview_status": owner.preview_status,
+            },
+        }])
         self.mock_manual_cleanup.assert_not_called()
 
     def test_converge_deletes_unmatched_unconditionally_without_classifier(self):

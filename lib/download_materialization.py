@@ -1,10 +1,9 @@
-"""Completed-download materialization and interrupted-import recovery.
+"""Completed-download materialization.
 
 This is the sole owner of turning event-stamped slskd file locations into a
-request-scoped processing directory, deciding whether an already-staged path
-is safe to resume, and quarantining an interrupted auto-import. Validation
-lives in :mod:`lib.download_validation`, completion orchestration
-in :mod:`lib.download_processing`, and poll state in :mod:`lib.download`.
+request-scoped processing directory and validating an already-staged manifest.
+Validation lives in :mod:`lib.download_validation`, completion orchestration in
+:mod:`lib.download_processing`, and poll state in :mod:`lib.download`.
 """
 
 from __future__ import annotations
@@ -12,14 +11,11 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
-import re
 import secrets
-import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Final, assert_never
+from typing import TYPE_CHECKING, Final, assert_never
 
-from lib.dispatch import _build_download_info
 from lib.download_recovery import ProcessingPathLocation, classify_processing_path
 from lib.fs_authority import (
     CopyDestinationWriteError,
@@ -42,30 +38,39 @@ from lib.fs_authority import (
     unlink_if_same,
 )
 from lib.grab_list import DownloadFile, GrabListEntry
+from lib.import_execution import CancellationToken
 from lib.import_manifest import audio_relative_paths, manifest_trace_summary
 from lib.processing_paths import (
     attempt_fingerprint,
     canonical_folder_for_row,
-    normalize_processing_path,
-    path_is_within_root,
     processing_albums_dir,
-    stage_to_ai_root,
 )
-from lib.quality import ActiveDownloadState, ValidationResult
 from lib.staged_album import StagedAlbum
-from lib.util import move_abandoned_auto_import
 
 if TYPE_CHECKING:
     from lib.context import CratediggerContext
-    from lib.download import DownloadDB
 
 logger = logging.getLogger("cratedigger")
 
 
-ABANDONED_AUTO_IMPORT_SCENARIO = "abandoned_auto_import"
-_ABANDON_PATH_PRESENT = "present"
-_ABANDON_PATH_ABSENT = "absent"
-_ABANDON_PATH_UNKNOWN = "unknown"
+def _checkpoint(cancellation_token: CancellationToken | None) -> None:
+    if cancellation_token is not None:
+        cancellation_token.raise_if_cancelled()
+
+
+def _remove_relative_tree_cancellable(
+    parent_fd: int,
+    name: str,
+    cancellation_token: CancellationToken | None,
+) -> None:
+    if cancellation_token is None:
+        remove_relative_tree(parent_fd, name)
+        return
+    remove_relative_tree(
+        parent_fd,
+        name,
+        before_mutation=cancellation_token.raise_if_cancelled,
+    )
 
 
 # === Materialize failure reasons (issue #868) ===
@@ -313,14 +318,13 @@ class Materialized:
 class MaterializeFailed:
     """A local-only materialize failure (missing event stamp, a file-move
     error, a vanished staged directory/file, a failed ``mkdir``). The
-    caller retries within the materialize grace window, then self-heals
-    the request back to ``wanted``. Historical bare ``False``.
+    processor owner decides the terminal response; the downloader never
+    retries or resets from this result. Historical bare ``False``.
 
     ``reason`` is a short, machine-stable diagnostic code — consumers
     must branch on the type tag, never on this string. It IS persisted
-    as evidence though (``download_log.beets_detail`` on the grace-expiry
-    reset, and ``CompletionFailed.reason`` on the completion path), so it
-    is derived structurally and never parsed out of a message: see
+    as evidence through ``CompletionFailed.reason``, so it is derived
+    structurally and never parsed out of a message: see
     :func:`source_preflight_reason` / :func:`materialize_authority_reason`.
     """
 
@@ -329,13 +333,11 @@ class MaterializeFailed:
 
 @dataclass(frozen=True)
 class MaterializeGuarded:
-    """The caller must stop without applying a generic materialize reset.
+    """The exact processor owner must stop without a generic lifecycle write.
 
-    This covers ownership/resume ambiguity (an active release lock,
-    unverifiable subprocess-start evidence, a post-move resume block) and
-    a successful abandonment whose reset and audit already committed.
-    Historical bare ``None``. ``detail`` is diagnostic only — consumers
-    must branch on the type tag, never on this string.
+    ``detail`` is diagnostic only — consumers branch on the type tag, never
+    on this string. Recovery and terminal lifecycle changes belong to the
+    owner-aware commands, not materialization.
     """
 
     detail: str
@@ -355,11 +357,9 @@ def _record_materialize_failure(
     """Journal the cause, then return the tagged failure (issue #868).
 
     The ONE construction site for ``MaterializeFailed`` in this module.
-    A materialize failure eventually self-heals the request back to
-    ``wanted``; before #868 several of these returns were silent, so six
-    grace expiries on 2026-07-22 left no recoverable cause anywhere. Now
-    every one names its request and its machine-stable reason, whether or
-    not the caller goes on to write a ``download_log`` row.
+    Before #868 several of these returns were silent, so failures left no
+    recoverable cause anywhere. Every failure now names its request and
+    machine-stable reason for the exact processor owner's recovery evidence.
 
     ``level`` preserves each site's pre-existing severity rather than
     flattening it: the previously-silent returns journal at WARNING, and
@@ -416,10 +416,7 @@ def _canonical_manifest_complete(
         return True
     except (FileNotFoundError, FilesystemAuthorityError, OSError):
         return False
-"""Return type of ``_materialize_processing_dir`` and
-``_evaluate_staged_path_readiness`` (issue #509 — the shared staged-path
-resume decision the former's non-canonical branch delegates to, and
-``lib.download._processing_path_ready_for_importer`` also consumes)."""
+"""Return type of processor-owned materialization and staged-path recovery."""
 
 
 # === slskd file locations ===
@@ -430,24 +427,6 @@ resume decision the former's non-canonical branch delegates to, and
 # ``lib.slskd_events.ingest_download_file_events`` at the top of each
 # poll cycle (issue #146). There is no on-disk path inference: a
 # completed file without a stamp is a hard failure.
-
-_REQUEST_SCOPED_STAGE_SUFFIX = re.compile(r" \[request-\d+\]$")
-
-
-def _is_request_scoped_auto_import_path(
-    *,
-    current_path: str,
-    staging_dir: str,
-) -> bool:
-    """Return True when ``current_path`` is under auto-import request staging."""
-    normalized_path = normalize_processing_path(current_path)
-    if not _REQUEST_SCOPED_STAGE_SUFFIX.search(os.path.basename(normalized_path)):
-        return False
-    return path_is_within_root(
-        normalized_path,
-        stage_to_ai_root(staging_dir=staging_dir, auto_import=True),
-    )
-
 
 def _attempt_fingerprint_for(files: list[DownloadFile]) -> str:
     """Fingerprint this attempt's exact (username, filename) file set.
@@ -479,373 +458,21 @@ def classify_staged_album_location(
 
 
 # === Download completion processing ===
-def _log_post_move_resume_blocked(
-    album_data: GrabListEntry,
-    *,
-    current_path: str,
-    detail: str,
-) -> None:
-    logger.error(
-        "POST-MOVE RESUME BLOCKED: request_id=%s %s - %s "
-        "current_path=%s %s See docs/advisory-locks.md.",
-        album_data.db_request_id,
-        album_data.artist,
-        album_data.title,
-        current_path,
-        detail,
-    )
-
-
-def _request_import_subprocess_started(
-    db: DownloadDB | None,
-    request_id: int | None,
-) -> bool | None:
-    """Return subprocess-start evidence, or None when ownership is unknown."""
-    if request_id is None or db is None:
-        return None
-    try:
-        row = db.get_request(request_id)
-    except Exception:
-        logger.debug(
-            "Failed to read active_download_state for resume guard",
-            exc_info=True,
-        )
-        return None
-    if not row:
-        return None
-    raw_state = row.get("active_download_state")
-    if not raw_state:
-        return False
-    try:
-        state = ActiveDownloadState.from_raw(raw_state)
-    except Exception:
-        logger.debug(
-            "Failed to parse active_download_state for resume guard",
-            exc_info=True,
-        )
-        return None
-    return state.import_subprocess_started_at is not None
-
-
-def _import_subprocess_already_started(
-    db: DownloadDB | None,
-    request_id: int | None,
-) -> bool:
-    """Did a previous attempt actually launch ``import_one.py`` for this row?
-
-    The auto-import resume guard blocks retries when files live at the
-    request-scoped staged path because a prior subprocess may have
-    started writing to beets. That guard is correct only when a
-    subprocess actually started — files-at-staged is a necessary but not
-    sufficient signal. The 2026-05-04 wedge accumulated 5788 failed
-    importer jobs because the guard fired even when the subprocess had
-    never launched (crash window between staged-move and subprocess
-    spawn). See ``docs/advisory-locks.md``.
-
-    With the ``import_subprocess_started_at`` flag set in
-    ``ActiveDownloadState`` immediately before ``run_import_one(...)``,
-    this helper returns ``True`` only when the flag is set: the
-    necessary AND sufficient evidence that the subprocess could have
-    written to beets.
-
-    Returns ``True`` (block) if state is unreachable — fail safe; the
-    operator can still recover manually. Returns ``False`` (permit
-    retry) only on positive evidence the subprocess never launched.
-    """
-    return _request_import_subprocess_started(db, request_id) is not False
-
-
-def _probe_abandon_path_liveness(path: str) -> str:
-    """Return whether a staged path is definitely present, absent, or unknown."""
-    try:
-        os.stat(path)
-    except FileNotFoundError:
-        return _ABANDON_PATH_ABSENT
-    except OSError:
-        logger.exception(
-            "ABANDON AUTO-IMPORT BLOCKED: could not stat current_path=%s",
-            path,
-        )
-        return _ABANDON_PATH_UNKNOWN
-    return _ABANDON_PATH_PRESENT
-
-
-def _restore_abandoned_auto_import(
-    *,
-    failed_path: str | None,
-    current_path: str,
-) -> None:
-    if failed_path is None:
-        return
-    try:
-        if os.path.exists(failed_path) and not os.path.exists(current_path):
-            os.makedirs(os.path.dirname(current_path), exist_ok=True)
-            shutil.move(failed_path, current_path)
-    except Exception:
-        logger.exception(
-            "ABANDON AUTO-IMPORT ROLLBACK FAILED: failed_path=%s current_path=%s",
-            failed_path,
-            current_path,
-        )
-
-
-def _commit_abandoned_auto_import(
-    db: DownloadDB,
-    *,
-    request_id: int,
-    current_path: str,
-    dl_info: Any,
-    detail: str,
-    validation_result: str | None,
-) -> bool:
-    log_id = db.abandon_auto_import_request(
-        request_id=request_id,
-        current_path=current_path,
-        soulseek_username=dl_info.username,
-        filetype=dl_info.filetype,
-        beets_detail=detail,
-        outcome="failed",
-        staged_path=current_path,
-        error_message=detail,
-        validation_result=validation_result,
-    )
-    return log_id is not None
-
-
-def _abandon_interrupted_auto_import(
-    album_data: GrabListEntry,
-    *,
-    request_id: int,
-    current_path: str,
-    db: DownloadDB,
-    detail: str,
-) -> bool:
-    """Quarantine an interrupted auto-import attempt and redownload later."""
-    path_state = _probe_abandon_path_liveness(current_path)
-    if path_state == _ABANDON_PATH_UNKNOWN:
-        return False
-
-    failed_path: str | None = None
-    if path_state == _ABANDON_PATH_PRESENT:
-        try:
-            failed_path = move_abandoned_auto_import(current_path)
-        except Exception:
-            logger.exception(
-                "ABANDON AUTO-IMPORT FAILED: request_id=%s current_path=%s",
-                request_id,
-                current_path,
-            )
-            return False
-
-    dl_info = _build_download_info(album_data)
-    validation_result: str | None = None
-    if failed_path is not None:
-        validation_result = ValidationResult(
-            valid=False,
-            scenario=ABANDONED_AUTO_IMPORT_SCENARIO,
-            detail=detail,
-            path=current_path,
-            soulseek_username=dl_info.username,
-            download_folder=current_path,
-            failed_path=failed_path,
-        ).to_json()
-
-    logger.warning(
-        "ABANDON AUTO-IMPORT: request_id=%s %s - %s current_path=%s "
-        "failed_path=%s detail=%s",
-        request_id,
-        album_data.artist,
-        album_data.title,
-        current_path,
-        failed_path,
-        detail,
-    )
-    try:
-        committed = _commit_abandoned_auto_import(
-            db,
-            request_id=request_id,
-            current_path=current_path,
-            dl_info=dl_info,
-            detail=detail,
-            validation_result=validation_result,
-        )
-    except Exception:
-        _restore_abandoned_auto_import(
-            failed_path=failed_path,
-            current_path=current_path,
-        )
-        logger.exception(
-            "ABANDON AUTO-IMPORT DB COMMIT FAILED: request_id=%s current_path=%s",
-            request_id,
-            current_path,
-        )
-        return False
-    if not committed:
-        _restore_abandoned_auto_import(
-            failed_path=failed_path,
-            current_path=current_path,
-        )
-        logger.warning(
-            "ABANDON AUTO-IMPORT SKIPPED: request_id=%s current_path=%s "
-            "row ownership changed before commit",
-            request_id,
-            current_path,
-        )
-        return False
-    return True
-
-
-def _abandon_request_scoped_auto_import(
-    album_data: GrabListEntry,
-    *,
-    request_id: int | None,
-    current_path: str,
-    current_path_kind: str,
-    db: DownloadDB | None,
-    detail: str,
-) -> bool:
-    if (
-        request_id is None
-        or db is None
-        or current_path_kind != "request_scoped_auto_import_staged"
-    ):
-        return False
-    if not album_data.mb_release_id:
-        _log_post_move_resume_blocked(
-            album_data,
-            current_path=current_path,
-            detail=(
-                "already lives at the request-scoped auto-import staged "
-                "path but has no release id for the liveness lock; "
-                "manual recovery is required."
-            ),
-        )
-        return False
-    try:
-        from lib.pipeline_db import (
-            ADVISORY_LOCK_NAMESPACE_RELEASE,
-            release_id_to_lock_key,
-        )
-
-        with db.advisory_lock(
-            ADVISORY_LOCK_NAMESPACE_RELEASE,
-            release_id_to_lock_key(album_data.mb_release_id),
-        ) as acquired:
-            if not acquired:
-                _log_post_move_resume_blocked(
-                    album_data,
-                    current_path=current_path,
-                    detail=(
-                        "already lives at the request-scoped auto-import "
-                        "staged path, but the release import lock is held; "
-                        "leaving it for the active importer."
-                    ),
-                )
-                return False
-            return _abandon_interrupted_auto_import(
-                album_data,
-                request_id=request_id,
-                current_path=current_path,
-                db=db,
-                detail=detail,
-            )
-    except Exception:
-        logger.exception(
-            "ABANDON AUTO-IMPORT LOCK CHECK FAILED: request_id=%s current_path=%s",
-            request_id,
-            current_path,
-        )
-        return False
-
-
 def _evaluate_staged_path_readiness(
     album_data: GrabListEntry,
     staged_album: StagedAlbum,
-    current_path_location: ProcessingPathLocation,
-    db: DownloadDB | None,
+    *,
+    cancellation_token: CancellationToken | None = None,
 ) -> MaterializeResult:
-    """Decide whether a NON-canonical staged path is safe to resume.
+    """Validate a noncanonical staged manifest without inferring ownership.
 
-    The ONE "is this staged /Incoming path safe to resume into the
-    importer" decision (issue #509). Before this, the same checks
-    (missing-dir handling, the ``blocks_post_move_retry``/
-    ``blocks_auto_import_dispatch`` guards, the abandon-and-reset call)
-    were expressed twice: here, and again in
-    ``lib.download._processing_path_ready_for_importer``. The two copies
-    had drifted — the poller's copy was missing the
-    ``blocks_auto_import_dispatch`` guard entirely, and computed
-    subprocess-start evidence as a plain in-memory bool
-    (``state.import_subprocess_started_at is not None``) instead of this
-    module's fail-safe tri-state DB read
-    (``_request_import_subprocess_started`` — ``None`` when ownership is
-    unverifiable, which callers must treat the same as "started").
-
-    Both callers now go through this one function; only their REACTION
-    to the tag still differs, because it's a genuinely different,
-    caller-owned policy rather than a duplicated decision:
-    ``_enqueue_completed_processing`` applies the grace-windowed
-    retry/reset policy in ``materialize_failure_action``, while the
-    poller's own pre-enqueue gate (``_processing_path_ready_for_importer``)
-    resets immediately on ``MaterializeFailed`` — its own long-standing,
-    tested "fail closed before even trying to enqueue" behavior.
-
-    Callers must already have excluded ``current_path_location.kind ==
-    "canonical"`` — that branch performs the real event-stamp/move work
-    in ``_materialize_processing_dir`` and has no equivalent here.
+    Exact-owner automation always uses its canonical processing path. The only
+    production noncanonical input is an already-staged operator/YouTube album,
+    so this seam checks only that the persisted manifest is locally present.
     """
     request_id = album_data.db_request_id
-    subprocess_started = _request_import_subprocess_started(db, request_id)
-
-    if current_path_location.kind == "request_scoped_auto_import_staged":
-        if subprocess_started is True:
-            handled = _abandon_request_scoped_auto_import(
-                album_data,
-                request_id=request_id,
-                current_path=staged_album.current_path,
-                current_path_kind=current_path_location.kind,
-                db=db,
-                detail=(
-                    "Abandoned interrupted auto-import; queued for "
-                    "redownload"
-                ),
-            )
-            if handled:
-                return MaterializeGuarded(
-                    detail="abandoned_interrupted_auto_import",
-                )
-            return MaterializeGuarded(
-                detail="abandon_blocked_release_lock_or_probe_unknown")
-        if subprocess_started is None:
-            _log_post_move_resume_blocked(
-                album_data,
-                current_path=staged_album.current_path,
-                detail=(
-                    "already lives at the request-scoped auto-import "
-                    "staged path but import ownership could not be "
-                    "verified; manual recovery is required."
-                ),
-            )
-            return MaterializeGuarded(
-                detail="ownership_unverifiable_request_scoped_staged")
 
     if not os.path.isdir(staged_album.current_path):
-        if (
-            current_path_location.blocks_post_move_retry
-            and subprocess_started is not False
-        ):
-            _log_post_move_resume_blocked(
-                album_data,
-                current_path=staged_album.current_path,
-                detail=(
-                    "already lives at the request-scoped auto-import "
-                    "staged path but the directory is missing. "
-                    "Automatic retry is disabled because beets may "
-                    "already have consumed the staged folder; manual "
-                    "recovery is required."
-                ),
-            )
-            return MaterializeGuarded(
-                detail="post_move_dir_missing_resume_blocked")
         return _record_materialize_failure(
             request_id,
             "staged_path_missing",
@@ -861,50 +488,12 @@ def _evaluate_staged_path_readiness(
         if not os.path.isfile(import_path):
             missing_paths.append(import_path)
     if missing_paths:
-        if (
-            current_path_location.blocks_post_move_retry
-            and subprocess_started is not False
-        ):
-            _log_post_move_resume_blocked(
-                album_data,
-                current_path=staged_album.current_path,
-                detail=(
-                    "already lives at the request-scoped auto-import "
-                    f"staged path but tracked files are missing ({', '.join(missing_paths)}). "
-                    "Automatic retry is disabled because import may "
-                    "already have started; manual recovery is required."
-                ),
-            )
-            return MaterializeGuarded(
-                detail="post_move_files_missing_resume_blocked")
         return _record_materialize_failure(
             request_id,
             "staged_path_missing_tracked_files",
             f"missing_paths={', '.join(missing_paths)}",
             level=logging.ERROR,
         )
-
-    if (
-        current_path_location.blocks_auto_import_dispatch
-        and subprocess_started is not False
-    ):
-        detail = (
-            "already lives at the request-scoped auto-import staged "
-            "path. Automatic retry is disabled to avoid duplicate "
-            "import; manual recovery is required."
-        )
-        if current_path_location.kind == "legacy_shared_staged":
-            detail = (
-                "already lives at the legacy shared staged path. "
-                "Automatic retry is disabled because the path is "
-                "ambiguous across editions; manual recovery is required."
-            )
-        _log_post_move_resume_blocked(
-            album_data,
-            current_path=staged_album.current_path,
-            detail=detail,
-        )
-        return MaterializeGuarded(detail="auto_import_dispatch_blocked_post_move")
 
     album_data.import_folder = staged_album.current_path
     return Materialized()
@@ -915,9 +504,9 @@ def _materialize_processing_dir(
     staged_album: StagedAlbum,
     ctx: CratediggerContext,
     *,
-    persist_current_path: bool = True,
     before_file_copy: Callable[[], None] | None = None,
     before_publish: Callable[[int, str], None] | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> MaterializeResult:
     """Ensure ``staged_album.current_path`` holds the album's local files.
 
@@ -939,30 +528,16 @@ def _materialize_processing_dir(
         staged_album.current_path,
         canonical_path,
     )
-    db = ctx.pipeline_db_source._get_db()
     request_id = album_data.db_request_id
-    if request_id is None and _is_request_scoped_auto_import_path(
-        current_path=staged_album.current_path,
-        staging_dir=ctx.cfg.beets_staging_dir,
-    ):
-        _log_post_move_resume_blocked(
-            album_data,
-            current_path=staged_album.current_path,
-            detail=(
-                "already lives at the request-scoped auto-import staged "
-                "path but is missing db_request_id. Automatic retry is "
-                "disabled because import ownership can no longer be "
-                "verified; manual recovery is required."
-            ),
-        )
-        return MaterializeGuarded(detail="missing_db_request_id_for_request_scoped_staged")
     current_path_location = classify_staged_album_location(
         album_data, staged_album, ctx,
     )
 
     if current_path_location.kind != "canonical":
         return _evaluate_staged_path_readiness(
-            album_data, staged_album, current_path_location, db,
+            album_data,
+            staged_album,
+            cancellation_token=cancellation_token,
         )
 
     # One atomic private directory publish replaces the old per-file move /
@@ -1004,7 +579,12 @@ def _materialize_processing_dir(
             transaction_prefix = f".materialize-tmp-{materialize_token}-"
             for entry_name in os.listdir(albums_fd):
                 if entry_name.startswith(transaction_prefix):
-                    remove_relative_tree(albums_fd, entry_name)
+                    _checkpoint(cancellation_token)
+                    _remove_relative_tree_cancellable(
+                        albums_fd,
+                        entry_name,
+                        cancellation_token,
+                    )
 
             # An existing destination is valid only when it is a
             # complete exact regular-file manifest. Never add files
@@ -1016,8 +596,6 @@ def _materialize_processing_dir(
                     return MaterializeGuarded(detail="processing_root_relocated")
                 staged_album.current_path = canonical_path
                 album_data.import_folder = canonical_path
-                if persist_current_path:
-                    staged_album.persist_current_path(db)
                 return Materialized()
             try:
                 os.stat(canonical_name, dir_fd=albums_fd, follow_symlinks=False)
@@ -1071,6 +649,7 @@ def _materialize_processing_dir(
                         )
 
             temp_name = f"{transaction_prefix}{secrets.token_hex(16)}"
+            _checkpoint(cancellation_token)
             os.mkdir(temp_name, 0o700, dir_fd=albums_fd)
             temp_fd = os.open(
                 temp_name,
@@ -1080,6 +659,7 @@ def _materialize_processing_dir(
             published = False
             try:
                 for opened, name in zip(opened_sources, destination_names, strict=True):
+                    _checkpoint(cancellation_token)
                     destination_fd = os.open(
                         name,
                         os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
@@ -1089,22 +669,43 @@ def _materialize_processing_dir(
                     try:
                         if before_file_copy is not None:
                             before_file_copy()
-                        copy_opened_file(opened.fd, destination_fd)
+                        _checkpoint(cancellation_token)
+                        copy_opened_file(
+                            opened.fd,
+                            destination_fd,
+                            before_write=lambda _count: _checkpoint(
+                                cancellation_token
+                            ),
+                        )
                     finally:
                         os.close(destination_fd)
+                _checkpoint(cancellation_token)
                 _fsync_private_directory(
                     temp_fd, "transaction directory")
                 if before_publish is not None:
                     before_publish(albums_fd, canonical_name)
+                _checkpoint(cancellation_token)
                 published = rename_relative_noreplace(
                     albums_fd, temp_name, canonical_name,
                 )
                 if published:
+                    _checkpoint(cancellation_token)
                     _fsync_private_directory(albums_fd, "albums directory")
             finally:
                 os.close(temp_fd)
-                if not published:
-                    remove_relative_tree(albums_fd, temp_name)
+                if (
+                    not published
+                    and not (
+                        cancellation_token is not None
+                        and cancellation_token.cancelled
+                    )
+                ):
+                    _checkpoint(cancellation_token)
+                    _remove_relative_tree_cancellable(
+                        albums_fd,
+                        temp_name,
+                        cancellation_token,
+                    )
 
             if not published:
                 # A writer that bypassed this process's shard lock
@@ -1120,8 +721,6 @@ def _materialize_processing_dir(
                     return MaterializeGuarded(detail="processing_root_relocated")
                 staged_album.current_path = canonical_path
                 album_data.import_folder = canonical_path
-                if persist_current_path:
-                    staged_album.persist_current_path(db)
                 return Materialized()
 
             # Verify the lexical root still names this held private
@@ -1142,6 +741,7 @@ def _materialize_processing_dir(
             # The durable private album is now visible. An
             # adversarial slskd replacement is never unlinked.
             for opened in opened_sources:
+                _checkpoint(cancellation_token)
                 unlink_if_same(opened)
     except CopySourceReadError as exc:
         # The share is read in FULL here, so this is where the convicted
@@ -1202,6 +802,4 @@ def _materialize_processing_dir(
 
     staged_album.current_path = canonical_path
     album_data.import_folder = canonical_path
-    if persist_current_path:
-        staged_album.persist_current_path(db)
     return Materialized()

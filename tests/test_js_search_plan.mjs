@@ -167,11 +167,11 @@ console.log('captureOriginContext() / restoreOriginContext()');
 }
 
 {
-  const captured = captureOriginContext({ tab: 'recents', scrollY: 1234, subView: 'downloading' });
+  const captured = captureOriginContext({ tab: 'recents', scrollY: 1234, subView: 'acquisition' });
   const restored = restoreOriginContext(captured);
   assertEqual(restored.tab, 'recents', 'recents tab round-trips');
   assertEqual(restored.scrollY, 1234, 'large scrollY round-trips');
-  assertEqual(restored.subView, 'downloading', 'recents downloading subView round-trips');
+  assertEqual(restored.subView, 'acquisition', 'recents acquisition subView round-trips');
 }
 
 // --- invalidateSearchPlanCache ---------------------------------------
@@ -906,18 +906,18 @@ function withFakeWindow(impl) {
 }
 
 {
-  // Origin tab is recents+downloading: restore recentsSub.
+  // Origin tab is recents+acquisition: restore recentsSub.
   withFakeWindow((win, calls) => {
     state.searchPlanDetailContext = {
       requestId: 99,
       originTab: 'recents',
       originScrollY: 100,
-      originSubView: 'downloading',
+      originSubView: 'acquisition',
     };
     state.recentsSub = 'history';
     closeSearchPlanDetail();
-    assertEqual(state.recentsSub, 'downloading',
-      'recents-origin: recentsSub restored to downloading');
+    assertEqual(state.recentsSub, 'acquisition',
+      'recents-origin: recentsSub restored to acquisition');
     assert(calls.showTab[0] === 'recents',
       'recents-origin: showTab("recents") called');
   });

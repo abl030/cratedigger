@@ -861,6 +861,7 @@ _MATERIALIZE_REASON_COPY: Final[dict[str, str]] = {
         # The row records no count, so it must not invent "two".
         "Downloaded files would import to the same filename; requeued"
     ),
+    # Historical, retired job-less auto-import recovery reason.
     "abandoned_interrupted_auto_import": (
         "Interrupted import abandoned and requeued"
     ),

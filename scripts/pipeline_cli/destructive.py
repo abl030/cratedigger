@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 import msgspec
 
+from lib import transitions
 from lib.beets_db import BeetsDB, open_beets_db
 from lib.destructive_release_service import (
     BanSourceBeetsAmbiguous,
@@ -154,13 +155,9 @@ def cmd_ban_source(
         return 4
     match result:
         case BanSourceTransitionConflict():
-            print(json.dumps({
-                "error": "transition_conflict",
-                "reason": result.conflict.kind.value,
-                "expected_status": result.conflict.expected_status,
-                "actual_status": result.conflict.actual_status,
-                "target_status": result.conflict.target_status,
-            }))
+            print(json.dumps(
+                transitions.transition_conflict_payload(result.conflict)
+            ))
             return 4
     raise AssertionError(f"Unhandled ban-source result: {result!r}")
 
@@ -254,6 +251,11 @@ def cmd_library_delete(
             "error": "destructive_operation_busy",
             "pipeline_id": result.pipeline_request_id,
         }))
+        return 4
+    if isinstance(result, transitions.TransitionConflict):
+        print(json.dumps(
+            transitions.transition_conflict_payload(result)
+        ))
         return 4
     if isinstance(result, DeletePipelinePurgeFailure):
         print(json.dumps({

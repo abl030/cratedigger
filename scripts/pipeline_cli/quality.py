@@ -8,6 +8,7 @@ by stale ``current_spectral_bitrate`` (issue #18).
 from __future__ import annotations
 
 import argparse
+import json
 from typing import TYPE_CHECKING, TypedDict
 
 from lib import transitions
@@ -549,6 +550,7 @@ def cmd_repair_spectral(
     causing the quality gate to requeue indefinitely (issue #18).
     """
     from lib.dispatch import load_quality_gate_state
+    from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_IMPORT
     from lib.quality import quality_gate_decision
 
     rank_cfg = _load_runtime_rank_config()
@@ -576,84 +578,121 @@ def cmd_repair_spectral(
     repaired = 0
     for req in candidates:
         rid = req["id"]
-        label = f"{req['artist_name']} - {req['album_title']}"
-        stale_br = req["current_spectral_bitrate"]
-        state = load_quality_gate_state(
-            request_id=rid,
-            db=db,
-        )
-        effective_min_br = (
-            state.measurement.min_bitrate_kbps
-            if state is not None
-            else req["min_bitrate"]
-        )
-        print(f"  [{rid:>4}] {label}")
-        print(f"         min_bitrate={effective_min_br}kbps, "
-              f"stale current_spectral={stale_br}kbps")
-
-        # Check what quality gate would decide after clearing stale data
-        decision = (
-            quality_gate_decision(
-                state.measurement,
-                cfg=rank_cfg,
-                verified_lossless_proof=state.verified_lossless_proof,
-            )
-            if state is not None
-            else "requeue_upgrade"
-        )
-        print(f"         after repair: quality_gate_decision → {decision}")
-
-        if args.dry_run:
-            print("         [DRY RUN] would clear spectral + remove stale denylists")
-            continue
-
-        expected_after_transition = "wanted"
-        if decision == "accept" and effective_min_br is not None:
-            transition_result = finalize_request(
-                db,
-                rid,
-                transitions.RequestTransition.to_imported(
-                    from_status="wanted",
-                    min_bitrate=effective_min_br,
-                ),
-            )
-            if isinstance(transition_result, transitions.TransitionConflict):
-                print(
-                    f"         transition conflict: "
-                    f"{transition_result.kind.value} "
-                    f"(actual={transition_result.actual_status})")
-                return 4
-            expected_after_transition = "imported"
-
-        # Clear only if the row is still in the status this repair established.
-        cleared = db.update_request_fields(
+        with db.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_IMPORT,
             rid,
-            expected_status=expected_after_transition,
-            last_download_spectral_bitrate=None,
-            current_spectral_bitrate=None,
-        )
-        if not cleared:
-            print("         transition conflict: row changed during repair")
-            return 4
+        ) as acquired:
+            if not acquired:
+                print(f"  [{rid:>4}] repair busy; retry later")
+                return 4
+            current = db.get_request(rid)
+            processing_locked = transitions.processing_locked_conflict(
+                current,
+                rid,
+                "repair_spectral",
+                expected_status="wanted",
+            )
+            if processing_locked is not None:
+                print(json.dumps(
+                    transitions.transition_conflict_payload(
+                        processing_locked
+                    )
+                ))
+                return 4
+            if (
+                current is None
+                or current["status"] != "wanted"
+                or current["current_spectral_grade"] != "genuine"
+                or current["current_spectral_bitrate"] is None
+            ):
+                print(f"  [{rid:>4}] transition conflict: row changed during repair")
+                return 4
 
-        # Remove denylist entries caused by stale spectral
-        del_cur = db._execute("""
-            DELETE FROM source_denylist
-            WHERE request_id = %s
-              AND (reason LIKE 'quality gate: spectral%%'
-                   OR reason LIKE 'spectral:%%')
-            RETURNING username, reason
-        """, (rid,))
-        removed = del_cur.fetchall()
-        for entry in removed:
-            print(f"         un-denylisted: {entry['username']} ({entry['reason']})")
+            label = f"{current['artist_name']} - {current['album_title']}"
+            stale_br = current["current_spectral_bitrate"]
+            state = load_quality_gate_state(
+                request_id=rid,
+                db=db,
+            )
+            effective_min_br = (
+                state.measurement.min_bitrate_kbps
+                if state is not None
+                else current["min_bitrate"]
+            )
+            print(f"  [{rid:>4}] {label}")
+            print(f"         min_bitrate={effective_min_br}kbps, "
+                  f"stale current_spectral={stale_br}kbps")
 
-        if decision == "accept" and effective_min_br is not None:
-            print("         → transitioned to imported")
-        else:
-            print(f"         → remains wanted (gate says {decision})")
+            decision = (
+                quality_gate_decision(
+                    state.measurement,
+                    cfg=rank_cfg,
+                    verified_lossless_proof=state.verified_lossless_proof,
+                )
+                if state is not None
+                else "requeue_upgrade"
+            )
+            print(f"         after repair: quality_gate_decision → {decision}")
 
-        repaired += 1
+            if args.dry_run:
+                print(
+                    "         [DRY RUN] would clear spectral + remove "
+                    "stale denylists"
+                )
+                continue
+
+            expected_after_transition = "wanted"
+            if decision == "accept" and effective_min_br is not None:
+                transition_result = finalize_request(
+                    db,
+                    rid,
+                    transitions.RequestTransition.to_imported(
+                        from_status="wanted",
+                        min_bitrate=effective_min_br,
+                    ),
+                )
+                if isinstance(
+                    transition_result,
+                    transitions.TransitionConflict,
+                ):
+                    print(
+                        f"         transition conflict: "
+                        f"{transition_result.kind.value} "
+                        f"(actual={transition_result.actual_status})"
+                    )
+                    return 4
+                expected_after_transition = "imported"
+
+            cleared = db.update_request_fields(
+                rid,
+                expected_status=expected_after_transition,
+                last_download_spectral_bitrate=None,
+                current_spectral_bitrate=None,
+            )
+            if not cleared:
+                print("         transition conflict: row changed during repair")
+                return 4
+
+            del_cur = db._execute("""
+                DELETE FROM source_denylist
+                WHERE request_id = %s
+                  AND (reason LIKE 'quality gate: spectral%%'
+                       OR reason LIKE 'spectral:%%')
+                RETURNING username, reason
+            """, (rid,))
+            removed = del_cur.fetchall()
+            for entry in removed:
+                print(
+                    f"         un-denylisted: {entry['username']} "
+                    f"({entry['reason']})"
+                )
+
+            if decision == "accept" and effective_min_br is not None:
+                print("         → transitioned to imported")
+            else:
+                print(f"         → remains wanted (gate says {decision})")
+
+            repaired += 1
 
     print(f"\nRepaired {repaired} album(s)." if not args.dry_run
           else f"\n[DRY RUN] Would repair {len(candidates)} album(s).")
