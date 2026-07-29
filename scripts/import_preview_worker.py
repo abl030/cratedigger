@@ -1631,7 +1631,7 @@ def run_once(
             limit=PREVIEW_CANDIDATE_SCAN_LIMIT,
             offset=0,
         )
-    for index, candidate in enumerate(candidates):
+    for candidate in candidates:
         claim_state = _ClaimState()
 
         if candidate.job_type == IMPORT_JOB_AUTOMATION:
@@ -1653,13 +1653,7 @@ def run_once(
                 claim_callback=claim_state.mark,
                 process_fn=process_fn,
             )
-            if claim_state.claimed:
-                # The claimed row leaves the eligible set, so its immediate
-                # successor compacts into the claimed row's former index.
-                cursor.offset += index
-                return result
-            continue
-        if candidate.job_type == IMPORT_JOB_FORCE:
+        elif candidate.job_type == IMPORT_JOB_FORCE:
             dsn = getattr(db, "dsn", None)
             if not dsn:
                 continue
@@ -1675,26 +1669,34 @@ def run_once(
                 claim_callback=claim_state.mark,
                 process_fn=process_fn,
             )
-            if claim_state.claimed:
-                cursor.offset += index
-                return result
+        else:
+            job = db.claim_import_preview_job_candidate(
+                candidate.id,
+                worker_id=worker_id,
+            )
+            if job is None:
+                continue
+            claim_state.mark()
+            logger.info(
+                "Claimed import preview job %s (%s)",
+                job.id,
+                job.job_type,
+            )
+            result = process_fn(
+                db,
+                job,
+                heartbeat_interval=heartbeat_interval,
+                runtime_config=runtime_config,
+                heartbeat_db_factory=heartbeat_db_factory,
+                candidate_measurement_fn=candidate_measurement_fn,
+            )
+
+        if not claim_state.claimed:
             continue
-        job = db.claim_import_preview_job_candidate(
-            candidate.id,
-            worker_id=worker_id,
-        )
-        if job is None:
-            continue
-        logger.info("Claimed import preview job %s (%s)", job.id, job.job_type)
-        cursor.offset += index
-        return process_fn(
-            db,
-            job,
-            heartbeat_interval=heartbeat_interval,
-            runtime_config=runtime_config,
-            heartbeat_db_factory=heartbeat_db_factory,
-            candidate_measurement_fn=candidate_measurement_fn,
-        )
+        # The only successful-claim exit for every job type. Any success is
+        # a bounded revisit point for older rows that may now be claimable.
+        cursor.offset = 0
+        return result
     cursor.offset += len(candidates)
     return None
 

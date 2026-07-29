@@ -521,16 +521,16 @@ class TestImportJobRunnableLifecycleGenerated(unittest.TestCase):
     )
     @example(lane="import", older_count=4, arrivals_per_poll=2)
     @example(lane="preview", older_count=4, arrivals_per_poll=2)
-    def test_successful_claim_resumes_at_compacted_successor_under_growth(
+    def test_successful_claim_resets_for_bounded_revisit_under_growth(
         self,
         lane: str,
         older_count: int,
         arrivals_per_poll: int,
     ) -> None:
-        """Own-row removal cannot strand older work behind steady arrivals."""
+        """Every success revisits older work despite steady arrivals."""
         from scripts import import_preview_worker, importer
 
-        def run_world(*, index_plus_one_mutant: bool) -> tuple[list[int], list[int]]:
+        def run_world(*, nonzero_offset_mutant: bool) -> tuple[list[int], list[int]]:
             db = FakePipelineDB()
             sequence = 0
 
@@ -600,9 +600,9 @@ class TestImportJobRunnableLifecycleGenerated(unittest.TestCase):
                         process_fn=execute_preview,
                         scan_cursor=cursor,
                     )
-                if index_plus_one_mutant:
-                    # Executable historical mutant: advance past the index
-                    # where the claimed row's successor just compacted.
+                if nonzero_offset_mutant:
+                    # Executable historical mutant: retain a nonzero offset
+                    # after success instead of revisiting older work.
                     cursor.offset += 1
                 for _arrival in range(arrivals_per_poll):
                     enqueue()
@@ -610,7 +610,7 @@ class TestImportJobRunnableLifecycleGenerated(unittest.TestCase):
             return older_job_ids, observed_job_ids
 
         older_job_ids, observed_job_ids = run_world(
-            index_plus_one_mutant=False,
+            nonzero_offset_mutant=False,
         )
         assert_all_older_candidates_progressed(
             older_job_ids=older_job_ids,
@@ -618,7 +618,188 @@ class TestImportJobRunnableLifecycleGenerated(unittest.TestCase):
         )
 
         mutant_older, mutant_observed = run_world(
-            index_plus_one_mutant=True,
+            nonzero_offset_mutant=True,
+        )
+        with self.assertRaisesRegex(AssertionError, "stranded older"):
+            assert_all_older_candidates_progressed(
+                older_job_ids=mutant_older,
+                observed_job_ids=mutant_observed,
+            )
+
+    @given(lane=st.sampled_from(("import", "preview")))
+    @example(lane="import")
+    @example(lane="preview")
+    def test_success_revisits_released_prefix_with_replenished_tail(
+        self,
+        lane: str,
+    ) -> None:
+        """Cleared contention progresses even while the tail stays nonempty."""
+        from scripts import import_preview_worker, importer
+
+        def run_world(
+            *,
+            retain_tail_offset_mutant: bool,
+        ) -> tuple[list[int], list[int]]:
+            inner = FakePipelineDB()
+            sequence = 0
+
+            def enqueue() -> int:
+                nonlocal sequence
+                sequence += 1
+                request_id = 10_000 + sequence
+                inner.seed_request(make_request_row(
+                    id=request_id,
+                    status="wanted",
+                ))
+                job = inner.enqueue_import_job(
+                    IMPORT_JOB_YOUTUBE,
+                    request_id=request_id,
+                    dedupe_key=f"released-prefix:{lane}:{sequence}",
+                    payload=youtube_import_payload(
+                        staged_path=f"/tmp/released-prefix-{sequence}",
+                        request_id=request_id,
+                        browse_id=f"released-prefix-{sequence}",
+                        download_log_id=sequence,
+                    ),
+                )
+                if lane == "import":
+                    inner._import_jobs[-1]["preview_status"] = (
+                        IMPORT_JOB_PREVIEW_EVIDENCE_READY
+                    )
+                return job.id
+
+            older_job_ids = [enqueue() for _item in range(32)]
+            enqueue()  # First tail row, just beyond the bounded page.
+            contended = True
+
+            class ContendedDB:
+                def __getattr__(self, name: str) -> Any:
+                    return getattr(inner, name)
+
+                def peek_import_preview_job_candidates(
+                    self,
+                    *,
+                    execution_lease: ExecutionLeaseSnapshot | None = None,
+                    limit: int,
+                    offset: int = 0,
+                ) -> list[ImportJob]:
+                    return inner.peek_import_preview_job_candidates(
+                        execution_lease=execution_lease,
+                        limit=limit,
+                        offset=offset,
+                    )
+
+                def claim_import_job_candidate(
+                    self,
+                    job_id: int,
+                    *,
+                    worker_id: str,
+                ) -> ImportJob | None:
+                    if contended and job_id in older_job_ids:
+                        return None
+                    return inner.claim_import_job_candidate(
+                        job_id,
+                        worker_id=worker_id,
+                    )
+
+                def claim_import_preview_job_candidate(
+                    self,
+                    job_id: int,
+                    *,
+                    worker_id: str,
+                ) -> ImportJob | None:
+                    if contended and job_id in older_job_ids:
+                        return None
+                    return inner.claim_import_preview_job_candidate(
+                        job_id,
+                        worker_id=worker_id,
+                    )
+
+            db = ContendedDB()
+            observed_job_ids: list[int] = []
+
+            def execute_import(
+                _db: object,
+                claimed: ImportJob,
+                **_kwargs: object,
+            ) -> DispatchOutcome:
+                observed_job_ids.append(claimed.id)
+                return DispatchOutcome(False, "released-prefix import")
+
+            def execute_preview(
+                _db: object,
+                claimed: ImportJob,
+                **_kwargs: object,
+            ) -> ImportJob:
+                observed_job_ids.append(claimed.id)
+                return claimed
+
+            cursor: Any = (
+                importer._CandidateScanCursor()
+                if lane == "import"
+                else import_preview_worker._CandidateScanCursor()
+            )
+
+            # One fully contended page advances to the tail.
+            if lane == "import":
+                importer.run_once(
+                    db,  # pyright: ignore[reportArgumentType]
+                    worker_id="released-prefix-import",
+                    execution_lease_factory=_unavailable_execution_lease,
+                    execute_fn=execute_import,
+                    scan_cursor=cursor,
+                )
+            else:
+                import_preview_worker.run_once(
+                    db,
+                    worker_id="released-prefix-preview",
+                    execution_lease_factory=_unavailable_execution_lease,
+                    process_fn=execute_preview,
+                    scan_cursor=cursor,
+                )
+            assert cursor.offset == 32
+            assert observed_job_ids == []
+
+            contended = False
+            # Tail success plus one poll for every older row is the fixed
+            # bound. A new tail row arrives after every successful claim.
+            for _poll in range(33):
+                before = len(observed_job_ids)
+                if lane == "import":
+                    importer.run_once(
+                        db,  # pyright: ignore[reportArgumentType]
+                        worker_id="released-prefix-import",
+                        execution_lease_factory=_unavailable_execution_lease,
+                        execute_fn=execute_import,
+                        scan_cursor=cursor,
+                    )
+                else:
+                    import_preview_worker.run_once(
+                        db,
+                        worker_id="released-prefix-preview",
+                        execution_lease_factory=_unavailable_execution_lease,
+                        process_fn=execute_preview,
+                        scan_cursor=cursor,
+                    )
+                assert len(observed_job_ids) == before + 1
+                if retain_tail_offset_mutant:
+                    # Executable old offset/index behavior: tail-page index
+                    # zero leaves the cursor at 32 instead of revisiting zero.
+                    cursor.offset = 32
+                enqueue()
+
+            return older_job_ids, observed_job_ids
+
+        older_job_ids, observed_job_ids = run_world(
+            retain_tail_offset_mutant=False,
+        )
+        assert_all_older_candidates_progressed(
+            older_job_ids=older_job_ids,
+            observed_job_ids=observed_job_ids,
+        )
+
+        mutant_older, mutant_observed = run_world(
+            retain_tail_offset_mutant=True,
         )
         with self.assertRaisesRegex(AssertionError, "stranded older"):
             assert_all_older_candidates_progressed(
