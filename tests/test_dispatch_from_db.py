@@ -27,6 +27,7 @@ from lib.quality_evidence import snapshot_audio_files
 from tests.fakes import FakePipelineDB
 from tests.helpers import (
     RecordingQualityGate,
+    claim_next_import_job,
     finalize_claimed_dispatch,
     handoff_automation_owner,
     make_album_quality_evidence,
@@ -216,7 +217,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 container="mp3",
                 storage_format="MP3",
             )
-            claimed = db.claim_next_import_job(worker_id="dispatch-from-db-test")
+            claimed = claim_next_import_job(db, worker_id="dispatch-from-db-test")
             assert claimed is not None and claimed.id == job.id
             import_job_id = claimed.id
             # Seed current (on-disk) evidence so override-min-bitrate
@@ -467,7 +468,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 job.id,
                 preview_result={"ready": True},
             )
-            claimed = db.claim_next_import_job(worker_id="valid-evidence-test")
+            claimed = claim_next_import_job(db, worker_id="valid-evidence-test")
             assert claimed is not None and claimed.id == job.id
             _seed_current_for_request(
                 db, 42,
@@ -551,7 +552,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 preview_result={"verdict": "would_import"},
                 message="ready",
             )
-            claimed = db.claim_next_import_job(worker_id="importer")
+            claimed = claim_next_import_job(db, worker_id="importer")
             assert claimed is not None
             _seed_candidate_for_import_job(
                 db, job.id,
@@ -632,7 +633,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 preview_result={"verdict": "would_import"},
                 message="ready",
             )
-            claimed = db.claim_next_import_job(worker_id="importer")
+            claimed = claim_next_import_job(db, worker_id="importer")
             assert claimed is not None
             # No upsert_album_quality_evidence — candidate evidence is missing.
 
@@ -695,7 +696,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 preview_result={"verdict": "would_import"},
                 message="ready",
             )
-            claimed = db.claim_next_import_job(worker_id="importer")
+            claimed = claim_next_import_job(db, worker_id="importer")
             assert claimed is not None
 
             from typing import Any as _Any

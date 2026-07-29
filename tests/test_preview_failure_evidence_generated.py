@@ -61,7 +61,11 @@ from lib.quality import (
 from lib.quality_evidence import EvidenceBuildResult, snapshot_audio_files
 from scripts import import_preview_worker
 from tests.fakes import FakeBeetsDB, FakePipelineDB
-from tests.helpers import make_album_quality_evidence, make_request_row
+from tests.helpers import (
+    claim_next_import_preview_job,
+    make_album_quality_evidence,
+    make_request_row,
+)
 
 FailureMode = Literal[
     "returned",
@@ -594,10 +598,8 @@ def _run_world(world: PreviewFailureWorld) -> PreviewFailureObservation:
             systemd_unit="cratedigger-import-preview.service",
             worker=ProcessIdentity(pid=764, start_ticks=1),
         )
-        claimed = db.claim_next_import_preview_job(
-            worker_id="generated-preview",
-            execution_lease=preview_lease,
-        )
+        claimed = claim_next_import_preview_job(db, worker_id="generated-preview",
+        execution_lease=preview_lease,)
         assert claimed is not None and claimed.id == job.id
         automation_authority = (
             import_preview_worker._AutomationPreviewAuthority(

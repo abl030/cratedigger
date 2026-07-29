@@ -60,7 +60,11 @@ from lib.quality_evidence import (
     snapshot_fingerprint,
 )
 from tests.fakes import FakeBeetsDB, FakePipelineDB
-from tests.helpers import make_album_quality_evidence, make_request_row
+from tests.helpers import (
+    claim_next_import_preview_job,
+    make_album_quality_evidence,
+    make_request_row,
+)
 
 _CHANGED_SNAPSHOT_FACT_SHAPES: tuple[
     tuple[EvidenceSubject | None, EvidenceSubject | None], ...
@@ -736,7 +740,7 @@ def _run_lossless_spectral_failure_world(
                 source_username="generated-peer",
             ),
         )
-        claimed = db.claim_next_import_preview_job(worker_id="preview")
+        claimed = claim_next_import_preview_job(db, worker_id="preview")
         assert claimed is not None
 
         harness_calls = 0

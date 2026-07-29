@@ -8,7 +8,11 @@ from hypothesis import strategies as st
 import tests._hypothesis_profiles  # noqa: F401
 from lib.import_execution import ExecutionLeaseSnapshot, ProcessIdentity
 from tests.fakes import FakePipelineDB
-from tests.helpers import handoff_automation_owner, make_request_row
+from tests.helpers import (
+    claim_next_import_preview_job,
+    handoff_automation_owner,
+    make_request_row,
+)
 
 
 def _lease(invocation_id: str) -> ExecutionLeaseSnapshot:
@@ -55,10 +59,8 @@ class TestProcessingOwnerCommandsGenerated(unittest.TestCase):
         ))
         job = handoff_automation_owner(db, 71)
         exact_lease = _lease("generated-preview")
-        claimed = db.claim_next_import_preview_job(
-            worker_id="generated-preview",
-            execution_lease=exact_lease,
-        )
+        claimed = claim_next_import_preview_job(db, worker_id="generated-preview",
+        execution_lease=exact_lease,)
         assert claimed is not None
         if not owner_is_exact:
             db._requests[71]["active_automation_import_job_id"] = job.id + 1
@@ -95,9 +97,7 @@ class TestProcessingOwnerCommandsGenerated(unittest.TestCase):
         ))
         job = handoff_automation_owner(db, 72)
         lease = _lease("known-bad-preview")
-        assert db.claim_next_import_preview_job(
-            execution_lease=lease,
-        ) is not None
+        assert claim_next_import_preview_job(db, execution_lease=lease,) is not None
         db._requests[72]["active_automation_import_job_id"] = job.id + 1
 
         self.assertFalse(db.set_import_job_candidate_evidence(

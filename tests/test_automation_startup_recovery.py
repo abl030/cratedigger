@@ -20,7 +20,11 @@ from lib.pipeline_db import PipelineDB
 from lib.pipeline_db.cleanup_journal import CleanupJournalIntent
 from lib.processing_cleanup import cleanup_manifest_hash
 from tests.fakes import FakePipelineDB
-from tests.helpers import handoff_automation_owner, make_request_row
+from tests.helpers import (
+    claim_next_import_preview_job,
+    handoff_automation_owner,
+    make_request_row,
+)
 
 TEST_DSN = os.environ["TEST_DB_DSN"]
 
@@ -91,10 +95,8 @@ class _StartupRecoveryContract:
     ) -> None:
         owner = self._owner()
         lease = _lease("import-preview")
-        claimed = self.db.claim_next_import_preview_job(
-            worker_id="preview-before-restart",
-            execution_lease=lease,
-        )
+        claimed = claim_next_import_preview_job(self.db, worker_id="preview-before-restart",
+        execution_lease=lease,)
         assert claimed is not None
         _seed_unrelated_importable_jobs(
             self.db,
@@ -111,10 +113,8 @@ class _StartupRecoveryContract:
     ) -> None:
         owner = self._owner()
         lease = _lease("import-preview")
-        claimed = self.db.claim_next_import_preview_job(
-            worker_id="preview-before-restart",
-            execution_lease=lease,
-        )
+        claimed = claim_next_import_preview_job(self.db, worker_id="preview-before-restart",
+        execution_lease=lease,)
         assert claimed is not None
         journal = self.db.create_processing_cleanup_journal(
             request_id=self.request_id,

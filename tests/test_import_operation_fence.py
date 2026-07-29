@@ -47,6 +47,8 @@ from lib.terminal_outcomes import (
 )
 from tests.fakes import FakePipelineDB
 from tests.helpers import (
+    claim_next_import_job,
+    claim_next_import_preview_job,
     handoff_automation_owner,
     make_album_quality_evidence,
     make_request_row,
@@ -255,10 +257,8 @@ def _claim_automation_job(
         systemd_unit="cratedigger-import-preview-worker.service",
         worker=ProcessIdentity(8501, 85001),
     )
-    assert db.claim_next_import_preview_job(
-        worker_id="preview",
-        execution_lease=preview_lease,
-    ) is not None
+    assert claim_next_import_preview_job(db, worker_id="preview",
+    execution_lease=preview_lease,) is not None
     _seed_candidate(
         db,
         job.id,
@@ -281,10 +281,8 @@ def _claim_automation_job(
         systemd_unit="cratedigger-importer.service",
         worker=ProcessIdentity(8502, 85002),
     )
-    claimed = db.claim_next_import_job(
-        worker_id="worker",
-        execution_lease=importer_lease,
-    )
+    claimed = claim_next_import_job(db, worker_id="worker",
+    execution_lease=importer_lease,)
     assert claimed is not None
     return claimed, importer_lease
 
@@ -311,7 +309,7 @@ class TestImportOperationFence(unittest.TestCase):
             source_path=source_path,
         )
         db.mark_import_job_preview_importable(job.id, preview_result={"ready": True})
-        claimed = db.claim_next_import_job(worker_id="worker")
+        claimed = claim_next_import_job(db, worker_id="worker")
         assert claimed is not None
         launched = db.authorize_import_job_launch(
             claimed.id,
@@ -351,7 +349,7 @@ class TestImportOperationFence(unittest.TestCase):
             source_path=source_path,
         )
         db.mark_import_job_preview_importable(job.id, preview_result={"ready": True})
-        claimed = db.claim_next_import_job(worker_id="worker")
+        claimed = claim_next_import_job(db, worker_id="worker")
         assert claimed is not None
 
         beets_invocations: list[int] = []
@@ -408,7 +406,7 @@ class TestImportOperationFence(unittest.TestCase):
                 job.id,
                 preview_result={"ready": True},
             )
-            claimed = db.claim_next_import_job(worker_id="worker")
+            claimed = claim_next_import_job(db, worker_id="worker")
             assert claimed is not None
 
             candidate = ensure_candidate_evidence_for_action(
@@ -463,9 +461,9 @@ class TestImportOperationFence(unittest.TestCase):
             )
             db.mark_import_job_preview_importable(job.id, preview_result={"ready": True})
 
-        first = db.claim_next_import_job(worker_id="old-worker")
+        first = claim_next_import_job(db, worker_id="old-worker")
         assert first is not None
-        second = db.claim_next_import_job(worker_id="old-worker")
+        second = claim_next_import_job(db, worker_id="old-worker")
         assert second is not None
         authorized = db.authorize_import_job_launch(
             second.id,
@@ -483,10 +481,10 @@ class TestImportOperationFence(unittest.TestCase):
             by_id[second.id].status,
             IMPORT_JOB_RECOVERY_REQUIRED,
         )
-        retry = db.claim_next_import_job(worker_id="new-worker-1")
+        retry = claim_next_import_job(db, worker_id="new-worker-1")
         assert retry is not None
         self.assertEqual(retry.id, first.id)
-        self.assertIsNone(db.claim_next_import_job(worker_id="new-worker-2"))
+        self.assertIsNone(claim_next_import_job(db, worker_id="new-worker-2"))
 
     def test_launched_exception_becomes_recovery_required_not_failed(self) -> None:
         from scripts import importer
@@ -511,7 +509,7 @@ class TestImportOperationFence(unittest.TestCase):
             source_path=source_path,
         )
         db.mark_import_job_preview_importable(job.id, preview_result={"ready": True})
-        claimed = db.claim_next_import_job(worker_id="worker")
+        claimed = claim_next_import_job(db, worker_id="worker")
         assert claimed is not None
         authorized = db.authorize_import_job_launch(
             claimed.id,
@@ -536,7 +534,7 @@ class TestImportOperationFence(unittest.TestCase):
         self.assertEqual(recovered.beets_launch_source_path, source_path)
         self.assertEqual(recovered.beets_launch_snapshot_fingerprint, fingerprint)
         self.assertIn("lost subprocess acknowledgement", recovered.message or "")
-        self.assertIsNone(db.claim_next_import_job(worker_id="replay-worker"))
+        self.assertIsNone(claim_next_import_job(db, worker_id="replay-worker"))
 
     def test_terminal_acknowledgement_prevents_recovery_replay(self) -> None:
         db = FakePipelineDB()
@@ -559,7 +557,7 @@ class TestImportOperationFence(unittest.TestCase):
             source_path=source_path,
         )
         db.mark_import_job_preview_importable(job.id, preview_result={"ready": True})
-        claimed = db.claim_next_import_job(worker_id="worker")
+        claimed = claim_next_import_job(db, worker_id="worker")
         assert claimed is not None
         assert db.authorize_import_job_launch(
             claimed.id,
@@ -588,7 +586,7 @@ class TestImportOperationFence(unittest.TestCase):
         completed = db.get_import_job(claimed.id)
         assert completed is not None
         self.assertEqual(completed.status, "completed")
-        self.assertIsNone(db.claim_next_import_job(worker_id="replay"))
+        self.assertIsNone(claim_next_import_job(db, worker_id="replay"))
 
     def test_automatic_launch_binds_current_request_source(self) -> None:
         db = FakePipelineDB()
@@ -692,7 +690,7 @@ class TestImportOperationFence(unittest.TestCase):
                     db.mark_import_job_preview_importable(
                         job.id, preview_result=preview_result,
                     )
-                    claimed = db.claim_next_import_job(worker_id="worker")
+                    claimed = claim_next_import_job(db, worker_id="worker")
                     assert claimed is not None
                 candidate_evidence_id = claimed.candidate_evidence_id
                 assert db.authorize_import_job_launch(
@@ -741,7 +739,7 @@ class TestImportOperationFence(unittest.TestCase):
         self.assertEqual(result.outcome, "closed")
         self.assertIsNone(result.retry_job)
         self.assertEqual(len(db.list_import_jobs()), 1)
-        self.assertIsNone(db.claim_next_import_job(worker_id="replay"))
+        self.assertIsNone(claim_next_import_job(db, worker_id="replay"))
 
     def test_recovery_resolution_discards_old_force_action_before_close_or_retry(self) -> None:
         """#853: recovery retains a copy only while reconciliation is pending."""
@@ -778,7 +776,7 @@ class TestImportOperationFence(unittest.TestCase):
                 db.mark_import_job_preview_importable(
                     job.id, preview_result={"action_path": action_path},
                 )
-                claimed = db.claim_next_import_job(worker_id="worker")
+                claimed = claim_next_import_job(db, worker_id="worker")
                 assert claimed is not None
                 assert db.authorize_import_job_launch(
                     claimed.id,
@@ -841,7 +839,7 @@ class TestImportOperationFence(unittest.TestCase):
             payload={"download_log_id": 1, "failed_path": "/tmp/operator-copy"},
         )
         db.mark_import_job_preview_importable(job.id, preview_result={"ready": True})
-        claimed = db.claim_next_import_job(worker_id="worker")
+        claimed = claim_next_import_job(db, worker_id="worker")
         assert claimed is not None
         pending = PendingImportTerminalOutcome(
             request_id=42,
@@ -895,7 +893,7 @@ class TestImportOperationFence(unittest.TestCase):
             payload={"download_log_id": 1, "failed_path": "/tmp/operator-copy"},
         )
         db.mark_import_job_preview_importable(job.id, preview_result={"ready": True})
-        claimed = db.claim_next_import_job(worker_id="worker")
+        claimed = claim_next_import_job(db, worker_id="worker")
         assert claimed is not None
         pending = PendingImportTerminalOutcome(
             request_id=42,
@@ -981,7 +979,7 @@ class TestImportOperationFence(unittest.TestCase):
                 job.id,
                 preview_result={"ready": True},
             )
-            claimed = db.claim_next_import_job(worker_id="worker")
+            claimed = claim_next_import_job(db, worker_id="worker")
             assert claimed is not None
             db.request(42)["status"] = "imported"
 
@@ -1033,7 +1031,7 @@ class TestImportOperationFence(unittest.TestCase):
                 job.id,
                 preview_result={"ready": True},
             )
-            claimed = db.claim_next_import_job(worker_id="worker")
+            claimed = claim_next_import_job(db, worker_id="worker")
             assert claimed is not None
             db.request(42)["status"] = "imported"
 
@@ -1133,7 +1131,7 @@ class TestImportOperationFencePostgres(unittest.TestCase):
         assert persisted is not None and persisted.id is not None
         db.set_import_job_candidate_evidence(job.id, persisted.id)
         db.mark_import_job_preview_importable(job.id, preview_result={"ready": True})
-        claimed = db.claim_next_import_job(worker_id="postgres-worker")
+        claimed = claim_next_import_job(db, worker_id="postgres-worker")
         assert claimed is not None
 
         launched = db.authorize_import_job_launch(
@@ -1179,7 +1177,7 @@ class TestImportOperationFencePostgres(unittest.TestCase):
         assert persisted is not None and persisted.id is not None
         db.set_import_job_candidate_evidence(job.id, persisted.id)
         db.mark_import_job_preview_importable(job.id, preview_result={"ready": True})
-        claimed = db.claim_next_import_job(worker_id="postgres-worker")
+        claimed = claim_next_import_job(db, worker_id="postgres-worker")
         assert claimed is not None
 
         launched = db.authorize_import_job_launch(
@@ -1204,7 +1202,7 @@ class TestImportOperationFencePostgres(unittest.TestCase):
             recovered[0].beets_launch_snapshot_fingerprint,
             evidence.snapshot_fingerprint,
         )
-        self.assertIsNone(observer.claim_next_import_job(worker_id="replay"))
+        self.assertIsNone(claim_next_import_job(observer, worker_id="replay"))
 
         resolution = resolve_import_job_recovery(
             observer,
@@ -1235,7 +1233,7 @@ class TestImportOperationFencePostgres(unittest.TestCase):
             payload={"download_log_id": 1, "failed_path": "/tmp/unlaunched"},
         )
         db.mark_import_job_preview_importable(job.id, preview_result={"ready": True})
-        claimed = db.claim_next_import_job(worker_id="postgres-worker")
+        claimed = claim_next_import_job(db, worker_id="postgres-worker")
         assert claimed is not None
 
         recovered = db.recover_running_import_jobs(
@@ -1245,7 +1243,7 @@ class TestImportOperationFencePostgres(unittest.TestCase):
 
         self.assertEqual(len(recovered), 1)
         self.assertEqual(recovered[0].status, "queued")
-        retry = db.claim_next_import_job(worker_id="retry")
+        retry = claim_next_import_job(db, worker_id="retry")
         assert retry is not None
         self.assertEqual(retry.id, claimed.id)
 
@@ -1285,7 +1283,7 @@ class TestImportOperationFencePostgres(unittest.TestCase):
         assert persisted is not None and persisted.id is not None
         db.set_import_job_candidate_evidence(job.id, persisted.id)
         db.mark_import_job_preview_importable(job.id, preview_result={"ready": True})
-        claimed = db.claim_next_import_job(worker_id="postgres-worker")
+        claimed = claim_next_import_job(db, worker_id="postgres-worker")
         assert claimed is not None
         assert db.authorize_import_job_launch(
             claimed.id,
@@ -1315,7 +1313,7 @@ class TestImportOperationFencePostgres(unittest.TestCase):
         )
         self.assertEqual(len(recovered), 1)
         self.assertEqual(recovered[0].status, IMPORT_JOB_RECOVERY_REQUIRED)
-        self.assertIsNone(observer.claim_next_import_job(worker_id="replay"))
+        self.assertIsNone(claim_next_import_job(observer, worker_id="replay"))
 
 
 if __name__ == "__main__":

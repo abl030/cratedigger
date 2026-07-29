@@ -60,6 +60,8 @@ from lib.quality_evidence import snapshot_audio_files
 from lib.staged_album import StagedAlbum
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import (
+    claim_next_import_job,
+    claim_next_import_preview_job,
     handoff_automation_owner,
     hermetic_beets_config_defaults,
     make_album_quality_evidence,
@@ -363,10 +365,8 @@ class TestAutomationEvidenceReuse(unittest.TestCase):
                 canonical_path=tmpdir,
             )
             preview_lease = _preview_execution_lease("reuse-preview")
-            assert db.claim_next_import_preview_job(
-                worker_id="preview",
-                execution_lease=preview_lease,
-            ) is not None
+            assert claim_next_import_preview_job(db, worker_id="preview",
+            execution_lease=preview_lease,) is not None
             _seed_candidate_for_import_job(
                 db, job.id,
                 mb_release_id="mbid-123",
@@ -389,10 +389,8 @@ class TestAutomationEvidenceReuse(unittest.TestCase):
                 expected_execution_lease=preview_lease,
             ) is not None
             execution_lease = _importer_execution_lease("reuse-importer")
-            claimed = db.claim_next_import_job(
-                worker_id="importer",
-                execution_lease=execution_lease,
-            )
+            claimed = claim_next_import_job(db, worker_id="importer",
+            execution_lease=execution_lease,)
             assert claimed is not None and claimed.id == job.id
             cfg = CratediggerConfig(
                 beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
@@ -712,10 +710,8 @@ class TestImporterWorker(unittest.TestCase):
             preview_lease = _preview_execution_lease(
                 f"prepare-import-{job.id}"
             )
-            claimed = db.claim_next_import_preview_job(
-                worker_id="preview",
-                execution_lease=preview_lease,
-            )
+            claimed = claim_next_import_preview_job(db, worker_id="preview",
+            execution_lease=preview_lease,)
             assert claimed is not None and claimed.id == job.id
             updated = db.mark_import_job_preview_importable(
                 job.id,
@@ -951,7 +947,7 @@ class TestImporterWorker(unittest.TestCase):
             ),
         )
         self._mark_importable(db, job)
-        claimed = db.claim_next_import_job(worker_id="worker")
+        claimed = claim_next_import_job(db, worker_id="worker")
         assert claimed is not None
 
         with patch(
@@ -971,6 +967,7 @@ class TestImporterWorker(unittest.TestCase):
             import_job_id=claimed.id,
             download_log_id=7,
             source_reference_path="/tmp/failed",
+            cfg=self._force_cfg,
         )
         assert updated is not None
         self.assertEqual(updated.status, "completed")
@@ -1008,7 +1005,7 @@ class TestImporterWorker(unittest.TestCase):
             action_path = os.path.join(
                 self._force_cfg.processing_dir, "albums", f"force-action-{job.id}",
             )
-            claimed = db.claim_next_import_job(worker_id="worker")
+            claimed = claim_next_import_job(db, worker_id="worker")
             assert claimed is not None
 
             updated = importer.process_claimed_job(
@@ -1046,7 +1043,7 @@ class TestImporterWorker(unittest.TestCase):
             ),
         )
         self._mark_importable(db, job)
-        claimed = db.claim_next_import_job(worker_id="worker")
+        claimed = claim_next_import_job(db, worker_id="worker")
         assert claimed is not None
 
         with patch(
@@ -1066,6 +1063,7 @@ class TestImporterWorker(unittest.TestCase):
             import_job_id=claimed.id,
             download_log_id=7,
             source_reference_path="/tmp/failed",
+            cfg=self._force_cfg,
         )
 
     def test_force_import_without_private_action_requeues_before_dispatch(self):
@@ -1085,7 +1083,7 @@ class TestImporterWorker(unittest.TestCase):
             preview_result={"verdict": "would_import"},
             message="ready",
         )
-        claimed = db.claim_next_import_job(worker_id="worker")
+        claimed = claim_next_import_job(db, worker_id="worker")
         assert claimed is not None
 
         updated = importer.process_claimed_job(cast(Any, db), claimed)
@@ -1121,7 +1119,7 @@ class TestImporterWorker(unittest.TestCase):
                 "import_result": json.loads(preview_ir.to_json()),
             },
         )
-        claimed = db.claim_next_import_job(worker_id="worker")
+        claimed = claim_next_import_job(db, worker_id="worker")
         assert claimed is not None
 
         with patch(
@@ -1167,7 +1165,7 @@ class TestImporterWorker(unittest.TestCase):
                 "import_result": json.loads(preview_ir.to_json()),
             },
         )
-        claimed = db.claim_next_import_job(worker_id="worker")
+        claimed = claim_next_import_job(db, worker_id="worker")
         assert claimed is not None
 
         with patch(
@@ -1203,7 +1201,7 @@ class TestImporterWorker(unittest.TestCase):
                 ),
             )
             self._mark_importable(db, job)
-            claimed = db.claim_next_import_job(worker_id="worker")
+            claimed = claim_next_import_job(db, worker_id="worker")
             assert claimed is not None
 
             with patch(
@@ -1280,7 +1278,7 @@ class TestImporterWorker(unittest.TestCase):
                 audio_corrupt=True,
                 audio_error="01.mp3: corrupt fixture",
             )
-            claimed = db.claim_next_import_job(worker_id="worker")
+            claimed = claim_next_import_job(db, worker_id="worker")
             assert claimed is not None
 
             updated = importer.process_claimed_job(cast(Any, db), claimed)
@@ -1338,7 +1336,7 @@ class TestImporterWorker(unittest.TestCase):
             )
             with open(os.path.join(action_path, "01.mp3"), "ab") as handle:
                 handle.write(b" drift")
-            claimed = db.claim_next_import_job(worker_id="worker")
+            claimed = claim_next_import_job(db, worker_id="worker")
             assert claimed is not None
 
             updated = importer.process_claimed_job(cast(Any, db), claimed)
@@ -1403,7 +1401,7 @@ class TestImporterWorker(unittest.TestCase):
                         files=snapshot_audio_files(action_path),
                     )
                     mutate(action_path)
-                    claimed = db.claim_next_import_job(worker_id="worker")
+                    claimed = claim_next_import_job(db, worker_id="worker")
                     assert claimed is not None
 
                     updated = importer.process_claimed_job(cast(Any, db), claimed)
@@ -1454,7 +1452,7 @@ class TestImporterWorker(unittest.TestCase):
                     "cleanup_eligible": True,
                 },
             )
-            claimed = db.claim_next_import_job(worker_id="worker")
+            claimed = claim_next_import_job(db, worker_id="worker")
             assert claimed is not None
 
             with patch(
@@ -1526,7 +1524,7 @@ class TestImporterWorker(unittest.TestCase):
                 mb_release_id="mbid-123",
                 files=snapshot_audio_files(action_path),
             )
-            claimed = db.claim_next_import_job(worker_id="worker")
+            claimed = claim_next_import_job(db, worker_id="worker")
             assert claimed is not None
 
             # No dispatch patch — the real guard runs. beets is never reached.
@@ -1604,7 +1602,7 @@ class TestImporterWorker(unittest.TestCase):
                 mb_release_id="mbid-123",
                 files=snapshot_audio_files(action_path),
             )
-            claimed = db.claim_next_import_job(worker_id="worker")
+            claimed = claim_next_import_job(db, worker_id="worker")
             assert claimed is not None
 
             updated = importer.process_claimed_job(cast(Any, db), claimed)
@@ -1656,7 +1654,7 @@ class TestImporterWorker(unittest.TestCase):
             from lib.import_preview import force_action_copy_path
 
             action_path = force_action_copy_path(self._force_cfg, job.id)
-            claimed = db.claim_next_import_job(worker_id="worker")
+            claimed = claim_next_import_job(db, worker_id="worker")
             assert claimed is not None
             claimed_attempts = claimed.attempts
 
@@ -1744,7 +1742,7 @@ class TestImporterWorker(unittest.TestCase):
                 ),
             )
             self._mark_importable(db, job)
-            claimed = db.claim_next_import_job(worker_id="worker")
+            claimed = claim_next_import_job(db, worker_id="worker")
             assert claimed is not None
 
             with patch(
@@ -1791,7 +1789,7 @@ class TestImporterWorker(unittest.TestCase):
                 ),
             )
             self._mark_importable(db, job)
-            claimed = db.claim_next_import_job(worker_id="worker")
+            claimed = claim_next_import_job(db, worker_id="worker")
             assert claimed is not None
 
             def reject_again(*_args, **kwargs):
@@ -1846,7 +1844,7 @@ class TestImporterWorker(unittest.TestCase):
                 ),
             )
             self._mark_importable(db, job)
-            claimed = db.claim_next_import_job(worker_id="worker")
+            claimed = claim_next_import_job(db, worker_id="worker")
             assert claimed is not None
             db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
@@ -1892,7 +1890,7 @@ class TestImporterWorker(unittest.TestCase):
                 ),
             )
             self._mark_importable(db, job)
-            claimed = db.claim_next_import_job(worker_id="worker")
+            claimed = claim_next_import_job(db, worker_id="worker")
             assert claimed is not None
 
             with patch(
@@ -1926,7 +1924,7 @@ class TestImporterWorker(unittest.TestCase):
             payload={"download_log_id": 1, "failed_path": "/tmp/force"},
         )
         self._mark_importable(db, job)
-        claimed = db.claim_next_import_job(worker_id="old-worker")
+        claimed = claim_next_import_job(db, worker_id="old-worker")
         assert claimed is not None
 
         recovered = importer.recover_abandoned_running_jobs(cast(Any, db))
@@ -1989,10 +1987,8 @@ class TestImporterWorker(unittest.TestCase):
         )
         self._mark_importable(db, job)
         lease = _importer_execution_lease("reconstruct-state")
-        claimed = db.claim_next_import_job(
-            worker_id="worker",
-            execution_lease=lease,
-        )
+        claimed = claim_next_import_job(db, worker_id="worker",
+        execution_lease=lease,)
         assert claimed is not None
         token = CancellationToken()
 
@@ -2038,10 +2034,8 @@ class TestImporterWorker(unittest.TestCase):
         )
         self._mark_importable(db, job)
         lease = _importer_execution_lease("dispatch-success")
-        claimed = db.claim_next_import_job(
-            worker_id="worker",
-            execution_lease=lease,
-        )
+        claimed = claim_next_import_job(db, worker_id="worker",
+        execution_lease=lease,)
         assert claimed is not None
         token = CancellationToken()
 
@@ -2095,10 +2089,8 @@ class TestImporterWorker(unittest.TestCase):
         )
         self._mark_importable(db, job)
         lease = _importer_execution_lease("deferred-detail")
-        claimed = db.claim_next_import_job(
-            worker_id="worker",
-            execution_lease=lease,
-        )
+        claimed = claim_next_import_job(db, worker_id="worker",
+        execution_lease=lease,)
         assert claimed is not None
         token = CancellationToken()
 
@@ -2151,10 +2143,8 @@ class TestImporterWorker(unittest.TestCase):
         )
         self._mark_importable(db, job)
         lease = _importer_execution_lease("failed-reason")
-        claimed = db.claim_next_import_job(
-            worker_id="worker",
-            execution_lease=lease,
-        )
+        claimed = claim_next_import_job(db, worker_id="worker",
+        execution_lease=lease,)
         assert claimed is not None
         token = CancellationToken()
 
@@ -2202,10 +2192,8 @@ class TestImporterWorker(unittest.TestCase):
         )
         self._mark_importable(db, job)
         lease = _importer_execution_lease("dispatch-failure")
-        claimed = db.claim_next_import_job(
-            worker_id="worker",
-            execution_lease=lease,
-        )
+        claimed = claim_next_import_job(db, worker_id="worker",
+        execution_lease=lease,)
         assert claimed is not None
         token = CancellationToken()
 
@@ -2292,7 +2280,7 @@ class TestImporterWorker(unittest.TestCase):
             ),
         )
         ready = self._mark_importable(db, job)
-        claimed = db.claim_next_import_job(worker_id="force-dispatch")
+        claimed = claim_next_import_job(db, worker_id="force-dispatch")
         assert claimed is not None
         token = CancellationToken()
         observed: dict[str, object] = {}
@@ -2342,7 +2330,7 @@ class TestImporterWorker(unittest.TestCase):
             preview_result={"verdict": "evidence_ready"},
         )
         assert ready is not None
-        claimed = setup_db.claim_next_import_job(worker_id="partial-authority")
+        claimed = claim_next_import_job(setup_db, worker_id="partial-authority")
         assert claimed is not None
         self.assertNotIn("action_path", claimed.preview_result or {})
 
@@ -2360,7 +2348,7 @@ class TestImporterWorker(unittest.TestCase):
         )
         for label, token, identity in partials:
             with self.subTest(label=label):
-                effect_db = MagicMock()
+                before_rows = copy.deepcopy(setup_db._import_jobs)
                 runtime_config = MagicMock(
                     side_effect=AssertionError(
                         "partial authority reached runtime config"
@@ -2379,7 +2367,7 @@ class TestImporterWorker(unittest.TestCase):
                     self.assertRaisesRegex(ValueError, "must be paired"),
                 ):
                     importer.execute_import_job(
-                        cast(Any, effect_db),
+                        setup_db,  # pyright: ignore[reportArgumentType]
                         claimed,
                         cancellation_token=token,
                         owner_session_identity=identity,
@@ -2388,7 +2376,7 @@ class TestImporterWorker(unittest.TestCase):
 
                 runtime_config.assert_not_called()
                 dispatch.assert_not_called()
-                self.assertEqual(effect_db.mock_calls, [])
+                self.assertEqual(setup_db._import_jobs, before_rows)
 
     def test_importer_scans_past_contended_force_candidate(self) -> None:
         """One busy request cannot starve a later unrelated import."""
@@ -2483,19 +2471,66 @@ class TestImporterWorker(unittest.TestCase):
         class PollProbeComplete(RuntimeError):
             pass
 
-        db = FakePipelineDB()
-        observed: list[object] = []
+        candidate_db = FakePipelineDB()
+        for request_id in range(1, importer.IMPORT_CANDIDATE_SCAN_LIMIT + 1):
+            candidate_db.seed_request(make_request_row(
+                id=request_id,
+                status="wanted",
+            ))
+            candidate_db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=request_id,
+                dedupe_key=f"cursor-probe:{request_id}",
+                payload=force_import_payload(
+                    download_log_id=request_id,
+                    failed_path=f"/tmp/cursor-probe-{request_id}",
+                ),
+            )
+            candidate_db._import_jobs[-1]["preview_status"] = (
+                "evidence_ready"
+            )
+        candidates = candidate_db.peek_import_job_candidates(
+            limit=importer.IMPORT_CANDIDATE_SCAN_LIMIT,
+        )
+        observed_offsets: list[int] = []
 
-        def observe_poll(
-            _db: object,
-            *,
-            worker_id: str,
-            scan_cursor: object,
-        ) -> None:
-            del worker_id
-            observed.append(scan_cursor)
-            if len(observed) == 2:
-                raise PollProbeComplete
+        class CursorProbeDB:
+            @contextmanager
+            def advisory_lock(self, _namespace: int, _key: int):
+                yield True
+
+            def recover_running_import_jobs(
+                self,
+                *,
+                requeue_message: str,
+                recovery_message: str,
+                limit: int,
+            ) -> list[ImportJob]:
+                del requeue_message, recovery_message, limit
+                return []
+
+            def list_automation_import_jobs_for_startup_recovery(
+                self,
+            ) -> list[ImportJob]:
+                return []
+
+            def peek_import_job_candidates(
+                self,
+                *,
+                execution_lease: ExecutionLeaseSnapshot | None = None,
+                limit: int,
+                offset: int = 0,
+            ) -> list[ImportJob]:
+                del execution_lease, limit
+                observed_offsets.append(offset)
+                if len(observed_offsets) == 2:
+                    raise PollProbeComplete
+                return candidates
+
+            def close(self) -> None:
+                return None
+
+        db = CursorProbeDB()
 
         argv = [
             "importer.py",
@@ -2509,26 +2544,15 @@ class TestImporterWorker(unittest.TestCase):
         with (
             patch("sys.argv", argv),
             patch("scripts.importer.PipelineDB", return_value=db),
-            patch(
-                "scripts.importer.recover_abandoned_running_jobs",
-                return_value=[],
-            ),
-            patch("scripts.importer.run_once", side_effect=observe_poll),
             patch("scripts.importer.time.sleep"),
             self.assertRaises(PollProbeComplete),
         ):
             importer.main()
 
-        assert_long_lived_worker_reuses_cursor(observed)
-
-        def cursor_recreation_mutant() -> list[object]:
-            return [
-                importer._CandidateScanCursor(),
-                importer._CandidateScanCursor(),
-            ]
-
-        with self.assertRaisesRegex(AssertionError, "recreated"):
-            assert_long_lived_worker_reuses_cursor(cursor_recreation_mutant())
+        self.assertEqual(
+            observed_offsets,
+            [0, importer.IMPORT_CANDIDATE_SCAN_LIMIT],
+        )
 
 
 class TestAutomationImporterOwnership(unittest.TestCase):
@@ -2555,10 +2579,8 @@ class TestAutomationImporterOwnership(unittest.TestCase):
         preview_lease = _preview_execution_lease(
             f"importer-owner-{request_id}"
         )
-        claimed = db.claim_next_import_preview_job(
-            worker_id="preview",
-            execution_lease=preview_lease,
-        )
+        claimed = claim_next_import_preview_job(db, worker_id="preview",
+        execution_lease=preview_lease,)
         assert claimed is not None
         ready = db.mark_import_job_preview_importable(
             job.id,
@@ -2970,10 +2992,8 @@ class TestAutomationImporterOwnership(unittest.TestCase):
         db = FakePipelineDB()
         self._importable_owner(db)
         expected_lease = _importer_execution_lease("startup-recovery")
-        claimed = db.claim_next_import_job(
-            worker_id="old-importer",
-            execution_lease=expected_lease,
-        )
+        claimed = claim_next_import_job(db, worker_id="old-importer",
+        execution_lease=expected_lease,)
         assert claimed is not None
 
         unknown = ExecutionLivenessEvidence(
@@ -3024,10 +3044,8 @@ class TestAutomationImporterOwnership(unittest.TestCase):
         setattr(db, "dsn", "postgresql://fake")  # noqa: B010
         self._importable_owner(db)
         lease = _importer_execution_lease("token-chain")
-        claimed = db.claim_next_import_job(
-            worker_id="importer",
-            execution_lease=lease,
-        )
+        claimed = claim_next_import_job(db, worker_id="importer",
+        execution_lease=lease,)
         assert claimed is not None
         token = CancellationToken()
         observed_authority: dict[str, object] = {}
@@ -3092,20 +3110,16 @@ class TestAutomationImporterOwnership(unittest.TestCase):
                 canonical_path=source,
             )
             preview_lease = _preview_execution_lease("token-preview")
-            assert db.claim_next_import_preview_job(
-                worker_id="preview",
-                execution_lease=preview_lease,
-            ) is not None
+            assert claim_next_import_preview_job(db, worker_id="preview",
+            execution_lease=preview_lease,) is not None
             assert db.mark_import_job_preview_importable(
                 job.id,
                 preview_result={"ready": True},
                 expected_execution_lease=preview_lease,
             ) is not None
             lease = _importer_execution_lease("token-dispatch")
-            claimed = db.claim_next_import_job(
-                worker_id="importer",
-                execution_lease=lease,
-            )
+            claimed = claim_next_import_job(db, worker_id="importer",
+            execution_lease=lease,)
             assert claimed is not None
             token = CancellationToken()
             ctx = make_ctx_with_fake_db(
@@ -3276,7 +3290,7 @@ class TestImportPreviewWorker(unittest.TestCase):
                     failed_path=source,
                 ),
             )
-            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            claimed = claim_next_import_preview_job(db, worker_id="preview")
             assert claimed is not None
             action_path = force_action_copy_path(cfg, job.id)
             os.mkdir(action_path, 0o700)
@@ -3389,7 +3403,7 @@ class TestImportPreviewWorker(unittest.TestCase):
                     source_username="alice",
                 ),
             )
-            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            claimed = claim_next_import_preview_job(db, worker_id="preview")
             assert claimed is not None
 
             preview_result = self._preview(
@@ -3465,7 +3479,7 @@ class TestImportPreviewWorker(unittest.TestCase):
                         failed_path=payload_source,
                     ),
                 )
-                claimed = db.claim_next_import_preview_job(worker_id="preview")
+                claimed = claim_next_import_preview_job(db, worker_id="preview")
                 assert claimed is not None
                 return db, claimed
 
@@ -3533,10 +3547,8 @@ class TestImportPreviewWorker(unittest.TestCase):
                 canonical_path=staged,
             )
             lease = _preview_execution_lease()
-            claimed = db.claim_next_import_preview_job(
-                worker_id="preview",
-                execution_lease=lease,
-            )
+            claimed = claim_next_import_preview_job(db, worker_id="preview",
+            execution_lease=lease,)
             assert claimed is not None
             authority = import_preview_worker._AutomationPreviewAuthority(
                 request=db.request(42),
@@ -3617,10 +3629,8 @@ class TestImportPreviewWorker(unittest.TestCase):
                 canonical_path=staged,
             )
             lease = _preview_execution_lease()
-            claimed = db.claim_next_import_preview_job(
-                worker_id="preview",
-                execution_lease=lease,
-            )
+            claimed = claim_next_import_preview_job(db, worker_id="preview",
+            execution_lease=lease,)
             assert claimed is not None
             authority = import_preview_worker._AutomationPreviewAuthority(
                 request=db.request(42),
@@ -3662,10 +3672,8 @@ class TestImportPreviewWorker(unittest.TestCase):
                 db.request(42)["active_automation_import_job_id"],
                 updated.id,
             )
-            claimed_for_import = db.claim_next_import_job(
-                worker_id="importer",
-                execution_lease=_preview_execution_lease("test-importer"),
-            )
+            claimed_for_import = claim_next_import_job(db, worker_id="importer",
+            execution_lease=_preview_execution_lease("test-importer"),)
             assert claimed_for_import is not None
             self.assertEqual(claimed_for_import.id, updated.id)
 
@@ -3987,10 +3995,12 @@ class TestImportPreviewWorker(unittest.TestCase):
                 canonical_path=canonical_path,
             )
             lease = _preview_execution_lease("wrong-owner")
-            candidate = db.peek_next_import_preview_job(
+            candidates = db.peek_import_preview_job_candidates(
                 execution_lease=lease,
+                limit=1,
             )
-            assert candidate is not None
+            assert candidates
+            candidate = candidates[0]
             db._requests[42]["active_automation_import_job_id"] = job.id + 1
 
             updated = import_preview_worker._process_automation_claim(
@@ -4082,10 +4092,12 @@ class TestImportPreviewWorker(unittest.TestCase):
                 canonical_path=canonical_path,
             )
             lease = _preview_execution_lease("lost-before-lock")
-            candidate = db.peek_next_import_preview_job(
+            candidates = db.peek_import_preview_job_candidates(
                 execution_lease=lease,
+                limit=1,
             )
-            assert candidate is not None
+            assert candidates
+            candidate = candidates[0]
 
             with self.assertRaises(OwnerSessionLost):
                 import_preview_worker._process_automation_claim(
@@ -4130,10 +4142,8 @@ class TestImportPreviewWorker(unittest.TestCase):
                 canonical_path=canonical_path,
             )
             lease = _preview_execution_lease("session-loss")
-            claimed = db.claim_next_import_preview_job(
-                worker_id="preview",
-                execution_lease=lease,
-            )
+            claimed = claim_next_import_preview_job(db, worker_id="preview",
+            execution_lease=lease,)
             assert claimed is not None
             authority = import_preview_worker._AutomationPreviewAuthority(
                 request=db.request(42),
@@ -4189,7 +4199,7 @@ class TestImportPreviewWorker(unittest.TestCase):
                 dedupe_key="force_import:evidence-readiness-fallback",
                 payload={"download_log_id": 1, "failed_path": source},
             )
-            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            claimed = claim_next_import_preview_job(db, worker_id="preview")
             assert claimed is not None
             audit = SpectralDetail(
                 candidate=SpectralAnalysisDetail(
@@ -4235,7 +4245,7 @@ class TestImportPreviewWorker(unittest.TestCase):
                     source_username="alice",
                 ),
             )
-            initial_claim = db.claim_next_import_preview_job(worker_id="peek")
+            initial_claim = claim_next_import_preview_job(db, worker_id="peek")
             assert initial_claim is not None
             assert initial_claim.preview_heartbeat_at is not None
             db.requeue_stale_import_preview_jobs(
@@ -4304,7 +4314,7 @@ class TestImportPreviewWorker(unittest.TestCase):
                 failed_path="/tmp/failed",
             ),
         )
-        claimed = db.claim_next_import_preview_job(worker_id="dead-worker")
+        claimed = claim_next_import_preview_job(db, worker_id="dead-worker")
         assert claimed is not None
         old = datetime.now(UTC) - timedelta(hours=2)
         for row in db._import_jobs:
@@ -4373,10 +4383,8 @@ class TestImportPreviewWorker(unittest.TestCase):
         db.seed_request(make_request_row(id=42))
         handoff_automation_owner(db, 42)
         lease = _preview_execution_lease("startup-recovery")
-        claimed = db.claim_next_import_preview_job(
-            worker_id="old-preview",
-            execution_lease=lease,
-        )
+        claimed = claim_next_import_preview_job(db, worker_id="old-preview",
+        execution_lease=lease,)
         assert claimed is not None
 
         live = ExecutionLivenessEvidence(
@@ -4458,10 +4466,8 @@ class TestImportPreviewWorker(unittest.TestCase):
 
         # The periodic age sweep is deliberately non-automation even after
         # the row has been claimed again under a new exact lease.
-        reclaimed = db.claim_next_import_preview_job(
-            worker_id="new-preview",
-            execution_lease=_preview_execution_lease("new-preview"),
-        )
+        reclaimed = claim_next_import_preview_job(db, worker_id="new-preview",
+        execution_lease=_preview_execution_lease("new-preview"),)
         assert reclaimed is not None
         self.assertEqual(
             import_preview_worker.recover_abandoned_preview_jobs(
@@ -4500,7 +4506,7 @@ class TestImportPreviewWorker(unittest.TestCase):
                 source_username="alice",
             ),
         )
-        claimed = db.claim_next_import_preview_job(worker_id="preview")
+        claimed = claim_next_import_preview_job(db, worker_id="preview")
         assert claimed is not None
 
         with patch(
@@ -4535,7 +4541,7 @@ class TestImportPreviewWorker(unittest.TestCase):
                 source_username="alice",
             ),
         )
-        claimed = db.claim_next_import_preview_job(worker_id="preview")
+        claimed = claim_next_import_preview_job(db, worker_id="preview")
         assert claimed is not None
 
         with patch(
@@ -4572,7 +4578,7 @@ class TestImportPreviewWorker(unittest.TestCase):
             dedupe_key="force_import:failure-have-lifecycle",
             payload={"download_log_id": 1, "failed_path": "/tmp/corrupt-audio"},
         )
-        claimed = db.claim_next_import_preview_job(worker_id="preview")
+        claimed = claim_next_import_preview_job(db, worker_id="preview")
         assert claimed is not None
         assert _HERMETIC_BEETS_PAIR is not None
         cfg = CratediggerConfig(
@@ -4645,7 +4651,7 @@ class TestImportPreviewWorker(unittest.TestCase):
                     dedupe_key=f"force_import:failure-have-{failing_stage}",
                     payload={"download_log_id": 1, "failed_path": "/tmp/corrupt-audio"},
                 )
-                claimed = db.claim_next_import_preview_job(worker_id="preview")
+                claimed = claim_next_import_preview_job(db, worker_id="preview")
                 assert claimed is not None
                 assert _HERMETIC_BEETS_PAIR is not None
                 cfg = CratediggerConfig(
@@ -4704,7 +4710,7 @@ class TestImportPreviewWorker(unittest.TestCase):
             dedupe_key="force_import:failure-have-no-mbid",
             payload={"download_log_id": 1, "failed_path": "/tmp/corrupt-audio"},
         )
-        claimed = db.claim_next_import_preview_job(worker_id="preview")
+        claimed = claim_next_import_preview_job(db, worker_id="preview")
         assert claimed is not None
         prepare = MagicMock()
         enrich = MagicMock()
@@ -4871,10 +4877,6 @@ class TestImportPreviewWorker(unittest.TestCase):
                 "scripts.import_preview_worker.run_once",
                 side_effect=observe_poll,
             ),
-            patch(
-                "scripts.import_preview_worker.preview_recovery_loop",
-                return_value=None,
-            ),
             patch("scripts.import_preview_worker.logger.exception"),
             patch("scripts.import_preview_worker.logger.error"),
         ):
@@ -4917,7 +4919,7 @@ class TestImportPreviewWorker(unittest.TestCase):
                 source_username="alice",
             ),
         )
-        claimed = db.claim_next_import_preview_job(worker_id="dead-worker")
+        claimed = claim_next_import_preview_job(db, worker_id="dead-worker")
         assert claimed is not None
         self.assertEqual(claimed.preview_status, "running")
 
@@ -5046,7 +5048,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                     source_username="alice",
                 ),
             )
-            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            claimed = claim_next_import_preview_job(db, worker_id="preview")
             assert claimed is not None
             # Seed download_log_candidate evidence — force path uses it.
             self._seed_evidence_for_download_log(db, download_log_id, source)
@@ -5121,7 +5123,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                     source_username="alice",
                 ),
             )
-            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            claimed = claim_next_import_preview_job(db, worker_id="preview")
             assert claimed is not None
             self._seed_evidence_for_download_log(db, download_log_id, source)
 
@@ -5171,7 +5173,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                     source_username="alice",
                 ),
             )
-            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            claimed = claim_next_import_preview_job(db, worker_id="preview")
             assert claimed is not None
             self._seed_evidence_for_download_log(db, download_log_id, source)
 
@@ -5240,7 +5242,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                     source_username="alice",
                 ),
             )
-            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            claimed = claim_next_import_preview_job(db, worker_id="preview")
             assert claimed is not None
             self._seed_evidence_for_download_log(db, download_log_id, source)
             calls: list[str] = []
@@ -5336,7 +5338,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                     source_username="alice",
                 ),
             )
-            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            claimed = claim_next_import_preview_job(db, worker_id="preview")
             assert claimed is not None
             self._seed_evidence_for_download_log(db, download_log_id, source)
 
@@ -5412,7 +5414,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                     source_username="alice",
                 ),
             )
-            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            claimed = claim_next_import_preview_job(db, worker_id="preview")
             assert claimed is not None
             self._seed_evidence_for_download_log(db, download_log_id, source)
 
@@ -5469,7 +5471,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                     source_username="alice",
                 ),
             )
-            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            claimed = claim_next_import_preview_job(db, worker_id="preview")
             assert claimed is not None
             self._seed_evidence_for_download_log(db, download_log_id, source)
             calls: list[str] = []
@@ -5526,7 +5528,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                     source_username="alice",
                 ),
             )
-            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            claimed = claim_next_import_preview_job(db, worker_id="preview")
             assert claimed is not None
             self._seed_evidence_for_download_log(db, download_log_id, source)
 
@@ -5593,10 +5595,8 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                 canonical_path=staged,
             )
             lease = _preview_execution_lease()
-            claimed = db.claim_next_import_preview_job(
-                worker_id="preview",
-                execution_lease=lease,
-            )
+            claimed = claim_next_import_preview_job(db, worker_id="preview",
+            execution_lease=lease,)
             assert claimed is not None
             authority = import_preview_worker._AutomationPreviewAuthority(
                 request=db.request(42),
@@ -5668,7 +5668,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                     source_username="alice",
                 ),
             )
-            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            claimed = claim_next_import_preview_job(db, worker_id="preview")
             assert claimed is not None
             # No evidence seeded → front-gate misses → measurement runs.
 
@@ -5735,7 +5735,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                     source_username="alice",
                 ),
             )
-            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            claimed = claim_next_import_preview_job(db, worker_id="preview")
             assert claimed is not None
             # Seed evidence with files that don't match the on-disk snapshot.
             from lib.quality import AlbumQualityEvidenceFile
@@ -5829,7 +5829,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                     source_username="buckwheat8404",
                 ),
             )
-            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            claimed = claim_next_import_preview_job(db, worker_id="preview")
             assert claimed is not None
             _seed_candidate_for_download_log(
                 db,
@@ -6072,7 +6072,7 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
         )
 
     def _claim(self, db: FakePipelineDB) -> Any:
-        claimed = db.claim_next_import_job(worker_id="worker")
+        claimed = claim_next_import_job(db, worker_id="worker")
         assert claimed is not None
         return claimed
 

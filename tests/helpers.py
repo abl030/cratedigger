@@ -27,7 +27,13 @@ from lib.import_execution import (
     ExecutionLeaseSnapshot,
     OwnerSessionIdentity,
 )
-from lib.import_queue import AutomationHandoffResult, ImportJob
+from lib.import_queue import (
+    IMPORT_JOB_AUTOMATION,
+    IMPORT_JOB_FORCE,
+    AutomationHandoffResult,
+    ImportJob,
+)
+from lib.pipeline_db._shared import ADVISORY_LOCK_NAMESPACE_IMPORT
 from lib.quality import (
     EVIDENCE_PROVENANCE_MEASURED,
     EVIDENCE_SUBJECT_INSTALLED,
@@ -435,6 +441,181 @@ def finalize_claimed_dispatch(db: Any, job: Any, outcome: Any) -> Any:
         db,
         job,
         execute_fn=lambda *_args, **_kwargs: outcome,
+    )
+
+
+class ImportJobClaimDB(Protocol):
+    def peek_import_job_candidates(
+        self,
+        *,
+        execution_lease: ExecutionLeaseSnapshot | None = None,
+        limit: int,
+        offset: int = 0,
+    ) -> list[ImportJob]: ...
+
+    def peek_import_preview_job_candidates(
+        self,
+        *,
+        execution_lease: ExecutionLeaseSnapshot | None = None,
+        limit: int,
+        offset: int = 0,
+    ) -> list[ImportJob]: ...
+
+    def advisory_lock(
+        self,
+        namespace: int,
+        key: int,
+    ) -> AbstractContextManager[bool]: ...
+
+    def claim_import_job_candidate(
+        self,
+        job_id: int,
+        *,
+        worker_id: str | None = None,
+    ) -> ImportJob | None: ...
+
+    def claim_import_preview_job_candidate(
+        self,
+        job_id: int,
+        *,
+        worker_id: str | None = None,
+    ) -> ImportJob | None: ...
+
+    def claim_automation_import_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+        execution_lease: ExecutionLeaseSnapshot,
+    ) -> ImportJob | None: ...
+
+    def claim_automation_import_preview_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+        execution_lease: ExecutionLeaseSnapshot,
+    ) -> ImportJob | None: ...
+
+    def claim_force_import_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+    ) -> ImportJob | None: ...
+
+    def claim_force_import_preview_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+    ) -> ImportJob | None: ...
+
+
+def claim_next_import_job(
+    db: ImportJobClaimDB,
+    *,
+    worker_id: str | None = None,
+    execution_lease: ExecutionLeaseSnapshot | None = None,
+) -> ImportJob | None:
+    """Claim the first import candidate for direct test setup.
+
+    Production workers scan bounded candidate pages and claim exact rows. Tests
+    that need a claimed fixture retain the old one-shot convenience here
+    without preserving a production API that no runtime caller uses.
+    """
+    candidates = db.peek_import_job_candidates(
+        execution_lease=execution_lease,
+        limit=1,
+    )
+    if not candidates:
+        return None
+    candidate = candidates[0]
+    if candidate.job_type == IMPORT_JOB_AUTOMATION:
+        if execution_lease is None or candidate.request_id is None:
+            return None
+        with db.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_IMPORT,
+            candidate.request_id,
+        ) as acquired:
+            if not acquired:
+                return None
+            return db.claim_automation_import_job_under_lock(
+                candidate.id,
+                request_id=candidate.request_id,
+                worker_id=worker_id,
+                execution_lease=execution_lease,
+            )
+    if candidate.job_type == IMPORT_JOB_FORCE:
+        if candidate.request_id is None:
+            return None
+        with db.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_IMPORT,
+            candidate.request_id,
+        ) as acquired:
+            if not acquired:
+                return None
+            return db.claim_force_import_job_under_lock(
+                candidate.id,
+                request_id=candidate.request_id,
+                worker_id=worker_id,
+            )
+    return db.claim_import_job_candidate(
+        candidate.id,
+        worker_id=worker_id,
+    )
+
+
+def claim_next_import_preview_job(
+    db: ImportJobClaimDB,
+    *,
+    worker_id: str | None = None,
+    execution_lease: ExecutionLeaseSnapshot | None = None,
+) -> ImportJob | None:
+    """Claim the first preview candidate for direct test setup."""
+    candidates = db.peek_import_preview_job_candidates(
+        execution_lease=execution_lease,
+        limit=1,
+    )
+    if not candidates:
+        return None
+    candidate = candidates[0]
+    if candidate.job_type == IMPORT_JOB_AUTOMATION:
+        if execution_lease is None or candidate.request_id is None:
+            return None
+        with db.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_IMPORT,
+            candidate.request_id,
+        ) as acquired:
+            if not acquired:
+                return None
+            return db.claim_automation_import_preview_job_under_lock(
+                candidate.id,
+                request_id=candidate.request_id,
+                worker_id=worker_id,
+                execution_lease=execution_lease,
+            )
+    if candidate.job_type == IMPORT_JOB_FORCE:
+        if candidate.request_id is None:
+            return None
+        with db.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_IMPORT,
+            candidate.request_id,
+        ) as acquired:
+            if not acquired:
+                return None
+            return db.claim_force_import_preview_job_under_lock(
+                candidate.id,
+                request_id=candidate.request_id,
+                worker_id=worker_id,
+            )
+    return db.claim_import_preview_job_candidate(
+        candidate.id,
+        worker_id=worker_id,
     )
 
 

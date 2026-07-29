@@ -50,6 +50,7 @@ from lib.quality_evidence import (
 )
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import (
+    claim_next_import_preview_job,
     handoff_automation_owner,
     hermetic_beets_config_defaults,
     make_album_quality_evidence,
@@ -2209,10 +2210,8 @@ class TestImportPreviewPath(unittest.TestCase):
             systemd_unit="cratedigger-import-preview-worker.service",
             worker=ProcessIdentity(pid=7001, start_ticks=70001),
         )
-        claimed = db.claim_next_import_preview_job(
-            worker_id="preview",
-            execution_lease=lease,
-        )
+        claimed = claim_next_import_preview_job(db, worker_id="preview",
+        execution_lease=lease,)
         assert claimed is not None and claimed.id == job.id
         preview_db = _AutomationPreviewDB(db, lease)
         source = tempfile.mkdtemp()

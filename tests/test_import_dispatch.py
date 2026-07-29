@@ -54,6 +54,8 @@ from lib.quality_evidence import snapshot_audio_files, snapshot_fingerprint
 from tests.fakes import FakePipelineDB
 from tests.helpers import (
     RecordingQualityGate,
+    claim_next_import_job,
+    claim_next_import_preview_job,
     hermetic_beets_config_defaults,
     make_album_quality_evidence,
     make_ctx_with_fake_db,
@@ -269,10 +271,8 @@ def _claim_dispatch_job(
             systemd_unit="cratedigger-import-preview-worker.service",
             worker=ProcessIdentity(8101, 81001),
         )
-        claimed_preview = db.claim_next_import_preview_job(
-            worker_id="dispatch-preview",
-            execution_lease=preview_lease,
-        )
+        claimed_preview = claim_next_import_preview_job(db, worker_id="dispatch-preview",
+        execution_lease=preview_lease,)
         assert claimed_preview is not None
     else:
         job = db.enqueue_import_job(
@@ -327,10 +327,8 @@ def _claim_dispatch_job(
             systemd_unit="cratedigger-importer.service",
             worker=ProcessIdentity(8102, 81002),
         )
-    claimed = db.claim_next_import_job(
-        worker_id="dispatch-test",
-        execution_lease=execution_lease,
-    )
+    claimed = claim_next_import_job(db, worker_id="dispatch-test",
+    execution_lease=execution_lease,)
     assert claimed is not None
     return claimed, CandidateEvidenceActionResult(
         evidence=persisted,
@@ -1231,7 +1229,7 @@ class TestAudioCorruptPostCommitQuarantine(unittest.TestCase):
                 queued.id,
                 preview_result={"ready": True},
             )
-            claimed = db.claim_next_import_job(worker_id="force-corrupt")
+            claimed = claim_next_import_job(db, worker_id="force-corrupt")
             assert claimed is not None
 
             import_result = make_import_result(decision="audio_corrupt")
@@ -2700,8 +2698,7 @@ class TestDispatchImport(unittest.TestCase):
         self.assertEqual(job.status, "recovery_required")
         self.assertEqual(db.request(42)["status"], "processing")
         self.assertEqual(db.download_logs, [])
-        self.assertIsNone(db.claim_next_import_job(
-            worker_id="automatic-replay"))
+        self.assertIsNone(claim_next_import_job(db, worker_id="automatic-replay"))
 
     def test_timeout(self):
         from lib.dispatch import dispatch_import_core
@@ -2767,7 +2764,7 @@ class TestDispatchImport(unittest.TestCase):
         self.assertEqual(recovered.status, "recovery_required")
         self.assertEqual(db.request(42)["status"], "processing")
         self.assertEqual(db.download_logs, [])
-        self.assertIsNone(db.claim_next_import_job(worker_id="automatic-replay"))
+        self.assertIsNone(claim_next_import_job(db, worker_id="automatic-replay"))
 
     def test_exception(self):
         from lib.dispatch import dispatch_import_core
@@ -2833,7 +2830,7 @@ class TestDispatchImport(unittest.TestCase):
         self.assertEqual(recovered.status, "recovery_required")
         self.assertEqual(db.request(42)["status"], "processing")
         self.assertEqual(db.download_logs, [])
-        self.assertIsNone(db.claim_next_import_job(worker_id="automatic-replay"))
+        self.assertIsNone(claim_next_import_job(db, worker_id="automatic-replay"))
 
 
 class TestImportDispatchRescueCapture(unittest.TestCase):

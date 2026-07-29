@@ -56,6 +56,8 @@ from tests.fakes import (
 )
 from tests.helpers import (
     RecordingQualityGate,
+    claim_next_import_job,
+    claim_next_import_preview_job,
     finalize_claimed_dispatch,
     handoff_automation_owner,
     hermetic_beets_config_defaults,
@@ -211,10 +213,8 @@ def _claim_dispatch_job(db, *, request_id: int, mb_release_id: str,
         preview_lease = _preview_execution_lease(
             f"integration-preview-{job.id}"
         )
-        assert db.claim_next_import_preview_job(
-            worker_id="integration-preview",
-            execution_lease=preview_lease,
-        ) is not None
+        assert claim_next_import_preview_job(db, worker_id="integration-preview",
+        execution_lease=preview_lease,) is not None
     _seed_candidate_for_import_job(
         db,
         job.id,
@@ -238,10 +238,8 @@ def _claim_dispatch_job(db, *, request_id: int, mb_release_id: str,
             worker=ProcessIdentity(pid=7002, start_ticks=70002),
         )
     )
-    claimed = db.claim_next_import_job(
-        worker_id="integration-dispatch",
-        execution_lease=execution_lease,
-    )
+    claimed = claim_next_import_job(db, worker_id="integration-dispatch",
+    execution_lease=execution_lease,)
     assert claimed is not None and claimed.id == job.id
     return claimed, execution_lease
 
@@ -1908,8 +1906,7 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         self.assertEqual(recovered.status, "recovery_required")
         self.assertEqual(db.request(42)["status"], "processing")
         self.assertEqual(db.download_logs, [])
-        self.assertIsNone(db.claim_next_import_job(
-            worker_id="automatic-replay"))
+        self.assertIsNone(claim_next_import_job(db, worker_id="automatic-replay"))
 
     def test_timeout_after_launch_requires_operator_recovery(self):
         import subprocess as sp
@@ -1974,8 +1971,7 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         self.assertEqual(recovered.status, "recovery_required")
         self.assertEqual(db.request(42)["status"], "processing")
         self.assertEqual(db.download_logs, [])
-        self.assertIsNone(db.claim_next_import_job(
-            worker_id="automatic-replay"))
+        self.assertIsNone(claim_next_import_job(db, worker_id="automatic-replay"))
 
     def test_exception_after_launch_requires_operator_recovery(self):
         from lib.dispatch import dispatch_import_core
@@ -2038,8 +2034,7 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         self.assertEqual(recovered.status, "recovery_required")
         self.assertEqual(db.request(42)["status"], "processing")
         self.assertEqual(db.download_logs, [])
-        self.assertIsNone(db.claim_next_import_job(
-            worker_id="automatic-replay"))
+        self.assertIsNone(claim_next_import_job(db, worker_id="automatic-replay"))
 
     def test_post_result_exception_requires_operator_recovery(self):
         from lib.dispatch import dispatch_import_core
@@ -2132,8 +2127,7 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         self.assertEqual(recovered.status, "recovery_required")
         self.assertEqual(db.request(42)["status"], "processing")
         self.assertEqual(db.download_logs, [])
-        self.assertIsNone(db.claim_next_import_job(
-            worker_id="automatic-replay"))
+        self.assertIsNone(claim_next_import_job(db, worker_id="automatic-replay"))
 
 
 class TestForceImportSlice(unittest.TestCase):
@@ -2195,7 +2189,7 @@ class TestForceImportSlice(unittest.TestCase):
                 job.id,
                 preview_result={"ready": True},
             )
-            claimed = db.claim_next_import_job(worker_id="force-slice")
+            claimed = claim_next_import_job(db, worker_id="force-slice")
             assert claimed is not None and claimed.id == job.id
             _seed_current_for_request(
                 db, 42,
@@ -2292,7 +2286,7 @@ class TestForceImportSlice(unittest.TestCase):
                 job.id,
                 preview_result={"ready": True},
             )
-            claimed = db.claim_next_import_job(worker_id="force-path-slice")
+            claimed = claim_next_import_job(db, worker_id="force-path-slice")
             assert claimed is not None and claimed.id == job.id
             _seed_current_for_request(
                 db, 833,
@@ -5628,7 +5622,7 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                     source_username="alice",
                 ),
             )
-            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            claimed = claim_next_import_preview_job(db, worker_id="preview")
             assert claimed is not None
 
             sentinels = {
@@ -5701,9 +5695,7 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                 updated.preview_result["import_result"]
             )
             self.assertEqual(preview_ir.spectral, audit)
-            import_claimed = db.claim_next_import_job(
-                worker_id="front-gate-importer"
-            )
+            import_claimed = claim_next_import_job(db, worker_id="front-gate-importer")
             assert import_claimed is not None and import_claimed.id == claimed.id
 
             ir = make_import_result(decision="import", new_min_bitrate=245)
@@ -5768,10 +5760,8 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
                 canonical_path=staged,
             )
             lease = _preview_execution_lease()
-            claimed = db.claim_next_import_preview_job(
-                worker_id="preview",
-                execution_lease=lease,
-            )
+            claimed = claim_next_import_preview_job(db, worker_id="preview",
+            execution_lease=lease,)
             assert claimed is not None
             authority = import_preview_worker._AutomationPreviewAuthority(
                 request=db.request(42),
@@ -5909,7 +5899,7 @@ class TestImporterRequeueToPreviewSlice(unittest.TestCase):
             )
 
             # Step 2: importer claims.
-            claimed = db.claim_next_import_job(worker_id="importer-1")
+            claimed = claim_next_import_job(db, worker_id="importer-1")
             assert claimed is not None
             self.assertEqual(claimed.status, "running")
 
@@ -5935,9 +5925,7 @@ class TestImporterRequeueToPreviewSlice(unittest.TestCase):
             self.assertIsNone(row["worker_id"])
 
             # Step 4: preview claims the requeued row.
-            preview_claimed = db.claim_next_import_preview_job(
-                worker_id="preview-1"
-            )
+            preview_claimed = claim_next_import_preview_job(db, worker_id="preview-1")
             assert preview_claimed is not None
             self.assertEqual(preview_claimed.id, job.id)
             self.assertEqual(preview_claimed.preview_status, "running")
@@ -5965,7 +5953,7 @@ class TestImporterRequeueToPreviewSlice(unittest.TestCase):
             )
 
             # Step 6: importer claims again — this time evidence exists.
-            second_claim = db.claim_next_import_job(worker_id="importer-2")
+            second_claim = claim_next_import_job(db, worker_id="importer-2")
             assert second_claim is not None
             self.assertEqual(second_claim.id, job.id)
             self.assertEqual(second_claim.status, "running")
@@ -5998,10 +5986,8 @@ class TestRecordPreviewMeasurementFailedSlice(unittest.TestCase):
         from scripts.importer import _complete_automation_processing_cleanup
 
         lease = _preview_execution_lease(f"measurement-preview-{job.id}")
-        claimed = db.claim_next_import_preview_job(
-            worker_id="measurement-preview",
-            execution_lease=lease,
-        )
+        claimed = claim_next_import_preview_job(db, worker_id="measurement-preview",
+        execution_lease=lease,)
         assert claimed is not None and claimed.id == job.id
         token = CancellationToken()
         with db._pin_owner_session(token) as owner_session_identity:
@@ -6242,7 +6228,7 @@ class TestU5PreviewWorkerLifecycleSlice(unittest.TestCase):
                 source_username="alice",
             ),
         )
-        return db.claim_next_import_preview_job(worker_id="preview")
+        return claim_next_import_preview_job(db, worker_id="preview")
 
     def test_ae6_source_vanished_preserves_operator_status(self):
         """AE6: ffmpeg ENOENT during measurement → measurement_failed,
@@ -6406,7 +6392,7 @@ class TestU5PreviewWorkerLifecycleSlice(unittest.TestCase):
         )
 
         self.assertIsNone(
-            db.claim_next_import_preview_job(worker_id="preview"),
+            claim_next_import_preview_job(db, worker_id="preview"),
         )
         current = db.get_import_job(orphan.id)
         assert current is not None
@@ -6462,7 +6448,7 @@ class TestU5PreviewEvidenceReadySlice(unittest.TestCase):
                     source_username="alice",
                 ),
             )
-            claimed = db.claim_next_import_preview_job(worker_id="preview")
+            claimed = claim_next_import_preview_job(db, worker_id="preview")
             assert claimed is not None
             cfg = CratediggerConfig(
                 beets_staging_dir=staging_dir,
@@ -7262,10 +7248,8 @@ class TestU7RecoverySweepSlice(unittest.TestCase):
 
         # Now the live preview-worker claim query must select this row.
         execution_lease = _preview_execution_lease("u7-test-preview")
-        claimed = self.db.claim_next_import_preview_job(
-            worker_id="u7-test-worker",
-            execution_lease=execution_lease,
-        )
+        claimed = claim_next_import_preview_job(self.db, worker_id="u7-test-worker",
+        execution_lease=execution_lease,)
         # There may be other 'waiting' jobs from parallel tests in a shared
         # DSN; if so we keep claiming until we find ours, but the contract is
         # that our row IS claimable. We bound the loop at a small constant.
@@ -7278,10 +7262,8 @@ class TestU7RecoverySweepSlice(unittest.TestCase):
             if claimed.id == job_id:
                 found = True
                 break
-            claimed = self.db.claim_next_import_preview_job(
-                worker_id="u7-test-worker",
-                execution_lease=execution_lease,
-            )
+            claimed = claim_next_import_preview_job(self.db, worker_id="u7-test-worker",
+            execution_lease=execution_lease,)
         self.assertTrue(
             found,
             f"claim_next_import_preview_job did not surface job {job_id}; "
@@ -7410,13 +7392,15 @@ class TestProcessingOwnerPostgresFilesystemSlice(unittest.TestCase):
         preview_lease = _preview_execution_lease(
             f"integration-real-preview-{job.id}",
         )
-        candidate = self.db.peek_next_import_preview_job(
+        candidates = self.db.peek_import_preview_job_candidates(
             execution_lease=preview_lease,
+            limit=1,
         )
-        assert candidate is not None, (
+        assert candidates, (
             self.db.get_request(request_id),
             self.db.get_import_job(job.id),
         )
+        candidate = candidates[0]
         self.assertEqual(candidate.id, job.id)
 
         def measured_candidate(
@@ -7514,10 +7498,12 @@ class TestProcessingOwnerPostgresFilesystemSlice(unittest.TestCase):
                 self._handoff_through_preview(root)
             )
             importer_lease = self._importer_lease(job.id)
-            candidate = self.db.peek_next_import_job(
+            candidates = self.db.peek_import_job_candidates(
                 execution_lease=importer_lease,
+                limit=1,
             )
-            assert candidate is not None
+            assert candidates
+            candidate = candidates[0]
             self.assertEqual(candidate.id, job.id)
 
             # The same real PostgreSQL slice rejects an adjacent job id before
@@ -7859,7 +7845,7 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                 source_username="alice",
             ),
         )
-        claimed = db.claim_next_import_preview_job(worker_id="preview")
+        claimed = claim_next_import_preview_job(db, worker_id="preview")
         assert claimed is not None
         return claimed, log_id
 

@@ -29,6 +29,8 @@ from scripts.importer import _execution_lease_from_job, process_claimed_job
 from tests.beets_world import BeetsWorld
 from tests.fakes import FakePipelineDB
 from tests.helpers import (
+    claim_next_import_job,
+    claim_next_import_preview_job,
     handoff_automation_owner,
     make_album_quality_evidence,
     make_import_result,
@@ -159,10 +161,8 @@ def _exercise_world(
     importer_lease: ExecutionLeaseSnapshot | None = None
     if world.job_type == IMPORT_JOB_AUTOMATION:
         preview_lease = _execution_lease(job.id, lane="preview")
-        preview_claim = db.claim_next_import_preview_job(
-            worker_id="generated-preview-worker",
-            execution_lease=preview_lease,
-        )
+        preview_claim = claim_next_import_preview_job(db, worker_id="generated-preview-worker",
+        execution_lease=preview_lease,)
         assert preview_claim is not None and preview_claim.id == job.id
         assert db.set_import_job_candidate_evidence(
             job.id,
@@ -181,10 +181,8 @@ def _exercise_world(
             job.id,
             preview_result={"ready": True},
         )
-    claimed = db.claim_next_import_job(
-        worker_id="generated-worker",
-        execution_lease=importer_lease,
-    )
+    claimed = claim_next_import_job(db, worker_id="generated-worker",
+    execution_lease=importer_lease,)
     assert claimed is not None
     if world.job_type == IMPORT_JOB_AUTOMATION:
         importer_lease = _execution_lease_from_job(claimed)
@@ -299,12 +297,10 @@ def _exercise_world(
             recovery_message="operator recovery required",
         )
     if world.job_type == IMPORT_JOB_AUTOMATION:
-        replay = db.claim_next_import_job(
-            worker_id="automatic-import-replay",
-            execution_lease=_execution_lease(claimed.id, lane="importer-replay"),
-        )
+        replay = claim_next_import_job(db, worker_id="automatic-import-replay",
+        execution_lease=_execution_lease(claimed.id, lane="importer-replay"),)
     else:
-        replay = db.claim_next_import_job(worker_id="automatic-replay")
+        replay = claim_next_import_job(db, worker_id="automatic-replay")
     replay_claimed = replay is not None
 
     final = db.get_import_job(claimed.id)

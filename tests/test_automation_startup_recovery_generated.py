@@ -22,7 +22,12 @@ from lib.import_execution import (
 )
 from lib.import_queue import IMPORT_JOB_AUTOMATION, IMPORT_JOB_FORCE
 from tests.fakes import FakePipelineDB
-from tests.helpers import handoff_automation_owner, make_request_row
+from tests.helpers import (
+    claim_next_import_job,
+    claim_next_import_preview_job,
+    handoff_automation_owner,
+    make_request_row,
+)
 
 Lane = Literal["preview", "import"]
 
@@ -67,10 +72,8 @@ def _owner_with_dead_execution(
         canonical_path="/processing/albums/generated-startup-owner",
     )
     preview_lease = _lease("preview")
-    claimed = db.claim_next_import_preview_job(
-        worker_id="generated-preview",
-        execution_lease=preview_lease,
-    )
+    claimed = claim_next_import_preview_job(db, worker_id="generated-preview",
+    execution_lease=preview_lease,)
     if claimed is None:
         raise AssertionError("generated preview owner was not claimable")
     if lane == "preview":
@@ -81,10 +84,8 @@ def _owner_with_dead_execution(
         expected_execution_lease=preview_lease,
     ) is None:
         raise AssertionError("generated owner did not finish preview")
-    claimed = db.claim_next_import_job(
-        worker_id="generated-importer",
-        execution_lease=_lease("import"),
-    )
+    claimed = claim_next_import_job(db, worker_id="generated-importer",
+    execution_lease=_lease("import"),)
     if claimed is None:
         raise AssertionError("generated import owner was not claimable")
     return db, owner.id

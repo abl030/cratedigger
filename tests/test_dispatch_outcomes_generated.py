@@ -73,6 +73,8 @@ from lib.quality_evidence import snapshot_audio_files
 from tests.beets_world import BeetsWorld
 from tests.fakes import DownloadLogRow, FakePipelineDB
 from tests.helpers import (
+    claim_next_import_job,
+    claim_next_import_preview_job,
     finalize_claimed_dispatch,
     handoff_automation_owner,
     make_album_quality_evidence,
@@ -294,10 +296,8 @@ def _run_dispatch(
                 canonical_path=tmpdir,
             )
             preview_lease = _preview_lease(job.id)
-            claimed_preview = db.claim_next_import_preview_job(
-                worker_id="generated-dispatch-preview",
-                execution_lease=preview_lease,
-            )
+            claimed_preview = claim_next_import_preview_job(db, worker_id="generated-dispatch-preview",
+            execution_lease=preview_lease,)
             assert claimed_preview is not None
         with open(os.path.join(tmpdir, "01 - Track.mp3"), "wb") as handle:
             handle.write(b"generated fixture audio")
@@ -323,10 +323,8 @@ def _run_dispatch(
             expected_execution_lease=preview_lease,
         )
         execution_lease = None if force else _importer_lease(job.id)
-        claimed = db.claim_next_import_job(
-            worker_id="generated-dispatch",
-            execution_lease=execution_lease,
-        )
+        claimed = claim_next_import_job(db, worker_id="generated-dispatch",
+        execution_lease=execution_lease,)
         assert claimed is not None
         import_job_id = claimed.id
         candidate_result = CandidateEvidenceActionResult(
@@ -693,10 +691,8 @@ def _run_have_analysis_abort(
                 canonical_path=tmpdir,
             )
             preview_lease = _preview_lease(job.id)
-            claimed_preview = db.claim_next_import_preview_job(
-                worker_id="generated-have-preview",
-                execution_lease=preview_lease,
-            )
+            claimed_preview = claim_next_import_preview_job(db, worker_id="generated-have-preview",
+            execution_lease=preview_lease,)
             assert claimed_preview is not None
         else:
             job = db.enqueue_import_job(
@@ -729,10 +725,8 @@ def _run_have_analysis_abort(
                 expected_execution_lease=preview_lease,
             )
             execution_lease = _importer_lease(job.id)
-            claimed = db.claim_next_import_job(
-                worker_id="generated-have-importer",
-                execution_lease=execution_lease,
-            )
+            claimed = claim_next_import_job(db, worker_id="generated-have-importer",
+            execution_lease=execution_lease,)
             assert claimed is not None
         candidate_result = CandidateEvidenceActionResult(
             evidence=persisted,

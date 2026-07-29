@@ -38,6 +38,8 @@ from tests.fakes import (
     RecordingProcessAlbum,
 )
 from tests.helpers import (
+    claim_next_import_job,
+    claim_next_import_preview_job,
     handoff_automation_owner,
     make_album_quality_evidence,
     make_ctx_with_fake_db,
@@ -3702,7 +3704,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             message="ready",
         )
 
-        claimed = db.claim_next_import_job(worker_id="fake-worker")
+        claimed = claim_next_import_job(db, worker_id="fake-worker")
         assert claimed is not None
         self.assertEqual(claimed.status, "running")
         self.assertEqual(claimed.attempts, 1)
@@ -3716,7 +3718,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         self.assertEqual(requeued[0].status, "queued")
         self.assertIsNone(requeued[0].worker_id)
 
-        claimed = db.claim_next_import_job(worker_id="fake-worker-2")
+        claimed = claim_next_import_job(db, worker_id="fake-worker-2")
         assert claimed is not None
         self.assertEqual(claimed.status, "running")
         self.assertEqual(claimed.attempts, 2)
@@ -3775,11 +3777,9 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             worker=ProcessIdentity(pid=102, start_ticks=1002),
         )
 
-        self.assertIsNone(db.claim_next_import_preview_job(worker_id="no-lease"))
-        claimed_preview = db.claim_next_import_preview_job(
-            worker_id="preview",
-            execution_lease=preview_lease,
-        )
+        self.assertIsNone(claim_next_import_preview_job(db, worker_id="no-lease"))
+        claimed_preview = claim_next_import_preview_job(db, worker_id="preview",
+        execution_lease=preview_lease,)
         assert claimed_preview is not None
         self.assertEqual(
             claimed_preview.execution_invocation_id,
@@ -3818,10 +3818,8 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             systemd_unit="cratedigger-importer.service",
             worker=ProcessIdentity(pid=201, start_ticks=2001),
         )
-        claimed_import = db.claim_next_import_job(
-            worker_id="importer",
-            execution_lease=importer_lease,
-        )
+        claimed_import = claim_next_import_job(db, worker_id="importer",
+        execution_lease=importer_lease,)
         assert claimed_import is not None
         self.assertFalse(db.heartbeat_import_job(
             job.id,
@@ -3889,10 +3887,8 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             systemd_unit="cratedigger-import-preview.service",
             worker=ProcessIdentity(pid=301, start_ticks=3001),
         )
-        assert db.claim_next_import_preview_job(
-            worker_id="preview",
-            execution_lease=preview_lease,
-        ) is not None
+        assert claim_next_import_preview_job(db, worker_id="preview",
+        execution_lease=preview_lease,) is not None
         evidence = make_album_quality_evidence(
             mb_release_id="fake-launch-lease",
             source_path="/processing/albums/fake-launch-lease",
@@ -3918,10 +3914,8 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             systemd_unit="cratedigger-importer.service",
             worker=ProcessIdentity(pid=401, start_ticks=4001),
         )
-        assert db.claim_next_import_job(
-            worker_id="importer",
-            execution_lease=importer_lease,
-        ) is not None
+        assert claim_next_import_job(db, worker_id="importer",
+        execution_lease=importer_lease,) is not None
         self.assertIsNotNone(db.authorize_import_job_launch(
             job.id,
             request_id=43,
@@ -3955,10 +3949,8 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         )
         assert recovered is not None
         self.assertEqual(recovered.status, "recovery_required")
-        self.assertIsNone(db.claim_next_import_job(
-            worker_id="must-not-replay",
-            execution_lease=importer_lease,
-        ))
+        self.assertIsNone(claim_next_import_job(db, worker_id="must-not-replay",
+        execution_lease=importer_lease,))
 
     def test_automation_startup_recovery_requires_exact_dead_proof(self):
         from lib.import_execution import (
@@ -3981,10 +3973,8 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             systemd_unit="cratedigger-import-preview.service",
             worker=ProcessIdentity(pid=501, start_ticks=5001),
         )
-        assert db.claim_next_import_preview_job(
-            worker_id="preview",
-            execution_lease=lease,
-        ) is not None
+        assert claim_next_import_preview_job(db, worker_id="preview",
+        execution_lease=lease,) is not None
 
         exact_evidence = ExecutionLivenessEvidence(
             lease=lease,
@@ -4080,7 +4070,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             job.id,
             preview_result={"action_path": "/processing/albums/force-action-1"},
         )
-        claimed = db.claim_next_import_job(worker_id="fake-recovery")
+        claimed = claim_next_import_job(db, worker_id="fake-recovery")
         assert claimed is not None
         assert db.authorize_import_job_launch(
             claimed.id,
@@ -4122,7 +4112,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             preview_result={"verdict": "would_import"},
             message="ready",
         )
-        claimed = db.claim_next_import_job(worker_id="importer")
+        claimed = claim_next_import_job(db, worker_id="importer")
         assert claimed is not None
         self.assertEqual(claimed.status, "running")
         prior_attempts = claimed.attempts
@@ -4147,7 +4137,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         self.assertEqual(updated.preview_attempts, prior_preview_attempts)
 
         # Now claimable by preview.
-        preview = db.claim_next_import_preview_job(worker_id="preview-1")
+        preview = claim_next_import_preview_job(db, worker_id="preview-1")
         assert preview is not None
         self.assertEqual(preview.id, claimed.id)
 
@@ -4185,8 +4175,8 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         self.assertIsNone(queued.preview_completed_at)
         self.assertIsNone(queued.importable_at)
         # Preview worker can claim it; importer cannot.
-        self.assertIsNone(db.claim_next_import_job(worker_id="importer"))
-        claimed = db.claim_next_import_preview_job(worker_id="preview")
+        self.assertIsNone(claim_next_import_job(db, worker_id="importer"))
+        claimed = claim_next_import_preview_job(db, worker_id="preview")
         assert claimed is not None
         self.assertEqual(claimed.id, queued.id)
 
@@ -4299,7 +4289,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         )
         self.assertEqual(queued.preview_status, "waiting")
 
-        claimed = db.claim_next_import_preview_job(worker_id="fake-preview")
+        claimed = claim_next_import_preview_job(db, worker_id="fake-preview")
         assert claimed is not None
         self.assertEqual(claimed.status, "queued")
         self.assertEqual(claimed.preview_status, "running")
@@ -5299,7 +5289,7 @@ class TestFakeActiveImportJobsForWrongMatch(unittest.TestCase):
             preview_result={"verdict": "would_import"},
             message="ok",
         )
-        claimed = db.claim_next_import_job(worker_id="w")
+        claimed = claim_next_import_job(db, worker_id="w")
         assert claimed is not None
         db.mark_import_job_completed(claimed.id, result={"ok": True})
 

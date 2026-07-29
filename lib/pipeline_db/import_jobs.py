@@ -14,7 +14,6 @@ from lib.import_execution import (
 )
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
-    IMPORT_JOB_FORCE,
     IMPORT_JOB_PREVIEW_WAITING,
     AutomationHandoffResult,
     ForceImportPayload,
@@ -683,53 +682,6 @@ class _ImportJobsMixin(_PipelineDBBase):
         ]
 
 
-    def peek_next_import_job(
-        self,
-        *,
-        execution_lease: ExecutionLeaseSnapshot | None = None,
-    ) -> ImportJob | None:
-        """Select the next import candidate without creating execution state."""
-        candidates = self.peek_import_job_candidates(
-            execution_lease=execution_lease,
-            limit=1,
-        )
-        return candidates[0] if candidates else None
-
-
-    def claim_next_import_job(
-        self,
-        *,
-        worker_id: str | None = None,
-        execution_lease: ExecutionLeaseSnapshot | None = None,
-    ) -> ImportJob | None:
-        candidate = self.peek_next_import_job(
-            execution_lease=execution_lease,
-        )
-        if candidate is None:
-            return None
-        if candidate.job_type == IMPORT_JOB_AUTOMATION:
-            if execution_lease is None or candidate.request_id is None:
-                return None
-            return self._claim_automation_import_job(
-                candidate.id,
-                request_id=candidate.request_id,
-                worker_id=worker_id,
-                execution_lease=execution_lease,
-            )
-        if candidate.job_type == IMPORT_JOB_FORCE:
-            if candidate.request_id is None:
-                return None
-            return self._claim_force_import_job(
-                candidate.id,
-                request_id=candidate.request_id,
-                worker_id=worker_id,
-            )
-        return self.claim_import_job_candidate(
-            candidate.id,
-            worker_id=worker_id,
-        )
-
-
     def claim_import_job_candidate(
         self,
         job_id: int,
@@ -753,27 +705,6 @@ class _ImportJobsMixin(_PipelineDBBase):
         """, (worker_id, job_id))
         row = cur.fetchone()
         return ImportJob.from_row(dict(row)) if row else None
-
-
-    def _claim_force_import_job(
-        self,
-        job_id: int,
-        *,
-        request_id: int,
-        worker_id: str | None,
-    ) -> ImportJob | None:
-        """Claim one force import in IMPORT -> request -> job order."""
-        with self.advisory_lock(
-            ADVISORY_LOCK_NAMESPACE_IMPORT,
-            request_id,
-        ) as acquired:
-            if not acquired:
-                return None
-            return self.claim_force_import_job_under_lock(
-                job_id,
-                request_id=request_id,
-                worker_id=worker_id,
-            )
 
 
     def claim_force_import_job_under_lock(
@@ -828,29 +759,6 @@ class _ImportJobsMixin(_PipelineDBBase):
                 return None
             self.conn.commit()
             return ImportJob.from_row(dict(row))
-
-
-    def _claim_automation_import_job(
-        self,
-        job_id: int,
-        *,
-        request_id: int,
-        worker_id: str | None,
-        execution_lease: ExecutionLeaseSnapshot,
-    ) -> ImportJob | None:
-        """Claim one processing owner in IMPORT -> request -> job order."""
-        with self.advisory_lock(
-            ADVISORY_LOCK_NAMESPACE_IMPORT,
-            request_id,
-        ) as acquired:
-            if not acquired:
-                return None
-            return self.claim_automation_import_job_under_lock(
-                job_id,
-                request_id=request_id,
-                worker_id=worker_id,
-                execution_lease=execution_lease,
-            )
 
 
     def claim_automation_import_job_under_lock(
@@ -2230,53 +2138,6 @@ class _ImportJobsMixin(_PipelineDBBase):
         ]
 
 
-    def peek_next_import_preview_job(
-        self,
-        *,
-        execution_lease: ExecutionLeaseSnapshot | None = None,
-    ) -> ImportJob | None:
-        """Select the next preview candidate without creating execution state."""
-        candidates = self.peek_import_preview_job_candidates(
-            execution_lease=execution_lease,
-            limit=1,
-        )
-        return candidates[0] if candidates else None
-
-
-    def claim_next_import_preview_job(
-        self,
-        *,
-        worker_id: str | None = None,
-        execution_lease: ExecutionLeaseSnapshot | None = None,
-    ) -> ImportJob | None:
-        candidate = self.peek_next_import_preview_job(
-            execution_lease=execution_lease,
-        )
-        if candidate is None:
-            return None
-        if candidate.job_type == IMPORT_JOB_AUTOMATION:
-            if execution_lease is None or candidate.request_id is None:
-                return None
-            return self._claim_automation_import_preview_job(
-                candidate.id,
-                request_id=candidate.request_id,
-                worker_id=worker_id,
-                execution_lease=execution_lease,
-            )
-        if candidate.job_type == IMPORT_JOB_FORCE:
-            if candidate.request_id is None:
-                return None
-            return self._claim_force_import_preview_job(
-                candidate.id,
-                request_id=candidate.request_id,
-                worker_id=worker_id,
-            )
-        return self.claim_import_preview_job_candidate(
-            candidate.id,
-            worker_id=worker_id,
-        )
-
-
     def claim_import_preview_job_candidate(
         self,
         job_id: int,
@@ -2302,27 +2163,6 @@ class _ImportJobsMixin(_PipelineDBBase):
         """, (worker_id, job_id))
         row = cur.fetchone()
         return ImportJob.from_row(dict(row)) if row else None
-
-
-    def _claim_force_import_preview_job(
-        self,
-        job_id: int,
-        *,
-        request_id: int,
-        worker_id: str | None,
-    ) -> ImportJob | None:
-        """Claim one force preview in IMPORT -> request -> job order."""
-        with self.advisory_lock(
-            ADVISORY_LOCK_NAMESPACE_IMPORT,
-            request_id,
-        ) as acquired:
-            if not acquired:
-                return None
-            return self.claim_force_import_preview_job_under_lock(
-                job_id,
-                request_id=request_id,
-                worker_id=worker_id,
-            )
 
 
     def claim_force_import_preview_job_under_lock(
@@ -2382,29 +2222,6 @@ class _ImportJobsMixin(_PipelineDBBase):
                 return None
             self.conn.commit()
             return ImportJob.from_row(dict(row))
-
-
-    def _claim_automation_import_preview_job(
-        self,
-        job_id: int,
-        *,
-        request_id: int,
-        worker_id: str | None,
-        execution_lease: ExecutionLeaseSnapshot,
-    ) -> ImportJob | None:
-        """Claim one preview owner in IMPORT -> request -> job order."""
-        with self.advisory_lock(
-            ADVISORY_LOCK_NAMESPACE_IMPORT,
-            request_id,
-        ) as acquired:
-            if not acquired:
-                return None
-            return self.claim_automation_import_preview_job_under_lock(
-                job_id,
-                request_id=request_id,
-                worker_id=worker_id,
-                execution_lease=execution_lease,
-            )
 
 
     def claim_automation_import_preview_job_under_lock(

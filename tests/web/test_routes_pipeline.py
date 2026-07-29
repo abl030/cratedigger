@@ -27,7 +27,11 @@ from web.classify import ClassifiedEntry, LogEntry, classify_log_entry
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from tests.fakes import FakeBeetsDB
-from tests.helpers import handoff_automation_owner, make_request_row
+from tests.helpers import (
+    claim_next_import_job,
+    handoff_automation_owner,
+    make_request_row,
+)
 from tests.web._harness import (
     _assert_required_fields,
     _FakeDbWebServerCase,
@@ -2022,7 +2026,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(data["outcome"], "closed")
         self.assertEqual(data["job"]["status"], "failed")
         self.assertIsNone(data["retry_job"])
-        self.assertIsNone(self.db.claim_next_import_job(worker_id="replay"))
+        self.assertIsNone(claim_next_import_job(self.db, worker_id="replay"))
 
     def test_import_job_recovery_retry_mints_new_operation(self):
         job_id = self._enqueue_force_job()

@@ -36,6 +36,7 @@ from lib.pipeline_db import AlbumRequestRow, TransferLedgerRow
 from lib.slskd_client import TransferSnapshot
 from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
 from tests.helpers import (
+    claim_next_import_preview_job,
     handoff_automation_owner,
     make_album_quality_evidence,
     make_ctx_with_fake_db,
@@ -174,10 +175,8 @@ class TestPostRejectionWrongMatchTriage(unittest.TestCase):
             systemd_unit="cratedigger-import-preview-worker.service",
             worker=ProcessIdentity(pid=4044, start_ticks=44),
         )
-        claimed = db.claim_next_import_preview_job(
-            worker_id="download-test-preview",
-            execution_lease=preview_lease,
-        )
+        claimed = claim_next_import_preview_job(db, worker_id="download-test-preview",
+        execution_lease=preview_lease,)
         assert claimed is not None and claimed.id == job.id
         self.assertTrue(db.set_import_job_candidate_evidence(
             job.id,
@@ -4907,15 +4906,13 @@ class TestPollActiveDownloads(unittest.TestCase):
         self.assertEqual(len(jobs), 1)
         self.assertEqual(jobs[0].preview_status, "waiting")
         self.assertIsNone(jobs[0].preview_message)
-        claimed = fake_db.claim_next_import_preview_job(
-            worker_id="preview",
-            execution_lease=ExecutionLeaseSnapshot(
-                host_boot_id="download-test-boot",
-                invocation_id="download-test-preview",
-                systemd_unit="cratedigger-import-preview-worker.service",
-                worker=ProcessIdentity(pid=5200, start_ticks=52),
-            ),
-        )
+        claimed = claim_next_import_preview_job(fake_db, worker_id="preview",
+        execution_lease=ExecutionLeaseSnapshot(
+            host_boot_id="download-test-boot",
+            invocation_id="download-test-preview",
+            systemd_unit="cratedigger-import-preview-worker.service",
+            worker=ProcessIdentity(pid=5200, start_ticks=52),
+        ),)
         assert claimed is not None
         self.assertEqual(claimed.id, jobs[0].id)
 

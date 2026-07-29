@@ -1488,16 +1488,6 @@ class FakePipelineDB:
         ))
         return queued
 
-    def _next_import_job_row(
-        self,
-        *,
-        execution_lease: ExecutionLeaseSnapshot | None = None,
-    ) -> dict[str, object] | None:
-        queued = self._import_job_candidate_rows(
-            execution_lease=execution_lease,
-        )
-        return queued[0] if queued else None
-
     def peek_import_job_candidates(
         self,
         *,
@@ -1515,66 +1505,6 @@ class FakePipelineDB:
                 execution_lease=execution_lease,
             )[offset:offset + limit]
         ]
-
-    def peek_next_import_job(
-        self,
-        *,
-        execution_lease: ExecutionLeaseSnapshot | None = None,
-    ) -> ImportJob | None:
-        row = self._next_import_job_row(execution_lease=execution_lease)
-        return (
-            ImportJob.from_row(copy.deepcopy(row))
-            if row is not None
-            else None
-        )
-
-    def claim_next_import_job(
-        self,
-        *,
-        worker_id: str | None = None,
-        execution_lease: ExecutionLeaseSnapshot | None = None,
-    ) -> ImportJob | None:
-        row = self._next_import_job_row(execution_lease=execution_lease)
-        if row is None:
-            return None
-        request_id = row.get("request_id")
-        job_id = row.get("id")
-        if not isinstance(job_id, int):
-            raise TypeError("fake import job row has a non-integer id")
-        if row.get("job_type") == IMPORT_JOB_AUTOMATION:
-            assert execution_lease is not None
-            if not isinstance(request_id, int):
-                return None
-            with self.advisory_lock(
-                ADVISORY_LOCK_NAMESPACE_IMPORT,
-                request_id,
-            ) as acquired:
-                if not acquired or not self._automation_job_has_authority(row):
-                    return None
-                return self.claim_automation_import_job_under_lock(
-                    job_id,
-                    request_id=request_id,
-                    worker_id=worker_id,
-                    execution_lease=execution_lease,
-                )
-        if row.get("job_type") == IMPORT_JOB_FORCE:
-            if not isinstance(request_id, int):
-                return None
-            with self.advisory_lock(
-                ADVISORY_LOCK_NAMESPACE_IMPORT,
-                request_id,
-            ) as acquired:
-                if not acquired:
-                    return None
-                return self.claim_force_import_job_under_lock(
-                    job_id,
-                    request_id=request_id,
-                    worker_id=worker_id,
-                )
-        return self.claim_import_job_candidate(
-            job_id,
-            worker_id=worker_id,
-        )
 
     def claim_import_job_candidate(
         self,
@@ -2600,16 +2530,6 @@ class FakePipelineDB:
         queued.sort(key=lambda row: (_as_datetime(row.get("created_at")), row["id"]))
         return queued
 
-    def _next_import_preview_job_row(
-        self,
-        *,
-        execution_lease: ExecutionLeaseSnapshot | None = None,
-    ) -> dict[str, object] | None:
-        queued = self._import_preview_job_candidate_rows(
-            execution_lease=execution_lease,
-        )
-        return queued[0] if queued else None
-
     def peek_import_preview_job_candidates(
         self,
         *,
@@ -2627,70 +2547,6 @@ class FakePipelineDB:
                 execution_lease=execution_lease,
             )[offset:offset + limit]
         ]
-
-    def peek_next_import_preview_job(
-        self,
-        *,
-        execution_lease: ExecutionLeaseSnapshot | None = None,
-    ) -> ImportJob | None:
-        row = self._next_import_preview_job_row(
-            execution_lease=execution_lease,
-        )
-        return (
-            ImportJob.from_row(copy.deepcopy(row))
-            if row is not None
-            else None
-        )
-
-    def claim_next_import_preview_job(
-        self,
-        *,
-        worker_id: str | None = None,
-        execution_lease: ExecutionLeaseSnapshot | None = None,
-    ) -> ImportJob | None:
-        row = self._next_import_preview_job_row(
-            execution_lease=execution_lease,
-        )
-        if row is None:
-            return None
-        request_id = row.get("request_id")
-        job_id = row.get("id")
-        if not isinstance(job_id, int):
-            raise TypeError("fake preview job row has a non-integer id")
-        if row.get("job_type") == IMPORT_JOB_AUTOMATION:
-            assert execution_lease is not None
-            if not isinstance(request_id, int):
-                return None
-            with self.advisory_lock(
-                ADVISORY_LOCK_NAMESPACE_IMPORT,
-                request_id,
-            ) as acquired:
-                if not acquired or not self._automation_job_has_authority(row):
-                    return None
-                return self.claim_automation_import_preview_job_under_lock(
-                    job_id,
-                    request_id=request_id,
-                    worker_id=worker_id,
-                    execution_lease=execution_lease,
-                )
-        if row.get("job_type") == IMPORT_JOB_FORCE:
-            if not isinstance(request_id, int):
-                return None
-            with self.advisory_lock(
-                ADVISORY_LOCK_NAMESPACE_IMPORT,
-                request_id,
-            ) as acquired:
-                if not acquired:
-                    return None
-                return self.claim_force_import_preview_job_under_lock(
-                    job_id,
-                    request_id=request_id,
-                    worker_id=worker_id,
-                )
-        return self.claim_import_preview_job_candidate(
-            job_id,
-            worker_id=worker_id,
-        )
 
     def claim_import_preview_job_candidate(
         self,

@@ -117,6 +117,8 @@ from scripts.import_preview_worker import (
 )
 from tests.beets_world import BeetsWorld, BeetsWorldRelease
 from tests.helpers import (
+    claim_next_import_job,
+    claim_next_import_preview_job,
     finalize_claimed_dispatch,
     handoff_automation_owner,
     make_album_quality_evidence,
@@ -793,10 +795,8 @@ class LifecycleWorld:
             if pending.job_type == IMPORT_JOB_AUTOMATION
             else None
         )
-        claimed = self.db.claim_next_import_preview_job(
-            worker_id="world-preview",
-            execution_lease=execution_lease,
-        )
+        claimed = claim_next_import_preview_job(self.db, worker_id="world-preview",
+        execution_lease=execution_lease,)
         if claimed is None or claimed.id != import_job_id:
             raise AssertionError("world preview job was not claimable")
         evidence_bound = self.db.set_import_job_candidate_evidence(
@@ -1195,10 +1195,8 @@ class LifecycleWorld:
             import_job.id,
             lane="importer",
         )
-        claimed_job = self.db.claim_next_import_job(
-            worker_id="world-model",
-            execution_lease=importer_lease,
-        )
+        claimed_job = claim_next_import_job(self.db, worker_id="world-model",
+        execution_lease=importer_lease,)
         if claimed_job is None or claimed_job.id != import_job.id:
             raise AssertionError("world automation import job was not claimable")
         cancellation_token = CancellationToken()
@@ -1425,7 +1423,7 @@ class LifecycleWorld:
             download_log_id=download_log_id,
             verified_lossless_proof=proof,
         )
-        claimed_job = self.db.claim_next_import_job(worker_id="world-model")
+        claimed_job = claim_next_import_job(self.db, worker_id="world-model")
         if claimed_job is None or claimed_job.id != import_job.id:
             raise AssertionError("world force-import job was not claimable")
         raw_previous_min_bitrate = row.get("min_bitrate")

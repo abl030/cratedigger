@@ -20,7 +20,7 @@ from lib.terminal_outcomes import (
     TerminalDownloadAudit,
 )
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_request_row
+from tests.helpers import claim_next_import_job, make_request_row
 from tests.test_pipeline_db import TEST_DSN, requires_postgres
 from tests.test_terminal_outcomes import (
     FaultInjectingPipelineDB,
@@ -198,7 +198,7 @@ class TestTerminalOutcomeGenerated(unittest.TestCase):
             payload={"download_log_id": 1, "failed_path": "/tmp/generated"},
         )
         db.mark_import_job_preview_importable(job.id, preview_result={})
-        claimed = db.claim_next_import_job(worker_id="generated-stop")
+        claimed = claim_next_import_job(db, worker_id="generated-stop")
         assert claimed is not None
         db.persist_import_terminal_outcome(ImportTerminalOutcome(
             request_id=42,
@@ -324,7 +324,7 @@ class TestTerminalOutcomeGenerated(unittest.TestCase):
             payload={"download_log_id": 1, "failed_path": "/tmp/generated"},
         )
         db.mark_import_job_preview_importable(job.id, preview_result={})
-        claimed = db.claim_next_import_job(worker_id="generated-stop")
+        claimed = claim_next_import_job(db, worker_id="generated-stop")
         assert claimed is not None
         fields: dict[str, object] = {
             "search_filetype_override": search_override,
@@ -406,7 +406,7 @@ class TestTerminalOutcomeGenerated(unittest.TestCase):
                     job.id,
                     preview_result={"ready": True},
                 )
-                claimed = db.claim_next_import_job(worker_id="generated")
+                claimed = claim_next_import_job(db, worker_id="generated")
                 assert claimed is not None
 
                 before = TerminalSnapshot(False, False, False, False, False)

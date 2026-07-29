@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import unittest
 from contextlib import contextmanager
-from typing import Any
 
 from hypothesis import example, given
 from hypothesis import strategies as st
@@ -26,7 +25,7 @@ from lib.import_queue import (
 )
 from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_IMPORT
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_request_row
+from tests.helpers import claim_next_import_job, make_request_row
 
 
 def assert_only_evidence_ready_is_claimable(
@@ -52,7 +51,7 @@ def _claimed_for(preview_status: str) -> bool:
         payload={"download_log_id": 663, "failed_path": "/tmp/663"},
     )
     db._import_jobs[0]["preview_status"] = preview_status
-    return db.claim_next_import_job(worker_id="generated") is not None
+    return claim_next_import_job(db, worker_id="generated") is not None
 
 
 def _unavailable_execution_lease(
@@ -220,8 +219,8 @@ class TestImportJobRunnableLifecycleGenerated(unittest.TestCase):
             observed.append(claimed.request_id)
             return claimed
 
+        import_cursor = importer._CandidateScanCursor()
         if lane == "import":
-            import_cursor = importer._CandidateScanCursor()
             for _poll in range(2):
                 importer.run_once(
                     db,  # pyright: ignore[reportArgumentType]
@@ -434,28 +433,29 @@ class TestImportJobRunnableLifecycleGenerated(unittest.TestCase):
             observed.append(claimed.request_id)
             return claimed
 
-        cursor: Any
+        import_cursor = importer._CandidateScanCursor()
+        preview_cursor = import_preview_worker._CandidateScanCursor()
         if lane == "import":
-            cursor = importer._CandidateScanCursor()
             importer.run_once(
                 db,  # pyright: ignore[reportArgumentType]
                 worker_id="wrap-shrink-import",
                 stage_db_factory=lambda _dsn: StageSession(),
                 execution_lease_factory=_unavailable_execution_lease,
                 execute_fn=execute_import,
-                scan_cursor=cursor,
+                scan_cursor=import_cursor,
             )
+            cursor_offset = import_cursor.offset
         else:
-            cursor = import_preview_worker._CandidateScanCursor()
             import_preview_worker.run_once(
                 db,
                 worker_id="wrap-shrink-preview",
                 stage_db_factory=lambda _dsn: StageSession(),
                 execution_lease_factory=_unavailable_execution_lease,
                 process_fn=execute_preview,
-                scan_cursor=cursor,
+                scan_cursor=preview_cursor,
             )
-        self.assertEqual(cursor.offset, 32)
+            cursor_offset = preview_cursor.offset
+        self.assertEqual(cursor_offset, 32)
         self.assertEqual(observed, [])
 
         # All rows in the exhausted page disappear, then a new row arrives at
@@ -476,12 +476,12 @@ class TestImportJobRunnableLifecycleGenerated(unittest.TestCase):
             )
             mutant_page = db.peek_import_job_candidates(
                 limit=importer.IMPORT_CANDIDATE_SCAN_LIMIT,
-                offset=cursor.offset,
+                offset=import_cursor.offset,
             )
         else:
             mutant_page = db.peek_import_preview_job_candidates(
                 limit=import_preview_worker.PREVIEW_CANDIDATE_SCAN_LIMIT,
-                offset=cursor.offset,
+                offset=preview_cursor.offset,
             )
         self.assertEqual(mutant_page, [])
         with self.assertRaisesRegex(AssertionError, "bounded scan failed"):
@@ -497,7 +497,7 @@ class TestImportJobRunnableLifecycleGenerated(unittest.TestCase):
                 stage_db_factory=lambda _dsn: StageSession(),
                 execution_lease_factory=_unavailable_execution_lease,
                 execute_fn=execute_import,
-                scan_cursor=cursor,
+                scan_cursor=import_cursor,
             )
         else:
             import_preview_worker.run_once(
@@ -506,7 +506,7 @@ class TestImportJobRunnableLifecycleGenerated(unittest.TestCase):
                 stage_db_factory=lambda _dsn: StageSession(),
                 execution_lease_factory=_unavailable_execution_lease,
                 process_fn=execute_preview,
-                scan_cursor=cursor,
+                scan_cursor=preview_cursor,
             )
 
         assert_unrelated_candidate_progressed(
@@ -578,11 +578,8 @@ class TestImportJobRunnableLifecycleGenerated(unittest.TestCase):
                 observed_job_ids.append(claimed.id)
                 return claimed
 
-            cursor: Any = (
-                importer._CandidateScanCursor()
-                if lane == "import"
-                else import_preview_worker._CandidateScanCursor()
-            )
+            import_cursor = importer._CandidateScanCursor()
+            preview_cursor = import_preview_worker._CandidateScanCursor()
             for _poll in range(older_count):
                 if lane == "import":
                     importer.run_once(
@@ -590,20 +587,20 @@ class TestImportJobRunnableLifecycleGenerated(unittest.TestCase):
                         worker_id="sustained-growth-import",
                         execution_lease_factory=_unavailable_execution_lease,
                         execute_fn=execute_import,
-                        scan_cursor=cursor,
+                        scan_cursor=import_cursor,
                     )
+                    if nonzero_offset_mutant:
+                        import_cursor.offset += 1
                 else:
                     import_preview_worker.run_once(
                         db,
                         worker_id="sustained-growth-preview",
                         execution_lease_factory=_unavailable_execution_lease,
                         process_fn=execute_preview,
-                        scan_cursor=cursor,
+                        scan_cursor=preview_cursor,
                     )
-                if nonzero_offset_mutant:
-                    # Executable historical mutant: retain a nonzero offset
-                    # after success instead of revisiting older work.
-                    cursor.offset += 1
+                    if nonzero_offset_mutant:
+                        preview_cursor.offset += 1
                 for _arrival in range(arrivals_per_poll):
                     enqueue()
 
@@ -673,7 +670,7 @@ class TestImportJobRunnableLifecycleGenerated(unittest.TestCase):
             contended = True
 
             class ContendedDB:
-                def __getattr__(self, name: str) -> Any:
+                def __getattr__(self, name: str) -> object:
                     return getattr(inner, name)
 
                 def peek_import_preview_job_candidates(
@@ -734,11 +731,8 @@ class TestImportJobRunnableLifecycleGenerated(unittest.TestCase):
                 observed_job_ids.append(claimed.id)
                 return claimed
 
-            cursor: Any = (
-                importer._CandidateScanCursor()
-                if lane == "import"
-                else import_preview_worker._CandidateScanCursor()
-            )
+            import_cursor = importer._CandidateScanCursor()
+            preview_cursor = import_preview_worker._CandidateScanCursor()
 
             # One fully contended page advances to the tail.
             if lane == "import":
@@ -747,17 +741,19 @@ class TestImportJobRunnableLifecycleGenerated(unittest.TestCase):
                     worker_id="released-prefix-import",
                     execution_lease_factory=_unavailable_execution_lease,
                     execute_fn=execute_import,
-                    scan_cursor=cursor,
+                    scan_cursor=import_cursor,
                 )
+                cursor_offset = import_cursor.offset
             else:
                 import_preview_worker.run_once(
                     db,
                     worker_id="released-prefix-preview",
                     execution_lease_factory=_unavailable_execution_lease,
                     process_fn=execute_preview,
-                    scan_cursor=cursor,
+                    scan_cursor=preview_cursor,
                 )
-            assert cursor.offset == 32
+                cursor_offset = preview_cursor.offset
+            assert cursor_offset == 32
             assert observed_job_ids == []
 
             contended = False
@@ -771,21 +767,21 @@ class TestImportJobRunnableLifecycleGenerated(unittest.TestCase):
                         worker_id="released-prefix-import",
                         execution_lease_factory=_unavailable_execution_lease,
                         execute_fn=execute_import,
-                        scan_cursor=cursor,
+                        scan_cursor=import_cursor,
                     )
+                    if retain_tail_offset_mutant:
+                        import_cursor.offset = 32
                 else:
                     import_preview_worker.run_once(
                         db,
                         worker_id="released-prefix-preview",
                         execution_lease_factory=_unavailable_execution_lease,
                         process_fn=execute_preview,
-                        scan_cursor=cursor,
+                        scan_cursor=preview_cursor,
                     )
+                    if retain_tail_offset_mutant:
+                        preview_cursor.offset = 32
                 assert len(observed_job_ids) == before + 1
-                if retain_tail_offset_mutant:
-                    # Executable old offset/index behavior: tail-page index
-                    # zero leaves the cursor at 32 instead of revisiting zero.
-                    cursor.offset = 32
                 enqueue()
 
             return older_job_ids, observed_job_ids

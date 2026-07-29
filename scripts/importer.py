@@ -617,11 +617,6 @@ def execute_import_job(
         if cancellation_token is not None:
             cancellation_token.raise_if_cancelled()
         runtime_config = force_runtime_config or read_runtime_config()
-        dispatch_config: dict[str, Any] = (
-            {"cfg": runtime_config}
-            if force_runtime_config is not None
-            else {}
-        )
         action_path = _force_action_path(job)
         expected_action_path = force_action_copy_path(runtime_config, job.id)
         if (
@@ -648,7 +643,7 @@ def execute_import_job(
                 source_dirs=source_dirs,
                 import_job_id=job.id,
                 download_log_id=payload.download_log_id,
-                **dispatch_config,
+                cfg=runtime_config,
             )
         assert owner_session_identity is not None
         return force_dispatch(
@@ -662,7 +657,7 @@ def execute_import_job(
             download_log_id=payload.download_log_id,
             cancellation_token=cancellation_token,
             owner_session_identity=owner_session_identity,
-            **dispatch_config,
+            cfg=runtime_config,
         )
 
     if job.job_type == IMPORT_JOB_AUTOMATION:

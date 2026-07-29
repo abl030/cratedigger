@@ -64,7 +64,12 @@ from lib.processing_cleanup import (
 from lib.quality import ActiveDownloadState
 from lib.terminal_outcomes import automation_recovery_close_outcome
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_album_quality_evidence, make_request_row
+from tests.helpers import (
+    claim_next_import_job,
+    claim_next_import_preview_job,
+    make_album_quality_evidence,
+    make_request_row,
+)
 
 _REQUEST_ID = 898
 _RELEASE_ID = "75dbf62e-7dd2-4ddc-b57b-9bad1758b6b0"
@@ -510,10 +515,8 @@ def _launched_owner_db(
 ) -> tuple[FakePipelineDB, int, ExecutionLeaseSnapshot]:
     db, job_id = _new_owner_db(witness=witness)
     preview_lease = _execution_lease("preview", job_id, 1)
-    claimed_preview = db.claim_next_import_preview_job(
-        worker_id="generated-preview",
-        execution_lease=preview_lease,
-    )
+    claimed_preview = claim_next_import_preview_job(db, worker_id="generated-preview",
+    execution_lease=preview_lease,)
     assert claimed_preview is not None and claimed_preview.id == job_id
     _seed_candidate(
         db,
@@ -526,10 +529,8 @@ def _launched_owner_db(
         expected_execution_lease=preview_lease,
     ) is not None
     import_lease = _execution_lease("import", job_id, 2)
-    claimed_import = db.claim_next_import_job(
-        worker_id="generated-import",
-        execution_lease=import_lease,
-    )
+    claimed_import = claim_next_import_job(db, worker_id="generated-import",
+    execution_lease=import_lease,)
     assert claimed_import is not None and claimed_import.id == job_id
     assert db.authorize_import_job_launch(
         job_id,
@@ -637,10 +638,8 @@ class ProcessingLifecycleMachine(RuleBasedStateMachine):
             self.oracle.owner_job_id,
             self.generation,
         )
-        claimed = self.db.claim_next_import_preview_job(
-            worker_id="generated-preview",
-            execution_lease=lease,
-        )
+        claimed = claim_next_import_preview_job(self.db, worker_id="generated-preview",
+        execution_lease=lease,)
         self.assert_or_raise(
             claimed is not None and claimed.id == self.oracle.owner_job_id
         )
@@ -716,10 +715,8 @@ class ProcessingLifecycleMachine(RuleBasedStateMachine):
             self.oracle.owner_job_id,
             self.generation,
         )
-        claimed = self.db.claim_next_import_job(
-            worker_id="generated-import",
-            execution_lease=lease,
-        )
+        claimed = claim_next_import_job(self.db, worker_id="generated-import",
+        execution_lease=lease,)
         self.assert_or_raise(
             claimed is not None and claimed.id == self.oracle.owner_job_id
         )
@@ -881,22 +878,18 @@ class ProcessingLifecycleMachine(RuleBasedStateMachine):
             ),
         )
         if journal is not None:
-            self.assert_or_raise(self.db.claim_next_import_preview_job(
-                worker_id="generated-must-not-replay-preview",
-                execution_lease=_execution_lease(
-                    "preview",
-                    new.id,
-                    self.generation + 1,
-                ),
-            ) is None)
-            self.assert_or_raise(self.db.claim_next_import_job(
-                worker_id="generated-must-not-replay-import",
-                execution_lease=_execution_lease(
-                    "import",
-                    new.id,
-                    self.generation + 1,
-                ),
-            ) is None)
+            self.assert_or_raise(claim_next_import_preview_job(self.db, worker_id="generated-must-not-replay-preview",
+            execution_lease=_execution_lease(
+                "preview",
+                new.id,
+                self.generation + 1,
+            ),) is None)
+            self.assert_or_raise(claim_next_import_job(self.db, worker_id="generated-must-not-replay-import",
+            execution_lease=_execution_lease(
+                "import",
+                new.id,
+                self.generation + 1,
+            ),) is None)
         self.oracle.owner_job_id = new.id
         self.oracle.stage = (
             "recovery_required"
@@ -1219,10 +1212,8 @@ class TestProcessingLifecycleGenerated(unittest.TestCase):
             lease = _execution_lease("preview", job_id, 1)
         else:
             preview_lease = _execution_lease("preview", job_id, 1)
-            claimed_preview = db.claim_next_import_preview_job(
-                worker_id="generated-setup-preview",
-                execution_lease=preview_lease,
-            )
+            claimed_preview = claim_next_import_preview_job(db, worker_id="generated-setup-preview",
+            execution_lease=preview_lease,)
             assert claimed_preview is not None
             assert db.mark_import_job_preview_importable(
                 job_id,
@@ -1480,9 +1471,9 @@ class TestProcessingLifecycleGenerated(unittest.TestCase):
                 expected_status="wanted",
             ))
         claimed = (
-            db.claim_next_import_preview_job(worker_id="future-preview")
+            claim_next_import_preview_job(db, worker_id="future-preview")
             if lane == "preview"
-            else db.claim_next_import_job(worker_id="future-import")
+            else claim_next_import_job(db, worker_id="future-import")
         )
         self.assertEqual(claimed is not None, not request_changed)
 
@@ -1496,10 +1487,8 @@ class TestProcessingLifecycleGenerated(unittest.TestCase):
 
         db, job_id = _new_owner_db(witness=witness)
         lease = _execution_lease("preview", job_id, 1)
-        self.assertIsNotNone(db.claim_next_import_preview_job(
-            worker_id="generated-preview",
-            execution_lease=lease,
-        ))
+        self.assertIsNotNone(claim_next_import_preview_job(db, worker_id="generated-preview",
+        execution_lease=lease,))
 
         recovered = import_preview_worker.recover_running_preview_jobs(
             db,  # pyright: ignore[reportArgumentType]
@@ -1594,14 +1583,10 @@ class TestProcessingLifecycleGenerated(unittest.TestCase):
             ),
         )
         if with_journal:
-            self.assertIsNone(db.claim_next_import_preview_job(
-                worker_id="generated-must-not-replay-preview",
-                execution_lease=_execution_lease("preview", new.id, 2),
-            ))
-            self.assertIsNone(db.claim_next_import_job(
-                worker_id="generated-must-not-replay-import",
-                execution_lease=_execution_lease("import", new.id, 2),
-            ))
+            self.assertIsNone(claim_next_import_preview_job(db, worker_id="generated-must-not-replay-preview",
+            execution_lease=_execution_lease("preview", new.id, 2),))
+            self.assertIsNone(claim_next_import_job(db, worker_id="generated-must-not-replay-import",
+            execution_lease=_execution_lease("import", new.id, 2),))
 
     @given(result_status=st.sampled_from(("wanted", "imported")))
     @example(result_status="imported")

@@ -17,6 +17,7 @@ from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads active profile)
 from tests.beets_world import BeetsWorld
+from tests.helpers import claim_next_import_job, claim_next_import_preview_job
 
 
 @contextmanager
@@ -270,7 +271,7 @@ def _run_have_boundary_through_both_adapters(
         )
         assert stored_candidate is not None and stored_candidate.id is not None
         db.set_import_job_candidate_evidence(job.id, stored_candidate.id)
-        claimed = db.claim_next_import_preview_job(worker_id="generated")
+        claimed = claim_next_import_preview_job(db, worker_id="generated")
         assert claimed is not None and claimed.id == job.id
         with _silence_logs(), patch(
             "lib.beets_db.BeetsDB",
@@ -514,10 +515,8 @@ def _run_candidate_snapshot_reuse_world(
             if job_mode == "automation"
             else None
         )
-        claimed = db.claim_next_import_preview_job(
-            worker_id="generated",
-            execution_lease=preview_lease,
-        )
+        claimed = claim_next_import_preview_job(db, worker_id="generated",
+        execution_lease=preview_lease,)
         assert claimed is not None and claimed.id == job.id
         assert db.set_import_job_candidate_evidence(
             job.id,
@@ -804,7 +803,7 @@ def _run_dispatch_finalization_world(
                 job.id,
                 preview_result=preview_result,
             )
-            claimed = db.claim_next_import_job(worker_id="generated-importer")
+            claimed = claim_next_import_job(db, worker_id="generated-importer")
             assert claimed is not None and claimed.id == job.id
             with _silence_logs():
                 outcome = dispatch_import_from_db(
@@ -838,10 +837,8 @@ def _run_dispatch_finalization_world(
                 systemd_unit="cratedigger-import-preview.service",
                 worker=ProcessIdentity(pid=9101, start_ticks=91001),
             )
-            claimed_preview = db.claim_next_import_preview_job(
-                worker_id="generated-preview",
-                execution_lease=preview_lease,
-            )
+            claimed_preview = claim_next_import_preview_job(db, worker_id="generated-preview",
+            execution_lease=preview_lease,)
             assert claimed_preview is not None and claimed_preview.id == job.id
             evidence = make_album_quality_evidence(
                 mb_release_id="generated-mbid",
@@ -870,10 +867,8 @@ def _run_dispatch_finalization_world(
                 systemd_unit="cratedigger-importer.service",
                 worker=ProcessIdentity(pid=9102, start_ticks=91002),
             )
-            claimed = db.claim_next_import_job(
-                worker_id="generated-importer",
-                execution_lease=importer_lease,
-            )
+            claimed = claim_next_import_job(db, worker_id="generated-importer",
+            execution_lease=importer_lease,)
             assert claimed is not None and claimed.id == job.id
             cancellation_token = CancellationToken()
             with patch_dispatch_externals(), _silence_logs(), \

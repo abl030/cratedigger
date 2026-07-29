@@ -43,6 +43,8 @@ from lib.terminal_outcomes import (
 from tests.fakes import FakePipelineDB
 from tests.fakes.download import RecordingProcessAlbum
 from tests.helpers import (
+    claim_next_import_job,
+    claim_next_import_preview_job,
     handoff_automation_owner,
     make_album_quality_evidence,
     make_ctx_with_fake_db,
@@ -287,10 +289,8 @@ def _seed_running_import(
             systemd_unit="cratedigger-import-preview-worker.service",
             worker=ProcessIdentity(7101, 71001),
         )
-        assert db.claim_next_import_preview_job(
-            worker_id="terminal-preview",
-            execution_lease=preview_lease,
-        ) is not None
+        assert claim_next_import_preview_job(db, worker_id="terminal-preview",
+        execution_lease=preview_lease,) is not None
         files = snapshot_audio_files(processing_path)
         evidence = make_album_quality_evidence(
             mb_release_id="terminal-outcome",
@@ -342,10 +342,8 @@ def _seed_running_import(
             preview_result={"ready": True},
         )
         execution_lease = None
-    claimed = db.claim_next_import_job(
-        worker_id="atomic-test",
-        execution_lease=execution_lease,
-    )
+    claimed = claim_next_import_job(db, worker_id="atomic-test",
+    execution_lease=execution_lease,)
     assert claimed is not None
     return db, request_id, claimed.id
 
@@ -372,7 +370,7 @@ def _seed_running_preview() -> tuple[PipelineDB, int, int]:
             "failed_path": "/tmp/atomic-preview",
         },
     )
-    claimed = db.claim_next_import_preview_job(worker_id="preview-test")
+    claimed = claim_next_import_preview_job(db, worker_id="preview-test")
     assert claimed is not None
     return db, request_id, claimed.id
 
@@ -405,10 +403,8 @@ def _seed_running_automation_preview() -> tuple[PipelineDB, int, int]:
         systemd_unit="cratedigger-import-preview-worker.service",
         worker=ProcessIdentity(7201, 72001),
     )
-    claimed = db.claim_next_import_preview_job(
-        worker_id="terminal-preview",
-        execution_lease=preview_lease,
-    )
+    claimed = claim_next_import_preview_job(db, worker_id="terminal-preview",
+    execution_lease=preview_lease,)
     assert claimed is not None
     return db, request_id, claimed.id
 
@@ -986,10 +982,8 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
             systemd_unit="cratedigger-import-preview-worker.service",
             worker=ProcessIdentity(7201, 72001),
         )
-        claimed = fake.claim_next_import_preview_job(
-            worker_id="terminal-preview",
-            execution_lease=lease,
-        )
+        claimed = claim_next_import_preview_job(fake, worker_id="terminal-preview",
+        execution_lease=lease,)
         assert claimed is not None
         token = CancellationToken()
         with fake._pin_owner_session(token) as owner_session_identity:
@@ -1281,10 +1275,8 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
             systemd_unit="cratedigger-import-preview-worker.service",
             worker=ProcessIdentity(7101, 71001),
         )
-        assert fake.claim_next_import_preview_job(
-            worker_id="terminal-preview",
-            execution_lease=preview_lease,
-        ) is not None
+        assert claim_next_import_preview_job(fake, worker_id="terminal-preview",
+        execution_lease=preview_lease,) is not None
         fake.mark_import_job_preview_importable(
             fake_job.id,
             preview_result={"ready": True},
@@ -1296,10 +1288,8 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
             systemd_unit="cratedigger-importer.service",
             worker=ProcessIdentity(7102, 71002),
         )
-        claimed = fake.claim_next_import_job(
-            worker_id="terminal-importer",
-            execution_lease=importer_lease,
-        )
+        claimed = claim_next_import_job(fake, worker_id="terminal-importer",
+        execution_lease=importer_lease,)
         assert claimed is not None
         token = CancellationToken()
         with fake._pin_owner_session(token) as owner_session_identity:
@@ -2399,7 +2389,7 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
             },
         )
         fake.mark_import_job_preview_importable(fake_job.id, preview_result={})
-        fake_claimed = fake.claim_next_import_job(worker_id="parity")
+        fake_claimed = claim_next_import_job(fake, worker_id="parity")
         assert fake_claimed is not None
 
         def command(owner: int, owned_job: int) -> ImportTerminalOutcome:
@@ -2492,7 +2482,7 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
             },
         )
         fake.mark_import_job_preview_importable(fake_job.id, preview_result={})
-        fake_claimed = fake.claim_next_import_job(worker_id="parity-boundaries")
+        fake_claimed = claim_next_import_job(fake, worker_id="parity-boundaries")
         assert fake_claimed is not None
         for _ in range(5):
             fake.log_download(
@@ -2571,7 +2561,7 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
             },
         )
         fake.mark_import_job_preview_importable(fake_job.id, preview_result={})
-        fake_claimed = fake.claim_next_import_job(worker_id="analysis-parity")
+        fake_claimed = claim_next_import_job(fake, worker_id="analysis-parity")
         assert fake_claimed is not None
         for _ in range(4):
             fake.log_download(

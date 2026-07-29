@@ -64,6 +64,8 @@ from lib.quality import (
 )
 from tests.fakes import FakePipelineDB
 from tests.helpers import (
+    claim_next_import_job,
+    claim_next_import_preview_job,
     handoff_automation_owner,
     make_album_quality_evidence,
     make_request_row,
@@ -1251,12 +1253,12 @@ class TestImportJobQueueAPI(unittest.TestCase):
             preview_result={"verdict": "would_import"},
             message="ready",
         )
-        claimed = self.db.claim_next_import_job(worker_id="test-worker")
+        claimed = claim_next_import_job(self.db, worker_id="test-worker")
         assert claimed is not None
         self.assertEqual(claimed.status, "running")
         self.assertEqual(claimed.worker_id, "test-worker")
         self.assertEqual(claimed.attempts, 1)
-        self.assertIsNone(self.db.claim_next_import_job(worker_id="other"))
+        self.assertIsNone(claim_next_import_job(self.db, worker_id="other"))
 
         completed = self.db.mark_import_job_completed(
             claimed.id,
@@ -1298,7 +1300,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
             job.id,
             preview_result={"ready": True},
         )
-        claimed = self.db.claim_next_import_job(worker_id="lost-worker")
+        claimed = claim_next_import_job(self.db, worker_id="lost-worker")
         assert claimed is not None
         launched = self.db.authorize_import_job_launch(
             claimed.id,
@@ -1374,7 +1376,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
                 self.db.mark_import_job_preview_importable(
                     job.id, preview_result=preview_result,
                 )
-                claimed = self.db.claim_next_import_job(worker_id="recovery-worker")
+                claimed = claim_next_import_job(self.db, worker_id="recovery-worker")
                 assert claimed is not None
                 assert self.db.authorize_import_job_launch(
                     claimed.id,
@@ -1421,8 +1423,8 @@ class TestImportJobQueueAPI(unittest.TestCase):
         )
         other = pipeline_db.PipelineDB(TEST_DSN)
         try:
-            first = self.db.claim_next_import_job(worker_id="one")
-            second = other.claim_next_import_job(worker_id="two")
+            first = claim_next_import_job(self.db, worker_id="one")
+            second = claim_next_import_job(other, worker_id="two")
             self.assertIsNotNone(first)
             self.assertIsNone(second)
         finally:
@@ -1865,7 +1867,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
             preview_result={"verdict": "would_import"},
             message="ready",
         )
-        claimed = self.db.claim_next_import_job(worker_id="old-worker")
+        claimed = claim_next_import_job(self.db, worker_id="old-worker")
         assert claimed is not None
 
         recovered = self.db.recover_running_import_jobs(
@@ -1879,7 +1881,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
         self.assertIsNone(recovered[0].heartbeat_at)
         self.assertEqual(recovered[0].attempts, 1)
 
-        retried = self.db.claim_next_import_job(worker_id="new-worker")
+        retried = claim_next_import_job(self.db, worker_id="new-worker")
         assert retried is not None
         self.assertEqual(retried.id, claimed.id)
         self.assertEqual(retried.attempts, 2)
@@ -1894,14 +1896,14 @@ class TestImportJobQueueAPI(unittest.TestCase):
             dedupe_key="manual:preview-gate",
             payload={"download_log_id": 1, "failed_path": "/tmp/manual"},
         )
-        self.assertIsNone(self.db.claim_next_import_job(worker_id="too-early"))
+        self.assertIsNone(claim_next_import_job(self.db, worker_id="too-early"))
 
         self.db.mark_import_job_preview_importable(
             job.id,
             preview_result={"verdict": "would_import"},
             message="ready",
         )
-        claimed = self.db.claim_next_import_job(worker_id="importer")
+        claimed = claim_next_import_job(self.db, worker_id="importer")
         assert claimed is not None
         self.assertEqual(claimed.id, job.id)
         self.assertEqual(claimed.status, "running")
@@ -1922,13 +1924,13 @@ class TestImportJobQueueAPI(unittest.TestCase):
             (job.id,),
         )
 
-        self.assertIsNone(self.db.claim_next_import_job(worker_id="importer"))
+        self.assertIsNone(claim_next_import_job(self.db, worker_id="importer"))
 
         self.db._execute(
             "UPDATE import_jobs SET preview_status = 'evidence_ready' WHERE id = %s",
             (job.id,),
         )
-        claimed = self.db.claim_next_import_job(worker_id="importer")
+        claimed = claim_next_import_job(self.db, worker_id="importer")
         assert claimed is not None
         self.assertEqual(claimed.id, job.id)
 
@@ -2011,9 +2013,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
         self.assertEqual(queued.preview_status, "waiting")
         self.assertEqual(queued.preview_attempts, 0)
 
-        claimed = self.db.claim_next_import_preview_job(
-            worker_id="preview-worker",
-        )
+        claimed = claim_next_import_preview_job(self.db, worker_id="preview-worker",)
         assert claimed is not None
         self.assertEqual(claimed.id, queued.id)
         self.assertEqual(claimed.status, "queued")
@@ -2021,7 +2021,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
         self.assertEqual(claimed.preview_attempts, 1)
         self.assertEqual(claimed.preview_worker_id, "preview-worker")
         self.assertIsNone(
-            self.db.claim_next_import_preview_job(worker_id="other-worker")
+            claim_next_import_preview_job(self.db, worker_id="other-worker")
         )
 
         marked = self.db.mark_import_job_preview_importable(
@@ -2087,8 +2087,8 @@ class TestImportJobQueueAPI(unittest.TestCase):
         )
         other = pipeline_db.PipelineDB(TEST_DSN)
         try:
-            first = self.db.claim_next_import_preview_job(worker_id="one")
-            second = other.claim_next_import_preview_job(worker_id="two")
+            first = claim_next_import_preview_job(self.db, worker_id="one")
+            second = claim_next_import_preview_job(other, worker_id="two")
             self.assertIsNotNone(first)
             self.assertIsNone(second)
         finally:
@@ -2244,22 +2244,16 @@ class TestAutomationImportHandoff(unittest.TestCase):
 
         before_preview = self.db.get_import_job(preview_job.id)
         before_import = self.db.get_import_job(import_job.id)
-        self.assertIsNone(self.db.claim_next_import_preview_job(
-            worker_id="stale-force-preview",
-        ))
-        self.assertIsNone(self.db.claim_next_import_job(
-            worker_id="stale-force-import",
-        ))
+        self.assertIsNone(claim_next_import_preview_job(self.db, worker_id="stale-force-preview",))
+        self.assertIsNone(claim_next_import_job(self.db, worker_id="stale-force-import",))
         assert handoff.job is not None
-        owner_preview = self.db.claim_next_import_preview_job(
-            worker_id="automation-preview",
-            execution_lease=ExecutionLeaseSnapshot(
-                host_boot_id="boot-force-fence",
-                invocation_id="invocation-force-fence",
-                systemd_unit="cratedigger-import-preview-worker.service",
-                worker=ProcessIdentity(pid=933, start_ticks=9330),
-            ),
-        )
+        owner_preview = claim_next_import_preview_job(self.db, worker_id="automation-preview",
+        execution_lease=ExecutionLeaseSnapshot(
+            host_boot_id="boot-force-fence",
+            invocation_id="invocation-force-fence",
+            systemd_unit="cratedigger-import-preview-worker.service",
+            worker=ProcessIdentity(pid=933, start_ticks=9330),
+        ),)
         self.assertIsNotNone(owner_preview)
         assert owner_preview is not None
         self.assertEqual(owner_preview.id, handoff.job.id)
@@ -2315,7 +2309,7 @@ class TestAutomationImportHandoff(unittest.TestCase):
             force_job.id,
             preview_result={"verdict": "evidence_ready"},
         ))
-        claimed = self.db.claim_next_import_job(worker_id="force-importer")
+        claimed = claim_next_import_job(self.db, worker_id="force-importer")
         self.assertIsNotNone(claimed)
 
         handoff = self._handoff(self.db, self.ENQUEUED_A)
@@ -2343,13 +2337,9 @@ class TestAutomationImportHandoff(unittest.TestCase):
             preview_lease,
             invocation_id="preview-stale",
         )
-        self.assertIsNone(self.db.claim_next_import_preview_job(
-            worker_id="missing-lease",
-        ))
-        claimed_preview = self.db.claim_next_import_preview_job(
-            worker_id="preview",
-            execution_lease=preview_lease,
-        )
+        self.assertIsNone(claim_next_import_preview_job(self.db, worker_id="missing-lease",))
+        claimed_preview = claim_next_import_preview_job(self.db, worker_id="preview",
+        execution_lease=preview_lease,)
         assert claimed_preview is not None
         self.assertEqual(
             claimed_preview.execution_invocation_id,
@@ -2405,10 +2395,8 @@ class TestAutomationImportHandoff(unittest.TestCase):
             systemd_unit="cratedigger-importer.service",
             worker=ProcessIdentity(pid=201, start_ticks=2001),
         )
-        claimed_import = self.db.claim_next_import_job(
-            worker_id="importer",
-            execution_lease=importer_lease,
-        )
+        claimed_import = claim_next_import_job(self.db, worker_id="importer",
+        execution_lease=importer_lease,)
         assert claimed_import is not None
         self.assertEqual(
             claimed_import.execution_worker_pid,
@@ -2437,10 +2425,8 @@ class TestAutomationImportHandoff(unittest.TestCase):
             systemd_unit="cratedigger-import-preview-worker.service",
             worker=ProcessIdentity(pid=501, start_ticks=5001),
         )
-        assert self.db.claim_next_import_preview_job(
-            worker_id="preview",
-            execution_lease=lease,
-        ) is not None
+        assert claim_next_import_preview_job(self.db, worker_id="preview",
+        execution_lease=lease,) is not None
 
         heartbeat = pipeline_db.PipelineDB(TEST_DSN)
         terminal = pipeline_db.PipelineDB(TEST_DSN)
@@ -2527,10 +2513,8 @@ class TestAutomationImportHandoff(unittest.TestCase):
             systemd_unit="cratedigger-import-preview-worker.service",
             worker=ProcessIdentity(pid=301, start_ticks=3001),
         )
-        assert self.db.claim_next_import_preview_job(
-            worker_id="preview",
-            execution_lease=preview_lease,
-        ) is not None
+        assert claim_next_import_preview_job(self.db, worker_id="preview",
+        execution_lease=preview_lease,) is not None
         evidence = make_album_quality_evidence(
             mb_release_id="automation-handoff-real",
             source_path="/processing/albums/exact-handoff",
@@ -2556,10 +2540,8 @@ class TestAutomationImportHandoff(unittest.TestCase):
             systemd_unit="cratedigger-importer.service",
             worker=ProcessIdentity(pid=401, start_ticks=4001),
         )
-        assert self.db.claim_next_import_job(
-            worker_id="importer",
-            execution_lease=importer_lease,
-        ) is not None
+        assert claim_next_import_job(self.db, worker_id="importer",
+        execution_lease=importer_lease,) is not None
         self.assertIsNotNone(self.db.authorize_import_job_launch(
             job.id,
             request_id=self.request_id,
@@ -2634,10 +2616,8 @@ class TestAutomationImportHandoff(unittest.TestCase):
         assert recovered is not None
         self.assertEqual(recovered.status, "recovery_required")
         self.assertEqual(recovered.execution_beets_pid, 402)
-        self.assertIsNone(self.db.claim_next_import_job(
-            worker_id="must-not-replay",
-            execution_lease=importer_lease,
-        ))
+        self.assertIsNone(claim_next_import_job(self.db, worker_id="must-not-replay",
+        execution_lease=importer_lease,))
 
     def test_stale_a_after_b_replacement_creates_nothing(self):
         other = self.db.__class__(TEST_DSN)
@@ -3371,7 +3351,7 @@ class TestRequeueImportJobForPreview(unittest.TestCase):
             preview_result={"verdict": "would_import"},
             message="ready",
         )
-        claimed = self.db.claim_next_import_job(worker_id="importer-1")
+        claimed = claim_next_import_job(self.db, worker_id="importer-1")
         assert claimed is not None
         self.assertEqual(claimed.status, "running")
         return claimed
@@ -3416,7 +3396,7 @@ class TestRequeueImportJobForPreview(unittest.TestCase):
             reason="incomplete",
         )
 
-        preview = self.db.claim_next_import_preview_job(worker_id="preview-1")
+        preview = claim_next_import_preview_job(self.db, worker_id="preview-1")
         assert preview is not None
         self.assertEqual(preview.id, claimed.id)
         self.assertEqual(preview.preview_status, "running")
@@ -3502,7 +3482,7 @@ class TestRequeueRunningImportPreviewJobs(unittest.TestCase):
             dedupe_key="manual:requeue-running-preview",
             payload={"download_log_id": 1, "failed_path": "/tmp/manual"},
         )
-        claimed = self.db.claim_next_import_preview_job(worker_id="preview-old")
+        claimed = claim_next_import_preview_job(self.db, worker_id="preview-old")
         assert claimed is not None
         self.assertEqual(claimed.preview_status, "running")
         self.assertIsNotNone(claimed.preview_heartbeat_at)
@@ -3532,7 +3512,7 @@ class TestRequeueRunningImportPreviewJobs(unittest.TestCase):
         self.db.requeue_running_import_preview_jobs(
             message="restart",
         )
-        reclaim = self.db.claim_next_import_preview_job(worker_id="preview-new")
+        reclaim = claim_next_import_preview_job(self.db, worker_id="preview-new")
         assert reclaim is not None
         self.assertEqual(reclaim.id, job_id)
         self.assertEqual(reclaim.preview_status, "running")

@@ -37,6 +37,8 @@ from lib.quality_evidence import snapshot_audio_files
 from lib.terminal_outcomes import ImportJobTerminal
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import (
+    claim_next_import_job,
+    claim_next_import_preview_job,
     finalize_claimed_dispatch,
     handoff_automation_owner,
     make_album_quality_evidence,
@@ -243,10 +245,8 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                     systemd_unit="cratedigger-import-preview-worker.service",
                     worker=ProcessIdentity(8201, 82001),
                 )
-                claimed_preview = db.claim_next_import_preview_job(
-                    worker_id="dispatch-core-preview",
-                    execution_lease=preview_lease,
-                )
+                claimed_preview = claim_next_import_preview_job(db, worker_id="dispatch-core-preview",
+                execution_lease=preview_lease,)
                 assert claimed_preview is not None
             candidate = _seed_candidate_for_import_job(
                 db,
@@ -271,10 +271,8 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                     worker=ProcessIdentity(8202, 82002),
                 )
             )
-            claimed = db.claim_next_import_job(
-                worker_id="dispatch-core-test",
-                execution_lease=execution_lease,
-            )
+            claimed = claim_next_import_job(db, worker_id="dispatch-core-test",
+            execution_lease=execution_lease,)
             assert claimed is not None
             cancellation_token = (
                 CancellationToken() if execution_lease is not None else None
@@ -465,10 +463,8 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 systemd_unit="cratedigger-import-preview-worker.service",
                 worker=ProcessIdentity(8301, 83001),
             )
-            assert db.claim_next_import_preview_job(
-                worker_id="stale-preview",
-                execution_lease=preview_lease,
-            ) is not None
+            assert claim_next_import_preview_job(db, worker_id="stale-preview",
+            execution_lease=preview_lease,) is not None
             candidate = _seed_candidate_for_import_job(
                 db,
                 job.id,
@@ -487,10 +483,8 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 systemd_unit="cratedigger-importer.service",
                 worker=ProcessIdentity(8302, 83002),
             )
-            assert db.claim_next_import_job(
-                worker_id="stale-test",
-                execution_lease=execution_lease,
-            ) is not None
+            assert claim_next_import_job(db, worker_id="stale-test",
+            execution_lease=execution_lease,) is not None
             cancellation_token = CancellationToken()
             with patch_dispatch_externals() as ext, \
                  pinned_dispatch_authority(
@@ -560,7 +554,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 job.id,
                 preview_result={"ready": True},
             )
-            claimed = db.claim_next_import_job(worker_id="stale-force-test")
+            claimed = claim_next_import_job(db, worker_id="stale-force-test")
             assert claimed is not None
             self.assertEqual(claimed.expected_request_status, "wanted")
 
@@ -804,7 +798,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 job.id,
                 preview_result={"ready": True},
             )
-            assert db.claim_next_import_job(worker_id="dispatch-test") is not None
+            assert claim_next_import_job(db, worker_id="dispatch-test") is not None
             _seed_current_for_request(
                 db, 42,
                 mb_release_id="mbid-123-current",
@@ -968,7 +962,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 job.id,
                 preview_result={"ready": True},
             )
-            assert db.claim_next_import_job(worker_id="dispatch-test") is not None
+            assert claim_next_import_job(db, worker_id="dispatch-test") is not None
             cfg = CratediggerConfig(
                 beets_harness_path=_HARNESS,
                 pipeline_db_enabled=True,
@@ -1373,10 +1367,8 @@ class TestDispatchCoreSeams(unittest.TestCase):
                     systemd_unit="cratedigger-import-preview-worker.service",
                     worker=ProcessIdentity(8401, 84001),
                 )
-                assert db.claim_next_import_preview_job(
-                    worker_id="seam-preview",
-                    execution_lease=preview_lease,
-                ) is not None
+                assert claim_next_import_preview_job(db, worker_id="seam-preview",
+                execution_lease=preview_lease,) is not None
             candidate = _seed_candidate_for_import_job(
                 db,
                 job.id,
@@ -1399,10 +1391,8 @@ class TestDispatchCoreSeams(unittest.TestCase):
                     worker=ProcessIdentity(8402, 84002),
                 )
             )
-            assert db.claim_next_import_job(
-                worker_id="seam-test",
-                execution_lease=execution_lease,
-            ) is not None
+            assert claim_next_import_job(db, worker_id="seam-test",
+            execution_lease=execution_lease,) is not None
             cancellation_token = (
                 CancellationToken() if execution_lease is not None else None
             )

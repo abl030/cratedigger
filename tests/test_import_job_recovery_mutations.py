@@ -45,7 +45,12 @@ from lib.pipeline_db.terminal_outcomes import ImportJobTerminalConflict
 from lib.processing_cleanup import (
     cleanup_manifest_hash,
 )
-from tests.helpers import handoff_automation_owner
+from tests.helpers import (
+    ImportJobClaimDB,
+    claim_next_import_job,
+    claim_next_import_preview_job,
+    handoff_automation_owner,
+)
 
 TEST_DSN = os.environ["TEST_DB_DSN"]
 _RELEASE_ID = "75dbf62e-7dd2-4ddc-b57b-9bad1758b6b0"
@@ -59,20 +64,12 @@ class _RawRecoveryDB(AutomationRecoveryMutationDB, Protocol):
     ) -> object: ...
 
 
-class _RecoveryTranscriptDB(AutomationRecoveryMutationDB, Protocol):
-    def claim_next_import_preview_job(
-        self,
-        *,
-        worker_id: str,
-        execution_lease: ExecutionLeaseSnapshot,
-    ) -> object | None: ...
-
-    def claim_next_import_job(
-        self,
-        *,
-        worker_id: str,
-        execution_lease: ExecutionLeaseSnapshot,
-    ) -> object | None: ...
+class _RecoveryTranscriptDB(
+    AutomationRecoveryMutationDB,
+    ImportJobClaimDB,
+    Protocol,
+):
+    pass
 
 
 def _replacement_lease(label: str) -> ExecutionLeaseSnapshot:
@@ -493,11 +490,13 @@ def _normalized_retry_transcript(
         and moved is not None
         and replacement.detail is not None
     )
-    preview_claim = db.claim_next_import_preview_job(
+    preview_claim = claim_next_import_preview_job(
+        db,
         worker_id="transcript-preview",
         execution_lease=_replacement_lease("transcript-preview"),
     )
-    import_claim = db.claim_next_import_job(
+    import_claim = claim_next_import_job(
+        db,
         worker_id="transcript-import",
         execution_lease=_replacement_lease("transcript-import"),
     )
@@ -584,14 +583,10 @@ class TestAutomationRecoveryMutationsFakeParity(unittest.TestCase):
         self.assertEqual(result.outcome, "retry_recovery_required")
         assert result.retry_job is not None
         self.assertEqual(result.retry_job.status, "recovery_required")
-        self.assertIsNone(db.claim_next_import_preview_job(
-            worker_id="must-not-replay-preview",
-            execution_lease=_replacement_lease("fake-preview"),
-        ))
-        self.assertIsNone(db.claim_next_import_job(
-            worker_id="must-not-replay-import",
-            execution_lease=_replacement_lease("fake-import"),
-        ))
+        self.assertIsNone(claim_next_import_preview_job(db, worker_id="must-not-replay-preview",
+        execution_lease=_replacement_lease("fake-preview"),))
+        self.assertIsNone(claim_next_import_job(db, worker_id="must-not-replay-import",
+        execution_lease=_replacement_lease("fake-import"),))
         replacement_detail = get_automation_recovery_detail(
             db,
             None,
@@ -1209,14 +1204,10 @@ class TestAutomationRecoveryMutationsPostgres(unittest.TestCase):
         assert old is not None and request is not None and moved is not None
         self.assertEqual(old.status, "failed")
         self.assertEqual(result.retry_job.status, "recovery_required")
-        self.assertIsNone(self.db.claim_next_import_preview_job(
-            worker_id="must-not-replay-preview",
-            execution_lease=_replacement_lease("real-preview"),
-        ))
-        self.assertIsNone(self.db.claim_next_import_job(
-            worker_id="must-not-replay-import",
-            execution_lease=_replacement_lease("real-import"),
-        ))
+        self.assertIsNone(claim_next_import_preview_job(self.db, worker_id="must-not-replay-preview",
+        execution_lease=_replacement_lease("real-preview"),))
+        self.assertIsNone(claim_next_import_job(self.db, worker_id="must-not-replay-import",
+        execution_lease=_replacement_lease("real-import"),))
         replacement_detail = get_automation_recovery_detail(
             self.db,
             None,

@@ -48,6 +48,7 @@ from tests.beets_world import (
     HISTORICAL_PASSENGER_PATH_TEMPLATE,
     BeetsWorldRelease,
 )
+from tests.helpers import claim_next_import_job
 from tests.world_model.census_seeds import (
     EVIDENCE_DRIFT_FACT_SEEDS,
     EVIDENCE_DRIFT_MUTATION_SEEDS,
@@ -384,7 +385,7 @@ class TestPinnedLifecycleWorld(unittest.TestCase):
             self.assertEqual(observation.full_preview_calls, 1)
             self.assertNotEqual(observation.candidate_status, "reused")
             self.assertIsNotNone(
-                world.db.claim_next_import_job(worker_id="probe-gate"),
+                claim_next_import_job(world.db, worker_id="probe-gate"),
                 "fresh evidence must unlock importer ownership",
             )
             world.assert_invariants()
@@ -408,7 +409,7 @@ class TestPinnedLifecycleWorld(unittest.TestCase):
             self.assertEqual(observation.full_preview_calls, 1)
             self.assertNotEqual(observation.candidate_status, "reused")
             self.assertIsNone(
-                world.db.claim_next_import_job(worker_id="probe-gate"),
+                claim_next_import_job(world.db, worker_id="probe-gate"),
                 "a changed snapshot without fresh evidence must not reach "
                 "the importer",
             )
