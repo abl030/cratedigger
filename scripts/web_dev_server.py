@@ -12,7 +12,9 @@ import html
 import json
 import mimetypes
 import os
+import secrets
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -75,6 +77,7 @@ class DevConfig:
     redis_host: str | None
     redis_port: int
     beets_directory: str | None = None
+    measure_mirror_requests: bool = False
 
     @property
     def badge_text(self) -> str:
@@ -96,6 +99,7 @@ class DevHTTPServer(ThreadingHTTPServer):
     ) -> None:
         super().__init__(server_address, RequestHandlerClass)
         self.config = config
+        self.mirror_request_counts = MirrorRequestCounts()
 
     def watched_files(self) -> list[Path]:
         paths = [WEB_ROOT / "index.html"]
@@ -118,6 +122,61 @@ class DevHTTPServer(ThreadingHTTPServer):
         return version
 
 
+class MirrorRequestCounts:
+    """Dev-only exclusive measurement lease at outbound HTTP boundaries."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._mb = 0
+        self._discogs = 0
+        self._active_token: str | None = None
+
+    def start(self) -> str:
+        with self._lock:
+            if self._active_token is not None:
+                raise MirrorMeasurementLeaseConflict("a mirror measurement is already active")
+            self._active_token = secrets.token_urlsafe(24)
+            self._mb = 0
+            self._discogs = 0
+            return self._active_token
+
+    def _require_owner(self, token: str) -> None:
+        if self._active_token != token:
+            raise MirrorMeasurementLeaseOwnerError("mirror measurement lease is not owned by this request")
+
+    def record_mb(self) -> None:
+        with self._lock:
+            if self._active_token is not None:
+                self._mb += 1
+
+    def record_discogs(self) -> None:
+        with self._lock:
+            if self._active_token is not None:
+                self._discogs += 1
+
+    def snapshot(self, token: str) -> dict[str, int]:
+        with self._lock:
+            self._require_owner(token)
+            return {"mb_mirror_requests": self._mb, "discogs_mirror_requests": self._discogs}
+
+    def finish(self, token: str) -> dict[str, int]:
+        with self._lock:
+            self._require_owner(token)
+            result = {"mb_mirror_requests": self._mb, "discogs_mirror_requests": self._discogs}
+            self._active_token = None
+            self._mb = 0
+            self._discogs = 0
+            return result
+
+
+class MirrorMeasurementLeaseConflict(RuntimeError):
+    """A second benchmark tried to use the one dev-server counter."""
+
+
+class MirrorMeasurementLeaseOwnerError(RuntimeError):
+    """A token does not own the active measurement lease."""
+
+
 class DevHandler(BaseHTTPRequestHandler):
     server: DevHTTPServer  # pyright: ignore[reportIncompatibleVariableOverride]
 
@@ -130,6 +189,16 @@ class DevHandler(BaseHTTPRequestHandler):
         if path == "/__dev/events":
             self._serve_events()
             return
+        if path == "/__dev/mirror-counts/capability" and self.server.config.measure_mirror_requests:
+            self._json({"data": self.server.config.data, "redis_enabled": bool(self.server.config.redis_host)})
+            return
+        if path == "/__dev/mirror-counts" and self.server.config.measure_mirror_requests:
+            token = parse_qs(parsed.query).get("token", [""])[0]
+            try:
+                self._json(self.server.mirror_request_counts.snapshot(token))
+            except MirrorMeasurementLeaseOwnerError as exc:
+                self._error(str(exc), 403)
+            return
         if path.startswith("/api/"):
             self._serve_api_get(parsed)
             return
@@ -140,6 +209,21 @@ class DevHandler(BaseHTTPRequestHandler):
         self._serve_static(path)
 
     def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        if self.server.config.measure_mirror_requests:
+            if parsed.path == "/__dev/mirror-counts/start":
+                try:
+                    self._json({"token": self.server.mirror_request_counts.start()})
+                except MirrorMeasurementLeaseConflict as exc:
+                    self._error(str(exc), 409)
+                return
+            if parsed.path == "/__dev/mirror-counts/finish":
+                token = parse_qs(parsed.query).get("token", [""])[0]
+                try:
+                    self._json(self.server.mirror_request_counts.finish(token))
+                except MirrorMeasurementLeaseOwnerError as exc:
+                    self._error(str(exc), 403)
+                return
         if urlparse(self.path).path.startswith("/api/"):
             self._json(
                 {
@@ -389,17 +473,25 @@ def configure_live_db_metadata(config: DevConfig) -> None:
     discogs.DISCOGS_API_BASE = config.discogs_api
 
 
-def configure_live_db(config: DevConfig) -> None:
+def configure_live_db(
+    config: DevConfig, mirror_request_counts: MirrorRequestCounts | None = None,
+) -> None:
     if not config.dsn:
         raise SystemExit("--dsn or PIPELINE_DB_DSN is required for --data live-db")
 
     import web.server as web_server
     from lib.pipeline_db import PipelineDB
+    from web import discogs, mb
 
     # These adapters use module globals in production too. Assign BOTH for
     # every live-db configuration, including missing values, so a second dev
     # server in the same process cannot inherit a stale mirror from the first.
     configure_live_db_metadata(config)
+    mirror_request_counts = mirror_request_counts or MirrorRequestCounts()
+    mb._on_mirror_request = mirror_request_counts.record_mb if config.measure_mirror_requests else None
+    discogs._on_mirror_request = (
+        mirror_request_counts.record_discogs if config.measure_mirror_requests else None
+    )
 
     def connect_readonly() -> None:
         if web_server.db is not None:
@@ -447,13 +539,19 @@ def build_config(args: argparse.Namespace) -> DevConfig:
         redis_host=args.redis_host,
         redis_port=args.redis_port,
         beets_directory=getattr(args, "beets_directory", None),
+        measure_mirror_requests=args.measure_mirror_requests,
     )
 
 
 def create_server(host: str, port: int, config: DevConfig) -> DevHTTPServer:
+    if config.measure_mirror_requests and config.data != "live-db":
+        raise ValueError("--measure-mirror-requests requires --data live-db")
+    if config.measure_mirror_requests and config.redis_host:
+        raise ValueError("--measure-mirror-requests requires Redis to be disabled")
+    server = DevHTTPServer((host, port), DevHandler, config)
     if config.data == "live-db":
-        configure_live_db(config)
-    return DevHTTPServer((host, port), DevHandler, config)
+        configure_live_db(config, server.mirror_request_counts)
+    return server
 
 
 def main() -> None:
@@ -500,6 +598,10 @@ def main() -> None:
     )
     parser.add_argument("--redis-host", default=None)
     parser.add_argument("--redis-port", type=int, default=6379)
+    parser.add_argument(
+        "--measure-mirror-requests", action="store_true",
+        help="expose exact dev-only outbound MB/Discogs counters to bench_artist_cold.py",
+    )
     args = parser.parse_args()
     if (args.beets_db is None) != (args.beets_directory is None):
         parser.error(
@@ -507,7 +609,10 @@ def main() -> None:
         )
 
     config = build_config(args)
-    server = create_server(args.host, args.port, config)
+    try:
+        server = create_server(args.host, args.port, config)
+    except ValueError as exc:
+        parser.error(str(exc))
     url = f"http://{args.host}:{args.port}"
     print(f"Cratedigger frontend dev server listening on {url}")
     print(f"  data: {config.data}")
