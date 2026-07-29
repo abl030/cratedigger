@@ -12,10 +12,14 @@ leaked stale badges when the pipeline updated Postgres outside the
 web UI's POST invalidation paths. See issue #101.
 """
 
+import concurrent.futures
 import json
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from typing import Any, TypedDict
 
 import msgspec
@@ -29,7 +33,7 @@ from lib.artist_catalogue import (
 # Use the `web.` package-qualified path to keep the web metadata cache
 # separate from the pipeline's peer-cache implementation.
 from web import cache as _cache
-from web.api_bases import PUBLIC_MB_WS2_BASE
+from web.api_bases import PUBLIC_MB_ORIGIN, PUBLIC_MB_WS2_BASE
 from web.artist_search import merge_exact_artist_identities
 
 # Default: public MusicBrainz (functional but rate-limited ~1 req/s).
@@ -42,6 +46,63 @@ from web.artist_search import merge_exact_artist_identities
 # /ws/2 prefix.
 MB_API_BASE = PUBLIC_MB_WS2_BASE
 USER_AGENT = "cratedigger-web/1.0"
+
+# A large artist exercises several independent browse families at once.  Keep
+# the limit at the HTTP boundary, rather than per caller, so nesting one
+# paginator inside another can never make the local MusicBrainz mirror see an
+# accidental fan-out.  The key is the mirror origin: development and tests may
+# point this module at several mirrors in one process.
+_MB_MIRROR_CONCURRENCY = 4
+_mb_mirror_semaphores: dict[str, threading.BoundedSemaphore] = {}
+_mb_mirror_semaphores_lock = threading.Lock()
+_mb_public_next_request_at: dict[str, float] = {}
+_PUBLIC_MB_REQUEST_INTERVAL_SECONDS = 1.0
+# Named seams keep the real public-MB policy testable without making every
+# mock-backed unit test sleep in real time.
+_monotonic = time.monotonic
+_sleep = time.sleep
+# Development benchmark hook. Production leaves it unset; count at the HTTP
+# attempt boundary so a retry is represented as the second upstream request.
+_on_mirror_request: Callable[[], None] | None = None
+
+
+class MusicBrainzArtistCatalogueIncomplete(RuntimeError):
+    """Raised when a counted browse response cannot conserve its identities."""
+
+
+def _mirror_origin(url: str) -> str:
+    parsed = urllib.parse.urlsplit(url)
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _mirror_concurrency(url: str) -> int:
+    """Keep public MusicBrainz serial; LAN/custom mirrors may fan out."""
+    hostname = urllib.parse.urlsplit(url).hostname
+    if hostname == urllib.parse.urlsplit(PUBLIC_MB_ORIGIN).hostname:
+        return 1
+    return _MB_MIRROR_CONCURRENCY
+
+
+def _mirror_semaphore(url: str) -> threading.BoundedSemaphore:
+    origin = _mirror_origin(url)
+    with _mb_mirror_semaphores_lock:
+        semaphore = _mb_mirror_semaphores.get(origin)
+        if semaphore is None:
+            semaphore = threading.BoundedSemaphore(_mirror_concurrency(url))
+            _mb_mirror_semaphores[origin] = semaphore
+        return semaphore
+
+
+def _wait_for_public_musicbrainz(url: str) -> None:
+    """Preserve MusicBrainz's public one-request-per-second etiquette."""
+    if _mirror_concurrency(url) != 1:
+        return
+    origin = _mirror_origin(url)
+    with _mb_mirror_semaphores_lock:
+        now = _monotonic()
+        request_at = max(now, _mb_public_next_request_at.get(origin, now))
+        _mb_public_next_request_at[origin] = request_at + _PUBLIC_MB_REQUEST_INTERVAL_SECONDS
+    _sleep(max(0, request_at - now))
 
 # Canonical Various Artists MBID. Used by the resolver and the browse-tab
 # VA short-circuit (web/js/browse.js) to keep VA off the artist-view path
@@ -71,19 +132,106 @@ def _get(url: str) -> Any:
     access is precisely typed without this module ever validating the
     external response's shape.
     """
-    req = urllib.request.Request(url)
-    req.add_header("User-Agent", USER_AGENT)
-    req.add_header("Connection", "close")
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            return json.loads(resp.read())
-    except urllib.error.URLError:
-        # Retry once — MB mirror may have closed a keep-alive connection
+    def request_once() -> object:
+        # Pace each HTTP attempt, including the retry. A retry is still a
+        # request received by public MusicBrainz and must not bypass etiquette.
+        _wait_for_public_musicbrainz(url)
         req = urllib.request.Request(url)
         req.add_header("User-Agent", USER_AGENT)
         req.add_header("Connection", "close")
+        if _on_mirror_request is not None:
+            _on_mirror_request()
         with urllib.request.urlopen(req, timeout=15) as resp:
             return json.loads(resp.read())
+
+    # One slot spans a retry too.  Releasing it between attempts would let a
+    # transient mirror failure briefly exceed the promised per-mirror cap.
+    with _mirror_semaphore(url):
+        try:
+            return request_once()
+        except urllib.error.URLError:
+            # Retry once — MB mirror may have closed a keep-alive connection
+            return request_once()
+
+
+def _parallel_results[Key, Result](
+    jobs: dict[Key, Callable[[], Result]], *, max_workers: int,
+) -> dict[Key, Result]:
+    """Return concurrent results, surfacing one failure without sibling wait."""
+    if not jobs:
+        return {}
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+    futures = {key: executor.submit(job) for key, job in jobs.items()}
+    try:
+        done, _pending = concurrent.futures.wait(
+            futures.values(), return_when=concurrent.futures.FIRST_EXCEPTION,
+        )
+        # A completed exception wins immediately; do not call the context
+        # manager's waiting shutdown path while another mirror request hangs.
+        for future in done:
+            future.result()
+        results = {key: future.result() for key, future in futures.items()}
+    except BaseException:
+        for future in futures.values():
+            future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
+    else:
+        executor.shutdown(wait=True)
+        return results
+
+
+def _fetch_browse_pages[MBPage, MBItem](
+    fetch_page: Callable[[int, int], MBPage],
+    page_total: Callable[[MBPage], int],
+    page_items: Callable[[MBPage], list[MBItem]],
+    item_id: Callable[[MBItem], str],
+) -> list[MBPage]:
+    """Fetch a counted MB browse endpoint in stable, identity-safe order.
+
+    Every 100-row segment is filled with the exact remaining limit.  A short
+    page is therefore followed at ``offset + len(page)`` with only that
+    segment's remainder, never skipped by a fixed ``offset += 100`` jump.
+    """
+    first = fetch_page(0, 100)
+    total = page_total(first)
+    if total < 0:
+        raise MusicBrainzArtistCatalogueIncomplete("negative browse total")
+    if total == 0 and page_items(first):
+        raise MusicBrainzArtistCatalogueIncomplete("zero-count browse returned identities")
+
+    def fill_segment(start: int, initial: MBPage | None = None) -> list[MBPage]:
+        end = min(start + 100, total)
+        offset = start
+        pages: list[MBPage] = []
+        page = initial
+        while offset < end:
+            current = page if page is not None else fetch_page(offset, end - offset)
+            page = None
+            items = page_items(current)
+            if not items:
+                raise MusicBrainzArtistCatalogueIncomplete(
+                    f"browse ended at {offset} before declared total {total}",
+                )
+            if len(items) > end - offset:
+                raise MusicBrainzArtistCatalogueIncomplete("browse exceeded its requested segment")
+            pages.append(current)
+            offset += len(items)
+        return pages
+
+    starts = range(0, total, 100)
+    jobs = {
+        start: (lambda start=start: fill_segment(start, first if start == 0 else None))
+        for start in starts
+    }
+    segments = _parallel_results(jobs, max_workers=_MB_MIRROR_CONCURRENCY)
+    pages = [page for start in starts for page in segments[start]]
+    ids = [item_id(item) for page in pages for item in page_items(page)]
+    if len(ids) != total or any(not identity for identity in ids) or len(ids) != len(set(ids)):
+        raise MusicBrainzArtistCatalogueIncomplete(
+            f"browse did not conserve {total} unique identities",
+        )
+    return pages
 
 
 class _MBArtistRefJSON(TypedDict, total=False):
@@ -490,58 +638,82 @@ def get_artist_release_groups(artist_mbid: str) -> list[ArtistCatalogueRow]:
             if provenance is not None:
                 provenance_by_rg.setdefault(rg_id, set()).add(provenance)
 
-        offset = 0
-        while True:
-            data: _MBReleaseGroupBrowseResponseJSON = _get(
+        def fetch_release_groups(
+            offset: int, limit: int,
+        ) -> _MBReleaseGroupBrowseResponseJSON:
+            return _get(
                 f"{MB_API_BASE}/release-group?artist={_quote_mb_identifier(artist_mbid)}"
-                f"&inc=artist-credits&fmt=json&limit=100&offset={offset}"
+                f"&inc=artist-credits&fmt=json&limit={limit}&offset={offset}"
             )
+
+        def fetch_direct_releases(
+            offset: int, limit: int,
+        ) -> _MBReleaseBrowseResponseJSON:
+            return _get(
+                f"{MB_API_BASE}/release?artist={_quote_mb_identifier(artist_mbid)}"
+                f"&inc=release-groups&fmt=json&limit={limit}&offset={offset}"
+            )
+
+        def fetch_track_appearances(
+            offset: int, limit: int,
+        ) -> _MBReleaseBrowseResponseJSON:
+            return _get(
+                f"{MB_API_BASE}/release?track_artist={_quote_mb_identifier(artist_mbid)}"
+                "&inc=release-groups+artist-credits"
+                f"&fmt=json&limit={limit}&offset={offset}"
+            )
+
+        # The three families are independent.  Each helper's remaining pages
+        # fan out after its own first page, and _get keeps their combined load
+        # within one mirror-wide budget.
+        families = _parallel_results({
+            "release_groups": lambda: _fetch_browse_pages(
+                fetch_release_groups,
+                lambda page: page.get("release-group-count", 0),
+                lambda page: page.get("release-groups", []),
+                lambda item: item.get("id", ""),
+            ),
+            "direct_releases": lambda: _fetch_browse_pages(
+                fetch_direct_releases,
+                lambda page: page.get("release-count", 0),
+                lambda page: page.get("releases", []),
+                lambda item: item.get("id", ""),
+            ),
+            "track_appearances": lambda: _fetch_browse_pages(
+                fetch_track_appearances,
+                lambda page: page.get("release-count", 0),
+                lambda page: page.get("releases", []),
+                lambda item: item.get("id", ""),
+            ),
+        }, max_workers=3)
+        release_group_pages = families["release_groups"]
+        direct_release_pages = families["direct_releases"]
+        track_appearance_pages = families["track_appearances"]
+
+        for data in release_group_pages:
             for rg in data.get("release-groups", []):
                 entry = _normalize_artist_release_group(
                     rg, is_appearance=False,
                 )
                 entries.setdefault(entry.id, entry)
-            total = data.get("release-group-count", 0)
-            offset += 100
-            if offset >= total:
-                break
 
         # A release group browse carries no child release statuses. Fetch the
         # directly credited releases without a status filter so mixed
         # Official/Promotion/Bootleg evidence survives as a set.
-        offset = 0
-        while True:
-            release_data: _MBReleaseBrowseResponseJSON = _get(
-                f"{MB_API_BASE}/release?artist={_quote_mb_identifier(artist_mbid)}"
-                f"&inc=release-groups&fmt=json&limit=100&offset={offset}"
-            )
+        for release_data in direct_release_pages:
             for release in release_data.get("releases", []):
                 collect_release_provenance(release)
-            total = release_data.get("release-count", 0)
-            offset += 100
-            if offset >= total:
-                break
 
-        offset = 0
-        while True:
-            track_data: _MBReleaseBrowseResponseJSON = _get(
-                f"{MB_API_BASE}/release?track_artist={_quote_mb_identifier(artist_mbid)}"
-                "&inc=release-groups+artist-credits"
-                f"&fmt=json&limit=100&offset={offset}"
-            )
+        for track_data in track_appearance_pages:
             for release in track_data.get("releases", []):
                 collect_release_provenance(release)
                 rg = release.get("release-group")
-                if not isinstance(rg, dict) or not rg.get("id"):
+                if rg is None or not rg.get("id"):
                     continue
                 entry = _normalize_artist_release_group(
                     rg, is_appearance=True,
                 )
                 entries.setdefault(entry.id, entry)
-            total = track_data.get("release-count", 0)
-            offset += 100
-            if offset >= total:
-                break
 
         for rg_id, entry in entries.items():
             entry.provenance = sorted(provenance_by_rg.get(rg_id, set()))
@@ -556,7 +728,7 @@ def get_artist_release_groups(artist_mbid: str) -> list[ArtistCatalogueRow]:
         return msgspec.to_builtins(rows)
 
     cached = _cache.memoize_meta(
-        f"mb:artist:{artist_mbid}:release_groups:v4", _fetch,
+        f"mb:artist:{artist_mbid}:release_groups:v5", _fetch,
     )
     return msgspec.convert(cached, type=list[ArtistCatalogueRow])
 
@@ -783,6 +955,24 @@ def get_artist_name(artist_mbid: str) -> str:
     return _cache.memoize_meta(f"mb:artist:{artist_mbid}:name", _fetch)
 
 
+def assert_exact_release_id_order(
+    expected_ids: list[str], releases: list[_MBReleaseFullJSON],
+) -> None:
+    """Fail closed unless detailed pagination preserves canonical identity/order.
+
+    The no-``inc`` artist browse is the direct-release identity authority.
+    Nested recording pages are only enrichment: changing their page limit can
+    alter membership, so they must not be allowed to add, lose, duplicate, or
+    reorder a release.
+    """
+    actual_ids = [release.get("id", "") for release in releases]
+    if actual_ids != expected_ids:
+        raise MusicBrainzArtistCatalogueIncomplete(
+            "recording browse did not conserve canonical direct-release IDs: "
+            f"expected {len(expected_ids)}, got {len(actual_ids)}"
+        )
+
+
 def get_artist_releases_with_recordings(
     artist_mbid: str,
 ) -> list[_MBReleaseFullJSON]:
@@ -791,21 +981,99 @@ def get_artist_releases_with_recordings(
     Returns raw MB release dicts with media[].tracks[].recording and release-group fields.
     """
     def _fetch() -> list[_MBReleaseFullJSON]:
-        releases: list[_MBReleaseFullJSON] = []
-        offset = 0
-        while True:
-            data: _MBArtistReleasesWithRecordingsResponseJSON = _get(
+        def fetch_canonical(
+            offset: int, limit: int,
+        ) -> _MBReleaseBrowseResponseJSON:
+            return _get(
                 f"{MB_API_BASE}/release?artist={_quote_mb_identifier(artist_mbid)}"
-                f"&inc=recordings+media+release-groups&fmt=json&limit=100&offset={offset}"
+                f"&fmt=json&limit={limit}&offset={offset}"
             )
-            page = data.get("releases", [])
-            releases.extend(page)
-            total = data.get("release-count", 0)
-            offset += len(page)
-            if not page or offset >= total:
-                break
+
+        canonical_pages = _fetch_browse_pages(
+            fetch_canonical, lambda page: page.get("release-count", 0),
+            lambda page: page.get("releases", []),
+            lambda item: item.get("id", ""),
+        )
+        canonical_ids = [
+            release.get("id", "")
+            for page in canonical_pages
+            for release in page.get("releases", [])
+        ]
+        if len(canonical_ids) != len(set(canonical_ids)):
+            raise MusicBrainzArtistCatalogueIncomplete(
+                "canonical direct-release browse contained duplicate IDs",
+            )
+
+        def fetch_segment(start: int) -> list[_MBReleaseFullJSON]:
+            """Fill one fixed canonical offset segment using its exact remainder.
+
+            MusicBrainz may return fewer releases than requested when media and
+            recordings are included.  Advancing by a short page with the old
+            *100* limit causes an overlap; reducing the next request to the
+            exact remainder keeps the segment's offset semantics stable.
+            """
+            end = min(start + 100, len(canonical_ids))
+            offset = start
+            segment: list[_MBReleaseFullJSON] = []
+            while offset < end:
+                data: _MBArtistReleasesWithRecordingsResponseJSON = _get(
+                    f"{MB_API_BASE}/release?artist={_quote_mb_identifier(artist_mbid)}"
+                    "&inc=recordings+media+release-groups&fmt=json"
+                    f"&limit={end - offset}&offset={offset}"
+                )
+                page = data.get("releases", [])
+                if not page:
+                    break
+                segment.extend(page)
+                offset += len(page)
+            return segment
+
+        starts = range(0, len(canonical_ids), 100)
+        segments = _parallel_results(
+            {start: (lambda start=start: fetch_segment(start)) for start in starts},
+            max_workers=_MB_MIRROR_CONCURRENCY,
+        )
+        detailed_pages = [
+            release
+            for start in starts
+            for release in segments[start]
+        ]
+
+        canonical_id_set = set(canonical_ids)
+        by_id: dict[str, _MBReleaseFullJSON] = {}
+        for release in detailed_pages:
+            release_id = release.get("id", "")
+            if release_id in canonical_id_set:
+                by_id.setdefault(release_id, release)
+
+        missing_ids = [release_id for release_id in canonical_ids if release_id not in by_id]
+        if missing_ids:
+            # A mirror may still surface an overlap across two fixed segments.
+            # Completeness outranks the fast path: fetch only those canonical
+            # leaves, still under the shared mirror cap, rather than silently
+            # dropping a pressing or guessing from an adjacent row.
+            def fetch_missing(release_id: str) -> _MBReleaseFullJSON:
+                return _get(
+                    f"{MB_API_BASE}/release/{_quote_mb_identifier(release_id)}"
+                    "?inc=recordings+media+release-groups&fmt=json",
+                )
+
+            repairs = _parallel_results(
+                {release_id: (lambda release_id=release_id: fetch_missing(release_id))
+                 for release_id in missing_ids},
+                max_workers=_MB_MIRROR_CONCURRENCY,
+            )
+            for release_id in missing_ids:
+                repaired = repairs[release_id]
+                if repaired.get("id", "") != release_id:
+                    raise MusicBrainzArtistCatalogueIncomplete(
+                        "recording repair returned a different release ID",
+                    )
+                by_id[release_id] = repaired
+        releases = [by_id[release_id] for release_id in canonical_ids]
+        assert_exact_release_id_order(canonical_ids, releases)
         return releases
 
     cached = _cache.memoize_meta(
-        f"mb:artist:{artist_mbid}:releases_with_recordings", _fetch)
+        f"mb:artist:{artist_mbid}:releases_with_recordings:v2", _fetch)
     return [{**item} for item in cached]

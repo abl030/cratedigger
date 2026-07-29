@@ -12,13 +12,16 @@ so that per-user pipeline / library overlay state is never baked
 into Redis (issue #101).
 """
 
+import concurrent.futures
 import hashlib
 import json
 import re
 import socket
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from typing import Any, Literal, TypedDict
 
 import msgspec
@@ -61,6 +64,47 @@ USER_AGENT = "cratedigger-web/1.0"
 SEARCH_CACHE_QUERY_PREFIX_CHARS = 200
 DEFAULT_HTTP_TIMEOUT_SECONDS = 60
 LABEL_RELEASES_INCLUDE_TIMEOUT_SECONDS = 20
+_DISCOGS_ARTIST_CONCURRENCY = 2
+_discogs_mirror_semaphores: dict[str, threading.BoundedSemaphore] = {}
+_discogs_mirror_semaphores_lock = threading.Lock()
+# Development benchmark hook. Production leaves it unset; it counts each
+# actual outbound attempt rather than high-level artist helper invocations.
+_on_mirror_request: Callable[[], None] | None = None
+
+
+def _mirror_semaphore(url: str) -> threading.BoundedSemaphore:
+    parsed = urllib.parse.urlsplit(url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    with _discogs_mirror_semaphores_lock:
+        semaphore = _discogs_mirror_semaphores.get(origin)
+        if semaphore is None:
+            semaphore = threading.BoundedSemaphore(_DISCOGS_ARTIST_CONCURRENCY)
+            _discogs_mirror_semaphores[origin] = semaphore
+        return semaphore
+
+
+def _parallel_results[Key, Result](
+    jobs: dict[Key, Callable[[], Result]], *, max_workers: int,
+) -> dict[Key, Result]:
+    if not jobs:
+        return {}
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+    futures = {key: executor.submit(job) for key, job in jobs.items()}
+    try:
+        done, _pending = concurrent.futures.wait(
+            futures.values(), return_when=concurrent.futures.FIRST_EXCEPTION,
+        )
+        for future in done:
+            future.result()
+        results = {key: future.result() for key, future in futures.items()}
+    except BaseException:
+        for future in futures.values():
+            future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
+    else:
+        executor.shutdown(wait=True)
+        return results
 
 # Canonical Various Artists artist_id sentinel. The Discogs CC0 dump uses
 # 194 as the foreign key in `release_artist` for VA-credited releases, but
@@ -97,8 +141,11 @@ def _get(url: str, *, timeout: int = DEFAULT_HTTP_TIMEOUT_SECONDS) -> Any:
     # mirror; the request always succeeds eventually. Generous timeout so the
     # web UI doesn't 500 on broad queries (use the in-flight Redis cache to
     # short-circuit repeats).
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read())
+    with _mirror_semaphore(url):
+        if _on_mirror_request is not None:
+            _on_mirror_request()
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read())
 
 
 def _is_timeout_error(exc: BaseException) -> bool:
@@ -487,9 +534,21 @@ def get_artist_releases(artist_id: int) -> list[ArtistCatalogueRow]:
     def _fetch() -> list[ArtistCatalogueRow]:
         entries: dict[tuple[str, str], ArtistCatalogueRow] = {}
 
+        # These endpoints are independent bulk documents.  Keep the fan-out
+        # deliberately tiny: one request for masters and one for appearances.
+        sources = _parallel_results({
+            "masters": lambda: _get(
+                f"{api_base}/api/artists/{artist_id}/masters/all",
+            ),
+            "appearances": lambda: _get(
+                f"{api_base}/api/artists/{artist_id}/appearances",
+            ),
+        }, max_workers=_DISCOGS_ARTIST_CONCURRENCY)
+        masters_raw = sources["masters"]
+        appearances_raw = sources["appearances"]
+
         masters = msgspec.convert(
-            _get(f"{api_base}/api/artists/{artist_id}/masters/all"),
-            type=_DiscogsArtistMastersResponse,
+            masters_raw, type=_DiscogsArtistMastersResponse,
         )
         _require_complete_artist_catalogue(masters, endpoint="masters/all")
         for r in masters.results:
@@ -500,8 +559,7 @@ def get_artist_releases(artist_id: int) -> list[ArtistCatalogueRow]:
             entries.setdefault((namespace, entry.id), entry)
 
         appearances = msgspec.convert(
-            _get(f"{api_base}/api/artists/{artist_id}/appearances"),
-            type=_DiscogsArtistMastersResponse,
+            appearances_raw, type=_DiscogsArtistMastersResponse,
         )
         _require_complete_artist_catalogue(appearances, endpoint="appearances")
         for r in appearances.results:

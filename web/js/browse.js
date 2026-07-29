@@ -75,6 +75,10 @@ export async function setBrowseSource(src) {
   // awaits. Otherwise an old-source fast-pair failure can paint Retry
   // while the new source is already selected but its artist ID is pending.
   const sourceSwitchToken = ++artistPageToken;
+  // A source lookup may find no equivalent artist and therefore never start
+  // a replacement load. Drop handoffs at invalidation, not only at the next
+  // load/close, so an early multi-megabyte compare payload cannot linger.
+  earlyCompareByToken.clear();
   // Explicit user source-toggle clears any active search-by-ID ring.
   // The source-guard in applySearchTargetAfterDiscography would mask
   // the immediate symptom, but a paste→toggle-twice sequence (away
@@ -171,6 +175,7 @@ export function closeBrowseArtist() {
   state.browseArtist = null;
   // Cancel in-flight artist-page loads + decoration fetches.
   artistPageToken++;
+  earlyCompareByToken.clear();
   // Closing the artist view clears any search-by-ID ring (R15).
   clearSearchTarget();
   document.getElementById('browse-artist').style.display = 'none';
@@ -407,6 +412,14 @@ export function invalidateBrowseArtist() {
  * fetches (compare / disambiguate) can never write over a newer page.
  */
 let artistPageToken = 0;
+// Compare responses that beat the useful source+library pair.  Token-keying
+// makes this an in-flight handoff, not a cross-artist cache.
+const earlyCompareByToken = new Map();
+
+/** Narrow test seam for lifecycle ownership of transient compare payloads. */
+export function pendingEarlyCompareHandoffsForTest() {
+  return earlyCompareByToken.size;
+}
 
 /**
  * Reload the current browse artist's page from scratch (cache dropped).
@@ -455,6 +468,9 @@ function renderArtistPageFailure(el) {
  */
 export async function loadArtistPage(aid, name) {
   const token = ++artistPageToken;
+  // A token can hand off one early response only to its own useful pair.
+  // Superseding navigation/close must release any megabyte-scale payload.
+  earlyCompareByToken.clear();
   const el = document.getElementById('browse-artist-body');
   if (!el) return;
 
@@ -500,18 +516,38 @@ export async function loadArtistPage(aid, name) {
     const libUrl = isDiscogs
       ? `${API}/api/library/artist?name=${encodeURIComponent(name)}`
       : `${API}/api/library/artist?name=${encodeURIComponent(name)}&mbid=${aid}`;
+    // Compare has its own cache/singleflight-aware backend work.  Start it
+    // beside the useful source+library pair, rather than after that pair
+    // completes; its result is only painted once the active fast page exists.
+    // Analysis deliberately remains later because it competes for MB browse
+    // capacity and delays useful content on large artists.
+    fireCompareComplement(el, aid, name, token);
     const [rgRes, libRes] = await Promise.all([
       fetchArtistPageJson(artistUrl),
       fetchArtistPageJson(libUrl),
     ]);
-    if (token !== artistPageToken) return;
-    state.browseCache[aid] = { fast: { rgRes, libRes }, compare: null, disamb: null };
-    renderUnified(el, aid, name, rgRes, libRes);
-    // Fire-and-forget decorations; each guards on the token.
-    fireCompareComplement(el, aid, name, token);
+    if (token !== artistPageToken) {
+      earlyCompareByToken.delete(token);
+      return;
+    }
+    const earlyCompare = earlyCompareByToken.get(token) || null;
+    earlyCompareByToken.delete(token);
+    state.browseCache[aid] = {
+      fast: { rgRes, libRes }, compare: earlyCompare, disamb: null,
+    };
+    renderUnified(el, aid, name, rgRes, libRes, earlyCompare);
+    // Analysis remains a post-useful decoration; its token guard protects
+    // navigation just as before.
     fireAnalysis(el, aid, token);
   } catch (_e) {
-    if (token !== artistPageToken) return;
+    earlyCompareByToken.delete(token);
+    if (token !== artistPageToken) {
+      earlyCompareByToken.delete(token);
+      return;
+    }
+    // The useful pair owns this page. Once it fails, its background compare
+    // request must be stale even if it resolves later for the same token.
+    artistPageToken++;
     renderArtistPageFailure(el);
   }
 }
@@ -588,12 +624,23 @@ async function fireCompareComplement(el, aid, name, token) {
     const isDiscogs = state.browseSource === 'discogs';
     const idParam = isDiscogs ? `discogs_id=${encodeURIComponent(aid)}` : `mbid=${encodeURIComponent(aid)}`;
     const r = await fetch(`${API}/api/artist/compare?name=${encodeURIComponent(name)}&${idParam}`);
-    if (token !== artistPageToken || !r.ok) return;
+    if (token !== artistPageToken || !r.ok) {
+      earlyCompareByToken.delete(token);
+      return;
+    }
     const data = await r.json();
-    if (token !== artistPageToken) return;
-    if (state.browseCache[aid]) state.browseCache[aid].compare = data;
+    if (token !== artistPageToken) {
+      earlyCompareByToken.delete(token);
+      return;
+    }
     const cached = state.browseCache[aid];
-    if (!cached?.fast) return;
+    if (!cached?.fast) {
+      // The early request won the race with useful content.  Do not create a
+      // partial cache entry: a failed fast pair must leave the cache untouched.
+      earlyCompareByToken.set(token, data);
+      return;
+    }
+    cached.compare = data;
     renderUnified(
       el, aid, name, cached.fast.rgRes, cached.fast.libRes, data, true,
     );
