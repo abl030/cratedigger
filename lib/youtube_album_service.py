@@ -154,14 +154,14 @@ def _cached_search(
             try:
                 return msgspec.json.decode(
                     blob,
-                    type=list[dict[str, Any]],
+                    type=list[dict[str, object]],
                 )
             except (msgspec.DecodeError, msgspec.ValidationError):
                 pass
     deadline_check("before YT search")
     results = msgspec.convert(
         yt_client.search(query, filter=filter_str, limit=limit),
-        type=list[dict[str, Any]],
+        type=list[dict[str, object]],
     )
     deadline_check("after YT search")
     if cache is not None:
@@ -202,14 +202,14 @@ def _cached_get_album(
             try:
                 return msgspec.json.decode(
                     blob,
-                    type=dict[str, Any],
+                    type=dict[str, object],
                 )
             except (msgspec.DecodeError, msgspec.ValidationError):
                 pass
     deadline_check("before a YT album fetch")
     album = msgspec.convert(
         yt_client.get_album(browse_id),
-        type=dict[str, Any],
+        type=dict[str, object],
     )
     deadline_check("after a YT album fetch")
     if cache is not None:

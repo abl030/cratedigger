@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 from dataclasses import dataclass
-from typing import Any, Never
+from typing import Never
 
 import requests
 from hypothesis import example, given
@@ -191,7 +191,7 @@ class _TimedYT:
         *,
         filter: str,
         limit: int,
-    ) -> list[dict[str, Any]]:
+    ) -> list[dict[str, object]]:
         del filter, limit
         self.search_calls += 1
         self._clock.advance(self._search_seconds)
@@ -329,7 +329,7 @@ def _empty_lookup(_identifier: str) -> None:
     return None
 
 
-def _unexpected_distance(**_kwargs: Any) -> Never:
+def _unexpected_distance(**_kwargs: object) -> Never:
     raise AssertionError("incomplete YT truth must fail before scoring")
 
 
@@ -561,7 +561,7 @@ def _resolve_incomplete_collection(
             "releases": [{"id": sibling_id} for sibling_id in sibling_ids],
         }
 
-    def _distance(*, mbid: str, **_kwargs: Any) -> BeetsDistanceResult:
+    def _distance(*, mbid: str, **_kwargs: object) -> BeetsDistanceResult:
         if world.cause == "scoring_deadline":
             clock.advance(world.scoring_seconds)
         return BeetsDistanceResult(
@@ -598,12 +598,12 @@ def _resolve_incomplete_collection(
 @st.composite
 def malformed_search_rows(
     draw: st.DrawFn,
-) -> tuple[dict[str, Any], ...]:
+) -> tuple[dict[str, object], ...]:
     """Non-empty search rows whose browseId is absent or unusable."""
     count = draw(st.integers(min_value=1, max_value=5))
-    rows: list[dict[str, Any]] = []
+    rows: list[dict[str, object]] = []
     for _ in range(count):
-        row: dict[str, Any] = {
+        row: dict[str, object] = {
             "title": draw(
                 st.text(
                     alphabet=st.characters(
@@ -637,7 +637,7 @@ class TestIncompleteMatrixPersistenceGenerated(unittest.TestCase):
     @example(rows=({"title": "present", "browseId": ""},))
     def test_nonempty_search_without_usable_browse_id_never_writes_empty(
         self,
-        rows: tuple[dict[str, Any], ...],
+        rows: tuple[dict[str, object], ...],
     ) -> None:
         yt = FakeYTMusic()
         yt.set_search(_YT_QUERY, list(rows))

@@ -1861,7 +1861,7 @@ class _DeadlineYTMusic(FakeYTMusic):
         scope: str | None = None,
         limit: int = 20,
         ignore_spelling: bool = False,
-    ) -> list[dict[str, Any]]:
+    ) -> list[dict[str, object]]:
         self._clock.advance(self._search_advance_seconds)
         return super().search(
             query,
@@ -1902,7 +1902,7 @@ def _seed_complete_youtube_matrix(
     *,
     rg: str = MB_RG,
     browse_id: str = "MPREb-cached-complete",
-) -> list[dict[str, Any]]:
+) -> list[dict[str, object]]:
     """Seed one complete durable row and return its exact read projection."""
     pdb.seed_youtube_album_mapping(rg, "mb", [{
         "yt_browse_id": browse_id,
