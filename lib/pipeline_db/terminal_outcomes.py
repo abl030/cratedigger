@@ -6,7 +6,7 @@ import json
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from typing import Any, Protocol, cast
+from typing import Any
 
 import msgspec
 import psycopg2.extras
@@ -24,7 +24,7 @@ from lib.pipeline_db._shared import (
 from lib.pipeline_db.cleanup_journal import (
     CleanupJournalConflict,
     ProcessingCleanupJournalRow,
-    _LockedCleanupScope,
+    _CleanupCursor,
 )
 from lib.pipeline_db.rows import AlbumRequestRow, album_request_row
 from lib.terminal_outcomes import (
@@ -48,31 +48,6 @@ class ImportJobTerminalConflict(RuntimeError):
 AUTOMATION_COMPLETION_RESULT_KEY = "automation_completion"
 PROCESSING_CLEANUP_AUDIT_KEY = "processing_cleanup"
 PROCESSING_CLEANUP_RESULT_KEY = "processing_cleanup"
-
-
-class _CleanupTerminalScope(Protocol):
-    def _lock_processing_cleanup_scope(
-        self,
-        cur: Any,
-        *,
-        request_id: int,
-    ) -> _LockedCleanupScope: ...
-
-    def _require_exact_processing_owner(
-        self,
-        scope: _LockedCleanupScope,
-        *,
-        request_id: int,
-        job_id: int,
-    ) -> None: ...
-
-    def _get_processing_cleanup_journal_locked(
-        self,
-        *,
-        request_id: int,
-        job_id: int,
-        scope: _LockedCleanupScope,
-    ) -> ProcessingCleanupJournalRow | None: ...
 
 
 def _lease_values(
@@ -805,19 +780,18 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
 
     def _require_automation_terminal_scope(
         self,
-        cur: Any,
+        cur: _CleanupCursor,
         *,
         request_id: int,
         job_id: int,
         authority: AutomationTerminalAuthority,
     ) -> tuple[dict[str, object], dict[str, object]]:
-        cleanup_db = cast(_CleanupTerminalScope, self)
-        scope = cleanup_db._lock_processing_cleanup_scope(
+        scope = self._lock_processing_cleanup_scope(
             cur,
             request_id=request_id,
         )
         try:
-            cleanup_db._require_exact_processing_owner(
+            self._require_exact_processing_owner(
                 scope,
                 request_id=request_id,
                 job_id=job_id,
@@ -871,7 +845,7 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                 f"automation job {job_id} execution lease changed"
             )
 
-        journal = cleanup_db._get_processing_cleanup_journal_locked(
+        journal = self._get_processing_cleanup_journal_locked(
             request_id=request_id,
             job_id=job_id,
             scope=scope,

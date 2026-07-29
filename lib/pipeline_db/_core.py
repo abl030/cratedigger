@@ -5,7 +5,7 @@ import time
 from collections.abc import Generator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import psycopg2
 import psycopg2.extras
@@ -27,6 +27,13 @@ from lib.pipeline_db._shared import (
     logger,
 )
 
+if TYPE_CHECKING:
+    from lib.pipeline_db.cleanup_journal import (
+        ProcessingCleanupJournalRow,
+        _CleanupCursor,
+        _LockedCleanupScope,
+    )
+
 
 class ReadOnlyQueryCursor(Protocol):
     """Cursor surface exposed by the raw read-only query scope."""
@@ -39,6 +46,16 @@ class ReadOnlyQueryCursor(Protocol):
     def close(self) -> None: ...
 
 
+class _PollingConnection(Protocol):
+    """libpq surface used by the process-wide bounded wait callback."""
+
+    OperationalError: type[Exception]
+
+    def poll(self) -> int: ...
+    def fileno(self) -> int: ...
+    def cancel(self) -> None: ...
+
+
 class OwnerSessionLost(RuntimeError):
     """The exact PostgreSQL session holding processor authority was lost."""
 
@@ -48,7 +65,7 @@ class _PinnedOwnerSession:
     connection: object
     identity: OwnerSessionIdentity
     token: CancellationToken
-    io_lock: threading.RLock
+    io_lock: AbstractContextManager[object]
 
 
 class _OwnerSessionProbeDeadline(TimeoutError):
@@ -58,7 +75,7 @@ class _OwnerSessionProbeDeadline(TimeoutError):
 _wait_state = threading.local()
 
 
-def _pipeline_wait_callback(connection: Any) -> None:
+def _pipeline_wait_callback(connection: _PollingConnection) -> None:
     """Drive synchronous libpq with an optional thread-local deadline."""
     while True:
         try:
@@ -137,6 +154,36 @@ class _PipelineDBBase:
         self,
         identity: OwnerSessionIdentity,
     ) -> OwnerSessionProbe: ...
+    def _lock_processing_cleanup_scope(
+        self,
+        cur: "_CleanupCursor",
+        *,
+        request_id: int,
+    ) -> "_LockedCleanupScope": ...
+    @staticmethod
+    def _require_exact_processing_owner(
+        scope: "_LockedCleanupScope",
+        *,
+        request_id: int,
+        job_id: int,
+    ) -> None: ...
+    def _get_processing_cleanup_journal_locked(
+        self,
+        *,
+        request_id: int,
+        job_id: int,
+        scope: "_LockedCleanupScope",
+    ) -> "ProcessingCleanupJournalRow | None": ...
+    def _retarget_processing_cleanup_journal_locked(
+        self,
+        cur: "_CleanupCursor",
+        *,
+        request_id: int,
+        old_job_id: int,
+        new_job_id: int,
+        expected_revision: int,
+        scope: "_LockedCleanupScope",
+    ) -> "ProcessingCleanupJournalRow | None": ...
     # Cross-cluster calls: declared here so the calling mixin type-checks;
     # resolved to the owning sibling mixin at runtime via the composed MRO.
     # - dashboard metrics aggregator -> search-plan cluster readiness:
@@ -536,7 +583,7 @@ class _CoreMixin(_PipelineDBBase):
 
 
     @contextmanager
-    def _atomic_locked(self) -> Generator[Any]:
+    def _atomic_locked(self) -> Generator[object]:
         """Run a multi-row write in one explicit transaction.
 
         ``PipelineDB`` runs ``autocommit=True`` — one statement per implicit

@@ -2214,7 +2214,7 @@ class TestImportPreviewPath(unittest.TestCase):
             execution_lease=lease,
         )
         assert claimed is not None and claimed.id == job.id
-        preview_db: Any = _AutomationPreviewDB(db, lease)
+        preview_db = _AutomationPreviewDB(db, lease)
         source = tempfile.mkdtemp()
         with open(os.path.join(source, "01.flac"), "wb") as handle:
             handle.write(b"truncated lossless bytes")
@@ -2267,7 +2267,7 @@ class TestImportPreviewPath(unittest.TestCase):
                 ),
             ), patch("lib.import_preview.run_import_one") as mock_run:
                 preview = measure_and_persist_candidate_evidence(
-                    preview_db,
+                    preview_db,  # pyright: ignore[reportArgumentType]
                     request_id=42,
                     path=source,
                     import_job_id=job.id,

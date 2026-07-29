@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal, Protocol, cast
+from typing import Literal, Protocol
 
 import msgspec
 
@@ -144,7 +144,19 @@ class AutomationRecoveryMutationDB(
     AutomationRecoveryDetailDB,
     Protocol,
 ):
-    def advisory_lock(self, namespace: int, key: int) -> Any: ...
+    def advisory_lock(
+        self,
+        namespace: int,
+        key: int,
+    ) -> AbstractContextManager[bool]: ...
+
+    def resolve_import_job_recovery(
+        self,
+        job_id: int,
+        *,
+        resolution: str,
+        reason: str,
+    ) -> tuple[ImportJob, ImportJob | None] | None: ...
 
     def _pin_owner_session(
         self,
@@ -1225,7 +1237,7 @@ def _apply_import_job_recovery(
         )
     if current.job_type != "automation_import":
         legacy = resolve_import_job_recovery(
-            cast(ImportRecoveryDB, db),
+            db,
             job_id,
             resolution=action,
             reason=reason,
@@ -1497,16 +1509,31 @@ def _apply_import_job_recovery(
                 if detail.completion.status == "captured"
                 else None
             )
+            owner_job_status = detail.owner_stage.job_status
+            if owner_job_status == "queued":
+                expected_job_status: Literal[
+                    "queued", "running", "recovery_required"
+                ] = "queued"
+            elif owner_job_status == "running":
+                expected_job_status = "running"
+            elif owner_job_status == "recovery_required":
+                expected_job_status = "recovery_required"
+            else:
+                return AutomationRecoveryActionResult(
+                    outcome="wrong_state",
+                    detail=detail,
+                    message=(
+                        "Recovery owner changed to unsupported job status "
+                        f"{owner_job_status!r}"
+                    ),
+                )
             command = automation_recovery_close_outcome(
                 request_id=request_id,
                 import_job_id=job_id,
                 result_status=result_status,
                 reason=reason,
                 evidence_revision=terminal_revision,
-                expected_job_status=cast(
-                    Literal["queued", "running", "recovery_required"],
-                    detail.owner_stage.job_status,
-                ),
+                expected_job_status=expected_job_status,
                 expected_preview_status=detail.owner_stage.preview_status,
                 expected_execution_lease=observed.lease,
                 cleanup_receipt=receipt,

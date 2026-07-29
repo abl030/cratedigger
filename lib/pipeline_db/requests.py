@@ -2,7 +2,7 @@
 import dataclasses
 from collections.abc import Mapping
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, TypedDict
 
 import psycopg2
 import psycopg2.extras
@@ -32,6 +32,11 @@ from lib.pipeline_db.rows import AlbumRequestRow, album_request_row
 from lib.release_identity import ReleaseIdentity, normalize_release_id
 
 
+class AcquisitionPayload(TypedDict):
+    acquisition: list[AlbumRequestRow]
+    youtube_ingest: list[dict[str, object]]
+
+
 class _RequestsMixin(_PipelineDBBase):
     """album_requests CRUD, status state machine, and Replace/rescue."""
 
@@ -43,9 +48,9 @@ class _RequestsMixin(_PipelineDBBase):
         raw: Mapping[str, object],
     ) -> AlbumRequestRow:
         """Validate a request row and attach its exact owner projection."""
-        row: dict[str, Any] = dict(album_request_row(raw))
+        row = album_request_row(raw)
         row["processing_owner"] = processing_owner_payload(raw)
-        return cast("AlbumRequestRow", row)
+        return row
 
     def add_request(
         self,
@@ -1334,7 +1339,7 @@ class _RequestsMixin(_PipelineDBBase):
         self,
         *,
         youtube_limit: int = 50,
-    ) -> dict[str, list[dict[str, Any]]]:
+    ) -> AcquisitionPayload:
         """Return active request acquisition plus YouTube ingest in one read.
 
         The request side is deliberately ``downloading|processing`` while the
@@ -1406,7 +1411,7 @@ class _RequestsMixin(_PipelineDBBase):
             else []
         )
         acquisition = [
-            dict(self._request_presentation_row(row))
+            self._request_presentation_row(row)
             for row in raw_rows
             if row.get("id") is not None
         ]

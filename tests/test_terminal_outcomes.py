@@ -19,6 +19,7 @@ from lib.download_processing import Completed, CompletionFailed, CompletionResul
 from lib.import_execution import (
     CancellationToken,
     ExecutionLeaseSnapshot,
+    OwnerSessionIdentity,
     ProcessIdentity,
 )
 from lib.import_queue import IMPORT_JOB_FORCE, ImportJob
@@ -744,7 +745,6 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
     def test_fake_matches_real_automation_preview_terminal_bundle(
         self,
     ) -> None:
-        from lib.import_execution import OwnerSessionIdentity
         from scripts import importer
 
         real, request_id, job_id = _seed_running_automation_preview()
@@ -799,20 +799,22 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
             execution_lease=lease,
         )
         assert claimed is not None
-        receipt = importer._complete_automation_processing_cleanup(
-            fake,
-            claimed,
-            DispatchOutcome(
-                success=False,
-                message="fake preview parity",
-                post_commit_cleanup=PostCommitCleanup(
-                    staged_path=processing_path,
+        token = CancellationToken()
+        with fake._pin_owner_session(token) as owner_session_identity:
+            receipt = importer._complete_automation_processing_cleanup(
+                fake,
+                claimed,
+                DispatchOutcome(
+                    success=False,
+                    message="fake preview parity",
+                    post_commit_cleanup=PostCommitCleanup(
+                        staged_path=processing_path,
+                    ),
                 ),
-            ),
-            execution_lease=lease,
-            cancellation_token=CancellationToken(),
-            owner_session_identity=OwnerSessionIdentity(id(fake), 4242),
-        )
+                execution_lease=lease,
+                cancellation_token=token,
+                owner_session_identity=owner_session_identity,
+            )
         fake_command = replace(
             real_command,
             request_id=42,
@@ -1036,7 +1038,6 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
         )
 
     def test_fake_matches_real_automation_terminal_owner_bundle(self) -> None:
-        from lib.import_execution import OwnerSessionIdentity
         from scripts import importer
 
         real, request_id, job_id = _seed_running_import(
@@ -1109,20 +1110,21 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
         )
         assert claimed is not None
         token = CancellationToken()
-        receipt = importer._complete_automation_processing_cleanup(
-            fake,
-            claimed,
-            DispatchOutcome(
-                success=True,
-                message="fake parity",
-                post_commit_cleanup=PostCommitCleanup(
-                    staged_path=processing_path,
+        with fake._pin_owner_session(token) as owner_session_identity:
+            receipt = importer._complete_automation_processing_cleanup(
+                fake,
+                claimed,
+                DispatchOutcome(
+                    success=True,
+                    message="fake parity",
+                    post_commit_cleanup=PostCommitCleanup(
+                        staged_path=processing_path,
+                    ),
                 ),
-            ),
-            execution_lease=importer_lease,
-            cancellation_token=token,
-            owner_session_identity=OwnerSessionIdentity(id(fake), 4242),
-        )
+                execution_lease=importer_lease,
+                cancellation_token=token,
+                owner_session_identity=owner_session_identity,
+            )
         fake_command = replace(
             real_command,
             request_id=42,
@@ -2050,7 +2052,7 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
             ctx: Any = None,
             execution_lease: ExecutionLeaseSnapshot,
             cancellation_token: CancellationToken,
-            owner_session_identity: Any,
+            owner_session_identity: OwnerSessionIdentity,
         ) -> DispatchOutcome:
             return importer.execute_automation_import_job(
                 owner,
@@ -2144,10 +2146,9 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
                 observer = PipelineDB(TEST_DSN)
                 try:
                     after = _snapshot(observer, request_id, job_id)
-                    after_counts = dict(cast(
-                        dict[str, object],
-                        after["counts"],
-                    ))
+                    raw_counts = after["counts"]
+                    assert isinstance(raw_counts, dict)
+                    after_counts = dict(raw_counts)
                     self.assertEqual(after_counts["cleanup_journals"], 1)
                     after_counts["cleanup_journals"] = 0
                     after["counts"] = after_counts

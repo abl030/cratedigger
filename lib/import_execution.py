@@ -14,7 +14,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Literal, Protocol, Self, cast
+from typing import Literal, Protocol, Self
 
 LivenessStatus = Literal["live", "dead", "unknown"]
 ProcessState = Literal["exact", "absent", "reused", "unknown"]
@@ -985,6 +985,11 @@ class OwnerSessionProbe:
 class AutomationOwnerCheckpointDB(Protocol):
     """Persistence seam for one exact automation-owner checkpoint."""
 
+    def _probe_owner_session(
+        self,
+        identity: OwnerSessionIdentity,
+    ) -> OwnerSessionProbe: ...
+
     def heartbeat_import_job(
         self,
         job_id: int,
@@ -1010,17 +1015,12 @@ def checkpoint_automation_owner(
 ) -> None:
     """Fail before the next effect unless the exact owner/session is live."""
     cancellation_token.raise_if_cancelled()
-    probe_owner_session = getattr(db, "_probe_owner_session", None)
-    if callable(probe_owner_session):
-        probe = cast(
-            OwnerSessionProbe,
-            probe_owner_session(owner_session_identity),
+    probe = db._probe_owner_session(owner_session_identity)
+    if not probe.live:
+        cancellation_token.cancel(
+            f"owner_session_reverification_failed:{probe.reason}"
         )
-        if not probe.live:
-            cancellation_token.cancel(
-                f"owner_session_reverification_failed:{probe.reason}"
-            )
-            cancellation_token.raise_if_cancelled()
+        cancellation_token.raise_if_cancelled()
     if db.heartbeat_import_job(
         import_job_id,
         expected_execution_lease=execution_lease,

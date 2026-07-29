@@ -10,6 +10,13 @@ from unittest.mock import patch
 from lib.config import CratediggerConfig
 from lib.dispatch import dispatch_import_core
 from lib.dispatch.types import EvidenceImportGate, ImportOneRun
+from lib.import_execution import (
+    ExecutionLeaseSnapshot,
+    ExecutionLivenessDecision,
+    ExecutionLivenessEvidence,
+    ExecutionCancelled,
+    ProcessIdentity,
+)
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
@@ -18,14 +25,16 @@ from lib.import_queue import (
     youtube_import_payload,
 )
 from lib.quality import DownloadInfo
-from scripts.importer import process_claimed_job
+from scripts.importer import _execution_lease_from_job, process_claimed_job
 from tests.beets_world import BeetsWorld
 from tests.fakes import FakePipelineDB
 from tests.helpers import (
+    handoff_automation_owner,
     make_album_quality_evidence,
     make_import_result,
     make_request_row,
     noop_quality_gate,
+    pinned_dispatch_authority,
 )
 
 
@@ -34,6 +43,36 @@ class OperationWorld:
     job_type: str
     authority: str
     terminal_acknowledged: bool
+
+
+def _execution_lease(job_id: int, *, lane: str) -> ExecutionLeaseSnapshot:
+    return ExecutionLeaseSnapshot(
+        host_boot_id="generated-operation-fence-boot",
+        invocation_id=f"generated-operation-fence-{lane}-{job_id}",
+        systemd_unit=f"cratedigger-{lane}.service",
+        worker=ProcessIdentity(
+            pid=70_300 + job_id,
+            start_ticks=703_000 + job_id,
+        ),
+    )
+
+
+def _dead_execution(
+    lease: ExecutionLeaseSnapshot,
+) -> ExecutionLivenessDecision:
+    return ExecutionLivenessDecision(
+        status="dead",
+        reason="generated prior worker exited",
+        evidence=ExecutionLivenessEvidence(
+            lease=lease,
+            current_host_boot_id="generated-operation-fence-next-boot",
+            boot_error=None,
+            worker=None,
+            beets=None,
+            invocation=None,
+            cgroup=None,
+        ),
+    )
 
 
 def assert_operation_fence(
@@ -65,21 +104,20 @@ def _exercise_world(
     request_id = 703
     release_id = "release-703"
     source_path = "/tmp/fence-source"
-    request_status = (
-        "downloading"
-        if world.job_type == IMPORT_JOB_AUTOMATION
-        else "wanted"
-    )
     active_state = (
-        {"current_path": source_path, "files": []}
+        {
+            "current_path": source_path,
+            "filetype": "flac",
+            "enqueued_at": "2026-07-29T00:00:00+00:00",
+            "files": [],
+        }
         if world.job_type == IMPORT_JOB_AUTOMATION
         else None
     )
     db.seed_request(make_request_row(
         id=request_id,
         mb_release_id=release_id,
-        status=request_status,
-        active_download_state=active_state,
+        status="wanted",
     ))
     if world.job_type == IMPORT_JOB_AUTOMATION:
         payload: dict[str, object] = {}
@@ -92,12 +130,22 @@ def _exercise_world(
             browse_id="MPREb_fence",
             download_log_id=request_id,
         )
-    job = db.enqueue_import_job(
-        world.job_type,
-        request_id=request_id,
-        dedupe_key=f"{world.job_type}:generated:{request_id}",
-        payload=payload,
-    )
+    if world.job_type == IMPORT_JOB_AUTOMATION:
+        assert active_state is not None
+        job = handoff_automation_owner(
+            db,
+            request_id,
+            state=active_state,
+            canonical_path=source_path,
+            message="generated operation-fence owner",
+        )
+    else:
+        job = db.enqueue_import_job(
+            world.job_type,
+            request_id=request_id,
+            dedupe_key=f"{world.job_type}:generated:{request_id}",
+            payload=payload,
+        )
     evidence = make_album_quality_evidence(
         mb_release_id=release_id,
         source_path=source_path,
@@ -108,10 +156,39 @@ def _exercise_world(
         snapshot_fingerprint=evidence.snapshot_fingerprint,
     )
     assert persisted is not None and persisted.id is not None
-    db.set_import_job_candidate_evidence(job.id, persisted.id)
-    db.mark_import_job_preview_importable(job.id, preview_result={"ready": True})
-    claimed = db.claim_next_import_job(worker_id="generated-worker")
+    importer_lease: ExecutionLeaseSnapshot | None = None
+    if world.job_type == IMPORT_JOB_AUTOMATION:
+        preview_lease = _execution_lease(job.id, lane="preview")
+        preview_claim = db.claim_next_import_preview_job(
+            worker_id="generated-preview-worker",
+            execution_lease=preview_lease,
+        )
+        assert preview_claim is not None and preview_claim.id == job.id
+        assert db.set_import_job_candidate_evidence(
+            job.id,
+            persisted.id,
+            expected_execution_lease=preview_lease,
+        )
+        assert db.mark_import_job_preview_importable(
+            job.id,
+            preview_result={"ready": True},
+            expected_execution_lease=preview_lease,
+        ) is not None
+        importer_lease = _execution_lease(job.id, lane="importer")
+    else:
+        db.set_import_job_candidate_evidence(job.id, persisted.id)
+        db.mark_import_job_preview_importable(
+            job.id,
+            preview_result={"ready": True},
+        )
+    claimed = db.claim_next_import_job(
+        worker_id="generated-worker",
+        execution_lease=importer_lease,
+    )
     assert claimed is not None
+    if world.job_type == IMPORT_JOB_AUTOMATION:
+        importer_lease = _execution_lease_from_job(claimed)
+        assert importer_lease is not None
 
     launch_release = release_id
     launch_source = source_path
@@ -142,7 +219,15 @@ def _exercise_world(
             )
         raise RecorderStop("stop immediately after the real Beets seam")
 
-    def execute(db_arg, job_arg, *, ctx=None):
+    def execute(
+        db_arg,
+        job_arg,
+        *,
+        ctx=None,
+        execution_lease=None,
+        cancellation_token=None,
+        owner_session_identity=None,
+    ):
         del ctx
         return dispatch_import_core(
             path=launch_source,
@@ -173,23 +258,53 @@ def _exercise_world(
             run_import_fn=record_beets_invocation,
             beets_library_db_path=str(beets.library_db),
             beets_library_root=str(beets.library_root),
+            execution_lease=execution_lease,
+            cancellation_token=cancellation_token,
+            owner_session_identity=owner_session_identity,
         )
 
     if world.authority != "not_executed":
-        process_claimed_job(
-            db,  # type: ignore[arg-type]
-            claimed,
-            execute_fn=execute,
-        )
+        with pinned_dispatch_authority(
+            db,
+            importer_lease,
+        ) as (cancellation_token, owner_session_identity):
+            try:
+                process_claimed_job(
+                    db,  # type: ignore[arg-type]
+                    claimed,
+                    execute_fn=execute,
+                    execution_lease=importer_lease,
+                    cancellation_token=cancellation_token,
+                    owner_session_identity=owner_session_identity,
+                )
+            except ExecutionCancelled:
+                if world.authority == "current":
+                    raise
     launched_job = db.get_import_job(claimed.id)
     assert launched_job is not None
     authorized = launched_job.beets_launch_authorized_at is not None
 
-    db.recover_running_import_jobs(
-        requeue_message="proven unstarted",
-        recovery_message="operator recovery required",
-    )
-    replay = db.claim_next_import_job(worker_id="automatic-replay")
+    if world.job_type == IMPORT_JOB_AUTOMATION:
+        assert importer_lease is not None
+        db.recover_automation_import_job(
+            claimed.id,
+            expected_execution_lease=importer_lease,
+            decision=_dead_execution(importer_lease),
+            requeue_message="proven unstarted",
+            recovery_message="operator recovery required",
+        )
+    else:
+        db.recover_running_import_jobs(
+            requeue_message="proven unstarted",
+            recovery_message="operator recovery required",
+        )
+    if world.job_type == IMPORT_JOB_AUTOMATION:
+        replay = db.claim_next_import_job(
+            worker_id="automatic-import-replay",
+            execution_lease=_execution_lease(claimed.id, lane="importer-replay"),
+        )
+    else:
+        replay = db.claim_next_import_job(worker_id="automatic-replay")
     replay_claimed = replay is not None
 
     final = db.get_import_job(claimed.id)
@@ -293,7 +408,14 @@ class TestGeneratedImportOperationFence(unittest.TestCase):
                     beets_invocations=invocations,
                     replay_claimed=replay_claimed,
                 )
-                self.assertEqual(status, "completed")
+                self.assertEqual(
+                    status,
+                    (
+                        IMPORT_JOB_RECOVERY_REQUIRED
+                        if job_type == IMPORT_JOB_AUTOMATION
+                        else "completed"
+                    ),
+                )
                 self.assertFalse(replay_claimed)
 
 

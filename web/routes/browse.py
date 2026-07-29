@@ -11,7 +11,7 @@ import copy
 import urllib.error
 import uuid
 from collections.abc import Callable
-from typing import NotRequired, TypedDict, TypeGuard, cast
+from typing import NotRequired, TypedDict, TypeGuard
 
 import msgspec
 
@@ -145,13 +145,12 @@ def _catalogue_payload(value: object) -> object:
 
     def stamp(node: object) -> None:
         if isinstance(node, dict):
-            row = cast("dict[str, object]", node)
-            if "source" in row and "identity_kind" in row:
-                row.setdefault("processing_owner", None)
-            for child in row.values():
+            if "source" in node and "identity_kind" in node:
+                node.setdefault("processing_owner", None)
+            for child in node.values():
                 stamp(child)
         elif isinstance(node, list):
-            for child in cast("list[object]", node):
+            for child in node:
                 stamp(child)
 
     stamp(payload)
@@ -838,10 +837,9 @@ def get_artist_compare(h: RouteHandler, params: dict[str, list[str]]) -> None:
     raw_payload = _catalogue_payload(response)
     if not isinstance(raw_payload, dict):
         raise TypeError("artist compare response must serialize to an object")
-    payload = cast("dict[str, object]", raw_payload)
-    payload["mb_artist"] = mb_artist
-    payload["discogs_artist"] = discogs_artist
-    h._json(payload)
+    raw_payload["mb_artist"] = mb_artist
+    raw_payload["discogs_artist"] = discogs_artist
+    h._json(raw_payload)
 
 
 # ── Search-by-ID resolver ────────────────────────────────────────────

@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import sys
 import unittest
-from typing import Any
 
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401
@@ -17,6 +16,7 @@ from lib.import_execution import (
     ProcessIdentity,
 )
 from lib.import_queue import IMPORT_JOB_FORCE
+from lib.pipeline_db import PipelineDB
 from lib.pipeline_db.cleanup_journal import CleanupJournalIntent
 from lib.processing_cleanup import cleanup_manifest_hash
 from tests.fakes import FakePipelineDB
@@ -51,7 +51,7 @@ def _dead(lease: ExecutionLeaseSnapshot) -> ExecutionLivenessDecision:
 
 
 def _seed_unrelated_importable_jobs(
-    db: Any,
+    db: FakePipelineDB | PipelineDB,
     *,
     request_id: int,
     count: int,
@@ -76,7 +76,7 @@ def _seed_unrelated_importable_jobs(
 
 
 class _StartupRecoveryContract:
-    db: Any
+    db: FakePipelineDB | PipelineDB
     request_id: int
 
     def _owner(self):
@@ -167,8 +167,6 @@ class TestAutomationStartupRecoveryPostgres(
     unittest.TestCase,
 ):
     def setUp(self) -> None:
-        from lib.pipeline_db import PipelineDB
-
         self.db = PipelineDB(TEST_DSN)
         self.db._execute("TRUNCATE album_requests CASCADE")
         self.db.conn.commit()

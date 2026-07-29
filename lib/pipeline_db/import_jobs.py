@@ -2,7 +2,7 @@
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Protocol, cast
+from typing import Any
 
 import msgspec
 import psycopg2
@@ -32,7 +32,6 @@ from lib.pipeline_db._shared import ADVISORY_LOCK_NAMESPACE_IMPORT
 from lib.pipeline_db.cleanup_journal import (
     CleanupJournalConflict,
     ProcessingCleanupJournalRow,
-    _LockedCleanupScope,
 )
 
 
@@ -90,34 +89,6 @@ class AutomationRecoveryRetryApplied:
 
 class AutomationRecoveryEvidenceChanged(RuntimeError):
     """The exact owner facts used by a recovery observation changed."""
-
-
-class _RecoveryCleanupMixin(Protocol):
-    def _lock_processing_cleanup_scope(
-        self,
-        cur: Any,
-        *,
-        request_id: int,
-    ) -> _LockedCleanupScope: ...
-
-    def _get_processing_cleanup_journal_locked(
-        self,
-        *,
-        request_id: int,
-        job_id: int,
-        scope: _LockedCleanupScope,
-    ) -> ProcessingCleanupJournalRow | None: ...
-
-    def _retarget_processing_cleanup_journal_locked(
-        self,
-        cur: Any,
-        *,
-        request_id: int,
-        old_job_id: int,
-        new_job_id: int,
-        expected_revision: int,
-        scope: _LockedCleanupScope,
-    ) -> ProcessingCleanupJournalRow | None: ...
 
 
 def _lease_values(
@@ -1107,11 +1078,10 @@ class _ImportJobsMixin(_PipelineDBBase):
         expected: AutomationRecoveryCAS,
     ) -> None:
         """Lock and compare the complete owner plus cleanup observation."""
-        cleanup_db = cast(_RecoveryCleanupMixin, self)
         with self._atomic(), self.conn.cursor(
             cursor_factory=psycopg2.extras.RealDictCursor,
         ) as cur:
-            scope = cleanup_db._lock_processing_cleanup_scope(
+            scope = self._lock_processing_cleanup_scope(
                 cur,
                 request_id=expected.request_id,
             )
@@ -1129,7 +1099,7 @@ class _ImportJobsMixin(_PipelineDBBase):
                 (expected.job_id, expected.request_id),
             )
             job_raw = cur.fetchone()
-            journal = cleanup_db._get_processing_cleanup_journal_locked(
+            journal = self._get_processing_cleanup_journal_locked(
                 request_id=expected.request_id,
                 job_id=expected.job_id,
                 scope=scope,
@@ -1192,7 +1162,6 @@ class _ImportJobsMixin(_PipelineDBBase):
         ):
             return None
 
-        cleanup_db = cast(_RecoveryCleanupMixin, self)
         with self.advisory_lock(
             ADVISORY_LOCK_NAMESPACE_IMPORT,
             expected.request_id,
@@ -1202,7 +1171,7 @@ class _ImportJobsMixin(_PipelineDBBase):
             with self._atomic(), self.conn.cursor(
                 cursor_factory=psycopg2.extras.RealDictCursor,
             ) as cur:
-                scope = cleanup_db._lock_processing_cleanup_scope(
+                scope = self._lock_processing_cleanup_scope(
                     cur,
                     request_id=expected.request_id,
                 )
@@ -1224,7 +1193,7 @@ class _ImportJobsMixin(_PipelineDBBase):
                     (expected.job_id, expected.request_id),
                 )
                 job_raw = cur.fetchone()
-                journal = cleanup_db._get_processing_cleanup_journal_locked(
+                journal = self._get_processing_cleanup_journal_locked(
                     request_id=expected.request_id,
                     job_id=expected.job_id,
                     scope=scope,
@@ -1361,7 +1330,7 @@ class _ImportJobsMixin(_PipelineDBBase):
                 retargeted: ProcessingCleanupJournalRow | None = None
                 if journal is not None:
                     retargeted = (
-                        cleanup_db._retarget_processing_cleanup_journal_locked(
+                        self._retarget_processing_cleanup_journal_locked(
                             cur,
                             request_id=expected.request_id,
                             old_job_id=expected.job_id,

@@ -19,6 +19,7 @@ import os
 import tempfile
 import unittest
 from collections.abc import Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from typing import Any, Literal, cast
 from unittest.mock import patch
@@ -33,7 +34,6 @@ from lib.config import CratediggerConfig
 from lib.import_execution import (
     CancellationToken,
     ExecutionLeaseSnapshot,
-    OwnerSessionIdentity,
     ProcessIdentity,
 )
 from lib.import_preview import (
@@ -666,6 +666,16 @@ def _run_world(world: PreviewFailureWorld) -> PreviewFailureObservation:
                 ),
             )
 
+        cancellation_token = (
+            CancellationToken()
+            if world.job_type == IMPORT_JOB_AUTOMATION
+            else None
+        )
+        owner_session_scope = (
+            db._pin_owner_session(cancellation_token)
+            if cancellation_token is not None
+            else nullcontext(None)
+        )
         with patch(
             "lib.beets_db.BeetsDB",
             lambda **_kwargs: fake_beets,
@@ -675,7 +685,7 @@ def _run_world(world: PreviewFailureWorld) -> PreviewFailureObservation:
             "scripts.import_preview_worker.logger.warning",
         ), patch(
             "lib.import_preview.logger.warning",
-        ):
+        ), owner_session_scope as owner_session_identity:
             updated = import_preview_worker.process_claimed_preview_job(
                 cast(Any, db),
                 claimed,
@@ -693,16 +703,8 @@ def _run_world(world: PreviewFailureWorld) -> PreviewFailureObservation:
                     else None
                 ),
                 automation_authority=automation_authority,
-                cancellation_token=(
-                    CancellationToken()
-                    if world.job_type == IMPORT_JOB_AUTOMATION
-                    else None
-                ),
-                owner_session_identity=(
-                    OwnerSessionIdentity(id(db), 4242)
-                    if world.job_type == IMPORT_JOB_AUTOMATION
-                    else None
-                ),
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
             )
 
         assert updated is not None

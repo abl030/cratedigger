@@ -12,17 +12,22 @@ import os
 import tempfile
 import types
 from collections.abc import Callable, Generator, Mapping
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from copy import deepcopy
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Protocol
 from unittest.mock import MagicMock, patch
 
 import msgspec
 import requests
 
 from lib.grab_list import DownloadFile, GrabListEntry
-from lib.import_queue import ImportJob
+from lib.import_execution import (
+    CancellationToken,
+    ExecutionLeaseSnapshot,
+    OwnerSessionIdentity,
+)
+from lib.import_queue import AutomationHandoffResult, ImportJob
 from lib.quality import (
     EVIDENCE_PROVENANCE_MEASURED,
     EVIDENCE_SUBJECT_INSTALLED,
@@ -366,28 +371,70 @@ def make_audio_corrupt_validation_report(
     )
 
 
+@contextmanager
+def pinned_dispatch_authority(
+    db: _PinnedDispatchDB,
+    execution_lease: ExecutionLeaseSnapshot | None,
+    *,
+    cancellation_token: CancellationToken | None = None,
+) -> Generator[
+    tuple[CancellationToken | None, OwnerSessionIdentity | None],
+]:
+    """Pin the real fake-DB owner session for one automation dispatch scope."""
+    if execution_lease is None:
+        if cancellation_token is not None:
+            raise AssertionError(
+                "non-automation dispatch cannot carry a cancellation token"
+            )
+        yield None, None
+        return
+
+    existing_pin = getattr(db, "_owner_session_pin", None)
+    if existing_pin is not None:
+        identity, pinned_token = existing_pin
+        if (
+            cancellation_token is not None
+            and cancellation_token is not pinned_token
+        ):
+            raise AssertionError(
+                "nested dispatch authority must reuse the pinned token"
+            )
+        yield pinned_token, identity
+        return
+
+    token = cancellation_token or CancellationToken()
+    with db._pin_owner_session(token) as identity:
+        yield token, identity
+
+
 def finalize_claimed_dispatch(db: Any, job: Any, outcome: Any) -> Any:
     """Apply a direct dispatch result through the production queue owner."""
-    from lib.import_execution import CancellationToken, OwnerSessionIdentity
     from lib.import_queue import IMPORT_JOB_AUTOMATION
     from scripts.importer import _execution_lease_from_job, process_claimed_job
 
-    authority: dict[str, Any] = {}
     if job.job_type == IMPORT_JOB_AUTOMATION:
         execution_lease = _execution_lease_from_job(job)
         assert execution_lease is not None, (
             "automation fixture must claim with an importer execution lease"
         )
-        authority = {
-            "execution_lease": execution_lease,
-            "cancellation_token": CancellationToken(),
-            "owner_session_identity": OwnerSessionIdentity(id(db), 4242),
-        }
+        with pinned_dispatch_authority(
+            db,
+            execution_lease,
+        ) as (cancellation_token, owner_session_identity):
+            assert cancellation_token is not None
+            assert owner_session_identity is not None
+            return process_claimed_job(
+                db,
+                job,
+                execute_fn=lambda *_args, **_kwargs: outcome,
+                execution_lease=execution_lease,
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
+            )
     return process_claimed_job(
         db,
         job,
         execute_fn=lambda *_args, **_kwargs: outcome,
-        **authority,
     )
 
 
@@ -672,10 +719,10 @@ def make_active_download_state_json(
 
 
 def handoff_automation_owner(
-    db: Any,
+    db: _AutomationHandoffDB,
     request_id: int,
     *,
-    state: ActiveDownloadState | Mapping[str, Any] | str | None = None,
+    state: ActiveDownloadState | Mapping[str, object] | str | None = None,
     canonical_path: str | None = None,
     message: str = "test automation owner handoff",
 ) -> ImportJob:
@@ -1100,3 +1147,29 @@ def patch_dispatch_externals():
         yield types.SimpleNamespace(
             run=run, cleanup=cleanup, plex=plex,
             jellyfin=jellyfin)
+class _PinnedDispatchDB(Protocol):
+    _owner_session_pin: tuple[OwnerSessionIdentity, CancellationToken] | None
+
+    def _pin_owner_session(
+        self,
+        token: CancellationToken,
+    ) -> AbstractContextManager[OwnerSessionIdentity]: ...
+
+
+class _AutomationHandoffDB(Protocol):
+    def set_downloading(
+        self,
+        request_id: int,
+        state_json: str,
+        *,
+        expected_status: str = "wanted",
+    ) -> bool: ...
+
+    def handoff_automation_import(
+        self,
+        *,
+        request_id: int,
+        expected_enqueued_at: str,
+        canonical_path: str,
+        message: str,
+    ) -> AutomationHandoffResult: ...

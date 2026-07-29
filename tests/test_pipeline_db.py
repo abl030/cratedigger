@@ -40,6 +40,7 @@ from lib.pipeline_db import (
     SupersedeRaceError,
     TransferLedgerRow,
 )
+from lib.import_queue import AutomationHandoffResult
 from lib.pipeline_db._shared import REQUEST_METADATA_RESERVED_FIELDS
 from lib.quality import (
     AlbumQualityEvidenceFile,
@@ -2011,7 +2012,7 @@ class TestAutomationImportHandoff(unittest.TestCase):
         """A starts while B's replacement transaction owns the row lock."""
         other = self.db.__class__(TEST_DSN)
         started = threading.Event()
-        result_box: list[Any] = []
+        result_box: list[AutomationHandoffResult] = []
         error_box: list[Exception] = []
         with tempfile.TemporaryDirectory() as tmpdir:
             source = os.path.join(tmpdir, "source")
@@ -2099,7 +2100,7 @@ class TestAutomationImportHandoff(unittest.TestCase):
             )
 
     def test_malformed_state_tags_match_fake(self):
-        def real_snapshot(request_id: int) -> dict[str, Any]:
+        def real_snapshot(request_id: int) -> Mapping[str, object]:
             row = self.db._execute(
                 """
                 SELECT status,
@@ -2207,6 +2208,7 @@ class TestAutomationImportHandoff(unittest.TestCase):
             ))
             self._set_downloading(other, self.ENQUEUED_B)
             before = copy.deepcopy(other.get_request(self.request_id))
+            assert before is not None
             with patch.object(
                 self.db,
                 "_automation_handoff_enforce_witness",
@@ -2221,8 +2223,8 @@ class TestAutomationImportHandoff(unittest.TestCase):
                 )
                 assert_handoff_contract(
                     exact=False,
-                    before=cast(Mapping[str, object], before),
-                    after=cast(Mapping[str, object], after),
+                    before=before,
+                    after=after,
                     job_count=len(self.db.list_import_jobs(
                         request_id=self.request_id,
                     )),
@@ -3651,7 +3653,7 @@ class TestDownloadLog(unittest.TestCase):
             (log_id,),
         ).fetchone()
         assert row is not None
-        payload = json_dict(row["validation_result"])
+        payload = cast(dict, row["validation_result"])
         self.assertEqual(payload["failed_path"], target)
         quarantine = json_dict(payload["post_commit_quarantine"])
         self.assertEqual(quarantine["moved"], True)

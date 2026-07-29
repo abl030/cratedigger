@@ -9,7 +9,14 @@ from __future__ import annotations
 
 import copy
 import json
-from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
+from collections.abc import (
+    Callable,
+    Generator,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
@@ -989,7 +996,7 @@ class FakePipelineDB:
             for request in self._requests.values()
         )
 
-    def _automation_job_has_authority(self, row: Mapping[str, Any]) -> bool:
+    def _automation_job_has_authority(self, row) -> bool:
         request_id = row.get("request_id")
         request = (
             self._requests.get(int(request_id))
@@ -1005,7 +1012,7 @@ class FakePipelineDB:
 
     @staticmethod
     def _execution_lease_matches(
-        row: Mapping[str, Any],
+        row,
         lease: ExecutionLeaseSnapshot | None,
         *,
         include_child: bool,
@@ -1048,7 +1055,7 @@ class FakePipelineDB:
         )
 
     @staticmethod
-    def _clear_execution_lease(row: dict[str, Any]) -> None:
+    def _clear_execution_lease(row) -> None:
         row["execution_invocation_id"] = None
         row["execution_host_boot_id"] = None
         row["execution_systemd_unit"] = None
@@ -1063,7 +1070,7 @@ class FakePipelineDB:
         *,
         request_id: int | None,
         dedupe_key: str | None,
-        payload: dict[str, Any],
+        payload,
         message: str | None,
         expected_request_status: str | None = None,
     ) -> ImportJob:
@@ -1789,11 +1796,7 @@ class FakePipelineDB:
     def _automation_recovery_rows(
         self,
         expected: AutomationRecoveryCAS,
-    ) -> tuple[
-        dict[str, Any] | None,
-        dict[str, Any] | None,
-        ProcessingCleanupJournalRow | None,
-    ]:
+    ):
         request = self._requests.get(expected.request_id)
         job = next(
             (
@@ -2389,7 +2392,7 @@ class FakePipelineDB:
 
     def _claim_import_preview_row(
         self,
-        row: dict[str, Any],
+        row,
         *,
         worker_id: str | None,
         execution_lease: ExecutionLeaseSnapshot | None,
@@ -2581,8 +2584,8 @@ class FakePipelineDB:
 
     def _request_presentation_copy(
         self,
-        row: Mapping[str, Any],
-    ) -> dict[str, Any]:
+        row,
+    ):
         """Mirror the production pointer join without latest-job inference."""
         projected = copy.deepcopy(dict(row))
         owner_id = projected.get("active_automation_import_job_id")
@@ -3080,9 +3083,9 @@ class FakePipelineDB:
 
     @staticmethod
     def _fake_automation_audit(
-        audit: Any,
+        audit,
         authority: AutomationTerminalAuthority,
-    ) -> Any:
+    ):
         payload = (
             {}
             if not audit.validation_result
@@ -3106,7 +3109,7 @@ class FakePipelineDB:
 
     def _fake_finish_processing_request(
         self,
-        request: dict[str, Any],
+        request,
         command: ImportTerminalOutcome,
         boundary: Callable[[str], None],
     ) -> tuple[transitions.TransitionApplied, ...]:
@@ -3178,6 +3181,12 @@ class FakePipelineDB:
         boundary(f"request.processing_to_{virtual}")
         return tuple(applied)
 
+    def _log_terminal_audit(self, request_id: int, audit):
+        return self.log_download(
+            request_id=request_id,
+            **audit.as_log_kwargs(),
+        )
+
     def _persist_automation_import_terminal_outcome(
         self,
         command: ImportTerminalOutcome,
@@ -3200,9 +3209,9 @@ class FakePipelineDB:
                 authority=authority,
             )
             audit = self._fake_automation_audit(command.audit, authority)
-            download_log_id = cast(Any, self.log_download)(
-                request_id=command.request_id,
-                **audit.as_log_kwargs(),
+            download_log_id = self._log_terminal_audit(
+                command.request_id,
+                audit,
             )
             boundary("download_log")
             cooled: set[str] = set()
@@ -3309,9 +3318,9 @@ class FakePipelineDB:
                         command.request_transition,
                     )
                 ))
-            download_log_id = cast(Any, self.log_download)(
-                request_id=command.request_id,
-                **command.audit.as_log_kwargs(),
+            download_log_id = self._log_terminal_audit(
+                command.request_id,
+                command.audit,
             )
             self.set_download_log_candidate_evidence(
                 download_log_id,
@@ -5035,7 +5044,7 @@ class FakePipelineDB:
         self,
         *,
         youtube_limit: int = 50,
-    ) -> dict[str, list[dict[str, Any]]]:
+    ):
         """In-memory mirror of the combined one-read acquisition query."""
         self.query_counts["get_acquisition"] = (
             self.query_counts.get("get_acquisition", 0) + 1
@@ -5048,7 +5057,7 @@ class FakePipelineDB:
             _as_datetime(row.get("updated_at")),
             int(row["id"]),
         ))
-        youtube: list[dict[str, Any]] = []
+        youtube = []
         youtube_limit = max(1, int(youtube_limit))
         for entry in sorted(
             self.download_logs,

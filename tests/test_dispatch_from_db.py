@@ -13,6 +13,7 @@ import msgspec
 
 from lib import transitions
 from lib.config import CratediggerConfig
+from lib.dispatch import entry_points as dispatch_entry_points_module
 from lib.dispatch.quality_gate import QualityGatePlan
 from lib.dispatch.types import DISPATCH_CODE_PROCESSING_LOCKED
 from lib.import_evidence import (
@@ -964,12 +965,13 @@ class TestDispatchFromDbAdvisoryLock(unittest.TestCase):
         owner = handoff_automation_owner(db, 42)
         before = db.get_request(42)
 
-        with patch(
-            "lib.dispatch.entry_points.ensure_candidate_evidence_for_action",
+        with patch.object(
+            dispatch_entry_points_module,
+            "ensure_candidate_evidence_for_action",
             side_effect=AssertionError("evidence lookup reached"),
         ):
             result = dispatch_import_from_db(
-                db,  # type: ignore[arg-type]
+                db,  # pyright: ignore[reportArgumentType]
                 request_id=42,
                 failed_path="/not-opened",
                 import_job_id=force_job.id,

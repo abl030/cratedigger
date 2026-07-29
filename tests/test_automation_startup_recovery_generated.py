@@ -5,10 +5,12 @@ from __future__ import annotations
 import os
 import sys
 import unittest
-from typing import Any, Literal, cast
+from typing import Literal
 
 from hypothesis import example, given
 from hypothesis import strategies as st
+
+import tests._hypothesis_profiles
 
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401
@@ -16,7 +18,6 @@ import conftest  # noqa: F401
 from lib.import_execution import (
     ExecutionLeaseSnapshot,
     ExecutionLivenessEvidence,
-    ExecutionLivenessProbe,
     ProcessIdentity,
 )
 from lib.import_queue import IMPORT_JOB_AUTOMATION, IMPORT_JOB_FORCE
@@ -139,13 +140,13 @@ class TestAutomationStartupRecoveryGenerated(unittest.TestCase):
 
         if lane == "preview":
             recovered = import_preview_worker.recover_running_preview_jobs(
-                cast(Any, db),
-                liveness_probe=cast(ExecutionLivenessProbe, _DeadProbe()),
+                db,  # pyright: ignore[reportArgumentType]
+                liveness_probe=_DeadProbe(),
             )
         else:
             recovered = importer.recover_abandoned_running_jobs(
-                cast(Any, db),
-                liveness_probe=cast(ExecutionLivenessProbe, _DeadProbe()),
+                db,  # pyright: ignore[reportArgumentType]
+                liveness_probe=_DeadProbe(),
             )
 
         self.assertEqual([job.id for job in recovered], [owner_id])

@@ -8,11 +8,7 @@ import unittest
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
-from unittest.mock import patch
 
-from lib import processing_cleanup
-from lib.fs_authority import FilesystemAuthorityError
 from lib.import_execution import CancellationToken, ExecutionCancelled
 from lib.pipeline_db import (
     CleanupJournalReceipt,
@@ -55,10 +51,7 @@ class _JournalStore:
             for key, value in old_progress.items()
         ):
             raise AssertionError("test journal progress was rewritten")
-        updated = cast(
-            ProcessingCleanupJournalRow,
-            copy.deepcopy(dict(self.row)),
-        )
+        updated = copy.deepcopy(self.row)
         updated["revision"] += 1
         updated["step_progress"] = dict(step_progress)
         updated["updated_at"] = datetime.now(UTC)
@@ -82,10 +75,7 @@ class _JournalStore:
             raise AssertionError("test completion lost exact owner/revision CAS")
         if receipt.step_progress != self.row["step_progress"]:
             raise AssertionError("test receipt lost exact progress")
-        updated = cast(
-            ProcessingCleanupJournalRow,
-            copy.deepcopy(dict(self.row)),
-        )
+        updated = copy.deepcopy(self.row)
         updated["revision"] += 1
         updated["completed_receipt"] = receipt
         updated["completed_at"] = datetime.now(UTC)
@@ -203,29 +193,23 @@ class TestProcessingCleanupExecutor(unittest.TestCase):
                 )
             )
             token = CancellationToken()
-            original = processing_cleanup._entry_matches_opened
+            checkpoints = 0
 
-            def cancel_after_hash(
-                opened_fd: int,
-                expected: processing_cleanup.CleanupManifestEntry,
-            ) -> bool:
-                matches = original(opened_fd, expected)
-                token.cancel("cancelled_during_unlink_hashing")
-                return matches
+            def cancel_after_hash() -> None:
+                nonlocal checkpoints
+                checkpoints += 1
+                if checkpoints == 3:
+                    token.cancel("cancelled_during_unlink_hashing")
+                token.raise_if_cancelled()
 
-            with (
-                patch(
-                    "lib.processing_cleanup._entry_matches_opened",
-                    side_effect=cancel_after_hash,
-                ),
-                self.assertRaises(ExecutionCancelled),
-            ):
+            with self.assertRaises(ExecutionCancelled):
                 execute_processing_cleanup(
                     store,
                     store.row,
-                    owner_checkpoint=token.raise_if_cancelled,
+                    owner_checkpoint=cancel_after_hash,
                 )
 
+            self.assertEqual(checkpoints, 3)
             self.assertTrue(source.is_dir())
             self.assertTrue((source / "01.flac").is_file())
             self.assertTrue((source / "Disc 2" / "02.flac").is_file())
@@ -246,32 +230,23 @@ class TestProcessingCleanupExecutor(unittest.TestCase):
                 )
             )
             token = CancellationToken()
-            original = processing_cleanup._inspect_open_root
-            inspections = 0
+            checkpoints = 0
 
-            def cancel_at_rename_hash(
-                root_fd: int,
-            ) -> processing_cleanup.CleanupExactManifest:
-                nonlocal inspections
-                manifest = original(root_fd)
-                inspections += 1
-                if inspections == 3:
+            def cancel_at_rename_hash() -> None:
+                nonlocal checkpoints
+                checkpoints += 1
+                if checkpoints == 5:
                     token.cancel("cancelled_during_quarantine_hashing")
-                return manifest
+                token.raise_if_cancelled()
 
-            with (
-                patch(
-                    "lib.processing_cleanup._inspect_open_root",
-                    side_effect=cancel_at_rename_hash,
-                ),
-                self.assertRaises(ExecutionCancelled),
-            ):
+            with self.assertRaises(ExecutionCancelled):
                 execute_processing_cleanup(
                     store,
                     store.row,
-                    owner_checkpoint=token.raise_if_cancelled,
+                    owner_checkpoint=cancel_at_rename_hash,
                 )
 
+            self.assertEqual(checkpoints, 5)
             self.assertTrue(source.is_dir())
             self.assertFalse(destination.exists())
 
@@ -466,18 +441,10 @@ class TestProcessingCleanupExecutor(unittest.TestCase):
                     source_path=str(source),
                 )
             )
-            refusal = FilesystemAuthorityError(
-                "simulated EIO",
-                code="read_failed",
-                errno_symbol="EIO",
-            )
-            with (
-                patch(
-                    "lib.processing_cleanup.open_directory_path",
-                    side_effect=refusal,
-                ),
-                self.assertRaises(ProcessingCleanupError) as blocked,
-            ):
+            held_source = Path(raw) / "held-source"
+            source.rename(held_source)
+            source.symlink_to(held_source, target_is_directory=True)
+            with self.assertRaises(ProcessingCleanupError) as blocked:
                 execute_processing_cleanup(
                     store,
                     store.row,
@@ -488,6 +455,7 @@ class TestProcessingCleanupExecutor(unittest.TestCase):
                 "source_uninspectable",
             )
             self.assertTrue(source.exists())
+            self.assertTrue(source.is_symlink())
             self.assertEqual(store.row["revision"], 1)
 
     def test_crash_after_every_boundary_resumes_without_path_inference(

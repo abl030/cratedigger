@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import unittest
 from datetime import UTC, datetime
-from typing import cast
 
 from hypothesis import given
 from hypothesis import strategies as st
@@ -79,27 +78,27 @@ def _owner_rows() -> tuple[dict[str, object], dict[str, object]]:
 
 
 def _journal() -> ProcessingCleanupJournalRow:
-    return cast(ProcessingCleanupJournalRow, {
-        "job_id": 7,
-        "request_id": 42,
-        "revision": 3,
-        "action": "remove_source_tree",
-        "source_path": "/processing/album",
-        "source_manifest": [],
-        "source_manifest_hash": "hash-a",
-        "destination_path": None,
-        "destination_manifest": None,
-        "destination_manifest_hash": None,
-        "selected_destination_path": None,
-        "step_progress": {"after:unlink:track.flac": True},
-        "declared_result_status": None,
-        "declared_reason": None,
-        "evidence_revision": None,
-        "completed_receipt": None,
-        "created_at": _NOW,
-        "updated_at": _NOW,
-        "completed_at": None,
-    })
+    return ProcessingCleanupJournalRow(
+        job_id=7,
+        request_id=42,
+        revision=3,
+        action="remove_source_tree",
+        source_path="/processing/album",
+        source_manifest=[],
+        source_manifest_hash="hash-a",
+        destination_path=None,
+        destination_manifest=None,
+        destination_manifest_hash=None,
+        selected_destination_path=None,
+        step_progress={"after:unlink:track.flac": True},
+        declared_result_status=None,
+        declared_reason=None,
+        evidence_revision=None,
+        completed_receipt=None,
+        created_at=_NOW,
+        updated_at=_NOW,
+        completed_at=None,
+    )
 
 
 _JOB_CAS_FIELDS = (
@@ -127,10 +126,11 @@ class TestAutomationRecoveryCASGenerated(unittest.TestCase):
         changed_field: str,
     ) -> None:
         request, job = _owner_rows()
+        observed = job[changed_field]
         job[changed_field] = (
             "changed"
-            if not isinstance(job[changed_field], int)
-            else cast(int, job[changed_field]) + 1
+            if not isinstance(observed, int)
+            else observed + 1
         )
         self.assertFalse(_recovery_owner_matches(
             _expected(),
@@ -158,10 +158,9 @@ class TestAutomationRecoveryCASGenerated(unittest.TestCase):
         revision_changed = _journal()
         revision_changed["revision"] = changed_revision
         progress_changed = _journal()
-        progress_changed["step_progress"] = cast(
-            dict[str, object],
-            changed_progress,
-        )
+        progress_changed["step_progress"] = {
+            key: value for key, value in changed_progress.items()
+        }
         self.assertFalse(_recovery_cleanup_matches(
             _expected(),
             revision_changed,
@@ -173,7 +172,9 @@ class TestAutomationRecoveryCASGenerated(unittest.TestCase):
 
     def test_known_bad_job_only_cas_misses_canonical_path_race(self) -> None:
         request, job = _owner_rows()
-        state = cast(dict[str, object], request["active_download_state"])
+        state = request["active_download_state"]
+        if not isinstance(state, dict):
+            raise AssertionError("fixture active download state must be an object")
         state["current_path"] = "/processing/new-incarnation"
 
         def job_only_mutant(raw: dict[str, object]) -> bool:

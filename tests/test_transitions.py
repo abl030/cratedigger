@@ -324,7 +324,7 @@ class TestApplyTransition(unittest.TestCase):
         before = db.get_request(1)
 
         result = apply_transition(
-            cast(Any, db),
+            db,
             1,
             "wanted",
             from_status="processing",

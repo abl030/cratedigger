@@ -19,8 +19,9 @@ from __future__ import annotations
 import copy
 import os
 import unittest
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from typing import Any, Literal, cast
+from typing import Literal
 
 from hypothesis import example, given
 from hypothesis import strategies as st
@@ -36,11 +37,9 @@ from lib import transitions
 from lib.import_execution import (
     ExecutionLeaseSnapshot,
     ExecutionLivenessEvidence,
-    ExecutionLivenessProbe,
     ProcessIdentity,
 )
 from lib.import_job_recovery_service import (
-    AutomationRecoveryMutationDB,
     apply_import_job_recovery,
     get_automation_recovery_detail,
 )
@@ -169,7 +168,7 @@ def _handoff_allowed(
 
 
 def _exact_processing_owner(
-    request: dict[str, Any],
+    request: Mapping[str, object],
     job_id: int,
 ) -> bool:
     """Independent owner predicate: status and exact pointer are inseparable."""
@@ -231,7 +230,7 @@ def _assert_retry_retarget(
 
 
 def _mutant_owner_ignores_pointer(
-    request: dict[str, Any],
+    request: Mapping[str, object],
     _job_id: int,
 ) -> bool:
     return request.get("status") == "processing"
@@ -384,8 +383,8 @@ def _recover_launched_owner(
     from scripts import importer
 
     recovered = importer.recover_abandoned_running_jobs(
-        cast(Any, db),
-        liveness_probe=cast(ExecutionLivenessProbe, _ChangedBootProbe()),
+        db,  # pyright: ignore[reportArgumentType]
+        liveness_probe=_ChangedBootProbe(),
     )
     if [job.id for job in recovered] != [job_id]:
         raise AssertionError(
@@ -530,11 +529,8 @@ class ProcessingLifecycleMachine(RuleBasedStateMachine):
 
         assert self.oracle.owner_job_id is not None
         recovered = import_preview_worker.recover_running_preview_jobs(
-            cast(Any, self.db),
-            liveness_probe=cast(
-                ExecutionLivenessProbe,
-                _ChangedBootProbe(),
-            ),
+            self.db,  # pyright: ignore[reportArgumentType]
+            liveness_probe=_ChangedBootProbe(),
         )
         self.assert_or_raise(
             [job.id for job in recovered] == [self.oracle.owner_job_id]
@@ -665,16 +661,16 @@ class ProcessingLifecycleMachine(RuleBasedStateMachine):
                 ),
             )
         old_revision = None if journal is None else journal["revision"]
-        probe = cast(ExecutionLivenessProbe, _ChangedBootProbe())
+        probe = _ChangedBootProbe()
         detail = get_automation_recovery_detail(
-            cast(AutomationRecoveryMutationDB, self.db),
+            self.db,
             None,
             old_job_id,
             liveness_probe=probe,
         )
         assert detail.detail is not None
         result = apply_import_job_recovery(
-            cast(AutomationRecoveryMutationDB, self.db),
+            self.db,
             None,
             old_job_id,
             action="retry",
@@ -752,29 +748,32 @@ class ProcessingLifecycleMachine(RuleBasedStateMachine):
         and not self.oracle.cleanup_journal_present
     )
     @rule(result_status=st.sampled_from(("wanted", "imported")))
-    def close_recovery(self, result_status: str) -> None:
+    def close_recovery(
+        self,
+        result_status: Literal["wanted", "imported"],
+    ) -> None:
         assert self.oracle.owner_job_id is not None
         job_id = self.oracle.owner_job_id
-        probe = cast(ExecutionLivenessProbe, _ChangedBootProbe())
+        probe = _ChangedBootProbe()
         detail = get_automation_recovery_detail(
-            cast(AutomationRecoveryMutationDB, self.db),
+            self.db,
             None,
             job_id,
             liveness_probe=probe,
         )
         assert detail.detail is not None
         result = apply_import_job_recovery(
-            cast(AutomationRecoveryMutationDB, self.db),
+            self.db,
             None,
             job_id,
             action="close",
             reason="generated explicit recovery close",
             evidence_revision=detail.detail.evidence_revision,
-            result_status=cast(Literal["wanted", "imported"], result_status),
+            result_status=result_status,
             liveness_probe=probe,
         )
         self.assert_or_raise(result.outcome == "closed")
-        self.oracle.status = cast(LifecycleStatus, result_status)
+        self.oracle.status = result_status
         self.oracle.stage = "none"
         self.oracle.witness = None
         self.oracle.owner_job_id = None
@@ -1051,11 +1050,8 @@ class TestProcessingLifecycleGenerated(unittest.TestCase):
         ))
 
         recovered = import_preview_worker.recover_running_preview_jobs(
-            cast(Any, db),
-            liveness_probe=cast(
-                ExecutionLivenessProbe,
-                _ChangedBootProbe(),
-            ),
+            db,  # pyright: ignore[reportArgumentType]
+            liveness_probe=_ChangedBootProbe(),
         )
 
         self.assertEqual([job.id for job in recovered], [job_id])
@@ -1088,9 +1084,9 @@ class TestProcessingLifecycleGenerated(unittest.TestCase):
                 ),
             )
             old_revision = journal["revision"]
-        probe = cast(ExecutionLivenessProbe, _ChangedBootProbe())
+        probe = _ChangedBootProbe()
         observed = get_automation_recovery_detail(
-            cast(AutomationRecoveryMutationDB, db),
+            db,
             None,
             old_job_id,
             liveness_probe=probe,
@@ -1098,7 +1094,7 @@ class TestProcessingLifecycleGenerated(unittest.TestCase):
         assert observed.detail is not None
 
         result = apply_import_job_recovery(
-            cast(AutomationRecoveryMutationDB, db),
+            db,
             None,
             old_job_id,
             action="retry",
@@ -1159,13 +1155,13 @@ class TestProcessingLifecycleGenerated(unittest.TestCase):
     @example(result_status="imported")
     def test_recovery_close_is_explicit_and_consumes_owner(
         self,
-        result_status: str,
+        result_status: Literal["wanted", "imported"],
     ) -> None:
         db, job_id, _lease = _launched_owner_db()
         _recover_launched_owner(db, job_id=job_id)
-        probe = cast(ExecutionLivenessProbe, _ChangedBootProbe())
+        probe = _ChangedBootProbe()
         observed = get_automation_recovery_detail(
-            cast(AutomationRecoveryMutationDB, db),
+            db,
             None,
             job_id,
             liveness_probe=probe,
@@ -1173,13 +1169,13 @@ class TestProcessingLifecycleGenerated(unittest.TestCase):
         assert observed.detail is not None
 
         result = apply_import_job_recovery(
-            cast(AutomationRecoveryMutationDB, db),
+            db,
             None,
             job_id,
             action="close",
             reason=f"generated explicit {result_status}",
             evidence_revision=observed.detail.evidence_revision,
-            result_status=cast(Literal["wanted", "imported"], result_status),
+            result_status=result_status,
             liveness_probe=probe,
         )
 
@@ -1329,7 +1325,7 @@ class TestProcessingLifecycleGenerated(unittest.TestCase):
     def test_known_bad_retry_without_retarget_is_detected(self) -> None:
         with self.assertRaisesRegex(
             AssertionError,
-            "request still points",
+            "retry did not create a fresh recovery_required job",
         ):
             _assert_retry_retarget(
                 old_job_id=11,

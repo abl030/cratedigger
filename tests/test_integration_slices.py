@@ -14,7 +14,7 @@ import os
 import shutil
 import tempfile
 import unittest
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from types import SimpleNamespace
 from typing import Any, Never, Self, cast
@@ -28,7 +28,6 @@ from lib.grab_list import GrabListEntry
 from lib.import_execution import (
     CancellationToken,
     ExecutionLeaseSnapshot,
-    OwnerSessionIdentity,
     ProcessIdentity,
 )
 from lib.quality import (
@@ -264,24 +263,28 @@ def _run_as_owned_test_child(
     return run_import_fn(**kwargs)
 
 
+@contextmanager
 def _automation_dispatch_kwargs(
     db: FakePipelineDB,
     execution_lease: ExecutionLeaseSnapshot | None,
     *,
     run_import_fn: Callable[..., Any] | None = None,
-) -> dict[str, Any]:
+) -> Iterator[dict[str, Any]]:
     if execution_lease is None:
-        return {}
+        yield {}
+        return
     owned_runner = _owned_test_runner
     if run_import_fn is not None:
         def owned_runner(**kwargs):
             return _run_as_owned_test_child(run_import_fn, kwargs)
-    return {
-        "execution_lease": execution_lease,
-        "cancellation_token": CancellationToken(),
-        "owner_session_identity": OwnerSessionIdentity(id(db), 4242),
-        "run_import_fn": owned_runner,
-    }
+    token = CancellationToken()
+    with db._pin_owner_session(token) as owner_session_identity:
+        yield {
+            "execution_lease": execution_lease,
+            "cancellation_token": token,
+            "owner_session_identity": owner_session_identity,
+            "run_import_fn": owned_runner,
+        }
 
 
 def _download_ownership_cfg() -> CratediggerConfig:
@@ -806,7 +809,11 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
                 force=force,
             )
             with patch_dispatch_externals() as ext, \
-                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
+                 _automation_dispatch_kwargs(
+                     db,
+                     execution_lease,
+                 ) as automation_kwargs:
                 ext.run.return_value = MagicMock(
                     returncode=0, stdout=stdout, stderr="")
                 outcome = dispatch_import_core(
@@ -834,9 +841,9 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
                             candidate=candidate
                         )
                     ),
-                    **_automation_dispatch_kwargs(db, execution_lease),
+                    **automation_kwargs,
                 )
-                finalize_claimed_dispatch(db, claimed, outcome)
+            finalize_claimed_dispatch(db, claimed, outcome)
         finally:
             beets_info.album_path = original_album_path
             import shutil
@@ -1689,7 +1696,11 @@ class TestLosslessSourceLockedSlice(unittest.TestCase):
                 source_path=tmpdir,
             )
             with patch_dispatch_externals() as ext, \
-                 patch("lib.beets_db.BeetsDB", _mock_beets_db(None)):
+                 patch("lib.beets_db.BeetsDB", _mock_beets_db(None)), \
+                 _automation_dispatch_kwargs(
+                     db,
+                     execution_lease,
+                 ) as automation_kwargs:
                 ext.run.return_value = MagicMock(
                     returncode=5, stdout=_make_stdout(ir), stderr="")
                 outcome = dispatch_import_core(
@@ -1706,9 +1717,9 @@ class TestLosslessSourceLockedSlice(unittest.TestCase):
                                      filename="01 - Track.mp3")],
                     cfg=cfg,
                     candidate_import_job_id=claimed.id,
-                    **_automation_dispatch_kwargs(db, execution_lease),
+                    **automation_kwargs,
                 )
-                finalize_claimed_dispatch(db, claimed, outcome)
+            finalize_claimed_dispatch(db, claimed, outcome)
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -1795,7 +1806,11 @@ class TestDispatchNoJsonResult(unittest.TestCase):
                 mb_release_id="mbid-123",
                 source_path=tmpdir,
             )
-            with patch_dispatch_externals():
+            with patch_dispatch_externals(), _automation_dispatch_kwargs(
+                db,
+                execution_lease,
+                run_import_fn=parsed_import,
+            ) as automation_kwargs:
                 outcome = dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="mbid-123",
@@ -1808,13 +1823,9 @@ class TestDispatchNoJsonResult(unittest.TestCase):
                     attempt_spectral_audit=audit,
                     quality_gate_fn=lambda **kwargs: None,
                     candidate_import_job_id=claimed.id,
-                    **_automation_dispatch_kwargs(
-                        db,
-                        execution_lease,
-                        run_import_fn=parsed_import,
-                    ),
+                    **automation_kwargs,
                 )
-                finalize_claimed_dispatch(db, claimed, outcome)
+            finalize_claimed_dispatch(db, claimed, outcome)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -1863,7 +1874,11 @@ class TestDispatchNoJsonResult(unittest.TestCase):
                 source_path=tmpdir,
             )
             with patch_dispatch_externals() as ext, \
-                 patch("lib.beets_db.BeetsDB", _mock_beets_db(None)):
+                 patch("lib.beets_db.BeetsDB", _mock_beets_db(None)), \
+                 _automation_dispatch_kwargs(
+                     db,
+                     execution_lease,
+                 ) as automation_kwargs:
                 ext.run.return_value = MagicMock(
                     returncode=1, stdout="some error\n", stderr="")
                 outcome = dispatch_import_core(
@@ -1877,9 +1892,9 @@ class TestDispatchNoJsonResult(unittest.TestCase):
                     cfg=cfg,
                     attempt_spectral_audit=audit,
                     candidate_import_job_id=claimed.id,
-                    **_automation_dispatch_kwargs(db, execution_lease),
+                    **automation_kwargs,
                 )
-                finalize_claimed_dispatch(db, claimed, outcome)
+            finalize_claimed_dispatch(db, claimed, outcome)
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -1925,7 +1940,14 @@ class TestDispatchNoJsonResult(unittest.TestCase):
                 mb_release_id="mbid-123",
                 source_path=tmpdir,
             )
-            with patch("lib.beets_db.BeetsDB", _mock_beets_db(None)):
+            with patch(
+                "lib.beets_db.BeetsDB",
+                _mock_beets_db(None),
+            ), _automation_dispatch_kwargs(
+                db,
+                execution_lease,
+                run_import_fn=timeout_import,
+            ) as automation_kwargs:
                 outcome = dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="mbid-123",
@@ -1937,13 +1959,9 @@ class TestDispatchNoJsonResult(unittest.TestCase):
                     cfg=cfg,
                     attempt_spectral_audit=audit,
                     candidate_import_job_id=claimed.id,
-                    **_automation_dispatch_kwargs(
-                        db,
-                        execution_lease,
-                        run_import_fn=timeout_import,
-                    ),
+                    **automation_kwargs,
                 )
-                finalize_claimed_dispatch(db, claimed, outcome)
+            finalize_claimed_dispatch(db, claimed, outcome)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -1986,7 +2004,14 @@ class TestDispatchNoJsonResult(unittest.TestCase):
                 mb_release_id="mbid-123",
                 source_path=tmpdir,
             )
-            with patch("lib.beets_db.BeetsDB", _mock_beets_db(None)):
+            with patch(
+                "lib.beets_db.BeetsDB",
+                _mock_beets_db(None),
+            ), _automation_dispatch_kwargs(
+                db,
+                execution_lease,
+                run_import_fn=failed_import,
+            ) as automation_kwargs:
                 outcome = dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="mbid-123",
@@ -1998,13 +2023,9 @@ class TestDispatchNoJsonResult(unittest.TestCase):
                     cfg=cfg,
                     attempt_spectral_audit=audit,
                     candidate_import_job_id=claimed.id,
-                    **_automation_dispatch_kwargs(
-                        db,
-                        execution_lease,
-                        run_import_fn=failed_import,
-                    ),
+                    **automation_kwargs,
                 )
-                finalize_claimed_dispatch(db, claimed, outcome)
+            finalize_claimed_dispatch(db, claimed, outcome)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -2076,7 +2097,14 @@ class TestDispatchNoJsonResult(unittest.TestCase):
                 mb_release_id="mbid-123",
                 source_path=tmpdir,
             )
-            with patch("lib.beets_db.BeetsDB", _mock_beets_db(None)):
+            with patch(
+                "lib.beets_db.BeetsDB",
+                _mock_beets_db(None),
+            ), _automation_dispatch_kwargs(
+                db,
+                execution_lease,
+                run_import_fn=parsed_import,
+            ) as automation_kwargs:
                 outcome = dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="mbid-123",
@@ -2089,13 +2117,9 @@ class TestDispatchNoJsonResult(unittest.TestCase):
                     attempt_spectral_audit=audit,
                     quality_gate_fn=failed_quality_gate,
                     candidate_import_job_id=claimed.id,
-                    **_automation_dispatch_kwargs(
-                        db,
-                        execution_lease,
-                        run_import_fn=parsed_import,
-                    ),
+                    **automation_kwargs,
                 )
-                finalize_claimed_dispatch(db, claimed, outcome)
+            finalize_claimed_dispatch(db, claimed, outcome)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -2579,7 +2603,11 @@ class TestBayOfBiscayUpgradeChain(unittest.TestCase):
                 source_path=tmpdir,
             )
             with patch_dispatch_externals() as ext, \
-                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
+                 _automation_dispatch_kwargs(
+                     db,
+                     execution_lease,
+                 ) as automation_kwargs:
                 ext.run.return_value = MagicMock(
                     returncode=0, stdout=stdout, stderr="")
                 outcome = dispatch_import_core(
@@ -2600,9 +2628,9 @@ class TestBayOfBiscayUpgradeChain(unittest.TestCase):
                         candidate=candidate,
                         current=current,
                     ),
-                    **_automation_dispatch_kwargs(db, execution_lease),
+                    **automation_kwargs,
                 )
-                finalize_claimed_dispatch(db, claimed, outcome)
+            finalize_claimed_dispatch(db, claimed, outcome)
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -3069,7 +3097,11 @@ class TestReleaseLockContention(unittest.TestCase):
                 source_path=tmpdir,
             )
             with patch_dispatch_externals() as ext, \
-                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)):
+                 patch("lib.beets_db.BeetsDB", _mock_beets_db(beets_info)), \
+                 _automation_dispatch_kwargs(
+                     db,
+                     execution_lease,
+                 ) as automation_kwargs:
                 ext.run.return_value = MagicMock(
                     returncode=0, stdout=_make_stdout(ir), stderr="")
                 outcome = dispatch_import_core(
@@ -3091,9 +3123,9 @@ class TestReleaseLockContention(unittest.TestCase):
                             candidate=candidate
                         )
                     ),
-                    **_automation_dispatch_kwargs(db, execution_lease),
+                    **automation_kwargs,
                 )
-                finalize_claimed_dispatch(db, claimed, outcome)
+            finalize_claimed_dispatch(db, claimed, outcome)
         finally:
             beets_info.album_path = original_album_path
             import shutil
@@ -5957,10 +5989,7 @@ class TestRecordPreviewMeasurementFailedSlice(unittest.TestCase):
         source_path: str,
     ):
         from lib.dispatch.types import DispatchOutcome, PostCommitCleanup
-        from lib.import_execution import (
-            CancellationToken,
-            OwnerSessionIdentity,
-        )
+        from lib.import_execution import CancellationToken
         from lib.terminal_outcomes import AutomationTerminalAuthority
         from scripts.importer import _complete_automation_processing_cleanup
 
@@ -5971,21 +6000,21 @@ class TestRecordPreviewMeasurementFailedSlice(unittest.TestCase):
         )
         assert claimed is not None and claimed.id == job.id
         token = CancellationToken()
-        owner = OwnerSessionIdentity(id(db), 4242)
-        cleanup_receipt = _complete_automation_processing_cleanup(
-            db,
-            claimed,
-            DispatchOutcome(
-                success=False,
-                message="preview measurement failed",
-                post_commit_cleanup=PostCommitCleanup(
-                    staged_path=source_path,
+        with db._pin_owner_session(token) as owner_session_identity:
+            cleanup_receipt = _complete_automation_processing_cleanup(
+                db,
+                claimed,
+                DispatchOutcome(
+                    success=False,
+                    message="preview measurement failed",
+                    post_commit_cleanup=PostCommitCleanup(
+                        staged_path=source_path,
+                    ),
                 ),
-            ),
-            execution_lease=lease,
-            cancellation_token=token,
-            owner_session_identity=owner,
-        )
+                execution_lease=lease,
+                cancellation_token=token,
+                owner_session_identity=owner_session_identity,
+            )
         return AutomationTerminalAuthority(
             expected_job_status="queued",
             expected_preview_status="running",
@@ -7106,16 +7135,41 @@ class TestU7RecoverySweepSlice(unittest.TestCase):
         self._mbids: list[str] = []
 
     def tearDown(self):
-        # Drop any seeded rows (CASCADE handles import_jobs).
+        # Drop the exact owner and request in one deferred-constraint
+        # transaction. The request FK deliberately does not treat an active
+        # automation job as disposable cascade debris.
         if self._mbids:
             conn = self._psycopg2.connect(_u7_test_dsn())
-            conn.autocommit = True
+            conn.autocommit = False
             try:
                 with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE album_requests
+                        SET status = 'wanted',
+                            active_automation_import_job_id = NULL,
+                            active_download_state = NULL
+                        WHERE mb_release_id = ANY(%s)
+                        """,
+                        (self._mbids,),
+                    )
+                    cur.execute(
+                        """
+                        DELETE FROM import_jobs AS job
+                        USING album_requests AS request
+                        WHERE job.request_id = request.id
+                          AND request.mb_release_id = ANY(%s)
+                        """,
+                        (self._mbids,),
+                    )
                     cur.execute(
                         "DELETE FROM album_requests WHERE mb_release_id = ANY(%s)",
                         (self._mbids,),
                     )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
             finally:
                 conn.close()
 

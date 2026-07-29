@@ -689,7 +689,6 @@ def _run_dispatch_finalization_world(
     from lib.import_execution import (
         CancellationToken,
         ExecutionLeaseSnapshot,
-        OwnerSessionIdentity,
         ProcessIdentity,
     )
     from lib.quality import DownloadInfo, ImportResult, QualityComparisonBasis
@@ -701,6 +700,7 @@ def _run_dispatch_finalization_world(
         make_request_row,
         noop_quality_gate,
         patch_dispatch_externals,
+        pinned_dispatch_authority,
     )
 
     db = FakePipelineDB()
@@ -875,7 +875,13 @@ def _run_dispatch_finalization_world(
                 execution_lease=importer_lease,
             )
             assert claimed is not None and claimed.id == job.id
-            with patch_dispatch_externals(), _silence_logs():
+            cancellation_token = CancellationToken()
+            with patch_dispatch_externals(), _silence_logs(), \
+                 pinned_dispatch_authority(
+                     db,
+                     importer_lease,
+                     cancellation_token=cancellation_token,
+                 ) as (cancellation_token, owner_session_identity):
                 outcome = dispatch_import_core(
                     path=source,
                     mb_release_id="generated-mbid",
@@ -894,10 +900,10 @@ def _run_dispatch_finalization_world(
                     beets_library_db_path=str(beets.library_db),
                     beets_library_root=str(beets.library_root),
                     execution_lease=importer_lease,
-                    cancellation_token=CancellationToken(),
-                    owner_session_identity=OwnerSessionIdentity(id(db), 4242),
+                    cancellation_token=cancellation_token,
+                    owner_session_identity=owner_session_identity,
                 )
-                finalize_claimed_dispatch(db, claimed, outcome)
+            finalize_claimed_dispatch(db, claimed, outcome)
 
     final_job = db.get_import_job(job.id)
     assert final_job is not None

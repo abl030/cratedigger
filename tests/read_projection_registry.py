@@ -43,7 +43,9 @@ from lib.pipeline_db import (
     PersistedDistance,
     PersistedTrack,
     PersistedYoutubeRow,
+    PipelineDB,
 )
+from tests.fakes import FakePipelineDB
 
 # A seeder takes a db (real ``PipelineDB`` or ``FakePipelineDB``), seeds
 # identical state, calls ONE read method, and returns the projected rows
@@ -157,7 +159,9 @@ def _seed_get_request_by_replaces_request_id(db: Any) -> "list[dict[str, Any]]":
     return _one(db.get_request_by_replaces_request_id(old_id))
 
 
-def _seed_get_acquisition(db: Any) -> "list[dict[str, Any]]":
+def _seed_get_acquisition(
+    db: PipelineDB | FakePipelineDB,
+) -> "list[dict[str, Any]]":
     request_id = db.add_request(
         "Parity Artist",
         "Parity Processing Album",
@@ -190,8 +194,8 @@ def _seed_get_acquisition(db: Any) -> "list[dict[str, Any]]":
     )
     payload = db.get_acquisition()
     return [
-        *payload["acquisition"],
-        *payload["youtube_ingest"],
+        *(dict(row) for row in payload["acquisition"]),
+        *(dict(row) for row in payload["youtube_ingest"]),
     ]
 
 

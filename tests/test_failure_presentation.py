@@ -1226,18 +1226,22 @@ _OWN_MESSAGE_TRIGGERS: tuple[_Trigger, ...] = (
         expect="Transfers disappeared from slskd",
     ),
     _Trigger(
+        # Emitted before issue #898 retired timeout-based processing
+        # abandonment. Retained only to render already-persisted audit rows.
         trigger="completed download could not be materialized within",
-        produced_by="lib/download.py",
-        evidence="Completed download could not be materialized within",
+        produced_by="",
+        evidence="",
         probe="Completed download could not be materialized within 3600s of "
               "processing start; resetting to wanted for re-download",
         expect="Download could not be staged for import in time",
         outcome="failed",
     ),
     _Trigger(
+        # Emitted before issue #898 made the exact automation job the sole
+        # processing owner. Retained only for historical audit rows.
         trigger="abandoned interrupted auto-import",
-        produced_by="lib/download_materialization.py",
-        evidence="Abandoned interrupted auto-import",
+        produced_by="",
+        evidence="",
         probe="Abandoned interrupted auto-import; queued for redownload",
         expect="Interrupted import abandoned and requeued",
         outcome="failed",
@@ -1538,7 +1542,10 @@ class TestEveryTriggerHasAProducer(unittest.TestCase):
             source = handle.read()
         from lib import failure_presentation as presenter
 
-        historical = {"event_path_missing"}
+        historical = {
+            "abandoned_interrupted_auto_import",
+            "event_path_missing",
+        }
         reasons = list(presenter._MATERIALIZE_REASON_COPY) + [
             prefix for prefix, _copy in presenter._MATERIALIZE_REASON_PREFIX_COPY
         ]

@@ -6,8 +6,8 @@ import pathlib
 import tempfile
 import threading
 import unittest
+from collections.abc import Callable
 from types import SimpleNamespace
-from typing import Any
 from unittest.mock import patch
 
 from lib.dispatch.subprocess_runner import run_import_one
@@ -15,6 +15,7 @@ from lib.download_materialization import _materialize_processing_dir
 from lib.download_rejection import _handle_rejected_result
 from lib.download_validation import _process_beets_validation
 from lib.fs_authority import copy_opened_file, remove_relative_tree
+from lib.grab_list import GrabListEntry
 from lib.import_execution import (
     CancellationToken,
     ExecutionCancelled,
@@ -25,7 +26,7 @@ from lib.import_preview import (
     measure_and_persist_candidate_evidence,
 )
 from lib.processing_paths import canonical_folder_for_row, processing_albums_dir
-from lib.quality import SpectralAnalysisDetail, ValidationResult
+from lib.quality import ValidationResult
 from lib.quality_evidence import EvidenceBuildResult
 from lib.staged_album import StagedAlbum
 from tests.fakes import FakePipelineDB
@@ -62,7 +63,7 @@ def _private_roots(raw: str) -> tuple[str, str]:
 
 def _materialize_world(
     raw: str,
-) -> tuple[Any, Any, StagedAlbum, str, str]:
+) -> tuple[GrabListEntry, SimpleNamespace, StagedAlbum, str, str]:
     download_root, processing_root = _private_roots(raw)
     source_dir = os.path.join(download_root, "peer", "album")
     os.makedirs(source_dir)
@@ -109,7 +110,7 @@ class TestMaterializationCancellation(unittest.TestCase):
                 _materialize_processing_dir(
                     album,
                     staged,
-                    ctx,
+                    ctx,  # pyright: ignore[reportArgumentType]
                     before_publish=cancel_before_publish,
                     cancellation_token=token,
             )
@@ -130,7 +131,7 @@ class TestMaterializationCancellation(unittest.TestCase):
             real_write = os.write
             writes = 0
 
-            def partial_write(fd: int, data: Any) -> int:
+            def partial_write(fd: int, data: memoryview) -> int:
                 nonlocal writes
                 writes += 1
                 count = real_write(fd, data[:4])
@@ -199,7 +200,7 @@ class TestMaterializationCancellation(unittest.TestCase):
                 _materialize_processing_dir(
                     album,
                     staged,
-                    ctx,
+                    ctx,  # pyright: ignore[reportArgumentType]
                     cancellation_token=token,
                 )
 
@@ -227,7 +228,7 @@ class TestPreviewCancellation(unittest.TestCase):
                 _destination_fd: int,
                 *,
                 max_bytes: int,
-                before_write: Any,
+                before_write: Callable[[int], None],
             ) -> int:
                 del max_bytes
                 token.cancel("lost_before_copy_write")
@@ -293,13 +294,6 @@ class TestPreviewCancellation(unittest.TestCase):
                 raise AssertionError("measurement ran after cancellation")
 
             with patch(
-                "lib.import_preview.load_persisted_existing_spectral",
-                return_value=(
-                    None,
-                    SpectralAnalysisDetail(attempted=False),
-                    False,
-                ),
-            ), patch(
                 "lib.import_preview.measure_preimport_state",
                 side_effect=forbidden_measure,
             ), self.assertRaisesRegex(ExecutionCancelled, "lost_during_repair"):

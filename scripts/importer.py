@@ -8,9 +8,10 @@ import os
 import socket
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager
 from dataclasses import replace
-from typing import Any, Protocol, assert_never
+from typing import Any, Protocol, assert_never, runtime_checkable
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
@@ -38,6 +39,7 @@ from lib.download_processing import (
     ProcessAlbumFn,
 )
 from lib.import_execution import (
+    AutomationOwnerCheckpointDB,
     CancellationToken,
     ExecutionCancelled,
     ExecutionLeaseSnapshot,
@@ -64,11 +66,14 @@ from lib.pipeline_db import (
     CleanupJournalIntent,
     CleanupJournalReceipt,
     PipelineDB,
+    ProcessingCleanupJournalRow,
 )
+from lib.pipeline_db.rows import AlbumRequestRow
 from lib.processing_cleanup import (
     PROCESSING_CLEANUP_NO_OP,
     PROCESSING_CLEANUP_QUARANTINE_SOURCE,
     PROCESSING_CLEANUP_REMOVE_SOURCE,
+    ProcessingCleanupJournalDB,
     cleanup_manifest_builtins,
     cleanup_manifest_hash,
     execute_processing_cleanup,
@@ -109,6 +114,31 @@ class _PostCommitCleanupDB(Protocol):
         log_id: int,
         audit: PostCommitQuarantineAudit,
     ) -> bool: ...
+
+
+class _AutomationCleanupDB(
+    AutomationOwnerCheckpointDB,
+    ProcessingCleanupJournalDB,
+    Protocol,
+):
+    """Exact persistence surface for owned processor cleanup."""
+
+    def get_request(self, request_id: int) -> AlbumRequestRow | None: ...
+
+    def get_processing_cleanup_journal(
+        self,
+        *,
+        request_id: int,
+        job_id: int,
+    ) -> ProcessingCleanupJournalRow | None: ...
+
+    def create_processing_cleanup_journal(
+        self,
+        *,
+        request_id: int,
+        job_id: int,
+        intent: CleanupJournalIntent,
+    ) -> ProcessingCleanupJournalRow: ...
 
 
 def _run_post_commit_cleanup(
@@ -332,7 +362,7 @@ def _automation_cleanup_intent(
 
 
 def _complete_automation_processing_cleanup(
-    db: Any,
+    db: _AutomationCleanupDB,
     job: ImportJob,
     outcome: DispatchOutcome,
     *,
@@ -706,6 +736,7 @@ def execute_automation_import_job(
     *,
     ctx: Any = None,
     process_album_fn: ProcessAlbumFn | None = None,
+    completed_processing_fn: Callable[..., CompletionResult] | None = None,
     execution_lease: ExecutionLeaseSnapshot | None = None,
     cancellation_token: CancellationToken | None = None,
     owner_session_identity: OwnerSessionIdentity | None = None,
@@ -746,7 +777,8 @@ def execute_automation_import_job(
     created_ctx = ctx is None
     runtime_ctx = ctx or _build_runtime_context(db, borrow_session=True)
     try:
-        result = _run_completed_processing(
+        process_completed = completed_processing_fn or _run_completed_processing
+        result = process_completed(
             entry,
             state,
             runtime_ctx,
@@ -1037,8 +1069,34 @@ def _execution_lease_from_job(
     )
 
 
+@runtime_checkable
+class _AutomationOwnerDB(Protocol):
+    def get_import_job(self, job_id: int) -> ImportJob | None: ...
+
+    def get_request(
+        self,
+        request_id: int,
+    ) -> Mapping[str, object] | None: ...
+
+
+@runtime_checkable
+class _AutomationStageDB(_AutomationOwnerDB, Protocol):
+    def _pin_owner_session(
+        self,
+        cancellation_token: CancellationToken,
+    ) -> AbstractContextManager[OwnerSessionIdentity]: ...
+
+    def advisory_lock(
+        self,
+        namespace: int,
+        key: int,
+    ) -> AbstractContextManager[bool]: ...
+
+    def close(self) -> None: ...
+
+
 def _automation_claim_is_current(
-    db: Any,
+    db: _AutomationOwnerDB,
     job: ImportJob,
     execution_lease: ExecutionLeaseSnapshot,
 ) -> bool:
@@ -1073,14 +1131,16 @@ def _process_automation_claim(
     *,
     dsn: str,
     execution_lease: ExecutionLeaseSnapshot,
-    ctx: Any,
-    stage_db_factory: Callable[[str], Any],
+    ctx: object | None,
+    stage_db_factory: Callable[[str], object],
     execute_fn: Callable[..., DispatchOutcome] = execute_import_job,
 ) -> ImportJob | None:
     """Run one automation importer under its pinned IMPORT owner session."""
     if job.request_id is None:
         return None
     stage_db = stage_db_factory(dsn)
+    if not isinstance(stage_db, _AutomationStageDB):
+        raise TypeError("automation stage DB is missing its owner-session protocol")
     token = CancellationToken()
     try:
         # Pin first. Acquiring IMPORT before pinning could reconnect between
@@ -1105,7 +1165,7 @@ def _process_automation_claim(
                 ):
                     return None
                 return process_claimed_job(
-                    stage_db,
+                    stage_db,  # pyright: ignore[reportArgumentType]
                     job,
                     ctx=ctx,
                     execute_fn=execute_fn,
@@ -1458,7 +1518,7 @@ def run_once(
     *,
     worker_id: str,
     ctx: Any = None,
-    stage_db_factory: Callable[[str], Any] | None = None,
+    stage_db_factory: Callable[[str], object] | None = None,
     execution_lease_factory: Callable[..., ExecutionLeaseSnapshot] | None = None,
     execute_fn: Callable[..., DispatchOutcome] = execute_import_job,
 ) -> ImportJob | None:

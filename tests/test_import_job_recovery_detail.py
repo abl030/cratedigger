@@ -7,8 +7,9 @@ import os
 import sys
 import unittest
 from datetime import UTC, datetime
-from typing import Any, cast
 from unittest.mock import patch
+
+import msgspec
 
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401
@@ -22,17 +23,19 @@ from lib.beets_db import (
 )
 from lib.import_execution import (
     CgroupObservation,
+    CgroupState,
     ExecutionLeaseSnapshot,
     ExecutionLivenessEvidence,
     InvocationObservation,
+    InvocationState,
     ProcessIdentity,
     ProcessObservation,
+    ProcessState,
 )
 from lib.import_job_recovery_service import (
     AUTOMATION_COMPLETION_RESULT_KEY,
     AutomationCompletionReceipt,
     AutomationRecoveryBeets,
-    AutomationRecoveryDetailDB,
     automation_completion_result_patch,
     get_automation_recovery_detail,
 )
@@ -51,12 +54,12 @@ def _job(
     *,
     status: str = "running",
     launch: bool = False,
-    result: dict[str, Any] | None = None,
+    result: dict[str, object] | None = None,
     completed_at: datetime | None = None,
     with_lease: bool = True,
     with_child: bool = True,
 ) -> ImportJob:
-    row: dict[str, Any] = {
+    row: dict[str, object] = {
         "id": 7,
         "job_type": "automation_import",
         "status": status,
@@ -86,19 +89,22 @@ def _job(
 
 
 def _request() -> AlbumRequestRow:
-    return cast(AlbumRequestRow, make_request_row(
-        id=42,
-        status="processing",
-        mb_release_id=_RELEASE_ID,
-        active_automation_import_job_id=7,
-        active_download_state={
-            "filetype": "flac",
-            "enqueued_at": "2026-07-29T00:00:00+00:00",
-            "files": [],
-            "processing_started_at": "2026-07-29T00:01:00+00:00",
-            "current_path": "/processing/album",
-        },
-    ))
+    return msgspec.convert(
+        make_request_row(
+            id=42,
+            status="processing",
+            mb_release_id=_RELEASE_ID,
+            active_automation_import_job_id=7,
+            active_download_state={
+                "filetype": "flac",
+                "enqueued_at": "2026-07-29T00:00:00+00:00",
+                "files": [],
+                "processing_started_at": "2026-07-29T00:01:00+00:00",
+                "current_path": "/processing/album",
+            },
+        ),
+        type=AlbumRequestRow,
+    )
 
 
 class _DetailDB:
@@ -178,11 +184,11 @@ def _lease() -> ExecutionLeaseSnapshot:
 
 def _process(
     identity: ProcessIdentity,
-    state: str,
+    state: ProcessState,
 ) -> ProcessObservation:
     return ProcessObservation(
         identity=identity,
-        state=cast(Any, state),
+        state=state,
         observed_start_ticks=(
             identity.start_ticks if state == "exact"
             else identity.start_ticks + 1 if state == "reused"
@@ -198,10 +204,10 @@ def _process(
 
 def _same_boot_evidence(
     *,
-    worker: str,
-    child: str,
-    invocation: str,
-    cgroup: str,
+    worker: ProcessState,
+    child: ProcessState,
+    invocation: InvocationState,
+    cgroup: CgroupState,
 ) -> ExecutionLivenessEvidence:
     lease = _lease()
     return ExecutionLivenessEvidence(
@@ -209,9 +215,9 @@ def _same_boot_evidence(
         current_host_boot_id="boot-a",
         boot_error=None,
         worker=_process(lease.worker, worker),
-        beets=_process(cast(ProcessIdentity, lease.beets), child),
+        beets=_process(lease.beets, child) if lease.beets is not None else None,
         invocation=InvocationObservation(
-            state=cast(Any, invocation),
+            state=invocation,
             stored_invocation_id=lease.invocation_id,
             observed_invocation_id=(
                 lease.invocation_id if invocation == "exact" else None
@@ -225,7 +231,7 @@ def _same_boot_evidence(
             sub_state="running" if invocation == "exact" else "dead",
         ),
         cgroup=CgroupObservation(
-            state=cast(Any, cgroup),
+            state=cgroup,
             path=(
                 "/system.slice/cratedigger-importer.service"
                 if cgroup == "exact" else None
@@ -262,7 +268,7 @@ def _detail(
     observed_at: datetime = _OBSERVED,
 ):
     result = get_automation_recovery_detail(
-        cast(AutomationRecoveryDetailDB, db),
+        db,
         beets or _missing_library(),
         7,
         liveness_probe=probe,
@@ -386,12 +392,16 @@ class TestAutomationRecoveryDetail(unittest.TestCase):
             captured_at="2026-07-29T01:02:04+00:00",
         )
         patch = automation_completion_result_patch(receipt)
+        persisted_receipt = msgspec.convert(
+            patch[AUTOMATION_COMPLETION_RESULT_KEY],
+            type=dict[str, object],
+        )
         self.assertEqual(
-            patch[AUTOMATION_COMPLETION_RESULT_KEY]["job_id"],  # type: ignore[index]
+            persisted_receipt["job_id"],
             7,
         )
         detail = _detail(
-            _DetailDB(_job(launch=True, result=cast(dict[str, Any], patch))),
+            _DetailDB(_job(launch=True, result=patch)),
             probe=_Probe(_changed_boot_evidence()),
         )
         self.assertEqual(detail.completion.status, "captured")
@@ -401,7 +411,7 @@ class TestAutomationRecoveryDetail(unittest.TestCase):
         wrong_owner["active_automation_import_job_id"] = 99
         unavailable = _detail(
             _DetailDB(
-                _job(launch=True, result=cast(dict[str, Any], patch)),
+                _job(launch=True, result=patch),
                 request=wrong_owner,
             ),
             probe=_Probe(_changed_boot_evidence()),
@@ -453,27 +463,27 @@ class TestAutomationRecoveryDetail(unittest.TestCase):
     def test_revision_excludes_observation_time_but_binds_cleanup_progress(
         self,
     ) -> None:
-        journal = cast(ProcessingCleanupJournalRow, {
-            "job_id": 7,
-            "request_id": 42,
-            "revision": 3,
-            "action": "remove_source",
-            "source_path": "/processing/album",
-            "source_manifest": [],
-            "source_manifest_hash": "sha256:a",
-            "destination_path": None,
-            "destination_manifest": None,
-            "destination_manifest_hash": None,
-            "selected_destination_path": None,
-            "step_progress": {"removed": 1},
-            "declared_result_status": None,
-            "declared_reason": None,
-            "evidence_revision": None,
-            "completed_receipt": None,
-            "created_at": _OBSERVED,
-            "updated_at": _OBSERVED,
-            "completed_at": None,
-        })
+        journal = ProcessingCleanupJournalRow(
+            job_id=7,
+            request_id=42,
+            revision=3,
+            action="remove_source",
+            source_path="/processing/album",
+            source_manifest=[],
+            source_manifest_hash="sha256:a",
+            destination_path=None,
+            destination_manifest=None,
+            destination_manifest_hash=None,
+            selected_destination_path=None,
+            step_progress={"removed": 1},
+            declared_result_status=None,
+            declared_reason=None,
+            evidence_revision=None,
+            completed_receipt=None,
+            created_at=_OBSERVED,
+            updated_at=_OBSERVED,
+            completed_at=None,
+        )
         probe = _Probe(_same_boot_evidence(
             worker="absent",
             child="absent",
@@ -593,7 +603,7 @@ class TestAutomationRecoveryDetailPostgres(unittest.TestCase):
             create=True,
         ):
             fake_result = get_automation_recovery_detail(
-                cast(AutomationRecoveryDetailDB, fake),
+                fake,
                 None,
                 fake_job.id,
                 observed_at=_OBSERVED,

@@ -10,7 +10,7 @@ import threading
 import time
 import unittest
 from itertools import pairwise
-from typing import Any, Self, cast
+from typing import Self
 from unittest.mock import MagicMock, patch
 
 sys.path.append(os.path.dirname(__file__))
@@ -665,7 +665,7 @@ class TestPinnedOwnerSessionPostgres(unittest.TestCase):
         token = CancellationToken()
         try:
             with patch(
-                "lib.pipeline_db._core.OwnerSessionWatchdog.start",
+                "lib.import_execution.threading.Thread",
                 side_effect=RuntimeError("thread unavailable"),
             ), self.assertRaisesRegex(
                 OwnerSessionLost,
@@ -697,9 +697,9 @@ class TestPinnedOwnerSessionPostgres(unittest.TestCase):
 
             def __exit__(
                 self,
-                exc_type: object,
-                exc_value: object,
-                traceback: object,
+                t: type[BaseException] | None,
+                v: BaseException | None,
+                tb: object,
             ) -> None:
                 return None
 
@@ -715,7 +715,7 @@ class TestPinnedOwnerSessionPostgres(unittest.TestCase):
             db.conn,
             identity,
             token,
-            cast(Any, gate),
+            gate,
         )
 
         def acquire() -> None:

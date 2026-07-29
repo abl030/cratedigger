@@ -101,6 +101,9 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"\.sp\.(run|Popen|check_output|check_call)$"),
     re.compile(r"\.subprocess\.(run|Popen|check_output|check_call)$"),
     re.compile(r"^subprocess\."),
+    # Owned subprocess supervision wrapper. Tests inject a deterministic
+    # process group here while exercising launch/cancellation fencing.
+    re.compile(r"^lib\.dispatch\.subprocess_runner\.MonitoredProcessGroup$"),
     # HTTP / URL clients
     re.compile(r"\.urllib\."),
     re.compile(r"\.requests\."),
@@ -108,7 +111,7 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"^requests\."),
     # OS / filesystem leaf seams (stdlib os.*)
     re.compile(r"\.os\.path\."),
-    re.compile(r"\.os\.(remove|rename|makedirs|mkdir|listdir|stat|unlink|rmdir|getcwd|getpgid|killpg|kill|chmod|symlink)$"),
+    re.compile(r"\.os\.(remove|rename|makedirs|mkdir|listdir|stat|write|unlink|rmdir|getcwd|getpgid|killpg|kill|chmod|symlink)$"),
     re.compile(r"\.shutil\."),
     re.compile(r"^os\.path\."),
     re.compile(r"^shutil\."),
@@ -425,6 +428,8 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"^scripts\.pipeline_cli\.quality\._load_runtime_rank_config$"),
     re.compile(r"^scripts\.pipeline_cli\.quality\._load_runtime_verified_lossless_target$"),
     re.compile(r"^scripts\.pipeline_cli\.quality\._load_beets_album_info$"),
+    # Recovery CLI Beets opener: filesystem/SQLite adapter boundary.
+    re.compile(r"^scripts\.pipeline_cli\.imports\._open_recovery_beets$"),
 
     # scripts.repair helpers that wrap external boundaries.
     # ``_fetch_slskd_downloads`` is a thin slskd HTTP call (#479 rename of
@@ -454,7 +459,7 @@ MULTILINE_PATCH_BASELINE: dict[str, int] = {
     'lib.download._run_completed_processing': 5,
     'lib.download_validation._handle_valid_result': 1,
     'lib.download_materialization._materialize_processing_dir': 2,
-    'lib.download_processing.process_completed_album': 10,
+    'lib.download_processing.process_completed_album': 9,
     'lib.import_evidence.ensure_current_evidence_for_action': 6,
     'lib.import_evidence.load_or_backfill_current_evidence': 1,
     'lib.import_preview.preview_import_from_download_log': 1,
@@ -468,7 +473,7 @@ MULTILINE_PATCH_BASELINE: dict[str, int] = {
     'lib.wrong_match_cleanup_service.load_current_evidence_for_action': 1,
     'lib.wrong_match_delete_service.delete_wrong_match': 6,
     'lib.wrong_match_delete_service.delete_wrong_match_group': 4,
-    'scripts.import_preview_worker.measure_and_persist_candidate_evidence': 16,
+    'scripts.import_preview_worker.measure_and_persist_candidate_evidence': 14,
     'scripts.pipeline_cli.youtube._RedisYoutubeCache': 2,
     'scripts.pipeline_cli.youtube._build_youtube_client': 2,
     'scripts.pipeline_cli.youtube.resolve_youtube_album': 2,

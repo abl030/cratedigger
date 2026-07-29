@@ -6,8 +6,10 @@ import os
 import sys
 import tempfile
 import unittest
-from typing import cast
+from typing import Protocol
 from unittest.mock import patch
+
+import msgspec
 
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401
@@ -28,13 +30,20 @@ from lib.import_job_recovery_service import (
 from lib.pipeline_db.cleanup_journal import CleanupJournalIntent
 from lib.pipeline_db.terminal_outcomes import ImportJobTerminalConflict
 from lib.processing_cleanup import (
-    CleanupSourceInspection,
     cleanup_manifest_hash,
 )
 from tests.helpers import handoff_automation_owner
 
 TEST_DSN = os.environ["TEST_DB_DSN"]
 _RELEASE_ID = "75dbf62e-7dd2-4ddc-b57b-9bad1758b6b0"
+
+
+class _RawRecoveryDB(AutomationRecoveryMutationDB, Protocol):
+    def _execute(
+        self,
+        sql: str,
+        params: tuple[object, ...] = (),
+    ) -> object: ...
 
 
 def _replacement_lease(label: str) -> ExecutionLeaseSnapshot:
@@ -63,7 +72,7 @@ class _ChangedBootProbe:
 
 
 class _MutatingChangedBootProbe(_ChangedBootProbe):
-    def __init__(self, db: AutomationRecoveryMutationDB, job_id: int) -> None:
+    def __init__(self, db: _RawRecoveryDB, job_id: int) -> None:
         self.db = db
         self.job_id = job_id
 
@@ -71,8 +80,7 @@ class _MutatingChangedBootProbe(_ChangedBootProbe):
         self,
         lease: ExecutionLeaseSnapshot,
     ) -> ExecutionLivenessEvidence:
-        raw_db = cast(object, self.db)
-        raw_db._execute(  # type: ignore[attr-defined]
+        self.db._execute(
             """
             UPDATE import_jobs
             SET execution_invocation_id = 'fresh-claim'
@@ -132,9 +140,8 @@ class TestAutomationRecoveryMutationsFakeParity(unittest.TestCase):
             ),
         )
         probe = _ChangedBootProbe()
-        typed_db = cast(AutomationRecoveryMutationDB, db)
         detail = get_automation_recovery_detail(
-            typed_db,
+            db,
             None,
             job.id,
             liveness_probe=probe,
@@ -142,7 +149,7 @@ class TestAutomationRecoveryMutationsFakeParity(unittest.TestCase):
         assert detail.detail is not None
 
         result = apply_import_job_recovery(
-            typed_db,
+            db,
             None,
             job.id,
             action="retry",
@@ -163,7 +170,7 @@ class TestAutomationRecoveryMutationsFakeParity(unittest.TestCase):
             execution_lease=_replacement_lease("fake-import"),
         ))
         replacement_detail = get_automation_recovery_detail(
-            typed_db,
+            db,
             None,
             result.retry_job.id,
         )
@@ -194,15 +201,14 @@ class TestAutomationRecoveryMutationsFakeParity(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             canonical = os.path.join(root, "already-gone")
             db, job = self._fake_owner(canonical_path=canonical)
-            typed_db = cast(AutomationRecoveryMutationDB, db)
             detail = get_automation_recovery_detail(
-                typed_db,
+                db,
                 None,
                 job.id,
             )
             assert detail.detail is not None
             result = apply_import_job_recovery(
-                typed_db,
+                db,
                 None,
                 job.id,
                 action="close",
@@ -216,7 +222,10 @@ class TestAutomationRecoveryMutationsFakeParity(unittest.TestCase):
             assert closed is not None
             self.assertEqual(closed.status, "failed")
             assert closed.result is not None
-            cleanup = cast(dict[str, object], closed.result["processing_cleanup"])
+            cleanup = msgspec.convert(
+                closed.result["processing_cleanup"],
+                type=dict[str, object],
+            )
             self.assertEqual(cleanup["outcome"], "no_op")
 
     def test_unknown_execution_blocks_action_without_mutation(self) -> None:
@@ -230,17 +239,16 @@ class TestAutomationRecoveryMutationsFakeParity(unittest.TestCase):
             "execution_worker_pid": 101,
             "execution_worker_start_ticks": 1001,
         })
-        typed_db = cast(AutomationRecoveryMutationDB, db)
         probe = _UnknownProbe()
         detail = get_automation_recovery_detail(
-            typed_db,
+            db,
             None,
             job.id,
             liveness_probe=probe,
         )
         assert detail.detail is not None
         result = apply_import_job_recovery(
-            typed_db,
+            db,
             None,
             job.id,
             action="retry",
@@ -473,9 +481,10 @@ class TestAutomationRecoveryMutationsPostgres(unittest.TestCase):
                     job_id=job.id,
                 )
             )
-            resolution = cast(
-                dict[str, object],
-                closed.result["recovery_resolution"],  # type: ignore[index]
+            assert closed.result is not None
+            resolution = msgspec.convert(
+                closed.result["recovery_resolution"],
+                type=dict[str, object],
             )
             self.assertEqual(resolution["result_status"], "wanted")
             self.assertEqual(resolution["reason"], (
@@ -514,12 +523,7 @@ class TestAutomationRecoveryMutationsPostgres(unittest.TestCase):
 
             with (
                 patch(
-                    "lib.pipeline_db._core.OwnerSessionWatchdog.start",
-                    return_value=None,
-                ),
-                patch(
-                    "lib.pipeline_db._core.OwnerSessionWatchdog.stop",
-                    return_value=None,
+                    "lib.import_execution.threading.Thread",
                 ),
                 patch.object(
                     self.db,
@@ -616,11 +620,14 @@ class TestAutomationRecoveryMutationsPostgres(unittest.TestCase):
             self.assertIsNone(request["active_automation_import_job_id"])
             self.assertEqual(closed.status, "failed")
             assert closed.result is not None
-            cleanup = cast(dict[str, object], closed.result["processing_cleanup"])
+            cleanup = msgspec.convert(
+                closed.result["processing_cleanup"],
+                type=dict[str, object],
+            )
             self.assertEqual(cleanup["outcome"], "no_op")
-            resolution = cast(
-                dict[str, object],
+            resolution = msgspec.convert(
                 closed.result["recovery_resolution"],
+                type=dict[str, object],
             )
             self.assertEqual(resolution["result_status"], "imported")
 
@@ -674,17 +681,13 @@ class TestAutomationRecoveryMutationsPostgres(unittest.TestCase):
     def test_close_blocks_uninspectable_source_without_journal_or_mutation(
         self,
     ) -> None:
-        request_id, job = self._owner("/processing/uninspectable")
-        revision = self._revision(job.id)
-        with patch(
-            "lib.import_job_recovery_service."
-            "inspect_processing_cleanup_source",
-            return_value=CleanupSourceInspection(
-                status="uninspectable",
-                error_code="read_failed",
-                reason="permission denied",
-            ),
-        ):
+        with tempfile.TemporaryDirectory() as root:
+            held_source = os.path.join(root, "held-source")
+            os.mkdir(held_source)
+            source = os.path.join(root, "uninspectable")
+            os.symlink(held_source, source, target_is_directory=True)
+            request_id, job = self._owner(source)
+            revision = self._revision(job.id)
             result = apply_import_job_recovery(
                 self.db,
                 None,
@@ -694,18 +697,18 @@ class TestAutomationRecoveryMutationsPostgres(unittest.TestCase):
                 evidence_revision=revision,
                 result_status="wanted",
             )
-        self.assertEqual(result.outcome, "cleanup_uninspectable")
-        request = self.db.get_request(request_id)
-        current = self.db.get_import_job(job.id)
-        assert request is not None and current is not None
-        self.assertEqual(request["status"], "processing")
-        self.assertEqual(current.status, "queued")
-        self.assertIsNone(
-            self.db.get_processing_cleanup_journal(
-                request_id=request_id,
-                job_id=job.id,
+            self.assertEqual(result.outcome, "cleanup_uninspectable")
+            request = self.db.get_request(request_id)
+            current = self.db.get_import_job(job.id)
+            assert request is not None and current is not None
+            self.assertEqual(request["status"], "processing")
+            self.assertEqual(current.status, "queued")
+            self.assertIsNone(
+                self.db.get_processing_cleanup_journal(
+                    request_id=request_id,
+                    job_id=job.id,
+                )
             )
-        )
 
     def test_close_is_break_glass_for_proven_dead_wedged_running_owner(
         self,

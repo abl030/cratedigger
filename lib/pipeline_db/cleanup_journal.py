@@ -12,7 +12,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Literal, TypedDict
+from typing import Literal, Protocol, TypedDict
 
 import msgspec
 import psycopg2.extras
@@ -107,6 +107,14 @@ class CleanupJournalConflict(RuntimeError):
         super().__init__(message)
 
 
+class _CleanupCursor(Protocol):
+    """RealDictCursor surface shared by exact-owner journal mutations."""
+
+    def execute(self, query: str, vars: object = ...) -> object: ...
+    def fetchone(self) -> Mapping[str, object] | None: ...
+    def fetchall(self) -> list[Mapping[str, object]]: ...
+
+
 @dataclass(frozen=True)
 class _LockedCleanupScope:
     request_status: str | None
@@ -118,6 +126,14 @@ class _LockedCleanupScope:
 def _json_clone(value: object) -> object:
     """Validate JSON compatibility and detach caller-owned mutable values."""
     return msgspec.json.decode(msgspec.json.encode(value))
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    if not isinstance(value, int):
+        raise TypeError(f"expected integer database value, got {type(value)!r}")
+    return value
 
 
 def _manifest_builtins(
@@ -300,7 +316,7 @@ class _CleanupJournalMixin(_PipelineDBBase):
 
     def _lock_processing_cleanup_scope(
         self,
-        cur: Any,
+        cur: _CleanupCursor,
         *,
         request_id: int,
     ) -> _LockedCleanupScope:
@@ -344,8 +360,9 @@ class _CleanupJournalMixin(_PipelineDBBase):
             active_job_id=(
                 None
                 if request is None
-                or request["active_automation_import_job_id"] is None
-                else int(request["active_automation_import_job_id"])
+                else _optional_int(
+                    request["active_automation_import_job_id"]
+                )
             ),
             jobs=jobs,
             journals=journals,
@@ -427,7 +444,7 @@ class _CleanupJournalMixin(_PipelineDBBase):
 
     def _create_processing_cleanup_journal_locked(
         self,
-        cur: Any,
+        cur: _CleanupCursor,
         *,
         request_id: int,
         job_id: int,
@@ -548,7 +565,7 @@ class _CleanupJournalMixin(_PipelineDBBase):
 
     def _checkpoint_processing_cleanup_journal_locked(
         self,
-        cur: Any,
+        cur: _CleanupCursor,
         *,
         request_id: int,
         job_id: int,
@@ -652,7 +669,7 @@ class _CleanupJournalMixin(_PipelineDBBase):
 
     def _complete_processing_cleanup_journal_locked(
         self,
-        cur: Any,
+        cur: _CleanupCursor,
         *,
         request_id: int,
         job_id: int,
@@ -754,7 +771,7 @@ class _CleanupJournalMixin(_PipelineDBBase):
 
     def _retarget_processing_cleanup_journal_locked(
         self,
-        cur: Any,
+        cur: _CleanupCursor,
         *,
         request_id: int,
         old_job_id: int,

@@ -9,9 +9,10 @@ import socket
 import sys
 import threading
 from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from cratedigger import TrackRecord
@@ -118,18 +119,37 @@ class _AutomationPreviewAuthority:
     canonical_path: str
 
 
+class _AutomationPreviewDelegate(Protocol):
+    def set_import_job_candidate_evidence(
+        self,
+        import_job_id: int,
+        evidence_id: int | None,
+        *,
+        expected_execution_lease: ExecutionLeaseSnapshot | None = None,
+    ) -> bool: ...
+
+    def mark_import_job_preview_importable(
+        self,
+        job_id: int,
+        *,
+        preview_result: dict[str, object] | None = None,
+        message: str | None = None,
+        expected_execution_lease: ExecutionLeaseSnapshot | None = None,
+    ) -> ImportJob | None: ...
+
+
 class _AutomationPreviewDB:
     """Lease-aware adapter over the exact pinned automation DB session."""
 
     def __init__(
         self,
-        db: Any,
+        db: _AutomationPreviewDelegate,
         execution_lease: ExecutionLeaseSnapshot,
     ) -> None:
         self._db = db
         self._execution_lease = execution_lease
 
-    def __getattr__(self, name: str) -> Any:
+    def __getattr__(self, name: str) -> object:
         return getattr(self._db, name)
 
     def set_import_job_candidate_evidence(
@@ -146,20 +166,27 @@ class _AutomationPreviewDB:
     def mark_import_job_preview_importable(
         self,
         import_job_id: int,
-        **kwargs: Any,
+        *,
+        preview_result: dict[str, object] | None = None,
+        message: str | None = None,
     ) -> ImportJob | None:
         return self._db.mark_import_job_preview_importable(
             import_job_id,
+            preview_result=preview_result,
+            message=message,
             expected_execution_lease=self._execution_lease,
-            **kwargs,
         )
 
     def mark_import_job_preview_failed(
         self,
-        *args: Any,
-        **kwargs: Any,
+        import_job_id: int,
+        *,
+        preview_status: str,
+        error: str,
+        preview_result: dict[str, object] | None = None,
+        message: str | None = None,
     ) -> None:
-        del args, kwargs
+        del import_job_id, preview_status, error, preview_result, message
         raise AutomationPreviewTerminalHandoffRequired(
             "automation preview failure requires the U4 owner terminal bundle"
         )
@@ -358,6 +385,7 @@ def _materialize_automation_authority(
     *,
     runtime_config: CratediggerConfig | None,
     cancellation_token: CancellationToken,
+    materialize_fn: Callable[..., object] | None = None,
 ) -> str:
     """Resume only the persisted exact manifest into its persisted path."""
     from lib.context import CratediggerContext
@@ -390,7 +418,8 @@ def _materialize_automation_authority(
         slskd=None,
         pipeline_db_source=_PreviewDBSource(db),
     )
-    materialized = _materialize_processing_dir(
+    materialize = materialize_fn or _materialize_processing_dir
+    materialized = materialize(
         entry,
         staged_album,
         ctx,
@@ -453,6 +482,17 @@ class _ImportPreviewJobClaimer(Protocol):
         worker_id: str,
         execution_lease: ExecutionLeaseSnapshot | None = None,
     ) -> ImportJob | None: ...
+
+
+class _PreviewHeartbeatDB(Protocol):
+    def heartbeat_import_job_preview(
+        self,
+        job_id: int,
+        *,
+        expected_execution_lease: ExecutionLeaseSnapshot | None = None,
+    ) -> bool: ...
+
+    def close(self) -> None: ...
 
 
 def _force_download_log_failed_path(
@@ -640,6 +680,7 @@ def _preview_input(
     runtime_config: CratediggerConfig | None = None,
     automation_authority: _AutomationPreviewAuthority | None = None,
     cancellation_token: CancellationToken | None = None,
+    automation_materialize_fn: Callable[..., object] | None = None,
 ) -> dict[str, Any]:
     if job.request_id is None:
         raise ValueError("Import job has no request_id")
@@ -656,6 +697,7 @@ def _preview_input(
             automation_authority,
             runtime_config=runtime_config,
             cancellation_token=cancellation_token,
+            materialize_fn=automation_materialize_fn,
         )
         return {
             "request_id": job.request_id,
@@ -689,7 +731,12 @@ def execute_preview_job(
     prepared_force_source_path: str | None = None,
     automation_authority: _AutomationPreviewAuthority | None = None,
     cancellation_token: CancellationToken | None = None,
+    candidate_measurement_fn: Callable[..., ImportPreviewResult] | None = None,
+    automation_materialize_fn: Callable[..., object] | None = None,
 ) -> ImportPreviewResult:
+    measure_candidate = (
+        candidate_measurement_fn or measure_and_persist_candidate_evidence
+    )
     if job.job_type == IMPORT_JOB_FORCE:
         if job.request_id is None:
             raise ValueError("Import job has no request_id")
@@ -700,7 +747,7 @@ def execute_preview_job(
         action_path = prepared_force_action_path or _prepare_force_action_path(
             db, job, cfg, raw_path=raw_path,
         )
-        result = measure_and_persist_candidate_evidence(
+        result = measure_candidate(
             db,
             request_id=job.request_id,
             path=action_path,
@@ -718,8 +765,9 @@ def execute_preview_job(
         runtime_config=runtime_config,
         automation_authority=automation_authority,
         cancellation_token=cancellation_token,
+        automation_materialize_fn=automation_materialize_fn,
     )
-    return measure_and_persist_candidate_evidence(
+    return measure_candidate(
         db,
         import_job_id=job.id,
         cancellation_token=cancellation_token,
@@ -901,6 +949,8 @@ def process_claimed_preview_job(
     automation_authority: _AutomationPreviewAuthority | None = None,
     cancellation_token: CancellationToken | None = None,
     owner_session_identity: OwnerSessionIdentity | None = None,
+    candidate_measurement_fn: Callable[..., ImportPreviewResult] | None = None,
+    automation_materialize_fn: Callable[..., object] | None = None,
 ) -> ImportJob | None:
     if job.job_type == IMPORT_JOB_AUTOMATION:
         if (
@@ -1144,6 +1194,8 @@ def process_claimed_preview_job(
                 prepared_force_source_path=front_gate_source,
                 automation_authority=automation_authority,
                 cancellation_token=cancellation_token,
+                candidate_measurement_fn=candidate_measurement_fn,
+                automation_materialize_fn=automation_materialize_fn,
             )
     except (ExecutionCancelled, OwnerSessionLost):
         raise
@@ -1285,7 +1337,9 @@ def process_claimed_preview_job_with_heartbeat(
     automation_authority: _AutomationPreviewAuthority | None = None,
     cancellation_token: CancellationToken | None = None,
     owner_session_identity: OwnerSessionIdentity | None = None,
-    heartbeat_db_factory: Any | None = None,
+    heartbeat_db_factory: Callable[[str], _PreviewHeartbeatDB] | None = None,
+    candidate_measurement_fn: Callable[..., ImportPreviewResult] | None = None,
+    automation_materialize_fn: Callable[..., object] | None = None,
 ) -> ImportJob | None:
     dsn = getattr(db, "dsn", None)
     if not dsn:
@@ -1297,6 +1351,8 @@ def process_claimed_preview_job_with_heartbeat(
             automation_authority=automation_authority,
             cancellation_token=cancellation_token,
             owner_session_identity=owner_session_identity,
+            candidate_measurement_fn=candidate_measurement_fn,
+            automation_materialize_fn=automation_materialize_fn,
         )
 
     stop = threading.Event()
@@ -1324,10 +1380,28 @@ def process_claimed_preview_job_with_heartbeat(
             automation_authority=automation_authority,
             cancellation_token=cancellation_token,
             owner_session_identity=owner_session_identity,
+            candidate_measurement_fn=candidate_measurement_fn,
+            automation_materialize_fn=automation_materialize_fn,
         )
     finally:
         stop.set()
         heartbeat_thread.join(timeout=5.0)
+
+
+@runtime_checkable
+class _AutomationPreviewStageDB(Protocol):
+    def _pin_owner_session(
+        self,
+        cancellation_token: CancellationToken,
+    ) -> AbstractContextManager[OwnerSessionIdentity]: ...
+
+    def advisory_lock(
+        self,
+        namespace: int,
+        key: int,
+    ) -> AbstractContextManager[bool]: ...
+
+    def close(self) -> None: ...
 
 
 def _process_automation_claim(
@@ -1337,17 +1411,20 @@ def _process_automation_claim(
     execution_lease: ExecutionLeaseSnapshot,
     heartbeat_interval: float,
     runtime_config: CratediggerConfig | None,
-    stage_db_factory: Any,
-    heartbeat_db_factory: Any,
+    stage_db_factory: Callable[[str], object],
+    heartbeat_db_factory: Callable[[str], _PreviewHeartbeatDB],
+    candidate_measurement_fn: Callable[..., ImportPreviewResult] | None = None,
 ) -> ImportJob | None:
     """Run one automation preview under its exact dedicated owner session."""
     if job.request_id is None:
         return None
     stage_db = stage_db_factory(dsn)
+    if not isinstance(stage_db, _AutomationPreviewStageDB):
+        raise TypeError("preview stage DB is missing its owner-session protocol")
     token = CancellationToken()
     try:
         with stage_db._pin_owner_session(
-            token
+            token,
         ) as owner_session_identity, stage_db.advisory_lock(
             ADVISORY_LOCK_NAMESPACE_IMPORT,
             job.request_id,
@@ -1373,6 +1450,7 @@ def _process_automation_claim(
                 cancellation_token=token,
                 owner_session_identity=owner_session_identity,
                 heartbeat_db_factory=heartbeat_db_factory,
+                candidate_measurement_fn=candidate_measurement_fn,
             )
     finally:
         stage_db.close()
@@ -1384,9 +1462,10 @@ def run_once(
     worker_id: str,
     heartbeat_interval: float = PREVIEW_HEARTBEAT_INTERVAL_SECONDS,
     runtime_config: CratediggerConfig | None = None,
-    stage_db_factory: Any | None = None,
-    heartbeat_db_factory: Any | None = None,
+    stage_db_factory: Callable[[str], object] | None = None,
+    heartbeat_db_factory: Callable[[str], _PreviewHeartbeatDB] | None = None,
     execution_lease_factory: Callable[..., ExecutionLeaseSnapshot] | None = None,
+    candidate_measurement_fn: Callable[..., ImportPreviewResult] | None = None,
 ) -> ImportJob | None:
     capture = execution_lease_factory or capture_execution_lease
     try:
@@ -1416,6 +1495,7 @@ def run_once(
             runtime_config=runtime_config,
             stage_db_factory=stage_db_factory or PipelineDB,
             heartbeat_db_factory=heartbeat_db_factory or PipelineDB,
+            candidate_measurement_fn=candidate_measurement_fn,
         )
     return process_claimed_preview_job_with_heartbeat(
         db,
@@ -1423,6 +1503,7 @@ def run_once(
         heartbeat_interval=heartbeat_interval,
         runtime_config=runtime_config,
         heartbeat_db_factory=heartbeat_db_factory,
+        candidate_measurement_fn=candidate_measurement_fn,
     )
 
 

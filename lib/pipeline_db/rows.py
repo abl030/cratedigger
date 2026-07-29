@@ -77,7 +77,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 import msgspec
 
@@ -139,6 +139,7 @@ class AlbumRequestRow(TypedDict):
     rescued_at: datetime | None
     prior_unfindable_category: str | None
     catalog_number: str | None
+    processing_owner: NotRequired[dict[str, object] | None]
 
 
 def album_request_row(raw: Mapping[str, object]) -> AlbumRequestRow:

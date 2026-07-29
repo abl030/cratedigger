@@ -583,7 +583,7 @@ class TestCmdSet(unittest.TestCase):
 
         with redirect_stdout(stdout):
             rc = pipeline_cli.cmd_set(
-                cast(Any, db),
+                db,
                 MagicMock(id=10, status="unsearchable"),
             )
 
@@ -730,7 +730,7 @@ class TestCmdImportJobRecovery(unittest.TestCase):
             43,
             canonical_path="/processing/cli-recovery",
         )
-        args = SimpleNamespace(
+        args = argparse.Namespace(
             recovery_action="show",
             job_id=job.id,
             beets_db=None,
@@ -752,8 +752,8 @@ class TestCmdImportJobRecovery(unittest.TestCase):
             redirect_stdout(stdout),
         ):
             rc = pipeline_cli.cmd_import_job_recovery(
-                cast(Any, db),
-                cast(Any, args),
+                db,
+                args,
             )
 
         self.assertEqual(rc, 0)
@@ -831,7 +831,7 @@ class TestCmdImportJobRecovery(unittest.TestCase):
             44,
             canonical_path="/processing/cli-action",
         )
-        retry_args = SimpleNamespace(
+        retry_args = argparse.Namespace(
             recovery_action="retry",
             job_id=job.id,
             reason="missing evidence",
@@ -839,7 +839,7 @@ class TestCmdImportJobRecovery(unittest.TestCase):
             beets_db=None,
             beets_directory=None,
         )
-        close_args = SimpleNamespace(
+        close_args = argparse.Namespace(
             recovery_action="close",
             job_id=job.id,
             reason="missing result",
@@ -854,13 +854,13 @@ class TestCmdImportJobRecovery(unittest.TestCase):
         ):
             with redirect_stderr(io.StringIO()) as retry_error:
                 retry_rc = pipeline_cli.cmd_import_job_recovery(
-                    cast(Any, db),
-                    cast(Any, retry_args),
+                    db,
+                    retry_args,
                 )
             with redirect_stderr(io.StringIO()) as close_error:
                 close_rc = pipeline_cli.cmd_import_job_recovery(
-                    cast(Any, db),
-                    cast(Any, close_args),
+                    db,
+                    close_args,
                 )
         self.assertEqual(retry_rc, 2)
         self.assertIn("evidence", retry_error.getvalue())
@@ -881,7 +881,7 @@ class TestCmdImportJobRecovery(unittest.TestCase):
             45,
             canonical_path="/processing/cli-stale",
         )
-        args = SimpleNamespace(
+        args = argparse.Namespace(
             recovery_action="close",
             job_id=job.id,
             reason="stale observation",
@@ -905,8 +905,8 @@ class TestCmdImportJobRecovery(unittest.TestCase):
             redirect_stderr(stderr),
         ):
             rc = pipeline_cli.cmd_import_job_recovery(
-                cast(Any, db),
-                cast(Any, args),
+                db,
+                args,
             )
         self.assertEqual(rc, 4)
         payload = json.loads(stderr.getvalue())
@@ -951,7 +951,7 @@ class TestCmdImportJobRecovery(unittest.TestCase):
         )
         observed = get_automation_recovery_detail(db, None, job.id)
         assert observed.detail is not None
-        args = SimpleNamespace(
+        args = argparse.Namespace(
             recovery_action="retry",
             job_id=job.id,
             reason="retain unresolved cleanup",
@@ -970,8 +970,8 @@ class TestCmdImportJobRecovery(unittest.TestCase):
             redirect_stdout(stdout),
         ):
             rc = pipeline_cli.cmd_import_job_recovery(
-                cast(Any, db),
-                cast(Any, args),
+                db,
+                args,
             )
 
         self.assertEqual(rc, 0)
@@ -2132,11 +2132,18 @@ class TestCmdStatusShowsDownloading(unittest.TestCase):
         self.assertEqual(counts["downloading"], 1)
 
     def test_status_prints_processing_count(self):
-        db = MagicMock()
-        db.count_by_status.return_value = {
-            "wanted": 2,
-            "processing": 3,
-        }
+        db = FakePipelineDB()
+        for request_id in (2135, 2136):
+            db.seed_request(make_request_row(
+                id=request_id,
+                status="wanted",
+            ))
+        for request_id in (2137, 2138, 2139):
+            db.seed_request(make_request_row(
+                id=request_id,
+                status="wanted",
+            ))
+            handoff_automation_owner(db, request_id)
         stdout = io.StringIO()
 
         with redirect_stdout(stdout):
@@ -2465,7 +2472,7 @@ class TestCmdRepairSpectral(unittest.TestCase):
             return_value=MagicMock(),
         ), redirect_stdout(stdout):
             result = pipeline_cli.cmd_repair_spectral(
-                cast(Any, db),
+                db,  # pyright: ignore[reportArgumentType]
                 MagicMock(dry_run=False),
             )
 

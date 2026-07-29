@@ -20,7 +20,6 @@ from lib.dispatch.types import DispatchOutcome, EvidenceImportGate, ImportOneRun
 from lib.import_execution import (
     CancellationToken,
     ExecutionLeaseSnapshot,
-    OwnerSessionIdentity,
     ProcessIdentity,
 )
 from lib.import_queue import IMPORT_JOB_FORCE
@@ -44,6 +43,7 @@ from tests.helpers import (
     make_request_row,
     noop_quality_gate,
     patch_dispatch_externals,
+    pinned_dispatch_authority,
 )
 
 
@@ -251,8 +251,16 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 execution_lease=execution_lease,
             )
             assert claimed is not None
+            cancellation_token = (
+                CancellationToken() if execution_lease is not None else None
+            )
             with patch_dispatch_externals() as ext, \
-                 patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir):
+                 patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir), \
+                 pinned_dispatch_authority(
+                     db,
+                     execution_lease,
+                     cancellation_token=cancellation_token,
+                 ) as (cancellation_token, owner_session_identity):
                 result = dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="mbid-123",
@@ -278,13 +286,8 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                         candidate=candidate,
                     ),
                     execution_lease=execution_lease,
-                    cancellation_token=(
-                        CancellationToken() if execution_lease is not None else None
-                    ),
-                    owner_session_identity=(
-                        OwnerSessionIdentity(id(db), 4242)
-                        if execution_lease is not None else None
-                    ),
+                    cancellation_token=cancellation_token,
+                    owner_session_identity=owner_session_identity,
                     run_import_fn=(
                         _owned_test_runner
                         if execution_lease is not None else None
@@ -463,7 +466,13 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 worker_id="stale-test",
                 execution_lease=execution_lease,
             ) is not None
-            with patch_dispatch_externals() as ext:
+            cancellation_token = CancellationToken()
+            with patch_dispatch_externals() as ext, \
+                 pinned_dispatch_authority(
+                     db,
+                     execution_lease,
+                     cancellation_token=cancellation_token,
+                 ) as (cancellation_token, owner_session_identity):
                 outcome = dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="mbid-123",
@@ -486,8 +495,8 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                         candidate=candidate,
                     ),
                     execution_lease=execution_lease,
-                    cancellation_token=CancellationToken(),
-                    owner_session_identity=OwnerSessionIdentity(id(db), 4242),
+                    cancellation_token=cancellation_token,
+                    owner_session_identity=owner_session_identity,
                     run_import_fn=_owned_test_runner,
                 )
 
@@ -1369,8 +1378,16 @@ class TestDispatchCoreSeams(unittest.TestCase):
                 worker_id="seam-test",
                 execution_lease=execution_lease,
             ) is not None
+            cancellation_token = (
+                CancellationToken() if execution_lease is not None else None
+            )
             with patch_dispatch_externals() as ext, \
-                 patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir):
+                 patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir), \
+                 pinned_dispatch_authority(
+                     db,
+                     execution_lease,
+                     cancellation_token=cancellation_token,
+                 ) as (cancellation_token, owner_session_identity):
                 if runner_hook is not None:
                     kwargs["run_import_fn"] = runner_hook
                 elif execution_lease is not None:
@@ -1390,13 +1407,8 @@ class TestDispatchCoreSeams(unittest.TestCase):
                         candidate=candidate,
                     ),
                     execution_lease=execution_lease,
-                    cancellation_token=(
-                        CancellationToken() if execution_lease is not None else None
-                    ),
-                    owner_session_identity=(
-                        OwnerSessionIdentity(id(db), 4242)
-                        if execution_lease is not None else None
-                    ),
+                    cancellation_token=cancellation_token,
+                    owner_session_identity=owner_session_identity,
                     **kwargs,
                 )
                 return ext.run.call_args[0][0] if ext.run.call_args else []

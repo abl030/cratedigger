@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 import unittest
+from collections.abc import Callable, Mapping
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
@@ -30,6 +31,7 @@ from lib.import_queue import (
     IMPORT_JOB_RECOVERY_REQUIRED,
     IMPORT_JOB_YOUTUBE,
     ForceImportPayload,
+    ImportJob,
     force_import_dedupe_key,
     force_import_payload,
     youtube_import_payload,
@@ -64,7 +66,7 @@ class TestOwnedImportSubprocessRunner(unittest.TestCase):
         def wait(
             observed_token: CancellationToken,
             *,
-            owner_session_probe: Any,
+            owner_session_probe: Callable[[], bool],
         ) -> int:
             self.assertIs(observed_token, token)
             self.assertEqual(events, ["spawn:4321"])
@@ -126,7 +128,12 @@ class TestOwnedImportSubprocessRunner(unittest.TestCase):
         monitored = MagicMock()
         monitored.pid = 4321
 
-        def wait(*_args: Any, **_kwargs: Any) -> int:
+        def wait(
+            _observed_token: CancellationToken,
+            *,
+            owner_session_probe: Callable[[], bool] | None = None,
+        ) -> int:
+            del owner_session_probe
             token.cancel("owner_session_lost")
             time.sleep(0.02)
             return -15
@@ -217,8 +224,8 @@ def _claim_automation_job(
     *,
     release_id: str,
     source_path: str,
-    preview_result: dict[str, Any] | None = None,
-) -> tuple[Any, ExecutionLeaseSnapshot]:
+    preview_result: Mapping[str, object] | None = None,
+) -> tuple[ImportJob, ExecutionLeaseSnapshot]:
     request = db.request(42)
     active_state = dict(request.get("active_download_state") or {})
     active_state.update({
@@ -261,7 +268,11 @@ def _claim_automation_job(
     )
     assert db.mark_import_job_preview_importable(
         job.id,
-        preview_result=preview_result or {"ready": True},
+        preview_result=(
+            dict(preview_result)
+            if preview_result is not None
+            else {"ready": True}
+        ),
         expected_execution_lease=preview_lease,
     ) is not None
     importer_lease = ExecutionLeaseSnapshot(
@@ -1079,8 +1090,16 @@ class TestImportOperationFence(unittest.TestCase):
 
         self.assertEqual(result.outcome, "authority_changed")
         self.assertIsNone(result.retry_job)
-        state = db.request(42)["active_download_state"]
-        self.assertIn("import_subprocess_started_at", state)
+        request = db.request(42)
+        self.assertEqual(request["status"], "processing")
+        self.assertEqual(
+            request["active_automation_import_job_id"],
+            recovery.id,
+        )
+        state = request["active_download_state"]
+        self.assertEqual(state["current_path"], source_path)
+        self.assertIn("processing_started_at", state)
+        self.assertNotIn("import_subprocess_started_at", state)
 
 
 @requires_postgres

@@ -22,11 +22,11 @@ from unittest.mock import MagicMock, patch
 import msgspec
 
 from lib.config import CratediggerConfig
+from lib.dispatch import core as dispatch_core_module
 from lib.import_execution import (
     CancellationToken,
     ExecutionCancelled,
     ExecutionLeaseSnapshot,
-    OwnerSessionIdentity,
     ProcessIdentity,
 )
 from lib.quality import (
@@ -62,6 +62,7 @@ from tests.helpers import (
     make_request_row,
     noop_quality_gate,
     patch_dispatch_externals,
+    pinned_dispatch_authority,
 )
 
 _HERMETIC_BEETS_DEFAULTS: AbstractContextManager[tuple[str, str]] | None = None
@@ -389,27 +390,34 @@ class TestAutomationDispatchExecutionFence(unittest.TestCase):
         kwargs = {}
         if evidence_gate_fn is not None:
             kwargs["evidence_gate_fn"] = evidence_gate_fn
-        return dispatch_import_core(
-            path=root,
-            mb_release_id="test-mbid",
-            request_id=42,
-            label="Test Artist - Test Album",
-            beets_harness_path=_HARNESS,
-            db=db,  # type: ignore[arg-type]
-            dl_info=DownloadInfo(filetype="mp3"),
-            distance=0.05,
-            scenario="strong_match",
-            files=[],
-            cfg=_full_dispatch_config(),
-            quality_gate_fn=noop_quality_gate,
-            candidate_import_job_id=claimed.id,
-            prevalidated_candidate_result=candidate,
-            execution_lease=execution_lease,
+        with pinned_dispatch_authority(
+            db,
+            execution_lease,
             cancellation_token=token,
-            owner_session_identity=OwnerSessionIdentity(id(db), 4242),
-            run_import_fn=runner,
-            **kwargs,
-        )
+        ) as (pinned_token, owner_session_identity):
+            assert pinned_token is token
+            assert owner_session_identity is not None
+            return dispatch_import_core(
+                path=root,
+                mb_release_id="test-mbid",
+                request_id=42,
+                label="Test Artist - Test Album",
+                beets_harness_path=_HARNESS,
+                db=db,  # type: ignore[arg-type]
+                dl_info=DownloadInfo(filetype="mp3"),
+                distance=0.05,
+                scenario="strong_match",
+                files=[],
+                cfg=_full_dispatch_config(),
+                quality_gate_fn=noop_quality_gate,
+                candidate_import_job_id=claimed.id,
+                prevalidated_candidate_result=candidate,
+                execution_lease=execution_lease,
+                cancellation_token=pinned_token,
+                owner_session_identity=owner_session_identity,
+                run_import_fn=runner,
+                **kwargs,
+            )
 
     def test_child_identity_is_persisted_before_wait_and_loss_stops_effects(
         self,
@@ -438,13 +446,16 @@ class TestAutomationDispatchExecutionFence(unittest.TestCase):
                 token.raise_if_cancelled()
                 raise AssertionError("cancelled runner must not return")
 
-            with patch(
-                "lib.dispatch.core._write_quality_evidence_action_file",
+            with patch.object(
+                dispatch_core_module,
+                "_write_quality_evidence_action_file",
                 return_value=None,
-            ), patch(
-                "lib.dispatch.core._refresh_current_evidence_after_import",
-            ) as refresh, patch(
-                "lib.dispatch.core._write_album_sidecar_after_import",
+            ), patch.object(
+                dispatch_core_module,
+                "_refresh_current_evidence_after_import",
+            ) as refresh, patch.object(
+                dispatch_core_module,
+                "_write_album_sidecar_after_import",
             ) as sidecar, self.assertRaisesRegex(
                 ExecutionCancelled,
                 "owner_session_lost",
@@ -486,8 +497,9 @@ class TestAutomationDispatchExecutionFence(unittest.TestCase):
                 })
                 return EvidenceImportGate(candidate=candidate.evidence)
 
-            with patch(
-                "lib.dispatch.core._write_quality_evidence_action_file",
+            with patch.object(
+                dispatch_core_module,
+                "_write_quality_evidence_action_file",
                 return_value=None,
             ):
                 outcome = self._dispatch(
@@ -547,17 +559,21 @@ class TestAutomationDispatchExecutionFence(unittest.TestCase):
                 db,
                 "capture_automation_import_completion",
                 side_effect=capture,
-            ), patch(
-                "lib.dispatch.core._write_quality_evidence_action_file",
+            ), patch.object(
+                dispatch_core_module,
+                "_write_quality_evidence_action_file",
                 return_value="/tmp/automation-completion-action",
-            ), patch(
-                "lib.dispatch.core._remove_quality_evidence_action_file",
+            ), patch.object(
+                dispatch_core_module,
+                "_remove_quality_evidence_action_file",
                 side_effect=lambda _path: order.append("action-removed"),
-            ), patch(
-                "lib.dispatch.core._refresh_current_evidence_after_import",
+            ), patch.object(
+                dispatch_core_module,
+                "_refresh_current_evidence_after_import",
                 side_effect=refresh_effect,
-            ), patch(
-                "lib.dispatch.core._write_album_sidecar_after_import",
+            ), patch.object(
+                dispatch_core_module,
+                "_write_album_sidecar_after_import",
                 side_effect=lambda *_args, **_kwargs: order.append(
                     "sidecar-written"
                 ),
@@ -615,15 +631,19 @@ class TestAutomationDispatchExecutionFence(unittest.TestCase):
                 db,
                 "capture_automation_import_completion",
                 return_value=None,
-            ), patch(
-                "lib.dispatch.core._write_quality_evidence_action_file",
+            ), patch.object(
+                dispatch_core_module,
+                "_write_quality_evidence_action_file",
                 return_value="/tmp/automation-conflict-action",
-            ), patch(
-                "lib.dispatch.core._remove_quality_evidence_action_file",
-            ) as remove_action, patch(
-                "lib.dispatch.core._refresh_current_evidence_after_import",
-            ) as refresh, patch(
-                "lib.dispatch.core._write_album_sidecar_after_import",
+            ), patch.object(
+                dispatch_core_module,
+                "_remove_quality_evidence_action_file",
+            ) as remove_action, patch.object(
+                dispatch_core_module,
+                "_refresh_current_evidence_after_import",
+            ) as refresh, patch.object(
+                dispatch_core_module,
+                "_write_album_sidecar_after_import",
             ) as sidecar, patch_dispatch_externals():
                 outcome = self._dispatch(
                     root=root,
@@ -714,12 +734,16 @@ def _dispatch_valid_result_cmd(
                 kwargs["prevalidated_candidate_result"] = candidate
                 kwargs["current_evidence_loader"] = no_current_evidence
                 kwargs["execution_lease"] = execution_lease
-                kwargs["cancellation_token"] = CancellationToken()
-                kwargs["owner_session_identity"] = OwnerSessionIdentity(
-                    id(db), 4242,
-                )
                 kwargs["run_import_fn"] = _owned_test_runner
-                return dispatch_import_core(**kwargs)
+                cancellation_token = CancellationToken()
+                with pinned_dispatch_authority(
+                    db,
+                    execution_lease,
+                    cancellation_token=cancellation_token,
+                ) as (cancellation_token, owner_session_identity):
+                    kwargs["cancellation_token"] = cancellation_token
+                    kwargs["owner_session_identity"] = owner_session_identity
+                    return dispatch_import_core(**kwargs)
 
             outcome = _handle_valid_result(
                 album_data,
@@ -1831,10 +1855,17 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
                 candidate_result,
                 evidence=persisted,
             )
+            cancellation_token = (
+                CancellationToken() if execution_lease is not None else None
+            )
             with patch_dispatch_externals() as ext, patch(
                 "lib.dispatch.subprocess_runner.parse_import_result",
                 return_value=make_import_result(decision="import"),
-            ):
+            ), pinned_dispatch_authority(
+                db,
+                execution_lease,
+                cancellation_token=cancellation_token,
+            ) as (cancellation_token, owner_session_identity):
                 outcome = dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="test-mbid",
@@ -1854,13 +1885,8 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
                         lambda *_args, **_kwargs: current_result
                     ),
                     execution_lease=execution_lease,
-                    cancellation_token=(
-                        CancellationToken() if execution_lease is not None else None
-                    ),
-                    owner_session_identity=(
-                        OwnerSessionIdentity(id(db), 4242)
-                        if execution_lease is not None else None
-                    ),
+                    cancellation_token=cancellation_token,
+                    owner_session_identity=owner_session_identity,
                     run_import_fn=(
                         _owned_test_runner
                         if execution_lease is not None else None
@@ -2112,8 +2138,16 @@ class TestDispatchImport(unittest.TestCase):
                 force=force,
             )
             import_job_id = claimed.id
+            cancellation_token = (
+                CancellationToken() if execution_lease is not None else None
+            )
             with patch_dispatch_externals() as ext, \
-                 patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir):
+                 patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir), \
+                 pinned_dispatch_authority(
+                     db,
+                     execution_lease,
+                     cancellation_token=cancellation_token,
+                 ) as (cancellation_token, owner_session_identity):
                 outcome = dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="test-mbid",
@@ -2133,13 +2167,8 @@ class TestDispatchImport(unittest.TestCase):
                     candidate_import_job_id=import_job_id,
                     prevalidated_candidate_result=candidate_result,
                     execution_lease=execution_lease,
-                    cancellation_token=(
-                        CancellationToken() if execution_lease is not None else None
-                    ),
-                    owner_session_identity=(
-                        OwnerSessionIdentity(id(db), 4242)
-                        if execution_lease is not None else None
-                    ),
+                    cancellation_token=cancellation_token,
+                    owner_session_identity=owner_session_identity,
                     run_import_fn=(
                         _owned_test_runner
                         if execution_lease is not None else None
@@ -2600,8 +2629,14 @@ class TestDispatchImport(unittest.TestCase):
             pipeline_db_enabled=True,
         )
         try:
+            cancellation_token = CancellationToken()
             with patch_dispatch_externals() as ext, \
-                 patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir):
+                 patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir), \
+                 pinned_dispatch_authority(
+                     db,
+                     execution_lease,
+                     cancellation_token=cancellation_token,
+                 ) as (cancellation_token, owner_session_identity):
                 outcome = dispatch_import_core(
                     path=source,
                     mb_release_id="test-mbid",
@@ -2619,8 +2654,8 @@ class TestDispatchImport(unittest.TestCase):
                     candidate_import_job_id=claimed.id,
                     prevalidated_candidate_result=candidate,
                     execution_lease=execution_lease,
-                    cancellation_token=CancellationToken(),
-                    owner_session_identity=OwnerSessionIdentity(id(db), 4242),
+                    cancellation_token=cancellation_token,
+                    owner_session_identity=owner_session_identity,
                     run_import_fn=_owned_test_runner,
                 )
                 assert outcome.terminal_outcome is not None
@@ -2710,15 +2745,22 @@ class TestDispatchImport(unittest.TestCase):
                 run_import_fn=_owned_test_runner,
             )
 
-        with patch("lib.dispatch.subprocess_runner.sp.run",
-                   side_effect=sp.TimeoutExpired(cmd="test", timeout=1800)):
+        cancellation_token = CancellationToken()
+        with patch(
+            "lib.dispatch.subprocess_runner.sp.run",
+            side_effect=sp.TimeoutExpired(cmd="test", timeout=1800),
+        ), pinned_dispatch_authority(
+            db,
+            execution_lease,
+            cancellation_token=cancellation_token,
+        ) as (cancellation_token, owner_session_identity):
             recovered = process_claimed_job(
                 db,  # type: ignore[arg-type]
                 claimed,
                 execute_fn=execute,
                 execution_lease=execution_lease,
-                cancellation_token=CancellationToken(),
-                owner_session_identity=OwnerSessionIdentity(id(db), 4242),
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
             )
 
         assert recovered is not None
@@ -2769,15 +2811,22 @@ class TestDispatchImport(unittest.TestCase):
                 run_import_fn=_owned_test_runner,
             )
 
-        with patch("lib.dispatch.subprocess_runner.sp.run",
-                   side_effect=RuntimeError("boom")):
+        cancellation_token = CancellationToken()
+        with patch(
+            "lib.dispatch.subprocess_runner.sp.run",
+            side_effect=RuntimeError("boom"),
+        ), pinned_dispatch_authority(
+            db,
+            execution_lease,
+            cancellation_token=cancellation_token,
+        ) as (cancellation_token, owner_session_identity):
             recovered = process_claimed_job(
                 db,  # type: ignore[arg-type]
                 claimed,
                 execute_fn=execute,
                 execution_lease=execution_lease,
-                cancellation_token=CancellationToken(),
-                owner_session_identity=OwnerSessionIdentity(id(db), 4242),
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
             )
 
         assert recovered is not None
@@ -2841,9 +2890,15 @@ class TestImportDispatchRescueCapture(unittest.TestCase):
                 path=tmpdir,
                 release_id="test-mbid",
             )
+            cancellation_token = CancellationToken()
             with patch_dispatch_externals(), \
                  patch("lib.dispatch.subprocess_runner.parse_import_result",
-                       return_value=ir):
+                       return_value=ir), \
+                 pinned_dispatch_authority(
+                     db,
+                     execution_lease,
+                     cancellation_token=cancellation_token,
+                 ) as (cancellation_token, owner_session_identity):
                 outcome = dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="test-mbid",
@@ -2861,8 +2916,8 @@ class TestImportDispatchRescueCapture(unittest.TestCase):
                     candidate_import_job_id=claimed.id,
                     prevalidated_candidate_result=candidate,
                     execution_lease=execution_lease,
-                    cancellation_token=CancellationToken(),
-                    owner_session_identity=OwnerSessionIdentity(id(db), 4242),
+                    cancellation_token=cancellation_token,
+                    owner_session_identity=owner_session_identity,
                     run_import_fn=_owned_test_runner,
                 )
                 assert outcome.terminal_outcome is not None
@@ -3019,8 +3074,14 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
             release_id="mbid-1",
         )
 
+        cancellation_token = CancellationToken()
         with patch_dispatch_externals() as ext, \
-             patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir):
+             patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir), \
+             pinned_dispatch_authority(
+                 db,
+                 execution_lease,
+                 cancellation_token=cancellation_token,
+             ) as (cancellation_token, owner_session_identity):
             dispatch_import_core(
                 path="/tmp/dest", mb_release_id="mbid-1",
                 request_id=42, label="Test Artist - Test Album",
@@ -3033,8 +3094,8 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
                 candidate_import_job_id=claimed.id,
                 prevalidated_candidate_result=candidate,
                 execution_lease=execution_lease,
-                cancellation_token=CancellationToken(),
-                owner_session_identity=OwnerSessionIdentity(id(db), 4242),
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
                 run_import_fn=_owned_test_runner,
             )
             return ext.run.call_args[0][0]
@@ -3135,10 +3196,15 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
             },
         )
         assert candidate_result.evidence is not None
+        cancellation_token = CancellationToken()
         with patch_dispatch_externals() as ext, patch(
             "lib.dispatch.subprocess_runner.parse_import_result",
             return_value=make_import_result(decision="import"),
-        ):
+        ), pinned_dispatch_authority(
+            db,
+            execution_lease,
+            cancellation_token=cancellation_token,
+        ) as (cancellation_token, owner_session_identity):
             dispatch_import_core(
                 path="/tmp/dest",
                 mb_release_id="test-mbid",
@@ -3158,8 +3224,8 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
                     )
                 ),
                 execution_lease=execution_lease,
-                cancellation_token=CancellationToken(),
-                owner_session_identity=OwnerSessionIdentity(id(db), 4242),
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
                 run_import_fn=_owned_test_runner,
             )
             cmd = ext.run.call_args[0][0]
@@ -3830,8 +3896,14 @@ class TestQualityGateUsesIntent(unittest.TestCase):
             release_id="test-mbid",
         )
 
+        cancellation_token = CancellationToken()
         with patch_dispatch_externals(), \
-             patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir):
+             patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir), \
+             pinned_dispatch_authority(
+                 db,
+                 execution_lease,
+                 cancellation_token=cancellation_token,
+             ) as (cancellation_token, owner_session_identity):
             outcome = dispatch_import_core(
                 path="/tmp/dest", mb_release_id="test-mbid",
                 request_id=42, label="Test",
@@ -3843,8 +3915,8 @@ class TestQualityGateUsesIntent(unittest.TestCase):
                 candidate_import_job_id=claimed.id,
                 prevalidated_candidate_result=candidate,
                 execution_lease=execution_lease,
-                cancellation_token=CancellationToken(),
-                owner_session_identity=OwnerSessionIdentity(id(db), 4242),
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
                 run_import_fn=_owned_test_runner,
             )
         assert outcome.terminal_outcome is not None
@@ -4064,18 +4136,24 @@ class TestDispatchJellyfinPinCaptureSlice(unittest.TestCase):
                 path=tmpdir,
                 release_id="test-mbid",
             )
+            cancellation_token = CancellationToken()
             with patch_dispatch_externals(), \
                  patch("lib.dispatch.subprocess_runner.parse_import_result",
                        return_value=ir), \
                  patch("lib.util._jellyfin_get_json",
-                       side_effect=self._fake_get_json):
+                       side_effect=self._fake_get_json), \
+                 pinned_dispatch_authority(
+                     db,
+                     execution_lease,
+                     cancellation_token=cancellation_token,
+                 ) as (cancellation_token, owner_session_identity):
                 dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="test-mbid",
                     request_id=42,
                     label="Test Artist - Test Album",
                     beets_harness_path=_HARNESS,
-                    db=db,  # type: ignore[arg-type]
+                    db=db,  # pyright: ignore[reportArgumentType]
                     dl_info=DownloadInfo(filetype="mp3"),
                     distance=0.05,
                     scenario="strong_match",
@@ -4088,8 +4166,8 @@ class TestDispatchJellyfinPinCaptureSlice(unittest.TestCase):
                     beets_library_db_path=beets_library_db,
                     beets_library_root=beets_library_root,
                     execution_lease=execution_lease,
-                    cancellation_token=CancellationToken(),
-                    owner_session_identity=OwnerSessionIdentity(id(db), 4242),
+                    cancellation_token=cancellation_token,
+                    owner_session_identity=owner_session_identity,
                     run_import_fn=_owned_test_runner,
                 )
         finally:

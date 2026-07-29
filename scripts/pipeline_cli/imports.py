@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from typing import TYPE_CHECKING, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Literal, Protocol
 
 import msgspec
 
@@ -29,7 +29,6 @@ from scripts.pipeline_cli.quality import _load_runtime_rank_config
 
 if TYPE_CHECKING:
     from lib.import_job_recovery_service import (
-        AutomationRecoveryDetailDB,
         AutomationRecoveryMutationDB,
     )
     from lib.import_preview import ImportPreviewDB, ImportPreviewResult
@@ -144,7 +143,6 @@ def cmd_import_job_recovery(
         or getattr(args, "resolution", None)
     )
     if action == "show":
-        detail_db = cast("AutomationRecoveryDetailDB", db)
         beets: BeetsDB | None = None
         try:
             beets = _open_recovery_beets(
@@ -155,14 +153,14 @@ def cmd_import_job_recovery(
             beets = None
         if beets is None:
             detail_result = get_automation_recovery_detail(
-                detail_db,
+                db,
                 None,
                 args.job_id,
             )
         else:
             with beets:
                 detail_result = get_automation_recovery_detail(
-                    detail_db,
+                    db,
                     beets,
                     args.job_id,
                 )
@@ -171,7 +169,10 @@ def cmd_import_job_recovery(
     if action not in {"retry", "close"}:
         print("  recovery action must be retry or close", file=sys.stderr)
         return 2
-    typed_action = cast(Literal["retry", "close"], action)
+    if action == "retry":
+        typed_action: Literal["retry", "close"] = "retry"
+    else:
+        typed_action = "close"
 
     current = db.get_import_job(args.job_id)
     beets = None

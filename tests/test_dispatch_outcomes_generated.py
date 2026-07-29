@@ -61,7 +61,6 @@ from lib.dispatch.types import _PREIMPORT_FACT_REJECT_DECISIONS, ImportAttemptRe
 from lib.import_execution import (
     CancellationToken,
     ExecutionLeaseSnapshot,
-    OwnerSessionIdentity,
     ProcessIdentity,
 )
 from lib.quality import (
@@ -83,6 +82,7 @@ from tests.helpers import (
     make_request_row,
     noop_quality_gate,
     patch_dispatch_externals,
+    pinned_dispatch_authority,
 )
 
 _HARNESS = "/nix/store/fake/harness/run_beets_harness.sh"
@@ -145,7 +145,7 @@ def _importer_lease(job_id: int) -> ExecutionLeaseSnapshot:
     )
 
 
-def _owned_test_runner(**kwargs: Any) -> Any:
+def _owned_test_runner(**kwargs):
     """Persist synthetic child proof before exercising the patched run seam."""
     from lib.dispatch.subprocess_runner import run_import_one
 
@@ -336,9 +336,17 @@ def _run_dispatch(
                 snapshot_guard="matched",
             ),
         )
+        cancellation_token = (
+            CancellationToken() if execution_lease is not None else None
+        )
         with patch_dispatch_externals(), \
              patch("lib.dispatch.subprocess_runner.parse_import_result",
-                   return_value=ir):
+                   return_value=ir), \
+             pinned_dispatch_authority(
+                 db,
+                 execution_lease,
+                 cancellation_token=cancellation_token,
+             ) as (cancellation_token, owner_session_identity):
             result = dispatch_import_core(
                 path=tmpdir,
                 mb_release_id="mbid-generated",
@@ -360,16 +368,8 @@ def _run_dispatch(
                 beets_library_db_path=str(beets.library_db),
                 beets_library_root=str(beets.library_root),
                 execution_lease=execution_lease,
-                cancellation_token=(
-                    CancellationToken()
-                    if execution_lease is not None
-                    else None
-                ),
-                owner_session_identity=(
-                    OwnerSessionIdentity(id(db), 4242)
-                    if execution_lease is not None
-                    else None
-                ),
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
                 run_import_fn=(
                     _owned_test_runner
                     if execution_lease is not None
@@ -741,7 +741,14 @@ def _run_have_analysis_abort(
                 snapshot_guard="matched",
             ),
         )
-        with patch_dispatch_externals():
+        cancellation_token = (
+            CancellationToken() if execution_lease is not None else None
+        )
+        with patch_dispatch_externals(), pinned_dispatch_authority(
+            db,
+            execution_lease,
+            cancellation_token=cancellation_token,
+        ) as (cancellation_token, owner_session_identity):
             outcome = dispatch_import_core(
                 path=tmpdir,
                 mb_release_id="generated-have-analysis-mbid",
@@ -765,16 +772,8 @@ def _run_have_analysis_abort(
                     lambda *_args, **_kwargs: current_result
                 ),
                 execution_lease=execution_lease,
-                cancellation_token=(
-                    CancellationToken()
-                    if execution_lease is not None
-                    else None
-                ),
-                owner_session_identity=(
-                    OwnerSessionIdentity(id(db), 4242)
-                    if execution_lease is not None
-                    else None
-                ),
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
             )
     if outcome.terminal_outcome is None:
         raise AssertionError("HAVE-analysis abort did not build a terminal outcome")
