@@ -201,8 +201,12 @@ inside socket authorization, never credentials.
   and the full result available as JSON. It uses the configured database and
   mirrors and remains available when `web.enable = false`; it does not use the
   optional web Unix socket or fall back to an HTTP adapter when that socket is
-  absent. A non-refresh durable-cache hit returns `ok` with `from_cache = true`
-  without contacting the mirrors or YouTube Music.
+  absent. Only a non-refresh lookup by an already-cached MusicBrainz
+  release-group identifier can return `ok` with `from_cache = true` without
+  contacting a mirror or YouTube Music. A Discogs lookup must consult the
+  configured mirror first because release IDs and master IDs share the integer
+  namespace; after the mirror establishes the master, the normal post-widen
+  durable-cache read may return `ok` with `from_cache = true`.
 
   Exhausting the configured HTTP status retries raises the public typed
   `requests.exceptions.RetryError` boundary. The resolver classifies that as

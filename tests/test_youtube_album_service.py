@@ -1361,6 +1361,43 @@ class TestSpeculativePreWidenCacheLookup(unittest.TestCase):
         self.assertEqual(result.release_group_identifier, master)
         self.assertEqual(result.source, "discogs")
 
+    def test_cached_discogs_master_retry_exhaustion_stays_unavailable(
+        self,
+    ) -> None:
+        """A cached master cannot hide an unavailable Discogs mirror."""
+        master = "12345"
+        pdb = self._seeded_pdb(master, "discogs")
+        durable_before = pdb.get_youtube_album_mapping(master, "discogs")
+        mirror_calls: list[str] = []
+
+        def _retry_exhausted(identifier: str) -> dict | None:
+            mirror_calls.append(identifier)
+            raise requests.exceptions.RetryError(
+                "Discogs mirror retries exhausted")
+
+        result = resolve_youtube_album(
+            master,
+            pdb=pdb,
+            mb_get_release=_empty_lookup(),
+            mb_get_release_group_releases=_empty_lookup(),
+            discogs_get_release=_retry_exhausted,
+            discogs_get_master_releases=_retry_exhausted,
+            yt_client=FakeYTMusic(),
+            distance_fn=_canned_distance(),
+            cache=None,
+        )
+
+        self.assertEqual(mirror_calls, [master])
+        self.assertEqual(result.outcome, "unresolved_mirror_unavailable")
+        self.assertFalse(result.from_cache)
+        self.assertEqual(result.youtube_releases, [])
+        self.assertIsNotNone(result.error_message)
+        self.assertIn("mirror unavailable", result.error_message or "")
+        self.assertEqual(
+            pdb.get_youtube_album_mapping(master, "discogs"),
+            durable_before,
+        )
+
     def test_discogs_input_never_short_circuits_even_with_cache_hit(self) -> None:
         """Even when the seeded matrix would match the input verbatim,
         Discogs must NOT speculative-cache because of the release/master

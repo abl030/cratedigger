@@ -48,7 +48,7 @@ _HEALTHY_BROWSE_ID = "MPREb-healthy"
 _CACHED_BROWSE_ID = "MPREb-cached"
 
 CachePosture = Literal["absent", "empty", "nonempty"]
-OperationSite = Literal["search", "seed", "sibling"]
+OperationSite = Literal["search", "seed", "sibling", "siblings_all"]
 RequestMethod = Literal["GET", "POST"]
 
 
@@ -57,6 +57,7 @@ class RetryWorld:
     status: int
     method: RequestMethod
     cache_posture: CachePosture
+    refresh: bool
     operation_site: OperationSite
 
 
@@ -236,7 +237,7 @@ class LoopbackYTClient:
     def get_album(self, browse_id: str) -> dict[str, Any]:
         if self._operation_site == "seed" and browse_id == _SEED_BROWSE_ID:
             self._exhaust()
-        if self._operation_site == "sibling":
+        if self._operation_site in ("sibling", "siblings_all"):
             if browse_id == _SEED_BROWSE_ID:
                 return _album(
                     browse_id,
@@ -245,6 +246,8 @@ class LoopbackYTClient:
             if browse_id == _BROKEN_BROWSE_ID:
                 self._exhaust()
             if browse_id == _HEALTHY_BROWSE_ID:
+                if self._operation_site == "siblings_all":
+                    self._exhaust()
                 return _album(browse_id)
         return _album(browse_id)
 
@@ -366,7 +369,7 @@ def run_retry_world(
                         yt_client=yt_client,
                         distance_fn=_distance,
                         cache=None,
-                        refresh=world.cache_posture != "absent",
+                        refresh=world.refresh,
                         sleep_fn=lambda _seconds: None,
                     )
                 except Exception as exc:  # noqa: BLE001 - checker records boundary escapes
@@ -389,9 +392,16 @@ def run_retry_world(
 def assert_retry_invariants(observation: RetryObservation) -> None:
     """Check retry count plus the world-specific service/cache contract."""
     world = observation.world
-    if observation.attempts != 4:
+    cache_short_circuit = (
+        not world.refresh and world.cache_posture != "absent")
+    expected_attempts = (
+        0 if cache_short_circuit
+        else 8 if world.operation_site == "siblings_all"
+        else 4
+    )
+    if observation.attempts != expected_attempts:
         raise AssertionError(
-            f"total=3 must produce four {world.method} attempts; "
+            f"expected {expected_attempts} {world.method} attempts; "
             f"observed {observation.attempts}")
     if observation.escaped_exception is not None:
         raise AssertionError(
@@ -402,7 +412,26 @@ def assert_retry_invariants(observation: RetryObservation) -> None:
             "resolver did not return YoutubeAlbumResolverResult")
 
     result = observation.result
-    if world.operation_site == "sibling":
+    if cache_short_circuit:
+        if result.outcome != "ok" or not result.from_cache:
+            raise AssertionError(
+                "non-refresh durable hit must return ok/from_cache")
+        expected_releases = (
+            expected_cached_releases()
+            if world.cache_posture == "nonempty"
+            else []
+        )
+        if msgspec.to_builtins(result.youtube_releases) != (
+                msgspec.to_builtins(expected_releases)):
+            raise AssertionError(
+                "non-refresh durable hit returned the wrong matrix")
+        if observation.upsert_calls != 0:
+            raise AssertionError(
+                "non-refresh durable hit must not upsert")
+        if observation.durable_after != observation.durable_before:
+            raise AssertionError(
+                "non-refresh durable hit rewrote durable state")
+    elif world.operation_site == "sibling":
         if result.outcome != "ok" or result.from_cache:
             raise AssertionError(
                 "one exhausting sibling must retain a fresh ok result")
@@ -415,13 +444,25 @@ def assert_retry_invariants(observation: RetryObservation) -> None:
         if observation.upsert_calls != 1:
             raise AssertionError(
                 "successful partial sibling matrix must be upserted once")
+        if observation.durable_after is None:
+            raise AssertionError(
+                "successful partial sibling matrix was not durable")
+        durable_ids = [
+            row.get("yt_browse_id") for row in observation.durable_after]
+        if (
+            len(durable_ids) != len(expected_ids)
+            or set(durable_ids) != set(expected_ids)
+        ):
+            raise AssertionError(
+                f"partial durable matrix mismatch: expected {expected_ids!r}, "
+                f"got {durable_ids!r}")
     else:
         if observation.upsert_calls != 0:
             raise AssertionError(
-                "outer retry exhaustion must never upsert durable mappings")
+                "retry exhaustion must never upsert durable mappings")
         if observation.durable_after != observation.durable_before:
             raise AssertionError(
-                "outer retry exhaustion rewrote durable state")
+                "retry exhaustion rewrote durable state")
 
         if world.cache_posture == "nonempty":
             if result.outcome != "ok" or not result.from_cache:
@@ -503,15 +544,33 @@ class TestRetryExhaustionResolverIntegration(unittest.TestCase):
             status=503,
             method="GET",
             cache_posture="absent",
+            refresh=False,
             operation_site="search",
         ))
         assert_retry_invariants(observation)
+
+    def test_real_503_get_absent_cache_refresh_is_unavailable_without_write(
+        self,
+    ) -> None:
+        observation = run_retry_world(RetryWorld(
+            status=503,
+            method="GET",
+            cache_posture="absent",
+            refresh=True,
+            operation_site="search",
+        ))
+        assert_retry_invariants(observation)
+        result = cast(YoutubeAlbumResolverResult, observation.result)
+        self.assertEqual(result.outcome, "unresolved_mirror_unavailable")
+        self.assertEqual(observation.upsert_calls, 0)
+        self.assertIsNone(observation.durable_after)
 
     def test_real_429_post_refresh_uses_exact_nonempty_fallback(self) -> None:
         observation = run_retry_world(RetryWorld(
             status=429,
             method="POST",
             cache_posture="nonempty",
+            refresh=True,
             operation_site="seed",
         ))
         assert_retry_invariants(observation)
@@ -521,6 +580,7 @@ class TestRetryExhaustionResolverIntegration(unittest.TestCase):
             status=502,
             method="POST",
             cache_posture="empty",
+            refresh=True,
             operation_site="seed",
         ))
         assert_retry_invariants(observation)
@@ -530,7 +590,32 @@ class TestRetryExhaustionResolverIntegration(unittest.TestCase):
             status=503,
             method="GET",
             cache_posture="absent",
+            refresh=False,
             operation_site="sibling",
+        ))
+        assert_retry_invariants(observation)
+
+    def test_real_503_all_siblings_exhaust_with_cache_preserves_durable_rows(
+        self,
+    ) -> None:
+        observation = run_retry_world(RetryWorld(
+            status=503,
+            method="GET",
+            cache_posture="nonempty",
+            refresh=True,
+            operation_site="siblings_all",
+        ))
+        assert_retry_invariants(observation)
+
+    def test_real_503_all_siblings_exhaust_absent_cache_is_unavailable(
+        self,
+    ) -> None:
+        observation = run_retry_world(RetryWorld(
+            status=503,
+            method="GET",
+            cache_posture="absent",
+            refresh=True,
+            operation_site="siblings_all",
         ))
         assert_retry_invariants(observation)
 

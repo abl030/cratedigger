@@ -107,7 +107,12 @@ control socket merely to unify those adapters. With the exported module's
 default `web.enable = false` composition, `pipeline-cli` is still installed
 while `cratedigger-web.service` and Cratedigger-prefixed systemd sockets are
 absent. A seeded durable YouTube mapping therefore remains usable headlessly
-without API, mirror, or YouTube transport.
+without the web API. Only a non-refresh lookup by an already-cached
+MusicBrainz release-group identifier can also avoid mirror and YouTube
+transport. A Discogs lookup must consult the configured mirror first because
+release IDs and master IDs share the integer namespace; after the mirror
+establishes the master, the normal post-widen durable-cache read may return
+from cache.
 
 The outer HTTPS proxy and the loopback gateway may be server blocks in the
 same nginx process, but they remain distinct listeners. Configure the outer
