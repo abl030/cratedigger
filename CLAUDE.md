@@ -12,6 +12,11 @@ Do not use Compound Engineering (`ce-*`, `compound-engineering:*`, or `lfg`) in
 this repository. Native agent planning, implementation, debugging, and review
 are sufficient.
 
+Work in an isolated git worktree, and clean it up when it is no longer useful.
+Keep the shared checkout on `main` and reasonably current; after merging to
+`main`, pull it forward. Use judgment around active or dirty trees, and never
+disturb another agent's work.
+
 ## Why this exists — the archivist frame
 
 Cratedigger is a **music archival tool first, an acquisition pipeline second**. The operator is an archivist: most of the long-tail music here is genuinely vanishing — niche pressings, Australian indie, demos that lived on one peer who logged off years ago. This frame is load-bearing; these invariants flow from it:
