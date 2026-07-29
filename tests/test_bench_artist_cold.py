@@ -1,21 +1,16 @@
-"""Explicit benchmark-harness checks, intentionally outside default discovery.
+"""Focused checks for the cold artist benchmark harness.
 
-Run: ``nix-shell --run "python3 tests/manual/bench_artist_cold_checks.py -v"``.
+Run: ``nix-shell --run "python3 -m unittest tests.test_bench_artist_cold -v"``.
 """
 from __future__ import annotations
 
 import concurrent.futures
 import json
-import os
 import subprocess
-import sys
 import threading
 import unittest
 import urllib.error
 import urllib.request
-
-sys.path.insert(0, os.path.normpath(os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", "..")))
 
 from scripts.bench_artist_cold import (
     Artist,

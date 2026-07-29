@@ -50,6 +50,8 @@ class _NestedRecordingWorld:
         offset = int(query.get("offset", ["0"])[0])
         limit = int(query.get("limit", ["100"])[0])
         if path.endswith("/release-group"):
+            if self.fail_release_groups:
+                return {"release-group-count": -1, "release-groups": []}
             size = min(limit, self.catalogue_short_page or limit)
             groups = [
                 {
@@ -134,12 +136,6 @@ class _Mirror:
                         mirror.world.active_requests,
                     )
                 try:
-                    if mirror.world.fail_release_groups and self.path.split("?", 1)[0].endswith(
-                        "/release-group",
-                    ):
-                        self.send_response(500)
-                        self.end_headers()
-                        return
                     if mirror.world.delay:
                         time.sleep(mirror.world.delay)
                     parsed = urllib.parse.urlsplit(self.path)
@@ -337,11 +333,10 @@ class TestArtistRecordingPaginationPins(unittest.TestCase):
         ), patch("web.mb._cache.memoize_meta", side_effect=_without_metadata_cache):
             with _Mirror(world) as api_base, patch.object(mb, "MB_API_BASE", api_base):
                 started = time.monotonic()
-                with self.assertRaises(urllib.error.HTTPError) as raised:
+                with self.assertRaises(mb.MusicBrainzArtistCatalogueIncomplete):
                     mb.get_artist_release_groups(ARTIST_ID)
                 self.assertLess(time.monotonic() - started, 0.5)
             time.sleep(0.2)
-        raised.exception.close()
         self.assertEqual(public_urls, [])
 
 
@@ -380,13 +375,36 @@ class TestArtistRecordingPaginationGenerated(unittest.TestCase):
         assert_catalogue_identity_count(total * 2, len(rows))
 
     @settings(max_examples=12)
-    @given(total=st.integers(min_value=1, max_value=180))
+    @given(total=st.integers(min_value=1, max_value=100))
     def test_counted_catalogue_generated_blank_identity_is_rejected(self, total: int) -> None:
+        # This invariant is already decided by the first response.  Keep this
+        # failure world single-page so a sibling cannot build page-two URLs
+        # after the temporary local-MB base is restored; multipage coverage is
+        # exercised by the conservation properties above.
         world = _NestedRecordingWorld(total, blank_catalogue_id=True)
-        with _Mirror(world) as api_base, patch.object(mb, "MB_API_BASE", api_base), patch(
-            "web.mb._cache.memoize_meta", side_effect=_without_metadata_cache,
-        ), self.assertRaises(mb.MusicBrainzArtistCatalogueIncomplete):
-            mb.get_artist_release_groups(ARTIST_ID)
+        public_urls: list[str] = []
+        real_urlopen = urllib.request.urlopen
+
+        def local_only(
+            request: urllib.request.Request, *, timeout: float | None = None,
+        ) -> object:
+            url = request.full_url
+            if url.startswith(PUBLIC_MB_WS2_BASE):
+                public_urls.append(url)
+                raise AssertionError(f"background worker escaped to public MB: {url}")
+            return real_urlopen(request, timeout=timeout)
+
+        with patch("web.mb.urllib.request.urlopen", side_effect=local_only), patch.object(
+            mb, "MB_API_BASE", "http://invalid-before-mirror/ws/2",
+        ), patch("web.mb._cache.memoize_meta", side_effect=_without_metadata_cache):
+            with _Mirror(world) as api_base, patch.object(
+                mb, "MB_API_BASE", api_base,
+            ), self.assertRaises(mb.MusicBrainzArtistCatalogueIncomplete):
+                mb.get_artist_release_groups(ARTIST_ID)
+            # Leave the guard active long enough for a wrongly retained
+            # sibling to reveal a restored-base request.
+            time.sleep(0.05)
+        self.assertEqual(public_urls, [])
 
 
 if __name__ == "__main__":
