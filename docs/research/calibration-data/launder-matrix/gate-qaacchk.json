@@ -1,0 +1,53 @@
+[
+ {
+  "variant": "genuine",
+  "slug": "8933--2014 - Ruins",
+  "n": 8,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 41.32659266666667,
+  "U_prod": 41.326592544832195,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.01796,
+  "derrien_proba_med": 0.0168665,
+  "derrien_z_max": 4.975,
+  "derrien_offsets": [
+   "1022",
+   "18",
+   "227",
+   "231",
+   "584",
+   "721",
+   "804",
+   "810"
+  ],
+  "derrien_n": 8
+ },
+ {
+  "variant": "qaac-cvbr256",
+  "slug": "8933--2014 - Ruins",
+  "n": 8,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 40.85826295833333,
+  "U_prod": 40.85826289062594,
+  "prod_grade": "genuine",
+  "prod_cliff": 13000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.125,
+  "derrien_proba_max": 0.148112,
+  "derrien_proba_med": 0.065918,
+  "derrien_z_max": 30.183,
+  "derrien_offsets": [
+   "960"
+  ],
+  "derrien_n": 8
+ }
+]

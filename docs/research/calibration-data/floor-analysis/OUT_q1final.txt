@@ -1,0 +1,48 @@
+cratedigger dev shell — run: python3 -m unittest discover -s tests -t . -v
+=== (A) SHIPPED MULTIWIN GATE, 100 arm albums ===
+
+T=62.0: genuine denied 36/100; of those, ultrasonic-leg-ONLY = 16. Launder albums uniquely held by that leg = 49/300.
+rule                          genuine->UNTESTABLE  launder->UNTESTABLE  per-class                lift
+nocliff & step_max<20                       14/16                10/49  mp3128-:0/9 opus96-:3/4 vorbisq:7/36   4.29
+nocliff & step_max<15                       14/16                 5/49  mp3128-:0/9 opus96-:2/4 vorbisq:3/36   8.57
+nocliff & step_max<12                       11/16                 4/49  mp3128-:0/9 opus96-:1/4 vorbisq:3/36   8.42
+nocliff & step_max<10                        9/16                 3/49  mp3128-:0/9 opus96-:1/4 vorbisq:2/36   9.19
+nocliff & step_max<8                         7/16                 0/49  mp3128-:0/9 opus96-:0/4 vorbisq:0/36    inf
+nocliff & step_max<6                         3/16                 0/49  mp3128-:0/9 opus96-:0/4 vorbisq:0/36    inf
+nocliff & step_max<4                         3/16                 0/49  mp3128-:0/9 opus96-:0/4 vorbisq:0/36    inf
+nocliff & step_max<2                         3/16                 0/49  mp3128-:0/9 opus96-:0/4 vorbisq:0/36    inf
+
+T=59.5: genuine denied 44/100; of those, ultrasonic-leg-ONLY = 24. Launder albums uniquely held by that leg = 49/300.
+rule                          genuine->UNTESTABLE  launder->UNTESTABLE  per-class                lift
+nocliff & step_max<20                       20/24                10/49  mp3128-:0/9 opus96-:3/4 vorbisq:7/36   4.08
+nocliff & step_max<15                       20/24                 5/49  mp3128-:0/9 opus96-:2/4 vorbisq:3/36   8.17
+nocliff & step_max<12                       17/24                 4/49  mp3128-:0/9 opus96-:1/4 vorbisq:3/36   8.68
+nocliff & step_max<10                       14/24                 3/49  mp3128-:0/9 opus96-:1/4 vorbisq:2/36   9.53
+nocliff & step_max<8                        11/24                 0/49  mp3128-:0/9 opus96-:0/4 vorbisq:0/36    inf
+nocliff & step_max<6                         6/24                 0/49  mp3128-:0/9 opus96-:0/4 vorbisq:0/36    inf
+nocliff & step_max<4                         4/24                 0/49  mp3128-:0/9 opus96-:0/4 vorbisq:0/36    inf
+nocliff & step_max<2                         3/24                 0/49  mp3128-:0/9 opus96-:0/4 vorbisq:0/36    inf
+
+=== (B) WINDOW-0 GATE, ARMS (100 albums), T=62 ===
+    genuine denied 26/100; ultrasonic-leg-ONLY genuine 12; launder candidates uniquely held by that leg 401
+rule                        genuine->UNT  launder->UNT   lift   worst-hit launder classes
+nocliff & step<20                  10/12       126/401   2.65   vorbis-q9:26/32 vorbis-q6:21/46 lame-v0:15/29 vorbis-q5:13/64
+nocliff & step<15                  10/12       106/401   3.15   vorbis-q9:22/32 vorbis-q6:19/46 lame-v0:12/29 opus-96:8/9
+nocliff & step<12                   4/12        72/401   1.86   vorbis-q9:13/32 vorbis-q6:11/46 lame-v0:10/29 t-aac128-mp3320:8/89
+nocliff & step<10                   3/12        53/401   1.89   lame-v0:10/29 vorbis-q9:8/32 t-aac128-mp3320:8/89 opus-256:5/9
+nocliff & step<8                    2/12        33/401   2.03   t-aac128-mp3320:8/89 lame-v0:5/29 vorbis-q9:5/32 opus-256:4/9
+nocliff & step<6                    2/12        21/401   3.18   t-aac128-mp3320:8/89 lame-v0:3/29 opus-256:2/9 vorbis-q9:2/32
+nocliff & step<4                    2/12        14/401   4.77   t-aac128-mp3320:8/89 vorbis-q9:2/32 lame-v0:1/29 vorbis-q5:1/64
+nocliff & step<2                    2/12        14/401   4.77   t-aac128-mp3320:8/89 vorbis-q9:2/32 lame-v0:1/29 vorbis-q5:1/64
+
+=== (B) WINDOW-0 GATE, NEW MATRIX (19 albums), T=62 ===
+    genuine denied 7/19; ultrasonic-leg-ONLY genuine 5; launder candidates uniquely held by that leg 153
+rule                        genuine->UNT  launder->UNT   lift   worst-hit launder classes
+nocliff & step<20                    4/5        43/153   2.85   aacffm-256:5/6 aacffm-320:5/6 wma-192:5/11 aacffm-128:4/16
+nocliff & step<15                    4/5        39/153   3.14   aacffm-256:5/6 aacffm-320:5/6 aacffm-128:4/16 wma-192:4/11
+nocliff & step<12                    2/5        18/153   3.40   aacffm-128:4/16 wma-192:3/11 wma-128:2/12 wma-320:2/10
+nocliff & step<10                    0/5        10/153   0.00   aacffm-128:4/16 wma-128:2/12 wma-192:2/11 lame-v0:1/5
+nocliff & step<8                     0/5         6/153   0.00   aacffm-128:4/16 wma-128:1/12 wma-192:1/11
+nocliff & step<6                     0/5         5/153   0.00   aacffm-128:4/16 wma-128:1/12
+nocliff & step<4                     0/5         4/153   0.00   aacffm-128:4/16
+nocliff & step<2                     0/5         4/153   0.00   aacffm-128:4/16

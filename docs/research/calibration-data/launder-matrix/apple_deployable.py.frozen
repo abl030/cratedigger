@@ -1,0 +1,118 @@
+"""Deployability sweep for the Apple arm — reporting only.
+
+The per-album lambda in apple_report.py is an ORACLE calibration: it is the
+max Derrien proba over that album's own genuine files, which an operator
+holding only the suspect copy does not have. Its zero false-positive rate is
+therefore true by construction, not evidence.
+
+This script reports the thresholds an operator can actually set:
+  * the paper lambda (0.031, corpus-independent),
+  * a pooled zero-FP lambda calibrated on this corpus's genuine set,
+and sweeps threshold vs (album-level recall, genuine album-level FP) so the
+operating point is visible rather than asserted.
+
+Album verdict rule: an album is FLAGGED if at least `k` of its tracks exceed
+the threshold. k=1 and a 25%-of-tracks rule are both reported.
+
+  python3 apple_deployable.py --tag apple
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import os
+import statistics
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+CONTROL = "genuine"
+PAPER = 0.031
+VARIANTS = ["qaac-cvbr256", "qaac-cvbr320", "qaac-abr192",
+            "qaac-tvbr91", "qaac-cbr128"]
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--tag", default="apple")
+    a = ap.parse_args()
+
+    rows = [r for r in csv.DictReader(
+        open(f"{HERE}/derrien-{a.tag}.tsv"), delimiter="\t")
+        if r["mode"] == "high" and not r["err"]]
+    by = {}
+    for r in rows:
+        by.setdefault((r["variant"], r["request_id"]), []).append(float(r["proba"]))
+    gate = {(g["variant"], g["slug"].split("--")[0]): g
+            for g in json.load(open(f"{HERE}/gate-{a.tag}.json"))}
+
+    ctl = sorted({rid for (v, rid) in by if v == CONTROL})
+    gen = [p for rid in ctl for p in by[(CONTROL, rid)]]
+    gen.sort()
+    pooled = gen[-1]
+
+    print("### genuine (control) Derrien distribution, track level")
+    print(f"  n={len(gen)}  min {gen[0]:.4f}  p50 {statistics.median(gen):.4f}  "
+          f"p95 {gen[int(.95*len(gen))]:.4f}  max {pooled:.4f}")
+    top = sorted(((p, rid) for rid in ctl for p in by[(CONTROL, rid)]),
+                 reverse=True)[:6]
+    print("  highest genuine tracks: " +
+          ", ".join(f"{rid}:{p:.4f}" for p, rid in top))
+
+    print("\n### launder track-level distribution (17 scorable albums)")
+    for v in VARIANTS:
+        p = sorted(x for rid in ctl for x in by.get((v, rid), []))
+        print(f"  {v:<14} n={len(p):3d}  min {p[0]:.4f}  p05 "
+              f"{p[int(.05*len(p))]:.4f}  p50 {statistics.median(p):.4f}  "
+              f"max {p[-1]:.4f}")
+
+    # ---- threshold sweep ---------------------------------------------
+    print("\n### threshold sweep — album-level, rule: >=1 track over lambda")
+    print(f"{'lambda':>8}{'genFP':>8}   " +
+          "".join(f"{v.replace('qaac-',''):>10}" for v in VARIANTS))
+    lambdas = [PAPER, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10, pooled, 0.12]
+    for L in lambdas:
+        fp = sum(1 for rid in ctl if any(p > L for p in by[(CONTROL, rid)]))
+        cells = []
+        for v in VARIANTS:
+            hit = sum(1 for rid in ctl
+                      if any(p > L for p in by.get((v, rid), [])))
+            cells.append(f"{hit}/{len(ctl)}")
+        tag = "  <- paper" if L == PAPER else ("  <- pooled" if L == pooled else "")
+        print(f"{L:>8.4f}{fp:>5}/{len(ctl)}   " +
+              "".join(f"{c:>10}" for c in cells) + tag)
+
+    print("\n### same sweep, rule: >=25% of the album's tracks over lambda")
+    print(f"{'lambda':>8}{'genFP':>8}   " +
+          "".join(f"{v.replace('qaac-',''):>10}" for v in VARIANTS))
+
+    def frac_rule(vals, L):
+        return vals and sum(1 for p in vals if p > L) >= max(1, len(vals) // 4)
+
+    for L in lambdas:
+        fp = sum(1 for rid in ctl if frac_rule(by[(CONTROL, rid)], L))
+        cells = []
+        for v in VARIANTS:
+            hit = sum(1 for rid in ctl if frac_rule(by.get((v, rid), []), L))
+            cells.append(f"{hit}/{len(ctl)}")
+        tag = "  <- paper" if L == PAPER else ("  <- pooled" if L == pooled else "")
+        print(f"{L:>8.4f}{fp:>5}/{len(ctl)}   " +
+              "".join(f"{c:>10}" for c in cells) + tag)
+
+    # ---- residual hole at DEPLOYABLE thresholds ------------------------
+    print("\n### residual hole at deployable thresholds")
+    print("albums that reach PROOF under the frozen gate AND Derrien misses")
+    for L, name in ((PAPER, f"paper {PAPER}"), (pooled, f"pooled {pooled:.4f}")):
+        print(f"  -- lambda = {name}, rule >=1 track --")
+        for v in VARIANTS:
+            for T in ("62", "59.5"):
+                proof = [rid for rid in ctl
+                         if (v, rid) in gate and not gate[(v, rid)][f"denied@{T}"]]
+                miss = [rid for rid in proof
+                        if not any(p > L for p in by.get((v, rid), []))]
+                print(f"     {v:<14} T={T:<5} PROOF {len(proof):2d}/17  "
+                      f"escapes both {len(miss)}"
+                      f"{'  ' + ','.join(miss) if miss else ''}")
+
+
+if __name__ == "__main__":
+    main()

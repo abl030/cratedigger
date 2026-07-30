@@ -1,0 +1,9474 @@
+[
+ {
+  "variant": "aacffm-128",
+  "slug": "8916--2013 - Random Access Memories [88883716862]",
+  "n": 13,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 72.350887,
+  "U_prod": 72.3508870490526,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 17000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.3076923076923077
+ },
+ {
+  "variant": "aacffm-128",
+  "slug": "8917--2014 - Syro [WARPCD247]",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 68.00982797222223,
+  "U_prod": 68.00982784330988,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 16500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.16666666666666666
+ },
+ {
+  "variant": "aacffm-128",
+  "slug": "8918--1995 - Tri Repetae [WARPCD38]",
+  "n": 10,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 71.37963946666666,
+  "U_prod": 71.37963950985191,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.7
+ },
+ {
+  "variant": "aacffm-128",
+  "slug": "8919--1996 - Feed Me Weird Things",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 70.57307083333333,
+  "U_prod": 70.5730708090217,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 16500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.3333333333333333
+ },
+ {
+  "variant": "aacffm-128",
+  "slug": "8920--2011 - Hurry Up, We're Dreaming",
+  "n": 22,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 79.73318643939393,
+  "U_prod": 79.73318648184976,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 17500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.9090909090909091
+ },
+ {
+  "variant": "aacffm-128",
+  "slug": "8921--1999 - Californication",
+  "n": 15,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 67.858726,
+  "U_prod": 67.85872611775213,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 16500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.06666666666666667
+ },
+ {
+  "variant": "aacffm-128",
+  "slug": "8922--2008 - Death Magnetic",
+  "n": 10,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 62.33082943333333,
+  "U_prod": 62.330829587415984,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "aacffm-128",
+  "slug": "8923--2001 - Jane Doe",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 65.738037,
+  "U_prod": 65.73803693642357,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "aacffm-128",
+  "slug": "8924--1984 - Tabula Rasa",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 69.893074,
+  "U_prod": 69.89307400311705,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 16500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.25
+ },
+ {
+  "variant": "aacffm-128",
+  "slug": "8925--1982 - The Goldberg Variations",
+  "n": 32,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 77.67532904166667,
+  "U_prod": 77.67532903413857,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "aacffm-128",
+  "slug": "8926--1987 - Kind of Blue [CK 40579]",
+  "n": 5,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 68.3669428,
+  "U_prod": 68.36694296376223,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 16500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.2
+ },
+ {
+  "variant": "aacffm-128",
+  "slug": "8928--2016 - Man Made Object",
+  "n": 10,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 75.16253583333334,
+  "U_prod": 75.16253571718676,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 16500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.4
+ },
+ {
+  "variant": "aacffm-128",
+  "slug": "8929--1996 - The Velvet Underground & Nico [31453 1250 2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 79.66807687878787,
+  "U_prod": 79.66807689713933,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 17000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.09090909090909091
+ },
+ {
+  "variant": "aacffm-128",
+  "slug": "8930--1993 - Bridge Over Troubled Water [462488 2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 79.39782475757576,
+  "U_prod": 79.39782474534995,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 17000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.09090909090909091
+ },
+ {
+  "variant": "aacffm-128",
+  "slug": "8931--1987 - Rumours [3010-2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 80.67650693939395,
+  "U_prod": 80.67650687417539,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 1.0
+ },
+ {
+  "variant": "aacffm-128",
+  "slug": "8932--1991 - Loveless [crecd 060]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 85.29075887878788,
+  "U_prod": 85.29075881547645,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 17000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.2727272727272727
+ },
+ {
+  "variant": "aacffm-128",
+  "slug": "8933--2014 - Ruins",
+  "n": 8,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 66.01729245833333,
+  "U_prod": 66.01729235911318,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 13000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.125
+ },
+ {
+  "variant": "aacffm-128",
+  "slug": "8934--1998 - Stratosphere",
+  "n": 17,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 79.9296128627451,
+  "U_prod": 79.92961289967292,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 17000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.058823529411764705
+ },
+ {
+  "variant": "aacffm-128",
+  "slug": "8935--1990 - Ambient 1_ Music for Airports [EEGCD 17]",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 72.32155408333334,
+  "U_prod": 72.32155414438972,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "aacffm-192",
+  "slug": "8916--2013 - Random Access Memories [88883716862]",
+  "n": 13,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 72.84100146153847,
+  "U_prod": 72.84100143275718,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "aacffm-192",
+  "slug": "8917--2014 - Syro [WARPCD247]",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 69.5183796388889,
+  "U_prod": 69.51837970960067,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "aacffm-192",
+  "slug": "8918--1995 - Tri Repetae [WARPCD38]",
+  "n": 10,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 68.88185109999999,
+  "U_prod": 68.88185122835577,
+  "prod_grade": "genuine",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.1
+ },
+ {
+  "variant": "aacffm-192",
+  "slug": "8919--1996 - Feed Me Weird Things",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 70.27788555555556,
+  "U_prod": 70.27788555830362,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.08333333333333333
+ },
+ {
+  "variant": "aacffm-192",
+  "slug": "8920--2011 - Hurry Up, We're Dreaming",
+  "n": 22,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 69.2988688030303,
+  "U_prod": 69.29886889672527,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.045454545454545456
+ },
+ {
+  "variant": "aacffm-192",
+  "slug": "8921--1999 - Californication",
+  "n": 15,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 71.37359626666667,
+  "U_prod": 71.37359628489627,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "aacffm-192",
+  "slug": "8922--2008 - Death Magnetic",
+  "n": 10,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 67.12672623333333,
+  "U_prod": 67.12672623859842,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "aacffm-192",
+  "slug": "8923--2001 - Jane Doe",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 74.85166033333333,
+  "U_prod": 74.85166030305221,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "aacffm-192",
+  "slug": "8924--1984 - Tabula Rasa",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 69.9547335,
+  "U_prod": 69.95473339866302,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "aacffm-192",
+  "slug": "8925--1982 - The Goldberg Variations",
+  "n": 32,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 77.64203426041666,
+  "U_prod": 77.64203425745858,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.09375
+ },
+ {
+  "variant": "aacffm-192",
+  "slug": "8926--1987 - Kind of Blue [CK 40579]",
+  "n": 5,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 68.84832746666666,
+  "U_prod": 68.84832752769049,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "aacffm-192",
+  "slug": "8928--2016 - Man Made Object",
+  "n": 10,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 74.6268939,
+  "U_prod": 74.62689396589239,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "aacffm-192",
+  "slug": "8929--1996 - The Velvet Underground & Nico [31453 1250 2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 79.99590136363636,
+  "U_prod": 79.99590150792675,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "aacffm-192",
+  "slug": "8930--1993 - Bridge Over Troubled Water [462488 2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 79.91051021212121,
+  "U_prod": 79.91051014205124,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "aacffm-192",
+  "slug": "8931--1987 - Rumours [3010-2]",
+  "n": 11,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 57.844075909090904,
+  "U_prod": 57.84407585928688,
+  "prod_grade": "genuine",
+  "prod_cliff": 16000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.45454545454545453
+ },
+ {
+  "variant": "aacffm-192",
+  "slug": "8932--1991 - Loveless [crecd 060]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 85.48067715151515,
+  "U_prod": 85.48067704141464,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "aacffm-192",
+  "slug": "8933--2014 - Ruins",
+  "n": 8,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 66.02263733333334,
+  "U_prod": 66.02263747850213,
+  "prod_grade": "genuine",
+  "prod_cliff": 13000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.125
+ },
+ {
+  "variant": "aacffm-192",
+  "slug": "8934--1998 - Stratosphere",
+  "n": 17,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 80.49263045098039,
+  "U_prod": 80.49263048873308,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "aacffm-192",
+  "slug": "8935--1990 - Ambient 1_ Music for Airports [EEGCD 17]",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 71.55892924999999,
+  "U_prod": 71.55892911915413,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "aacffm-256",
+  "slug": "8916--2013 - Random Access Memories [88883716862]",
+  "n": 13,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 41.44431,
+  "U_prod": 41.44431019079971,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.028176,
+  "derrien_proba_med": 0.018541,
+  "derrien_z_max": 8.904,
+  "derrien_offsets": [
+   "0",
+   "104",
+   "296",
+   "378",
+   "439",
+   "816",
+   "87",
+   "895",
+   "902",
+   "918",
+   "946"
+  ],
+  "derrien_n": 13
+ },
+ {
+  "variant": "aacffm-256",
+  "slug": "8917--2014 - Syro [WARPCD247]",
+  "n": 12,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 42.83292605555555,
+  "U_prod": 42.83292604883244,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.066598,
+  "derrien_proba_med": 0.0282865,
+  "derrien_z_max": 20.375,
+  "derrien_offsets": [
+   "0",
+   "293",
+   "50",
+   "512",
+   "768",
+   "896"
+  ],
+  "derrien_n": 12
+ },
+ {
+  "variant": "aacffm-256",
+  "slug": "8918--1995 - Tri Repetae [WARPCD38]",
+  "n": 10,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 25.522287433333336,
+  "U_prod": 25.522287537178016,
+  "prod_grade": "genuine",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.1,
+  "derrien_proba_max": 0.260817,
+  "derrien_proba_med": 0.020758,
+  "derrien_z_max": 20.151,
+  "derrien_offsets": [
+   "0",
+   "128",
+   "256",
+   "258",
+   "340",
+   "350",
+   "716",
+   "896"
+  ],
+  "derrien_n": 10
+ },
+ {
+  "variant": "aacffm-256",
+  "slug": "8919--1996 - Feed Me Weird Things",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 64.37634313888888,
+  "U_prod": 64.37634319984224,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.082933,
+  "derrien_proba_med": 0.0190375,
+  "derrien_z_max": 6.988,
+  "derrien_offsets": [
+   "0",
+   "24",
+   "356",
+   "402",
+   "587",
+   "64",
+   "685",
+   "793",
+   "862",
+   "890"
+  ],
+  "derrien_n": 12
+ },
+ {
+  "variant": "aacffm-256",
+  "slug": "8920--2011 - Hurry Up, We're Dreaming",
+  "n": 22,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 63.26104774242424,
+  "U_prod": 63.26104778863282,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.045454545454545456
+ },
+ {
+  "variant": "aacffm-256",
+  "slug": "8921--1999 - Californication",
+  "n": 15,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 46.90359588888889,
+  "U_prod": 46.903595851435426,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.022029,
+  "derrien_proba_med": 0.019467,
+  "derrien_z_max": 6.454,
+  "derrien_offsets": [
+   "0",
+   "101",
+   "124",
+   "174",
+   "355",
+   "384",
+   "437",
+   "515",
+   "517",
+   "576",
+   "601",
+   "812",
+   "891"
+  ],
+  "derrien_n": 15
+ },
+ {
+  "variant": "aacffm-256",
+  "slug": "8922--2008 - Death Magnetic",
+  "n": 10,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 51.313316933333326,
+  "U_prod": 51.3133169993024,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.028226,
+  "derrien_proba_med": 0.02157,
+  "derrien_z_max": 9.857,
+  "derrien_offsets": [
+   "0",
+   "112",
+   "128",
+   "360",
+   "463",
+   "515",
+   "777"
+  ],
+  "derrien_n": 10
+ },
+ {
+  "variant": "aacffm-256",
+  "slug": "8923--2001 - Jane Doe",
+  "n": 12,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 46.86486213888889,
+  "U_prod": 46.8648621329941,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.021635,
+  "derrien_proba_med": 0.0181775,
+  "derrien_z_max": 6.3,
+  "derrien_offsets": [
+   "250",
+   "265",
+   "368",
+   "38",
+   "393",
+   "467",
+   "483",
+   "515",
+   "572",
+   "763",
+   "791",
+   "855"
+  ],
+  "derrien_n": 12
+ },
+ {
+  "variant": "aacffm-256",
+  "slug": "8924--1984 - Tabula Rasa",
+  "n": 4,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 61.18850291666667,
+  "U_prod": 61.188503032839755,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.020115,
+  "derrien_proba_med": 0.017163499999999998,
+  "derrien_z_max": 5.479,
+  "derrien_offsets": [
+   "137",
+   "206",
+   "423",
+   "576"
+  ],
+  "derrien_n": 4
+ },
+ {
+  "variant": "aacffm-256",
+  "slug": "8925--1982 - The Goldberg Variations",
+  "n": 32,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 71.937014625,
+  "U_prod": 71.93701458828971,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.029728,
+  "derrien_proba_med": 0.0216535,
+  "derrien_z_max": 12.416,
+  "derrien_offsets": [
+   "0",
+   "1011",
+   "388",
+   "460",
+   "506",
+   "619",
+   "745",
+   "877",
+   "924",
+   "941"
+  ],
+  "derrien_n": 32
+ },
+ {
+  "variant": "aacffm-256",
+  "slug": "8926--1987 - Kind of Blue [CK 40579]",
+  "n": 5,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 63.39505233333333,
+  "U_prod": 63.395052452186405,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.037109,
+  "derrien_proba_med": 0.01796,
+  "derrien_z_max": 7.724,
+  "derrien_offsets": [
+   "0",
+   "366",
+   "485",
+   "560"
+  ],
+  "derrien_n": 5
+ },
+ {
+  "variant": "aacffm-256",
+  "slug": "8928--2016 - Man Made Object",
+  "n": 10,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 50.36623483333334,
+  "U_prod": 50.36623490567387,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.021583,
+  "derrien_proba_med": 0.0180075,
+  "derrien_z_max": 6.382,
+  "derrien_offsets": [
+   "231",
+   "310",
+   "323",
+   "41",
+   "50",
+   "520",
+   "578",
+   "723",
+   "758",
+   "896"
+  ],
+  "derrien_n": 10
+ },
+ {
+  "variant": "aacffm-256",
+  "slug": "8929--1996 - The Velvet Underground & Nico [31453 1250 2]",
+  "n": 11,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 55.033307121212125,
+  "U_prod": 55.03330711815051,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.025862,
+  "derrien_proba_med": 0.018029,
+  "derrien_z_max": 8.619,
+  "derrien_offsets": [
+   "129",
+   "237",
+   "29",
+   "384",
+   "390",
+   "453",
+   "492",
+   "538",
+   "578",
+   "809",
+   "996"
+  ],
+  "derrien_n": 11
+ },
+ {
+  "variant": "aacffm-256",
+  "slug": "8930--1993 - Bridge Over Troubled Water [462488 2]",
+  "n": 11,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 52.37949663636364,
+  "U_prod": 52.379496663812944,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.057889,
+  "derrien_proba_med": 0.018955,
+  "derrien_z_max": 15.15,
+  "derrien_offsets": [
+   "0",
+   "118",
+   "128",
+   "131",
+   "192",
+   "287",
+   "325",
+   "35",
+   "377",
+   "932",
+   "974"
+  ],
+  "derrien_n": 11
+ },
+ {
+  "variant": "aacffm-256",
+  "slug": "8931--1987 - Rumours [3010-2]",
+  "n": 11,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 49.30316287878788,
+  "U_prod": 49.30316300584579,
+  "prod_grade": "genuine",
+  "prod_cliff": 16000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.45454545454545453
+ },
+ {
+  "variant": "aacffm-256",
+  "slug": "8932--1991 - Loveless [crecd 060]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 69.88087427272727,
+  "U_prod": 69.88087423459879,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.023923,
+  "derrien_proba_med": 0.018541,
+  "derrien_z_max": 7.585,
+  "derrien_offsets": [
+   "0",
+   "1004",
+   "202",
+   "337",
+   "388",
+   "440",
+   "751",
+   "80",
+   "826",
+   "87",
+   "922"
+  ],
+  "derrien_n": 11
+ },
+ {
+  "variant": "aacffm-256",
+  "slug": "8933--2014 - Ruins",
+  "n": 8,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 41.048264625,
+  "U_prod": 41.04826477288606,
+  "prod_grade": "genuine",
+  "prod_cliff": 13000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.125,
+  "derrien_proba_max": 0.029459,
+  "derrien_proba_med": 0.020833,
+  "derrien_z_max": 11.073,
+  "derrien_offsets": [
+   "0",
+   "195",
+   "454",
+   "912"
+  ],
+  "derrien_n": 8
+ },
+ {
+  "variant": "aacffm-256",
+  "slug": "8934--1998 - Stratosphere",
+  "n": 17,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 63.70666478431373,
+  "U_prod": 63.70666471419087,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.021583,
+  "derrien_proba_med": 0.018029,
+  "derrien_z_max": 6.819,
+  "derrien_offsets": [
+   "0",
+   "10",
+   "115",
+   "133",
+   "252",
+   "294",
+   "326",
+   "423",
+   "605",
+   "614",
+   "68",
+   "77",
+   "848",
+   "901",
+   "961",
+   "991",
+   "993"
+  ],
+  "derrien_n": 17
+ },
+ {
+  "variant": "aacffm-256",
+  "slug": "8935--1990 - Ambient 1_ Music for Airports [EEGCD 17]",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 67.80448433333333,
+  "U_prod": 67.80448413851929,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.022461,
+  "derrien_proba_med": 0.018941,
+  "derrien_z_max": 7.959,
+  "derrien_offsets": [
+   "0",
+   "700",
+   "906"
+  ],
+  "derrien_n": 4
+ },
+ {
+  "variant": "aacffm-320",
+  "slug": "8916--2013 - Random Access Memories [88883716862]",
+  "n": 13,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 41.645350974358976,
+  "U_prod": 41.64535101796212,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.028708,
+  "derrien_proba_med": 0.019784,
+  "derrien_z_max": 10.477,
+  "derrien_offsets": [
+   "0",
+   "512",
+   "521",
+   "525",
+   "635",
+   "655",
+   "690",
+   "725",
+   "896",
+   "9",
+   "944",
+   "956"
+  ],
+  "derrien_n": 13
+ },
+ {
+  "variant": "aacffm-320",
+  "slug": "8917--2014 - Syro [WARPCD247]",
+  "n": 12,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 42.89704663888889,
+  "U_prod": 42.89704668969454,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.051523,
+  "derrien_proba_med": 0.0250715,
+  "derrien_z_max": 17.24,
+  "derrien_offsets": [
+   "0",
+   "217",
+   "226",
+   "413",
+   "428",
+   "768",
+   "896"
+  ],
+  "derrien_n": 12
+ },
+ {
+  "variant": "aacffm-320",
+  "slug": "8918--1995 - Tri Repetae [WARPCD38]",
+  "n": 10,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 25.58283463333333,
+  "U_prod": 25.582834491244533,
+  "prod_grade": "genuine",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.1,
+  "derrien_proba_max": 0.201923,
+  "derrien_proba_med": 0.021011500000000002,
+  "derrien_z_max": 21.842,
+  "derrien_offsets": [
+   "0",
+   "128",
+   "386",
+   "420",
+   "444",
+   "640",
+   "805"
+  ],
+  "derrien_n": 10
+ },
+ {
+  "variant": "aacffm-320",
+  "slug": "8919--1996 - Feed Me Weird Things",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 64.41236908333333,
+  "U_prod": 64.41236899232165,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.074519,
+  "derrien_proba_med": 0.0184355,
+  "derrien_z_max": 6.777,
+  "derrien_offsets": [
+   "0",
+   "103",
+   "302",
+   "356",
+   "398",
+   "402",
+   "516",
+   "572",
+   "584",
+   "641",
+   "966"
+  ],
+  "derrien_n": 12
+ },
+ {
+  "variant": "aacffm-320",
+  "slug": "8920--2011 - Hurry Up, We're Dreaming",
+  "n": 22,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 63.10577325757576,
+  "U_prod": 63.10577336648316,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.045454545454545456
+ },
+ {
+  "variant": "aacffm-320",
+  "slug": "8921--1999 - Californication",
+  "n": 15,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 47.078302288888885,
+  "U_prod": 47.07830221202793,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.02459,
+  "derrien_proba_med": 0.01796,
+  "derrien_z_max": 7.29,
+  "derrien_offsets": [
+   "0",
+   "1011",
+   "141",
+   "202",
+   "24",
+   "337",
+   "577",
+   "618",
+   "629",
+   "755",
+   "768",
+   "78",
+   "84",
+   "896",
+   "898"
+  ],
+  "derrien_n": 15
+ },
+ {
+  "variant": "aacffm-320",
+  "slug": "8922--2008 - Death Magnetic",
+  "n": 10,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 51.514258299999995,
+  "U_prod": 51.514258284365496,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.054856,
+  "derrien_proba_med": 0.021097,
+  "derrien_z_max": 14.999,
+  "derrien_offsets": [
+   "0",
+   "104",
+   "384",
+   "4",
+   "511",
+   "512",
+   "608",
+   "773"
+  ],
+  "derrien_n": 10
+ },
+ {
+  "variant": "aacffm-320",
+  "slug": "8923--2001 - Jane Doe",
+  "n": 12,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 47.09752330555555,
+  "U_prod": 47.097523333275745,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.020683,
+  "derrien_proba_med": 0.018319000000000002,
+  "derrien_z_max": 5.883,
+  "derrien_offsets": [
+   "152",
+   "166",
+   "418",
+   "472",
+   "530",
+   "561",
+   "600",
+   "794",
+   "804",
+   "851",
+   "984"
+  ],
+  "derrien_n": 12
+ },
+ {
+  "variant": "aacffm-320",
+  "slug": "8924--1984 - Tabula Rasa",
+  "n": 4,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 61.18933916666667,
+  "U_prod": 61.18933919397338,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.017473,
+  "derrien_proba_med": 0.016355,
+  "derrien_z_max": 4.212,
+  "derrien_offsets": [
+   "411",
+   "412",
+   "492",
+   "844"
+  ],
+  "derrien_n": 4
+ },
+ {
+  "variant": "aacffm-320",
+  "slug": "8925--1982 - The Goldberg Variations",
+  "n": 32,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 71.28015462500001,
+  "U_prod": 71.28015469171726,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.027579,
+  "derrien_proba_med": 0.019980499999999998,
+  "derrien_z_max": 10.395,
+  "derrien_offsets": [
+   "0",
+   "1006",
+   "375",
+   "494",
+   "531",
+   "745"
+  ],
+  "derrien_n": 32
+ },
+ {
+  "variant": "aacffm-320",
+  "slug": "8926--1987 - Kind of Blue [CK 40579]",
+  "n": 5,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 63.09470386666667,
+  "U_prod": 63.094703918351925,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.026042,
+  "derrien_proba_med": 0.018678,
+  "derrien_z_max": 10.115,
+  "derrien_offsets": [
+   "0",
+   "102",
+   "40",
+   "567"
+  ],
+  "derrien_n": 5
+ },
+ {
+  "variant": "aacffm-320",
+  "slug": "8928--2016 - Man Made Object",
+  "n": 10,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 50.22216996666667,
+  "U_prod": 50.22216982656384,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.040471,
+  "derrien_proba_med": 0.0185955,
+  "derrien_z_max": 16.028,
+  "derrien_offsets": [
+   "0",
+   "1",
+   "359",
+   "580",
+   "777",
+   "778",
+   "81",
+   "845",
+   "88"
+  ],
+  "derrien_n": 10
+ },
+ {
+  "variant": "aacffm-320",
+  "slug": "8929--1996 - The Velvet Underground & Nico [31453 1250 2]",
+  "n": 11,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 55.29404181818182,
+  "U_prod": 55.29404170362343,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.022129,
+  "derrien_proba_med": 0.017986,
+  "derrien_z_max": 6.809,
+  "derrien_offsets": [
+   "24",
+   "302",
+   "318",
+   "410",
+   "451",
+   "557",
+   "741",
+   "745",
+   "773",
+   "848",
+   "896"
+  ],
+  "derrien_n": 11
+ },
+ {
+  "variant": "aacffm-320",
+  "slug": "8930--1993 - Bridge Over Troubled Water [462488 2]",
+  "n": 11,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 52.439416484848486,
+  "U_prod": 52.439416509330016,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.062799,
+  "derrien_proba_med": 0.018541,
+  "derrien_z_max": 17.949,
+  "derrien_offsets": [
+   "0",
+   "113",
+   "129",
+   "32",
+   "501",
+   "525",
+   "707",
+   "716",
+   "824",
+   "876",
+   "960"
+  ],
+  "derrien_n": 11
+ },
+ {
+  "variant": "aacffm-320",
+  "slug": "8931--1987 - Rumours [3010-2]",
+  "n": 11,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 49.19179627272728,
+  "U_prod": 49.19179627201561,
+  "prod_grade": "genuine",
+  "prod_cliff": 16000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.2727272727272727
+ },
+ {
+  "variant": "aacffm-320",
+  "slug": "8932--1991 - Loveless [crecd 060]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 69.62831578787879,
+  "U_prod": 69.62831585018415,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.022541,
+  "derrien_proba_med": 0.018955,
+  "derrien_z_max": 7.14,
+  "derrien_offsets": [
+   "0",
+   "145",
+   "149",
+   "219",
+   "26",
+   "324",
+   "50",
+   "798",
+   "921",
+   "924",
+   "939"
+  ],
+  "derrien_n": 11
+ },
+ {
+  "variant": "aacffm-320",
+  "slug": "8933--2014 - Ruins",
+  "n": 8,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 41.12074779166666,
+  "U_prod": 41.12074803916249,
+  "prod_grade": "genuine",
+  "prod_cliff": 13000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.125,
+  "derrien_proba_max": 0.026882,
+  "derrien_proba_med": 0.0190455,
+  "derrien_z_max": 9.87,
+  "derrien_offsets": [
+   "0",
+   "492",
+   "592",
+   "714"
+  ],
+  "derrien_n": 8
+ },
+ {
+  "variant": "aacffm-320",
+  "slug": "8934--1998 - Stratosphere",
+  "n": 17,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 62.68641564705882,
+  "U_prod": 62.68641563676773,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.021635,
+  "derrien_proba_med": 0.01796,
+  "derrien_z_max": 6.593,
+  "derrien_offsets": [
+   "115",
+   "206",
+   "229",
+   "268",
+   "330",
+   "336",
+   "347",
+   "348",
+   "363",
+   "544",
+   "561",
+   "686",
+   "775",
+   "81",
+   "906",
+   "946",
+   "993"
+  ],
+  "derrien_n": 17
+ },
+ {
+  "variant": "aacffm-320",
+  "slug": "8935--1990 - Ambient 1_ Music for Airports [EEGCD 17]",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 67.01223575000002,
+  "U_prod": 67.01223562831046,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.023281,
+  "derrien_proba_med": 0.0198365,
+  "derrien_z_max": 8.158,
+  "derrien_offsets": [
+   "0",
+   "657",
+   "997"
+  ],
+  "derrien_n": 4
+ },
+ {
+  "variant": "genuine",
+  "slug": "8916--2013 - Random Access Memories [88883716862]",
+  "n": 13,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 41.608416923076916,
+  "U_prod": 41.60841709679091,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "genuine",
+  "slug": "8917--2014 - Syro [WARPCD247]",
+  "n": 12,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 42.96659641666667,
+  "U_prod": 42.966596294387806,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "genuine",
+  "slug": "8918--1995 - Tri Repetae [WARPCD38]",
+  "n": 10,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 25.534620033333333,
+  "U_prod": 25.534620116353793,
+  "prod_grade": "genuine",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.1
+ },
+ {
+  "variant": "genuine",
+  "slug": "8919--1996 - Feed Me Weird Things",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 64.8525808888889,
+  "U_prod": 64.85258079071987,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "genuine",
+  "slug": "8920--2011 - Hurry Up, We're Dreaming",
+  "n": 22,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 63.49694521212121,
+  "U_prod": 63.49694533418863,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.045454545454545456
+ },
+ {
+  "variant": "genuine",
+  "slug": "8921--1999 - Californication",
+  "n": 15,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 47.01679908888889,
+  "U_prod": 47.01679910065411,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "genuine",
+  "slug": "8922--2008 - Death Magnetic",
+  "n": 10,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 51.63580046666667,
+  "U_prod": 51.635800407487054,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "genuine",
+  "slug": "8923--2001 - Jane Doe",
+  "n": 12,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 47.168435055555555,
+  "U_prod": 47.16843514586915,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "genuine",
+  "slug": "8924--1984 - Tabula Rasa",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 62.0156525,
+  "U_prod": 62.0156523779763,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "genuine",
+  "slug": "8925--1982 - The Goldberg Variations",
+  "n": 32,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 71.74388507291667,
+  "U_prod": 71.7438850251771,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "genuine",
+  "slug": "8926--1987 - Kind of Blue [CK 40579]",
+  "n": 5,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 63.752211333333335,
+  "U_prod": 63.75221123980474,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "genuine",
+  "slug": "8928--2016 - Man Made Object",
+  "n": 10,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 50.64702526666667,
+  "U_prod": 50.64702528080452,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "genuine",
+  "slug": "8929--1996 - The Velvet Underground & Nico [31453 1250 2]",
+  "n": 11,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 55.67585875757575,
+  "U_prod": 55.675858784335055,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "genuine",
+  "slug": "8930--1993 - Bridge Over Troubled Water [462488 2]",
+  "n": 11,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 52.60799775757576,
+  "U_prod": 52.607997642780084,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "genuine",
+  "slug": "8931--1987 - Rumours [3010-2]",
+  "n": 11,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 49.40577575757575,
+  "U_prod": 49.40577586320689,
+  "prod_grade": "genuine",
+  "prod_cliff": 16000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.09090909090909091
+ },
+ {
+  "variant": "genuine",
+  "slug": "8932--1991 - Loveless [crecd 060]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 69.52504966666666,
+  "U_prod": 69.52504974470588,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "genuine",
+  "slug": "8933--2014 - Ruins",
+  "n": 8,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 41.32659266666667,
+  "U_prod": 41.326592544832195,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "genuine",
+  "slug": "8934--1998 - Stratosphere",
+  "n": 17,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 61.97286139215686,
+  "U_prod": 61.97286151211776,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "genuine",
+  "slug": "8935--1990 - Ambient 1_ Music for Airports [EEGCD 17]",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 67.82542783333335,
+  "U_prod": 67.82542799270605,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "lame-cbr128",
+  "slug": "8916--2013 - Random Access Memories [88883716862]",
+  "n": 13,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 75.33590302564102,
+  "U_prod": 75.33590308898815,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.9230769230769231
+ },
+ {
+  "variant": "lame-cbr128",
+  "slug": "8917--2014 - Syro [WARPCD247]",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 70.84137191666666,
+  "U_prod": 70.84137211967015,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 1.0
+ },
+ {
+  "variant": "lame-cbr128",
+  "slug": "8918--1995 - Tri Repetae [WARPCD38]",
+  "n": 10,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 75.45062493333333,
+  "U_prod": 75.45062489162838,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 1.0
+ },
+ {
+  "variant": "lame-cbr128",
+  "slug": "8919--1996 - Feed Me Weird Things",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 70.21178725,
+  "U_prod": 70.21178713679186,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.6666666666666666
+ },
+ {
+  "variant": "lame-cbr128",
+  "slug": "8920--2011 - Hurry Up, We're Dreaming",
+  "n": 22,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 77.25426645454546,
+  "U_prod": 77.2542665253273,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.8636363636363636
+ },
+ {
+  "variant": "lame-cbr128",
+  "slug": "8921--1999 - Californication",
+  "n": 15,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 70.42315295555555,
+  "U_prod": 70.42315295373037,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 1.0
+ },
+ {
+  "variant": "lame-cbr128",
+  "slug": "8922--2008 - Death Magnetic",
+  "n": 10,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 64.8377639,
+  "U_prod": 64.83776400251622,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.7
+ },
+ {
+  "variant": "lame-cbr128",
+  "slug": "8923--2001 - Jane Doe",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 70.98583725,
+  "U_prod": 70.98583735244098,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 1.0
+ },
+ {
+  "variant": "lame-cbr128",
+  "slug": "8924--1984 - Tabula Rasa",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 69.57408699999999,
+  "U_prod": 69.57408718302946,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 1.0
+ },
+ {
+  "variant": "lame-cbr128",
+  "slug": "8925--1982 - The Goldberg Variations",
+  "n": 32,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 77.54195892708333,
+  "U_prod": 77.54195887974423,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.875
+ },
+ {
+  "variant": "lame-cbr128",
+  "slug": "8926--1987 - Kind of Blue [CK 40579]",
+  "n": 5,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 68.45134426666667,
+  "U_prod": 68.45134433954021,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.8
+ },
+ {
+  "variant": "lame-cbr128",
+  "slug": "8928--2016 - Man Made Object",
+  "n": 10,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 74.86568053333333,
+  "U_prod": 74.86568040230758,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.7
+ },
+ {
+  "variant": "lame-cbr128",
+  "slug": "8929--1996 - The Velvet Underground & Nico [31453 1250 2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 79.45119093939394,
+  "U_prod": 79.45119101026692,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 1.0
+ },
+ {
+  "variant": "lame-cbr128",
+  "slug": "8930--1993 - Bridge Over Troubled Water [462488 2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 80.04881596969697,
+  "U_prod": 80.04881609754023,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 1.0
+ },
+ {
+  "variant": "lame-cbr128",
+  "slug": "8931--1987 - Rumours [3010-2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 78.24899190909092,
+  "U_prod": 78.24899191972078,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 1.0
+ },
+ {
+  "variant": "lame-cbr128",
+  "slug": "8932--1991 - Loveless [crecd 060]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 85.36664721212122,
+  "U_prod": 85.36664731809338,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 1.0
+ },
+ {
+  "variant": "lame-cbr128",
+  "slug": "8933--2014 - Ruins",
+  "n": 8,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 66.12729125000001,
+  "U_prod": 66.12729140742144,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 13000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.375
+ },
+ {
+  "variant": "lame-cbr128",
+  "slug": "8934--1998 - Stratosphere",
+  "n": 17,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 80.35927411764706,
+  "U_prod": 80.35927424023018,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.9411764705882353
+ },
+ {
+  "variant": "lame-cbr128",
+  "slug": "8935--1990 - Ambient 1_ Music for Airports [EEGCD 17]",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 71.44831816666667,
+  "U_prod": 71.44831796367242,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.75
+ },
+ {
+  "variant": "lame-cbr192",
+  "slug": "8916--2013 - Random Access Memories [88883716862]",
+  "n": 13,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 75.71027546153846,
+  "U_prod": 75.71027541608683,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 18000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.9230769230769231,
+  "derrien_proba_max": 0.03726,
+  "derrien_proba_med": 0.02459,
+  "derrien_z_max": 5.69,
+  "derrien_offsets": [
+   "123",
+   "292",
+   "412",
+   "433",
+   "453",
+   "475",
+   "491",
+   "496",
+   "586",
+   "792",
+   "820",
+   "975",
+   "981"
+  ],
+  "derrien_n": 13
+ },
+ {
+  "variant": "lame-cbr192",
+  "slug": "8917--2014 - Syro [WARPCD247]",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 72.85342216666668,
+  "U_prod": 72.85342217682226,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 18000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.9166666666666666,
+  "derrien_proba_max": 0.040865,
+  "derrien_proba_med": 0.026152,
+  "derrien_z_max": 7.542,
+  "derrien_offsets": [
+   "1010",
+   "1022",
+   "134",
+   "186",
+   "3",
+   "356",
+   "408",
+   "472",
+   "844",
+   "861",
+   "895",
+   "991"
+  ],
+  "derrien_n": 12
+ },
+ {
+  "variant": "lame-cbr192",
+  "slug": "8918--1995 - Tri Repetae [WARPCD38]",
+  "n": 10,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 77.08906123333334,
+  "U_prod": 77.08906134487046,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.9,
+  "derrien_proba_max": 0.079327,
+  "derrien_proba_med": 0.034519,
+  "derrien_z_max": 5.675,
+  "derrien_offsets": [
+   "257",
+   "288",
+   "351",
+   "56",
+   "577",
+   "600",
+   "685",
+   "949",
+   "96",
+   "983"
+  ],
+  "derrien_n": 10
+ },
+ {
+  "variant": "lame-cbr192",
+  "slug": "8919--1996 - Feed Me Weird Things",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 70.5193593888889,
+  "U_prod": 70.519359208074,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 18000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.5833333333333334,
+  "derrien_proba_max": 0.115385,
+  "derrien_proba_med": 0.03726,
+  "derrien_z_max": 8.44,
+  "derrien_offsets": [
+   "134",
+   "190",
+   "20",
+   "230",
+   "305",
+   "474",
+   "479",
+   "55",
+   "699",
+   "832",
+   "888",
+   "984"
+  ],
+  "derrien_n": 12
+ },
+ {
+  "variant": "lame-cbr192",
+  "slug": "8920--2011 - Hurry Up, We're Dreaming",
+  "n": 22,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 77.13700604545454,
+  "U_prod": 77.13700605778946,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.6363636363636364,
+  "derrien_proba_max": 0.066106,
+  "derrien_proba_med": 0.047476000000000004,
+  "derrien_z_max": 5.433,
+  "derrien_offsets": [
+   "1002",
+   "1017",
+   "17",
+   "319",
+   "35",
+   "40",
+   "412",
+   "413",
+   "45",
+   "48",
+   "622",
+   "657",
+   "663",
+   "760",
+   "792",
+   "870",
+   "911",
+   "937",
+   "960",
+   "969",
+   "991",
+   "996"
+  ],
+  "derrien_n": 22
+ },
+ {
+  "variant": "lame-cbr192",
+  "slug": "8921--1999 - Californication",
+  "n": 15,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 73.2544691111111,
+  "U_prod": 73.25446918860185,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 18000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.7333333333333333,
+  "derrien_proba_max": 0.043269,
+  "derrien_proba_med": 0.026978,
+  "derrien_z_max": 6.481,
+  "derrien_offsets": [
+   "259",
+   "319",
+   "447",
+   "507",
+   "617",
+   "805",
+   "824",
+   "845",
+   "849",
+   "853",
+   "868",
+   "929",
+   "951",
+   "958",
+   "969"
+  ],
+  "derrien_n": 15
+ },
+ {
+  "variant": "lame-cbr192",
+  "slug": "8922--2008 - Death Magnetic",
+  "n": 10,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 69.64357453333334,
+  "U_prod": 69.64357451506115,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 18000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.8,
+  "derrien_proba_max": 0.039663,
+  "derrien_proba_med": 0.027008499999999998,
+  "derrien_z_max": 6.489,
+  "derrien_offsets": [
+   "161",
+   "310",
+   "356",
+   "368",
+   "46",
+   "462",
+   "535",
+   "642",
+   "873",
+   "986"
+  ],
+  "derrien_n": 10
+ },
+ {
+  "variant": "lame-cbr192",
+  "slug": "8923--2001 - Jane Doe",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 77.70704124999999,
+  "U_prod": 77.70704132204811,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 18000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 1.0,
+  "derrien_proba_max": 0.044471,
+  "derrien_proba_med": 0.0283275,
+  "derrien_z_max": 6.096,
+  "derrien_offsets": [
+   "291",
+   "509",
+   "518",
+   "63",
+   "698",
+   "727",
+   "738",
+   "805",
+   "832",
+   "941",
+   "959",
+   "998"
+  ],
+  "derrien_n": 12
+ },
+ {
+  "variant": "lame-cbr192",
+  "slug": "8924--1984 - Tabula Rasa",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 69.7397385,
+  "U_prod": 69.73973854452592,
+  "prod_grade": "genuine",
+  "prod_cliff": 18000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.25,
+  "derrien_proba_max": 0.02658,
+  "derrien_proba_med": 0.021936499999999998,
+  "derrien_z_max": 4.497,
+  "derrien_offsets": [
+   "406",
+   "629",
+   "764",
+   "979"
+  ],
+  "derrien_n": 4
+ },
+ {
+  "variant": "lame-cbr192",
+  "slug": "8925--1982 - The Goldberg Variations",
+  "n": 32,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 77.57274047916667,
+  "U_prod": 77.57274051359471,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.59375,
+  "derrien_proba_max": 0.051683,
+  "derrien_proba_med": 0.021567500000000003,
+  "derrien_z_max": 7.351,
+  "derrien_offsets": [
+   "107",
+   "118",
+   "119",
+   "123",
+   "173",
+   "216",
+   "255",
+   "267",
+   "292",
+   "310",
+   "325",
+   "327",
+   "340",
+   "359",
+   "376",
+   "4",
+   "436",
+   "449",
+   "493",
+   "555",
+   "594",
+   "748",
+   "79",
+   "800",
+   "830",
+   "854",
+   "868",
+   "930",
+   "945",
+   "953",
+   "992"
+  ],
+  "derrien_n": 32
+ },
+ {
+  "variant": "lame-cbr192",
+  "slug": "8926--1987 - Kind of Blue [CK 40579]",
+  "n": 5,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 68.74420726666666,
+  "U_prod": 68.74420712713611,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 18000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 1.0,
+  "derrien_proba_max": 0.048077,
+  "derrien_proba_med": 0.031699,
+  "derrien_z_max": 4.548,
+  "derrien_offsets": [
+   "24",
+   "355",
+   "617",
+   "814",
+   "929"
+  ],
+  "derrien_n": 5
+ },
+ {
+  "variant": "lame-cbr192",
+  "slug": "8928--2016 - Man Made Object",
+  "n": 10,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 75.2270985,
+  "U_prod": 75.2270983909827,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 18000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.8,
+  "derrien_proba_max": 0.045673,
+  "derrien_proba_med": 0.035457,
+  "derrien_z_max": 5.439,
+  "derrien_offsets": [
+   "44",
+   "528",
+   "602",
+   "625",
+   "656",
+   "717",
+   "758",
+   "794",
+   "867",
+   "992"
+  ],
+  "derrien_n": 10
+ },
+ {
+  "variant": "lame-cbr192",
+  "slug": "8929--1996 - The Velvet Underground & Nico [31453 1250 2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 80.1352856060606,
+  "U_prod": 80.13528565078383,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 16500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.9090909090909091,
+  "derrien_proba_max": 0.038669,
+  "derrien_proba_med": 0.025862,
+  "derrien_z_max": 6.137,
+  "derrien_offsets": [
+   "150",
+   "250",
+   "390",
+   "422",
+   "506",
+   "542",
+   "602",
+   "704",
+   "705",
+   "718",
+   "828"
+  ],
+  "derrien_n": 11
+ },
+ {
+  "variant": "lame-cbr192",
+  "slug": "8930--1993 - Bridge Over Troubled Water [462488 2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 79.72239739393939,
+  "U_prod": 79.72239738567916,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 18000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.9090909090909091,
+  "derrien_proba_max": 0.052885,
+  "derrien_proba_med": 0.027878,
+  "derrien_z_max": 6.194,
+  "derrien_offsets": [
+   "134",
+   "211",
+   "250",
+   "256",
+   "423",
+   "496",
+   "53",
+   "543",
+   "550",
+   "634",
+   "7"
+  ],
+  "derrien_n": 11
+ },
+ {
+  "variant": "lame-cbr192",
+  "slug": "8931--1987 - Rumours [3010-2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 78.38835781818182,
+  "U_prod": 78.38835789116852,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.9090909090909091,
+  "derrien_proba_max": 0.063702,
+  "derrien_proba_med": 0.055288,
+  "derrien_z_max": 4.323,
+  "derrien_offsets": [
+   "0",
+   "1001",
+   "126",
+   "178",
+   "217",
+   "252",
+   "391",
+   "593",
+   "746",
+   "875",
+   "882"
+  ],
+  "derrien_n": 11
+ },
+ {
+  "variant": "lame-cbr192",
+  "slug": "8932--1991 - Loveless [crecd 060]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 85.25633666666667,
+  "U_prod": 85.25633666064682,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.9090909090909091,
+  "derrien_proba_max": 0.049279,
+  "derrien_proba_med": 0.03726,
+  "derrien_z_max": 5.997,
+  "derrien_offsets": [
+   "107",
+   "112",
+   "251",
+   "364",
+   "470",
+   "582",
+   "711",
+   "715",
+   "752",
+   "98",
+   "992"
+  ],
+  "derrien_n": 11
+ },
+ {
+  "variant": "lame-cbr192",
+  "slug": "8933--2014 - Ruins",
+  "n": 8,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 66.21406391666667,
+  "U_prod": 66.21406400958196,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 18000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.875,
+  "derrien_proba_max": 0.03726,
+  "derrien_proba_med": 0.019926,
+  "derrien_z_max": 4.901,
+  "derrien_offsets": [
+   "12",
+   "145",
+   "187",
+   "2",
+   "51",
+   "682",
+   "790",
+   "932"
+  ],
+  "derrien_n": 8
+ },
+ {
+  "variant": "lame-cbr192",
+  "slug": "8934--1998 - Stratosphere",
+  "n": 17,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 80.57977437254901,
+  "U_prod": 80.57977439516561,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.8235294117647058,
+  "derrien_proba_max": 0.045673,
+  "derrien_proba_med": 0.023566,
+  "derrien_z_max": 5.383,
+  "derrien_offsets": [
+   "1000",
+   "195",
+   "223",
+   "26",
+   "294",
+   "372",
+   "430",
+   "460",
+   "548",
+   "624",
+   "749",
+   "772",
+   "834",
+   "855",
+   "862",
+   "945",
+   "971"
+  ],
+  "derrien_n": 17
+ },
+ {
+  "variant": "lame-cbr192",
+  "slug": "8935--1990 - Ambient 1_ Music for Airports [EEGCD 17]",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 72.12531733333333,
+  "U_prod": 72.12531743012823,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 18000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.75,
+  "derrien_proba_max": 0.023325,
+  "derrien_proba_med": 0.021481,
+  "derrien_z_max": 5.89,
+  "derrien_offsets": [
+   "570",
+   "635",
+   "643",
+   "998"
+  ],
+  "derrien_n": 4
+ },
+ {
+  "variant": "lame-cbr256",
+  "slug": "8916--2013 - Random Access Memories [88883716862]",
+  "n": 13,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 74.21595571794872,
+  "U_prod": 74.21595570137673,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.07692307692307693,
+  "derrien_proba_max": 0.032452,
+  "derrien_proba_med": 0.022129,
+  "derrien_z_max": 5.085,
+  "derrien_offsets": [
+   "375",
+   "42",
+   "44",
+   "455",
+   "535",
+   "536",
+   "657",
+   "727",
+   "894",
+   "913",
+   "971",
+   "989",
+   "997"
+  ],
+  "derrien_n": 13
+ },
+ {
+  "variant": "lame-cbr256",
+  "slug": "8917--2014 - Syro [WARPCD247]",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 72.04993247222222,
+  "U_prod": 72.04993245935874,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.028777,
+  "derrien_proba_med": 0.0221115,
+  "derrien_z_max": 6.254,
+  "derrien_offsets": [
+   "1003",
+   "205",
+   "572",
+   "62",
+   "746",
+   "771",
+   "8",
+   "827",
+   "895",
+   "943",
+   "969",
+   "977"
+  ],
+  "derrien_n": 12
+ },
+ {
+  "variant": "lame-cbr256",
+  "slug": "8918--1995 - Tri Repetae [WARPCD38]",
+  "n": 10,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 77.0235101,
+  "U_prod": 77.02351012583449,
+  "prod_grade": "genuine",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.1,
+  "derrien_proba_max": 0.045673,
+  "derrien_proba_med": 0.0283625,
+  "derrien_z_max": 4.939,
+  "derrien_offsets": [
+   "1017",
+   "254",
+   "304",
+   "335",
+   "496",
+   "624",
+   "75",
+   "946",
+   "962"
+  ],
+  "derrien_n": 10
+ },
+ {
+  "variant": "lame-cbr256",
+  "slug": "8919--1996 - Feed Me Weird Things",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 70.28827472222223,
+  "U_prod": 70.28827484242002,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.16666666666666666,
+  "derrien_proba_max": 0.08774,
+  "derrien_proba_med": 0.022260000000000002,
+  "derrien_z_max": 5.385,
+  "derrien_offsets": [
+   "132",
+   "138",
+   "141",
+   "195",
+   "239",
+   "25",
+   "265",
+   "309",
+   "479",
+   "664",
+   "75",
+   "935"
+  ],
+  "derrien_n": 12
+ },
+ {
+  "variant": "lame-cbr256",
+  "slug": "8920--2011 - Hurry Up, We're Dreaming",
+  "n": 22,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 77.29000134848485,
+  "U_prod": 77.29000135480929,
+  "prod_grade": "suspect",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.13636363636363635,
+  "derrien_proba_max": 0.060096,
+  "derrien_proba_med": 0.044471,
+  "derrien_z_max": 5.703,
+  "derrien_offsets": [
+   "13",
+   "174",
+   "320",
+   "328",
+   "354",
+   "362",
+   "395",
+   "420",
+   "510",
+   "516",
+   "530",
+   "569",
+   "593",
+   "664",
+   "719",
+   "796",
+   "807",
+   "812",
+   "863",
+   "867",
+   "875",
+   "909"
+  ],
+  "derrien_n": 22
+ },
+ {
+  "variant": "lame-cbr256",
+  "slug": "8921--1999 - Californication",
+  "n": 15,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 69.97684988888889,
+  "U_prod": 69.97684984531287,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.026442,
+  "derrien_proba_med": 0.020115,
+  "derrien_z_max": 5.807,
+  "derrien_offsets": [
+   "226",
+   "331",
+   "382",
+   "394",
+   "40",
+   "415",
+   "484",
+   "512",
+   "600",
+   "667",
+   "673",
+   "737",
+   "935",
+   "969",
+   "997"
+  ],
+  "derrien_n": 15
+ },
+ {
+  "variant": "lame-cbr256",
+  "slug": "8922--2008 - Death Magnetic",
+  "n": 10,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 69.92473146666666,
+  "U_prod": 69.92473151353987,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.1,
+  "derrien_proba_max": 0.026316,
+  "derrien_proba_med": 0.021583,
+  "derrien_z_max": 5.025,
+  "derrien_offsets": [
+   "1014",
+   "144",
+   "423",
+   "449",
+   "689",
+   "707",
+   "780",
+   "920",
+   "932",
+   "955"
+  ],
+  "derrien_n": 10
+ },
+ {
+  "variant": "lame-cbr256",
+  "slug": "8923--2001 - Jane Doe",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 79.06376222222222,
+  "U_prod": 79.0637622310482,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.045673,
+  "derrien_proba_med": 0.0248325,
+  "derrien_z_max": 7.308,
+  "derrien_offsets": [
+   "114",
+   "137",
+   "250",
+   "29",
+   "519",
+   "647",
+   "778",
+   "825",
+   "875",
+   "914",
+   "949",
+   "990"
+  ],
+  "derrien_n": 12
+ },
+ {
+  "variant": "lame-cbr256",
+  "slug": "8924--1984 - Tabula Rasa",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 70.00539625,
+  "U_prod": 70.00539610949325,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.25,
+  "derrien_proba_max": 0.034483,
+  "derrien_proba_med": 0.022195,
+  "derrien_z_max": 4.242,
+  "derrien_offsets": [
+   "110",
+   "444",
+   "570",
+   "733"
+  ],
+  "derrien_n": 4
+ },
+ {
+  "variant": "lame-cbr256",
+  "slug": "8925--1982 - The Goldberg Variations",
+  "n": 32,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 77.69024227083334,
+  "U_prod": 77.69024229202647,
+  "prod_grade": "suspect",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.15625,
+  "derrien_proba_max": 0.057692,
+  "derrien_proba_med": 0.028063499999999998,
+  "derrien_z_max": 5.647,
+  "derrien_offsets": [
+   "1",
+   "1007",
+   "107",
+   "140",
+   "157",
+   "191",
+   "194",
+   "198",
+   "21",
+   "210",
+   "253",
+   "287",
+   "30",
+   "359",
+   "366",
+   "39",
+   "396",
+   "410",
+   "414",
+   "479",
+   "500",
+   "508",
+   "645",
+   "776",
+   "786",
+   "800",
+   "830",
+   "856",
+   "873",
+   "88",
+   "900",
+   "940"
+  ],
+  "derrien_n": 32
+ },
+ {
+  "variant": "lame-cbr256",
+  "slug": "8926--1987 - Kind of Blue [CK 40579]",
+  "n": 5,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 68.41542580000001,
+  "U_prod": 68.41542574240631,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.045673,
+  "derrien_proba_med": 0.027878,
+  "derrien_z_max": 5.692,
+  "derrien_offsets": [
+   "140",
+   "60",
+   "754",
+   "895",
+   "922"
+  ],
+  "derrien_n": 5
+ },
+ {
+  "variant": "lame-cbr256",
+  "slug": "8928--2016 - Man Made Object",
+  "n": 10,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 75.18243193333333,
+  "U_prod": 75.18243193386984,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.1,
+  "derrien_proba_max": 0.033764,
+  "derrien_proba_med": 0.0288465,
+  "derrien_z_max": 4.923,
+  "derrien_offsets": [
+   "1005",
+   "32",
+   "381",
+   "415",
+   "441",
+   "599",
+   "709",
+   "820",
+   "888",
+   "984"
+  ],
+  "derrien_n": 10
+ },
+ {
+  "variant": "lame-cbr256",
+  "slug": "8929--1996 - The Velvet Underground & Nico [31453 1250 2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 79.8379046060606,
+  "U_prod": 79.8379045950586,
+  "prod_grade": "suspect",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.040468,
+  "derrien_proba_med": 0.023885,
+  "derrien_z_max": 5.037,
+  "derrien_offsets": [
+   "1019",
+   "16",
+   "17",
+   "193",
+   "218",
+   "26",
+   "38",
+   "622",
+   "719",
+   "812",
+   "832"
+  ],
+  "derrien_n": 11
+ },
+ {
+  "variant": "lame-cbr256",
+  "slug": "8930--1993 - Bridge Over Troubled Water [462488 2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 80.48951648484848,
+  "U_prod": 80.4895166587189,
+  "prod_grade": "genuine",
+  "prod_cliff": 18000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.18181818181818182,
+  "derrien_proba_max": 0.044471,
+  "derrien_proba_med": 0.030502,
+  "derrien_z_max": 6.513,
+  "derrien_offsets": [
+   "124",
+   "125",
+   "193",
+   "206",
+   "287",
+   "288",
+   "373",
+   "484",
+   "567",
+   "832",
+   "922"
+  ],
+  "derrien_n": 11
+ },
+ {
+  "variant": "lame-cbr256",
+  "slug": "8931--1987 - Rumours [3010-2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 78.64401218181818,
+  "U_prod": 78.64401234097069,
+  "prod_grade": "suspect",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.7272727272727273,
+  "derrien_proba_max": 0.070913,
+  "derrien_proba_med": 0.054087,
+  "derrien_z_max": 4.304,
+  "derrien_offsets": [
+   "1003",
+   "202",
+   "237",
+   "267",
+   "28",
+   "365",
+   "400",
+   "43",
+   "675",
+   "683",
+   "867"
+  ],
+  "derrien_n": 11
+ },
+ {
+  "variant": "lame-cbr256",
+  "slug": "8932--1991 - Loveless [crecd 060]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 85.15515260606061,
+  "U_prod": 85.15515273813149,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 18000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.5454545454545454,
+  "derrien_proba_max": 0.051683,
+  "derrien_proba_med": 0.026978,
+  "derrien_z_max": 5.559,
+  "derrien_offsets": [
+   "23",
+   "272",
+   "332",
+   "357",
+   "431",
+   "434",
+   "59",
+   "758",
+   "83",
+   "84",
+   "981"
+  ],
+  "derrien_n": 11
+ },
+ {
+  "variant": "lame-cbr256",
+  "slug": "8933--2014 - Ruins",
+  "n": 8,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 66.07300695833334,
+  "U_prod": 66.07300711757561,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.021004,
+  "derrien_proba_med": 0.018236000000000002,
+  "derrien_z_max": 5.202,
+  "derrien_offsets": [
+   "1014",
+   "269",
+   "35",
+   "487",
+   "56",
+   "672",
+   "697",
+   "983"
+  ],
+  "derrien_n": 8
+ },
+ {
+  "variant": "lame-cbr256",
+  "slug": "8934--1998 - Stratosphere",
+  "n": 17,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 80.44631125490196,
+  "U_prod": 80.44631135870243,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.23529411764705882,
+  "derrien_proba_max": 0.046875,
+  "derrien_proba_med": 0.023325,
+  "derrien_z_max": 5.749,
+  "derrien_offsets": [
+   "16",
+   "185",
+   "209",
+   "236",
+   "296",
+   "433",
+   "436",
+   "497",
+   "558",
+   "598",
+   "694",
+   "781",
+   "794",
+   "864",
+   "914",
+   "948",
+   "963"
+  ],
+  "derrien_n": 17
+ },
+ {
+  "variant": "lame-cbr256",
+  "slug": "8935--1990 - Ambient 1_ Music for Airports [EEGCD 17]",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 71.88692016666667,
+  "U_prod": 71.88692030622997,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.033654,
+  "derrien_proba_med": 0.023531499999999997,
+  "derrien_z_max": 5.095,
+  "derrien_offsets": [
+   "536",
+   "650",
+   "835",
+   "917"
+  ],
+  "derrien_n": 4
+ },
+ {
+  "variant": "lame-cbr320",
+  "slug": "8916--2013 - Random Access Memories [88883716862]",
+  "n": 13,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 75.30254479487179,
+  "U_prod": 75.30254480829693,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.021635,
+  "derrien_proba_med": 0.018029,
+  "derrien_z_max": 5.62,
+  "derrien_offsets": [
+   "116",
+   "156",
+   "209",
+   "257",
+   "289",
+   "384",
+   "388",
+   "396",
+   "444",
+   "51",
+   "667",
+   "905",
+   "978"
+  ],
+  "derrien_n": 13
+ },
+ {
+  "variant": "lame-cbr320",
+  "slug": "8917--2014 - Syro [WARPCD247]",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 73.64221980555556,
+  "U_prod": 73.64221985130074,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.02524,
+  "derrien_proba_med": 0.021107,
+  "derrien_z_max": 6.815,
+  "derrien_offsets": [
+   "1006",
+   "23",
+   "31",
+   "449",
+   "592",
+   "633",
+   "681",
+   "728",
+   "73",
+   "870",
+   "953",
+   "996"
+  ],
+  "derrien_n": 12
+ },
+ {
+  "variant": "lame-cbr320",
+  "slug": "8918--1995 - Tri Repetae [WARPCD38]",
+  "n": 10,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 74.22539833333333,
+  "U_prod": 74.22539848770887,
+  "prod_grade": "genuine",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.1,
+  "derrien_proba_max": 0.060096,
+  "derrien_proba_med": 0.019432,
+  "derrien_z_max": 5.548,
+  "derrien_offsets": [
+   "173",
+   "223",
+   "514",
+   "553",
+   "72",
+   "76",
+   "824",
+   "84",
+   "883",
+   "992"
+  ],
+  "derrien_n": 10
+ },
+ {
+  "variant": "lame-cbr320",
+  "slug": "8919--1996 - Feed Me Weird Things",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 70.27772472222223,
+  "U_prod": 70.27772479372767,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.092548,
+  "derrien_proba_med": 0.017986,
+  "derrien_z_max": 4.535,
+  "derrien_offsets": [
+   "1001",
+   "126",
+   "180",
+   "234",
+   "363",
+   "442",
+   "443",
+   "615",
+   "732",
+   "848",
+   "849"
+  ],
+  "derrien_n": 12
+ },
+ {
+  "variant": "lame-cbr320",
+  "slug": "8920--2011 - Hurry Up, We're Dreaming",
+  "n": 22,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 77.10670837878787,
+  "U_prod": 77.10670840999019,
+  "prod_grade": "genuine",
+  "prod_cliff": 18000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.045454545454545456,
+  "derrien_proba_max": 0.05649,
+  "derrien_proba_med": 0.045072,
+  "derrien_z_max": 5.049,
+  "derrien_offsets": [
+   "1000",
+   "1006",
+   "128",
+   "28",
+   "40",
+   "490",
+   "54",
+   "555",
+   "56",
+   "563",
+   "647",
+   "653",
+   "682",
+   "718",
+   "724",
+   "734",
+   "900",
+   "942",
+   "945",
+   "952",
+   "961",
+   "991"
+  ],
+  "derrien_n": 22
+ },
+ {
+  "variant": "lame-cbr320",
+  "slug": "8921--1999 - Californication",
+  "n": 15,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 72.49680008888889,
+  "U_prod": 72.49680011883306,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.021004,
+  "derrien_proba_med": 0.018885,
+  "derrien_z_max": 6.077,
+  "derrien_offsets": [
+   "1001",
+   "1022",
+   "160",
+   "175",
+   "180",
+   "296",
+   "325",
+   "482",
+   "49",
+   "618",
+   "655",
+   "739",
+   "915",
+   "975",
+   "997"
+  ],
+  "derrien_n": 15
+ },
+ {
+  "variant": "lame-cbr320",
+  "slug": "8922--2008 - Death Magnetic",
+  "n": 10,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 72.19055153333333,
+  "U_prod": 72.1905514668533,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.02524,
+  "derrien_proba_med": 0.019567,
+  "derrien_z_max": 5.917,
+  "derrien_offsets": [
+   "1015",
+   "175",
+   "183",
+   "235",
+   "43",
+   "537",
+   "549",
+   "587",
+   "686",
+   "939"
+  ],
+  "derrien_n": 10
+ },
+ {
+  "variant": "lame-cbr320",
+  "slug": "8923--2001 - Jane Doe",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 82.08796719444445,
+  "U_prod": 82.0879673872302,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.022482,
+  "derrien_proba_med": 0.019397,
+  "derrien_z_max": 6.426,
+  "derrien_offsets": [
+   "1018",
+   "145",
+   "195",
+   "222",
+   "240",
+   "355",
+   "396",
+   "414",
+   "462",
+   "535",
+   "688",
+   "924"
+  ],
+  "derrien_n": 12
+ },
+ {
+  "variant": "lame-cbr320",
+  "slug": "8924--1984 - Tabula Rasa",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 70.005162,
+  "U_prod": 70.00516219773444,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.031609,
+  "derrien_proba_med": 0.026316,
+  "derrien_z_max": 4.303,
+  "derrien_offsets": [
+   "1010",
+   "280",
+   "482",
+   "642"
+  ],
+  "derrien_n": 4
+ },
+ {
+  "variant": "lame-cbr320",
+  "slug": "8925--1982 - The Goldberg Variations",
+  "n": 32,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 77.71066601041667,
+  "U_prod": 77.71066595199522,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.044065,
+  "derrien_proba_med": 0.0222845,
+  "derrien_z_max": 5.334,
+  "derrien_offsets": [
+   "102",
+   "108",
+   "122",
+   "143",
+   "186",
+   "216",
+   "240",
+   "273",
+   "276",
+   "302",
+   "362",
+   "442",
+   "512",
+   "543",
+   "568",
+   "57",
+   "60",
+   "609",
+   "652",
+   "68",
+   "705",
+   "75",
+   "787",
+   "816",
+   "819",
+   "838",
+   "846",
+   "848",
+   "952",
+   "953",
+   "985"
+  ],
+  "derrien_n": 32
+ },
+ {
+  "variant": "lame-cbr320",
+  "slug": "8926--1987 - Kind of Blue [CK 40579]",
+  "n": 5,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 68.35946293333333,
+  "U_prod": 68.35946266719642,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.042067,
+  "derrien_proba_med": 0.023381,
+  "derrien_z_max": 4.677,
+  "derrien_offsets": [
+   "262",
+   "362",
+   "453",
+   "54",
+   "929"
+  ],
+  "derrien_n": 5
+ },
+ {
+  "variant": "lame-cbr320",
+  "slug": "8928--2016 - Man Made Object",
+  "n": 10,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 74.89655706666667,
+  "U_prod": 74.89655711310675,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.020833,
+  "derrien_proba_med": 0.019185,
+  "derrien_z_max": 5.475,
+  "derrien_offsets": [
+   "1017",
+   "317",
+   "332",
+   "381",
+   "732",
+   "740",
+   "854",
+   "866",
+   "894",
+   "903"
+  ],
+  "derrien_n": 10
+ },
+ {
+  "variant": "lame-cbr320",
+  "slug": "8929--1996 - The Velvet Underground & Nico [31453 1250 2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 79.41326878787879,
+  "U_prod": 79.41326882982833,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.040468,
+  "derrien_proba_med": 0.020335,
+  "derrien_z_max": 6.089,
+  "derrien_offsets": [
+   "16",
+   "199",
+   "448",
+   "450",
+   "511",
+   "663",
+   "746",
+   "75",
+   "801",
+   "874",
+   "988"
+  ],
+  "derrien_n": 11
+ },
+ {
+  "variant": "lame-cbr320",
+  "slug": "8930--1993 - Bridge Over Troubled Water [462488 2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 80.48710357575759,
+  "U_prod": 80.48710373581767,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.044471,
+  "derrien_proba_med": 0.023566,
+  "derrien_z_max": 5.733,
+  "derrien_offsets": [
+   "127",
+   "319",
+   "367",
+   "44",
+   "492",
+   "518",
+   "554",
+   "581",
+   "612",
+   "636",
+   "859"
+  ],
+  "derrien_n": 11
+ },
+ {
+  "variant": "lame-cbr320",
+  "slug": "8931--1987 - Rumours [3010-2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 77.47056754545454,
+  "U_prod": 77.47056764988231,
+  "prod_grade": "genuine",
+  "prod_cliff": 16000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.36363636363636365,
+  "derrien_proba_max": 0.061298,
+  "derrien_proba_med": 0.050481,
+  "derrien_z_max": 4.285,
+  "derrien_offsets": [
+   "126",
+   "2",
+   "399",
+   "407",
+   "799",
+   "803",
+   "9",
+   "913",
+   "934",
+   "942",
+   "978"
+  ],
+  "derrien_n": 11
+ },
+ {
+  "variant": "lame-cbr320",
+  "slug": "8932--1991 - Loveless [crecd 060]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 85.2338153030303,
+  "U_prod": 85.2338154200604,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.09090909090909091,
+  "derrien_proba_max": 0.036871,
+  "derrien_proba_med": 0.024281,
+  "derrien_z_max": 6.25,
+  "derrien_offsets": [
+   "1015",
+   "159",
+   "263",
+   "405",
+   "608",
+   "626",
+   "66",
+   "69",
+   "784",
+   "98",
+   "988"
+  ],
+  "derrien_n": 11
+ },
+ {
+  "variant": "lame-cbr320",
+  "slug": "8933--2014 - Ruins",
+  "n": 8,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 66.07138545833334,
+  "U_prod": 66.0713854785171,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.019784,
+  "derrien_proba_med": 0.0172925,
+  "derrien_z_max": 5.712,
+  "derrien_offsets": [
+   "1022",
+   "108",
+   "128",
+   "375",
+   "639",
+   "644",
+   "708",
+   "726"
+  ],
+  "derrien_n": 8
+ },
+ {
+  "variant": "lame-cbr320",
+  "slug": "8934--1998 - Stratosphere",
+  "n": 17,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 80.53670711764707,
+  "U_prod": 80.53670717328603,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.035201,
+  "derrien_proba_med": 0.018885,
+  "derrien_z_max": 5.396,
+  "derrien_offsets": [
+   "1004",
+   "1011",
+   "1015",
+   "24",
+   "294",
+   "531",
+   "550",
+   "563",
+   "610",
+   "673",
+   "711",
+   "721",
+   "765",
+   "82",
+   "836",
+   "895",
+   "977"
+  ],
+  "derrien_n": 17
+ },
+ {
+  "variant": "lame-cbr320",
+  "slug": "8935--1990 - Ambient 1_ Music for Airports [EEGCD 17]",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 71.80217950000001,
+  "U_prod": 71.80217947709272,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.034689,
+  "derrien_proba_med": 0.0176435,
+  "derrien_z_max": 5.003,
+  "derrien_offsets": [
+   "145",
+   "304",
+   "570",
+   "928"
+  ],
+  "derrien_n": 4
+ },
+ {
+  "variant": "lame-v0",
+  "slug": "8916--2013 - Random Access Memories [88883716862]",
+  "n": 13,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 44.323478820512825,
+  "U_prod": 44.32347884233979,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "lame-v0",
+  "slug": "8917--2014 - Syro [WARPCD247]",
+  "n": 12,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 44.189465750000004,
+  "U_prod": 44.18946564443178,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "lame-v0",
+  "slug": "8918--1995 - Tri Repetae [WARPCD38]",
+  "n": 10,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 25.535016300000002,
+  "U_prod": 25.535016268671317,
+  "prod_grade": "genuine",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.1
+ },
+ {
+  "variant": "lame-v0",
+  "slug": "8919--1996 - Feed Me Weird Things",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 68.27645505555556,
+  "U_prod": 68.27645504172871,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "lame-v0",
+  "slug": "8920--2011 - Hurry Up, We're Dreaming",
+  "n": 22,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 71.08459431818181,
+  "U_prod": 71.08459427480288,
+  "prod_grade": "genuine",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.2727272727272727
+ },
+ {
+  "variant": "lame-v0",
+  "slug": "8921--1999 - Californication",
+  "n": 15,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 47.89725004444445,
+  "U_prod": 47.89725007457094,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "lame-v0",
+  "slug": "8922--2008 - Death Magnetic",
+  "n": 10,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 53.825741300000004,
+  "U_prod": 53.82574143259768,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "lame-v0",
+  "slug": "8923--2001 - Jane Doe",
+  "n": 12,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 53.87447727777778,
+  "U_prod": 53.87447740239016,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "lame-v0",
+  "slug": "8924--1984 - Tabula Rasa",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 69.50549808333334,
+  "U_prod": 69.50549800930936,
+  "prod_grade": "genuine",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.5
+ },
+ {
+  "variant": "lame-v0",
+  "slug": "8925--1982 - The Goldberg Variations",
+  "n": 32,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 77.70847808333333,
+  "U_prod": 77.7084780779969,
+  "prod_grade": "genuine",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.3125
+ },
+ {
+  "variant": "lame-v0",
+  "slug": "8926--1987 - Kind of Blue [CK 40579]",
+  "n": 5,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 68.416225,
+  "U_prod": 68.41622491228517,
+  "prod_grade": "genuine",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.2
+ },
+ {
+  "variant": "lame-v0",
+  "slug": "8928--2016 - Man Made Object",
+  "n": 10,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 55.48604300000001,
+  "U_prod": 55.48604298974355,
+  "prod_grade": "genuine",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.1
+ },
+ {
+  "variant": "lame-v0",
+  "slug": "8929--1996 - The Velvet Underground & Nico [31453 1250 2]",
+  "n": 11,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 59.372113454545456,
+  "U_prod": 59.37211344647139,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "lame-v0",
+  "slug": "8930--1993 - Bridge Over Troubled Water [462488 2]",
+  "n": 11,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 57.79628912121212,
+  "U_prod": 57.796289082688574,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "lame-v0",
+  "slug": "8931--1987 - Rumours [3010-2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "cliff"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff"
+  ],
+  "U_win0": 56.897730606060605,
+  "U_prod": 56.89773064123167,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.8181818181818182
+ },
+ {
+  "variant": "lame-v0",
+  "slug": "8932--1991 - Loveless [crecd 060]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 82.40266412121213,
+  "U_prod": 82.40266419275692,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.09090909090909091
+ },
+ {
+  "variant": "lame-v0",
+  "slug": "8933--2014 - Ruins",
+  "n": 8,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 47.496702125,
+  "U_prod": 47.49670233784837,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "lame-v0",
+  "slug": "8934--1998 - Stratosphere",
+  "n": 17,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 70.06826503921569,
+  "U_prod": 70.06826522105298,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "lame-v0",
+  "slug": "8935--1990 - Ambient 1_ Music for Airports [EEGCD 17]",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 71.30194458333334,
+  "U_prod": 71.30194447932408,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "lame-v2",
+  "slug": "8916--2013 - Random Access Memories [88883716862]",
+  "n": 13,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 73.435418,
+  "U_prod": 73.43541793931354,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.9230769230769231
+ },
+ {
+  "variant": "lame-v2",
+  "slug": "8917--2014 - Syro [WARPCD247]",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 71.22608213888888,
+  "U_prod": 71.22608213938555,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 18000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.9166666666666666
+ },
+ {
+  "variant": "lame-v2",
+  "slug": "8918--1995 - Tri Repetae [WARPCD38]",
+  "n": 10,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 77.42374943333333,
+  "U_prod": 77.42374948380952,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 1.0
+ },
+ {
+  "variant": "lame-v2",
+  "slug": "8919--1996 - Feed Me Weird Things",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 70.4291805,
+  "U_prod": 70.42918052082216,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.5833333333333334
+ },
+ {
+  "variant": "lame-v2",
+  "slug": "8920--2011 - Hurry Up, We're Dreaming",
+  "n": 22,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 77.33984162121213,
+  "U_prod": 77.33984162289129,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.7727272727272727
+ },
+ {
+  "variant": "lame-v2",
+  "slug": "8921--1999 - Californication",
+  "n": 15,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 66.84972157777777,
+  "U_prod": 66.849721667843,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 18000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.7333333333333333
+ },
+ {
+  "variant": "lame-v2",
+  "slug": "8922--2008 - Death Magnetic",
+  "n": 10,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 67.34078373333332,
+  "U_prod": 67.34078395653827,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 18000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.8
+ },
+ {
+  "variant": "lame-v2",
+  "slug": "8923--2001 - Jane Doe",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 72.38112088888889,
+  "U_prod": 72.38112101500383,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 18000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 1.0
+ },
+ {
+  "variant": "lame-v2",
+  "slug": "8924--1984 - Tabula Rasa",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 70.0097995,
+  "U_prod": 70.00979936519177,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.75
+ },
+ {
+  "variant": "lame-v2",
+  "slug": "8925--1982 - The Goldberg Variations",
+  "n": 32,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 77.68825166666667,
+  "U_prod": 77.68825176444257,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.8125
+ },
+ {
+  "variant": "lame-v2",
+  "slug": "8926--1987 - Kind of Blue [CK 40579]",
+  "n": 5,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 68.41306159999999,
+  "U_prod": 68.41306153530023,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.6
+ },
+ {
+  "variant": "lame-v2",
+  "slug": "8928--2016 - Man Made Object",
+  "n": 10,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 75.10360863333334,
+  "U_prod": 75.10360863508143,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.7
+ },
+ {
+  "variant": "lame-v2",
+  "slug": "8929--1996 - The Velvet Underground & Nico [31453 1250 2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 79.82594009090909,
+  "U_prod": 79.8259401491685,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.5454545454545454
+ },
+ {
+  "variant": "lame-v2",
+  "slug": "8930--1993 - Bridge Over Troubled Water [462488 2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 80.38872287878787,
+  "U_prod": 80.38872285498346,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.9090909090909091
+ },
+ {
+  "variant": "lame-v2",
+  "slug": "8931--1987 - Rumours [3010-2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 78.64330818181817,
+  "U_prod": 78.64330815809912,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 1.0
+ },
+ {
+  "variant": "lame-v2",
+  "slug": "8932--1991 - Loveless [crecd 060]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 84.79619066666667,
+  "U_prod": 84.79619063431312,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 18000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.9090909090909091
+ },
+ {
+  "variant": "lame-v2",
+  "slug": "8933--2014 - Ruins",
+  "n": 8,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 66.06711733333333,
+  "U_prod": 66.06711733803303,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.625
+ },
+ {
+  "variant": "lame-v2",
+  "slug": "8934--1998 - Stratosphere",
+  "n": 17,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 80.55537758823529,
+  "U_prod": 80.55537756555076,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.8235294117647058
+ },
+ {
+  "variant": "lame-v2",
+  "slug": "8935--1990 - Ambient 1_ Music for Airports [EEGCD 17]",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 71.89073116666667,
+  "U_prod": 71.8907313089504,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.5
+ },
+ {
+  "variant": "null-flac",
+  "slug": "8916--2013 - Random Access Memories [88883716862]",
+  "n": 13,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 41.608416923076916,
+  "U_prod": 41.60841709679091,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "null-flac",
+  "slug": "8917--2014 - Syro [WARPCD247]",
+  "n": 12,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 42.96659641666667,
+  "U_prod": 42.966596294387806,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "null-flac",
+  "slug": "8918--1995 - Tri Repetae [WARPCD38]",
+  "n": 10,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 25.534620033333333,
+  "U_prod": 25.534620116353793,
+  "prod_grade": "genuine",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.1
+ },
+ {
+  "variant": "null-flac",
+  "slug": "8919--1996 - Feed Me Weird Things",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 64.8525808888889,
+  "U_prod": 64.85258079071987,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "null-flac",
+  "slug": "8920--2011 - Hurry Up, We're Dreaming",
+  "n": 22,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 63.39022324242424,
+  "U_prod": 63.39022335900338,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.045454545454545456
+ },
+ {
+  "variant": "null-flac",
+  "slug": "8921--1999 - Californication",
+  "n": 15,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 47.01679908888889,
+  "U_prod": 47.01679910065411,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "null-flac",
+  "slug": "8922--2008 - Death Magnetic",
+  "n": 10,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 51.63580046666667,
+  "U_prod": 51.635800407487054,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "null-flac",
+  "slug": "8923--2001 - Jane Doe",
+  "n": 12,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 47.168435055555555,
+  "U_prod": 47.16843514586915,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "null-flac",
+  "slug": "8924--1984 - Tabula Rasa",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 62.0156525,
+  "U_prod": 62.0156523779763,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "null-flac",
+  "slug": "8925--1982 - The Goldberg Variations",
+  "n": 32,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 71.74388507291667,
+  "U_prod": 71.7438850251771,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "null-flac",
+  "slug": "8926--1987 - Kind of Blue [CK 40579]",
+  "n": 5,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 63.752211333333335,
+  "U_prod": 63.75221123980474,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "null-flac",
+  "slug": "8928--2016 - Man Made Object",
+  "n": 10,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 50.64702526666667,
+  "U_prod": 50.64702528080452,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "null-flac",
+  "slug": "8929--1996 - The Velvet Underground & Nico [31453 1250 2]",
+  "n": 11,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 55.67585875757575,
+  "U_prod": 55.675858784335055,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "null-flac",
+  "slug": "8930--1993 - Bridge Over Troubled Water [462488 2]",
+  "n": 11,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 52.60799775757576,
+  "U_prod": 52.607997642780084,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "null-flac",
+  "slug": "8931--1987 - Rumours [3010-2]",
+  "n": 11,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 49.40577575757575,
+  "U_prod": 49.40577586320689,
+  "prod_grade": "genuine",
+  "prod_cliff": 16000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.09090909090909091
+ },
+ {
+  "variant": "null-flac",
+  "slug": "8932--1991 - Loveless [crecd 060]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 69.52504966666666,
+  "U_prod": 69.52504974470588,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "null-flac",
+  "slug": "8933--2014 - Ruins",
+  "n": 8,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 41.32659266666667,
+  "U_prod": 41.326592544832195,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "null-flac",
+  "slug": "8934--1998 - Stratosphere",
+  "n": 17,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 61.97286139215686,
+  "U_prod": 61.97286151211776,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "null-flac",
+  "slug": "8935--1990 - Ambient 1_ Music for Airports [EEGCD 17]",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 67.82542783333335,
+  "U_prod": 67.82542799270605,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-192",
+  "slug": "8916--2013 - Random Access Memories [88883716862]",
+  "n": 13,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 72.2764861025641,
+  "U_prod": 72.2764861917673,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-192",
+  "slug": "8917--2014 - Syro [WARPCD247]",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 69.32659708333334,
+  "U_prod": 69.32659696842006,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-192",
+  "slug": "8918--1995 - Tri Repetae [WARPCD38]",
+  "n": 10,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 70.8999129,
+  "U_prod": 70.8999129954949,
+  "prod_grade": "genuine",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.1
+ },
+ {
+  "variant": "opus-192",
+  "slug": "8919--1996 - Feed Me Weird Things",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 71.30295452777777,
+  "U_prod": 71.30295448065262,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-192",
+  "slug": "8920--2011 - Hurry Up, We're Dreaming",
+  "n": 22,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 77.34845033333333,
+  "U_prod": 77.34845042223016,
+  "prod_grade": "genuine",
+  "prod_cliff": 18000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.045454545454545456
+ },
+ {
+  "variant": "opus-192",
+  "slug": "8921--1999 - Californication",
+  "n": 15,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 67.13007139999999,
+  "U_prod": 67.1300714943879,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-192",
+  "slug": "8922--2008 - Death Magnetic",
+  "n": 10,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 68.40711246666667,
+  "U_prod": 68.40711233094058,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-192",
+  "slug": "8923--2001 - Jane Doe",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 71.36196211111111,
+  "U_prod": 71.36196214304178,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-192",
+  "slug": "8924--1984 - Tabula Rasa",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 69.995392,
+  "U_prod": 69.99539202258397,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-192",
+  "slug": "8925--1982 - The Goldberg Variations",
+  "n": 32,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 78.08715865625,
+  "U_prod": 78.08715862639684,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-192",
+  "slug": "8926--1987 - Kind of Blue [CK 40579]",
+  "n": 5,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 70.489897,
+  "U_prod": 70.48989692182674,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-192",
+  "slug": "8928--2016 - Man Made Object",
+  "n": 10,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 74.06396496666667,
+  "U_prod": 74.06396472850595,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-192",
+  "slug": "8929--1996 - The Velvet Underground & Nico [31453 1250 2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 81.12633,
+  "U_prod": 81.12633015673958,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-192",
+  "slug": "8930--1993 - Bridge Over Troubled Water [462488 2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 80.19190406060606,
+  "U_prod": 80.19190422699816,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-192",
+  "slug": "8931--1987 - Rumours [3010-2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 78.64549854545454,
+  "U_prod": 78.64549863394879,
+  "prod_grade": "genuine",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.2727272727272727
+ },
+ {
+  "variant": "opus-192",
+  "slug": "8932--1991 - Loveless [crecd 060]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 85.21159963636363,
+  "U_prod": 85.21159971200528,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-192",
+  "slug": "8933--2014 - Ruins",
+  "n": 8,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 66.70060075,
+  "U_prod": 66.70060075848599,
+  "prod_grade": "genuine",
+  "prod_cliff": 13000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.125
+ },
+ {
+  "variant": "opus-192",
+  "slug": "8934--1998 - Stratosphere",
+  "n": 17,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 81.14884625490197,
+  "U_prod": 81.14884623355368,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-192",
+  "slug": "8935--1990 - Ambient 1_ Music for Airports [EEGCD 17]",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 72.66124575,
+  "U_prod": 72.66124594193262,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-256",
+  "slug": "8916--2013 - Random Access Memories [88883716862]",
+  "n": 13,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 73.28280466666666,
+  "U_prod": 73.28280462899257,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-256",
+  "slug": "8917--2014 - Syro [WARPCD247]",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 70.45447688888889,
+  "U_prod": 70.45447699590314,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-256",
+  "slug": "8918--1995 - Tri Repetae [WARPCD38]",
+  "n": 10,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 70.89008963333333,
+  "U_prod": 70.89008977623871,
+  "prod_grade": "genuine",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.1
+ },
+ {
+  "variant": "opus-256",
+  "slug": "8919--1996 - Feed Me Weird Things",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 71.79946261111111,
+  "U_prod": 71.79946259858946,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-256",
+  "slug": "8920--2011 - Hurry Up, We're Dreaming",
+  "n": 22,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 77.07342669696969,
+  "U_prod": 77.07342665882666,
+  "prod_grade": "genuine",
+  "prod_cliff": 18000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.045454545454545456
+ },
+ {
+  "variant": "opus-256",
+  "slug": "8921--1999 - Californication",
+  "n": 15,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 68.72842644444445,
+  "U_prod": 68.72842652424592,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-256",
+  "slug": "8922--2008 - Death Magnetic",
+  "n": 10,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 70.85600456666666,
+  "U_prod": 70.8560046120116,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-256",
+  "slug": "8923--2001 - Jane Doe",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 76.63421136111111,
+  "U_prod": 76.63421147145853,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-256",
+  "slug": "8924--1984 - Tabula Rasa",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 69.9962975,
+  "U_prod": 69.99629752161883,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-256",
+  "slug": "8925--1982 - The Goldberg Variations",
+  "n": 32,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 78.1959433125,
+  "U_prod": 78.19594328908244,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-256",
+  "slug": "8926--1987 - Kind of Blue [CK 40579]",
+  "n": 5,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 70.49037960000001,
+  "U_prod": 70.49037950777152,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-256",
+  "slug": "8928--2016 - Man Made Object",
+  "n": 10,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 74.49191440000001,
+  "U_prod": 74.4919143196015,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-256",
+  "slug": "8929--1996 - The Velvet Underground & Nico [31453 1250 2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 81.1923557878788,
+  "U_prod": 81.19235586527422,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-256",
+  "slug": "8930--1993 - Bridge Over Troubled Water [462488 2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 80.67848109090909,
+  "U_prod": 80.67848117212772,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-256",
+  "slug": "8931--1987 - Rumours [3010-2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 78.64599463636364,
+  "U_prod": 78.64599458495869,
+  "prod_grade": "genuine",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.18181818181818182
+ },
+ {
+  "variant": "opus-256",
+  "slug": "8932--1991 - Loveless [crecd 060]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 85.70447809090909,
+  "U_prod": 85.70447820309634,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-256",
+  "slug": "8933--2014 - Ruins",
+  "n": 8,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 66.7002045,
+  "U_prod": 66.70020458996223,
+  "prod_grade": "genuine",
+  "prod_cliff": 13000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.125
+ },
+ {
+  "variant": "opus-256",
+  "slug": "8934--1998 - Stratosphere",
+  "n": 17,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 80.9451508627451,
+  "U_prod": 80.94515089654017,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-256",
+  "slug": "8935--1990 - Ambient 1_ Music for Airports [EEGCD 17]",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 72.66090975,
+  "U_prod": 72.66091003091248,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-96",
+  "slug": "8916--2013 - Random Access Memories [88883716862]",
+  "n": 13,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 69.57387158974359,
+  "U_prod": 69.57387145940812,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-96",
+  "slug": "8917--2014 - Syro [WARPCD247]",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 67.36542722222222,
+  "U_prod": 67.36542723333602,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-96",
+  "slug": "8918--1995 - Tri Repetae [WARPCD38]",
+  "n": 10,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 69.22806926666667,
+  "U_prod": 69.2280693708913,
+  "prod_grade": "genuine",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.2
+ },
+ {
+  "variant": "opus-96",
+  "slug": "8919--1996 - Feed Me Weird Things",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 71.77264772222223,
+  "U_prod": 71.77264776443258,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-96",
+  "slug": "8920--2011 - Hurry Up, We're Dreaming",
+  "n": 22,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 77.72175539393939,
+  "U_prod": 77.72175538972436,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-96",
+  "slug": "8921--1999 - Californication",
+  "n": 15,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 63.63095102222222,
+  "U_prod": 63.63095100735724,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-96",
+  "slug": "8922--2008 - Death Magnetic",
+  "n": 10,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 63.01084033333334,
+  "U_prod": 63.01084036584698,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-96",
+  "slug": "8923--2001 - Jane Doe",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 63.792351611111116,
+  "U_prod": 63.79235150854902,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-96",
+  "slug": "8924--1984 - Tabula Rasa",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 69.992575,
+  "U_prod": 69.99257473044597,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-96",
+  "slug": "8925--1982 - The Goldberg Variations",
+  "n": 32,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 78.21095854166667,
+  "U_prod": 78.21095857143555,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-96",
+  "slug": "8926--1987 - Kind of Blue [CK 40579]",
+  "n": 5,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 70.48872659999999,
+  "U_prod": 70.48872632245818,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-96",
+  "slug": "8928--2016 - Man Made Object",
+  "n": 10,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 74.5501613,
+  "U_prod": 74.55016106371221,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-96",
+  "slug": "8929--1996 - The Velvet Underground & Nico [31453 1250 2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 80.51914433333333,
+  "U_prod": 80.519144405238,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-96",
+  "slug": "8930--1993 - Bridge Over Troubled Water [462488 2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 80.16147912121211,
+  "U_prod": 80.1614791807643,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-96",
+  "slug": "8931--1987 - Rumours [3010-2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 78.54601103030303,
+  "U_prod": 78.5460111559643,
+  "prod_grade": "genuine",
+  "prod_cliff": 15000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.18181818181818182
+ },
+ {
+  "variant": "opus-96",
+  "slug": "8932--1991 - Loveless [crecd 060]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 84.14633145454546,
+  "U_prod": 84.14633127104081,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-96",
+  "slug": "8933--2014 - Ruins",
+  "n": 8,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 66.88253475,
+  "U_prod": 66.88253474381631,
+  "prod_grade": "genuine",
+  "prod_cliff": 13000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.125
+ },
+ {
+  "variant": "opus-96",
+  "slug": "8934--1998 - Stratosphere",
+  "n": 17,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 79.98335349019608,
+  "U_prod": 79.98335349982992,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "opus-96",
+  "slug": "8935--1990 - Ambient 1_ Music for Airports [EEGCD 17]",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 72.6645445,
+  "U_prod": 72.66454468897686,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "vorbis-q10",
+  "slug": "8916--2013 - Random Access Memories [88883716862]",
+  "n": 13,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 42.983715256410264,
+  "U_prod": 42.98371528420493,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "vorbis-q10",
+  "slug": "8917--2014 - Syro [WARPCD247]",
+  "n": 12,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 44.14966755555556,
+  "U_prod": 44.14966760265122,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "vorbis-q10",
+  "slug": "8918--1995 - Tri Repetae [WARPCD38]",
+  "n": 10,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 25.789725233333332,
+  "U_prod": 25.789725244166345,
+  "prod_grade": "genuine",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.1
+ },
+ {
+  "variant": "vorbis-q10",
+  "slug": "8919--1996 - Feed Me Weird Things",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 67.6736426111111,
+  "U_prod": 67.67364260808446,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "vorbis-q10",
+  "slug": "8920--2011 - Hurry Up, We're Dreaming",
+  "n": 22,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 67.38315043939393,
+  "U_prod": 67.3831506209749,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.045454545454545456
+ },
+ {
+  "variant": "vorbis-q10",
+  "slug": "8921--1999 - Californication",
+  "n": 15,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 47.12029842222223,
+  "U_prod": 47.120298397982054,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "vorbis-q10",
+  "slug": "8922--2008 - Death Magnetic",
+  "n": 10,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 52.69660739999999,
+  "U_prod": 52.69660755614717,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "vorbis-q10",
+  "slug": "8923--2001 - Jane Doe",
+  "n": 12,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 47.16875363888889,
+  "U_prod": 47.168753591354296,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "vorbis-q10",
+  "slug": "8924--1984 - Tabula Rasa",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 69.55566558333334,
+  "U_prod": 69.55566551263831,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "vorbis-q10",
+  "slug": "8925--1982 - The Goldberg Variations",
+  "n": 32,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 77.45949494791667,
+  "U_prod": 77.45949499499176,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "vorbis-q10",
+  "slug": "8926--1987 - Kind of Blue [CK 40579]",
+  "n": 5,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 68.36540166666666,
+  "U_prod": 68.36540153321779,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "vorbis-q10",
+  "slug": "8928--2016 - Man Made Object",
+  "n": 10,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 53.62940806666667,
+  "U_prod": 53.62940818571216,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "vorbis-q10",
+  "slug": "8929--1996 - The Velvet Underground & Nico [31453 1250 2]",
+  "n": 11,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 57.49330533333334,
+  "U_prod": 57.49330532646077,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "vorbis-q10",
+  "slug": "8930--1993 - Bridge Over Troubled Water [462488 2]",
+  "n": 11,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 53.74153921212121,
+  "U_prod": 53.741539164730845,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "vorbis-q10",
+  "slug": "8931--1987 - Rumours [3010-2]",
+  "n": 11,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 49.26472860606061,
+  "U_prod": 49.26472864476498,
+  "prod_grade": "genuine",
+  "prod_cliff": 16000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.09090909090909091
+ },
+ {
+  "variant": "vorbis-q10",
+  "slug": "8932--1991 - Loveless [crecd 060]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 75.27532606060605,
+  "U_prod": 75.27532619224509,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "vorbis-q10",
+  "slug": "8933--2014 - Ruins",
+  "n": 8,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 44.725588666666674,
+  "U_prod": 44.72558908629977,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "vorbis-q10",
+  "slug": "8934--1998 - Stratosphere",
+  "n": 17,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 67.97994982352941,
+  "U_prod": 67.97994987645956,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "vorbis-q10",
+  "slug": "8935--1990 - Ambient 1_ Music for Airports [EEGCD 17]",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 71.445567,
+  "U_prod": 71.4455670653577,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "vorbis-q4",
+  "slug": "8916--2013 - Random Access Memories [88883716862]",
+  "n": 13,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 71.65513494871794,
+  "U_prod": 71.65513487528126,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 16500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.8461538461538461
+ },
+ {
+  "variant": "vorbis-q4",
+  "slug": "8917--2014 - Syro [WARPCD247]",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 68.16905677777778,
+  "U_prod": 68.16905673835902,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 16500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.75
+ },
+ {
+  "variant": "vorbis-q4",
+  "slug": "8918--1995 - Tri Repetae [WARPCD38]",
+  "n": 10,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 75.84493426666667,
+  "U_prod": 75.84493422305312,
+  "prod_grade": "genuine",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.5
+ },
+ {
+  "variant": "vorbis-q4",
+  "slug": "8919--1996 - Feed Me Weird Things",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 71.35594613888888,
+  "U_prod": 71.35594594796807,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 16000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.5
+ },
+ {
+  "variant": "vorbis-q4",
+  "slug": "8920--2011 - Hurry Up, We're Dreaming",
+  "n": 22,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 78.50941493939393,
+  "U_prod": 78.50941493533047,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 17500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.4090909090909091
+ },
+ {
+  "variant": "vorbis-q4",
+  "slug": "8921--1999 - Californication",
+  "n": 15,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 64.08605317777777,
+  "U_prod": 64.08605313820921,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.8666666666666667
+ },
+ {
+  "variant": "vorbis-q4",
+  "slug": "8922--2008 - Death Magnetic",
+  "n": 10,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 63.570703333333334,
+  "U_prod": 63.5707034086116,
+  "prod_grade": "suspect",
+  "prod_cliff": 18000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.5
+ },
+ {
+  "variant": "vorbis-q4",
+  "slug": "8923--2001 - Jane Doe",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 65.80970611111111,
+  "U_prod": 65.80970626932317,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 1.0
+ },
+ {
+  "variant": "vorbis-q4",
+  "slug": "8924--1984 - Tabula Rasa",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 69.9527805,
+  "U_prod": 69.9527807371877,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 17500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.75
+ },
+ {
+  "variant": "vorbis-q4",
+  "slug": "8925--1982 - The Goldberg Variations",
+  "n": 32,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 77.59331128125,
+  "U_prod": 77.59331127407815,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.4375
+ },
+ {
+  "variant": "vorbis-q4",
+  "slug": "8926--1987 - Kind of Blue [CK 40579]",
+  "n": 5,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 68.804168,
+  "U_prod": 68.80416820939362,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 16500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.8
+ },
+ {
+  "variant": "vorbis-q4",
+  "slug": "8928--2016 - Man Made Object",
+  "n": 10,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 74.6061179,
+  "U_prod": 74.60611800889268,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 16000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.6
+ },
+ {
+  "variant": "vorbis-q4",
+  "slug": "8929--1996 - The Velvet Underground & Nico [31453 1250 2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 80.13917821212122,
+  "U_prod": 80.13917819045375,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 17000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.5454545454545454
+ },
+ {
+  "variant": "vorbis-q4",
+  "slug": "8930--1993 - Bridge Over Troubled Water [462488 2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 79.73894657575758,
+  "U_prod": 79.73894675340374,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 18000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.8181818181818182
+ },
+ {
+  "variant": "vorbis-q4",
+  "slug": "8931--1987 - Rumours [3010-2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 78.85305275757575,
+  "U_prod": 78.8530527182529,
+  "prod_grade": "suspect",
+  "prod_cliff": 16000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.5454545454545454
+ },
+ {
+  "variant": "vorbis-q4",
+  "slug": "8932--1991 - Loveless [crecd 060]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 84.26588603030304,
+  "U_prod": 84.26588605178473,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 18000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.8181818181818182
+ },
+ {
+  "variant": "vorbis-q4",
+  "slug": "8933--2014 - Ruins",
+  "n": 8,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 65.79817579166667,
+  "U_prod": 65.79817561700114,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 13000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.25
+ },
+ {
+  "variant": "vorbis-q4",
+  "slug": "8934--1998 - Stratosphere",
+  "n": 17,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 79.14517903921569,
+  "U_prod": 79.14517908913624,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.6470588235294118
+ },
+ {
+  "variant": "vorbis-q4",
+  "slug": "8935--1990 - Ambient 1_ Music for Airports [EEGCD 17]",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 71.782257,
+  "U_prod": 71.78225717784882,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 18000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.25
+ },
+ {
+  "variant": "vorbis-q5",
+  "slug": "8916--2013 - Random Access Memories [88883716862]",
+  "n": 13,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 66.34786848717948,
+  "U_prod": 66.3478685869313,
+  "prod_grade": "genuine",
+  "prod_cliff": 18000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.15384615384615385
+ },
+ {
+  "variant": "vorbis-q5",
+  "slug": "8917--2014 - Syro [WARPCD247]",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 62.97141566666667,
+  "U_prod": 62.97141557304255,
+  "prod_grade": "genuine",
+  "prod_cliff": 18000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.08333333333333333
+ },
+ {
+  "variant": "vorbis-q5",
+  "slug": "8918--1995 - Tri Repetae [WARPCD38]",
+  "n": 10,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling"
+  ],
+  "U_win0": 56.1537943,
+  "U_prod": 56.153794246521215,
+  "prod_grade": "genuine",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.1
+ },
+ {
+  "variant": "vorbis-q5",
+  "slug": "8919--1996 - Feed Me Weird Things",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 70.05324041666667,
+  "U_prod": 70.05324035198824,
+  "prod_grade": "genuine",
+  "prod_cliff": 16500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.08333333333333333
+ },
+ {
+  "variant": "vorbis-q5",
+  "slug": "8920--2011 - Hurry Up, We're Dreaming",
+  "n": 22,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 77.09991893939394,
+  "U_prod": 77.09991893108311,
+  "prod_grade": "suspect",
+  "prod_cliff": 17000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.36363636363636365
+ },
+ {
+  "variant": "vorbis-q5",
+  "slug": "8921--1999 - Californication",
+  "n": 15,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 62.909852,
+  "U_prod": 62.90985213685439,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "vorbis-q5",
+  "slug": "8922--2008 - Death Magnetic",
+  "n": 10,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 64.23422223333333,
+  "U_prod": 64.23422237771868,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.1
+ },
+ {
+  "variant": "vorbis-q5",
+  "slug": "8923--2001 - Jane Doe",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 66.45364061111111,
+  "U_prod": 66.45364072690616,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "vorbis-q5",
+  "slug": "8924--1984 - Tabula Rasa",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 69.957005,
+  "U_prod": 69.95700516584148,
+  "prod_grade": "genuine",
+  "prod_cliff": 17500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.25
+ },
+ {
+  "variant": "vorbis-q5",
+  "slug": "8925--1982 - The Goldberg Variations",
+  "n": 32,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 77.54348813541667,
+  "U_prod": 77.54348811286394,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.21875
+ },
+ {
+  "variant": "vorbis-q5",
+  "slug": "8926--1987 - Kind of Blue [CK 40579]",
+  "n": 5,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 68.3967562,
+  "U_prod": 68.3967563750234,
+  "prod_grade": "suspect",
+  "prod_cliff": 17500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.6
+ },
+ {
+  "variant": "vorbis-q5",
+  "slug": "8928--2016 - Man Made Object",
+  "n": 10,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 68.91125623333333,
+  "U_prod": 68.91125623752643,
+  "prod_grade": "genuine",
+  "prod_cliff": 17500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.1
+ },
+ {
+  "variant": "vorbis-q5",
+  "slug": "8929--1996 - The Velvet Underground & Nico [31453 1250 2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 79.26927048484849,
+  "U_prod": 79.26927045768215,
+  "prod_grade": "suspect",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.09090909090909091
+ },
+ {
+  "variant": "vorbis-q5",
+  "slug": "8930--1993 - Bridge Over Troubled Water [462488 2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 75.15877506060606,
+  "U_prod": 75.15877496581292,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.18181818181818182
+ },
+ {
+  "variant": "vorbis-q5",
+  "slug": "8931--1987 - Rumours [3010-2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 74.4762103030303,
+  "U_prod": 74.47621030043014,
+  "prod_grade": "genuine",
+  "prod_cliff": 16000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.2727272727272727
+ },
+ {
+  "variant": "vorbis-q5",
+  "slug": "8932--1991 - Loveless [crecd 060]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 84.47364584848485,
+  "U_prod": 84.47364604357257,
+  "prod_grade": "genuine",
+  "prod_cliff": 18000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.36363636363636365
+ },
+ {
+  "variant": "vorbis-q5",
+  "slug": "8933--2014 - Ruins",
+  "n": 8,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 65.88134320833333,
+  "U_prod": 65.88134328097371,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 13000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.25
+ },
+ {
+  "variant": "vorbis-q5",
+  "slug": "8934--1998 - Stratosphere",
+  "n": 17,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 78.47436215686274,
+  "U_prod": 78.47436221816021,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 17500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.4117647058823529
+ },
+ {
+  "variant": "vorbis-q5",
+  "slug": "8935--1990 - Ambient 1_ Music for Airports [EEGCD 17]",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 71.88477491666666,
+  "U_prod": 71.88477491412235,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 18000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.5
+ },
+ {
+  "variant": "vorbis-q6",
+  "slug": "8916--2013 - Random Access Memories [88883716862]",
+  "n": 13,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 49.26388441025641,
+  "U_prod": 49.263884301359354,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.07692307692307693
+ },
+ {
+  "variant": "vorbis-q6",
+  "slug": "8917--2014 - Syro [WARPCD247]",
+  "n": 12,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 48.93739772222222,
+  "U_prod": 48.93739785819704,
+  "prod_grade": "genuine",
+  "prod_cliff": 18000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.08333333333333333
+ },
+ {
+  "variant": "vorbis-q6",
+  "slug": "8918--1995 - Tri Repetae [WARPCD38]",
+  "n": 10,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 26.5323552,
+  "U_prod": 26.532355238476207,
+  "prod_grade": "genuine",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.1
+ },
+ {
+  "variant": "vorbis-q6",
+  "slug": "8919--1996 - Feed Me Weird Things",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 69.6094821388889,
+  "U_prod": 69.60948213127108,
+  "prod_grade": "genuine",
+  "prod_cliff": 16500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.08333333333333333
+ },
+ {
+  "variant": "vorbis-q6",
+  "slug": "8920--2011 - Hurry Up, We're Dreaming",
+  "n": 22,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 71.82453204545455,
+  "U_prod": 71.82453213837324,
+  "prod_grade": "suspect",
+  "prod_cliff": 17500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.3181818181818182
+ },
+ {
+  "variant": "vorbis-q6",
+  "slug": "8921--1999 - Californication",
+  "n": 15,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 50.39987231111111,
+  "U_prod": 50.39987242937462,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "vorbis-q6",
+  "slug": "8922--2008 - Death Magnetic",
+  "n": 10,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 55.532856933333335,
+  "U_prod": 55.53285681481198,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "vorbis-q6",
+  "slug": "8923--2001 - Jane Doe",
+  "n": 12,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 52.74395772222223,
+  "U_prod": 52.74395788244638,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "vorbis-q6",
+  "slug": "8924--1984 - Tabula Rasa",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 69.97676625,
+  "U_prod": 69.97676608389594,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "vorbis-q6",
+  "slug": "8925--1982 - The Goldberg Variations",
+  "n": 32,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 77.5085839375,
+  "U_prod": 77.50858403791375,
+  "prod_grade": "suspect",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.1875
+ },
+ {
+  "variant": "vorbis-q6",
+  "slug": "8926--1987 - Kind of Blue [CK 40579]",
+  "n": 5,
+  "denied@62": true,
+  "legs@62": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "cliff",
+   "no-ultrasonic"
+  ],
+  "U_win0": 68.35171013333334,
+  "U_prod": 68.35171012834509,
+  "prod_grade": "suspect",
+  "prod_cliff": 18000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.6
+ },
+ {
+  "variant": "vorbis-q6",
+  "slug": "8928--2016 - Man Made Object",
+  "n": 10,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 57.90298580000001,
+  "U_prod": 57.90298573443282,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.1
+ },
+ {
+  "variant": "vorbis-q6",
+  "slug": "8929--1996 - The Velvet Underground & Nico [31453 1250 2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 72.94889672727273,
+  "U_prod": 72.94889686842731,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.09090909090909091
+ },
+ {
+  "variant": "vorbis-q6",
+  "slug": "8930--1993 - Bridge Over Troubled Water [462488 2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 65.21580854545454,
+  "U_prod": 65.21580867671202,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "vorbis-q6",
+  "slug": "8931--1987 - Rumours [3010-2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 63.7881203030303,
+  "U_prod": 63.788120424456686,
+  "prod_grade": "genuine",
+  "prod_cliff": 16000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.09090909090909091
+ },
+ {
+  "variant": "vorbis-q6",
+  "slug": "8932--1991 - Loveless [crecd 060]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 82.59454106060606,
+  "U_prod": 82.59454111718844,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.09090909090909091
+ },
+ {
+  "variant": "vorbis-q6",
+  "slug": "8933--2014 - Ruins",
+  "n": 8,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 65.34731095833332,
+  "U_prod": 65.34731101442094,
+  "prod_grade": "suspect",
+  "prod_cliff": 13000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.125
+ },
+ {
+  "variant": "vorbis-q6",
+  "slug": "8934--1998 - Stratosphere",
+  "n": 17,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 76.66000370588235,
+  "U_prod": 76.66000370510673,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.29411764705882354
+ },
+ {
+  "variant": "vorbis-q6",
+  "slug": "8935--1990 - Ambient 1_ Music for Airports [EEGCD 17]",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 71.89215241666666,
+  "U_prod": 71.89215257208703,
+  "prod_grade": "likely_transcode",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.5
+ },
+ {
+  "variant": "vorbis-q7",
+  "slug": "8916--2013 - Random Access Memories [88883716862]",
+  "n": 13,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 48.56712884615385,
+  "U_prod": 48.56712894893656,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.15384615384615385
+ },
+ {
+  "variant": "vorbis-q7",
+  "slug": "8917--2014 - Syro [WARPCD247]",
+  "n": 12,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 48.29438366666667,
+  "U_prod": 48.29438360568094,
+  "prod_grade": "genuine",
+  "prod_cliff": 18000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.08333333333333333
+ },
+ {
+  "variant": "vorbis-q7",
+  "slug": "8918--1995 - Tri Repetae [WARPCD38]",
+  "n": 10,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 26.2347131,
+  "U_prod": 26.23471309981037,
+  "prod_grade": "genuine",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.1
+ },
+ {
+  "variant": "vorbis-q7",
+  "slug": "8919--1996 - Feed Me Weird Things",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 68.99182677777777,
+  "U_prod": 68.99182673593765,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "vorbis-q7",
+  "slug": "8920--2011 - Hurry Up, We're Dreaming",
+  "n": 22,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 70.94767656060606,
+  "U_prod": 70.94767665457529,
+  "prod_grade": "genuine",
+  "prod_cliff": 17500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.22727272727272727
+ },
+ {
+  "variant": "vorbis-q7",
+  "slug": "8921--1999 - Californication",
+  "n": 15,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 49.55833257777778,
+  "U_prod": 49.558332550197484,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "vorbis-q7",
+  "slug": "8922--2008 - Death Magnetic",
+  "n": 10,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 54.616524633333334,
+  "U_prod": 54.61652480019156,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "vorbis-q7",
+  "slug": "8923--2001 - Jane Doe",
+  "n": 12,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 51.18477736111111,
+  "U_prod": 51.184777283084145,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "vorbis-q7",
+  "slug": "8924--1984 - Tabula Rasa",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 69.990686,
+  "U_prod": 69.99068608825026,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.25
+ },
+ {
+  "variant": "vorbis-q7",
+  "slug": "8925--1982 - The Goldberg Variations",
+  "n": 32,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 77.58977832291667,
+  "U_prod": 77.58977837077225,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.15625
+ },
+ {
+  "variant": "vorbis-q7",
+  "slug": "8926--1987 - Kind of Blue [CK 40579]",
+  "n": 5,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 68.36139253333333,
+  "U_prod": 68.36139254559488,
+  "prod_grade": "suspect",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.4
+ },
+ {
+  "variant": "vorbis-q7",
+  "slug": "8928--2016 - Man Made Object",
+  "n": 10,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 57.04432716666666,
+  "U_prod": 57.04432716285663,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.1
+ },
+ {
+  "variant": "vorbis-q7",
+  "slug": "8929--1996 - The Velvet Underground & Nico [31453 1250 2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 70.54123545454546,
+  "U_prod": 70.54123538070213,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "vorbis-q7",
+  "slug": "8930--1993 - Bridge Over Troubled Water [462488 2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 62.78156412121212,
+  "U_prod": 62.781564272721134,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "vorbis-q7",
+  "slug": "8931--1987 - Rumours [3010-2]",
+  "n": 11,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 61.029813818181815,
+  "U_prod": 61.029813825218554,
+  "prod_grade": "genuine",
+  "prod_cliff": 16000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.09090909090909091
+ },
+ {
+  "variant": "vorbis-q7",
+  "slug": "8932--1991 - Loveless [crecd 060]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 81.57962306060607,
+  "U_prod": 81.5796231285476,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.09090909090909091
+ },
+ {
+  "variant": "vorbis-q7",
+  "slug": "8933--2014 - Ruins",
+  "n": 8,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 64.10355125,
+  "U_prod": 64.10355135214792,
+  "prod_grade": "genuine",
+  "prod_cliff": 13000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.125
+ },
+ {
+  "variant": "vorbis-q7",
+  "slug": "8934--1998 - Stratosphere",
+  "n": 17,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 75.858726,
+  "U_prod": 75.85872607900313,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.29411764705882354
+ },
+ {
+  "variant": "vorbis-q7",
+  "slug": "8935--1990 - Ambient 1_ Music for Airports [EEGCD 17]",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 71.90118891666667,
+  "U_prod": 71.90118943948008,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.25
+ },
+ {
+  "variant": "vorbis-q8",
+  "slug": "8916--2013 - Random Access Memories [88883716862]",
+  "n": 13,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 48.07518546153847,
+  "U_prod": 48.0751854397199,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.07692307692307693,
+  "derrien_proba_max": 0.030048,
+  "derrien_proba_med": 0.019397,
+  "derrien_z_max": 7.232,
+  "derrien_offsets": [
+   "1012",
+   "1014",
+   "135",
+   "164",
+   "265",
+   "454",
+   "548",
+   "561",
+   "64",
+   "711",
+   "742",
+   "850",
+   "874"
+  ],
+  "derrien_n": 13
+ },
+ {
+  "variant": "vorbis-q8",
+  "slug": "8917--2014 - Syro [WARPCD247]",
+  "n": 12,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 47.735385416666674,
+  "U_prod": 47.73538541945237,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.08333333333333333,
+  "derrien_proba_max": 0.033654,
+  "derrien_proba_med": 0.0313625,
+  "derrien_z_max": 7.377,
+  "derrien_offsets": [
+   "1003",
+   "133",
+   "17",
+   "58",
+   "6",
+   "696",
+   "80",
+   "831",
+   "834",
+   "848",
+   "882",
+   "961"
+  ],
+  "derrien_n": 12
+ },
+ {
+  "variant": "vorbis-q8",
+  "slug": "8918--1995 - Tri Repetae [WARPCD38]",
+  "n": 10,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 26.249223966666666,
+  "U_prod": 26.249224113902084,
+  "prod_grade": "genuine",
+  "prod_cliff": 15500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.1,
+  "derrien_proba_max": 0.127404,
+  "derrien_proba_med": 0.018678,
+  "derrien_z_max": 5.5,
+  "derrien_offsets": [
+   "12",
+   "192",
+   "251",
+   "450",
+   "528",
+   "555",
+   "669",
+   "698",
+   "73",
+   "739"
+  ],
+  "derrien_n": 10
+ },
+ {
+  "variant": "vorbis-q8",
+  "slug": "8919--1996 - Feed Me Weird Things",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 69.0657495,
+  "U_prod": 69.06574957400467,
+  "prod_grade": "genuine",
+  "prod_cliff": 17000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.08333333333333333,
+  "derrien_proba_max": 0.116587,
+  "derrien_proba_med": 0.029343,
+  "derrien_z_max": 5.49,
+  "derrien_offsets": [
+   "1003",
+   "122",
+   "299",
+   "305",
+   "422",
+   "453",
+   "5",
+   "594",
+   "641",
+   "710",
+   "821",
+   "936"
+  ],
+  "derrien_n": 12
+ },
+ {
+  "variant": "vorbis-q8",
+  "slug": "8920--2011 - Hurry Up, We're Dreaming",
+  "n": 22,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 70.44752198484849,
+  "U_prod": 70.44752205013592,
+  "prod_grade": "genuine",
+  "prod_cliff": 17500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.3181818181818182
+ },
+ {
+  "variant": "vorbis-q8",
+  "slug": "8921--1999 - Californication",
+  "n": 15,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 49.20099257777778,
+  "U_prod": 49.20099259559599,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.043269,
+  "derrien_proba_med": 0.019784,
+  "derrien_z_max": 7.293,
+  "derrien_offsets": [
+   "105",
+   "123",
+   "237",
+   "250",
+   "333",
+   "348",
+   "403",
+   "450",
+   "513",
+   "560",
+   "578",
+   "631",
+   "661",
+   "815",
+   "984"
+  ],
+  "derrien_n": 15
+ },
+ {
+  "variant": "vorbis-q8",
+  "slug": "8922--2008 - Death Magnetic",
+  "n": 10,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 54.96438859999999,
+  "U_prod": 54.96438850733406,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.022837,
+  "derrien_proba_med": 0.0180075,
+  "derrien_z_max": 5.241,
+  "derrien_offsets": [
+   "1010",
+   "377",
+   "607",
+   "669",
+   "685",
+   "765",
+   "869",
+   "893",
+   "914",
+   "972"
+  ],
+  "derrien_n": 10
+ },
+ {
+  "variant": "vorbis-q8",
+  "slug": "8923--2001 - Jane Doe",
+  "n": 12,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 50.17432655555555,
+  "U_prod": 50.17432645555422,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.02518,
+  "derrien_proba_med": 0.020492,
+  "derrien_z_max": 5.546,
+  "derrien_offsets": [
+   "102",
+   "1022",
+   "26",
+   "453",
+   "506",
+   "515",
+   "627",
+   "658",
+   "67",
+   "779",
+   "886",
+   "908"
+  ],
+  "derrien_n": 12
+ },
+ {
+  "variant": "vorbis-q8",
+  "slug": "8924--1984 - Tabula Rasa",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 70.00377925,
+  "U_prod": 70.0037793682097,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.25,
+  "derrien_proba_max": 0.049279,
+  "derrien_proba_med": 0.032451999999999995,
+  "derrien_z_max": 7.063,
+  "derrien_offsets": [
+   "178",
+   "196",
+   "379",
+   "42"
+  ],
+  "derrien_n": 4
+ },
+ {
+  "variant": "vorbis-q8",
+  "slug": "8925--1982 - The Goldberg Variations",
+  "n": 32,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 77.58451744791667,
+  "U_prod": 77.58451749140184,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.125,
+  "derrien_proba_max": 0.061298,
+  "derrien_proba_med": 0.045673,
+  "derrien_z_max": 7.017,
+  "derrien_offsets": [
+   "154",
+   "176",
+   "234",
+   "31",
+   "339",
+   "347",
+   "387",
+   "4",
+   "43",
+   "446",
+   "448",
+   "533",
+   "589",
+   "648",
+   "689",
+   "712",
+   "77",
+   "808",
+   "818",
+   "847",
+   "875",
+   "889",
+   "897",
+   "901",
+   "939",
+   "958",
+   "959",
+   "961",
+   "963",
+   "977",
+   "979"
+  ],
+  "derrien_n": 32
+ },
+ {
+  "variant": "vorbis-q8",
+  "slug": "8926--1987 - Kind of Blue [CK 40579]",
+  "n": 5,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 68.37621893333333,
+  "U_prod": 68.3762191725649,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.2,
+  "derrien_proba_max": 0.039663,
+  "derrien_proba_med": 0.03125,
+  "derrien_z_max": 11.61,
+  "derrien_offsets": [
+   "171",
+   "529",
+   "58",
+   "596",
+   "64"
+  ],
+  "derrien_n": 5
+ },
+ {
+  "variant": "vorbis-q8",
+  "slug": "8928--2016 - Man Made Object",
+  "n": 10,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 56.78428616666666,
+  "U_prod": 56.784286100094505,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.1,
+  "derrien_proba_max": 0.034856,
+  "derrien_proba_med": 0.022858,
+  "derrien_z_max": 6.499,
+  "derrien_offsets": [
+   "1011",
+   "109",
+   "11",
+   "217",
+   "304",
+   "573",
+   "636",
+   "824",
+   "867",
+   "979"
+  ],
+  "derrien_n": 10
+ },
+ {
+  "variant": "vorbis-q8",
+  "slug": "8929--1996 - The Velvet Underground & Nico [31453 1250 2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 69.64331472727272,
+  "U_prod": 69.6433149820651,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.038669,
+  "derrien_proba_med": 0.033654,
+  "derrien_z_max": 6.625,
+  "derrien_offsets": [
+   "278",
+   "32",
+   "39",
+   "436",
+   "509",
+   "614",
+   "651",
+   "66",
+   "704",
+   "868",
+   "991"
+  ],
+  "derrien_n": 11
+ },
+ {
+  "variant": "vorbis-q8",
+  "slug": "8930--1993 - Bridge Over Troubled Water [462488 2]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 62.003873393939394,
+  "U_prod": 62.003873518115576,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.049279,
+  "derrien_proba_med": 0.026079,
+  "derrien_z_max": 6.281,
+  "derrien_offsets": [
+   "111",
+   "131",
+   "19",
+   "219",
+   "318",
+   "480",
+   "492",
+   "516",
+   "618",
+   "825",
+   "940"
+  ],
+  "derrien_n": 11
+ },
+ {
+  "variant": "vorbis-q8",
+  "slug": "8931--1987 - Rumours [3010-2]",
+  "n": 11,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 59.29771366666667,
+  "U_prod": 59.297713757363574,
+  "prod_grade": "genuine",
+  "prod_cliff": 16000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.09090909090909091
+ },
+ {
+  "variant": "vorbis-q8",
+  "slug": "8932--1991 - Loveless [crecd 060]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 80.96856921212121,
+  "U_prod": 80.96856916158828,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.049279,
+  "derrien_proba_med": 0.021531,
+  "derrien_z_max": 4.847,
+  "derrien_offsets": [
+   "192",
+   "217",
+   "307",
+   "34",
+   "35",
+   "376",
+   "472",
+   "52",
+   "548",
+   "707",
+   "913"
+  ],
+  "derrien_n": 11
+ },
+ {
+  "variant": "vorbis-q8",
+  "slug": "8933--2014 - Ruins",
+  "n": 8,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 63.020681708333335,
+  "U_prod": 63.020681621861065,
+  "prod_grade": "genuine",
+  "prod_cliff": 13000,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.125,
+  "derrien_proba_max": 0.042067,
+  "derrien_proba_med": 0.0224665,
+  "derrien_z_max": 7.454,
+  "derrien_offsets": [
+   "1014",
+   "15",
+   "205",
+   "448",
+   "53",
+   "576",
+   "827",
+   "960"
+  ],
+  "derrien_n": 8
+ },
+ {
+  "variant": "vorbis-q8",
+  "slug": "8934--1998 - Stratosphere",
+  "n": 17,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 75.49750139215686,
+  "U_prod": 75.49750143638879,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.11764705882352941,
+  "derrien_proba_max": 0.039663,
+  "derrien_proba_med": 0.030048,
+  "derrien_z_max": 5.166,
+  "derrien_offsets": [
+   "109",
+   "214",
+   "230",
+   "264",
+   "327",
+   "575",
+   "586",
+   "693",
+   "752",
+   "777",
+   "799",
+   "846",
+   "849",
+   "928",
+   "966"
+  ],
+  "derrien_n": 17
+ },
+ {
+  "variant": "vorbis-q8",
+  "slug": "8935--1990 - Ambient 1_ Music for Airports [EEGCD 17]",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 72.41129383333333,
+  "U_prod": 72.41129406225693,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "prod_codec_family": "lossless",
+  "cliff_frac<=19k": 0.0,
+  "derrien_proba_max": 0.063702,
+  "derrien_proba_med": 0.0365085,
+  "derrien_z_max": 9.518,
+  "derrien_offsets": [
+   "121",
+   "19",
+   "400",
+   "576"
+  ],
+  "derrien_n": 4
+ }
+]

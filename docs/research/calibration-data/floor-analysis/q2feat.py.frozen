@@ -1,0 +1,59 @@
+"""Q2: per (arm, album, variant) features from the 16 PRODUCTION slices only (all variants), + labels."""
+import gzip, json
+from collections import defaultdict
+from statistics import mean, median
+CAL="/home/abl030/cratedigger/.claude/worktrees/829-phase5-pr2/docs/research/calibration-data"
+MTX="/home/abl030/.claude/jobs/fb229c18/tmp/matrix"
+ARMS={'TRAIN':'results.tsv.gz','R1':'results-holdout.tsv.gz','R2':'results-holdout2.tsv.gz','R3':'results-holdout3.tsv.gz'}
+MATRIX={'LOCAL':'results-local.tsv','LOCALW':'results-localw.tsv','APPLE':'results-apple.tsv'}
+LOSSLESS=10000
+KB={'control-flac1644':LOSSLESS,'genuine':LOSSLESS,'null-flac':LOSSLESS,
+ 'lame-v0':245,'lame-v2':190,'lame-v4':165,'lame-v6':115,
+ 'vorbis-q-1':45,'vorbis-q0':64,'vorbis-q2':96,'vorbis-q3':112,'vorbis-q4':128,'vorbis-q5':160,
+ 'vorbis-q6':192,'vorbis-q7':224,'vorbis-q8':256,'vorbis-q9':320,'vorbis-q10':500,
+ 'fdk-vbr3':128,'fdk-vbr5':192,'fdk-he1-64':64,'fdk-he2-32':32,
+ 'apple-cbr128':128,'apple-abr192':192,'apple-cvbr256':256,'apple-tvbr91':256,
+ 'qaac-cbr128':128,'qaac-abr192':192,'qaac-cvbr256':256,'qaac-cvbr320':320,'qaac-tvbr91':256,
+ 't-mp3128-flac':128,'t-opus96-flac':96,'t-vorbisq5-flac':160,'t-mp3192-mp3320':192,
+ 't-aac128-mp3320':128,'t-mp3128-aac256':128,'ffmpeg-q0':245,'opus-128':128}
+def kb(v):
+    if v in KB: return KB[v]
+    for pre in ('lame-cbr','opus-','aacffm-','fdk-cbr','wma-'):
+        if v.startswith(pre):
+            try: return int(v[len(pre):])
+            except ValueError: pass
+    return None
+def _open(p): return gzip.open(p,'rt') if p.endswith('.gz') else open(p)
+rows=[]
+for ds,f in list(ARMS.items())+list(MATRIX.items()):
+    base = CAL if ds in ARMS else MTX
+    acc=defaultdict(list)
+    for ln in _open(base+'/'+f):
+        p=ln.rstrip('\n').split('\t')
+        if len(p)<27 or not p[11] or not p[10]: continue
+        s=[float(x) for x in p[11:27]]
+        acc[(p[1],p[0])].append((float(p[10]), s, int(p[7]) if p[7] else None, float(p[9]) if p[9] else 0.0))
+    for (v,slug),tr in acc.items():
+        if len(tr)<2: continue
+        k=kb(v)
+        if k is None: continue
+        def d(a,b): return mean(ref-mean(s[a:b]) for ref,s,_c,_h in tr)
+        # bandwidth edge: highest slice index whose level is within 20 dB of the 12-13 kHz level
+        edges=[]
+        for ref,s,_c,_h in tr:
+            base_l=mean(s[0:3]); e=0
+            for i in range(16):
+                if s[i] >= base_l-20: e=i
+            edges.append(12000+500*e)
+        cl=[c for _r,_s,c,_h in tr if c]
+        rows.append({'ds':ds,'slug':slug,'variant':v,'kbps':k,'n':len(tr),
+            'd12_14':d(0,5),'d14_16':d(5,9),'d16_18':d(9,13),'d18_195':d(13,16),
+            'edge_med':median(edges),'edge_p25':sorted(edges)[len(edges)//4],
+            'cliff_frac':len(cl)/len(tr),'cliff_med':median(cl) if cl else 22050,
+            'cliff_min':min(cl) if cl else 22050,
+            'hfdef':mean(h for _r,_s,_c,h in tr),
+            'rel18':mean(mean(s[13:16])-mean(s[0:3]) for _r,s,_c,_h in tr)})
+json.dump(rows,open('/home/abl030/.claude/jobs/fb229c18/tmp/floor/q2feats.json','w'))
+print('rows',len(rows))
+from collections import Counter
+print(Counter(r['ds'] for r in rows))

@@ -1,0 +1,135 @@
+"""Run the Derrien AAC-transcode detector over the same file set.
+
+Uses `aacdet.py` from ../derrien unmodified (bit-exact against the author's
+Matlab under Octave, worst diff 3.3e-16).
+
+Derrien is AAC-specific in principle. It is run on EVERY variant anyway:
+whether it fires on non-AAC launders is itself a result, and its
+false-positive rate on genuine files is the number that governs deployability.
+
+  python3 derrien.py --tag pilot --variants genuine,opus-128 [--albums ...]
+
+Resumable per (tag, variant, album). Emits derrien-{tag}.tsv.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+from concurrent.futures import ProcessPoolExecutor
+
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "derrien"))
+
+from variants import spec  # noqa: E402
+
+OUT_ROOT = "/mnt/virtio/Music/matrix"
+MANIFEST = os.path.join(HERE, "manifest.json")
+CACHE = os.path.join(HERE, "derrien_cache")
+
+COLS = ["variant", "slug", "request_id", "mode", "path", "sr", "ch", "dur",
+        "proba", "median", "std", "z", "offset", "pmode", "secs", "err"]
+
+
+def work(item):
+    import aacdet as A
+    vid, slug, rid, mode, path, nb_win, nb_sf = item
+    t0 = time.time()
+    row = dict.fromkeys(COLS, "")
+    row.update(variant=vid, slug=slug, request_id=rid, mode=mode, path=path)
+    try:
+        r = A.analyse(path, nb_win=nb_win, nb_sf=nb_sf, mode=mode)
+        row.update(sr=r["rate"], ch=r["channels"], dur=f"{r['duration']:.1f}",
+                   proba=f"{r['proba']:.6f}", median=f"{r['proba_median']:.6f}",
+                   std=f"{r['proba_std']:.6f}", z=f"{r['proba_z']:.3f}",
+                   offset=r["offset"], pmode=r["proba_mode"])
+    except Exception as e:  # noqa: BLE001 - recorded per row, corpus keeps going
+        row["err"] = f"{type(e).__name__}: {e}".replace("\t", " ")[:200]
+    row["secs"] = f"{time.time() - t0:.1f}"
+    return row
+
+
+def album_files(vid, sp, alb):
+    if sp["kind"] == "genuine":
+        folder = alb["album_dir"]
+    else:
+        folder = os.path.join(OUT_ROOT, vid, str(alb["request_id"]))
+    if not os.path.isdir(folder):
+        raise RuntimeError(f"[{vid}] not built: {folder}")
+    return sorted(os.path.join(folder, f) for f in os.listdir(folder)
+                  if f.lower().endswith(".flac"))
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--tag", required=True)
+    ap.add_argument("--variants", required=True)
+    ap.add_argument("--albums", default="")
+    ap.add_argument("--mode", default="high")
+    ap.add_argument("--nb-win", type=int, default=8)
+    ap.add_argument("--nb-sf", type=int, default=8)
+    ap.add_argument("--workers", type=int, default=20)
+    a = ap.parse_args()
+
+    albums = json.load(open(MANIFEST))
+    only = {x.strip() for x in a.albums.split(",") if x.strip()}
+    if only:
+        albums = [x for x in albums if str(x["request_id"]) in only]
+    vids = [v.strip() for v in a.variants.split(",") if v.strip()]
+    modes = [m.strip() for m in a.mode.split(",") if m.strip()]
+
+    todo, cached, keys = [], [], []
+    for vid in vids:
+        sp = spec(vid)
+        for alb in albums:
+            rid = str(alb["request_id"])
+            slug = f"{rid}--{os.path.basename(alb['album_dir'])}"
+            cpath = os.path.join(CACHE, a.tag, f"{vid}__{rid}.json")
+            if os.path.exists(cpath):
+                cached += json.load(open(cpath))
+                continue
+            keys.append((vid, rid, cpath))
+            for p in album_files(vid, sp, alb):
+                for m in modes:
+                    todo.append((vid, slug, rid, m, p, a.nb_win, a.nb_sf))
+
+    print(f"{len(todo)} analyses ({len(cached)} rows cached), "
+          f"{a.workers} workers", flush=True)
+    rows = list(cached)
+    if todo:
+        t0 = time.time()
+        fresh, done = [], 0
+        with ProcessPoolExecutor(max_workers=a.workers) as ex:
+            for row in ex.map(work, todo, chunksize=1):
+                fresh.append(row)
+                done += 1
+                if done % 50 == 0:
+                    el = time.time() - t0
+                    print(f"  {done}/{len(todo)} {el:.0f}s "
+                          f"eta {el / done * (len(todo) - done):.0f}s", flush=True)
+        by = {}
+        for r in fresh:
+            by.setdefault((r["variant"], r["request_id"]), []).append(r)
+        for vid, rid, cpath in keys:
+            os.makedirs(os.path.dirname(cpath), exist_ok=True)
+            json.dump(by.get((vid, rid), []), open(cpath, "w"))
+        rows += fresh
+        print(f"analysed {len(fresh)} in {time.time() - t0:.0f}s", flush=True)
+
+    rows.sort(key=lambda r: (r["variant"], r["path"], r["mode"]))
+    with open(f"{HERE}/derrien-{a.tag}.tsv", "w") as fh:
+        fh.write("\t".join(COLS) + "\n")
+        for r in rows:
+            fh.write("\t".join(str(r[c]) for c in COLS) + "\n")
+    print(f"wrote {len(rows)} rows -> derrien-{a.tag}.tsv")
+
+
+if __name__ == "__main__":
+    main()

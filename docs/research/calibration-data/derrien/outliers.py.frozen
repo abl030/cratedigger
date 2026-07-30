@@ -1,0 +1,21 @@
+import csv
+import sys
+
+path = sys.argv[1]
+rows = [r for r in csv.DictReader(open(path), delimiter="\t") if r["err"] == ""]
+mode = sys.argv[2] if len(sys.argv) > 2 else "high"
+rows = [r for r in rows if r["mode"] == mode]
+
+g = sorted([r for r in rows if r["cls"].startswith("genuine") or r["cls"].startswith("wild")],
+           key=lambda r: -float(r["proba"]))
+print("--- highest-scoring negatives (candidate false positives) ---")
+for r in g[:12]:
+    parts = r["path"].split("/")
+    print(f"{float(r['proba']):.4f} z={float(r['z']):5.1f} off={r['offset']:>4} "
+          f"sr={r['sr']} {r['cls']:>18} {r['rid']:>5} | {parts[-2][:34]} | {parts[-1][:38]}")
+
+lau = sorted([r for r in rows if r["cls"] == "launder"], key=lambda r: float(r["proba"]))
+print("\n--- weakest launders (misses) ---")
+for r in lau[:10]:
+    print(f"{float(r['proba']):.4f} z={float(r['z']):5.1f} off={r['offset']:>4} "
+          f"sr={r['sr']} dur={r['dur']:>6} {r['rid']}/{r['path'].split('/')[-1]}")

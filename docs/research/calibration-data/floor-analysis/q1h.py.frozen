@@ -1,0 +1,43 @@
+"""Q1: validate the two lifting features per-arm and per-class; test combinations."""
+import sys, json
+sys.path.insert(0,'/home/abl030/.claude/jobs/fb229c18/tmp/floor')
+from load import *
+from collections import defaultdict
+ARMS={'TRAIN':('results.tsv.gz','extended.tsv.gz','multiwin.tsv.gz'),
+ 'R1':('results-holdout.tsv.gz','extended-holdout.tsv.gz','multiwin-holdout.tsv.gz'),
+ 'R2':('results-holdout2.tsv.gz','extended-holdout2.tsv.gz','multiwin-holdout2.tsv.gz'),
+ 'R3':('results-holdout3.tsv.gz','extended-holdout3.tsv.gz','multiwin-holdout3.tsv.gz')}
+GENV='control-flac1644'; FRAUD=('t-mp3128-flac','t-opus96-flac','t-vorbisq5-flac')
+FEAT={(r['ds'],r['slug'],r['variant']):r for r in json.load(open('/home/abl030/.claude/jobs/fb229c18/tmp/floor/feats.json'))}
+REC={}
+for arm,(r,e,m) in ARMS.items():
+    A=load_arm(CAL+'/'+r,CAL+'/'+e,CAL+'/'+m)
+    for v in (GENV,)+FRAUD:
+        for slug,(tr,cl,w) in A[v].items():
+            d,legs,_=gate(tr,cl,w,62.0); REC[(arm,slug,v)]=set(legs)
+UNI=[(k,FEAT[k]) for k,L in REC.items() if L=={'no-ultrasonic'} and k in FEAT]
+PRE={
+ 'nocliff  (cliff_frac==0)': lambda f: f['cliff_frac']==0.0,
+ 'U_sd<=5':                  lambda f: f['U_sd']<=5,
+ 'U_sd<=8':                  lambda f: f['U_sd']<=8,
+ 'nocliff AND U_sd<=8':      lambda f: f['cliff_frac']==0.0 and f['U_sd']<=8,
+ 'nocliff AND step<8':       lambda f: f['cliff_frac']==0.0 and f['step']<8,
+ 'nocliff AND U_sd<=8 AND step<8': lambda f: f['cliff_frac']==0.0 and f['U_sd']<=8 and f['step']<8,
+}
+print("Universe = albums denied by the ultrasonic leg ALONE (T=62, multiwin).  'rescue'=genuine, 'void'=launder.")
+print(f"{'precondition':<34}{'arm':>7}{'genuine':>12}{'mp3128':>9}{'opus96':>9}{'vq5':>9}{'lift':>7}")
+for name,fn in PRE.items():
+    for arm in ('TRAIN','R1','R2','R3','ALL'):
+        sub=[(k,f) for k,f in UNI if arm=='ALL' or k[0]==arm]
+        g=[1 for k,f in sub if k[2]==GENV]; gr=[1 for k,f in sub if k[2]==GENV and fn(f)]
+        cells={}
+        for v in FRAUD:
+            tot=[1 for k,f in sub if k[2]==v]; vd=[1 for k,f in sub if k[2]==v and fn(f)]
+            cells[v]=(len(vd),len(tot))
+        L=sum(c[0] for c in cells.values()); LT=sum(c[1] for c in cells.values())
+        exp=len(g)*L/LT if LT else 0
+        lift=len(gr)/exp if exp>0 else float('nan')
+        print(f"{name if arm=='TRAIN' else '':<34}{arm:>7}{len(gr):>5}/{len(g):<6}"
+              + "".join(f"{cells[v][0]:>4}/{cells[v][1]:<4}" for v in FRAUD)
+              + (f"{lift:>7.2f}" if exp>0 else f"{'--':>7}"))
+    print()

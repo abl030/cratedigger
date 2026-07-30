@@ -1,0 +1,31 @@
+"""How much post-decode gain does the Derrien statistic tolerate?"""
+import sys
+import json
+import numpy as np
+
+sys.path.insert(0, "/home/abl030/.claude/jobs/fb229c18/tmp/derrien")
+import aacdet as A  # noqa: E402
+
+idx = json.load(open("/mnt/virtio/Music/derrien-arm/index.json"))
+low_l, high_l, low_s, high_s, win = A.init_aac(44)
+tau_l, tau_s = A.tau_tables(low_l, high_l, low_s, high_s)
+plans = (A.BandPlan(low_l, high_l, A.IBLEN_LONG, 1),
+         A.BandPlan(low_s, high_s, A.IBLEN_SHORT, A.NB_SHORT_WIN))
+sfv = np.linspace(0.3, 0.7, 8)
+offs = np.arange(1024)
+
+print(f"{'gain dB':>8s} {'linear':>8s} " + " ".join(f"{'trk' + str(i):>14s}" for i in range(3)))
+segs_all = []
+for k in range(3):
+    p = idx["8916"]["map"][k]["launder"]
+    e, r, _, _ = A._block_energies(p)
+    fr, _ = A.select_frames_from_blocks(e["M"], 8, "high")
+    segs_all.append(A.read_segments(p, fr, 2 * A.IBLEN_LONG + 1023)["M"])
+
+for db in (0.0, -0.1, -0.5, -1.0, -3.0, -6.0, -12.0, 6.0):
+    g = 10 ** (db / 20.0)
+    out = []
+    for seg in segs_all:
+        pr = A.detect_aac(seg * g, offs, sfv, plans, win, tau_l, tau_s)
+        out.append(f"{pr.max():.4f}@{int(np.argmax(pr))}")
+    print(f"{db:8.1f} {g:8.4f} " + " ".join(f"{o:>14s}" for o in out))

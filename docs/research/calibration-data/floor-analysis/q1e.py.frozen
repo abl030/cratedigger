@@ -1,0 +1,36 @@
+import json
+from collections import defaultdict
+from statistics import mean
+R = json.load(open('/home/abl030/.claude/jobs/fb229c18/tmp/floor/feats.json'))
+ARM=[r for r in R if r['ds'] in ('TRAIN','R1','R2','R3')]
+GENV='control-flac1644'; FRAUD=('t-mp3128-flac','t-opus96-flac','t-vorbisq5-flac')
+gen={(r['ds'],r['slug']):r for r in ARM if r['variant']==GENV}
+
+def legs(r,T):
+    L=set()
+    if r['cliff_frac']>=0.6: L.add('cliff')
+    if r['step']>=15.0 and r['cons']>=0.5: L.add('ceiling')
+    if r['U']>=T: L.add('ultra')
+    return L
+
+T=62.0
+print("=== Structure of the window-0 gate, arms (T=62) ===")
+for v in [GENV]+list(FRAUD):
+    rows=[r for r in ARM if r['variant']==v]
+    c=defaultdict(int)
+    for r in rows: c[tuple(sorted(legs(r,T)))]+=1
+    print(f"  {v:<18} n={len(rows)}  " + "  ".join(f"{k or '(none=PROVED)'}:{n}" for k,n in sorted(c.items(),key=lambda x:-x[1])))
+print()
+print("=== TRADE CURVE: precondition on the CODEC-INVARIANT midband (D_b12_14 = ref - mean(12-14kHz)) ===")
+print("   genuine: P=proved D=denied U=untestable (of 100).  launders: pooled 3 FLAC-fraud classes (of 300).")
+print(f"{'theta':>7}{'gP':>5}{'gD':>5}{'gU':>5} | {'lP':>5}{'lD':>5}{'lU':>5} |{'gain(genuine rescued)':>23}{'cost(launders voided)':>23}")
+for th in (99,60,55,52,50,48,46,44,42,40,38,36,34,30,25,0):
+    gc=defaultdict(int); lc=defaultdict(int)
+    for r in ARM:
+        L=legs(r,T)
+        if L & {'cliff','ceiling'}: s='D'
+        elif 'ultra' in L: s='U' if r['D_b12_14']>=th else 'D'
+        else: s='P'
+        if r['variant']==GENV: gc[s]+=1
+        elif r['variant'] in FRAUD: lc[s]+=1
+    print(f"{th:>7}{gc['P']:>5}{gc['D']:>5}{gc['U']:>5} | {lc['P']:>5}{lc['D']:>5}{lc['U']:>5} |{gc['U']:>23}{lc['U']:>23}")

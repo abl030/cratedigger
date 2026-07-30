@@ -1,0 +1,81 @@
+"""Literal loop-for-loop transcription of detect_aac.m, used as a parity oracle
+for the vectorised port in aacdet.py. Deliberately unoptimised and written to
+follow the Matlab statement by statement.
+"""
+import numpy as np
+
+
+def mdct_naive(x):
+    """MDCT.m, transcribed."""
+    N = len(x) // 2
+    t = np.arange(2 * N)
+    f = np.arange(N)
+    X = x * np.exp(-1j * np.pi * t / 2 / N)
+    X = np.fft.fft(X)
+    X = X[:N]
+    return np.real(X * np.exp(-1j * np.pi * (f + 0.5) * (N + 1) / 2 / N))
+
+
+def detect_aac_naive(signal, offset, sf, selected_windows, iblen_long,
+                     iblen_short, offset_short, nb_sb_long, nb_sb_short,
+                     nb_short_windows, w_low_l, w_high_l, w_low_s, w_high_s,
+                     wn_long, wn_start, wn_stop, wn_short, tau_l, tau_s):
+    """detect_aac.m, transcribed. All band indices here are 1-based like Matlab."""
+    buffer_count_tot = np.zeros(2)
+
+    for no_fen in selected_windows:
+        lo = (no_fen - 1) * iblen_long + offset
+        signal_win = signal[lo:lo + 2 * iblen_long]
+
+        mdct_long = mdct_naive(wn_long * signal_win)
+        mdct_start = mdct_naive(wn_start * signal_win)
+        mdct_stop = mdct_naive(wn_stop * signal_win)
+
+        mdct_short = np.zeros((iblen_short, nb_short_windows))
+        for nb_sb_win in range(1, nb_short_windows + 1):
+            n1 = (nb_sb_win - 1) * iblen_short + offset_short
+            zn = wn_short * signal_win[n1:n1 + 2 * iblen_short]
+            mdct_short[:, nb_sb_win - 1] = mdct_naive(zn)
+
+        bc_long = np.zeros(2)
+        bc_start = np.zeros(2)
+        bc_stop = np.zeros(2)
+        for s in range(1, nb_sb_long):
+            a, b = w_low_l[s - 1] - 1, w_high_l[s - 1]
+            sb_long = mdct_long[a:b]
+            sb_start = mdct_start[a:b]
+            sb_stop = mdct_stop[a:b]
+            SF_long = 4 * np.log2(np.abs(sb_long).max()) + 16 / 3 + 60
+            SF_start = 4 * np.log2(np.abs(sb_start).max()) + 16 / 3 + 60
+            SF_stop = 4 * np.log2(np.abs(sb_stop).max()) + 16 / 3 + 60
+            for k in range(len(sf)):
+                sc_long = np.abs(sb_long) ** 0.75 * 2 ** (-3 / 16 * (sf[k] * SF_long - 60))
+                sc_start = np.abs(sb_start) ** 0.75 * 2 ** (-3 / 16 * (sf[k] * SF_start - 60))
+                sc_stop = np.abs(sb_stop) ** 0.75 * 2 ** (-3 / 16 * (sf[k] * SF_stop - 60))
+                e_long = ((np.round(sc_long) - sc_long) ** 2).mean()
+                e_start = ((np.round(sc_start) - sc_start) ** 2).mean()
+                e_stop = ((np.round(sc_stop) - sc_stop) ** 2).mean()
+                bc_long[0] += e_long < tau_l[s - 1]
+                bc_start[0] += e_start < tau_l[s - 1]
+                bc_stop[0] += e_stop < tau_l[s - 1]
+            bc_long[1] += len(sf)
+            bc_start[1] += len(sf)
+            bc_stop[1] += len(sf)
+
+        bc_short = np.zeros(2)
+        for s in range(1, nb_sb_short):
+            a, b = w_low_s[s - 1] - 1, w_high_s[s - 1]
+            sb_short = mdct_short[a:b, :].reshape(-1, order="F")
+            SF_short = 4 * np.log2(np.abs(sb_short).max()) + 16 / 3 + 60
+            for k in range(len(sf)):
+                sc = np.abs(sb_short) ** 0.75 * 2 ** (-3 / 16 * (sf[k] * SF_short - 60))
+                bc_short[0] += ((np.round(sc) - sc) ** 2).mean() < tau_s[s - 1]
+            bc_short[1] += len(sf)
+
+        p = [bc_long[0] / bc_long[1], bc_start[0] / bc_start[1],
+             bc_stop[0] / bc_stop[1], bc_short[0] / bc_short[1]]
+        idx = int(np.argmax(p))
+        chosen = [bc_long, bc_start, bc_stop, bc_short][idx]
+        buffer_count_tot += chosen
+
+    return buffer_count_tot[0] / buffer_count_tot[1]

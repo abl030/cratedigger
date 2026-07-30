@@ -1,0 +1,61 @@
+"""Do independent copies of the same track recover the SAME frame offset?
+
+If the recovered offset were noise it would be uniform on 0..1023, so two
+independent copies would agree by chance ~0.1% of the time.
+"""
+import csv
+import sys
+from collections import defaultdict
+import numpy as np
+
+rows = []
+for p in sys.argv[1:]:
+    for r in csv.DictReader(open(p), delimiter="\t"):
+        if r["err"] == "" and r["mode"] == "high" and r["cls"].startswith("wild"):
+            rows.append(r)
+
+# group by (duration to 0.1s, sample rate, channels) across DIFFERENT album dirs
+g = defaultdict(list)
+for r in rows:
+    key = (round(float(r["dur"]), 1), r["sr"], r["ch"])
+    g[key].append(r)
+
+pairs = agree = 0
+strong_pairs = strong_agree = 0
+examples = []
+for key, v in g.items():
+    dirs = {r["path"].split("/")[-2] for r in v}
+    if len(v) < 2 or len(dirs) < 2:
+        continue
+    for i in range(len(v)):
+        for j in range(i + 1, len(v)):
+            a, b = v[i], v[j]
+            if a["path"].split("/")[-2] == b["path"].split("/")[-2]:
+                continue
+            pairs += 1
+            same = a["offset"] == b["offset"]
+            agree += same
+            if float(a["proba"]) > 0.025 and float(b["proba"]) > 0.025:
+                strong_pairs += 1
+                strong_agree += same
+                if same and len(examples) < 6:
+                    examples.append((a["offset"], float(a["proba"]),
+                                     a["path"].split("/")[-2][:30],
+                                     a["path"].split("/")[-1][:28]))
+
+print(f"duplicate-track pairs across different album dirs: {pairs}")
+print(f"  offsets agree exactly: {agree} ({agree / max(pairs, 1) * 100:.1f}%)  "
+      f"[chance = {100 / 1024:.2f}%]")
+print(f"pairs where BOTH copies score > 0.025: {strong_pairs}")
+print(f"  offsets agree exactly: {strong_agree} "
+      f"({strong_agree / max(strong_pairs, 1) * 100:.1f}%)")
+print("\nexamples of agreeing high-scoring duplicate pairs:")
+for off, p, d, f in examples:
+    print(f"  offset={off:>4} proba={p:.4f}  {d} | {f}")
+
+allof = np.array([int(r["offset"]) for r in rows])
+hi = np.array([int(r["offset"]) for r in rows if float(r["proba"]) > 0.03])
+print(f"\nwild offset distribution: n={len(allof)}, "
+      f"frac at 0={np.mean(allof == 0) * 100:.1f}%, "
+      f"frac at 960={np.mean(allof == 960) * 100:.1f}%")
+print(f"  among scoring > 0.03 (n={len(hi)}): frac at 0={np.mean(hi == 0) * 100:.1f}%")

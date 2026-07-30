@@ -1,0 +1,162 @@
+"""Score a measured tag: frozen gate at T=62 and T=59.5, plus Derrien.
+
+`score_v3.py` here is a byte-identical copy of
+docs/research/calibration-data/score_v3.py.frozen (md5
+b1eb515c4b0af702913d831ba045dafa); its load/gate/_window_legs are imported and
+driven, never edited. No multiwin file is supplied, so the gate runs
+SINGLE-WINDOW (window 0 = the production 30 s-from-start window), which is
+what production does.
+
+  python3 score.py --tag pilot [--control genuine]
+
+Emits gate-{tag}.json (per album, both thresholds, both detectors) and
+tracks-{tag}.tsv (per track).
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import os
+import statistics
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+THRESHOLDS = [62.0, 59.5]
+# Derrien lambda from the paper; the zero-FP lambda calibrated on this run's
+# own genuine control is reported alongside it.
+PAPER_LAMBDA = 0.031
+
+
+def load_derrien(tag):
+    p = f"{HERE}/derrien-{tag}.tsv"
+    if not os.path.exists(p):
+        return {}, {}
+    per_track, per_album = {}, {}
+    for r in csv.DictReader(open(p), delimiter="\t"):
+        if r["err"] or r["mode"] != "high":
+            continue
+        per_track[(r["variant"], r["path"])] = r
+        per_album.setdefault((r["variant"], r["slug"]), []).append(r)
+    return per_track, per_album
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--tag", required=True)
+    ap.add_argument("--control", default="genuine")
+    a = ap.parse_args()
+    tag = a.tag
+
+    sys.argv = ["score_v3", f"{HERE}/results-{tag}.tsv",
+                f"{HERE}/extended-{tag}.tsv", f"{HERE}/__no_multiwin__.tsv", "62"]
+    sys.path.insert(0, HERE)
+    import score_v3  # noqa: E402
+
+    albums = score_v3.load()
+    prod = {(x["variant"], x["slug"]): x
+            for x in json.load(open(f"{HERE}/albums-{tag}.json"))}
+    dtrk, dalb = load_derrien(tag)
+
+    rows = []
+    for variant, per_slug in sorted(albums.items()):
+        for slug, (tr, cl, wins) in sorted(per_slug.items()):
+            rec = {"variant": variant, "slug": slug, "n": len(tr)}
+            for T in THRESHOLDS:
+                score_v3.T_ULTRA = T
+                denied, legs = score_v3.gate(tr, cl, wins)
+                rec[f"denied@{T:g}"] = denied
+                rec[f"legs@{T:g}"] = legs
+            vv = list(wins[0].values()) if 0 in wins else []
+            rec["U_win0"] = (sum(v[0] - sum(v[18:21]) / 3.0 for v in vv) / len(vv)) \
+                if vv else None
+            p = prod.get((variant, slug), {})
+            rec["U_prod"] = p.get("ultrasonic_deficit_db")
+            rec["prod_grade"] = p.get("grade")
+            rec["prod_cliff"] = p.get("cliff_hz")
+            rec["prod_codec_family"] = p.get("codec_family")
+            rec["cliff_frac<=19k"] = sum(1 for c, _d in cl if c and c <= 19000) / len(cl)
+            d = dalb.get((variant, slug), [])
+            if d:
+                pv = [float(x["proba"]) for x in d]
+                zv = [float(x["z"]) for x in d]
+                rec["derrien_proba_max"] = max(pv)
+                rec["derrien_proba_med"] = statistics.median(pv)
+                rec["derrien_z_max"] = max(zv)
+                rec["derrien_offsets"] = sorted({x["offset"] for x in d})
+                rec["derrien_n"] = len(d)
+            rows.append(rec)
+
+    json.dump(rows, open(f"{HERE}/gate-{tag}.json", "w"), indent=1)
+
+    # ---- per-track TSV -------------------------------------------------
+    tcols = ["slug", "variant", "codec_family", "encoder", "setting", "path",
+             "grade", "cliff_hz", "est_kbps", "hf_deficit_db", "ref_db"]
+    with open(f"{HERE}/tracks-{tag}.tsv", "w") as fh:
+        fh.write("\t".join(tcols + ["derrien_proba", "derrien_z",
+                                    "derrien_offset"]) + "\n")
+        for r in csv.reader(open(f"{HERE}/results-{tag}.tsv"), delimiter="\t"):
+            d = dtrk.get((r[1], r[5]), {})
+            fh.write("\t".join(r[:11] + [d.get("proba", ""), d.get("z", ""),
+                                         d.get("offset", "")]) + "\n")
+
+    # ---- report --------------------------------------------------------
+    by = {}
+    for r in rows:
+        by.setdefault(r["variant"], []).append(r)
+
+    print(f"\n{'album':<36}{'U(win0)':>8}  {'T=62':>22}  {'T=59.5':>22}"
+          f"  {'derr pmax':>10}")
+    for variant in sorted(by):
+        print(f"\n--- {variant} ---")
+        for r in sorted(by[variant], key=lambda x: x["slug"]):
+            def leg(T):
+                return ("DENY " + ",".join(r[f"legs@{T:g}"])) \
+                    if r[f"denied@{T:g}"] else "PROOF"
+            dp = r.get("derrien_proba_max")
+            print(f"{r['slug'][:35]:<36}{r['U_win0']:>8.2f}  {leg(62):>22}  "
+                  f"{leg(59.5):>22}  {dp if dp is None else f'{dp:10.4f}'}")
+        for T in THRESHOLDS:
+            d = sum(1 for r in by[variant] if r[f"denied@{T:g}"])
+            print(f"    T={T:g}: DENIED {d}/{len(by[variant])}  "
+                  f"reached PROOF {len(by[variant]) - d}/{len(by[variant])}")
+
+    # ---- paired deltas vs the control ---------------------------------
+    ctl = {r["slug"]: r for r in by.get(a.control, [])}
+    if ctl:
+        print(f"\n=== paired U delta vs control '{a.control}' ===")
+        for variant in sorted(by):
+            if variant == a.control:
+                continue
+            ds = [r["U_win0"] - ctl[r["slug"]]["U_win0"]
+                  for r in by[variant] if r["slug"] in ctl]
+            if not ds:
+                continue
+            ds.sort()
+            print(f"  {variant:<16} n={len(ds):2d}  mean {sum(ds) / len(ds):+7.2f}  "
+                  f"median {ds[len(ds) // 2]:+7.2f}  min {ds[0]:+7.2f}  "
+                  f"max {ds[-1]:+7.2f}")
+
+    # ---- Derrien separation -------------------------------------------
+    gen = [float(x["proba"]) for k, x in dtrk.items() if k[0] == a.control]
+    if gen:
+        lam0 = max(gen)
+        print(f"\n=== Derrien (track level, mode=high) ===")
+        print(f"  control '{a.control}': n={len(gen)} max proba {lam0:.4f}  "
+              f"paper lambda {PAPER_LAMBDA}  FP@paper "
+              f"{sum(1 for v in gen if v > PAPER_LAMBDA)}/{len(gen)}")
+        for variant in sorted({k[0] for k in dtrk}):
+            if variant == a.control:
+                continue
+            v = [float(x["proba"]) for k, x in dtrk.items() if k[0] == variant]
+            print(f"  {variant:<16} n={len(v):3d} med {statistics.median(v):.4f} "
+                  f"max {max(v):.4f}  recall@paper "
+                  f"{sum(1 for x in v if x > PAPER_LAMBDA) / len(v) * 100:5.1f}%  "
+                  f"recall@zeroFP({lam0:.4f}) "
+                  f"{sum(1 for x in v if x > lam0) / len(v) * 100:5.1f}%")
+
+    print(f"\nwrote gate-{tag}.json, tracks-{tag}.tsv")
+
+
+if __name__ == "__main__":
+    main()

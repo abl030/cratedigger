@@ -1,0 +1,117 @@
+"""Reconstruct a CD TOC from track-split FLAC files and query CTDB / AccurateRip.
+
+Read-only probe. No repository files touched.
+"""
+import hashlib
+import base64
+import os
+import struct
+import sys
+import urllib.request
+
+SECTOR = 588  # samples per CD sector at 44100 Hz
+
+
+def streaminfo(path):
+    with open(path, "rb") as fh:
+        magic = fh.read(4)
+        if magic != b"fLaC":
+            raise ValueError(f"not flac: {path}")
+        hdr = fh.read(4)
+        block_type = hdr[0] & 0x7F
+        length = struct.unpack(">I", b"\x00" + hdr[1:4])[0]
+        if block_type != 0:
+            raise ValueError("first block not STREAMINFO")
+        data = fh.read(length)
+    bits = int.from_bytes(data[10:18], "big")
+    sample_rate = (bits >> 44) & 0xFFFFF
+    channels = ((bits >> 41) & 0x7) + 1
+    bps = ((bits >> 36) & 0x1F) + 1
+    total = bits & 0xFFFFFFFFF
+    return sample_rate, channels, bps, total
+
+
+def toc_from_dir(d):
+    files = sorted(f for f in os.listdir(d) if f.lower().endswith(".flac"))
+    lens = []
+    meta = []
+    for f in files:
+        sr, ch, bps, total = streaminfo(os.path.join(d, f))
+        meta.append((f, sr, ch, bps, total))
+        lens.append(total)
+    return files, meta, lens
+
+
+def build_toc(lens):
+    """offsets[0]=0, cumulative; leadout = total. All in sectors."""
+    offs = [0]
+    acc = 0
+    for L in lens:
+        acc += L
+        offs.append(acc // SECTOR)
+    return offs
+
+
+def cddbid(toc):
+    n = len(toc) - 1
+    s = "".join(str(abs(toc[t]) // 75 + 2) for t in range(n))
+    id0 = sum(ord(c) - ord("0") for c in s)
+    return "%02X%04X%02X" % (id0 % 255, abs(toc[n]) // 75 - abs(toc[0]) // 75, n)
+
+
+def arid(toc):
+    n = len(toc) - 1
+    d1 = d2 = 0
+    k = 0
+    for t in range(n):
+        o = toc[t]
+        d1 += o
+        k += 1
+        d2 += max(1, o) * k
+    lead = abs(toc[n])
+    d1 += lead
+    k += 1
+    d2 += max(1, lead) * k
+    return "%08x-%08x-%s" % (d1 & 0xFFFFFFFF, d2 & 0xFFFFFFFF, cddbid(toc).lower())
+
+
+def mbid(toc):
+    n = len(toc) - 1
+    s = "01" + "%02X" % n + "%08X" % (toc[n] + 150)
+    for t in range(n):
+        s += "%08X" % (toc[t] + 150)
+    s = s.ljust(804, "0")
+    h = hashlib.sha1(s.encode("ascii")).digest()
+    return base64.b64encode(h).decode().replace("+", ".").replace("/", "_").replace("=", "-")
+
+
+def ctdb_lookup(toc):
+    tocstr = ":".join(str(x) for x in toc)
+    url = ("https://db.cue.tools/lookup2.php?version=3&ctdb=1&fuzzy=1"
+           "&metadata=default&toc=" + tocstr)
+    req = urllib.request.Request(url, headers={"User-Agent": "CTDBProbe 1.0 (research)"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.read().decode("utf-8", "replace")
+
+
+if __name__ == "__main__":
+    d = sys.argv[1]
+    files, meta, lens = toc_from_dir(d)
+    print(f"== {d}")
+    misaligned = [(f, t % SECTOR) for (f, sr, ch, bps, t) in meta if t % SECTOR]
+    for f, sr, ch, bps, t in meta:
+        print(f"  {f[:45]:45s} sr={sr} ch={ch} bps={bps} samples={t} "
+              f"sectors={t/SECTOR:.4f} rem={t % SECTOR}")
+    print(f"  sector-misaligned tracks: {len(misaligned)}/{len(meta)}")
+    toc = build_toc(lens)
+    print(f"  TOC: {':'.join(str(x) for x in toc)}")
+    print(f"  ARID:  {arid(toc)}")
+    print(f"  CDDB:  {cddbid(toc)}")
+    print(f"  MBID:  {mbid(toc)}")
+    if "--lookup" in sys.argv:
+        try:
+            xml = ctdb_lookup(toc)
+            print("  CTDB response (first 1500 chars):")
+            print("  " + xml[:1500].replace("\n", "\n  "))
+        except Exception as exc:  # noqa: BLE001
+            print(f"  CTDB lookup failed: {exc!r}")

@@ -1,0 +1,35 @@
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import subprocess, zlib, re
+from toc_probe import toc_from_dir, build_toc, ctdb_lookup
+from arverify import fetch_ar, parse_ar, ar_checksums
+import numpy as np
+
+ALBUMS = sys.argv[1:]
+for d in ALBUMS:
+    files, meta, lens = toc_from_dir(d)
+    n = len(files); toc = build_toc(lens)
+    raws = [subprocess.run(["flac","-d","-c","--totally-silent","--force-raw-format",
+             "--endian=little","--sign=signed", os.path.join(d,f)],
+             capture_output=True, check=True).stdout for f in files]
+    # CTDB
+    xml = ctdb_lookup(toc)
+    ent = re.findall(r'confidence="(\d+)"[^>]*crc32="([0-9a-f]+)"[^>]*trackcrcs="([^"]*)"', xml)
+    want = {}
+    for conf, dcrc, tc in ent:
+        for i, c in enumerate(tc.split()):
+            want.setdefault(i, {}).setdefault(int(c,16), 0)
+            want[i][int(c,16)] = max(want[i][int(c,16)], int(conf))
+    ctdb_hits = sum(1 for i,r in enumerate(raws) if (zlib.crc32(r)&0xFFFFFFFF) in want.get(i,{}))
+    # AR
+    _u, blob = fetch_ar(toc)
+    ar1 = ar2 = 0
+    if blob:
+        blocks = parse_ar(blob, n)
+        for i, r in enumerate(raws):
+            arr = np.frombuffer(r, dtype="<u4")
+            c1, c2 = ar_checksums(arr, i+1, n)
+            if any(i < len(b) and b[i][0] > 0 and b[i][1] == c1 for b in blocks): ar1 += 1
+            if any(i < len(b) and b[i][0] > 0 and b[i][2] == c2 for b in blocks): ar2 += 1
+    print(f"{os.path.basename(d)[:44]:44s} n={n:2d} CTDBentries={len(ent):3d} "
+          f"CTDBtrk={ctdb_hits}/{n} ARv1={ar1}/{n} ARv2={ar2}/{n}")

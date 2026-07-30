@@ -1,0 +1,27 @@
+"""Q2: floor from the ultrasonic deficit U itself (the proof leg's own statistic), LOO by album."""
+import json, bisect
+from collections import defaultdict
+from statistics import median
+F=json.load(open('/home/abl030/.claude/jobs/fb229c18/tmp/floor/feats.json'))
+Q=json.load(open('/home/abl030/.claude/jobs/fb229c18/tmp/floor/q2feats.json'))
+KB={(r['ds'],r['slug'],r['variant']):r['kbps'] for r in Q}
+LOSSLESS=10000
+for tag,dss in (('ARMS (17 variants w/ ultrasonic data)',{'TRAIN','R1','R2','R3'}),('MATRIX19 (26 variants)',{'LOCAL','LOCALW','APPLE'})):
+    pool=[(r,KB[(r['ds'],r['slug'],r['variant'])]) for r in F if r['ds'] in dss and (r['ds'],r['slug'],r['variant']) in KB]
+    res=[]
+    for a in sorted({(r['ds'],r['slug']) for r,_ in pool}):
+        tr=[(r,k) for r,k in pool if (r['ds'],r['slug'])!=a]
+        pts=sorted((r['U'],k) for r,k in tr); xs=[];mins=[];m=10**9
+        for x,k in pts: m=min(m,k); xs.append(x); mins.append(m)   # F(u)=min kbps over rows with U<=u
+        def Ff(u):
+            i=bisect.bisect_right(xs,u)-1
+            return mins[i] if i>=0 else LOSSLESS
+        for r,k in ((r,k) for r,k in pool if (r['ds'],r['slug'])==a): res.append((r,k,Ff(r['U'])))
+    ok=sum(1 for _r,k,f in res if k>=f)
+    print(f"\n=== {tag}: floor from U (LOO by album). n={len(res)}  correctness {ok}/{len(res)}={100*ok/len(res):.1f}% ===")
+    byv=defaultdict(list)
+    for r,k,f in res: byv[r['variant']].append((f,k,r['U']))
+    for v in sorted(byv, key=lambda v: median(x[2] for x in byv[v])):
+        fs=sorted(x[0] for x in byv[v])
+        if len(fs)<5: continue
+        print(f"    {v:<18}true {('LL' if byv[v][0][1]==LOSSLESS else byv[v][0][1]):>6}  medU {median(x[2] for x in byv[v]):>5.1f}  floor med {median(fs):>6.0f}  p90 {fs[int(.9*len(fs))]:>6}  viol {sum(1 for f,k,_u in byv[v] if k<f)}")

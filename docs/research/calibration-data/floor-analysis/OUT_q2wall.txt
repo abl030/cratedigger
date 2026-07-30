@@ -1,0 +1,37 @@
+cratedigger dev shell — run: python3 -m unittest discover -s tests -t . -v
+
+=== ARMS: floor from a WALL signature (ceiling leg, no cliff). n=612 candidates; LOO by album ===
+    correctness 611/612 = 99.8%   median floor 96
+    opus-96           true     96  n=54   floor med     96  min    96  viol 0
+    t-opus96-flac     true     96  n=95   floor med     96  min    96  viol 1
+    vorbis-q5         true    160  n=31   floor med     96  min    96  viol 0
+    t-vorbisq5-flac   true    160  n=36   floor med     96  min    96  viol 0
+    vorbis-q6         true    192  n=16   floor med     96  min    96  viol 0
+    lame-cbr224       true    224  n=91   floor med     96  min    96  viol 0
+    lame-v0           true    245  n=17   floor med     96  min    96  viol 0
+    lame-cbr256       true    256  n=92   floor med     96  min    96  viol 0
+    opus-256          true    256  n=51   floor med     96  min    96  viol 0
+    apple-cvbr256     true    256  n=5    floor med     96  min    96  viol 0
+    lame-cbr320       true    320  n=90   floor med     96  min    96  viol 0
+    vorbis-q9         true    320  n=20   floor med     96  min    96  viol 0
+    control-flac1644  true     LL  n=14   floor med     96  min    96  viol 0
+
+=== MATRIX19: floor from a WALL signature (ceiling leg, no cliff). n=186 candidates; LOO by album ===
+    correctness 185/186 = 99.5%   median floor 96
+    opus-96           true     96  n=19   floor med     96  min    96  viol 1
+    wma-128           true    128  n=4    floor med     96  min    96  viol 0
+    vorbis-q5         true    160  n=6    floor med     96  min    96  viol 0
+    qaac-abr192       true    192  n=12   floor med     96  min    96  viol 0
+    aacffm-192        true    192  n=17   floor med     96  min    96  viol 0
+    opus-192          true    192  n=19   floor med     96  min    96  viol 0
+    wma-192           true    192  n=5    floor med     96  min    96  viol 0
+    lame-v0           true    245  n=3    floor med     96  min    96  viol 0
+    qaac-tvbr91       true    256  n=12   floor med     96  min    96  viol 0
+    qaac-cvbr256      true    256  n=3    floor med     96  min    96  viol 0
+    lame-cbr256       true    256  n=17   floor med     96  min    96  viol 0
+    opus-256          true    256  n=19   floor med     96  min    96  viol 0
+    lame-cbr320       true    320  n=18   floor med     96  min    96  viol 0
+    wma-320           true    320  n=7    floor med     96  min    96  viol 0
+    vorbis-q10        true    500  n=4    floor med     96  min    96  viol 0
+    genuine           true     LL  n=6    floor med     96  min    96  viol 0
+    null-flac         true     LL  n=6    floor med     96  min    96  viol 0

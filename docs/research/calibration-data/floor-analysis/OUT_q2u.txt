@@ -1,0 +1,51 @@
+cratedigger dev shell — run: python3 -m unittest discover -s tests -t . -v
+
+=== ARMS (17 variants w/ ultrasonic data): floor from U (LOO by album). n=1634  correctness 1629/1634=99.7% ===
+    control-flac1644  true     LL  medU  54.7  floor med     96  p90     96  viol 0
+    apple-cvbr256     true    256  medU  59.0  floor med     96  p90     96  viol 1
+    lame-v0           true    245  medU  60.0  floor med     96  p90     96  viol 1
+    vorbis-q9         true    320  medU  61.5  floor med     96  p90     96  viol 1
+    opus-256          true    256  medU  63.2  floor med     96  p90     96  viol 0
+    opus-96           true     96  medU  63.2  floor med     96  p90     96  viol 1
+    vorbis-q6         true    192  medU  65.4  floor med     96  p90     96  viol 1
+    vorbis-q5         true    160  medU  71.4  floor med     96  p90     96  viol 0
+    t-vorbisq5-flac   true    160  medU  73.3  floor med     96  p90     96  viol 0
+    t-mp3128-aac256   true    128  medU  76.2  floor med     96  p90     96  viol 0
+    t-opus96-flac     true     96  medU  76.6  floor med     96  p90     96  viol 0
+    t-aac128-mp3320   true    128  medU  76.6  floor med     96  p90     96  viol 0
+    t-mp3192-mp3320   true    192  medU  77.5  floor med     96  p90     96  viol 0
+    lame-cbr256       true    256  medU  77.6  floor med     96  p90     96  viol 0
+    t-mp3128-flac     true    128  medU  77.7  floor med     96  p90     96  viol 0
+    lame-cbr224       true    224  medU  77.9  floor med     96  p90     96  viol 0
+    lame-cbr320       true    320  medU  78.0  floor med     96  p90     96  viol 0
+
+=== MATRIX19 (26 variants): floor from U (LOO by album). n=617  correctness 608/617=98.5% ===
+    aacffm-256        true    256  medU  52.4  floor med    192  p90    192  viol 1
+    aacffm-320        true    320  medU  52.4  floor med    192  p90    192  viol 1
+    genuine           true     LL  medU  52.6  floor med    192  p90    192  viol 0
+    null-flac         true     LL  medU  52.6  floor med    192  p90    192  viol 0
+    vorbis-q10        true    500  medU  53.7  floor med    192  p90    192  viol 1
+    qaac-cvbr256      true    256  medU  54.0  floor med    192  p90    192  viol 0
+    qaac-cvbr320      true    320  medU  54.0  floor med    192  p90    192  viol 0
+    lame-v0           true    245  medU  57.8  floor med    160  p90    192  viol 1
+    vorbis-q8         true    256  medU  63.0  floor med     96  p90    192  viol 0
+    vorbis-q7         true    224  medU  64.1  floor med     96  p90    192  viol 1
+    vorbis-q6         true    192  medU  65.3  floor med     96  p90    192  viol 1
+    vorbis-q5         true    160  medU  70.0  floor med     96  p90    128  viol 1
+    wma-128           true    128  medU  70.1  floor med     96  p90     96  viol 1
+    aacffm-192        true    192  medU  71.4  floor med     96  p90     96  viol 0
+    opus-96           true     96  medU  71.8  floor med     96  p90     96  viol 1
+    qaac-cbr128       true    128  medU  71.8  floor med     96  p90     96  viol 0
+    vorbis-q4         true    128  medU  71.8  floor med     96  p90     96  viol 0
+    wma-192           true    192  medU  72.1  floor med     96  p90     96  viol 0
+    opus-192          true    192  medU  72.3  floor med     96  p90     96  viol 0
+    aacffm-128        true    128  medU  72.3  floor med     96  p90     96  viol 0
+    wma-320           true    320  medU  72.8  floor med     96  p90     96  viol 0
+    opus-256          true    256  medU  73.3  floor med     96  p90     96  viol 0
+    lame-v2           true    190  medU  73.4  floor med     96  p90     96  viol 0
+    qaac-abr192       true    192  medU  74.1  floor med     96  p90     96  viol 0
+    qaac-tvbr91       true    256  medU  74.5  floor med     96  p90     96  viol 0
+    lame-cbr128       true    128  medU  74.9  floor med     96  p90     96  viol 0
+    lame-cbr320       true    320  medU  74.9  floor med     96  p90     96  viol 0
+    lame-cbr256       true    256  medU  75.2  floor med     96  p90     96  viol 0
+    lame-cbr192       true    192  medU  75.7  floor med     96  p90     96  viol 0

@@ -1,0 +1,64 @@
+"""Build the source-track manifest from sources.tsv (rid<TAB>album_dir)."""
+import json
+import os
+import subprocess
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SRC = os.path.join(HERE, "sources.tsv")
+OUT = os.path.join(HERE, "manifest.json")
+
+
+def probe(path):
+    p = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "a:0",
+         "-show_entries",
+         "stream=sample_rate,channels,bits_per_raw_sample,codec_name",
+         "-show_entries", "format=duration", "-of", "json", path],
+        capture_output=True, text=True, check=True)
+    d = json.loads(p.stdout)
+    st = d["streams"][0]
+    return {
+        "path": path,
+        "sr": int(st.get("sample_rate", 0)),
+        "ch": int(st.get("channels", 0)),
+        "bits": st.get("bits_per_raw_sample"),
+        "codec": st.get("codec_name"),
+        "dur": float(d["format"]["duration"]),
+    }
+
+
+def main():
+    out = []
+    for ln in open(SRC):
+        ln = ln.rstrip("\n")
+        if "\t" not in ln:
+            continue
+        rid, path = ln.split("\t", 1)
+        if not os.path.isdir(path):
+            print(f"MISSING DIR {rid}: {path}", file=sys.stderr)
+            continue
+        tracks = sorted(os.path.join(path, f) for f in os.listdir(path)
+                        if f.lower().endswith(".flac"))
+        out.append({"request_id": int(rid), "album_dir": path,
+                    "tracks": [probe(t) for t in tracks]})
+    out.sort(key=lambda a: a["request_id"])
+    json.dump(out, open(OUT, "w"), indent=1)
+
+    print(f"{'rid':>5} {'n':>3} {'sr':>7} {'bit':>3} {'min':>6}  album")
+    hires = []
+    for a in out:
+        srs = sorted({t["sr"] for t in a["tracks"]})
+        bits = sorted({str(t["bits"]) for t in a["tracks"]})
+        mins = sum(t["dur"] for t in a["tracks"]) / 60
+        if max(srs) > 48000:
+            hires.append(a["request_id"])
+        print(f"{a['request_id']:>5} {len(a['tracks']):>3} {'/'.join(map(str, srs)):>7} "
+              f"{'/'.join(bits):>3} {mins:>6.1f}  {os.path.basename(a['album_dir'])[:46]}")
+    print(f"\nHI-RES (>48 kHz, exclude from the pilot): {hires}")
+    print(f"TOTAL {len(out)} albums, {sum(len(a['tracks']) for a in out)} tracks, "
+          f"{sum(t['dur'] for a in out for t in a['tracks']) / 60:.0f} min")
+
+
+if __name__ == "__main__":
+    main()

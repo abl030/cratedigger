@@ -1,0 +1,91 @@
+"""Q1 DEFINITIVE. Two evaluations:
+   (A) shipped multiwin gate on the 100 arm albums (control + 3 FLAC-fraud classes) -- full multiwin features.
+   (B) window-0 gate over the FULL variant set (arms + new 19-album matrix), deduped.
+   Precondition family: NO-WALL = (no track shows an in-window cliff) AND (max ceiling-step over windows < s).
+"""
+import sys, json
+sys.path.insert(0,'/home/abl030/.claude/jobs/fb229c18/tmp/floor')
+from load import *
+from collections import defaultdict
+
+ARMS={'TRAIN':('results.tsv.gz','extended.tsv.gz','multiwin.tsv.gz'),
+ 'R1':('results-holdout.tsv.gz','extended-holdout.tsv.gz','multiwin-holdout.tsv.gz'),
+ 'R2':('results-holdout2.tsv.gz','extended-holdout2.tsv.gz','multiwin-holdout2.tsv.gz'),
+ 'R3':('results-holdout3.tsv.gz','extended-holdout3.tsv.gz','multiwin-holdout3.tsv.gz')}
+GENV='control-flac1644'; FRAUD=('t-mp3128-flac','t-opus96-flac','t-vorbisq5-flac')
+
+MW={}
+for arm,(r,e,m) in ARMS.items():
+    A=load_arm(CAL+'/'+r,CAL+'/'+e,CAL+'/'+m)
+    for v in (GENV,)+FRAUD:
+        for slug,(tr,cl,wins) in A[v].items():
+            steps=[];Us=[]
+            for off,vv in wins.items():
+                if len(vv)>=2:
+                    ceil,nu,U,step,cons=window_legs(list(vv.values()),62.0)
+                    steps.append(step);Us.append(U)
+            cf=sum(1 for c,_d in cl if c and c<=19000)/len(cl)
+            MW[(arm,slug,v)]={'step_max':max(steps),'U_max':max(Us),'cliff_frac':cf,
+                              'legs':{T:set(gate(tr,cl,wins,T)[1]) for T in (62.0,59.5)}}
+
+print("=== (A) SHIPPED MULTIWIN GATE, 100 arm albums ===")
+for T in (62.0,59.5):
+    uni={k:v for k,v in MW.items() if v['legs'][T]=={'no-ultrasonic'}}
+    gtot=sum(1 for k in uni if k[2]==GENV); ltot=sum(1 for k in uni if k[2] in FRAUD)
+    gden=sum(1 for k,v in MW.items() if k[2]==GENV and v['legs'][T])
+    print(f"\nT={T}: genuine denied {gden}/100; of those, ultrasonic-leg-ONLY = {gtot}. "
+          f"Launder albums uniquely held by that leg = {ltot}/300.")
+    print(f"{'rule':<28}{'genuine->UNTESTABLE':>21}{'launder->UNTESTABLE':>21}{'  per-class':<24}{'lift':>7}")
+    for s in (20,15,12,10,8,6,4,2):
+        f=lambda v: v['cliff_frac']==0.0 and v['step_max']<s
+        g=sum(1 for k,v in uni.items() if k[2]==GENV and f(v))
+        per={c:(sum(1 for k,v in uni.items() if k[2]==c and f(v)), sum(1 for k in uni if k[2]==c)) for c in FRAUD}
+        l=sum(p[0] for p in per.values())
+        exp=gtot*l/ltot if ltot else 0
+        lift=g/exp if exp>0 else None
+        print(f"{'nocliff & step_max<%g'%s:<28}{f'{g}/{gtot}':>21}{f'{l}/{ltot}':>21}"
+              f"  {' '.join(f'{c[2:9]}:{per[c][0]}/{per[c][1]}' for c in FRAUD):<24}"
+              + (f"{lift:>7.2f}" if lift is not None else f"{'inf' if g else '--':>7}"))
+
+# ---------- (B) window-0, full variant set ----------
+R=json.load(open('/home/abl030/.claude/jobs/fb229c18/tmp/floor/feats.json'))
+def w0legs(r,T):
+    L=set()
+    if r['cliff_frac']>=0.6: L.add('cliff')
+    if r['step']>=15.0 and r['cons']>=0.5: L.add('ceiling')
+    if r['U']>=T: L.add('ultra')
+    return L
+# dedupe matrix genuine/null-flac across the three matrix datasets
+seen=set(); MX=[]
+for r in R:
+    if r['ds'] not in ('LOCAL','LOCALW','APPLE'): continue
+    key=(r['slug'], 'genuine' if r['variant'] in ('genuine','null-flac') else r['variant'])
+    if r['variant'] in ('genuine','null-flac'):
+        if key in seen: continue
+        seen.add(key); r=dict(r); r['variant']='genuine'
+    MX.append(r)
+ARM=[r for r in R if r['ds'] in ('TRAIN','R1','R2','R3')]
+for gname,rows,gv in (('ARMS (100 albums)',ARM,'control-flac1644'),('NEW MATRIX (19 albums)',MX,'genuine')):
+    T=62.0
+    uni=[r for r in rows if w0legs(r,T)=={'ultra'}]
+    gtot=sum(1 for r in uni if r['variant']==gv)
+    ltot=sum(1 for r in uni if r['variant']!=gv)
+    gden=sum(1 for r in rows if r['variant']==gv and w0legs(r,T))
+    gn=sum(1 for r in rows if r['variant']==gv)
+    print(f"\n=== (B) WINDOW-0 GATE, {gname}, T=62 ===")
+    print(f"    genuine denied {gden}/{gn}; ultrasonic-leg-ONLY genuine {gtot}; launder candidates uniquely held by that leg {ltot}")
+    print(f"{'rule':<26}{'genuine->UNT':>14}{'launder->UNT':>14}{'lift':>7}   worst-hit launder classes")
+    for s in (20,15,12,10,8,6,4,2):
+        f=lambda r: r['cliff_frac']==0.0 and r['step']<s
+        g=sum(1 for r in uni if r['variant']==gv and f(r))
+        hits=defaultdict(lambda:[0,0])
+        for r in uni:
+            if r['variant']==gv: continue
+            hits[r['variant']][1]+=1
+            if f(r): hits[r['variant']][0]+=1
+        l=sum(h[0] for h in hits.values())
+        exp=gtot*l/ltot if ltot else 0
+        top=sorted((k for k in hits if hits[k][0]), key=lambda k:-hits[k][0])[:4]
+        print(f"{'nocliff & step<%g'%s:<26}{f'{g}/{gtot}':>14}{f'{l}/{ltot}':>14}"
+              + (f"{g/exp:>7.2f}" if exp>0 else f"{'--':>7}")
+              + "   " + " ".join(f"{k}:{hits[k][0]}/{hits[k][1]}" for k in top))

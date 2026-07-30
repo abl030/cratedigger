@@ -1,0 +1,149 @@
+"""Validation of the numpy Derrien port: MDCT identity, tau null, end-to-end."""
+import sys
+import numpy as np
+
+sys.path.insert(0, "/home/abl030/.claude/jobs/fb229c18/tmp/derrien")
+import aacdet as A  # noqa: E402
+
+rng = np.random.default_rng(7)
+ok = True
+
+
+def check(name, cond, detail=""):
+    global ok
+    ok = ok and bool(cond)
+    print(f"{'PASS' if cond else 'FAIL'}  {name}  {detail}")
+
+
+# --- 1. MDCT matches the textbook direct-sum definition -----------------
+def mdct_direct(x):
+    n2 = len(x)
+    n = n2 // 2
+    t = np.arange(n2)
+    out = np.empty(n)
+    for k in range(n):
+        out[k] = np.sum(x * np.cos(np.pi / n * (t + 0.5 + n / 2) * (k + 0.5)))
+    return out
+
+
+x = rng.standard_normal(2048)
+a = A.mdct(x)
+b = mdct_direct(x)
+# The reference MDCT.m carries a sign/scale convention; compare up to that.
+r = a / b
+check("MDCT == direct DCT-IV definition (up to constant)",
+      np.allclose(r, r[0], rtol=1e-8, atol=1e-8) and abs(abs(r[0]) - 1) < 1e-9,
+      f"ratio={r[0]:.6f} maxdev={np.abs(r - r[0]).max():.2e}")
+
+# --- 2. MDCT/IMDCT TDAC perfect reconstruction with the sine window -----
+low_l, high_l, low_s, high_s, win = A.init_aac(44)
+w = win["long"]
+N = 1024
+sig = rng.standard_normal(N * 8)
+
+
+def imdct(X):
+    n = len(X)
+    t = np.arange(2 * n)
+    return (2.0 / n) * np.array(
+        [np.sum(X * np.cos(np.pi / n * (ti + 0.5 + n / 2) * (np.arange(n) + 0.5)))
+         for ti in t])
+
+
+rec = np.zeros_like(sig)
+scale = A.mdct(w * sig[0:2 * N])[0] / mdct_direct(w * sig[0:2 * N])[0]
+for f in range(len(sig) // N - 1):
+    seg = sig[f * N:(f + 2) * N] * w
+    X = A.mdct(seg) / scale
+    rec[f * N:(f + 2) * N] += imdct(X) * w
+mid = rec[N:-N]
+check("TDAC perfect reconstruction (sine window)",
+      np.allclose(mid, sig[N:-N], atol=1e-9),
+      f"max abs err={np.abs(mid - sig[N:-N]).max():.2e}")
+
+# --- 3. tau tables reproduce the 1% quantile of their stated null --------
+tau_l, tau_s = A.tau_tables(low_l, high_l, low_s, high_s)
+widths = (high_l - low_l + 1)[:len(tau_l) - 1]
+rows = []
+for wdt in sorted(set(widths.tolist())):
+    idx = int(np.nonzero(widths == wdt)[0][0])
+    e = rng.uniform(-0.5, 0.5, size=(200000, int(wdt)))
+    m = (e ** 2).mean(axis=1)
+    emp = np.quantile(m, 0.01)
+    rows.append((wdt, tau_l[idx], emp, abs(tau_l[idx] - emp) / emp))
+worst = max(r[3] for r in rows)
+# The port reproduces main.m's formula exactly by construction; this check
+# measures how good that formula's Gaussian approximation actually is. It is
+# loose on narrow bands (the mean of 4 squared uniform errors is far from
+# Gaussian), which makes tau CONSERVATIVE there - a finding about the paper,
+# not a defect in the port.
+check("tau(s) formula is conservative vs the true null (never anti-conservative)",
+      all(t <= e * 1.001 for _w, t, e, _d in rows),
+      f"worst rel err={worst:.3f} over widths {sorted(set(widths.tolist()))}")
+for wdt, t, e, d in rows:
+    print(f"      width={wdt:4d}  tau={t:.5f}  empirical={e:.5f}  rel={d:.3f}")
+
+# --- 4. End-to-end: a synthetic signal carrying an exact AAC lattice -----
+# Build a signal whose MDCT coefficients ARE on the power-law quantisation
+# lattice at a known offset, and confirm the detector spikes there.
+nb_sf = 8
+sf = np.linspace(0.3, 0.7, nb_sf)
+plans = (A.BandPlan(low_l, high_l, A.IBLEN_LONG, 1),
+         A.BandPlan(low_s, high_s, A.IBLEN_SHORT, A.NB_SHORT_WIN))
+
+nfr = 24
+true_off = 313
+# A real analysis -> per-band quantisation -> synthesis round trip. Frames must
+# come from ONE underlying signal, otherwise TDAC aliasing never cancels and no
+# lattice survives in the output.
+src = rng.standard_normal(N * (nfr + 4))
+src = np.convolve(src, np.ones(12) / 12.0, mode="same")
+src = src / np.abs(src).max() * 0.7   # realistic scale; do NOT rescale after
+                                      # quantising - the power-law lattice is
+                                      # not scale-invariant.
+rec = np.zeros_like(src)
+for f in range(nfr + 2):
+    s0 = true_off + f * N
+    X = A.mdct(src[s0:s0 + 2 * N] * w) / scale
+    Xq = X.copy()
+    for bnd in range(len(low_l) - 1):
+        lo, hi = low_l[bnd], high_l[bnd] + 1
+        seg_ = X[lo:hi]
+        mx = np.abs(seg_).max()
+        if mx <= 0:
+            continue
+        sfm = 4 * np.log2(mx) + 16 / 3 + 60
+        frac = float(rng.choice(sf))   # draw from the detector's own grid
+        q = 2 ** (-3 / 16 * (frac * sfm - 60))
+        Xq[lo:hi] = np.sign(seg_) * (np.rint(np.abs(seg_) ** 0.75 * q) / q) ** (4 / 3)
+    rec[s0:s0 + 2 * N] += imdct(Xq) * w
+sig = rec
+
+frames = np.arange(4, 4 + 8)
+offs = np.arange(0, N, 1)
+segm = np.stack([sig[(fr - 1) * N: (fr - 1) * N + 2 * N + N - 1] for fr in frames])
+p = A.detect_aac(segm, offs, sf, plans, win, tau_l, tau_s)
+check("synthetic AAC codec round trip -> detector peaks at the true offset",
+      int(np.argmax(p)) == true_off,
+      f"argmax={int(np.argmax(p))} true={true_off} peak={p.max():.3f} "
+      f"median={np.median(p):.4f} z={(p.max() - np.median(p)) / p.std():.1f}")
+
+# White noise control: no lattice, statistic must sit near the null rate.
+noise = rng.standard_normal(N * (nfr + 4)) * 0.2
+segn = np.stack([noise[(fr - 1) * N: (fr - 1) * N + 2 * N + N - 1] for fr in frames])
+pn = A.detect_aac(segn, offs, sf, plans, win, tau_l, tau_s)
+check("white-noise control stays below the paper's lambda=0.031",
+      pn.max() < 0.031, f"max={pn.max():.4f} median={np.median(pn):.4f}")
+
+# --- 5. NAC probe on the same synthetic lattice --------------------------
+prof = A.nac_profile(segm, offs, win["long"])
+z = A.profile_zscore(prof)
+# Reported, not asserted: the Yang-style NAC probe is measured here and on the
+# real corpus to have no discriminating power at this bitrate.
+print(f"REPORT  NAC probe on the synthetic lattice: best={z['best_offset']} "
+      f"(true={true_off}) z={z['z']:.2f}")
+profn = A.nac_profile(segn, offs, win["long"])
+zn = A.profile_zscore(profn)
+print(f"      noise control NAC z={zn['z']:.2f}")
+
+print("\nOVERALL:", "PASS" if ok else "FAIL")

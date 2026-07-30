@@ -1,0 +1,56 @@
+"""Q2: leave-one-album-out launder-floor estimator."""
+import json
+from collections import defaultdict
+from statistics import median
+R=json.load(open('/home/abl030/.claude/jobs/fb229c18/tmp/floor/q2feats.json'))
+for r in R: r['album']=(r['ds'],r['slug'])
+LOSSLESS=10000
+STATS={'rel18':1,'edge_med':1,'edge_p25':1,'cliff_med':1,'cliff_min':1,'d18_195':-1,'d16_18':-1,'hfdef':-1}
+
+def floor_fn(train, key, sign):
+    pts=sorted(((sign*r[key], r['kbps']) for r in train))
+    # suffix min: F(s) = min kbps over rows with S>=s
+    xs=[]; mins=[]; m=10**9
+    for x,k in reversed(pts):
+        m=min(m,k); xs.append(x); mins.append(m)
+    xs.reverse(); mins.reverse()
+    import bisect
+    def F(s):
+        s=sign*s
+        i=bisect.bisect_left(xs,s)
+        return mins[i] if i<len(mins) else LOSSLESS
+    return F
+
+def loo(pool, keys):
+    albums=sorted({r['album'] for r in pool})
+    out=[]
+    for a in albums:
+        tr=[r for r in pool if r['album']!=a]; te=[r for r in pool if r['album']==a]
+        Fs=[(k,floor_fn(tr,k,STATS[k])) for k in keys]
+        for r in te:
+            f=max(F(r[k]) for k,F in Fs)
+            out.append((r,f))
+    return out
+
+def report(tag, pool, keys):
+    res=loo(pool,keys)
+    ok=sum(1 for r,f in res if r['kbps']>=f)
+    print(f"\n== {tag}  stats={keys}  n={len(res)}")
+    print(f"   correctness (true >= predicted floor): {ok}/{len(res)} = {100*ok/len(res):.1f}%")
+    byv=defaultdict(list)
+    for r,f in res: byv[r['variant']].append(f)
+    interesting=['control-flac1644','genuine','lame-v0','lame-cbr320','lame-cbr128','vorbis-q6','vorbis-q9','vorbis-q5',
+                 'aacffm-256','aacffm-128','apple-cvbr256','qaac-cvbr256','opus-256','opus-96','fdk-he1-64','fdk-he2-32',
+                 't-mp3128-flac','t-vorbisq5-flac','t-opus96-flac']
+    print(f"   {'variant':<20}{'n':>4}{'true kbps':>10}{'median floor':>14}{'p90 floor':>11}{'violations':>12}")
+    for v in interesting:
+        if v not in byv: continue
+        fs=sorted(byv[v]); k=[r['kbps'] for r,_ in res if r['variant']==v][0]
+        viol=sum(1 for r,f in res if r['variant']==v and r['kbps']<f)
+        print(f"   {v:<20}{len(fs):>4}{('lossless' if k==LOSSLESS else k):>10}{median(fs):>14.0f}{fs[int(.9*len(fs))]:>11.0f}{viol:>12}")
+
+ARM=[r for r in R if r['ds'] in ('TRAIN','R1','R2','R3')]
+MX=[r for r in R if r['ds'] in ('LOCAL','LOCALW','APPLE')]
+for keys in (['rel18'],['edge_med'],['cliff_med'],['rel18','edge_med'],['rel18','edge_med','cliff_med','d18_195','hfdef']):
+    report('ARMS (100 albums, full matrix)', ARM, keys)
+report('MATRIX19 (19 albums, wide codec set)', MX, ['rel18','edge_med','cliff_med','d18_195','hfdef'])

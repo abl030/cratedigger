@@ -1,0 +1,46 @@
+"""Q2 v3: floor conditioned on affirmative cliff evidence; and the album-heterogeneity diagnosis."""
+import json, bisect
+from collections import defaultdict
+from statistics import median
+R=json.load(open('/home/abl030/.claude/jobs/fb229c18/tmp/floor/q2feats.json'))
+for r in R: r['album']=(r['ds'],r['slug'])
+LOSSLESS=10000
+ARM=[r for r in R if r['ds'] in ('TRAIN','R1','R2','R3')]
+MX=[r for r in R if r['ds'] in ('LOCAL','LOCALW','APPLE')]
+
+print("=== DIAGNOSIS: is the floor dragged down by album heterogeneity? ===")
+ctl=[r['d18_195'] for r in ARM if r['variant']=='control-flac1644']
+print(f"  genuine-lossless d18_195 across 100 albums: min {min(ctl):.1f}  med {median(ctl):.1f}  max {max(ctl):.1f}  (spread {max(ctl)-min(ctl):.1f} dB)")
+for v in ('opus-32','opus-12','fdk-he1-64','lame-cbr128'):
+    x=[r['d18_195'] for r in ARM if r['variant']==v]
+    lo=sum(1 for y in x if y<=median(ctl))
+    print(f"  {v:<12} d18_195 min {min(x):.1f} med {median(x):.1f}; albums whose {v} looks better than the MEDIAN genuine album: {lo}/100")
+
+def floor_cliff(train):
+    pts=sorted((r['cliff_med'], r['kbps']) for r in train)
+    xs=[];mins=[];m=10**9
+    for x,k in reversed(pts): m=min(m,k); xs.append(x); mins.append(m)
+    xs.reverse(); mins.reverse()
+    def F(v):
+        i=bisect.bisect_left(xs,v)
+        return mins[i] if i<len(mins) else LOSSLESS
+    return F
+
+for tag,pool_all in (('ARMS',ARM),('MATRIX19',MX)):
+    pool=[r for r in pool_all if r['cliff_frac']>=0.6]
+    res=[]
+    for a in sorted({r['album'] for r in pool}):
+        F=floor_cliff([r for r in pool if r['album']!=a])
+        for r in (x for x in pool if x['album']==a): res.append((r,F(r['cliff_med'])))
+    ok=sum(1 for r,f in res if r['kbps']>=f)
+    print(f"\n=== {tag}: floor CONDITIONED on an affirmative cliff (cliff_frac>=0.6). n={len(res)} candidates ===")
+    print(f"    correctness: {ok}/{len(res)} = {100*ok/len(res):.1f}%")
+    byv=defaultdict(list)
+    for r,f in res: byv[r['variant']].append((f,r['kbps']))
+    print(f"    {'variant':<20}{'true':>7}{'n':>5}{'floor med':>11}{'floor p90':>11}{'viol':>6}")
+    for v in sorted(byv, key=lambda v: byv[v][0][1]):
+        fs=sorted(f for f,_ in byv[v]); k=byv[v][0][1]
+        if len(fs)<5: continue
+        print(f"    {v:<20}{('LL' if k==LOSSLESS else k):>7}{len(fs):>5}{median(fs):>11.0f}{fs[int(.9*len(fs))]:>11}{sum(1 for f,kk in byv[v] if kk<f):>6}")
+    cov=len(pool)/len(pool_all)
+    print(f"    coverage: {len(pool)}/{len(pool_all)} = {100*cov:.0f}% of all candidates have affirmative cliff evidence")

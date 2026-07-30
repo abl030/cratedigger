@@ -28,6 +28,33 @@ swept via its own ledger before the DB went. The measurements survive in
 `docs/research/calibration-data/` — that directory is now the only surviving
 evidence for every constant here.
 
+### Research status (2026-07-30) — ongoing; PR3 has not started
+
+Research did **not** stop when this plan was written, and a further round of
+measurement ran on 2026-07-30. It is committed under
+`docs/research/calibration-data/` as four new datasets, each with its own
+README carrying exact commands, tool versions and column layouts:
+
+| directory | what it is |
+|---|---|
+| `launder-matrix/` | 31 encoder variant IDs × 19 ground-truth albums, built as real launders, measured through the unmodified production analyzer and scored with a byte-identical copy of the frozen gate in single-window mode. 7,681 track rows. |
+| `derrien/` | a validated numpy port of Derrien's MDCT-lattice AAC-transcode detector (JAES 2019), with a 430-row paired arm and a 1500-row unlabelled arm from the quarantine trees. |
+| `floor-analysis/` | re-reading of the four committed arms plus the new matrix: preconditions, leave-one-album-out bitrate floors, a PROVED/BOUNDED/DENIED framing. No new audio. |
+| `provenance/` | read-only AccurateRip / CUETools DB / MusicBrainz DiscID probes over the library's 38 FLAC album directories — a non-spectral axis. |
+
+`docs/research/spectral-calibration-findings.md` § "2026-07-30 — further
+measurement, ongoing" summarises all four and names which existing claims they
+touch.
+
+**This is a status note, not a design change.** These datasets are recorded
+descriptively and deliberately draw no conclusions; the investigation was left
+open. Nothing in §1.5 or §3 below has been revised by them, and no decision in
+this plan should be read as either confirmed or overturned on their account.
+Each new README ends with an "Unexplored directions" section listing open
+questions and the data that would answer them.
+
+**PR3 has not started.**
+
 ---
 
 ## 1.5 Corrections since this plan was written — READ FIRST

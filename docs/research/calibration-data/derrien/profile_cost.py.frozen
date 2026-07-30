@@ -1,0 +1,41 @@
+"""Where does the per-track cost go, and how does it scale with nb_win/nb_sf?"""
+import sys
+import time
+import json
+import numpy as np
+
+sys.path.insert(0, "/home/abl030/.claude/jobs/fb229c18/tmp/derrien")
+import aacdet as A  # noqa: E402
+
+idx = json.load(open("/mnt/virtio/Music/derrien-arm/index.json"))
+g = idx["8916"]["map"][0]["genuine"]
+lau = idx["8916"]["map"][0]["launder"]
+
+t = time.time()
+eblk, rate, nch, total = A._block_energies(g)
+t_read = time.time() - t
+print(f"streaming energy pass (full file read): {t_read:.2f}s for "
+      f"{total / rate:.0f}s of audio")
+
+low_l, high_l, low_s, high_s, win = A.init_aac(44)
+tau_l, tau_s = A.tau_tables(low_l, high_l, low_s, high_s)
+plans = (A.BandPlan(low_l, high_l, A.IBLEN_LONG, 1),
+         A.BandPlan(low_s, high_s, A.IBLEN_SHORT, A.NB_SHORT_WIN))
+
+print(f"\n{'nb_win':>7s} {'nb_sf':>6s} {'stride':>7s} {'detect s':>9s} "
+      f"{'genuine':>9s} {'launder':>9s} {'gen z':>7s} {'lau z':>7s}")
+for nb_win, nb_sf, stride in ((8, 8, 1), (8, 8, 2), (8, 8, 4), (4, 8, 1),
+                              (8, 4, 1), (4, 4, 1), (16, 16, 1), (2, 8, 1)):
+    sfv = np.linspace(0.3, 0.7, nb_sf)
+    offs = np.arange(0, A.IBLEN_LONG, stride)
+    row = []
+    for path in (g, lau):
+        e2, r2, _, _ = A._block_energies(path)
+        fr, _ = A.select_frames_from_blocks(e2["M"], nb_win, "high")
+        segs = A.read_segments(path, fr, 2 * A.IBLEN_LONG + int(offs.max()))
+        t0 = time.time()
+        p = A.detect_aac(segs["M"], offs, sfv, plans, win, tau_l, tau_s)
+        dt = time.time() - t0
+        row.append((p.max(), (p.max() - np.median(p)) / p.std(), dt))
+    print(f"{nb_win:7d} {nb_sf:6d} {stride:7d} {row[0][2] + row[1][2]:9.2f} "
+          f"{row[0][0]:9.4f} {row[1][0]:9.4f} {row[0][1]:7.1f} {row[1][1]:7.1f}")

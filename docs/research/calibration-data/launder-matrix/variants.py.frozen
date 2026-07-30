@@ -1,0 +1,321 @@
+"""Variant registry for the launder-detection matrix.
+
+EVERY variant records the EXACT argv template that produces it. The previous
+matrix's "lame-v0" is unusable because its command line was not preserved;
+that must never happen again, so `argv` here IS the record.
+
+Placeholders: {in} = the PCM WAV, {out} = the lossy intermediate.
+
+kind:
+  genuine      - no build at all; measurement points at the source album dir.
+  null         - FLAC -> WAV -> FLAC, no lossy step (the confound control).
+  local        - run `argv` on doc1.
+  remote_qaac  - ship the WAV to the Windows VM, run qaac, ship back.
+
+Chain for every non-genuine variant:
+  source FLAC --WAV_ARGV--> PCM WAV (native rate/depth, NO resample)
+              --argv-------> lossy intermediate   (skipped for kind=null)
+              --DECODE_ARGV-> 16-bit FLAC
+"""
+from __future__ import annotations
+
+# FLAC -> PCM WAV. {codec} is pcm_s16le / pcm_s24le, chosen from the source's
+# bit depth. No -ar: 44.1 kHz sources stay 44.1 kHz.
+WAV_ARGV = [
+    "ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", "{in}",
+    "-map", "0:a", "-map_metadata", "-1", "-vn", "-c:a", "{codec}",
+    "-f", "wav", "{out}",
+]
+
+# lossy (or WAV, for kind=null) -> 16-bit FLAC. 16-bit is the adversarial
+# case: a 24-bit twin measured up to +13.8 dB higher U on the Apple arm
+# because requantisation noise refills the ultrasonic band.
+DECODE_ARGV = [
+    "ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", "{in}",
+    "-map", "0:a", "-map_metadata", "-1", "-vn",
+    "-sample_fmt", "s16", "-c:a", "flac", "{out}",
+]
+
+_FF = ["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", "{in}",
+       "-map", "0:a", "-map_metadata", "-1", "-vn"]
+
+
+def _ffmpeg(codec: str, *args: str) -> list[str]:
+    return _FF + ["-c:a", codec, *args, "{out}"]
+
+
+# id -> spec. `codec_family` mirrors what lib.spectral_check would call the
+# lossy intermediate; `encoder`/`setting` fill columns 3/4 of the committed
+# results TSV.
+VARIANTS: dict[str, dict[str, object]] = {
+    # ---- controls ----
+    "genuine": {
+        "kind": "genuine", "ext": "flac", "codec_family": "lossless",
+        "encoder": "-", "setting": "-", "argv": [],
+        "notes": "untouched source FLAC from the beets library",
+    },
+    "null-flac": {
+        "kind": "null", "ext": "wav", "codec_family": "lossless",
+        "encoder": "ffmpeg", "setting": "wav-roundtrip", "argv": [],
+        "notes": "FLAC -> WAV -> FLAC, NO lossy step. If this moves the gate "
+                 "statistic away from genuine, every matrix result is confounded.",
+    },
+
+    # ---- MP3: the real lame binary ----
+    "lame-v0": {
+        "kind": "local", "ext": "mp3", "codec_family": "mp3",
+        "encoder": "lame", "setting": "-V0",
+        "argv": ["lame", "--quiet", "--noreplaygain", "-V", "0", "{in}", "{out}"],
+        "notes": "stock lame -V0; lowpass left at lame's default (~19.5 kHz)",
+    },
+    "lame-v2": {
+        "kind": "local", "ext": "mp3", "codec_family": "mp3",
+        "encoder": "lame", "setting": "-V2",
+        "argv": ["lame", "--quiet", "--noreplaygain", "-V", "2", "{in}", "{out}"],
+        "notes": "stock lame -V2",
+    },
+    "lame-cbr128": {
+        "kind": "local", "ext": "mp3", "codec_family": "mp3",
+        "encoder": "lame", "setting": "-b128",
+        "argv": ["lame", "--quiet", "--noreplaygain", "-b", "128", "{in}", "{out}"],
+        "notes": "known-result check: this class must be DENIED by the gate",
+    },
+    "lame-cbr320": {
+        "kind": "local", "ext": "mp3", "codec_family": "mp3",
+        "encoder": "lame", "setting": "-b320",
+        "argv": ["lame", "--quiet", "--noreplaygain", "-b", "320", "{in}", "{out}"],
+        "notes": "stock lame CBR 320",
+    },
+
+    # ---- MP3: ffmpeg's libmp3lame front-end (different rate control) ----
+    "ffmpeg-q0": {
+        "kind": "local", "ext": "mp3", "codec_family": "mp3",
+        "encoder": "ffmpeg-libmp3lame", "setting": "-q:a 0",
+        "argv": _ffmpeg("libmp3lame", "-q:a", "0"),
+        "notes": "ffmpeg's -q:a 0 maps to lame VBR 0 but ffmpeg does not apply "
+                 "lame's default lowpass the same way; kept distinct from lame-v0 "
+                 "deliberately so the two are never conflated again",
+    },
+    "ffmpeg-b320": {
+        "kind": "local", "ext": "mp3", "codec_family": "mp3",
+        "encoder": "ffmpeg-libmp3lame", "setting": "-b:a 320k",
+        "argv": _ffmpeg("libmp3lame", "-b:a", "320k"),
+        "notes": "ffmpeg libmp3lame CBR 320",
+    },
+
+    # ---- AAC: ffmpeg native (libfdk_aac is NOT in this ffmpeg) ----
+    "aacffm-256": {
+        "kind": "local", "ext": "m4a", "codec_family": "aac",
+        "encoder": "ffmpeg-aac", "setting": "-b:a 256k",
+        "argv": _ffmpeg("aac", "-b:a", "256k"),
+        "notes": "ffmpeg native AAC encoder (not libfdk, not CoreAudio)",
+    },
+    "aacffm-128": {
+        "kind": "local", "ext": "m4a", "codec_family": "aac",
+        "encoder": "ffmpeg-aac", "setting": "-b:a 128k",
+        "argv": _ffmpeg("aac", "-b:a", "128k"),
+        "notes": "ffmpeg native AAC encoder",
+    },
+
+    # ---- Vorbis ----
+    "vorbis-q6": {
+        "kind": "local", "ext": "ogg", "codec_family": "vorbis",
+        "encoder": "ffmpeg-libvorbis", "setting": "-q:a 6",
+        "argv": _ffmpeg("libvorbis", "-q:a", "6"),
+        "notes": "oggenc/vorbis-tools is absent; ffmpeg drives the same "
+                 "libvorbis. -q:a 6 == oggenc -q 6 in the library's own scale.",
+    },
+    "vorbis-q5": {
+        "kind": "local", "ext": "ogg", "codec_family": "vorbis",
+        "encoder": "ffmpeg-libvorbis", "setting": "-q:a 5",
+        "argv": _ffmpeg("libvorbis", "-q:a", "5"),
+        "notes": "matches the committed t-vorbisq5-flac fraud class",
+    },
+
+    # ---- Opus (libopus ALWAYS outputs 48 kHz; see run notes) ----
+    "opus-128": {
+        "kind": "local", "ext": "opus", "codec_family": "opus",
+        "encoder": "ffmpeg-libopus", "setting": "-b:a 128k",
+        "argv": _ffmpeg("libopus", "-b:a", "128k"),
+        "notes": "opusenc is absent; ffmpeg drives the same libopus. libopus "
+                 "encodes at 48 kHz unconditionally, so the decoded FLAC is "
+                 "48 kHz even from a 44.1 kHz source. That is a real property "
+                 "of an Opus launder, not a harness resample.",
+    },
+    "opus-96": {
+        "kind": "local", "ext": "opus", "codec_family": "opus",
+        "encoder": "ffmpeg-libopus", "setting": "-b:a 96k",
+        "argv": _ffmpeg("libopus", "-b:a", "96k"),
+        "notes": "matches the committed t-opus96-flac fraud class; 48 kHz out",
+    },
+
+    # ---- WMA ----
+    "wma-192": {
+        "kind": "local", "ext": "wma", "codec_family": "wma",
+        "encoder": "ffmpeg-wmav2", "setting": "-b:a 192k",
+        "argv": _ffmpeg("wmav2", "-b:a", "192k"),
+        "notes": "ffmpeg wmav2",
+    },
+
+    # ================= local-encoder matrix additions (2026-07-30) =========
+    # ---- MP3: lame CBR ladder (boundary finding) ----
+    "lame-cbr192": {
+        "kind": "local", "ext": "mp3", "codec_family": "mp3",
+        "encoder": "lame", "setting": "-b192",
+        "argv": ["lame", "--quiet", "--noreplaygain", "-b", "192", "{in}", "{out}"],
+        "notes": "stock lame CBR 192",
+    },
+    "lame-cbr256": {
+        "kind": "local", "ext": "mp3", "codec_family": "mp3",
+        "encoder": "lame", "setting": "-b256",
+        "argv": ["lame", "--quiet", "--noreplaygain", "-b", "256", "{in}", "{out}"],
+        "notes": "stock lame CBR 256",
+    },
+
+    # ---- Vorbis ladder ----
+    "vorbis-q4": {
+        "kind": "local", "ext": "ogg", "codec_family": "vorbis",
+        "encoder": "ffmpeg-libvorbis", "setting": "-q:a 4",
+        "argv": _ffmpeg("libvorbis", "-q:a", "4"),
+        "notes": "ffmpeg drives libvorbis; -q:a 4 == oggenc -q 4",
+    },
+    "vorbis-q7": {
+        "kind": "local", "ext": "ogg", "codec_family": "vorbis",
+        "encoder": "ffmpeg-libvorbis", "setting": "-q:a 7",
+        "argv": _ffmpeg("libvorbis", "-q:a", "7"),
+        "notes": "ffmpeg drives libvorbis; -q:a 7 == oggenc -q 7",
+    },
+    "vorbis-q8": {
+        "kind": "local", "ext": "ogg", "codec_family": "vorbis",
+        "encoder": "ffmpeg-libvorbis", "setting": "-q:a 8",
+        "argv": _ffmpeg("libvorbis", "-q:a", "8"),
+        "notes": "ffmpeg drives libvorbis; -q:a 8 == oggenc -q 8",
+    },
+    "vorbis-q10": {
+        "kind": "local", "ext": "ogg", "codec_family": "vorbis",
+        "encoder": "ffmpeg-libvorbis", "setting": "-q:a 10",
+        "argv": _ffmpeg("libvorbis", "-q:a", "10"),
+        "notes": "ffmpeg drives libvorbis; -q:a 10 == oggenc -q 10 (top of scale)",
+    },
+
+    # ---- AAC: ffmpeg native ladder (NOT libfdk, NOT CoreAudio) ----
+    "aacffm-192": {
+        "kind": "local", "ext": "m4a", "codec_family": "aac",
+        "encoder": "ffmpeg-aac", "setting": "-b:a 192k",
+        "argv": _ffmpeg("aac", "-b:a", "192k"),
+        "notes": "ffmpeg native AAC encoder",
+    },
+    "aacffm-320": {
+        "kind": "local", "ext": "m4a", "codec_family": "aac",
+        "encoder": "ffmpeg-aac", "setting": "-b:a 320k",
+        "argv": _ffmpeg("aac", "-b:a", "320k"),
+        "notes": "ffmpeg native AAC encoder. MEASURED, content-dependent "
+                 "ceiling: on sparse material the encoder clamps near ~243 "
+                 "kbps so aacffm-320 collapses onto aacffm-256 (Grouper 60 s: "
+                 "242.8 vs 242.5 kbps); on dense material it does reach a "
+                 "higher rate (Autechre 60 s: 344.5 vs 283.3 kbps). Read any "
+                 "aacffm-320 vs aacffm-256 difference with that in mind.",
+    },
+
+    # ---- Opus ladder (libopus ALWAYS outputs 48 kHz; see run notes) ----
+    "opus-192": {
+        "kind": "local", "ext": "opus", "codec_family": "opus",
+        "encoder": "ffmpeg-libopus", "setting": "-b:a 192k",
+        "argv": _ffmpeg("libopus", "-b:a", "192k"),
+        "notes": "48 kHz out regardless of source rate (libopus property)",
+    },
+    "opus-256": {
+        "kind": "local", "ext": "opus", "codec_family": "opus",
+        "encoder": "ffmpeg-libopus", "setting": "-b:a 256k",
+        "argv": _ffmpeg("libopus", "-b:a", "256k"),
+        "notes": "48 kHz out regardless of source rate (libopus property)",
+    },
+
+    # ---- WMA ladder (ffmpeg wmav2, NOT the Microsoft encoder) ----
+    "wma-128": {
+        "kind": "local", "ext": "wma", "codec_family": "wma",
+        "encoder": "ffmpeg-wmav2", "setting": "-b:a 128k",
+        "argv": _ffmpeg("wmav2", "-b:a", "128k"),
+        "notes": "ffmpeg wmav2 is a clean-room reimplementation; results "
+                 "describe wmav2, not Microsoft's WMA encoder. MEASURED: "
+                 "wmav2 overshoots the requested rate badly - -b:a 128k lands "
+                 "at ~138 kbps. The label is the request, not the result.",
+    },
+    "wma-320": {
+        "kind": "local", "ext": "wma", "codec_family": "wma",
+        "encoder": "ffmpeg-wmav2", "setting": "-b:a 320k",
+        "argv": _ffmpeg("wmav2", "-b:a", "320k"),
+        "notes": "ffmpeg wmav2 is a clean-room reimplementation; results "
+                 "describe wmav2, not Microsoft's WMA encoder. MEASURED: "
+                 "-b:a 320k actually lands at ~551 kbps (and -b:a 192k at "
+                 "~276 kbps). The label is the request, not the result.",
+    },
+
+    # ---- Apple CoreAudio via qaac on the Windows VM ----
+    "qaac-cvbr256": {
+        "kind": "remote_qaac", "ext": "m4a", "codec_family": "aac",
+        "encoder": "qaac", "setting": "-s -v 256",
+        "argv": ["C:\\Tools\\qaac\\qaac64.exe", "-s", "-v", "256",
+                 "-o", "{out}", "{in}"],
+        "notes": "Apple CoreAudio CVBR 256; the class already measured to "
+                 "defeat the proof gate (docs/research/calibration-data/apple-arm)",
+    },
+    "qaac-tvbr91": {
+        "kind": "remote_qaac", "ext": "m4a", "codec_family": "aac",
+        "encoder": "qaac", "setting": "-s -V 91",
+        "argv": ["C:\\Tools\\qaac\\qaac64.exe", "-s", "-V", "91",
+                 "-o", "{out}", "{in}"],
+        "notes": "Apple CoreAudio TVBR q91. -s is --silent (console only, "
+                 "no bitstream effect); qaac --help verified 2026-07-30: "
+                 "-V/--tvbr <n> is True VBR quality 0-127. Smoke: 60 s "
+                 "44.1/16 stereo -> 1494761 B (~199 kbps).",
+    },
+
+    # ---- Apple CoreAudio family additions (2026-07-30) ----
+    # Flags verified against `qaac64.exe --help` on 192.168.1.115 before any
+    # batch encode; qaac 2.89 / CoreAudioToolbox 7.10.9.0 (byte-identical to
+    # the toolchain of the committed apple-arm calibration).
+    #   -c/--cbr <bitrate>   AAC CBR
+    #   -a/--abr <bitrate>   AAC ABR
+    #   -v/--cvbr <bitrate>  AAC Constrained VBR
+    #   -V/--tvbr <n>        AAC True VBR, quality 0-127
+    #   -s/--silent          suppress console messages (no bitstream effect)
+    # `--formats` confirms LC 44100Hz/48000Hz Stereo offers
+    # 64..128..192..256..320, so every bitrate below is a native rung, not a
+    # rounded one. All 19 corpus albums are stereo.
+    "qaac-cbr128": {
+        "kind": "remote_qaac", "ext": "m4a", "codec_family": "aac",
+        "encoder": "qaac", "setting": "-s -c 128",
+        "argv": ["C:\\Tools\\qaac\\qaac64.exe", "-s", "-c", "128",
+                 "-o", "{out}", "{in}"],
+        "notes": "Apple CoreAudio CBR 128; the low-rate end of the Apple "
+                 "family, expected to be denied by the frozen gate. Smoke: "
+                 "60 s 44.1/16 stereo -> 974626 B (~130 kbps).",
+    },
+    "qaac-abr192": {
+        "kind": "remote_qaac", "ext": "m4a", "codec_family": "aac",
+        "encoder": "qaac", "setting": "-s -a 192",
+        "argv": ["C:\\Tools\\qaac\\qaac64.exe", "-s", "-a", "192",
+                 "-o", "{out}", "{in}"],
+        "notes": "Apple CoreAudio ABR 192. Smoke: 60 s 44.1/16 stereo -> "
+                 "1486377 B (~198 kbps).",
+    },
+    "qaac-cvbr320": {
+        "kind": "remote_qaac", "ext": "m4a", "codec_family": "aac",
+        "encoder": "qaac", "setting": "-s -v 320",
+        "argv": ["C:\\Tools\\qaac\\qaac64.exe", "-s", "-v", "320",
+                 "-o", "{out}", "{in}"],
+        "notes": "Apple CoreAudio CVBR 320, the top rung; if the gate is "
+                 "defeated at 256 it must also be checked here. Smoke: 60 s "
+                 "44.1/16 stereo -> 2646789 B (~353 kbps).",
+    },
+}
+
+PILOT = ["genuine", "null-flac", "lame-v0", "ffmpeg-q0", "aacffm-256",
+         "vorbis-q6", "opus-128", "lame-cbr128"]
+
+
+def spec(vid: str) -> dict[str, object]:
+    if vid not in VARIANTS:
+        raise KeyError(f"unknown variant {vid!r}; known: {sorted(VARIANTS)}")
+    return VARIANTS[vid]

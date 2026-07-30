@@ -1,0 +1,41 @@
+cratedigger dev shell — run: python3 -m unittest discover -s tests -t . -v
+2014 - Syro [WARPCD247]                      mine=Qg_lmtdsKnK1.. MBdiscs= 1 MATCH
+1984 - Tabula Rasa                           mine=8hnxCzfAbLg3.. MBdiscs= 4 no-match
+1995 - Tri Repetae [WARPCD38]                mine=TFp4ci0XHt9c.. MBdiscs= 4 MATCH
+1990 - Ambient 1_ Music for Airports [EEGCD  mine=pX2UR5R0TS.Q.. MBdiscs= 7 MATCH
+The Rough Guide to Australian Aboriginal Mus mine=LMrQ0nJhe0fc.. MBdiscs= 0 release has no discid
+2001 - Jane Doe                              mine=131ntEz17z87.. MBdiscs= 1 MATCH
+2013 - Random Access Memories [88883716862]  mine=59h_gD9RVcuG.. MBdiscs= 1 MATCH
+2000 - The Pointless Gift                    mine=6aQCRTj_9W15.. MBdiscs= 1 MATCH
+2004 - Fake Our Deaths                       mine=6dT6m4PZAfRE.. MBdiscs= 1 MATCH
+2006 - Ten Lives                             mine=0Ym797K7YGEO.. MBdiscs= 0 release has no discid
+1998 - Stratosphere                          mine=ShKEuSqSPXDI.. MBdiscs= 1 no-match
+1987 - Rumours [3010-2]                      not sector aligned
+2016 - Man Made Object                       mine=wHyWYllBktIs.. MBdiscs= 1 MATCH
+1998 - Voices of Gondwana                    mine=dXN1BJW5ofJ1.. MBdiscs= 1 MATCH
+2017 - New Light New Hope                    mine=1r5wmXEN3eCX.. MBdiscs= 0 release has no discid
+2014 - Ruins                                 mine=W7oI2FUv74iI.. MBdiscs= 1 MATCH
+1993 - A Long Time Coming                    mine=YEY6ba_ETcdj.. MBdiscs= 1 MATCH
+1997 - Raising the Standard                  mine=Pfchldo1.u06.. MBdiscs= 1 MATCH
+1982 - The Goldberg Variations               mine=fbYrTJNmXb4m.. MBdiscs= 4 no-match
+2011 - Hurry Up, We're Dreaming              not sector aligned
+2008 - Death Magnetic                        mine=bs6fciSLoLgC.. MBdiscs= 1 MATCH
+1987 - Kind of Blue [CK 40579]               mine=USO1yIzNmYFJ.. MBdiscs= 5 MATCH
+1991 - Loveless [crecd 060]                  not sector aligned
+1989 - Slay Tracks_ 1933-1969                mine=onubGQBgez3f.. MBdiscs= 0 release has no discid
+1990 - Demolition Plot J-7                   mine=02jzNJ.g78S5.. MBdiscs= 0 release has no discid
+1991 - Perfect Sound Forever                 mine=aOx3BaKvxMtb.. MBdiscs= 0 release has no discid
+1992 - Slanted and Enchanted                 mine=3O8CP7VtKyrr.. MBdiscs= 9 MATCH
+1992 - Watery, Domestic                      mine=6Ve1UXLJNXg6.. MBdiscs= 5 no-match
+1997 - Shady Lane                            mine=Yhb64392f4_I.. MBdiscs= 0 release has no discid
+1999 - Major Leagues                         mine=TT5i6OsIu2Tw.. MBdiscs= 2 no-match
+1999 - Spit on a Stranger                    mine=vV1V5Hm6LkM4.. MBdiscs= 1 no-match
+1999 - Terror Twilight                       mine=AyAUZzjfQkA5.. MBdiscs= 3 MATCH
+2025 - Hecklers Choice_ Big Gums and Heavy L not sector aligned
+1999 - Californication                       mine=.ie4v8yx452f.. MBdiscs=36 MATCH
+1991 - End on End                            mine=beJcNFuIR.jc.. MBdiscs= 2 MATCH
+1993 - Bridge Over Troubled Water [462488 2] mine=cWP1UNWNEwPB.. MBdiscs=14 no-match
+1996 - Feed Me Weird Things                  mine=3w78t60OBtNr.. MBdiscs= 2 MATCH
+1996 - The Velvet Underground & Nico [31453  mine=I0p3ZdaXM22V.. MBdiscs= 7 MATCH
+
+20/34 albums: computed DiscID present on the matched MB release (27 releases have any discid)

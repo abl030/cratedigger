@@ -1,0 +1,95 @@
+"""Per (dataset, album, variant) feature extraction. Window-0 (production window) features."""
+import sys, json
+sys.path.insert(0, "/home/abl030/.claude/jobs/fb229c18/tmp/floor")
+from load import CAL, MTX, load_arm, gate, window_legs
+from statistics import mean as _m
+
+ARMS = {
+ 'TRAIN': ('results.tsv.gz', 'extended.tsv.gz', 'multiwin.tsv.gz'),
+ 'R1': ('results-holdout.tsv.gz', 'extended-holdout.tsv.gz', 'multiwin-holdout.tsv.gz'),
+ 'R2': ('results-holdout2.tsv.gz', 'extended-holdout2.tsv.gz', 'multiwin-holdout2.tsv.gz'),
+ 'R3': ('results-holdout3.tsv.gz', 'extended-holdout3.tsv.gz', 'multiwin-holdout3.tsv.gz'),
+}
+MATRIX = {
+ 'LOCAL': ('results-local.tsv', 'extended-local.tsv', None),
+ 'LOCALW': ('results-localw.tsv', 'extended-localw.tsv', None),
+ 'APPLE': ('results-apple.tsv', 'extended-apple.tsv', None),
+}
+
+BANDS = {
+    'b12_14': range(0, 5),      # 12000-14000
+    'b14_16': range(5, 9),      # 14500-16000
+    'b16_18': range(9, 13),     # 16500-18000
+    'b18_195': range(13, 16),   # 18500-19500
+    'b20_215': range(16, 20),   # 20000-21500
+    'bU': range(17, 20),        # 20500-21500  (the proof leg's band)
+}
+
+
+def track_feats(v):
+    """v = [ref_db, s12000..s21500]"""
+    ref, s = v[0], v[1:]
+    f = {'ref': ref}
+    for name, idx in BANDS.items():
+        lvl = _m(s[i] for i in idx)
+        f['abs_' + name] = lvl
+        f['D_' + name] = ref - lvl
+    # local slope in dB per 500Hz over 12-19.5k (below all ultrasonic action)
+    lo = _m(s[i] for i in range(0, 5)); hi = _m(s[i] for i in range(13, 16))
+    f['slope_mid'] = (lo - hi) / 11.0
+    # decay 18-19.5k -> 20.5-21.5k
+    f['drop_hi'] = _m(s[i] for i in range(13, 16)) - _m(s[i] for i in range(17, 20))
+    f['U'] = ref - _m(s[i] for i in range(17, 20))
+    return f
+
+
+def build(ds, base, files):
+    r, e, m = files
+    A = load_arm(base + '/' + r, base + '/' + e, (base + '/' + m) if m else None)
+    out = []
+    for variant, slugs in A.items():
+        for slug, (tr, cl, wins) in slugs.items():
+            w0 = wins.get(0)
+            if not w0 or len(w0) < 2:
+                continue
+            vecs = list(w0.values())
+            tf = [track_feats(v) for v in vecs]
+            row = {'ds': ds, 'slug': slug, 'variant': variant, 'n': len(vecs)}
+            for k in tf[0]:
+                row[k] = _m(t[k] for t in tf)
+            # per-track spread of U
+            row['U_sd'] = (sum((t['U'] - row['U']) ** 2 for t in tf) / len(tf)) ** 0.5
+            ceil0, _nu, U0, step0, cons0 = window_legs(vecs, 62.0)
+            row['step'] = step0; row['cons'] = cons0
+            row['cliff_frac'] = sum(1 for c, _d in cl if c and c <= 19000) / len(cl)
+            cs = [c for c, _d in cl if c]
+            row['cliff_med'] = sorted(cs)[len(cs) // 2] if cs else None
+            row['hfdef'] = _m(d for _c, d in cl)
+            for T in (62.0, 59.5):
+                d, legs, _Us = gate(tr, cl, wins, T)
+                row['denied@%g' % T] = d
+                row['legs@%g' % T] = legs
+                # single-window (window 0 only) verdict for cross-dataset comparability
+                legs1 = set()
+                if row['cliff_frac'] >= 0.6:
+                    legs1.add('cliff')
+                if ceil0:
+                    legs1.add('ceiling')
+                if U0 >= T:
+                    legs1.add('no-ultrasonic')
+                row['w0denied@%g' % T] = bool(legs1)
+                row['w0legs@%g' % T] = sorted(legs1)
+            out.append(row)
+    return out
+
+
+if __name__ == '__main__':
+    rows = []
+    for ds, f in ARMS.items():
+        rows += build(ds, CAL, f)
+    for ds, f in MATRIX.items():
+        rows += build(ds, MTX, f)
+    json.dump(rows, open('/home/abl030/.claude/jobs/fb229c18/tmp/floor/feats.json', 'w'))
+    print('rows', len(rows))
+    from collections import Counter
+    print(Counter(r['ds'] for r in rows))

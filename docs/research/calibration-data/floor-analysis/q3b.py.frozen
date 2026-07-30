@@ -1,0 +1,29 @@
+"""Q3b: three-state on the NEW 19-album matrix, wide codec set (window-0 gate)."""
+import json
+from collections import Counter, defaultdict
+R=json.load(open('/home/abl030/.claude/jobs/fb229c18/tmp/floor/feats.json'))
+seen=set(); MX=[]
+for r in R:
+    if r['ds'] not in ('LOCAL','LOCALW','APPLE'): continue
+    if r['variant'] in ('genuine','null-flac'):
+        k=(r['slug'],'g')
+        if k in seen: continue
+        seen.add(k); r=dict(r); r['variant']='genuine'
+    MX.append(r)
+def st(r,T,s):
+    if r['cliff_frac']>=0.6: return 'BOUNDED'
+    if r['step']>=15.0 and r['cons']>=0.5: return 'DENIED(wall)'
+    if r['U']>=T:
+        return 'UNTESTABLE' if (r['cliff_frac']==0.0 and r['step']<s) else 'DENIED(deficit)'
+    return 'PROVED'
+ORDER=['genuine','lame-v0','vorbis-q10','vorbis-q8','vorbis-q7','vorbis-q6','aacffm-320','aacffm-256','qaac-cvbr320',
+ 'qaac-cvbr256','qaac-tvbr91','qaac-abr192','opus-256','opus-192','opus-96','lame-v2','lame-cbr320','lame-cbr256',
+ 'lame-cbr192','lame-cbr128','qaac-cbr128','vorbis-q5','vorbis-q4','aacffm-192','aacffm-128','wma-320','wma-192','wma-128']
+for s in (8,12,15):
+    print(f"\n===== THREE-STATE, NEW MATRIX 19 albums, window-0 gate T=62, untestable = nocliff & step<{s} =====")
+    print(f"{'candidate':<16}{'n':>4}{'PROVED':>8}{'BOUNDED':>9}{'DEN(wall)':>11}{'DEN(deficit)':>14}{'UNTEST':>8}")
+    for v in ORDER:
+        rs=[r for r in MX if r['variant']==v]
+        if not rs: continue
+        c=Counter(st(r,62.0,s) for r in rs)
+        print(f"{v:<16}{len(rs):>4}{c['PROVED']:>8}{c['BOUNDED']:>9}{c['DENIED(wall)']:>11}{c['DENIED(deficit)']:>14}{c['UNTESTABLE']:>8}")

@@ -1,0 +1,1956 @@
+[
+ {
+  "request_id": 8916,
+  "album_dir": "/mnt/virtio/Music/Beets/Daft Punk/2013 - Random Access Memories [88883716862]",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/Beets/Daft Punk/2013 - Random Access Memories [88883716862]/01 Give Life Back to Music.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 275.386667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Daft Punk/2013 - Random Access Memories [88883716862]/02 The Game of Love.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 322.146667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Daft Punk/2013 - Random Access Memories [88883716862]/03 Giorgio by Moroder.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 544.626667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Daft Punk/2013 - Random Access Memories [88883716862]/04 Within.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 228.506667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Daft Punk/2013 - Random Access Memories [88883716862]/05 Instant Crush.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 337.56
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Daft Punk/2013 - Random Access Memories [88883716862]/06 Lose Yourself to Dance.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 353.893333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Daft Punk/2013 - Random Access Memories [88883716862]/07 Touch.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 498.96
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Daft Punk/2013 - Random Access Memories [88883716862]/08 Get Lucky.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 369.626667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Daft Punk/2013 - Random Access Memories [88883716862]/09 Beyond.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 290.24
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Daft Punk/2013 - Random Access Memories [88883716862]/10 Motherboard.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 341.653333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Daft Punk/2013 - Random Access Memories [88883716862]/11 Fragments of Time.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 279.773333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Daft Punk/2013 - Random Access Memories [88883716862]/12 Doin' It Right.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 251.293333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Daft Punk/2013 - Random Access Memories [88883716862]/13 Contact.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 383.626667
+   }
+  ]
+ },
+ {
+  "request_id": 8917,
+  "album_dir": "/mnt/virtio/Music/Beets/Aphex Twin/2014 - Syro [WARPCD247]",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/Beets/Aphex Twin/2014 - Syro [WARPCD247]/01 minipops 67 (source field mix).flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 287.586667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Aphex Twin/2014 - Syro [WARPCD247]/02 XMAS_EVET10 (thanaton3 mix).flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 631.24
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Aphex Twin/2014 - Syro [WARPCD247]/03 produk 29.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 303.92
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Aphex Twin/2014 - Syro [WARPCD247]/04 4 bit 9d api+e+6.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 268.813333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Aphex Twin/2014 - Syro [WARPCD247]/05 180db_.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 191.466667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Aphex Twin/2014 - Syro [WARPCD247]/06 CIRCLONT6A (syrobonkus mix).flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 360.2
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Aphex Twin/2014 - Syro [WARPCD247]/07 fz pseudotimestretch+e+3.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 58.586667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Aphex Twin/2014 - Syro [WARPCD247]/08 CIRCLONT14 (shrymoming mix).flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 441.306667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Aphex Twin/2014 - Syro [WARPCD247]/09 syro u473t8+e (piezoluminescence mix).flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 392.96
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Aphex Twin/2014 - Syro [WARPCD247]/10 PAPAT4 (pineal mix).flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 258.973333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Aphex Twin/2014 - Syro [WARPCD247]/11 s950tx16wasr10 (earth portal mix).flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 361.973333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Aphex Twin/2014 - Syro [WARPCD247]/12 aisatsana.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 321.88
+   }
+  ]
+ },
+ {
+  "request_id": 8918,
+  "album_dir": "/mnt/virtio/Music/Beets/Autechre/1995 - Tri Repetae [WARPCD38]",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/Beets/Autechre/1995 - Tri Repetae [WARPCD38]/01 Dael.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 399.96
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Autechre/1995 - Tri Repetae [WARPCD38]/02 Clipper.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 514.0
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Autechre/1995 - Tri Repetae [WARPCD38]/03 Leterel.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 428.106667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Autechre/1995 - Tri Repetae [WARPCD38]/04 Rotar.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 484.293333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Autechre/1995 - Tri Repetae [WARPCD38]/05 Stud.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 580.866667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Autechre/1995 - Tri Repetae [WARPCD38]/06 Eutow.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 255.933333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Autechre/1995 - Tri Repetae [WARPCD38]/07 C_Pach.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 279.266667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Autechre/1995 - Tri Repetae [WARPCD38]/08 Gnit.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 349.64
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Autechre/1995 - Tri Repetae [WARPCD38]/09 Overand.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 453.466667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Autechre/1995 - Tri Repetae [WARPCD38]/10 Rsdio.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 608.466667
+   }
+  ]
+ },
+ {
+  "request_id": 8919,
+  "album_dir": "/mnt/virtio/Music/Beets/Squarepusher/1996 - Feed Me Weird Things",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/Beets/Squarepusher/1996 - Feed Me Weird Things/01 Squarepusher Theme.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 380.333333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Squarepusher/1996 - Feed Me Weird Things/02 Tundra.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 475.266667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Squarepusher/1996 - Feed Me Weird Things/03 The Swifty.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 320.093333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Squarepusher/1996 - Feed Me Weird Things/04 Dimotane Co.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 294.64
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Squarepusher/1996 - Feed Me Weird Things/05 Smedleys Melody.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 153.093333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Squarepusher/1996 - Feed Me Weird Things/06 Windscale 2.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 395.64
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Squarepusher/1996 - Feed Me Weird Things/07 North Circular.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 368.533333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Squarepusher/1996 - Feed Me Weird Things/08 Goodnight Jade.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 165.36
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Squarepusher/1996 - Feed Me Weird Things/09 Theme From Ernest Borgnine.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 475.706667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Squarepusher/1996 - Feed Me Weird Things/10 U.F.O.'s Over Leytonstone.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 399.626667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Squarepusher/1996 - Feed Me Weird Things/11 Kodack.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 434.906667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Squarepusher/1996 - Feed Me Weird Things/12 Future Gibbon.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 138.733333
+   }
+  ]
+ },
+ {
+  "request_id": 8920,
+  "album_dir": "/mnt/virtio/Music/Beets/M83/2011 - Hurry Up, We're Dreaming",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/Beets/M83/2011 - Hurry Up, We're Dreaming/01 Intro.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "codec": "flac",
+    "dur": 321.0
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/M83/2011 - Hurry Up, We're Dreaming/02 Midnight City.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "codec": "flac",
+    "dur": 242.5
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/M83/2011 - Hurry Up, We're Dreaming/03 Reunion.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "codec": "flac",
+    "dur": 234.5
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/M83/2011 - Hurry Up, We're Dreaming/04 Where the Boats Go.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "codec": "flac",
+    "dur": 105.0
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/M83/2011 - Hurry Up, We're Dreaming/05 Wait.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "codec": "flac",
+    "dur": 337.5
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/M83/2011 - Hurry Up, We're Dreaming/06 Raconte-moi une histoire.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "codec": "flac",
+    "dur": 244.0
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/M83/2011 - Hurry Up, We're Dreaming/07 Train to Pluton.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "codec": "flac",
+    "dur": 74.5
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/M83/2011 - Hurry Up, We're Dreaming/08 Claudia Lewis.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "codec": "flac",
+    "dur": 271.0
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/M83/2011 - Hurry Up, We're Dreaming/09 This Bright Flash.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "codec": "flac",
+    "dur": 143.0
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/M83/2011 - Hurry Up, We're Dreaming/10 When Will You Come Home_.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "codec": "flac",
+    "dur": 88.0
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/M83/2011 - Hurry Up, We're Dreaming/11 Soon, My Friend.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "codec": "flac",
+    "dur": 176.0
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/M83/2011 - Hurry Up, We're Dreaming/12 My Tears Are Becoming a Sea.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "codec": "flac",
+    "dur": 151.0
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/M83/2011 - Hurry Up, We're Dreaming/13 New Map.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "codec": "flac",
+    "dur": 261.0
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/M83/2011 - Hurry Up, We're Dreaming/14 OK Pal.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "codec": "flac",
+    "dur": 237.0
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/M83/2011 - Hurry Up, We're Dreaming/15 Another Wave From You.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "codec": "flac",
+    "dur": 112.5
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/M83/2011 - Hurry Up, We're Dreaming/16 Splendor.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "codec": "flac",
+    "dur": 302.0
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/M83/2011 - Hurry Up, We're Dreaming/17 Year One, One UFO.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "codec": "flac",
+    "dur": 197.5
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/M83/2011 - Hurry Up, We're Dreaming/18 Fountains.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "codec": "flac",
+    "dur": 80.0
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/M83/2011 - Hurry Up, We're Dreaming/19 Steve McQueen.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "codec": "flac",
+    "dur": 228.0
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/M83/2011 - Hurry Up, We're Dreaming/20 Echoes of Mine.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "codec": "flac",
+    "dur": 219.0
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/M83/2011 - Hurry Up, We're Dreaming/21 Klaus I Love You.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "codec": "flac",
+    "dur": 101.0
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/M83/2011 - Hurry Up, We're Dreaming/22 Outro.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "codec": "flac",
+    "dur": 237.5
+   }
+  ]
+ },
+ {
+  "request_id": 8921,
+  "album_dir": "/mnt/virtio/Music/Beets/Red Hot Chili Peppers/1999 - Californication",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/Beets/Red Hot Chili Peppers/1999 - Californication/01 Around the World.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 238.733333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Red Hot Chili Peppers/1999 - Californication/02 Parallel Universe.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 270.4
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Red Hot Chili Peppers/1999 - Californication/03 Scar Tissue.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 217.533333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Red Hot Chili Peppers/1999 - Californication/04 Otherside.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 255.76
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Red Hot Chili Peppers/1999 - Californication/05 Get on Top.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 198.2
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Red Hot Chili Peppers/1999 - Californication/06 Californication.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 321.573333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Red Hot Chili Peppers/1999 - Californication/07 Easily.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 231.333333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Red Hot Chili Peppers/1999 - Californication/08 Porcelain.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 163.6
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Red Hot Chili Peppers/1999 - Californication/09 Emit Remmus.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 240.293333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Red Hot Chili Peppers/1999 - Californication/10 I Like Dirt.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 157.64
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Red Hot Chili Peppers/1999 - Californication/11 This Velvet Glove.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 225.026667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Red Hot Chili Peppers/1999 - Californication/12 Savior.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 292.573333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Red Hot Chili Peppers/1999 - Californication/13 Purple Stain.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 253.226667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Red Hot Chili Peppers/1999 - Californication/14 Right on Time.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 112.533333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Red Hot Chili Peppers/1999 - Californication/15 Road Trippin'.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 205.666667
+   }
+  ]
+ },
+ {
+  "request_id": 8922,
+  "album_dir": "/mnt/virtio/Music/Beets/Metallica/2008 - Death Magnetic",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/Beets/Metallica/2008 - Death Magnetic/01 That Was Just Your Life.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 428.32
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Metallica/2008 - Death Magnetic/02 The End of the Line.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 472.36
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Metallica/2008 - Death Magnetic/03 Broken, Beat & Scarred.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 385.466667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Metallica/2008 - Death Magnetic/04 The Day That Never Comes.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 476.266667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Metallica/2008 - Death Magnetic/05 All Nightmare Long.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 477.973333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Metallica/2008 - Death Magnetic/06 Cyanide.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 399.546667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Metallica/2008 - Death Magnetic/07 The Unforgiven III.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 466.586667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Metallica/2008 - Death Magnetic/08 The Judas Kiss.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 480.76
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Metallica/2008 - Death Magnetic/09 Suicide & Redemption.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 597.72
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Metallica/2008 - Death Magnetic/10 My Apocalypse.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 301.013333
+   }
+  ]
+ },
+ {
+  "request_id": 8923,
+  "album_dir": "/mnt/virtio/Music/Beets/Converge/2001 - Jane Doe",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/Beets/Converge/2001 - Jane Doe/01 Concubine.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 79.333333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Converge/2001 - Jane Doe/02 Fault and Fracture.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 185.453333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Converge/2001 - Jane Doe/03 Distance and Meaning.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 257.933333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Converge/2001 - Jane Doe/04 Hell to Pay.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 271.773333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Converge/2001 - Jane Doe/05 Homewrecker.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 231.08
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Converge/2001 - Jane Doe/06 The Broken Vow.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 133.253333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Converge/2001 - Jane Doe/07 Bitter and Then Some.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 87.72
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Converge/2001 - Jane Doe/08 Heaven in Her Arms.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 240.613333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Converge/2001 - Jane Doe/09 Phoenix in Flight.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 228.893333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Converge/2001 - Jane Doe/10 Phoenix in Flames.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 42.08
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Converge/2001 - Jane Doe/11 Thaw.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 269.973333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Converge/2001 - Jane Doe/12 Jane Doe.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 693.973333
+   }
+  ]
+ },
+ {
+  "request_id": 8924,
+  "album_dir": "/mnt/virtio/Music/Beets/Arvo Part/1984 - Tabula Rasa",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/Beets/Arvo Part/1984 - Tabula Rasa/01 Fratres.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 687.706667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Arvo Part/1984 - Tabula Rasa/02 Cantus in Memory of Benjamin Britten.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 308.36
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Arvo Part/1984 - Tabula Rasa/03 Fratres.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 719.533333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Arvo Part/1984 - Tabula Rasa/04 Tabula Rasa.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 1586.04
+   }
+  ]
+ },
+ {
+  "request_id": 8925,
+  "album_dir": "/mnt/virtio/Music/Beets/Johann Sebastian Bach; Glenn Gould/1982 - The Goldberg Variations",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/Beets/Johann Sebastian Bach; Glenn Gould/1982 - The Goldberg Variations/01 Goldberg Variations, BWV 988_ I. Aria.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 186.733333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Johann Sebastian Bach; Glenn Gould/1982 - The Goldberg Variations/02 Goldberg Variations, BWV 988_ II. Variatio 1 a 1 clav_.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 70.933333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Johann Sebastian Bach; Glenn Gould/1982 - The Goldberg Variations/03 Goldberg Variations, BWV 988_ III. Variatio 2 a 1 clav_.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 49.36
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Johann Sebastian Bach; Glenn Gould/1982 - The Goldberg Variations/04 Goldberg Variations, BWV 988_ IV. Variatio 3 a 1 clav. Canone all'unisono.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 90.746667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Johann Sebastian Bach; Glenn Gould/1982 - The Goldberg Variations/05 Goldberg Variations, BWV 988_ V. Variatio 4 a 1 clav_.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 50.52
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Johann Sebastian Bach; Glenn Gould/1982 - The Goldberg Variations/06 Goldberg Variations, BWV 988_ VI. Variatio 5 a 1 ovvero 2 clav_.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 36.56
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Johann Sebastian Bach; Glenn Gould/1982 - The Goldberg Variations/07 Goldberg Variations, BWV 988_ VII. Variatio 6 a 1 clav. Canone alla seconda.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 40.666667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Johann Sebastian Bach; Glenn Gould/1982 - The Goldberg Variations/08 Goldberg Variations, BWV 988_ VIII. Variatio 7 a 1 ovvero 2 clav. Al tempo di giga.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 75.973333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Johann Sebastian Bach; Glenn Gould/1982 - The Goldberg Variations/09 Goldberg Variations, BWV 988_ IX. Variatio 8 a 2 clav_.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 53.813333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Johann Sebastian Bach; Glenn Gould/1982 - The Goldberg Variations/10 Goldberg Variations, BWV 988_ X. Variatio 9 a 1 clav. Canone alla terza.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 59.373333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Johann Sebastian Bach; Glenn Gould/1982 - The Goldberg Variations/11 Goldberg Variations, BWV 988_ XI. Variatio 10 a 1 clav. Fughetta.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 64.226667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Johann Sebastian Bach; Glenn Gould/1982 - The Goldberg Variations/12 Goldberg Variations, BWV 988_ XII. Variatio 11 a 2 clav_.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 53.693333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Johann Sebastian Bach; Glenn Gould/1982 - The Goldberg Variations/13 Goldberg Variations, BWV 988_ XIII. Variatio 12. Canone alla quarta.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 97.786667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Johann Sebastian Bach; Glenn Gould/1982 - The Goldberg Variations/14 Goldberg Variations, BWV 988_ XIV. Variatio 13 a 2 clav_.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 158.493333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Johann Sebastian Bach; Glenn Gould/1982 - The Goldberg Variations/15 Goldberg Variations, BWV 988_ XV. Variatio 14 a 2 clav_.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 64.36
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Johann Sebastian Bach; Glenn Gould/1982 - The Goldberg Variations/16 Goldberg Variations, BWV 988_ XVI. Variatio 15 a 1 clav. Canone alla quinta. Andante.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 302.253333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Johann Sebastian Bach; Glenn Gould/1982 - The Goldberg Variations/17 Goldberg Variations, BWV 988_ XVII. Variatio 16 a 1 clav. Ouverture.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 98.68
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Johann Sebastian Bach; Glenn Gould/1982 - The Goldberg Variations/18 Goldberg Variations, BWV 988_ XVIII. Variatio 17 a 2 clav_.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 53.946667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Johann Sebastian Bach; Glenn Gould/1982 - The Goldberg Variations/19 Goldberg Variations, BWV 988_ XIX. Variatio 18 a 1 clav. Canone alla sesta.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 63.04
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Johann Sebastian Bach; Glenn Gould/1982 - The Goldberg Variations/20 Goldberg Variations, BWV 988_ XX. Variatio 19 a 1 clav_.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 63.44
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Johann Sebastian Bach; Glenn Gould/1982 - The Goldberg Variations/21 Goldberg Variations, BWV 988_ XXI. Variatio 20 a 2 clav_.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 49.8
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Johann Sebastian Bach; Glenn Gould/1982 - The Goldberg Variations/22 Goldberg Variations, BWV 988_ XXII. Variatio 21. Canone alla settima.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 133.16
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Johann Sebastian Bach; Glenn Gould/1982 - The Goldberg Variations/23 Goldberg Variations, BWV 988_ XXIII. Variatio 22 a 1 clav. Alla breve.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 62.946667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Johann Sebastian Bach; Glenn Gould/1982 - The Goldberg Variations/24 Goldberg Variations, BWV 988_ XXIV. Variatio 23 a 2 clav_.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 57.96
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Johann Sebastian Bach; Glenn Gould/1982 - The Goldberg Variations/25 Goldberg Variations, BWV 988_ XXV. Variatio 24 a 1 clav. Canone all'ottava.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 103.706667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Johann Sebastian Bach; Glenn Gould/1982 - The Goldberg Variations/26 Goldberg Variations, BWV 988_ XXVI. Variatio 25 a 2 clav. Adagio.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 363.026667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Johann Sebastian Bach; Glenn Gould/1982 - The Goldberg Variations/27 Goldberg Variations, BWV 988_ XXVII. Variatio 26 a 2 clav_.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 52.586667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Johann Sebastian Bach; Glenn Gould/1982 - The Goldberg Variations/28 Goldberg Variations, BWV 988_ XXVIII. Variatio 27 a 2 clav. Canone alla nona.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 81.386667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Johann Sebastian Bach; Glenn Gould/1982 - The Goldberg Variations/29 Goldberg Variations, BWV 988_ XXIX. Variatio 28 a 2 clav_.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 63.306667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Johann Sebastian Bach; Glenn Gould/1982 - The Goldberg Variations/30 Goldberg Variations, BWV 988_ XXX. Variatio 29 a 1 ovvero 2 clav_.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 61.866667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Johann Sebastian Bach; Glenn Gould/1982 - The Goldberg Variations/31 Goldberg Variations, BWV 988_ XXXI. Variatio 30 a 1 clav. Quodlibet.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 89.826667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Johann Sebastian Bach; Glenn Gould/1982 - The Goldberg Variations/32 Goldberg Variations, BWV 988_ XXXII. Aria da capo.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 226.44
+   }
+  ]
+ },
+ {
+  "request_id": 8926,
+  "album_dir": "/mnt/virtio/Music/Beets/Miles Davis/1987 - Kind of Blue [CK 40579]",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/Beets/Miles Davis/1987 - Kind of Blue [CK 40579]/01 So What.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 545.8
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Miles Davis/1987 - Kind of Blue [CK 40579]/02 Freddie Freeloader.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 575.8
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Miles Davis/1987 - Kind of Blue [CK 40579]/03 Blue in Green.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 328.626667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Miles Davis/1987 - Kind of Blue [CK 40579]/04 All Blues.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 693.84
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Miles Davis/1987 - Kind of Blue [CK 40579]/05 Flamenco Sketches.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 565.093333
+   }
+  ]
+ },
+ {
+  "request_id": 8928,
+  "album_dir": "/mnt/virtio/Music/Beets/GoGo Penguin/2016 - Man Made Object",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/Beets/GoGo Penguin/2016 - Man Made Object/01 All Res.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 315.826667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/GoGo Penguin/2016 - Man Made Object/02 Unspeakable World.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 283.866667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/GoGo Penguin/2016 - Man Made Object/03 Branches Break.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 262.653333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/GoGo Penguin/2016 - Man Made Object/04 Weird Cat.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 339.106667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/GoGo Penguin/2016 - Man Made Object/05 Quiet Mind.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 263.533333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/GoGo Penguin/2016 - Man Made Object/06 Smarra.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 391.213333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/GoGo Penguin/2016 - Man Made Object/07 Initiate.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 287.36
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/GoGo Penguin/2016 - Man Made Object/08 GBFISYSIH.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 201.88
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/GoGo Penguin/2016 - Man Made Object/09 Surrender to Mountain.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 238.6
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/GoGo Penguin/2016 - Man Made Object/10 Protest.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 284.306667
+   }
+  ]
+ },
+ {
+  "request_id": 8929,
+  "album_dir": "/mnt/virtio/Music/Beets/The Velvet Underground & Nico/1996 - The Velvet Underground & Nico [31453 1250 2]",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/Beets/The Velvet Underground & Nico/1996 - The Velvet Underground & Nico [31453 1250 2]/01 Sunday Morning.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 176.133333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/The Velvet Underground & Nico/1996 - The Velvet Underground & Nico [31453 1250 2]/02 I'm Waiting for the Man.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 279.893333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/The Velvet Underground & Nico/1996 - The Velvet Underground & Nico [31453 1250 2]/03 Femme Fatale.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 158.933333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/The Velvet Underground & Nico/1996 - The Velvet Underground & Nico [31453 1250 2]/04 Venus in Furs.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 312.8
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/The Velvet Underground & Nico/1996 - The Velvet Underground & Nico [31453 1250 2]/05 Run Run Run.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 262.666667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/The Velvet Underground & Nico/1996 - The Velvet Underground & Nico [31453 1250 2]/06 All Tomorrow's Parties.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 360.04
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/The Velvet Underground & Nico/1996 - The Velvet Underground & Nico [31453 1250 2]/07 Heroin.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 432.626667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/The Velvet Underground & Nico/1996 - The Velvet Underground & Nico [31453 1250 2]/08 There She Goes Again.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 161.306667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/The Velvet Underground & Nico/1996 - The Velvet Underground & Nico [31453 1250 2]/09 I'll Be Your Mirror.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 134.026667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/The Velvet Underground & Nico/1996 - The Velvet Underground & Nico [31453 1250 2]/10 The Black Angel's Death Song.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 191.706667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/The Velvet Underground & Nico/1996 - The Velvet Underground & Nico [31453 1250 2]/11 European Son.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 466.893333
+   }
+  ]
+ },
+ {
+  "request_id": 8930,
+  "album_dir": "/mnt/virtio/Music/Beets/Simon & Garfunkel/1993 - Bridge Over Troubled Water [462488 2]",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/Beets/Simon & Garfunkel/1993 - Bridge Over Troubled Water [462488 2]/01 Bridge Over Troubled Water.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 295.826667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Simon & Garfunkel/1993 - Bridge Over Troubled Water [462488 2]/02 El condor pasa (If I Could).flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 189.106667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Simon & Garfunkel/1993 - Bridge Over Troubled Water [462488 2]/03 Cecilia.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 174.733333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Simon & Garfunkel/1993 - Bridge Over Troubled Water [462488 2]/04 Keep the Customer Satisfied.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 157.6
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Simon & Garfunkel/1993 - Bridge Over Troubled Water [462488 2]/05 So Long, Frank Lloyd Wright.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 225.266667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Simon & Garfunkel/1993 - Bridge Over Troubled Water [462488 2]/06 The Boxer.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 312.733333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Simon & Garfunkel/1993 - Bridge Over Troubled Water [462488 2]/07 Baby Driver.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 197.293333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Simon & Garfunkel/1993 - Bridge Over Troubled Water [462488 2]/08 The Only Living Boy in New York.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 241.666667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Simon & Garfunkel/1993 - Bridge Over Troubled Water [462488 2]/09 Why Don't You Write Me.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 166.106667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Simon & Garfunkel/1993 - Bridge Over Troubled Water [462488 2]/10 Bye Bye Love.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 172.56
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Simon & Garfunkel/1993 - Bridge Over Troubled Water [462488 2]/11 Song for the Asking.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 119.933333
+   }
+  ]
+ },
+ {
+  "request_id": 8931,
+  "album_dir": "/mnt/virtio/Music/Beets/Fleetwood Mac/1987 - Rumours [3010-2]",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/Beets/Fleetwood Mac/1987 - Rumours [3010-2]/01 Second Hand News.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "codec": "flac",
+    "dur": 167.543521
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Fleetwood Mac/1987 - Rumours [3010-2]/02 Dreams.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "codec": "flac",
+    "dur": 254.147938
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Fleetwood Mac/1987 - Rumours [3010-2]/03 Never Going Back Again.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "codec": "flac",
+    "dur": 133.274031
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Fleetwood Mac/1987 - Rumours [3010-2]/04 Don't Stop.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "codec": "flac",
+    "dur": 190.0
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Fleetwood Mac/1987 - Rumours [3010-2]/05 Go Your Own Way.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "codec": "flac",
+    "dur": 217.958219
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Fleetwood Mac/1987 - Rumours [3010-2]/06 Songbird.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "codec": "flac",
+    "dur": 199.883063
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Fleetwood Mac/1987 - Rumours [3010-2]/07 The Chain.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "codec": "flac",
+    "dur": 267.700167
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Fleetwood Mac/1987 - Rumours [3010-2]/08 You Make Loving Fun.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "codec": "flac",
+    "dur": 214.022646
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Fleetwood Mac/1987 - Rumours [3010-2]/09 I Don't Want to Know.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "codec": "flac",
+    "dur": 197.082021
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Fleetwood Mac/1987 - Rumours [3010-2]/10 Oh Daddy.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "codec": "flac",
+    "dur": 232.0
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Fleetwood Mac/1987 - Rumours [3010-2]/11 Gold Dust Woman.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "codec": "flac",
+    "dur": 308.203927
+   }
+  ]
+ },
+ {
+  "request_id": 8932,
+  "album_dir": "/mnt/virtio/Music/Beets/My Bloody Valentine/1991 - Loveless [crecd 060]",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/Beets/My Bloody Valentine/1991 - Loveless [crecd 060]/01 Only Shallow.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 256.844785
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/My Bloody Valentine/1991 - Loveless [crecd 060]/02 Loomer.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 158.257506
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/My Bloody Valentine/1991 - Loveless [crecd 060]/03 Touched.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 56.590068
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/My Bloody Valentine/1991 - Loveless [crecd 060]/04 To Here Knows When.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 331.14381
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/My Bloody Valentine/1991 - Loveless [crecd 060]/05 When You Sleep.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 251.807188
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/My Bloody Valentine/1991 - Loveless [crecd 060]/06 I Only Said.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 334.76381
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/My Bloody Valentine/1991 - Loveless [crecd 060]/07 Come In Alone.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 238.750181
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/My Bloody Valentine/1991 - Loveless [crecd 060]/08 Sometimes.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 319.099002
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/My Bloody Valentine/1991 - Loveless [crecd 060]/09 Blown a Wish.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 216.400499
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/My Bloody Valentine/1991 - Loveless [crecd 060]/10 What You Want.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 335.620771
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/My Bloody Valentine/1991 - Loveless [crecd 060]/11 Soon.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 416.048662
+   }
+  ]
+ },
+ {
+  "request_id": 8933,
+  "album_dir": "/mnt/virtio/Music/Beets/Grouper/2014 - Ruins",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/Beets/Grouper/2014 - Ruins/01 Made of Metal.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 98.946667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Grouper/2014 - Ruins/02 Clearing.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 281.68
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Grouper/2014 - Ruins/03 Call Across Rooms.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 179.253333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Grouper/2014 - Ruins/04 Labyrinth.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 227.84
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Grouper/2014 - Ruins/05 Lighthouse.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 344.16
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Grouper/2014 - Ruins/06 Holofernes.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 92.786667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Grouper/2014 - Ruins/07 Holding.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 476.626667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Grouper/2014 - Ruins/08 Made of Air.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 684.36
+   }
+  ]
+ },
+ {
+  "request_id": 8934,
+  "album_dir": "/mnt/virtio/Music/Beets/Duster/1998 - Stratosphere",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/Beets/Duster/1998 - Stratosphere/01 Moon Age.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 66.266667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Duster/1998 - Stratosphere/02 Heading for the Door.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 188.173333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Duster/1998 - Stratosphere/03 Gold Dust.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 125.933333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Duster/1998 - Stratosphere/04 Topical Solution.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 300.893333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Duster/1998 - Stratosphere/05 Docking the Pod.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 110.64
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Duster/1998 - Stratosphere/06 The Landing.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 163.16
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Duster/1998 - Stratosphere/07 Echo, Bravo.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 272.04
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Duster/1998 - Stratosphere/08 Constellations.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 223.2
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Duster/1998 - Stratosphere/09 The Queen of Hearts.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 259.426667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Duster/1998 - Stratosphere/10 Two Way Radio.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 19.4
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Duster/1998 - Stratosphere/11 Inside Out.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 141.04
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Duster/1998 - Stratosphere/12 Stratosphere.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 417.533333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Duster/1998 - Stratosphere/13 Reed to Hillsborough.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 240.8
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Duster/1998 - Stratosphere/14 Shadows of Planes.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 110.133333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Duster/1998 - Stratosphere/15 Earth Moon Transit.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 263.493333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Duster/1998 - Stratosphere/16 The Twins _ Romantica.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 222.933333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Duster/1998 - Stratosphere/17 Sideria.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 107.6
+   }
+  ]
+ },
+ {
+  "request_id": 8935,
+  "album_dir": "/mnt/virtio/Music/Beets/Brian Eno/1990 - Ambient 1_ Music for Airports [EEGCD 17]",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/Beets/Brian Eno/1990 - Ambient 1_ Music for Airports [EEGCD 17]/01 1_1.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 1040.533333
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Brian Eno/1990 - Ambient 1_ Music for Airports [EEGCD 17]/02 2_1.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 535.36
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Brian Eno/1990 - Ambient 1_ Music for Airports [EEGCD 17]/03 1_2.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 726.306667
+   },
+   {
+    "path": "/mnt/virtio/Music/Beets/Brian Eno/1990 - Ambient 1_ Music for Airports [EEGCD 17]/04 2_2.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "codec": "flac",
+    "dur": 611.8
+   }
+  ]
+ }
+]

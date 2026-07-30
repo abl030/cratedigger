@@ -1,0 +1,21 @@
+cratedigger dev shell — run: python3 -m unittest discover -s tests -t . -v
+
+ARMS  (window-0, T=62): genuine ultra-only 12; near-transparent launders uniquely held 152; aggressive 249
+rule                    gen->UNT  NEAR->UNT  lift(near)  AGGR->UNT  lift(aggr)
+nocliff & step<20          10/12     83/152        1.53     43/249        4.83
+nocliff & step<15          10/12     74/152        1.71     32/249        6.48
+nocliff & step<12           4/12     47/152        1.08     25/249        3.32
+nocliff & step<10           3/12     33/152        1.15     20/249        3.11
+nocliff & step<8            2/12     18/152        1.41     15/249        2.77
+nocliff & step<6            2/12     10/152        2.53     11/249        3.77
+nocliff & step<4            2/12      4/152        6.33     10/249        4.15
+
+MATRIX19  (window-0, T=62): genuine ultra-only 5; near-transparent launders uniquely held 67; aggressive 86
+rule                    gen->UNT  NEAR->UNT  lift(near)  AGGR->UNT  lift(aggr)
+nocliff & step<20            4/5      27/67        1.99      16/86        4.30
+nocliff & step<15            4/5      25/67        2.14      14/86        4.91
+nocliff & step<12            2/5       7/67        3.83      11/86        3.13
+nocliff & step<10            0/5       1/67          --       9/86          --
+nocliff & step<8             0/5       0/67          --       6/86          --
+nocliff & step<6             0/5       0/67          --       5/86          --
+nocliff & step<4             0/5       0/67          --       4/86          --

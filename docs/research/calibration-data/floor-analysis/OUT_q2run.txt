@@ -1,0 +1,121 @@
+cratedigger dev shell — run: python3 -m unittest discover -s tests -t . -v
+
+== ARMS (100 albums, full matrix)  stats=['rel18']  n=5300
+   correctness (true >= predicted floor): 5296/5300 = 99.9%
+   variant                n true kbps  median floor  p90 floor  violations
+   control-flac1644     100  lossless            12         12           0
+   lame-v0              100       245            12         12           0
+   lame-cbr320          100       320            12         12           0
+   lame-cbr128          100       128            12         12           0
+   vorbis-q6            100       192            12         12           0
+   vorbis-q9            100       320            12         12           0
+   vorbis-q5            100       160            12         12           0
+   aacffm-256           100       256            12         12           0
+   aacffm-128           100       128            12         12           0
+   apple-cvbr256        100       256            12         12           0
+   opus-256             100       256            12         12           0
+   opus-96              100        96            12         12           0
+   fdk-he1-64           100        64            12         12           0
+   fdk-he2-32           100        32            12         12           0
+   t-mp3128-flac        100       128            12         12           0
+   t-vorbisq5-flac      100       160            12         12           0
+   t-opus96-flac        100        96            12         12           0
+
+== ARMS (100 albums, full matrix)  stats=['edge_med']  n=5300
+   correctness (true >= predicted floor): 5300/5300 = 100.0%
+   variant                n true kbps  median floor  p90 floor  violations
+   control-flac1644     100  lossless            12         12           0
+   lame-v0              100       245            12         12           0
+   lame-cbr320          100       320            12         12           0
+   lame-cbr128          100       128            12         12           0
+   vorbis-q6            100       192            12         12           0
+   vorbis-q9            100       320            12         12           0
+   vorbis-q5            100       160            12         12           0
+   aacffm-256           100       256            12         12           0
+   aacffm-128           100       128            12         12           0
+   apple-cvbr256        100       256            12         12           0
+   opus-256             100       256            12         12           0
+   opus-96              100        96            12         12           0
+   fdk-he1-64           100        64            12         12           0
+   fdk-he2-32           100        32            12         12           0
+   t-mp3128-flac        100       128            12         12           0
+   t-vorbisq5-flac      100       160            12         12           0
+   t-opus96-flac        100        96            12         12           0
+
+== ARMS (100 albums, full matrix)  stats=['cliff_med']  n=5300
+   correctness (true >= predicted floor): 5300/5300 = 100.0%
+   variant                n true kbps  median floor  p90 floor  violations
+   control-flac1644     100  lossless            12         12           0
+   lame-v0              100       245            12         12           0
+   lame-cbr320          100       320            12         12           0
+   lame-cbr128          100       128            12         12           0
+   vorbis-q6            100       192            12         12           0
+   vorbis-q9            100       320            12         12           0
+   vorbis-q5            100       160            12         12           0
+   aacffm-256           100       256            12         12           0
+   aacffm-128           100       128            12         12           0
+   apple-cvbr256        100       256            12         12           0
+   opus-256             100       256            12         12           0
+   opus-96              100        96            12         12           0
+   fdk-he1-64           100        64            12         12           0
+   fdk-he2-32           100        32            12         12           0
+   t-mp3128-flac        100       128            12         12           0
+   t-vorbisq5-flac      100       160            12         12           0
+   t-opus96-flac        100        96            12         12           0
+
+== ARMS (100 albums, full matrix)  stats=['rel18', 'edge_med']  n=5300
+   correctness (true >= predicted floor): 5296/5300 = 99.9%
+   variant                n true kbps  median floor  p90 floor  violations
+   control-flac1644     100  lossless            12         12           0
+   lame-v0              100       245            12         12           0
+   lame-cbr320          100       320            12         12           0
+   lame-cbr128          100       128            12         12           0
+   vorbis-q6            100       192            12         12           0
+   vorbis-q9            100       320            12         12           0
+   vorbis-q5            100       160            12         12           0
+   aacffm-256           100       256            12         12           0
+   aacffm-128           100       128            12         12           0
+   apple-cvbr256        100       256            12         12           0
+   opus-256             100       256            12         12           0
+   opus-96              100        96            12         12           0
+   fdk-he1-64           100        64            12         12           0
+   fdk-he2-32           100        32            12         12           0
+   t-mp3128-flac        100       128            12         12           0
+   t-vorbisq5-flac      100       160            12         12           0
+   t-opus96-flac        100        96            12         12           0
+
+== ARMS (100 albums, full matrix)  stats=['rel18', 'edge_med', 'cliff_med', 'd18_195', 'hfdef']  n=5300
+   correctness (true >= predicted floor): 5277/5300 = 99.6%
+   variant                n true kbps  median floor  p90 floor  violations
+   control-flac1644     100  lossless            12         12           0
+   lame-v0              100       245            12         12           1
+   lame-cbr320          100       320            12         12           1
+   lame-cbr128          100       128            12         12           0
+   vorbis-q6            100       192            12         12           1
+   vorbis-q9            100       320            12         12           1
+   vorbis-q5            100       160            12         12           1
+   aacffm-256           100       256            12         12           1
+   aacffm-128           100       128            12         12           0
+   apple-cvbr256        100       256            12         12           1
+   opus-256             100       256            12         12           1
+   opus-96              100        96            12         12           1
+   fdk-he1-64           100        64            12         12           1
+   fdk-he2-32           100        32            12         12           0
+   t-mp3128-flac        100       128            12         12           0
+   t-vorbisq5-flac      100       160            12         12           1
+   t-opus96-flac        100        96            12         12           1
+
+== MATRIX19 (19 albums, wide codec set)  stats=['rel18', 'edge_med', 'cliff_med', 'd18_195', 'hfdef']  n=617
+   correctness (true >= predicted floor): 602/617 = 97.6%
+   variant                n true kbps  median floor  p90 floor  violations
+   genuine               55  lossless            96         96           0
+   lame-v0               19       245            96         96           1
+   lame-cbr320           19       320            96        128           1
+   lame-cbr128           19       128            96         96           0
+   vorbis-q6             19       192            96         96           1
+   vorbis-q5             19       160            96         96           1
+   aacffm-256            19       256            96        128           1
+   aacffm-128            19       128            96         96           0
+   qaac-cvbr256          19       256            96         96           0
+   opus-256              19       256            96        128           1
+   opus-96               19        96            96        128           2

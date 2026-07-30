@@ -1,0 +1,24 @@
+import json
+from statistics import median
+R = json.load(open('/home/abl030/.claude/jobs/fb229c18/tmp/floor/feats.json'))
+ARM = [r for r in R if r['ds'] in ('TRAIN','R1','R2','R3')]
+by = {}
+for r in ARM:
+    by[(r['ds'], r['slug'], r['variant'])] = r
+gen = {(r['ds'], r['slug']): r for r in ARM if r['variant']=='control-flac1644'}
+FRAUD = ('t-mp3128-flac','t-opus96-flac','t-vorbisq5-flac')
+print("PAIRED abs_bU (album's own genuine vs its launder), arms, 100 albums")
+print(f"{'variant':<18}{'n':>4}{'med gen':>9}{'med lau':>9}{'med delta':>11}{'delta<0 %':>11}{'lau<-112 %':>12}{'gen<-112 %':>12}")
+for v in FRAUD + ('apple-cvbr256','lame-cbr320','vorbis-q9','opus-256','lame-v0'):
+    pairs = [(gen[(r['ds'],r['slug'])]['abs_bU'], r['abs_bU']) for r in ARM if r['variant']==v and (r['ds'],r['slug']) in gen]
+    if not pairs: continue
+    d = [b-a for a,b in pairs]
+    print(f"{v:<18}{len(pairs):>4}{median(a for a,_ in pairs):>9.1f}{median(b for _,b in pairs):>9.1f}"
+          f"{median(d):>11.1f}{100*sum(1 for x in d if x<0)/len(d):>10.0f}%"
+          f"{100*sum(1 for _,b in pairs if b<-112)/len(pairs):>11.0f}%{100*sum(1 for a,_ in pairs if a<-112)/len(pairs):>11.0f}%")
+print()
+# Distribution of genuine abs_bU by whether the ultrasonic leg fires
+gd=[r['abs_bU'] for r in gen.values() if 'no-ultrasonic' in r['legs@62']]
+gp=[r['abs_bU'] for r in gen.values() if 'no-ultrasonic' not in r['legs@62']]
+print('genuine ultra-fires abs_bU: ', [round(x) for x in sorted(gd)])
+print('genuine ultra-quiet abs_bU: ', [round(x) for x in sorted(gp)])

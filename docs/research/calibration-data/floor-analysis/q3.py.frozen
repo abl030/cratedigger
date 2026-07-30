@@ -1,0 +1,60 @@
+"""Q3: three-state table. Also: where do the (c)-universe floor violations concentrate?"""
+import sys, json, bisect
+sys.path.insert(0,'/home/abl030/.claude/jobs/fb229c18/tmp/floor')
+from load import *
+from collections import defaultdict, Counter
+from statistics import median
+Q2=json.load(open('/home/abl030/.claude/jobs/fb229c18/tmp/floor/q2feats.json'))
+for r in Q2: r['album']=(r['ds'],r['slug'])
+LOSSLESS=10000
+ARMq=[r for r in Q2 if r['ds'] in ('TRAIN','R1','R2','R3')]
+OPUS=lambda v: v.startswith('opus-') or v=='t-opus96-flac'
+HE=lambda v: v.startswith('fdk-he')
+poolc=[r for r in ARMq if not OPUS(r['variant']) and not HE(r['variant'])]
+def ffn(train,key,sign):
+    pts=sorted((sign*r[key],r['kbps']) for r in train); xs=[];mins=[];m=10**9
+    for x,k in reversed(pts): m=min(m,k); xs.append(x); mins.append(m)
+    xs.reverse();mins.reverse()
+    return lambda v:(mins[bisect.bisect_left(xs,sign*v)] if bisect.bisect_left(xs,sign*v)<len(mins) else LOSSLESS)
+viol=Counter()
+for a in sorted({r['album'] for r in poolc}):
+    tr=[r for r in poolc if r['album']!=a]
+    F1=ffn(tr,'d18_195',-1);F2=ffn(tr,'d16_18',-1);F3=ffn(tr,'cliff_min',1)
+    for r in (x for x in poolc if x['album']==a):
+        f=max(F1(r['d18_195']),F2(r['d16_18']),F3(r['cliff_min']))
+        if r['kbps']<f: viol[a]+=1
+print("(c)-universe floor violations by held-out album:", viol.most_common(6), " total", sum(viol.values()))
+
+# ---- three-state table ----
+ARMS={'TRAIN':('results.tsv.gz','extended.tsv.gz','multiwin.tsv.gz'),
+ 'R1':('results-holdout.tsv.gz','extended-holdout.tsv.gz','multiwin-holdout.tsv.gz'),
+ 'R2':('results-holdout2.tsv.gz','extended-holdout2.tsv.gz','multiwin-holdout2.tsv.gz'),
+ 'R3':('results-holdout3.tsv.gz','extended-holdout3.tsv.gz','multiwin-holdout3.tsv.gz')}
+GENV='control-flac1644'; FRAUD=('t-mp3128-flac','t-opus96-flac','t-vorbisq5-flac')
+MW={}
+for arm,(r,e,m) in ARMS.items():
+    A=load_arm(CAL+'/'+r,CAL+'/'+e,CAL+'/'+m)
+    for v in (GENV,)+FRAUD:
+        for slug,(tr,cl,wins) in A[v].items():
+            steps=[]
+            for off,vv in wins.items():
+                if len(vv)>=2: steps.append(window_legs(list(vv.values()),62.0)[3])
+            cf=sum(1 for c,_d in cl if c and c<=19000)/len(cl)
+            MW[(arm,slug,v)]={'step_max':max(steps),'cliff_frac':cf,
+                              'legs':{T:set(gate(tr,cl,wins,T)[1]) for T in (62.0,59.5)}}
+CLIFFF={(r['ds'],r['slug'],r['variant']):r for r in ARMq}
+def state(k,rec,T,s):
+    L=rec['legs'][T]
+    if 'cliff' in L: return 'BOUNDED'
+    if 'ceiling' in L: return 'DENIED(wall)'
+    if 'no-ultrasonic' in L:
+        return 'UNTESTABLE' if (rec['cliff_frac']==0.0 and rec['step_max']<s) else 'DENIED(deficit)'
+    return 'PROVED'
+for T in (62.0,):
+  for s in (8,12,15):
+    print(f"\n===== THREE-STATE, arms 100 albums, T={T}, untestable rule = nocliff & step_max<{s} =====")
+    print(f"{'candidate':<20}{'n':>5}{'PROVED':>8}{'BOUNDED':>9}{'DENIED(wall)':>14}{'DENIED(deficit)':>17}{'UNTESTABLE':>12}")
+    for v in (GENV,)+FRAUD:
+        c=Counter(state(k,rec,T,s) for k,rec in MW.items() if k[2]==v)
+        n=sum(c.values())
+        print(f"{v:<20}{n:>5}{c['PROVED']:>8}{c['BOUNDED']:>9}{c['DENIED(wall)']:>14}{c['DENIED(deficit)']:>17}{c['UNTESTABLE']:>12}")

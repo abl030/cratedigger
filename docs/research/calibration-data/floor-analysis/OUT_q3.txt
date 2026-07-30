@@ -1,0 +1,23 @@
+cratedigger dev shell — run: python3 -m unittest discover -s tests -t . -v
+(c)-universe floor violations by held-out album: [(('TRAIN', 'Autechre--1995_-_Tri_Repetae'), 21), (('R3', 'Sarah_Davachi--2018_-_Let_Night_Come_on_Bells_End_the_Day'), 9)]  total 30
+
+===== THREE-STATE, arms 100 albums, T=62.0, untestable rule = nocliff & step_max<8 =====
+candidate               n  PROVED  BOUNDED  DENIED(wall)  DENIED(deficit)  UNTESTABLE
+control-flac1644      100      64        0            20                9           7
+t-mp3128-flac         100       0       91             0                9           0
+t-opus96-flac         100       0        0            96                4           0
+t-vorbisq5-flac       100       0        8            56               36           0
+
+===== THREE-STATE, arms 100 albums, T=62.0, untestable rule = nocliff & step_max<12 =====
+candidate               n  PROVED  BOUNDED  DENIED(wall)  DENIED(deficit)  UNTESTABLE
+control-flac1644      100      64        0            20                5          11
+t-mp3128-flac         100       0       91             0                9           0
+t-opus96-flac         100       0        0            96                3           1
+t-vorbisq5-flac       100       0        8            56               33           3
+
+===== THREE-STATE, arms 100 albums, T=62.0, untestable rule = nocliff & step_max<15 =====
+candidate               n  PROVED  BOUNDED  DENIED(wall)  DENIED(deficit)  UNTESTABLE
+control-flac1644      100      64        0            20                2          14
+t-mp3128-flac         100       0       91             0                9           0
+t-opus96-flac         100       0        0            96                2           2
+t-vorbisq5-flac       100       0        8            56               33           3

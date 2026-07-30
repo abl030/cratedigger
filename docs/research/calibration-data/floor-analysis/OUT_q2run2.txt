@@ -1,0 +1,69 @@
+cratedigger dev shell — run: python3 -m unittest discover -s tests -t . -v
+
+===== (a) ALL codecs  (arms, LOO by album; n=5300) =====
+  correctness (true kbps >= predicted floor): 5271/5300 = 99.45%
+  variant                true  floor p10  floor med  floor p90  viol
+  control-flac1644         LL         12         12         12     0
+  lame-v0                 245         12         12         12     1
+  lame-cbr320             320         12         12         12     1
+  lame-cbr192             192         12         12         12     1
+  lame-cbr128             128         12         12         12     0
+  vorbis-q9               320         12         12         12     1
+  vorbis-q6               192         12         12         12     1
+  vorbis-q5               160         12         12         12     1
+  vorbis-q4               128         12         12         12     1
+  aacffm-320              320         12         12         12     1
+  aacffm-256              256         12         12         12     1
+  aacffm-128              128         12         12         12     0
+  apple-cvbr256           256         12         12         12     1
+  apple-abr192            192         12         12         12     1
+  apple-cbr128            128         12         12         12     0
+  fdk-he1-64               64         12         12         12     1
+  opus-256                256         12         12         12     1
+  opus-96                  96         12         12         12     1
+  t-mp3128-flac           128         12         12         12     0
+  t-vorbisq5-flac         160         12         12         12     1
+  t-opus96-flac            96         12         12         12     1
+
+===== (b) no Opus (candidate is 44.1kHz)  (arms, LOO by album; n=4400) =====
+  correctness (true kbps >= predicted floor): 4377/4400 = 99.48%
+  variant                true  floor p10  floor med  floor p90  viol
+  control-flac1644         LL         32         64         64     0
+  lame-v0                 245         32         64         64     1
+  lame-cbr320             320         32         64         64     1
+  lame-cbr192             192         32         45         45     1
+  lame-cbr128             128         32         32         32     0
+  vorbis-q9               320         32         64         64     1
+  vorbis-q6               192         32         64         64     1
+  vorbis-q5               160         32         64         64     1
+  vorbis-q4               128         32         45         45     1
+  aacffm-320              320         32         64         64     1
+  aacffm-256              256         32         64         64     1
+  aacffm-128              128         32         32         32     0
+  apple-cvbr256           256         32         64         64     1
+  apple-abr192            192         32         45         64     1
+  apple-cbr128            128         32         32         45     0
+  fdk-he1-64               64         32         64         64     1
+  t-mp3128-flac           128         32         32         32     0
+  t-vorbisq5-flac         160         32         45         64     1
+
+===== (c) no Opus, no HE-AAC  (arms, LOO by album; n=4200) =====
+  correctness (true kbps >= predicted floor): 4170/4200 = 99.29%
+  variant                true  floor p10  floor med  floor p90  viol
+  control-flac1644         LL         45        128        160     0
+  lame-v0                 245         45        128        160     1
+  lame-cbr320             320         45        128        160     1
+  lame-cbr192             192         45         45         45     1
+  lame-cbr128             128         45         45         45     0
+  vorbis-q9               320         45        128        160     1
+  vorbis-q6               192         45        128        160     1
+  vorbis-q5               160         45         96        128     1
+  vorbis-q4               128         45         45         45     1
+  aacffm-320              320         45        128        160     1
+  aacffm-256              256         45        128        160     1
+  aacffm-128              128         45         45         45     0
+  apple-cvbr256           256         45        128        160     1
+  apple-abr192            192         45         45        128     1
+  apple-cbr128            128         45         45         45     0
+  t-mp3128-flac           128         45         45         45     0
+  t-vorbisq5-flac         160         45         45        128     1

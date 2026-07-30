@@ -1,0 +1,150 @@
+"""Measure variants with the PRODUCTION analyzer.
+
+`lib.spectral_check.analyze_album` is called UNMODIFIED. `_get_band_rms` is
+wrapped by a pass-through recorder so the raw slice vectors the frozen scorer
+consumes come from the same sox calls production makes -- nothing is
+re-measured or re-implemented.
+
+  python3 measure.py --tag pilot --variants genuine,null-flac,opus-128 \
+                     [--albums 8918,8923,8933]
+
+Resumable: one cache JSON per (tag, variant, album); re-runs skip cached work.
+Emits results-{tag}.tsv (27 col) + extended-{tag}.tsv (6 col) +
+albums-{tag}.json in the committed calibration-data format.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = "/home/abl030/cratedigger/.claude/worktrees/829-phase5-pr2"
+sys.path.insert(0, HERE)
+sys.path.insert(0, REPO)
+
+from variants import spec  # noqa: E402
+import lib.spectral_check as sc  # noqa: E402
+
+OUT_ROOT = "/mnt/virtio/Music/matrix"
+MANIFEST = os.path.join(HERE, "manifest.json")
+CACHE = os.path.join(HERE, "measure_cache")
+
+_rec: dict[tuple[str, int, int], float] = {}
+_lock = threading.Lock()
+_orig = sc._get_band_rms
+
+
+def _recording_band_rms(filepath, lo_hz, hi_hz, trim_seconds=30):
+    rms = _orig(filepath, lo_hz, hi_hz, trim_seconds)
+    with _lock:
+        _rec[(filepath, lo_hz, hi_hz)] = rms
+    return rms
+
+
+sc._get_band_rms = _recording_band_rms
+
+ALL_FREQS = sc.SLICE_FREQS + sc.EXTENSION_SLICE_FREQS  # 12000..21500
+
+
+def album_folder(vid, sp, alb):
+    if sp["kind"] == "genuine":
+        return alb["album_dir"]
+    return os.path.join(OUT_ROOT, vid, str(alb["request_id"]))
+
+
+def measure_one(vid, sp, alb, tag):
+    rid = str(alb["request_id"])
+    slug = f"{rid}--{os.path.basename(alb['album_dir'])}"
+    cpath = os.path.join(CACHE, tag, f"{vid}__{rid}.json")
+    if os.path.exists(cpath):
+        return json.load(open(cpath))
+
+    folder = album_folder(vid, sp, alb)
+    if not os.path.isdir(folder):
+        raise RuntimeError(f"[{vid}/{rid}] not built: {folder}")
+    res = sc.analyze_album(folder)
+
+    files = []
+    for root, _d, names in os.walk(folder):
+        for f in sorted(names):
+            if os.path.splitext(f)[1].lower() in sc.AUDIO_EXTENSIONS:
+                files.append(os.path.join(root, f))
+    # analyze_album keeps only non-error tracks, in file order.
+    ok = [f for f in files if (f, 1000, 4000) in _rec]
+    if len(ok) != len(res.tracks):
+        raise RuntimeError(f"[{vid}/{rid}] recorder/track mismatch "
+                           f"{len(ok)} vs {len(res.tracks)}")
+
+    mrows, erows = [], []
+    for path, tr in zip(ok, res.tracks):
+        ref_db = sc.rms_to_db(_rec[(path, 1000, 4000)])
+        vals = {}
+        for fq in ALL_FREQS:
+            r = _rec.get((path, fq, fq + sc.SLICE_WIDTH))
+            vals[fq] = sc.rms_to_db(r) if r is not None else None
+        inwin = [vals[f] if vals[f] is not None else sc.DB_FLOOR
+                 for f in sc.SLICE_FREQS]
+        mrows.append([
+            slug, vid, tr.codec_family, str(sp["encoder"]), str(sp["setting"]),
+            path, tr.grade,
+            str(tr.cliff_freq_hz) if tr.cliff_freq_hz else "",
+            str(tr.estimated_bitrate_kbps) if tr.estimated_bitrate_kbps else "",
+            f"{tr.hf_deficit_db:.6f}", f"{ref_db:.6f}",
+        ] + [f"{v:.6f}" for v in inwin])
+        erows.append([vid, path] + [
+            "" if vals[f] is None else f"{vals[f]:.6f}"
+            for f in sc.EXTENSION_SLICE_FREQS])
+
+    out = {
+        "slug": slug, "variant": vid, "request_id": rid, "folder": folder,
+        "grade": res.grade, "suspect_pct": res.suspect_pct,
+        "cliff_hz": res.cliff_hz, "codec_family": res.codec_family,
+        "ultrasonic_deficit_db": res.ultrasonic_deficit_db,
+        "estimated_bitrate_kbps": res.estimated_bitrate_kbps,
+        "n_tracks": len(res.tracks),
+        "n_error": len([t for t in res.tracks if t.grade == "error"]),
+        "_results_rows": mrows, "_extended_rows": erows,
+    }
+    os.makedirs(os.path.dirname(cpath), exist_ok=True)
+    json.dump(out, open(cpath, "w"))
+    return out
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--tag", required=True)
+    ap.add_argument("--variants", required=True)
+    ap.add_argument("--albums", default="")
+    ap.add_argument("--workers", type=int, default=6)
+    a = ap.parse_args()
+
+    albums = json.load(open(MANIFEST))
+    only = {x.strip() for x in a.albums.split(",") if x.strip()}
+    if only:
+        albums = [x for x in albums if str(x["request_id"]) in only]
+    vids = [v.strip() for v in a.variants.split(",") if v.strip()]
+
+    jobs = [(v, spec(v), alb, a.tag) for v in vids for alb in albums]
+    print(f"{len(jobs)} album-measurements, {a.workers} workers", flush=True)
+    with ThreadPoolExecutor(max_workers=a.workers) as ex:
+        recs = list(ex.map(lambda j: measure_one(*j), jobs))
+
+    mrows, erows, albs = [], [], []
+    for r in recs:
+        mrows += r.pop("_results_rows")
+        erows += r.pop("_extended_rows")
+        albs.append(r)
+    with open(f"{HERE}/results-{a.tag}.tsv", "w") as fh:
+        fh.write("".join("\t".join(r) + "\n" for r in mrows))
+    with open(f"{HERE}/extended-{a.tag}.tsv", "w") as fh:
+        fh.write("".join("\t".join(r) + "\n" for r in erows))
+    json.dump(albs, open(f"{HERE}/albums-{a.tag}.json", "w"), indent=1)
+    print(f"wrote {len(mrows)} track rows, {len(albs)} album rows -> *-{a.tag}.*")
+
+
+if __name__ == "__main__":
+    main()

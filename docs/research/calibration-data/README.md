@@ -10,6 +10,21 @@ This directory is the substrate those documents were computed from, kept so
 that any future claim about the model can be checked against the data rather
 than against a summary of it.
 
+## Sub-directories
+
+Each is a self-contained measurement record with its own README carrying the
+exact commands, tool versions and column layouts. **The research they belong to
+is unfinished; the later four are deliberately descriptive and draw no
+conclusions.**
+
+| directory | what it holds | measured |
+|---|---|---|
+| `apple-arm/` | the Apple CVBR-256 → FLAC gate test that closed residual #1 | 2026-07-30 |
+| `launder-matrix/` | 31 encoder variants × 19 albums, built as real launders, measured through the production analyzer and scored with the frozen gate | 2026-07-30 |
+| `derrien/` | a validated numpy port of Derrien's MDCT-lattice AAC-transcode detector, plus paired and wild measurement arms | 2026-07-30 |
+| `floor-analysis/` | re-reading of the four committed arms plus the launder matrix — preconditions, bitrate floors, a three-state framing | 2026-07-30 |
+| `provenance/` | read-only AccurateRip / CUETools DB / MusicBrainz DiscID probes over the library's FLAC albums | 2026-07-30 |
+
 ## Provenance
 
 Issue #829. The spectral subsystem's cliff→bitrate table

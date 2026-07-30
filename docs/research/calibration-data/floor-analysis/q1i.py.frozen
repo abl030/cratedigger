@@ -1,0 +1,31 @@
+"""Q1 final: sweep the no-wall precondition over the FULL variant set (window-0 gate, arms + new matrix)."""
+import json
+from collections import defaultdict
+R=json.load(open('/home/abl030/.claude/jobs/fb229c18/tmp/floor/feats.json'))
+ARMSET={'TRAIN','R1','R2','R3'}
+GEN_OF={'TRAIN':'control-flac1644','R1':'control-flac1644','R2':'control-flac1644','R3':'control-flac1644',
+        'LOCAL':'genuine','LOCALW':'genuine','APPLE':'genuine'}
+def w0legs(r,T):
+    L=set()
+    if r['cliff_frac']>=0.6: L.add('cliff')
+    if r['step']>=15.0 and r['cons']>=0.5: L.add('ceiling')
+    if r['U']>=T: L.add('ultra')
+    return L
+T=62.0
+def pre(r,ts): return r['cliff_frac']==0.0 and r['step']<ts
+groups={'ARMS':[r for r in R if r['ds'] in ARMSET],
+        'MATRIX19':[r for r in R if r['ds'] in ('LOCAL','LOCALW','APPLE')]}
+for gname,rows in groups.items():
+    gv=set(GEN_OF[r['ds']] for r in rows)
+    uni=[r for r in rows if w0legs(r,T)=={'ultra'}]
+    print(f"\n########## {gname}: universe = candidates denied by ultrasonic leg ALONE (window-0 gate, T=62) ##########")
+    byv=defaultdict(list)
+    for r in uni: byv[r['variant']].append(r)
+    print(f"{'step<':>7}" + "".join(f"{v[:11]:>13}" for v in sorted(byv, key=lambda v: (v not in gv, v))))
+    for ts in (15,12,10,8,6,4,2,0):
+        line=f"{ts:>7}"
+        for v in sorted(byv, key=lambda x:(x not in gv, x)):
+            n=len(byv[v]); k=sum(1 for r in byv[v] if pre(r,ts))
+            line+=f"{f'{k}/{n}':>13}"
+        print(line)
+    print("  (genuine variant is the first column; every other column is a launder class — voided detections)")

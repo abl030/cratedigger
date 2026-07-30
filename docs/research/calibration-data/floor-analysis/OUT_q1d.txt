@@ -1,0 +1,19 @@
+cratedigger dev shell — run: python3 -m unittest discover -s tests -t . -v
+GENUINE albums (n=100): correlation of U with preserved-band features
+   D_b12_14     r=+0.272
+   D_b14_16     r=+0.429
+   D_b16_18     r=+0.578
+   D_b18_195    r=+0.707
+   abs_b12_14   r=-0.028
+   abs_b14_16   r=-0.118
+   ref          r=+0.202
+   slope_mid    r=+0.482
+
+Preserved-band fidelity: |launder - genuine| for D_b12_14 / D_b14_16 (median abs diff, dB)
+   t-mp3128-flac      n=100  d12_14 med  0.29 p90  0.83   d14_16 med  1.57 p90  3.31
+   t-opus96-flac      n=100  d12_14 med  0.17 p90  0.27   d14_16 med  0.86 p90  1.22
+   t-vorbisq5-flac    n=100  d12_14 med  0.12 p90  0.27   d14_16 med  0.15 p90  0.35
+   apple-cvbr256      n=34   d12_14 med  0.31 p90  0.35   d14_16 med  0.32 p90  0.37
+   lame-cbr320        n=100  d12_14 med  0.05 p90  0.15   d14_16 med  0.07 p90  0.18
+   opus-256           n=100  d12_14 med  0.16 p90  0.20   d14_16 med  0.15 p90  0.24
+   vorbis-q9          n=100  d12_14 med  0.16 p90  0.25   d14_16 med  0.17 p90  0.26

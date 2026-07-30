@@ -1,0 +1,158 @@
+"""Apple/CoreAudio half of the launder matrix — reporting only.
+
+Reads what the harness already produced (derrien-<tag>.tsv, gate-<tag>.json)
+and answers two questions the harness's own pooled summary cannot:
+
+  1. Per-album Derrien recall, scored against THAT album's own genuine
+     control (lambda_album = max genuine track proba on the album), which
+     is the scoring the RUNBOOK requires. The pooled number is printed
+     next to it so the difference is visible.
+  2. The residual hole: albums that reach PROOF under the frozen spectral
+     gate AND are not caught by Derrien.
+
+Nothing here re-measures anything.
+
+  python3 apple_report.py --tag apple
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import os
+import statistics
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+HIRES = {"8920", "8931"}          # 96 kHz sources; Derrien rejects 96 kHz
+PAPER_LAMBDA = 0.031
+CONTROL = "genuine"
+
+
+def load(tag):
+    rows = [r for r in csv.DictReader(
+        open(f"{HERE}/derrien-{tag}.tsv"), delimiter="\t")
+        if r["mode"] == "high"]
+    ok = [r for r in rows if not r["err"]]
+    errs = [r for r in rows if r["err"]]
+    gate = {(g["variant"], g["slug"].split("--")[0]): g
+            for g in json.load(open(f"{HERE}/gate-{tag}.json"))}
+    return ok, errs, gate
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--tag", default="apple")
+    ap.add_argument("--variants", default="qaac-cvbr256,qaac-cbr128,"
+                                          "qaac-abr192,qaac-tvbr91,qaac-cvbr320")
+    a = ap.parse_args()
+    variants = [v.strip() for v in a.variants.split(",") if v.strip()]
+    ok, errs, gate = load(a.tag)
+
+    by = {}
+    for r in ok:
+        by.setdefault((r["variant"], r["request_id"]), []).append(float(r["proba"]))
+
+    ctl_albums = sorted({rid for (v, rid) in by if v == CONTROL})
+    lam = {rid: max(by[(CONTROL, rid)]) for rid in ctl_albums}
+    lam_pool = max(v for rid in ctl_albums for v in by[(CONTROL, rid)])
+    gen_all = [v for rid in ctl_albums for v in by[(CONTROL, rid)]]
+
+    print(f"### corpus / control ({a.tag})")
+    print(f"genuine tracks scored by Derrien: {len(gen_all)}"
+          f"   albums with a baseline: {len(ctl_albums)}")
+    if errs:
+        bad = sorted({(r['variant'], r['request_id'], r['err'][:45])
+                      for r in errs})
+        print(f"Derrien could not score {len(errs)} rows:")
+        for v, rid, e in bad:
+            print(f"   {v:14s} {rid}  {e}")
+    print(f"pooled zero-FP lambda (max genuine proba, all albums): {lam_pool:.4f}")
+    print(f"paper lambda {PAPER_LAMBDA}: genuine FP "
+          f"{sum(1 for v in gen_all if v > PAPER_LAMBDA)}/{len(gen_all)} "
+          f"({sum(1 for v in gen_all if v > PAPER_LAMBDA)/len(gen_all)*100:.1f}%)")
+    print("\nper-album genuine lambda (max genuine track proba):")
+    for rid in ctl_albums:
+        n = len(by[(CONTROL, rid)])
+        print(f"   {rid}  n={n:2d}  lambda={lam[rid]:.4f}  "
+              f"median={statistics.median(by[(CONTROL, rid)]):.4f}")
+
+    # ---- per-variant recall ------------------------------------------
+    print(f"\n### Derrien recall, per-album lambda vs pooled lambda "
+          f"({lam_pool:.4f})")
+    hdr = (f"{'variant':<14}{'n_tr':>5}{'per-album':>11}{'pooled':>9}"
+           f"{'paper':>8}   {'albums all-tracks-caught':>26}")
+    print(hdr)
+    summary = {}
+    for v in variants:
+        rids = [rid for rid in ctl_albums if (v, rid) in by]
+        tr = [(rid, p) for rid in rids for p in by[(v, rid)]]
+        if not tr:
+            continue
+        per = sum(1 for rid, p in tr if p > lam[rid]) / len(tr) * 100
+        pool = sum(1 for _r, p in tr if p > lam_pool) / len(tr) * 100
+        paper = sum(1 for _r, p in tr if p > PAPER_LAMBDA) / len(tr) * 100
+        full = sum(1 for rid in rids
+                   if all(p > lam[rid] for p in by[(v, rid)]))
+        summary[v] = dict(n=len(tr), per=per, pool=pool, paper=paper,
+                          albums=len(rids), full=full)
+        print(f"{v:<14}{len(tr):>5}{per:>10.1f}%{pool:>8.1f}%{paper:>7.1f}%"
+              f"{full:>20}/{len(rids)}")
+
+    # ---- per-album detail --------------------------------------------
+    print("\n### per-album Derrien recall (tracks above that album's own lambda)")
+    print(f"{'album':<8}{'lambda':>8}  " +
+          "".join(f"{v.replace('qaac-',''):>12}" for v in variants))
+    for rid in ctl_albums:
+        cells = []
+        for v in variants:
+            p = by.get((v, rid), [])
+            cells.append("-" if not p else
+                         f"{sum(1 for x in p if x > lam[rid])}/{len(p)}")
+        print(f"{rid:<8}{lam[rid]:>8.4f}  " +
+              "".join(f"{c:>12}" for c in cells))
+
+    # ---- the residual hole -------------------------------------------
+    print("\n### residual hole: album reaches PROOF under the frozen gate AND "
+          "Derrien does not catch it")
+    print("(Derrien album verdict = ANY track above that album's own lambda)")
+    for v in variants:
+        for T in ("62", "59.5"):
+            proof, escaped, nod = [], [], []
+            for rid in sorted({k[1] for k in gate if k[0] == v}):
+                g = gate.get((v, rid))
+                if g is None or g[f"denied@{T}"]:
+                    continue
+                proof.append(rid)
+                p = by.get((v, rid), [])
+                if rid not in lam or not p:
+                    nod.append(rid)
+                elif not any(x > lam[rid] for x in p):
+                    escaped.append(rid)
+            print(f"  {v:<14} T={T:<5} PROOF {len(proof):2d}/19   "
+                  f"escapes both {len(escaped)}  "
+                  f"no-Derrien-baseline {len(nod)}"
+                  f"{'  ' + ','.join(escaped) if escaped else ''}"
+                  f"{'  [hi-res: ' + ','.join(nod) + ']' if nod else ''}")
+
+    # ---- hi-res note --------------------------------------------------
+    print("\n### hi-res albums (96 kHz sources, reported separately)")
+    for rid in sorted(HIRES):
+        g = gate.get((CONTROL, rid))
+        print(f"  {rid}: genuine gate T=62 "
+              f"{'DENY' if g and g['denied@62'] else 'PROOF'}; "
+              f"Derrien has NO genuine baseline (96 kHz unsupported)")
+        for v in variants:
+            p = by.get((v, rid), [])
+            gg = gate.get((v, rid))
+            if not p:
+                print(f"     {v:<14} no Derrien rows")
+                continue
+            print(f"     {v:<14} gate T=62 "
+                  f"{'DENY ' if gg and gg['denied@62'] else 'PROOF'}  "
+                  f"derrien n={len(p)} med={statistics.median(p):.4f} "
+                  f"max={max(p):.4f}  >pooled_lambda "
+                  f"{sum(1 for x in p if x > lam_pool)}/{len(p)}")
+
+
+if __name__ == "__main__":
+    main()

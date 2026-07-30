@@ -1,0 +1,35 @@
+"""Q1: split the cost by launder severity class (aggressive vs near-transparent)."""
+import json
+from collections import defaultdict
+R=json.load(open('/home/abl030/.claude/jobs/fb229c18/tmp/floor/feats.json'))
+def w0legs(r,T):
+    L=set()
+    if r['cliff_frac']>=0.6: L.add('cliff')
+    if r['step']>=15.0 and r['cons']>=0.5: L.add('ceiling')
+    if r['U']>=T: L.add('ultra')
+    return L
+NEAR={'lame-v0','lame-cbr320','lame-cbr256','lame-cbr224','vorbis-q6','vorbis-q7','vorbis-q8','vorbis-q9','vorbis-q10',
+      'aacffm-256','aacffm-320','apple-cvbr256','qaac-cvbr256','qaac-cvbr320','qaac-tvbr91','opus-256','opus-192'}
+seen=set(); MX=[]
+for r in R:
+    if r['ds'] not in ('LOCAL','LOCALW','APPLE'): continue
+    if r['variant'] in ('genuine','null-flac'):
+        k=(r['slug'],'g')
+        if k in seen: continue
+        seen.add(k); r=dict(r); r['variant']='genuine'
+    MX.append(r)
+ARM=[r for r in R if r['ds'] in ('TRAIN','R1','R2','R3')]
+for gname,rows,gv in (('ARMS',ARM,'control-flac1644'),('MATRIX19',MX,'genuine')):
+    T=62.0; uni=[r for r in rows if w0legs(r,T)=={'ultra'}]
+    gtot=sum(1 for r in uni if r['variant']==gv)
+    near=[r for r in uni if r['variant'] in NEAR]; aggr=[r for r in uni if r['variant']!=gv and r['variant'] not in NEAR]
+    print(f"\n{gname}  (window-0, T=62): genuine ultra-only {gtot}; near-transparent launders uniquely held {len(near)}; aggressive {len(aggr)}")
+    print(f"{'rule':<22}{'gen->UNT':>10}{'NEAR->UNT':>11}{'lift(near)':>12}{'AGGR->UNT':>11}{'lift(aggr)':>12}")
+    for s in (20,15,12,10,8,6,4):
+        f=lambda r: r['cliff_frac']==0.0 and r['step']<s
+        g=sum(1 for r in uni if r['variant']==gv and f(r))
+        n=sum(1 for r in near if f(r)); a=sum(1 for r in aggr if f(r))
+        ln=g/(gtot*n/len(near)) if near and n else None
+        la=g/(gtot*a/len(aggr)) if aggr and a else None
+        print(f"{'nocliff & step<%g'%s:<22}{f'{g}/{gtot}':>10}{f'{n}/{len(near)}':>11}"
+              +(f"{ln:>12.2f}" if ln else f"{'--':>12}")+f"{f'{a}/{len(aggr)}':>11}"+(f"{la:>12.2f}" if la else f"{'--':>12}"))

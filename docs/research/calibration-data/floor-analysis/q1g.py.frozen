@@ -1,0 +1,65 @@
+"""Q1: systematic precondition comparison with a lift-vs-random metric, plus the T-sweep baseline."""
+import sys, json
+sys.path.insert(0,'/home/abl030/.claude/jobs/fb229c18/tmp/floor')
+from load import *
+from collections import defaultdict
+ARMS={'TRAIN':('results.tsv.gz','extended.tsv.gz','multiwin.tsv.gz'),
+ 'R1':('results-holdout.tsv.gz','extended-holdout.tsv.gz','multiwin-holdout.tsv.gz'),
+ 'R2':('results-holdout2.tsv.gz','extended-holdout2.tsv.gz','multiwin-holdout2.tsv.gz'),
+ 'R3':('results-holdout3.tsv.gz','extended-holdout3.tsv.gz','multiwin-holdout3.tsv.gz')}
+GENV='control-flac1644'; FRAUD=('t-mp3128-flac','t-opus96-flac','t-vorbisq5-flac')
+FEAT={(r['ds'],r['slug'],r['variant']):r for r in json.load(open('/home/abl030/.claude/jobs/fb229c18/tmp/floor/feats.json'))}
+REC={}
+for arm,(r,e,m) in ARMS.items():
+    A=load_arm(CAL+'/'+r,CAL+'/'+e,CAL+'/'+m)
+    for v in (GENV,)+FRAUD:
+        for slug,(tr,cl,w) in A[v].items():
+            for T in (56,58,59.5,62,64,66,68,70,72):
+                d,legs,Us=gate(tr,cl,w,float(T))
+                REC[(arm,slug,v,T)]=(set(legs),Us)
+
+print("=== BASELINE KNOB: sweeping the ultrasonic threshold T (multiwin, 100 arm albums) ===")
+print(f"{'T':>6}{'gen denied':>12}{'gen ULTRA-only':>16}{'launder uniquely caught by ultra (of 300)':>44}")
+for T in (56,58,59.5,62,64,66,68,70,72):
+    gd=sum(1 for (a,s,v,t),(L,_) in REC.items() if v==GENV and t==T and L)
+    gu=sum(1 for (a,s,v,t),(L,_) in REC.items() if v==GENV and t==T and L=={'no-ultrasonic'})
+    lu=sum(1 for (a,s,v,t),(L,_) in REC.items() if v in FRAUD and t==T and L=={'no-ultrasonic'})
+    lp=sum(1 for (a,s,v,t),(L,_) in REC.items() if v in FRAUD and t==T and not L)
+    print(f"{T:>6}{gd:>12}{gu:>16}{lu:>30}   (frauds PROVED: {lp})")
+
+def curve(T, key, cmp, ths):
+    out=[]
+    for th in ths:
+        g=l=0
+        for (a,s,v,t),(L,_) in REC.items():
+            if t!=T or L!={'no-ultrasonic'}: continue
+            f=FEAT.get((a,s,v))
+            if f is None or f.get(key) is None: continue
+            if cmp(f[key],th):
+                if v==GENV: g+=1
+                elif v in FRAUD: l+=1
+        out.append((th,g,l))
+    return out
+
+T=62
+GTOT=sum(1 for (a,s,v,t),(L,_) in REC.items() if v==GENV and t==T and L=={'no-ultrasonic'})
+LTOT=sum(1 for (a,s,v,t),(L,_) in REC.items() if v in FRAUD and t==T and L=={'no-ultrasonic'})
+print(f"\n=== PRECONDITION LIFT (T=62). Universe: {GTOT} genuine + {LTOT} launder albums denied by the ultrasonic leg ALONE.")
+print("    'lift' = genuine rescued / genuine expected if the same number of launders were voided at random. >1 = real power.")
+FAMS=[
+ ('D_b12_14 >= th','D_b12_14',lambda x,t:x>=t,[60,55,50,46,44,42,40,38,36,34,30]),
+ ('abs_b12_14 <= th','abs_b12_14',lambda x,t:x<=t,[-100,-95,-90,-85,-80,-75,-70,-65,-60]),
+ ('abs_bU <= th','abs_bU',lambda x,t:x<=t,[-115,-112,-110,-105,-100,-95,-90,-85]),
+ ('ref <= th','ref',lambda x,t:x<=t,[-50,-45,-40,-35,-30,-25,-20]),
+ ('U_sd <= th','U_sd',lambda x,t:x<=t,[3,4,5,6,8,10,12,15]),
+ ('slope_mid >= th','slope_mid',lambda x,t:x>=t,[2.0,1.6,1.3,1.0,0.8,0.6,0.4,0.2]),
+ ('hfdef >= th','hfdef',lambda x,t:x>=t,[80,75,70,65,60,55,50]),
+ ('cliff_med is None/high','cliff_frac',lambda x,t:x<=t,[0.0,0.1,0.2,0.3,0.5]),
+]
+for name,key,cmp,ths in FAMS:
+    print(f"\n  {name}")
+    for th,g,l in curve(T,key,cmp,ths):
+        exp = GTOT*l/LTOT if LTOT else 0
+        lift = (g/exp) if exp>0 else float('nan')
+        print(f"     th={th:<7} rescued {g:>3}/{GTOT}   voided {l:>3}/{LTOT}   lift {lift:>5.2f}" if exp>0
+              else f"     th={th:<7} rescued {g:>3}/{GTOT}   voided {l:>3}/{LTOT}   lift    --")

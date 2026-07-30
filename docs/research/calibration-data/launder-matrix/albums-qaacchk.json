@@ -1,0 +1,30 @@
+[
+ {
+  "slug": "8933--2014 - Ruins",
+  "variant": "genuine",
+  "request_id": "8933",
+  "folder": "/mnt/virtio/Music/Beets/Grouper/2014 - Ruins",
+  "grade": "genuine",
+  "suspect_pct": 0.0,
+  "cliff_hz": null,
+  "codec_family": "lossless",
+  "ultrasonic_deficit_db": 41.326592544832195,
+  "estimated_bitrate_kbps": null,
+  "n_tracks": 8,
+  "n_error": 0
+ },
+ {
+  "slug": "8933--2014 - Ruins",
+  "variant": "qaac-cvbr256",
+  "request_id": "8933",
+  "folder": "/mnt/virtio/Music/matrix/qaac-cvbr256/8933",
+  "grade": "genuine",
+  "suspect_pct": 12.5,
+  "cliff_hz": 13000,
+  "codec_family": "lossless",
+  "ultrasonic_deficit_db": 40.85826289062594,
+  "estimated_bitrate_kbps": 96,
+  "n_tracks": 8,
+  "n_error": 0
+ }
+]
