@@ -31,10 +31,21 @@ encoder×bitrate matrix, and per-codec verdicts.
 
 Each arm encoded the same ground-truth FLACs through the full matrix (LAME,
 ffmpeg-native AAC, libfdk AAC incl. HE-AAC, **Apple CoreAudio** via qaac,
-Opus, Vorbis) plus second-generation fraud shapes (mp3-128→FLAC,
-opus-96→FLAC, vorbis-q5→FLAC, apple-256→FLAC, aac128→mp3320), then measured
-every file with the **production analyzer**, capturing raw slice vectors
-rather than only the bucketed output.
+Opus, Vorbis) plus second-generation fraud shapes, then measured every file
+with the **production analyzer**, capturing raw slice vectors rather than only
+the bucketed output.
+
+**The proof gate was validated against THREE FLAC-container fraud classes,
+not four** — `t-mp3128-flac`, `t-opus96-flac`, `t-vorbisq5-flac`, which is
+what the frozen scorer's `FLAC_FRAUDS` set contains. `t-apple256-flac` was
+built once for the V0 probe experiment and appears only in
+`probe_pair.tsv.gz`; it was never spectrally measured here and never entered
+the gate evaluation. An earlier version of this README listed it among the
+fraud classes, which overstated what had been tested. **See `apple-arm/` —
+that gap is now measured, and the gate does not catch the class.** The
+lossy-container shapes (`t-aac128-mp3320`, `t-mp3128-aac256`,
+`t-mp3192-mp3320`) are present in `results*`/`extended*` but cannot receive
+lossless proof in any case.
 
 Holdout arms were sealed until the scorer being tested was frozen. Round 1
 **failed**, and that failure is part of this record — see
@@ -154,11 +165,18 @@ per-class, **not** posterior odds. Real peer-shared content is roughly 49% mp3
 
 ## Known residuals
 
-1. **Apple CVBR-256 → FLAC is spectrally invisible** on all four arms
-   (96–99% no-cliff vs control 99–100%; deficit 45–49 vs 44–48 dB) and
-   survives the v3 gate. Lowest perceptual severity of any fraud class.
-   402 paired examples informed this; the pairs themselves are gone with the
-   encode tree.
+1. **Apple CVBR-256 → FLAC defeats the proof gate — MEASURED 2026-07-30, see
+   `apple-arm/`.** 10 of 17 launders reach proof; at `T = 59.5` the launder
+   proof-set is byte-for-byte identical to the genuine proof-set, i.e. zero
+   discriminating power. Pooled conditional false-accept 91–92% across two
+   arms. Mechanism: Apple CVBR-256 applies essentially no lowpass in the
+   measured band — 2.1 dB down at 21.5 kHz — so no leg has anything to see.
+   This entry previously described the same conclusion as an inference from
+   `.m4a` statistics across four arms; it was never gate-tested until now,
+   and the measured result is worse than the inference implied.
+   Still the lowest perceptual severity of any fraud class (near-transparent
+   source), and no cheap discriminator is known — the V0/Opus probe axis
+   (`probe_pair.tsv.gz`) fails against it too.
 2. **Lossy-side band assertions are weak on HF-poor material.**
 3. **No-cliff asserts nothing** — the high end of every ladder is invisible.
    A permanent property, not a defect.

@@ -1,0 +1,109 @@
+"""Measure the apple arm with the PRODUCTION analyzer.
+
+`lib.spectral_check.analyze_album` is called unmodified. `_get_band_rms` is
+wrapped by a pass-through recorder so the raw slice vectors the frozen
+scorer consumes are captured from the same sox calls production makes --
+nothing is re-measured or re-implemented.
+
+Emits the two calibration TSVs (`results` 27-col, `extended` 6-col) plus a
+per-album JSON of the production AlbumResult facts.
+"""
+import json
+import os
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
+sys.path.insert(0, "/home/abl030/cratedigger/.claude/worktrees/829-phase5-pr2")
+
+import lib.spectral_check as sc  # noqa: E402
+
+ROOT = "/mnt/virtio/Music/apple-arm"
+OUT = "/home/abl030/.claude/jobs/fb229c18/tmp"
+
+_rec: dict[tuple[str, int, int], float] = {}
+_lock = threading.Lock()
+_orig = sc._get_band_rms
+
+
+def _recording_band_rms(filepath, lo_hz, hi_hz, trim_seconds=30):
+    rms = _orig(filepath, lo_hz, hi_hz, trim_seconds)
+    with _lock:
+        _rec[(filepath, lo_hz, hi_hz)] = rms
+    return rms
+
+
+sc._get_band_rms = _recording_band_rms
+
+ALL_FREQS = sc.SLICE_FREQS + sc.EXTENSION_SLICE_FREQS  # 12000..21500
+
+
+def measure(slug: str, variant: str, folder: str):
+    res = sc.analyze_album(folder)
+    return slug, variant, folder, res
+
+
+def main():
+    index = json.load(open(os.path.join(
+        ROOT, os.environ.get("APPLE_ARM_INDEX", "index.json"))))
+    variant_dir = sys.argv[1] if len(sys.argv) > 1 else "launder"
+    variant_name = sys.argv[2] if len(sys.argv) > 2 else "t-apple256-flac"
+    tag = sys.argv[3] if len(sys.argv) > 3 else "apple"
+
+    jobs = []
+    for rid, a in sorted(index.items()):
+        slug = f"{rid}--{os.path.basename(a['album_dir'])}"
+        jobs.append((slug, "control-flac1644", a["album_dir"]))
+        jobs.append((slug, variant_name, os.path.join(ROOT, variant_dir, rid)))
+
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        results = list(ex.map(lambda j: measure(*j), jobs))
+
+    mrows, erows, albums = [], [], []
+    for slug, variant, folder, res in results:
+        files = []
+        for root, _d, names in os.walk(folder):
+            for f in sorted(names):
+                if os.path.splitext(f)[1].lower() in sc.AUDIO_EXTENSIONS:
+                    files.append(os.path.join(root, f))
+        # analyze_album keeps only non-error tracks, in file order.
+        ok = [f for f in files if (f, 1000, 4000) in _rec]
+        assert len(ok) == len(res.tracks), (slug, variant, len(ok), len(res.tracks))
+        for path, tr in zip(ok, res.tracks):
+            ref_db = sc.rms_to_db(_rec[(path, 1000, 4000)])
+            vals = {}
+            for fq in ALL_FREQS:
+                r = _rec.get((path, fq, fq + sc.SLICE_WIDTH))
+                vals[fq] = sc.rms_to_db(r) if r is not None else None
+            inwin = [vals[f] if vals[f] is not None else sc.DB_FLOOR
+                     for f in sc.SLICE_FREQS]
+            mrows.append("\t".join([
+                slug, variant, tr.codec_family, "qaac" if "apple" in variant else "-",
+                "cvbr256" if "apple" in variant else "-", path, tr.grade,
+                str(tr.cliff_freq_hz) if tr.cliff_freq_hz else "",
+                str(tr.estimated_bitrate_kbps) if tr.estimated_bitrate_kbps else "",
+                f"{tr.hf_deficit_db:.6f}", f"{ref_db:.6f}",
+            ] + [f"{v:.6f}" for v in inwin]))
+            ext = [vals[f] for f in sc.EXTENSION_SLICE_FREQS]
+            erows.append("\t".join(
+                [variant, path] + ["" if v is None else f"{v:.6f}" for v in ext]))
+        albums.append({
+            "slug": slug, "variant": variant, "folder": folder,
+            "grade": res.grade, "suspect_pct": res.suspect_pct,
+            "cliff_hz": res.cliff_hz, "codec_family": res.codec_family,
+            "ultrasonic_deficit_db": res.ultrasonic_deficit_db,
+            "estimated_bitrate_kbps": res.estimated_bitrate_kbps,
+            "n_tracks": len(res.tracks),
+            "n_error": len([t for t in res.tracks if t.grade == "error"]),
+        })
+
+    with open(f"{OUT}/results-{tag}.tsv", "w") as fh:
+        fh.write("\n".join(mrows) + "\n")
+    with open(f"{OUT}/extended-{tag}.tsv", "w") as fh:
+        fh.write("\n".join(erows) + "\n")
+    json.dump(albums, open(f"{OUT}/albums-{tag}.json", "w"), indent=1)
+    print(f"wrote {len(mrows)} track rows, {len(albums)} album rows")
+
+
+if __name__ == "__main__":
+    main()

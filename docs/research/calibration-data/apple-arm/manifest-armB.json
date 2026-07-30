@@ -1,0 +1,2243 @@
+[
+ {
+  "request_id": "c2-00",
+  "album_dir": "/mnt/virtio/Music/apple-arm/gt2/c2-00",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-00/000.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 206.432844
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-00/001.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 111.137229
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-00/002.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 123.071542
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-00/003.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 76.677479
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-00/004.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 326.515271
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-00/005.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 62.988229
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-00/006.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 105.845115
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-00/007.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 304.388906
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-00/008.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 84.457188
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-00/009.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 98.021135
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-00/010.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 266.214625
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-00/011.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 110.590677
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-00/012.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 69.626656
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-00/013.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 55.856573
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-00/014.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 55.473073
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-00/015.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 55.78176
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-00/016.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 59.093292
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-00/017.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 126.209802
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-00/018.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 47.037104
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-00/019.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 49.471688
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-00/020.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 68.023875
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-00/021.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 106.580646
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-00/022.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 78.865927
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-00/023.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 79.215167
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-00/024.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 83.662438
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-00/025.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 168.478573
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-00/026.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 180.432479
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-00/027.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 79.17774
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-00/028.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 71.70651
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-00/029.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 137.032125
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-00/030.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 250.321042
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-00/031.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 211.320219
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-00/032.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 188.09099
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-00/033.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 234.573208
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-00/034.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 314.295573
+   }
+  ]
+ },
+ {
+  "request_id": "c2-01",
+  "album_dir": "/mnt/virtio/Music/apple-arm/gt2/c2-01",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-01/000.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 447.8
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-01/001.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 394.24
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-01/002.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 464.293333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-01/003.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 279.666667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-01/004.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 535.266667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-01/005.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 211.373333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-01/006.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 531.426667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-01/007.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 308.466667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-01/008.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 414.706667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-01/009.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 598.066667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-01/010.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 438.093333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-01/011.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 164.266667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-01/012.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 440.333333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-01/013.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 480.506667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-01/014.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 333.96
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-01/015.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 285.866667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-01/016.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 125.106667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-01/017.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 436.933333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-01/018.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 357.533333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-01/019.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 255.333333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-01/020.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 429.493333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-01/021.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 450.4
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-01/022.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 687.173333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-01/023.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 341.88
+   }
+  ]
+ },
+ {
+  "request_id": "c2-02",
+  "album_dir": "/mnt/virtio/Music/apple-arm/gt2/c2-02",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-02/000.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 735.808163
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-02/001.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 754.640816
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-02/002.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 732.538776
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-02/003.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 391.8
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-02/004.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 888.85102
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-02/005.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 463.897891
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-02/006.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 526.109297
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-02/007.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 564.238776
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-02/008.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 499.640816
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-02/009.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 455.938776
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-02/010.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 433.77551
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-02/011.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 765.653515
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-02/012.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 845.885465
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-02/013.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 494.459819
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-02/014.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 667.744898
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-02/015.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 520.5
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-02/016.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 668.830658
+   }
+  ]
+ },
+ {
+  "request_id": "c2-03",
+  "album_dir": "/mnt/virtio/Music/apple-arm/gt2/c2-03",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-03/000.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 314.075079
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-03/001.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 249.191066
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-03/002.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 184.516485
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-03/003.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 86.943946
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-03/004.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 257.380363
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-03/005.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 184.600476
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-03/006.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 249.667914
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-03/007.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 66.786259
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-03/008.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 307.151224
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-03/009.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 78.742653
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-03/010.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 158.478345
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-03/011.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 68.588141
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-03/012.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 85.75415
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-03/013.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 248.80771
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-03/014.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 334.570045
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-03/015.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 177.9222
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-03/016.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 564.165896
+   }
+  ]
+ },
+ {
+  "request_id": "c2-04",
+  "album_dir": "/mnt/virtio/Music/apple-arm/gt2/c2-04",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-04/000.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 78.044
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-04/001.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 382.801667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-04/002.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 105.442333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-04/003.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 395.172
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-04/004.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 108.668
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-04/005.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 348.0865
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-04/006.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 307.4335
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-04/007.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 59.336
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-04/008.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 96.022833
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-04/009.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 150.115823
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-04/010.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 398.669344
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-04/011.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 357.428833
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-04/012.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 90.422667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-04/013.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 367.219667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-04/014.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 187.289
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-04/015.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 265.063
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-04/016.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 74.432
+   }
+  ]
+ },
+ {
+  "request_id": "c2-05",
+  "album_dir": "/mnt/virtio/Music/apple-arm/gt2/c2-05",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-05/000.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 215.4
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-05/001.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 299.626667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-05/002.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 36.666667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-05/003.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 226.44
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-05/004.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 203.693333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-05/005.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 127.84
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-05/006.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 147.266667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-05/007.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 432.56
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-05/008.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 39.44
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-05/009.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 169.2
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-05/010.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 198.8
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-05/011.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 111.826667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-05/012.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 46.506667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-05/013.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 220.96
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-05/014.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 212.8
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-05/015.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 159.706667
+   }
+  ]
+ },
+ {
+  "request_id": "c2-06",
+  "album_dir": "/mnt/virtio/Music/apple-arm/gt2/c2-06",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-06/000.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 287.36
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-06/001.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 130.893333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-06/002.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 234.693333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-06/003.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 271.773333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-06/004.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 300.973333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-06/005.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 268.493333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-06/006.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 219.333333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-06/007.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 291.72
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-06/008.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 283.12
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-06/009.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 292.52
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-06/010.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 261.746667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-06/011.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 263.36
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-06/012.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 328.826667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-06/013.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 241.68
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-06/014.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 336.013333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-06/015.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 727.106667
+   }
+  ]
+ },
+ {
+  "request_id": "c2-07",
+  "album_dir": "/mnt/virtio/Music/apple-arm/gt2/c2-07",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-07/000.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 170.573333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-07/001.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 146.8
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-07/002.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 158.093333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-07/003.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 151.733333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-07/004.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 251.733333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-07/005.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 172.106667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-07/006.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 143.76
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-07/007.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 181.04
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-07/008.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 129.76
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-07/009.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 142.306667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-07/010.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 158.2
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-07/011.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 145.56
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-07/012.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 163.84
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-07/013.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 136.76
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-07/014.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 131.333333
+   }
+  ]
+ },
+ {
+  "request_id": "c2-08",
+  "album_dir": "/mnt/virtio/Music/apple-arm/gt2/c2-08",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-08/000.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 279.666667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-08/001.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 234.146667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-08/002.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 200.653333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-08/003.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 258.586667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-08/004.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 299.626667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-08/005.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 73.613333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-08/006.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 63.68
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-08/007.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 49.44
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-08/008.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 199.36
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-08/009.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 171.6
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-08/010.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 281.72
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-08/011.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 240.266667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-08/012.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 172.893333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-08/013.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 168.013333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-08/014.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 241.52
+   }
+  ]
+ },
+ {
+  "request_id": "c2-09",
+  "album_dir": "/mnt/virtio/Music/apple-arm/gt2/c2-09",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-09/000.flac",
+    "sr": 44100,
+    "ch": 1,
+    "bits": "16",
+    "dur": 145.8
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-09/001.flac",
+    "sr": 44100,
+    "ch": 1,
+    "bits": "16",
+    "dur": 155.0
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-09/002.flac",
+    "sr": 44100,
+    "ch": 1,
+    "bits": "16",
+    "dur": 150.173333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-09/003.flac",
+    "sr": 44100,
+    "ch": 1,
+    "bits": "16",
+    "dur": 174.266667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-09/004.flac",
+    "sr": 44100,
+    "ch": 1,
+    "bits": "16",
+    "dur": 186.293333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-09/005.flac",
+    "sr": 44100,
+    "ch": 1,
+    "bits": "16",
+    "dur": 141.24
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-09/006.flac",
+    "sr": 44100,
+    "ch": 1,
+    "bits": "16",
+    "dur": 180.133333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-09/007.flac",
+    "sr": 44100,
+    "ch": 1,
+    "bits": "16",
+    "dur": 173.0
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-09/008.flac",
+    "sr": 44100,
+    "ch": 1,
+    "bits": "16",
+    "dur": 191.293333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-09/009.flac",
+    "sr": 44100,
+    "ch": 1,
+    "bits": "16",
+    "dur": 175.306667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-09/010.flac",
+    "sr": 44100,
+    "ch": 1,
+    "bits": "16",
+    "dur": 195.533333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-09/011.flac",
+    "sr": 44100,
+    "ch": 1,
+    "bits": "16",
+    "dur": 143.4
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-09/012.flac",
+    "sr": 44100,
+    "ch": 1,
+    "bits": "16",
+    "dur": 173.2
+   }
+  ]
+ },
+ {
+  "request_id": "c2-10",
+  "album_dir": "/mnt/virtio/Music/apple-arm/gt2/c2-10",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-10/000.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 280.786667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-10/001.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 357.653333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-10/002.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 292.093333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-10/003.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 62.253333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-10/004.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 299.613333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-10/005.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 378.893333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-10/006.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 397.666667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-10/007.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 351.946667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-10/008.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 547.733333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-10/009.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 327.786667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-10/010.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 469.866667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-10/011.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 256.586667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-10/012.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 98.2
+   }
+  ]
+ },
+ {
+  "request_id": "c2-11",
+  "album_dir": "/mnt/virtio/Music/apple-arm/gt2/c2-11",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-11/000.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 171.866667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-11/001.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 186.973333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-11/002.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 186.32
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-11/003.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 142.0
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-11/004.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 192.36
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-11/005.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 202.853333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-11/006.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 160.093333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-11/007.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 228.093333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-11/008.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 211.093333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-11/009.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 204.24
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-11/010.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 144.866667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-11/011.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 176.0
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-11/012.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 275.52
+   }
+  ]
+ },
+ {
+  "request_id": "c2-12",
+  "album_dir": "/mnt/virtio/Music/apple-arm/gt2/c2-12",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-12/000.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 275.386667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-12/001.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 322.146667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-12/002.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 544.626667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-12/003.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 228.506667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-12/004.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 337.56
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-12/005.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 353.893333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-12/006.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 498.96
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-12/007.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 369.626667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-12/008.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 290.24
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-12/009.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 341.653333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-12/010.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 279.773333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-12/011.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 251.293333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-12/012.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 383.626667
+   }
+  ]
+ },
+ {
+  "request_id": "c2-13",
+  "album_dir": "/mnt/virtio/Music/apple-arm/gt2/c2-13",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-13/000.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 235.72
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-13/001.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 138.106667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-13/002.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 153.266667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-13/003.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 163.573333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-13/004.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 209.76
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-13/005.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 180.76
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-13/006.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 198.973333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-13/007.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 170.893333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-13/008.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 126.52
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-13/009.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 166.533333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-13/010.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 136.866667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-13/011.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 211.453333
+   }
+  ]
+ },
+ {
+  "request_id": "c2-14",
+  "album_dir": "/mnt/virtio/Music/apple-arm/gt2/c2-14",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-14/000.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 332.76
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-14/001.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 258.266667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-14/002.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 348.013333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-14/003.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 129.28
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-14/004.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 414.106667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-14/005.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 237.84
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-14/006.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 464.453333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-14/007.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 467.306667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-14/008.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 412.893333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-14/009.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 144.786667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-14/010.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 337.84
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-14/011.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 470.746667
+   }
+  ]
+ },
+ {
+  "request_id": "c2-15",
+  "album_dir": "/mnt/virtio/Music/apple-arm/gt2/c2-15",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-15/000.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 188.666667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-15/001.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 252.733333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-15/002.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 159.44
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-15/003.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 250.293333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-15/004.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 221.066667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-15/005.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 210.04
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-15/006.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 214.133333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-15/007.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 240.733333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-15/008.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 210.226667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-15/009.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 182.8
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-15/010.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 309.973333
+   }
+  ]
+ },
+ {
+  "request_id": "c2-16",
+  "album_dir": "/mnt/virtio/Music/apple-arm/gt2/c2-16",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-16/000.flac",
+    "sr": 192000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 296.462234
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-16/001.flac",
+    "sr": 192000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 188.595026
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-16/002.flac",
+    "sr": 192000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 174.717599
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-16/003.flac",
+    "sr": 192000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 157.694734
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-16/004.flac",
+    "sr": 192000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 223.438875
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-16/005.flac",
+    "sr": 192000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 312.578125
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-16/006.flac",
+    "sr": 192000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 197.271349
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-16/007.flac",
+    "sr": 192000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 241.721203
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-16/008.flac",
+    "sr": 192000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 166.06975
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-16/009.flac",
+    "sr": 192000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 172.773432
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-16/010.flac",
+    "sr": 192000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 110.522552
+   }
+  ]
+ },
+ {
+  "request_id": "c2-17",
+  "album_dir": "/mnt/virtio/Music/apple-arm/gt2/c2-17",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-17/000.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 369.626667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-17/001.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 182.066667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-17/002.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 329.64
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-17/003.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 286.866667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-17/004.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 366.6
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-17/005.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 216.426667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-17/006.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 334.666667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-17/007.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 258.706667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-17/008.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 197.333333
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-17/009.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 267.666667
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-17/010.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 323.693333
+   }
+  ]
+ },
+ {
+  "request_id": "c2-18",
+  "album_dir": "/mnt/virtio/Music/apple-arm/gt2/c2-18",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-18/000.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 178.982041
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-18/001.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 226.12517
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-18/002.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 188.287891
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-18/003.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 332.00381
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-18/004.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 80.825578
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-18/005.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 230.297687
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-18/006.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 177.598639
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-18/007.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 153.342041
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-18/008.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 245.284082
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-18/009.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 207.851429
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-18/010.flac",
+    "sr": 44100,
+    "ch": 2,
+    "bits": "16",
+    "dur": 94.441633
+   }
+  ]
+ },
+ {
+  "request_id": "c2-19",
+  "album_dir": "/mnt/virtio/Music/apple-arm/gt2/c2-19",
+  "tracks": [
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-19/000.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 79.158115
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-19/001.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 372.260219
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-19/002.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 112.222594
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-19/003.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 502.869135
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-19/004.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 220.069479
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-19/005.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 78.483469
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-19/006.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 172.548719
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-19/007.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 132.34349
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-19/008.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 193.483052
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-19/009.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 472.837688
+   },
+   {
+    "path": "/mnt/virtio/Music/apple-arm/gt2/c2-19/010.flac",
+    "sr": 96000,
+    "ch": 2,
+    "bits": "24",
+    "dur": 98.23701
+   }
+  ]
+ }
+]

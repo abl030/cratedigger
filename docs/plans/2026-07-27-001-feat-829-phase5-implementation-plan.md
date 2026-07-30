@@ -86,9 +86,36 @@ was never spectrally measured and never entered the gate evaluation. The
 frozen scorer's `FLAC_FRAUDS` is only mp3-128 / opus-96 / vorbis-q5.
 
 **The gate is validated against three FLAC-container fraud classes on four
-arms, not four.** Residual #1 (Apple CVBR-256 survives the gate) is an
-inference from `.m4a` statistics, not a measurement. Running the gate on
-TRAINING's Apple encodes promotes roughly 19 of 34.
+arms, not four.**
+
+**MEASURED 2026-07-30 — the gate does not catch the class.** Full method and
+data: `docs/research/calibration-data/apple-arm/`.
+
+| | T = 62 | T = 59.5 |
+|---|---:|---:|
+| Apple launders reaching PROOF (n=17) | **10** | **10** |
+| genuine controls reaching PROOF | 11 | 10 |
+| conditional P(launder proof \| genuine proof) | 91% | **100%** |
+
+At `T = 59.5` the launder proof-set is byte-for-byte the same album set as the
+genuine proof-set — zero discriminating power. Pooled over two arms: 91–92%
+conditional false accept. Apple CVBR-256 applies essentially no lowpass in the
+measured band (2.1 dB down at 21.5 kHz), so no leg has anything to see;
+production grades all 17 launders `genuine`. Lowering the threshold does not
+help. The harness reproduces the published 34/100 genuine-denial figure
+exactly, so this is not an artifact of an unusual album set.
+
+**Consequence for PR3: see §1.7 — the proof's claim is reframed, not
+abandoned.**
+
+**Additional constraint discovered by the same arm — `ultrasonic_deficit_db`
+is not comparable across decode paths.** The same bits measure **50.26 through
+`_ffmpeg_to_wav` @48 kHz versus 47.17 sox-native @44.1 kHz, a +3.09 dB skew** —
+larger than the gate's entire 2.04 dB four-arm margin. A carried or propagated
+value from a non-sox-native container (ALAC, M4A, WMA) is on a different scale
+from a native FLAC measurement, and **PR3 must not gate both against one
+threshold.** Isolated on request 8923, the only `was_converted_from='alac'`
+control; the other 16 reproduce their stored value to 1e-7.
 
 **d. The published safety margin is stale.** "T=62 sits 4.7 dB below the
 tightest observed value" was computed on TRAINING (67.9) and ROUND-2 (66.7).
@@ -104,6 +131,47 @@ genuinely dangerous case, HE-AAC laundered into a FLAC container, has no AAC
 object type left to read; that case is what the ultrasonic leg is for.
 `sbr_present` in `lib/quality/spectral_interpretation.py` is currently dead
 plumbing — PR3 should wire it or delete it (`scope.md`); leaning delete.
+
+---
+
+## 1.7 What "verified lossless" claims — reframed, and binding on PR3
+
+The Apple result (§1.5c) falsifies the unqualified bar this project was
+working to. "Zero fraud albums receive proof" holds for the three measured
+classes and **fails at ~91% for Apple CVBR-256 → FLAC**. The stamp cannot
+honestly mean "proven bit-faithful to a lossless source."
+
+**Operator decision 2026-07-30: keep the name, bound the claim.**
+
+> *"verified lossless inasmuch as we can — we still call it verified lossless
+> but at least now we know what we can't know"*
+
+`verified_lossless` therefore means, precisely:
+
+> **No evidence of lossy origin was found by the tests we have** — the
+> in-window cliff, the album ceiling, and the ultrasonic deficit. Not "this is
+> bit-faithful to a lossless source."
+
+This is the strongest claim the evidence supports, and it is more useful than
+the unqualified version because its failure modes are **enumerated** rather
+than unknown. PR3 shipping under this framing is honest; PR3 shipping under
+the old framing would not be.
+
+What PR3 owes because of it:
+
+- **Do not widen the claim in copy.** Anything reading as "guaranteed
+  bit-perfect" is now known-false. The honest register is "no evidence of
+  lossy origin by these tests", with the limits discoverable.
+- **Denial semantics are unchanged and remain load-bearing** — withhold proof,
+  never reject, denylist or accuse. The archivist invariant survives this
+  reframe intact.
+- **The named blind spot goes in the record, not just the research doc**, so
+  an operator reading a proof knows what it does and does not cover.
+- PR4's tier copy inherits the same constraint (§3, PR4).
+
+The boundary is falsifiable and written down: any future discriminator that
+separates the Apple class moves it. The V0/Opus probe axis has already been
+tried and fails against this class too.
 
 ---
 
@@ -330,6 +398,14 @@ checker owes a known-bad self-test.
   the discriminator (unreconstructable afterwards), PR4 renders it. Doing the
   display in PR3 means paying the Rule D 36k-row live-corpus differential for
   copy PR4 immediately rewrites.
+- **Ship under §1.7's reframed claim.** The proof means "no evidence of lossy
+  origin by these tests", not bit-faithfulness. Copy must not widen it.
+- **Do not gate `ultrasonic_deficit_db` from different decode paths against
+  one threshold** (§1.5c): sox-native vs `_ffmpeg_to_wav`@48 kHz differ by
+  +3.09 dB on identical bits, more than the whole 2.04 dB margin. Either
+  normalise the measurement path or scope the threshold by path — and note
+  15,399 of 15,547 proofs carry `spectral_provenance='carried'`, so carried
+  values are the common case, not the edge.
 - **Quality core: fable/opus review, merge held for operator approval.**
 - Reference implementation: `docs/research/calibration-data/score_v3.py.frozen`
   — its `_window_legs` / `gate` are the shape to port. The `.frozen` suffix
