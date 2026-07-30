@@ -63,6 +63,16 @@
     processingDir = "/srv/cratedigger-processing";
 
     # --- Database: provisioned locally, peer auth, zero passwords -----
+    # Keep this safe default unless you deliberately operate an external
+    # PostgreSQL server. PostgreSQL data must remain on a supported local
+    # filesystem, never virtiofs/NFS/FUSE or the shared music filesystem.
+    #
+    # If an external PostgreSQL runs in nspawn with its data directory bind
+    # mounted from the host, the host directory must retain the container
+    # PostgreSQL user's mapped numeric UID/GID across every NixOS switch.
+    # A systemd.tmpfiles.rules `d` entry is reapplied: declaring that bind
+    # root as root:root can leave PostgreSQL apparently healthy on open file
+    # handles, then panic when the next checkpoint opens pg_control.
     pipelineDb.createLocally = true;
 
     # --- Beets: cratedigger owns the package, config, and binary ------
