@@ -6013,59 +6013,6 @@ class TestSimplifySlskdTransferOwnershipCurrentSchema(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Byte-exact evidence snapshots — migration 068.
-# ---------------------------------------------------------------------------
-
-@requires_postgres
-class TestEvidenceFileContentDigestMigration(unittest.TestCase):
-    """Historical rows stay NULL; new exact digests are schema-constrained."""
-
-    def _query(self, sql: str, params: tuple = ()):
-        conn = psycopg2.connect(TEST_DSN)
-        conn.autocommit = True
-        try:
-            with conn.cursor() as cur:
-                cur.execute(sql, params)
-                return cur.fetchall()
-        finally:
-            conn.close()
-
-    def test_records_068_and_adds_nullable_digest_column(self):
-        self.assertEqual(
-            self._query(
-                "SELECT version FROM schema_migrations WHERE version = 68"
-            ),
-            [(68,)],
-        )
-        self.assertEqual(
-            self._query(
-                """
-                SELECT is_nullable, data_type, column_default
-                FROM information_schema.columns
-                WHERE table_schema = 'public'
-                  AND table_name = 'album_quality_evidence_files'
-                  AND column_name = 'content_sha256'
-                """
-            ),
-            [("YES", "text", None)],
-        )
-
-    def test_digest_constraint_requires_lowercase_sha256_or_null(self):
-        rows = self._query(
-            """
-            SELECT pg_get_constraintdef(oid)
-            FROM pg_constraint
-            WHERE conrelid = 'album_quality_evidence_files'::regclass
-              AND pg_get_constraintdef(oid) LIKE '%%content_sha256%%'
-            """
-        )
-        self.assertEqual(len(rows), 1)
-        definition = rows[0][0]
-        self.assertIn("content_sha256 IS NULL", definition)
-        self.assertIn("[0-9a-f]{64}", definition)
-
-
-# ---------------------------------------------------------------------------
 # Fail-loud schema gate (deploy-kill-migrate-wants fix).
 #
 # cratedigger.service and cratedigger-unfindable.service dropped their

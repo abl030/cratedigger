@@ -266,17 +266,16 @@ operation.
   132k (min 102k) ... V0 224k avg`. Historical rows without materialized
   evidence show no inferred output measurement rather than recycling a
   decision-time bitrate.
-  Spectral evidence is attempt-local and two-sided. `IN` describes the
-  candidate before conversion; `HAVE` describes the exact requested release's
-  current Beets snapshot. Each side reuses complete content-addressed evidence
-  while its snapshot matches and measures only missing, incomplete, or changed
-  evidence. A current copy proven to be a derivative converted from a lossless
-  source keeps persisted pre-conversion evidence because scanning the
-  derivative's altered spectrum could mislabel the source. Both sides show
-  grade plus floor when measured. Historical rows remain explicitly
-  unmeasured, or `ungraded` when an old row has only an existing floor. A side
-  that was attempted but could not be decoded renders `analysis failed`; this
-  is distinct from a legacy row whose analysis was never attempted.
+  Spectral evidence is attempt-local and two-sided: `IN` is measured from the
+  candidate before conversion, while `HAVE` normally measures the exact
+  requested release's current Beets files. The sole exception is a current
+  copy proven to be a derivative converted from a lossless source: `HAVE` then
+  uses persisted pre-conversion evidence because the derivative's altered
+  spectrum could mislabel the source. Both sides show grade plus floor when
+  measured. Historical rows remain explicitly unmeasured, or `ungraded` when
+  an old row has only an existing floor. A side that was attempted but could
+  not be decoded renders `analysis failed`; this is distinct from a legacy
+  row whose analysis was never attempted.
   V0 probes render for every candidate — research probes of lossy sources
   qualified "(from lossy)" — matching the Wrong Matches convention. Probe
   averages and minima stay under that V0 label (`V0 171k avg (min 165k)`);

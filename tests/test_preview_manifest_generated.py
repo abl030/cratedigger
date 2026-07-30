@@ -235,7 +235,7 @@ def _run_owned_preview_action(
     request_id: int,
     canonical_dir: str,
     import_job_id: int = 1,
-) -> tuple[ImportPreviewResult, PreviewActionFileHandoff | None]:
+) -> tuple[ImportPreviewResult, PreviewActionFileHandoff]:
     """Drive the REAL preview fact-gathering (the #859 fire site) against a
     real owned canonical album. ``_write_preview_spectral_evidence_file``
     runs unmocked — only the harness subprocess and the beets exact-release
@@ -266,8 +266,8 @@ def _run_owned_preview_action(
                 attempted=True, grade="genuine", bitrate_kbps=1000,
             ),
         )
-    assert len(handoffs) <= 1, "preview handed off duplicate action files"
-    return result, handoffs[0] if handoffs else None
+    assert len(handoffs) == 1, "lossless preview must hand off one action file"
+    return result, handoffs[0]
 
 
 def _expected_basenames(
@@ -398,8 +398,6 @@ class TestPreviewSidecarManifestPurityPin(unittest.TestCase):
                 f"decision={preview_result.decision!r} "
                 f"detail={preview_result.detail!r}",
             )
-            self.assertIsNotNone(action_handoff)
-            assert action_handoff is not None
 
             assert_preview_action_file_handoff_is_safe(
                 action_handoff, canonical_dir, label="preview action handoff",
@@ -491,26 +489,17 @@ class TestPreviewManifestPurityProperty(unittest.TestCase):
             canonical_dir = staged_album.current_path
             expected_basenames = _expected_basenames(album, staged_album)
 
-            preview_result, action_handoff = _run_owned_preview_action(
+            _, action_handoff = _run_owned_preview_action(
                 db, ctx, request_id=request_id, canonical_dir=canonical_dir,
             )
 
-            mixed_source = any(
-                name.lower().endswith(".mp3") for name in basenames
+            assert_preview_action_file_handoff_is_safe(
+                action_handoff, canonical_dir, label="generated world",
             )
-            if mixed_source:
-                self.assertEqual(preview_result.decision, "mixed_source")
-                self.assertIsNone(action_handoff)
-            else:
-                self.assertIsNotNone(action_handoff)
-                assert action_handoff is not None
-                assert_preview_action_file_handoff_is_safe(
-                    action_handoff, canonical_dir, label="generated world",
-                )
-                self.assertFalse(
-                    os.path.exists(action_handoff.path),
-                    "preview cleanup must remove the action file after handoff",
-                )
+            self.assertFalse(
+                os.path.exists(action_handoff.path),
+                "preview cleanup must remove the action file after handoff",
+            )
 
             actual_basenames = frozenset(os.listdir(canonical_dir))
             assert_canonical_manifest_pure(

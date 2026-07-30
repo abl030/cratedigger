@@ -69,21 +69,6 @@ def _seed_candidate_for_download_log(db, log_id: int, *, mb_release_id: str,
 def _seed_candidate_for_import_job(db, job_id: int, *, mb_release_id: str,
                                    expected_execution_lease=None,
                                    **kwargs):
-    source_path = kwargs.get("source_path")
-    if (
-        "files" not in kwargs
-        and isinstance(source_path, str)
-        and os.path.isdir(source_path)
-    ):
-        files = snapshot_audio_files(source_path)
-        if not files:
-            with open(
-                os.path.join(source_path, "01 - Track.mp3"),
-                "wb",
-            ) as handle:
-                handle.write(b"fixture audio")
-            files = snapshot_audio_files(source_path)
-        kwargs["files"] = files
     evidence = make_album_quality_evidence(mb_release_id=mb_release_id, **kwargs)
     db.upsert_album_quality_evidence(evidence)
     persisted = db.find_album_quality_evidence(
@@ -866,7 +851,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             assert claim_next_import_job(db, worker_id="dispatch-test") is not None
             _seed_current_for_request(
                 db, 42,
-                mb_release_id="mbid-123",
+                mb_release_id="mbid-123-current",
                 files=snapshot_audio_files(current_dir),
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=128,
@@ -1094,7 +1079,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             )
             _seed_candidate_for_import_job(
                 db, job.id,
-                mb_release_id="mbid-123",
+                mb_release_id="mbid-123-candidate",
                 files=snapshot_audio_files(tmpdir),
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=245,

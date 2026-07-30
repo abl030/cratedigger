@@ -129,21 +129,10 @@ def _assert_missing_evidence_converges(
             "missing-evidence scar did not qualify the real invariant checker"
         )
 
-    initial = world.touch_current_evidence(request_id)
-    if initial.available:
-        raise AssertionError(
-            "spectrally blank rebuilt HAVE became action authority"
-        )
-    if "spectral" not in (initial.provenance.fallback_reason or ""):
-        raise AssertionError(
-            "missing-evidence rebuild did not wait for HAVE enrichment: "
-            f"{initial.provenance.fallback_reason!r}"
-        )
-    world.enrich_current_evidence(request_id)
     result = world.touch_current_evidence(request_id)
     if not result.available or result.evidence is None:
         raise AssertionError(
-            "production HAVE enrichment did not converge missing scar: "
+            "production current-evidence action did not converge missing scar: "
             f"{result.provenance.fallback_reason!r}"
         )
     row = world.db.get_request(request_id)
@@ -311,11 +300,7 @@ class TestPinnedLifecycleWorld(unittest.TestCase):
             )
             assert first_evidence is not None
             capture_path = first_evidence.source_path
-            self.assertFalse(world.import_request(
-                request_id,
-                codec="mp3",
-                reuse_current_bytes=True,
-            ))
+            self.assertFalse(world.import_request(request_id, codec="mp3"))
             self.assertEqual(
                 world.db.get_request_current_evidence_id(request_id),
                 first_evidence_id,
@@ -580,11 +565,7 @@ class TestPinnedLifecycleWorld(unittest.TestCase):
             ))
 
             self.assertTrue(world.force_import_request(request_id, codec="mp3"))
-            self.assertFalse(world.force_import_request(
-                request_id,
-                codec="mp3",
-                reuse_current_bytes=True,
-            ))
+            self.assertFalse(world.force_import_request(request_id, codec="mp3"))
             world.assert_invariants()
 
     def test_census_seed_rebuilds_legacy_evidence_on_touch(self) -> None:

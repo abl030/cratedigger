@@ -59,10 +59,6 @@ from lib.dispatch.types import (
     PostCommitCleanup,
     QualityGateFn,
 )
-from lib.import_evidence import (
-    ensure_candidate_evidence_for_action,
-    load_current_evidence_for_action,
-)
 from lib.import_execution import (
     CancellationToken,
     ExecutionCancelled,
@@ -78,13 +74,11 @@ from lib.processing_paths import (
     processing_albums_dir,
 )
 from lib.quality import (
-    AlbumQualityEvidence,
     AlbumQualityEvidenceDecisionFacts,
     DownloadInfo,
     ImportResult,
     TargetQualityContract,
     ValidationResult,
-    candidate_preimport_rejection_from_evidence,
     comparison_basis_from_decision,
     dispatch_action,
     evidence_decision_name,
@@ -93,11 +87,7 @@ from lib.quality import (
     override_bitrate_from_current_evidence,
     resolve_rejection_search_override,
 )
-from lib.quality_evidence import (
-    EvidenceBuildResult,
-    audio_snapshot_matches,
-    audit_v0_probe_from_metric,
-)
+from lib.quality_evidence import EvidenceBuildResult, audit_v0_probe_from_metric
 from lib.terminal_outcomes import PendingImportTerminalOutcome
 
 if TYPE_CHECKING:
@@ -107,8 +97,7 @@ if TYPE_CHECKING:
         CurrentEvidenceActionResult,
     )
     from lib.pipeline_db import DownloadLogOutcome, PipelineDB
-    from lib.quality import QualityRankConfig, SpectralDetail
-    from lib.quality_evidence import QualityEvidenceDB
+    from lib.quality import SpectralDetail
 
 logger = logging.getLogger("cratedigger")
 
@@ -610,235 +599,6 @@ def _resolve_dispatch_beets_paths(
     return cfg.beets_library_db, cfg.beets_directory
 
 
-def _revalidate_candidate_action(
-    db: PipelineDB,
-    *,
-    mb_release_id: str,
-    path: str,
-    candidate_import_job_id: int | None,
-    candidate_download_log_id: int | None,
-    expected: AlbumQualityEvidence | None,
-    execution_lease: ExecutionLeaseSnapshot | None,
-    phase: str,
-) -> CandidateEvidenceActionResult | DispatchOutcome:
-    """Refresh exact candidate bytes and mutable action-time authorities."""
-
-    fresh = ensure_candidate_evidence_for_action(
-        db,
-        mb_release_id=mb_release_id,
-        source_path=path,
-        import_job_id=candidate_import_job_id,
-        download_log_id=candidate_download_log_id,
-    )
-    if (
-        fresh.available
-        and fresh.evidence is not None
-        and expected is not None
-        and (
-            expected.id is None
-            or fresh.evidence.id == expected.id
-        )
-        and fresh.evidence.mb_release_id == expected.mb_release_id
-        and fresh.evidence.snapshot_fingerprint == expected.snapshot_fingerprint
-    ):
-        return fresh
-    reason = (
-        fresh.provenance.fallback_reason
-        or fresh.provenance.candidate_status
-        or f"candidate evidence changed {phase}"
-    )
-    return _requeue_import_job_to_preview(
-        db,
-        import_job_id=candidate_import_job_id,
-        reason=reason,
-        expected_execution_lease=execution_lease,
-    )
-
-
-def _revalidate_current_action(
-    db: QualityEvidenceDB,
-    *,
-    gate: EvidenceImportGate,
-    request_id: int,
-    mb_release_id: str,
-    quality_ranks: QualityRankConfig | None,
-    current_evidence_loader: Callable[
-        ..., CurrentEvidenceActionResult | None
-    ],
-    beets_library_db_path: str,
-    beets_library_root: str,
-) -> EvidenceImportGate | str:
-    """Refresh exact HAVE path, FK, evidence facts, and bytes after candidate work."""
-
-    try:
-        fresh = current_evidence_loader(
-            db,
-            request_id=request_id,
-            mb_release_id=mb_release_id,
-            quality_ranks=quality_ranks,
-            beets_library_db_path=beets_library_db_path,
-            beets_library_root=beets_library_root,
-        )
-    except Exception as exc:  # noqa: BLE001 - collaborator boundary fails closed
-        return f"current evidence revalidation failed: {type(exc).__name__}: {exc}"
-
-    if gate.current is None:
-        if gate.current_status == "missing" and (
-            fresh is None
-            or (
-                fresh.evidence is None
-                and fresh.provenance.current_status == "missing"
-            )
-        ):
-            return replace(
-                gate,
-                current_reason=(
-                    fresh.provenance.fallback_reason
-                    if fresh is not None
-                    else gate.current_reason
-                ),
-                current_path=(
-                    fresh.provenance.installed_path
-                    if fresh is not None
-                    else gate.current_path
-                ),
-                current_snapshot_guard=(
-                    fresh.provenance.snapshot_guard
-                    if fresh is not None
-                    else gate.current_snapshot_guard
-                ),
-            )
-        return "installed HAVE changed after action evidence was loaded"
-
-    expected = gate.current
-    expected_path = gate.current_path
-    if (
-        fresh is None
-        or not fresh.available
-        or fresh.evidence is None
-        or fresh.evidence != expected
-        or fresh.provenance.installed_path != expected_path
-        or expected_path is None
-    ):
-        return "installed HAVE evidence changed after action evidence was loaded"
-
-    if (
-        expected.id is not None
-        and db.get_request_current_evidence_id(request_id) != expected.id
-    ):
-        return "installed HAVE evidence link changed after action evidence was loaded"
-    if not audio_snapshot_matches(expected_path, expected.files):
-        return "installed HAVE bytes changed after action evidence was loaded"
-
-    return replace(
-        gate,
-        current=fresh.evidence,
-        current_status=fresh.provenance.current_status,
-        current_reason=fresh.provenance.fallback_reason,
-        current_path=fresh.provenance.installed_path,
-        current_snapshot_guard=fresh.provenance.snapshot_guard,
-    )
-
-
-def _revalidate_current_or_requeue(
-    db: PipelineDB,
-    *,
-    gate: EvidenceImportGate,
-    request_id: int,
-    mb_release_id: str,
-    quality_ranks: QualityRankConfig | None,
-    current_evidence_loader: Callable[
-        ..., CurrentEvidenceActionResult | None
-    ] | None,
-    beets_library_db_path: str,
-    beets_library_root: str,
-    import_job_id: int | None,
-    execution_lease: ExecutionLeaseSnapshot | None,
-) -> EvidenceImportGate | DispatchOutcome:
-    """Keep a loaded/absent HAVE expectation fresh or restart preview."""
-
-    if gate.current_status is None or _current_evidence_analysis_failed(gate):
-        return gate
-    refreshed = _revalidate_current_action(
-        db,
-        gate=gate,
-        request_id=request_id,
-        mb_release_id=mb_release_id,
-        quality_ranks=quality_ranks,
-        current_evidence_loader=(
-            current_evidence_loader or load_current_evidence_for_action
-        ),
-        beets_library_db_path=beets_library_db_path,
-        beets_library_root=beets_library_root,
-    )
-    if not isinstance(refreshed, str):
-        return refreshed
-    return _requeue_import_job_to_preview(
-        db,
-        import_job_id=import_job_id,
-        reason=refreshed,
-        expected_execution_lease=execution_lease,
-    )
-
-
-def _have_analysis_failure_outcome(
-    db: PipelineDB,
-    *,
-    gate: EvidenceImportGate,
-    request_id: int,
-    dl_info: DownloadInfo,
-    candidate_reference: str,
-    import_job_id: int | None,
-    source_download_log_id: int | None,
-    cooled_down_users: set[str] | None,
-    requeue_to_wanted: bool,
-) -> DispatchOutcome | None:
-    """Fail closed on unusable HAVE except for canonical integrity facts."""
-
-    if not _current_evidence_analysis_failed(gate):
-        return None
-    if (
-        gate.candidate is not None
-        and candidate_preimport_rejection_from_evidence(gate.candidate)
-            is not None
-    ):
-        return None
-    reason = (
-        gate.current_reason
-        or "installed HAVE analysis failed without diagnostics"
-    )
-    pending = _record_have_analysis_error(
-        db,
-        request_id=request_id,
-        dl_info=dl_info,
-        raw_error=reason,
-        installed_path=gate.current_path,
-        candidate_reference=candidate_reference,
-        snapshot_guard=gate.current_snapshot_guard,
-        import_job_id=import_job_id,
-        source_download_log_id=source_download_log_id,
-        cooled_down_users=cooled_down_users,
-        requeue_to_wanted=requeue_to_wanted,
-    )
-    return DispatchOutcome(
-        success=False,
-        message=(
-            "Installed HAVE analysis failed; "
-            + (
-                "request returned to wanted for a future retry"
-                if requeue_to_wanted
-                else "request lifecycle was preserved"
-            )
-        ),
-        code="have_analysis_error",
-        terminal_outcome=(
-            pending
-            if isinstance(pending, PendingImportTerminalOutcome)
-            else None
-        ),
-    )
-
-
 def dispatch_import_core(
     *,
     path: str,
@@ -1021,25 +781,6 @@ def dispatch_import_core(
 
         quality_evidence_action_file: str | None = None
         try:
-            candidate_result_for_gate = prevalidated_candidate_result
-            if prevalidated_candidate_result is not None:
-                # The queue owner validated this row before entering dispatch,
-                # but the action copy can still change before the RELEASE lock
-                # is acquired. Revalidate candidate bytes before the evidence
-                # gate is allowed to load, enrich, analyze, or CAS HAVE.
-                refreshed_candidate = _revalidate_candidate_action(
-                    db,
-                    mb_release_id=mb_release_id,
-                    path=path,
-                    candidate_import_job_id=candidate_import_job_id,
-                    candidate_download_log_id=candidate_download_log_id,
-                    expected=prevalidated_candidate_result.evidence,
-                    execution_lease=active_execution_lease,
-                    phase="before HAVE analysis",
-                )
-                if isinstance(refreshed_candidate, DispatchOutcome):
-                    return refreshed_candidate
-                candidate_result_for_gate = refreshed_candidate
             evidence_gate_kwargs: dict[str, object] = {}
             if current_evidence_loader is not None:
                 evidence_gate_kwargs["current_evidence_loader"] = (
@@ -1053,7 +794,7 @@ def dispatch_import_core(
                 quality_ranks=cfg.quality_ranks if cfg is not None else None,
                 candidate_import_job_id=candidate_import_job_id,
                 candidate_download_log_id=candidate_download_log_id,
-                prevalidated_candidate_result=candidate_result_for_gate,
+                prevalidated_candidate_result=prevalidated_candidate_result,
                 attempt_existing_spectral=(
                     attempt_result.audit.existing
                     if attempt_result.audit is not None
@@ -1064,60 +805,74 @@ def dispatch_import_core(
                 beets_library_root=effective_beets_library_root,
                 **evidence_gate_kwargs,
             )
+            if prevalidated_candidate_result is not None:
+                # Re-check the queue-owned action copy before *any* evidence
+                # decision can become terminal. A late content change is a
+                # typed preview retry, never a false quality rejection.
+                from lib.import_evidence import ensure_candidate_evidence_for_action
+
+                fresh_candidate = ensure_candidate_evidence_for_action(
+                    db,
+                    source_path=path,
+                    import_job_id=candidate_import_job_id,
+                )
+                if (
+                    not fresh_candidate.available
+                    or fresh_candidate.evidence is None
+                    or evidence_gate.candidate is None
+                    or fresh_candidate.evidence.id != evidence_gate.candidate.id
+                    or fresh_candidate.evidence.snapshot_fingerprint
+                        != evidence_gate.candidate.snapshot_fingerprint
+                ):
+                    reason = (
+                        fresh_candidate.provenance.fallback_reason
+                        or fresh_candidate.provenance.candidate_status
+                        or "candidate evidence changed before dispatch"
+                    )
+                    return _requeue_import_job_to_preview(
+                        db,
+                        import_job_id=candidate_import_job_id,
+                        reason=reason,
+                        expected_execution_lease=active_execution_lease,
+                    )
             if (
                 evidence_gate.candidate is not None
-                and (
-                    candidate_import_job_id is not None
-                    or candidate_download_log_id is not None
-                )
+                and _current_evidence_analysis_failed(evidence_gate)
             ):
-                # HAVE resolution/enrichment can be lengthy. Revalidate the
-                # exact candidate again before any terminal decision, action
-                # file, or Beets launch. This second pass also observes mutable
-                # action-time authorities such as newly-added bad-audio hashes
-                # without repeating candidate spectral analysis.
-                refreshed_candidate = _revalidate_candidate_action(
+                reason = (
+                    evidence_gate.current_reason
+                    or "installed HAVE analysis failed without diagnostics"
+                )
+                pending = _record_have_analysis_error(
                     db,
-                    mb_release_id=mb_release_id,
-                    path=path,
-                    candidate_import_job_id=candidate_import_job_id,
-                    candidate_download_log_id=candidate_download_log_id,
-                    expected=evidence_gate.candidate,
-                    execution_lease=active_execution_lease,
-                    phase="during HAVE analysis",
+                    request_id=request_id,
+                    dl_info=dl_info,
+                    raw_error=reason,
+                    installed_path=evidence_gate.current_path,
+                    candidate_reference=path,
+                    snapshot_guard=evidence_gate.current_snapshot_guard,
+                    import_job_id=candidate_import_job_id,
+                    source_download_log_id=candidate_download_log_id,
+                    cooled_down_users=cooled_down_users,
+                    requeue_to_wanted=requeue_on_failure,
                 )
-                if isinstance(refreshed_candidate, DispatchOutcome):
-                    return refreshed_candidate
-                evidence_gate = replace(
-                    evidence_gate,
-                    candidate=refreshed_candidate.evidence,
-                    candidate_status=(
-                        refreshed_candidate.provenance.candidate_status
+                return DispatchOutcome(
+                    success=False,
+                    message=(
+                        "Installed HAVE analysis failed; "
+                        + (
+                            "request returned to wanted for a future retry"
+                            if requeue_on_failure
+                            else "request lifecycle was preserved"
+                        )
                     ),
-                    candidate_reason=(
-                        refreshed_candidate.provenance.fallback_reason
-                    ),
-                    snapshot_guard=(
-                        refreshed_candidate.provenance.snapshot_guard
+                    code="have_analysis_error",
+                    terminal_outcome=(
+                        pending
+                        if isinstance(pending, PendingImportTerminalOutcome)
+                        else None
                     ),
                 )
-            refreshed_current = _revalidate_current_or_requeue(
-                db,
-                gate=evidence_gate,
-                request_id=request_id,
-                mb_release_id=mb_release_id,
-                quality_ranks=(
-                    cfg.quality_ranks if cfg is not None else None
-                ),
-                current_evidence_loader=current_evidence_loader,
-                beets_library_db_path=effective_beets_library_db_path,
-                beets_library_root=effective_beets_library_root,
-                import_job_id=candidate_import_job_id,
-                execution_lease=active_execution_lease,
-            )
-            if isinstance(refreshed_current, DispatchOutcome):
-                return refreshed_current
-            evidence_gate = refreshed_current
             existing_v0_probe = audit_v0_probe_from_metric(
                 evidence_gate.current.v0_metric
                 if evidence_gate.current is not None
@@ -1149,19 +904,6 @@ def dispatch_import_core(
                     reason=reason or "missing",
                     expected_execution_lease=active_execution_lease,
                 )
-            have_failure = _have_analysis_failure_outcome(
-                db,
-                gate=evidence_gate,
-                request_id=request_id,
-                dl_info=dl_info,
-                candidate_reference=path,
-                import_job_id=candidate_import_job_id,
-                source_download_log_id=candidate_download_log_id,
-                cooled_down_users=cooled_down_users,
-                requeue_to_wanted=requeue_on_failure,
-            )
-            if have_failure is not None:
-                return have_failure
             if evidence_gate.candidate is not None:
                 # U11: ``full_pipeline_decision_from_evidence`` is the single
                 # decision function. Folder/audio-integrity facts

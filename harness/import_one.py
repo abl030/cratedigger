@@ -50,15 +50,7 @@ def _bootstrap_import_paths() -> None:
 _bootstrap_import_paths()
 
 from lib import transitions
-from lib.beets_db import (
-    AlbumInfo,
-    BeetsDB,
-    CurrentBeetsMissing,
-    CurrentBeetsUnique,
-    exact_release_identity_matches,
-    release_identity_for_lookup,
-    validate_beets_storage_pair,
-)
+from lib.beets_db import AlbumInfo, BeetsDB, validate_beets_storage_pair
 from lib.measurement import ffprobe_audio_codec_name
 from lib.permissions import fix_library_modes, reset_umask
 from lib.release_identity import ReleaseIdentity
@@ -1589,47 +1581,6 @@ def _validate_quality_evidence_action_snapshot(
         )
 
 
-def _validate_quality_evidence_current_snapshot(
-    beets: BeetsDB,
-    mbid: str,
-    payload: QualityEvidenceActionPayload,
-) -> None:
-    """Recheck exact installed HAVE bytes immediately before Beets mutation."""
-
-    from lib.quality_evidence import audio_snapshot_matches
-
-    identity = release_identity_for_lookup(mbid)
-    if identity is None:
-        raise ValueError(
-            "quality evidence current snapshot has invalid release identity"
-        )
-    current = beets.resolve_current_release(identity)
-    if payload.current is None:
-        if not isinstance(current, CurrentBeetsMissing):
-            raise ValueError(
-                "quality evidence current snapshot changed; refusing to mutate"
-            )
-        return
-
-    if not exact_release_identity_matches(
-        mbid,
-        payload.current.mb_release_id,
-    ):
-        raise ValueError(
-            "quality evidence current snapshot release mismatch; "
-            "refusing to mutate"
-        )
-    if (
-        not isinstance(current, CurrentBeetsUnique)
-        or payload.current_path is None
-        or current.album_path != payload.current_path
-        or not audio_snapshot_matches(current.album_path, payload.current.files)
-    ):
-        raise ValueError(
-            "quality evidence current snapshot changed; refusing to mutate"
-        )
-
-
 def _materialize_quality_evidence_action(
     *,
     work_path: str,
@@ -1813,7 +1764,6 @@ def _run_quality_evidence_authorized_import(
             payload=payload,
             r=r,
         )
-        _validate_quality_evidence_current_snapshot(beets, mbid, payload)
     except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         r.exit_code = 5
         r.decision = "quality_evidence_action_failed"

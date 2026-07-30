@@ -23,7 +23,7 @@ TYPING_RATCHET_BASELINE: dict[str, dict[str, int]] = {
     "lib/field_resolver_service.py": {"any": 43},
     "lib/import_evidence.py": {"any": 3},
     "lib/import_manifest.py": {"any": 3},
-    "lib/import_preview.py": {"any": 6},
+    "lib/import_preview.py": {"any": 7},
     "lib/import_queue.py": {"any": 18},
     "lib/jellyfin_pin_service.py": {"any": 2},
     "lib/json_narrow.py": {"any": 3},

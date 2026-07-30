@@ -11,10 +11,11 @@ applied to that DB, then synthetic owner-keyed evidence is seeded directly
 with raw SQL, then migration 021 is applied. Assertions read the post-
 migration shape.
 
-The fingerprint cross-check tests pin migration 021's historical inventory
-formula for at least three file-list shapes. Migration 068 later adds exact
-per-file content digests; old rows intentionally retain this legacy key and
-become non-reusable until normal preview rebuilds them.
+The fingerprint cross-check tests confirm that the in-SQL hash matches the
+Python helper ``snapshot_fingerprint`` for at least three file-list shapes
+(single file, multiple files, file with NULL codec) — guarding against
+silent drift between the SQL backfill and the Python helper that all
+future writers will use.
 """
 
 from __future__ import annotations
@@ -40,32 +41,12 @@ from lib.migrator import (
     apply_migrations,
     discover_migrations,
 )
+from lib.quality import AlbumQualityEvidenceFile
+from lib.quality_evidence import snapshot_fingerprint
 
 TEST_DSN: str = os.environ.get("TEST_DB_DSN") or ""
 
 EMPTY_FILESET_FINGERPRINT = hashlib.sha256(b"[]").hexdigest()
-
-
-def _migration_021_fingerprint(
-    fixture_files: Sequence[tuple[str, int, str, str, str | None]],
-) -> str:
-    payload = [
-        [relative_path, size_bytes, extension, container, codec]
-        for (
-            relative_path,
-            size_bytes,
-            extension,
-            container,
-            codec,
-        ) in sorted(fixture_files, key=lambda row: row[0])
-    ]
-    encoded = json.dumps(
-        payload,
-        sort_keys=False,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    )
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def requires_postgres(cls):
@@ -366,8 +347,15 @@ class TestMigration021Backfill(_Mig021CaseBase):
         self.assertEqual(row[0], mbid)
         self.assertEqual(row[2], "/staged/import/path")
 
-        py_fp = _migration_021_fingerprint([
-            ("01.flac", 12345, "flac", "flac", "flac"),
+        py_fp = snapshot_fingerprint([
+            AlbumQualityEvidenceFile(
+                relative_path="01.flac",
+                size_bytes=12345,
+                mtime_ns=0,
+                extension="flac",
+                container="flac",
+                codec="flac",
+            )
         ])
         self.assertEqual(row[1], py_fp)
 
@@ -600,7 +588,11 @@ class TestMigration021Idempotence(_Mig021CaseBase):
 
 @requires_postgres
 class TestMigration021FingerprintCrossCheck(_Mig021CaseBase):
-    """Migration 021's SQL matches its frozen legacy inventory formula."""
+    """The in-SQL fingerprint must equal Python's ``snapshot_fingerprint`` for
+    a representative set of file-list shapes. This is the regression guard
+    against silent drift between the migration's SQL and the helper that
+    every post-deploy writer will use.
+    """
 
     def _fingerprint_after_migration(self, fixture_files):
         mbid = "mb-fp-" + uuid.uuid4().hex[:6]
@@ -621,7 +613,18 @@ class TestMigration021FingerprintCrossCheck(_Mig021CaseBase):
         return row[0]
 
     def _py_fingerprint(self, fixture_files):
-        return _migration_021_fingerprint(fixture_files)
+        files = [
+            AlbumQualityEvidenceFile(
+                relative_path=rel,
+                size_bytes=size,
+                mtime_ns=0,
+                extension=ext,
+                container=container,
+                codec=codec,
+            )
+            for (rel, size, ext, container, codec) in fixture_files
+        ]
+        return snapshot_fingerprint(files)
 
     def test_single_file_fixture_matches_python(self):
         fixture = [("01.flac", 12345, "flac", "flac", "flac")]

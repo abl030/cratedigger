@@ -82,11 +82,9 @@ CFG = QualityRankConfig.defaults()
 _STORED_BUCKETS = (96, 112, 128, 160, 192, 224, 256, 320)
 _LIVE_NON_BUCKETS = (121, 130, 198, 235, 247, 738)
 
-#: Grades that form a complete persisted policy fact, plus None for a
-#: withheld/unavailable spectral opinion. ``error`` is an analyzer outcome,
-#: not a storage-valid decision grade.
+#: Grades ``classify_album`` emits, plus the ``error`` grade and None.
 _GRADES: tuple[str | None, ...] = (
-    None, "genuine", "marginal", "suspect", "likely_transcode",
+    None, "genuine", "marginal", "suspect", "likely_transcode", "error",
 )
 
 #: The measured-format labels the evidence rows carry, paired with the

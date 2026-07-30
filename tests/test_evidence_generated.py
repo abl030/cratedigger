@@ -28,13 +28,12 @@ import tempfile
 import unittest
 import uuid
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Literal, cast
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from hypothesis import example, given, settings
+from hypothesis import example, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
@@ -56,8 +55,6 @@ from lib.quality import (
     VerifiedLosslessProof,
 )
 from lib.quality_evidence import (
-    EvidenceBuildResult,
-    audio_snapshot_matches,
     backfill_current_evidence_from_album_info,
     snapshot_audio_files,
     snapshot_fingerprint,
@@ -77,33 +74,6 @@ _CHANGED_SNAPSHOT_FACT_SHAPES: tuple[
     ("installed", None),
     (None, None),
 )
-
-
-class TestByteExactSnapshotGenerated(unittest.TestCase):
-    """Exact evidence reuse rejects every same-size byte mutation."""
-
-    @given(
-        payload=st.binary(min_size=1, max_size=256),
-        xor_mask=st.integers(min_value=1, max_value=255),
-    )
-    @example(payload=b"\x00", xor_mask=1)
-    def test_same_size_replacement_never_matches(
-        self,
-        payload: bytes,
-        xor_mask: int,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as root:
-            track = os.path.join(root, "01.mp3")
-            with open(track, "wb") as handle:
-                handle.write(payload)
-            captured = snapshot_audio_files(root)
-            replacement = bytes(byte ^ xor_mask for byte in payload)
-            self.assertEqual(len(replacement), len(payload))
-            with open(track, "r+b") as handle:
-                handle.write(replacement)
-                handle.truncate()
-
-            self.assertFalse(audio_snapshot_matches(root, captured))
 
 
 def _current_release(
@@ -434,10 +404,9 @@ def assert_blank_path_outcome(
     *,
     source_path_kind: str,
     requires_lossless_v0: bool,
-    has_usable_spectral: bool,
     current_status: str | None,
     available: bool,
-    linked_source_path: str | None,
+    result_source_path: str | None,
 ) -> None:
     """A blank-source_path row is never authoritative for an action.
 
@@ -450,38 +419,28 @@ def assert_blank_path_outcome(
     provenance). Request stamps cannot change that outcome. Here it only
     shapes which blank-path outcome is legal.
     """
-    if requires_lossless_v0 and available:
-        raise AssertionError(
-            "lossless-source row without a V0 backfill source "
-            "must fail closed, not become available")
     if source_path_kind == "real":
-        if (
-            not requires_lossless_v0
-            and has_usable_spectral
-            and current_status != "loaded"
-        ):
+        if not requires_lossless_v0 and current_status != "loaded":
             raise AssertionError(
                 "complete current evidence with a real source_path must "
                 f"load as authoritative (got {current_status})")
-        if (
-            not requires_lossless_v0
-            and available != has_usable_spectral
-        ):
-            raise AssertionError(
-                "real-path action authority did not match spectral completeness"
-            )
         return
     if current_status == "loaded":
         raise AssertionError(
             "blank-source_path current evidence was loaded as authoritative")
     if requires_lossless_v0:
+        if available:
+            raise AssertionError(
+                "lossless-source row without a V0 backfill source "
+                "must fail closed, not become available")
         return
-    if not (linked_source_path or "").strip():
+    if not available:
         raise AssertionError(
-            "blank-source_path row did not rebuild from album_info")
-    if available != has_usable_spectral:
+            "blank-source_path row must rebuild from album_info, "
+            "not fail closed")
+    if not (result_source_path or "").strip():
         raise AssertionError(
-            "rebuilt action authority did not match spectral completeness")
+            "rebuilt action evidence still carries a blank source_path")
 
 
 def _run_blank_path_world(
@@ -570,13 +529,10 @@ def _run_blank_path_world(
                 format="MP3",
             ),
         )
-        linked = db.load_album_quality_evidence_by_id(
-            db.get_request_current_evidence_id(request_id),
-        )
         return (
             result.provenance.current_status,
             result.available,
-            linked.source_path if linked is not None else None,
+            result.evidence.source_path if result.evidence is not None else None,
         )
     finally:
         shutil.rmtree(root, ignore_errors=True)
@@ -617,15 +573,9 @@ class TestGeneratedBlankSourcePath(unittest.TestCase):
         assert_blank_path_outcome(
             source_path_kind=world.source_path_kind,
             requires_lossless_v0=world.was_converted_from is not None,
-            has_usable_spectral=world.spectral_grade in {
-                "genuine",
-                "marginal",
-                "suspect",
-                "likely_transcode",
-            },
             current_status=current_status,
             available=available,
-            linked_source_path=result_source_path,
+            result_source_path=result_source_path,
         )
 
 
@@ -636,41 +586,36 @@ class TestBlankPathCheckerTripsOnViolations(unittest.TestCase):
         with self.assertRaises(AssertionError):
             assert_blank_path_outcome(
                 source_path_kind="blank", requires_lossless_v0=False,
-                has_usable_spectral=True,
                 current_status="loaded",
-                available=True, linked_source_path="")
+                available=True, result_source_path="")
 
-    def test_trips_on_blank_spectral_rebuild_becoming_authoritative(self):
+    def test_trips_on_fail_closed_instead_of_rebuild(self):
         with self.assertRaises(AssertionError):
             assert_blank_path_outcome(
                 source_path_kind="blank", requires_lossless_v0=False,
-                has_usable_spectral=False,
-                current_status="backfilled",
-                available=True, linked_source_path="/library/album")
+                current_status="failed",
+                available=False, result_source_path=None)
 
     def test_trips_on_rebuilt_row_still_blank(self):
         with self.assertRaises(AssertionError):
             assert_blank_path_outcome(
                 source_path_kind="whitespace", requires_lossless_v0=False,
-                has_usable_spectral=True,
                 current_status="backfilled",
-                available=True, linked_source_path="   ")
+                available=True, result_source_path="   ")
 
     def test_trips_on_real_path_not_loading(self):
         with self.assertRaises(AssertionError):
             assert_blank_path_outcome(
                 source_path_kind="real", requires_lossless_v0=False,
-                has_usable_spectral=True,
                 current_status="backfilled",
-                available=True, linked_source_path="/library/album")
+                available=True, result_source_path="/library/album")
 
     def test_trips_on_lossless_no_scalar_becoming_available(self):
         with self.assertRaises(AssertionError):
             assert_blank_path_outcome(
                 source_path_kind="blank", requires_lossless_v0=True,
-                has_usable_spectral=True,
                 current_status="backfilled",
-                available=True, linked_source_path="/library/album")
+                available=True, result_source_path="/library/album")
 
 
 LosslessSpectralFailureKind = Literal[
@@ -948,110 +893,6 @@ class TestGeneratedLosslessSpectralFailureLifecycle(unittest.TestCase):
                     harness_calls=harness_calls,
                     candidate_evidence_id=candidate_evidence_id,
                 )
-
-
-class TestGeneratedCandidateIntegritySkipsHave(unittest.TestCase):
-    @given(
-        scenario=st.sampled_from((
-            "audio_corrupt",
-            "nested_layout",
-            "empty_fileset",
-            "mixed_source",
-        )),
-    )
-    @example(scenario="mixed_source")
-    @settings(max_examples=10, deadline=None)
-    def test_complete_candidate_integrity_never_touches_have(
-        self,
-        scenario: str,
-    ) -> None:
-        from lib.config import CratediggerConfig
-
-        root = tempfile.mkdtemp(prefix="candidate-integrity-have-gen-")
-        try:
-            staging_dir = os.path.join(root, "Incoming")
-            source = os.path.join(
-                staging_dir,
-                "failed_imports",
-                "album",
-            )
-            os.makedirs(source)
-            slskd_dir = os.path.join(root, "slskd")
-            os.makedirs(slskd_dir)
-            processing_dir = os.path.join(root, "processing")
-            os.makedirs(processing_dir, mode=0o700)
-            os.makedirs(
-                os.path.join(processing_dir, "albums"),
-                mode=0o700,
-            )
-            os.makedirs(
-                os.path.join(processing_dir, "preview"),
-                mode=0o700,
-            )
-            cfg = CratediggerConfig(
-                audio_check_mode=(
-                    "normal" if scenario == "audio_corrupt" else "off"
-                ),
-                beets_staging_dir=staging_dir,
-                slskd_download_dir=slskd_dir,
-                processing_dir=processing_dir,
-            )
-
-            track_dir = source
-            if scenario == "nested_layout":
-                track_dir = os.path.join(source, "CD1")
-                os.makedirs(track_dir)
-            if scenario != "empty_fileset":
-                Path(track_dir, "01.mp3").write_bytes(b"candidate")
-            if scenario == "mixed_source":
-                Path(source, "02.flac").write_bytes(b"candidate-lossless")
-
-            expected_decision = scenario
-            forbidden_current = Mock(
-                side_effect=AssertionError("HAVE evidence loaded"),
-            )
-            forbidden_resolver = Mock(
-                side_effect=AssertionError("HAVE path resolved"),
-            )
-            forbidden_analyzer = Mock(
-                side_effect=AssertionError("spectral analyzer ran"),
-            )
-            db = FakePipelineDB()
-            db.seed_request(make_request_row(
-                id=71,
-                mb_release_id="candidate-integrity-generated",
-            ))
-            persisted_candidate = make_album_quality_evidence(
-                mb_release_id="candidate-integrity-generated",
-            )
-            result = measure_and_persist_candidate_evidence(
-                db,
-                request_id=71,
-                path=source,
-                runtime_config=cfg,
-                current_evidence_loader=forbidden_current,
-                existing_spectral_resolver=forbidden_resolver,
-                spectral_detail_analyzer=forbidden_analyzer,
-                persist_measurement_fn=(
-                    lambda *_args, **_kwargs: EvidenceBuildResult(
-                        persisted_candidate,
-                        "ready",
-                    )
-                ),
-                repair_fn=lambda _path: None,
-            )
-
-            self.assertEqual(
-                result.verdict,
-                "evidence_ready",
-                result.to_dict(),
-            )
-            self.assertEqual(result.decision, expected_decision)
-            forbidden_current.assert_not_called()
-            forbidden_resolver.assert_not_called()
-            forbidden_analyzer.assert_not_called()
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
 
 
 class TestLosslessSpectralFailureCheckerTripsOnViolations(unittest.TestCase):

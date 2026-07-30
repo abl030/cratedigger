@@ -1184,19 +1184,32 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
         target_format: str | None = None,
         verified_lossless_target: str | None = None,
         verified_lossless_proof=None,
-        current=None,
-        current_path: str | None = None,
     ):
         from lib.quality import (
             AlbumQualityEvidence,
+            AlbumQualityEvidenceFile,
             AudioQualityMeasurement,
             QualityEvidenceActionPayload,
             QualityEvidenceActionProvenance,
             TargetQualityContract,
         )
-        from lib.quality_evidence import snapshot_audio_files, snapshot_fingerprint
+        from lib.quality_evidence import snapshot_fingerprint
 
-        files = snapshot_audio_files(album_path)
+        files = []
+        for fname in sorted(os.listdir(album_path)):
+            full_path = os.path.join(album_path, fname)
+            if not os.path.isfile(full_path):
+                continue
+            stat = os.stat(full_path)
+            ext = os.path.splitext(fname)[1].lstrip(".").lower()
+            files.append(AlbumQualityEvidenceFile(
+                relative_path=fname,
+                size_bytes=stat.st_size,
+                mtime_ns=stat.st_mtime_ns,
+                extension=ext,
+                container=ext,
+                codec=ext,
+            ))
 
         candidate = AlbumQualityEvidence(
             mb_release_id="mbid-test-candidate",
@@ -1233,15 +1246,14 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
             decision_payload["target_final_format"] = target_final_format
         return QualityEvidenceActionPayload(
             candidate=candidate,
-            current=current,
-            current_path=current_path,
+            current=None,
             decision=decision_payload,
             decision_name=decision if decision_name is None else decision_name,
             target_format=target_format,
             verified_lossless_target=verified_lossless_target,
             provenance=QualityEvidenceActionProvenance(
                 candidate_status="reused",
-                current_status="loaded" if current is not None else "missing",
+                current_status="missing",
                 snapshot_status="matched",
             ),
         )
@@ -1249,28 +1261,6 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
     def _write_payload(self, payload, path: str) -> None:
         with open(path, "wb") as f:
             f.write(msgspec.json.encode(payload))
-
-    @staticmethod
-    def _current_absent_then_present(beets, mbid: str):
-        from lib.beets_db import CurrentBeetsMissing, release_identity_for_lookup
-
-        identity = release_identity_for_lookup(mbid)
-        assert identity is not None
-        present = beets.resolve_current_release(identity)
-        calls = 0
-
-        def resolve(current_identity):
-            nonlocal calls
-            calls += 1
-            if calls == 1:
-                return CurrentBeetsMissing(identity=current_identity)
-            return present
-
-        return patch.object(
-            beets,
-            "resolve_current_release",
-            side_effect=resolve,
-        )
 
     def test_quality_evidence_action_flag_present_in_help(self):
         import_script = os.path.join(HARNESS_DIR, "import_one.py")
@@ -1345,7 +1335,6 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
                        side_effect=measurement_error), \
                  patch("lib.spectral_check.analyze_album",
                        side_effect=measurement_error), \
-                 self._current_absent_then_present(beets, "mbid-123"), \
                  self.assertRaises(SystemExit) as cm:
                 import_one.main()
 
@@ -1430,7 +1419,6 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
                  patch("harness.import_one.run_import",
                        return_value=import_one.RunImportOutcome(0, [])), \
                  patch("harness.import_one.fix_library_modes"), \
-                 self._current_absent_then_present(beets, "mbid-123"), \
                  self.assertRaises(SystemExit) as cm:
                 import_one.main()
 
@@ -1483,87 +1471,6 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
             result = json.loads(sentinel.removeprefix("__IMPORT_RESULT__"))
             self.assertEqual(result["decision"], "quality_evidence_action_failed")
             self.assertIn("snapshot mismatch", result["error"])
-
-    def test_evidence_backed_current_snapshot_mismatch_fails_before_run_import(
-        self,
-    ):
-        from harness import import_one
-        from lib.quality import (
-            AlbumQualityEvidence,
-            AudioQualityMeasurement,
-        )
-        from lib.quality_evidence import snapshot_audio_files, snapshot_fingerprint
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            candidate_path = os.path.join(tmpdir, "candidate")
-            current_path = os.path.join(tmpdir, "library", "album")
-            os.makedirs(candidate_path)
-            os.makedirs(current_path)
-            with open(
-                os.path.join(candidate_path, "01 - Track.mp3"),
-                "wb",
-            ) as handle:
-                handle.write(b"candidate")
-            current_track = os.path.join(current_path, "01 - Track.mp3")
-            with open(current_track, "wb") as handle:
-                handle.write(b"installed")
-            current_files = snapshot_audio_files(current_path)
-            current = AlbumQualityEvidence(
-                mb_release_id="mbid-123",
-                snapshot_fingerprint=snapshot_fingerprint(current_files),
-                source_path=current_path,
-                measurement=AudioQualityMeasurement(
-                    min_bitrate_kbps=192,
-                    avg_bitrate_kbps=192,
-                    median_bitrate_kbps=192,
-                    format="MP3",
-                    spectral_grade="genuine",
-                    spectral_subject="source",
-                    spectral_provenance="measured",
-                ),
-                measured_at=datetime(2026, 1, 1, tzinfo=UTC),
-                files=current_files,
-                codec="mp3",
-                container="mp3",
-                storage_format="MP3",
-                audio_file_count=1,
-            )
-            action_path = os.path.join(tmpdir, "action.json")
-            self._write_payload(
-                self._payload_for_album(
-                    candidate_path,
-                    current=current,
-                    current_path=current_path,
-                ),
-                action_path,
-            )
-            with open(current_track, "wb") as handle:
-                handle.write(b"rewritten")
-
-            beets = FakeBeetsDB()
-            beets.set_item_paths("mbid-123", [(77, current_track)])
-
-            stdout = io.StringIO()
-            argv = [
-                "import_one.py",
-                candidate_path,
-                "mbid-123",
-                "--quality-evidence-action-file",
-                action_path,
-            ]
-            with patch.object(sys, "argv", argv), \
-                 patch("sys.stdout", stdout), \
-                 patch("harness.import_one.BeetsDB", return_value=beets), \
-                 patch("harness.import_one.run_import") as mock_run_import, \
-                 self.assertRaises(SystemExit) as cm:
-                import_one.main()
-
-            self.assertEqual(cm.exception.code, 5)
-            mock_run_import.assert_not_called()
-            sentinel = stdout.getvalue().strip().splitlines()[-1]
-            result = json.loads(sentinel.removeprefix("__IMPORT_RESULT__"))
-            self.assertEqual(result["decision"], "quality_evidence_action_failed")
-            self.assertIn("current snapshot changed", result["error"])
 
     def test_malformed_evidence_action_file_fails_before_run_import(self):
         from harness import import_one
@@ -1658,7 +1565,6 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
                        return_value=import_one.RunImportOutcome(
                            0, [], replaced_albums=replaced)), \
                  patch("harness.import_one.fix_library_modes"), \
-                 self._current_absent_then_present(beets, "mbid-123"), \
                  self.assertRaises(SystemExit) as cm:
                 import_one.main()
 

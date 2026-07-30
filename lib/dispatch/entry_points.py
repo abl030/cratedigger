@@ -235,7 +235,6 @@ def _dispatch_import_from_db_locked(
 
     candidate_result = ensure_candidate_evidence_for_action(
         db,
-        mb_release_id=mbid,
         source_path=failed_path,
         import_job_id=import_job_id,
         download_log_id=download_log_id,

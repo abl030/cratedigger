@@ -139,7 +139,6 @@ from lib.quality import (
     EVIDENCE_SUBJECT_INSTALLED,
     EVIDENCE_SUBJECT_SOURCE,
     LOSSLESS_CODECS,
-    SPECTRAL_USABLE_GRADES,
     V0_PROBE_LOSSLESS_SOURCE,
     V0_PROBE_NATIVE_LOSSY_RESEARCH,
     ActiveDownloadState,
@@ -4725,9 +4724,7 @@ class FakePipelineDB:
         )
         # Spectral is an atomic pair. A stale writer without a grade cannot
         # erase a successful attempt-time scan on the same audio snapshot.
-        # Historical grades outside the canonical vocabulary are poison, not
-        # a successful fact, so rebuild clears their whole tuple. R19 is the
-        # other exception: new lossless lineage clears a stored
+        # R19 is the exception: new lossless lineage clears a stored
         # installed-subject tuple because those derivative bytes are not an
         # authoritative spectral subject.
         #
@@ -4740,40 +4737,10 @@ class FakePipelineDB:
         # earlier draft of this fake added that extra precondition, which a
         # previous version of this comment claimed (wrongly) was already an
         # exact mirror.
-        existing_spectral_tuple_valid = True
-        if existing is not None:
-            stored_measurement = existing.measurement
-            stored_spectral_fields = (
-                stored_measurement.spectral_grade,
-                stored_measurement.spectral_bitrate_kbps,
-                stored_measurement.spectral_subject,
-                stored_measurement.spectral_provenance,
-                stored_measurement.cliff_hz,
-                stored_measurement.codec_family,
-                stored_measurement.ultrasonic_deficit_db,
-                stored_measurement.spectral_measurement_version,
-            )
-            existing_spectral_tuple_valid = (
-                not any(value is not None for value in stored_spectral_fields)
-                or (
-                    stored_measurement.spectral_grade
-                        in SPECTRAL_USABLE_GRADES
-                    and stored_measurement.spectral_subject
-                        in {EVIDENCE_SUBJECT_INSTALLED, EVIDENCE_SUBJECT_SOURCE}
-                    and stored_measurement.spectral_provenance
-                        in {"measured", "carried"}
-                    and not (
-                        stored_measurement.spectral_subject
-                            == EVIDENCE_SUBJECT_INSTALLED
-                        and stored_measurement.spectral_provenance == "carried"
-                    )
-                )
-            )
         if (
             existing is not None
             and existing.lineage_version >= 4
             and evidence.measurement.spectral_grade is None
-            and existing_spectral_tuple_valid
             and not (
                 incoming_lossless_lineage
                 and existing.measurement.spectral_subject

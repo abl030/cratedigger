@@ -1150,7 +1150,7 @@ class TestLoadEvidenceImportGateDelegation(unittest.TestCase):
 
     def _candidate_result(self):
         evidence = make_album_quality_evidence(
-            mb_release_id="mbid-123",
+            mb_release_id="mbid-candidate",
         )
         provenance = ActionEvidenceProvenance(
             candidate_status="reused",

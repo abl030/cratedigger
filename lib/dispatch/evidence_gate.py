@@ -33,19 +33,16 @@ from lib.import_evidence import (
     load_current_evidence_for_action,
 )
 from lib.quality import (
-    SPECTRAL_USABLE_GRADES,
     DownloadInfo,
     QualityEvidenceActionPayload,
     QualityEvidenceActionProvenance,
     SpectralMeasurement,
-    candidate_preimport_rejection_from_evidence,
     evidence_decision_name,
 )
 from lib.quality_evidence import (
     EvidenceBuildResult,
     audit_v0_probe_from_metric,
     backfill_current_evidence_from_album_info,
-    has_lossless_source_lineage,
     propagate_candidate_evidence_to_current,
 )
 
@@ -205,7 +202,6 @@ def _write_quality_evidence_action_file(
     payload = QualityEvidenceActionPayload(
         candidate=candidate,
         current=current,
-        current_path=gate.current_path,
         decision=decision,
         decision_name=evidence_decision_name(decision),
         target_format=target_format,
@@ -254,45 +250,13 @@ def _load_evidence_import_gate(
     if candidate_result is None:
         candidate_result = ensure_candidate_evidence_for_action(
             db,
-            mb_release_id=mb_release_id,
             source_path=path,
             import_job_id=candidate_import_job_id,
             download_log_id=candidate_download_log_id,
         )
-    if candidate_result.evidence is not None:
-        from lib.beets_db import exact_release_identity_matches
-
-        if not exact_release_identity_matches(
-            mb_release_id,
-            candidate_result.evidence.mb_release_id,
-        ):
-            return EvidenceImportGate(
-                candidate=None,
-                candidate_status="failed",
-                candidate_reason=(
-                    "candidate evidence exact release identity "
-                    "does not match request"
-                ),
-                snapshot_guard="failed",
-            )
     if not candidate_result.available:
         return EvidenceImportGate(
             candidate=None,
-            candidate_status=candidate_result.provenance.candidate_status,
-            candidate_reason=candidate_result.provenance.fallback_reason,
-            snapshot_guard=candidate_result.provenance.snapshot_guard,
-        )
-
-    candidate = candidate_result.evidence
-    if (
-        candidate is not None
-        and candidate_preimport_rejection_from_evidence(candidate) is not None
-    ):
-        # Candidate integrity is decided before HAVE by the canonical quality
-        # predicate. Do not load, enrich, or CAS current evidence for bytes
-        # that are already durably rejected.
-        return EvidenceImportGate(
-            candidate=candidate,
             candidate_status=candidate_result.provenance.candidate_status,
             candidate_reason=candidate_result.provenance.fallback_reason,
             snapshot_guard=candidate_result.provenance.snapshot_guard,
@@ -318,20 +282,14 @@ def _load_evidence_import_gate(
         )
 
     fresh_have_failure: str | None = None
-    if (
-        attempt_have_audit_available
-        and (
-            current_result.evidence is None
-            or not has_lossless_source_lineage(current_result.evidence)
-        )
-    ):
+    if attempt_have_audit_available:
         if attempt_existing_spectral is None:
             fresh_have_failure = "attempt returned no installed HAVE spectral result"
         elif not attempt_existing_spectral.attempted:
             fresh_have_failure = "attempt did not run installed HAVE spectral analysis"
         elif attempt_existing_spectral.error is not None:
             fresh_have_failure = attempt_existing_spectral.error
-        elif attempt_existing_spectral.grade not in SPECTRAL_USABLE_GRADES:
+        elif attempt_existing_spectral.grade in (None, "error"):
             fresh_have_failure = (
                 "attempt did not produce a usable installed HAVE spectral grade"
             )
