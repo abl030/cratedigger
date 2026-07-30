@@ -9,6 +9,7 @@ import {
   handleProcessingLockedConflict,
   processingConflictFromResponse,
   processingOwnerPresentation,
+  refetchProcessingRequest,
 } from '../web/js/release_action_state.js';
 import {
   renderActionToolbar,
@@ -287,7 +288,7 @@ console.log('Processing conflict detector — canonical and temporary transition
   );
 }
 
-console.log('Processing conflict handler — immediate lock, row refetch, focus and scroll survive');
+console.log('Processing conflict handler — immediate lock and row refetch preserve focus');
 {
   const attributes = new Map([['onclick', 'window.deleteRequest(903)']]);
   let focused = 0;
@@ -330,11 +331,11 @@ console.log('Processing conflict handler — immediate lock, row refetch, focus 
     },
     querySelectorAll() { return [control]; },
   };
-  let restored = '';
+  let scrollCalls = 0;
   globalThis.window = {
     scrollX: 13,
     scrollY: 29,
-    scrollTo(x, y) { restored = `${x},${y}`; },
+    scrollTo() { scrollCalls++; },
   };
   let refetches = 0;
   const handled = await handleProcessingLockedConflict({
@@ -357,7 +358,7 @@ console.log('Processing conflict handler — immediate lock, row refetch, focus 
   assertEqual(attributes.has('onclick'), false, 'stale inline mutation is removed');
   assertEqual(control.dataset.processingLocked, 'true', 'typed locked state is retained');
   assertEqual(refetches, 1, 'only affected request is refetched');
-  assertEqual(restored, '13,29', 'scroll context restored');
+  assertEqual(scrollCalls, 0, 'refresh does not rewrite the viewport');
   assertEqual(focused, 0, 'already-focused control is not redundantly focused after refetch');
   assertContains(live.textContent, 'job #73', 'aria-live announcement names exact owner');
   assertEqual(inserted.length, 1, 'visible owner explanation stays beside the locked control');
@@ -446,6 +447,11 @@ console.log('Processing conflict handler — authoritative owner refresh repaint
       },
     },
     control,
+    refetch: (requestId, generation) => refetchProcessingRequest(
+      requestId,
+      '',
+      generation,
+    ),
   });
   assertEqual(control.textContent, 'importing', 'fresh owner status replaces conflict-time label');
   assertContains(
@@ -488,6 +494,11 @@ console.log('Processing conflict handler — authoritative owner refresh repaint
       },
     },
     control,
+    refetch: (requestId, generation) => refetchProcessingRequest(
+      requestId,
+      '',
+      generation,
+    ),
   });
   assertEqual(control.textContent, 'imported', 'fresh lifecycle status replaces stale processing label');
   assertEqual(
@@ -501,6 +512,199 @@ console.log('Processing conflict handler — authoritative owner refresh repaint
     'completed request no longer claims a processing lock',
   );
   assertContains(live.textContent, 'now imported', 'non-processing refresh is announced truthfully');
+  globalThis.document = oldDocument;
+  globalThis.window = oldWindow;
+  globalThis.fetch = oldFetch;
+}
+
+console.log('Processing conflict handler — newest same-request refresh wins');
+{
+  clearStore();
+  const oldDocument = globalThis.document;
+  const oldWindow = globalThis.window;
+  const oldFetch = globalThis.fetch;
+  const inserted = [];
+  const body = fakeDomElement('application shell', null, inserted);
+  const control = fakeDomElement('Delete request', 911, inserted);
+  const live = fakeDomElement('', null, inserted);
+  const older = deferred();
+  const newer = deferred();
+  let fetches = 0;
+  globalThis.document = {
+    activeElement: control,
+    body,
+    documentElement: fakeDomElement('document root', null, inserted),
+    createElement() {
+      return fakeDomElement('', null, inserted, false);
+    },
+    getElementById(id) {
+      if (id === 'processing-lock-live-region') return live;
+      return inserted.find(element => element.id === id && element.isConnected) || null;
+    },
+    querySelectorAll() { return [control]; },
+  };
+  globalThis.window = { scrollX: 0, scrollY: 0, scrollTo() {} };
+  globalThis.fetch = async () => {
+    fetches++;
+    return fetches === 1 ? older.promise : newer.promise;
+  };
+  const first = handleProcessingLockedConflict({
+    httpStatus: 409,
+    payload: {
+      error: 'processing_locked',
+      request_id: 911,
+      processing_owner: {
+        job_id: 91,
+        status: 'running',
+        preview_status: 'evidence_ready',
+      },
+    },
+    control,
+    refetch: (requestId, generation) => refetchProcessingRequest(
+      requestId,
+      '',
+      generation,
+    ),
+  });
+  const second = handleProcessingLockedConflict({
+    httpStatus: 409,
+    payload: {
+      error: 'processing_locked',
+      request_id: 911,
+      processing_owner: {
+        job_id: 92,
+        status: 'running',
+        preview_status: 'evidence_ready',
+      },
+    },
+    control,
+    refetch: (requestId, generation) => refetchProcessingRequest(
+      requestId,
+      '',
+      generation,
+    ),
+  });
+  newer.resolve({
+    ok: true,
+    async json() {
+      return {
+        request: {
+          id: 911,
+          status: 'wanted',
+          mb_release_id: 'refresh-race-release',
+          processing_owner: null,
+        },
+      };
+    },
+  });
+  await second;
+  older.resolve({
+    ok: true,
+    async json() {
+      return {
+        request: {
+          id: 911,
+          status: 'processing',
+          mb_release_id: 'refresh-race-release',
+          processing_owner: {
+            job_id: 91,
+            status: 'running',
+            preview_status: 'evidence_ready',
+          },
+        },
+      };
+    },
+  });
+  await first;
+  assertEqual(
+    pipelineStore.get('refresh-race-release')?.status,
+    'wanted',
+    'older processing response cannot overwrite newer wanted state',
+  );
+  assertEqual(
+    pipelineStore.get('refresh-race-release')?.processing_owner,
+    null,
+    'older owner cannot relock the central store',
+  );
+  assertEqual(control.textContent, 'wanted', 'older response cannot relock the row');
+
+  const staleFailure = deferred();
+  const currentSuccess = deferred();
+  fetches = 0;
+  globalThis.fetch = async () => {
+    fetches++;
+    return fetches === 1 ? staleFailure.promise : currentSuccess.promise;
+  };
+  const staleFailureHandling = handleProcessingLockedConflict({
+    httpStatus: 409,
+    payload: {
+      error: 'processing_locked',
+      request_id: 911,
+      processing_owner: {
+        job_id: 93,
+        status: 'running',
+        preview_status: 'evidence_ready',
+      },
+    },
+    control,
+    refetch: (requestId, generation) => refetchProcessingRequest(
+      requestId,
+      '',
+      generation,
+    ),
+  });
+  const currentSuccessHandling = handleProcessingLockedConflict({
+    httpStatus: 409,
+    payload: {
+      error: 'processing_locked',
+      request_id: 911,
+      processing_owner: {
+        job_id: 94,
+        status: 'running',
+        preview_status: 'evidence_ready',
+      },
+    },
+    control,
+    refetch: (requestId, generation) => refetchProcessingRequest(
+      requestId,
+      '',
+      generation,
+    ),
+  });
+  currentSuccess.resolve({
+    ok: true,
+    async json() {
+      return {
+        request: {
+          id: 911,
+          status: 'wanted',
+          mb_release_id: 'refresh-race-release',
+          processing_owner: null,
+        },
+      };
+    },
+  });
+  await currentSuccessHandling;
+  const retryCountBeforeStaleFailure = inserted.filter(
+    element => element.isConnected
+      && element.className === 'p-btn processing-refresh-retry',
+  ).length;
+  const announcementBeforeStaleFailure = live.textContent;
+  staleFailure.reject(new Error('obsolete row refresh failed'));
+  await staleFailureHandling;
+  assertEqual(
+    inserted.filter(
+      element => element.isConnected
+        && element.className === 'p-btn processing-refresh-retry',
+    ).length,
+    retryCountBeforeStaleFailure,
+    'older failed response cannot expose obsolete retry UI',
+  );
+  assertEqual(
+    live.textContent,
+    announcementBeforeStaleFailure,
+    'older failed response cannot restore an obsolete lock announcement',
+  );
   globalThis.document = oldDocument;
   globalThis.window = oldWindow;
   globalThis.fetch = oldFetch;
@@ -845,6 +1049,57 @@ console.log('Processing conflict handler — focus moved during refetch is not s
     0,
     'refetch completion does not focus the old control',
   );
+  globalThis.document = oldDocument;
+  globalThis.window = oldWindow;
+}
+
+console.log('Processing conflict handler — scrolling during refetch stays operator-owned');
+{
+  const oldDocument = globalThis.document;
+  const oldWindow = globalThis.window;
+  const inserted = [];
+  const body = fakeDomElement('application shell', null, inserted);
+  const control = fakeDomElement('Delete request', 912, inserted);
+  const live = fakeDomElement('', null, inserted);
+  const refresh = deferred();
+  let scrollCalls = 0;
+  globalThis.document = {
+    activeElement: control,
+    body,
+    documentElement: fakeDomElement('document root', null, inserted),
+    createElement() {
+      return fakeDomElement('', null, inserted, false);
+    },
+    getElementById(id) {
+      if (id === 'processing-lock-live-region') return live;
+      return inserted.find(element => element.id === id && element.isConnected) || null;
+    },
+    querySelectorAll() { return [control]; },
+  };
+  globalThis.window = {
+    scrollX: 0,
+    scrollY: 20,
+    scrollTo() { scrollCalls++; },
+  };
+  const handling = handleProcessingLockedConflict({
+    httpStatus: 409,
+    payload: {
+      error: 'processing_locked',
+      request_id: 912,
+      processing_owner: {
+        job_id: 93,
+        status: 'running',
+        preview_status: 'evidence_ready',
+      },
+    },
+    control,
+    refetch: async () => refresh.promise,
+  });
+  globalThis.window.scrollY = 480;
+  refresh.resolve();
+  await handling;
+  assertEqual(globalThis.window.scrollY, 480, 'new scroll position survives');
+  assertEqual(scrollCalls, 0, 'async completion never restores stale scroll');
   globalThis.document = oldDocument;
   globalThis.window = oldWindow;
 }

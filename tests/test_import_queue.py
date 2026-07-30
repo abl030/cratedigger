@@ -34,6 +34,7 @@ from lib.download_processing import (
     CompletionResult,
 )
 from lib.import_execution import (
+    AutomationOwnerFailStop,
     CancellationToken,
     ExecutionCancelled,
     ExecutionLeaseSnapshot,
@@ -3609,6 +3610,7 @@ class TestImportPreviewWorker(unittest.TestCase):
             self.assertEqual(updated.preview_status, "evidence_ready")
 
     def test_automation_preview_reject_with_evidence_marks_ready_for_dispatch(self):
+        from lib.download_materialization import Materialized
         from scripts import import_preview_worker
 
         with tempfile.TemporaryDirectory() as staged:
@@ -3662,6 +3664,12 @@ class TestImportPreviewWorker(unittest.TestCase):
                     source_path=staged,
                 )
 
+            materialize_calls: list[int] = []
+
+            def materialize(*_args: object, **_kwargs: object) -> Materialized:
+                materialize_calls.append(claimed.id)
+                return Materialized()
+
             updated = import_preview_worker.process_claimed_preview_job(
                 db,
                 claimed,
@@ -3669,9 +3677,11 @@ class TestImportPreviewWorker(unittest.TestCase):
                 automation_authority=authority,
                 cancellation_token=CancellationToken(),
                 candidate_measurement_fn=reject_preview,
+                automation_materialize_fn=materialize,
             )
 
             assert updated is not None
+            self.assertEqual(materialize_calls, [claimed.id])
             self.assertEqual(updated.status, "queued")
             self.assertEqual(updated.preview_status, "evidence_ready")
             self.assertIsNone(updated.preview_error)
@@ -3795,7 +3805,10 @@ class TestImportPreviewWorker(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as root:
             processing_dir = os.path.join(root, "processing")
-            os.makedirs(processing_albums_dir(processing_dir), mode=0o700)
+            slskd_download_dir = os.path.join(root, "slskd")
+            os.mkdir(processing_dir, 0o700)
+            os.mkdir(processing_albums_dir(processing_dir), 0o700)
+            os.mkdir(slskd_download_dir, 0o700)
             request = make_request_row(
                 id=42,
                 active_download_state={
@@ -3874,6 +3887,7 @@ class TestImportPreviewWorker(unittest.TestCase):
                 heartbeat_interval=3600,
                 runtime_config=CratediggerConfig(
                     processing_dir=processing_dir,
+                    slskd_download_dir=slskd_download_dir,
                 ),
                 stage_db_factory=lambda _dsn: StageSession(
                     db,
@@ -3902,6 +3916,7 @@ class TestImportPreviewWorker(unittest.TestCase):
                 heartbeat_interval=3600,
                 runtime_config=CratediggerConfig(
                     processing_dir=processing_dir,
+                    slskd_download_dir=slskd_download_dir,
                 ),
                 stage_db_factory=stage_factory,
                 heartbeat_db_factory=lambda _dsn: db,
@@ -4026,6 +4041,99 @@ class TestImportPreviewWorker(unittest.TestCase):
         stored = db.get_import_job(candidate.id)
         assert stored is not None
         self.assertIsNone(stored.candidate_evidence_id)
+
+    def test_claimed_preview_with_lost_authority_fail_stops_worker(self) -> None:
+        """A claimed row cannot return to the daemon under its live lease."""
+        from scripts import import_preview_worker
+
+        class AuthorityLostAfterClaimSession:
+            def __init__(self, inner: FakePipelineDB) -> None:
+                self._inner = inner
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(self._inner, name)
+
+            @contextmanager
+            def _pin_owner_session(self, token: CancellationToken):
+                token.raise_if_cancelled()
+                yield object()
+
+            @contextmanager
+            def advisory_lock(self, _namespace: int, _key: int):
+                yield True
+
+            def claim_automation_import_preview_job_under_lock(
+                self,
+                job_id: int,
+                *,
+                request_id: int,
+                worker_id: str | None,
+                execution_lease: ExecutionLeaseSnapshot,
+            ) -> ImportJob | None:
+                claimed = (
+                    self._inner.claim_automation_import_preview_job_under_lock(
+                        job_id,
+                        request_id=request_id,
+                        worker_id=worker_id,
+                        execution_lease=execution_lease,
+                    )
+                )
+                if claimed is not None:
+                    self._inner._requests[request_id][
+                        "active_download_state"
+                    ] = None
+                return claimed
+
+            def close(self) -> None:
+                return None
+
+        with tempfile.TemporaryDirectory() as canonical_path:
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(id=42))
+            handoff_automation_owner(
+                db,
+                42,
+                state={
+                    "filetype": "flac",
+                    "enqueued_at": "2026-04-25T00:00:00+00:00",
+                    "current_path": canonical_path,
+                    "files": [{
+                        "username": "alice",
+                        "filename": "Artist\\Album\\01.flac",
+                        "file_dir": "Artist\\Album",
+                        "size": 123,
+                    }],
+                },
+                canonical_path=canonical_path,
+            )
+            lease = _preview_execution_lease("authority-lost-after-claim")
+            candidate = db.peek_import_preview_job_candidates(
+                execution_lease=lease,
+                limit=1,
+            )[0]
+
+            with self.assertRaises(AutomationOwnerFailStop):
+                import_preview_worker._process_automation_claim(
+                    candidate,
+                    dsn="postgresql://fake",
+                    worker_id="preview",
+                    execution_lease=lease,
+                    heartbeat_interval=3600,
+                    runtime_config=CratediggerConfig(),
+                    stage_db_factory=(
+                        lambda _dsn: AuthorityLostAfterClaimSession(db)
+                    ),
+                    heartbeat_db_factory=lambda _dsn: db,
+                )
+
+        stored = db.get_import_job(candidate.id)
+        assert stored is not None
+        self.assertEqual(stored.preview_status, "running")
+        self.assertEqual(db.request(42)["status"], "processing")
+        self.assertEqual(
+            db.request(42)["active_automation_import_job_id"],
+            candidate.id,
+        )
 
     def test_automation_pinned_session_loss_before_lock_is_fail_stop(self):
         """Known-bad reconnect between pin and IMPORT lock cannot run preview."""
@@ -5568,12 +5676,11 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
         self.assertFalse(result.spectral.existing.attempted)
         self.assertIsNone(result.spectral.existing.error)
 
-    def test_automation_job_valid_evidence_skips_measurement_and_materialization(self):
-        """AE4 automation: matching snapshot + valid evidence → no measurement.
-
-        Crucially, no materialization either: the path-derivation helper must
-        not invoke _materialize_processing_dir.
-        """
+    def test_automation_job_valid_evidence_skips_measurement_after_materialization(
+        self,
+    ) -> None:
+        """AE4 automation: exact manifest + matching evidence skips measurement."""
+        from lib.download_materialization import Materialized
         from lib.quality import SpectralAnalysisDetail
         from scripts import import_preview_worker
 
@@ -5619,6 +5726,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             )
 
             candidate_audit_calls: list[str] = []
+            materialize_calls: list[str] = []
 
             def analyze(path: str):
                 candidate_audit_calls.append(path)
@@ -5627,13 +5735,18 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                     grade="genuine",
                 )
 
+            def materialize(
+                *_args: object,
+                **_kwargs: object,
+            ) -> Materialized:
+                materialize_calls.append(staged)
+                return Materialized()
+
             with patch(
                 "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
             ) as preview, patch(
                 "lib.measurement.measure_preimport_state",
-            ) as preimport, patch(
-                "lib.download_materialization._materialize_processing_dir",
-            ) as materialize:
+            ) as preimport:
                 updated = import_preview_worker.process_claimed_preview_job(
                     db,
                     claimed,
@@ -5641,11 +5754,12 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                     execution_lease=lease,
                     automation_authority=authority,
                     cancellation_token=CancellationToken(),
+                    automation_materialize_fn=materialize,
                 )
 
         preview.assert_not_called()
         preimport.assert_not_called()
-        materialize.assert_not_called()
+        self.assertEqual(materialize_calls, [staged])
         self.assertEqual(candidate_audit_calls, [])
         assert updated is not None
         self.assertEqual(updated.preview_status, "evidence_ready")
@@ -5654,6 +5768,197 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             updated.preview_result.get("candidate_status"),
             "reused",
         )
+
+    def test_ready_evidence_never_runs_before_canonical_materialization(
+        self,
+    ) -> None:
+        """A rejected manifest cannot be marked importable by stored evidence."""
+        from scripts import import_preview_worker
+
+        with tempfile.TemporaryDirectory() as staged:
+            with open(os.path.join(staged, "01.flac"), "wb") as handle:
+                handle.write(b"audio")
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=42,
+                active_download_state={
+                    "filetype": "flac",
+                    "enqueued_at": "2026-04-25T00:00:00+00:00",
+                    "current_path": staged,
+                    "files": [{
+                        "username": "alice",
+                        "filename": "Artist\\Album\\01.flac",
+                        "file_dir": "Artist\\Album",
+                        "size": 5,
+                    }],
+                },
+            ))
+            handoff_automation_owner(
+                db,
+                42,
+                state=db.request(42)["active_download_state"],
+                canonical_path=staged,
+            )
+            lease = _preview_execution_lease("manifest-before-evidence")
+            claimed = claim_next_import_preview_job(
+                db,
+                worker_id="preview",
+                execution_lease=lease,
+            )
+            assert claimed is not None
+            authority = import_preview_worker._AutomationPreviewAuthority(
+                request=db.request(42),
+                state=ActiveDownloadState.from_raw(
+                    db.request(42)["active_download_state"]
+                ),
+                canonical_path=staged,
+            )
+            self._seed_evidence_for_job(
+                import_preview_worker._AutomationPreviewDB(db, lease),
+                claimed.id,
+                staged,
+            )
+
+            materialize_calls: list[str] = []
+
+            def reject_manifest(
+                *_args: object,
+                **_kwargs: object,
+            ) -> None:
+                materialize_calls.append(staged)
+                raise RuntimeError("incomplete_or_unsafe_canonical")
+
+            token = CancellationToken()
+            with db._pin_owner_session(token) as owner_session_identity:
+                updated = import_preview_worker.process_claimed_preview_job(
+                    db,
+                    claimed,
+                    execution_lease=lease,
+                    automation_authority=authority,
+                    cancellation_token=token,
+                    owner_session_identity=owner_session_identity,
+                    automation_materialize_fn=reject_manifest,
+                )
+
+        self.assertEqual(materialize_calls, [staged])
+        assert updated is not None
+        self.assertEqual(updated.status, "failed")
+        self.assertEqual(db.request(42)["status"], "wanted")
+        self.assertIsNone(
+            db.request(42)["active_automation_import_job_id"],
+        )
+
+    @given(
+        variant=st.sampled_from((
+            "empty",
+            "missing_member",
+            "extra_entry",
+            "root_symlink",
+        )),
+    )
+    def test_generated_unsafe_existing_canonical_never_materializes(
+        self,
+        variant: str,
+    ) -> None:
+        """Exact no-follow manifest authority rejects every unsafe world."""
+        from lib.download_reconstruction import reconstruct_grab_list_entry
+        from lib.processing_paths import (
+            canonical_folder_for_row,
+            processing_albums_dir,
+        )
+        from scripts import import_preview_worker
+
+        with tempfile.TemporaryDirectory() as root:
+            processing_dir = os.path.join(root, "processing")
+            slskd_download_dir = os.path.join(root, "slskd")
+            albums_dir = processing_albums_dir(processing_dir)
+            os.mkdir(processing_dir, 0o700)
+            os.mkdir(slskd_download_dir, 0o700)
+            os.mkdir(albums_dir, 0o700)
+            request = make_request_row(
+                id=42,
+                active_download_state={
+                    "filetype": "flac",
+                    "enqueued_at": "2026-04-25T00:00:00+00:00",
+                    "current_path": "/pending/canonical-path",
+                    "files": [
+                        {
+                            "username": "alice",
+                            "filename": "Artist\\Album\\01.flac",
+                            "file_dir": "Artist\\Album",
+                            "size": 5,
+                        },
+                        {
+                            "username": "alice",
+                            "filename": "Artist\\Album\\02.flac",
+                            "file_dir": "Artist\\Album",
+                            "size": 5,
+                        },
+                    ],
+                },
+            )
+            state = ActiveDownloadState.from_raw(
+                request["active_download_state"]
+            )
+            canonical_path = canonical_folder_for_row(
+                reconstruct_grab_list_entry(request, state),
+                albums_dir,
+            )
+            request["active_download_state"]["current_path"] = canonical_path
+            target_path = f"{canonical_path}-target"
+            destination = (
+                target_path if variant == "root_symlink" else canonical_path
+            )
+            os.mkdir(destination, 0o700)
+            if variant != "empty":
+                with open(
+                    os.path.join(destination, "01.flac"),
+                    "wb",
+                ) as handle:
+                    handle.write(b"audio")
+            if variant in {"extra_entry", "root_symlink"}:
+                with open(
+                    os.path.join(destination, "02.flac"),
+                    "wb",
+                ) as handle:
+                    handle.write(b"audio")
+            if variant == "extra_entry":
+                with open(
+                    os.path.join(destination, "preview-control.json"),
+                    "w",
+                    encoding="utf-8",
+                ) as handle:
+                    handle.write("{}")
+            if variant == "root_symlink":
+                os.symlink(target_path, canonical_path)
+
+            db = FakePipelineDB()
+            db.seed_request(request)
+            job = handoff_automation_owner(
+                db,
+                42,
+                state=db.request(42)["active_download_state"],
+                canonical_path=canonical_path,
+            )
+            authority = import_preview_worker._AutomationPreviewAuthority(
+                request=db.request(42),
+                state=ActiveDownloadState.from_raw(
+                    db.request(42)["active_download_state"]
+                ),
+                canonical_path=canonical_path,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "could not be materialized"):
+                import_preview_worker._materialize_automation_authority(
+                    db,
+                    job,
+                    authority,
+                    runtime_config=CratediggerConfig(
+                        processing_dir=processing_dir,
+                        slskd_download_dir=slskd_download_dir,
+                    ),
+                    cancellation_token=CancellationToken(),
+                )
 
     def test_missing_evidence_falls_through_to_full_measurement(self):
         """No evidence row → worker runs full preview measurement (legacy path)."""
@@ -7087,14 +7392,18 @@ def automation_world_failure_violation(
     * the self-heal committed — the job is terminally ``failed``, the request is
       searchable again and no automation owner is attached; or
     * no owner-atomic write was authorized at all — the row is untouched, still
-      ``running`` under its persisted lease and still the exact owner, for
-      lease-proven startup recovery. Never fabricate a write the owner
-      authority refuses.
+      ``running`` under its persisted lease and still the exact owner, while an
+      ``AutomationOwnerFailStop`` ends the daemon for lease-proven automatic
+      recovery. Returning normally with that same lease live is illegal. Never
+      fabricate a write the owner authority refuses.
 
     ``recovery_required`` is never legal: it strands ``processing`` behind an
     inactive job that ``get_wanted`` cannot see.
     """
-    if escaped is not None:
+    if escaped is not None and not isinstance(
+        escaped,
+        AutomationOwnerFailStop,
+    ):
         return (
             f"{label} escaped process_claimed_job as "
             f"{type(escaped).__name__}"
@@ -7102,6 +7411,11 @@ def automation_world_failure_violation(
     if job_status == "recovery_required":
         return f"{label} parked the job for human intervention"
     if job_status == "failed":
+        if escaped is not None:
+            return (
+                f"{label} fail-stopped after writing terminal job status "
+                f"{job_status}"
+            )
         if request_status not in _WORLD_FAILURE_SEARCHABLE:
             return (
                 f"{label} self-healed the job but left the request "
@@ -7118,6 +7432,11 @@ def automation_world_failure_violation(
             return (
                 f"{label} left a torn owner: job running, request "
                 f"{request_status}, owner {active_owner}"
+            )
+        if not isinstance(escaped, AutomationOwnerFailStop):
+            return (
+                f"{label} returned to the live daemon with owner "
+                f"{active_owner} still attached"
             )
         return None
     return f"{label} left the job at {job_status}"
@@ -7421,16 +7740,14 @@ class TestAutomationTerminalStageFaultRouting(unittest.TestCase):
                 escaped = exc
         return updated, escaped
 
-    def test_cleanup_failure_never_parks_the_request(self) -> None:
-        """A journal that no longer names the canonical owner is not parked.
+    def test_cleanup_failure_fail_stops_for_automatic_recovery(self) -> None:
+        """A journal that no longer names the canonical owner fail-stops.
 
         The cleanup cannot complete, so no terminal bundle can consume its
         receipt and no owner-atomic write is authorable. The row therefore stays
-        ``running`` under its persisted lease for startup recovery instead of
-        being parked as ``recovery_required`` behind ``processing``. The debris
-        the unfinished cleanup leaves under ``processing/albums/`` is the
-        documented residual — a fresh attempt gets its own attempt-scoped
-        canonical folder, so it cannot collide.
+        ``running`` under its persisted lease while the worker exits. Systemd
+        restart makes that lease provably dead, and startup recovery resumes
+        the exact journal without an operator action.
         """
         db = FakePipelineDB()
         canonical = self._canonical_dir()
@@ -7439,7 +7756,7 @@ class TestAutomationTerminalStageFaultRouting(unittest.TestCase):
 
         updated, escaped = self._run_terminal_stage(db, claimed, lease)
 
-        self.assertIsNone(escaped)
+        self.assertIsInstance(escaped, AutomationOwnerFailStop)
         self.assertIsNone(updated)
         stored = db.get_import_job(claimed.id)
         assert stored is not None
@@ -7457,7 +7774,7 @@ class TestAutomationTerminalStageFaultRouting(unittest.TestCase):
         )
 
     def test_terminal_persist_conflict_never_parks_the_request(self) -> None:
-        """A terminal CAS that loses its row every time is not parked."""
+        """A terminal CAS that always loses fail-stops instead of parking."""
         from lib.pipeline_db.terminal_outcomes import ImportJobTerminalConflict
 
         class ConflictDB(_TerminalBoundaryFaultDB):
@@ -7469,7 +7786,7 @@ class TestAutomationTerminalStageFaultRouting(unittest.TestCase):
 
         updated, escaped = self._run_terminal_stage(db, claimed, lease)
 
-        self.assertIsNone(escaped)
+        self.assertIsInstance(escaped, AutomationOwnerFailStop)
         self.assertIsNone(updated)
         stored = db.get_import_job(claimed.id)
         assert stored is not None
@@ -7788,12 +8105,15 @@ class TestAutomationCleanupQuarantineRoot(unittest.TestCase):
 # is authorable for it. The two ``False`` rows are not policy exceptions: the
 # cleanup could not complete (so no receipt exists to consume) or the terminal
 # CAS refuses every bundle. Both leave the row untouched and ``running`` under
-# its persisted lease — never parked.
+# its persisted lease while ``AutomationOwnerFailStop`` ends the process so
+# automatic death-proven recovery can proceed — never parked and never returned
+# to the live daemon loop.
 _WORLD_FAILURE_CLASSES: dict[str, bool] = {
     "execute_crash_after_launch": True,
     "beets_acknowledgement_ambiguous": True,
     "no_terminal_outcome_pre_launch": True,
     "missing_completion_receipt": True,
+    "prelaunch_requeue_failed": True,
     "recoverable_terminal_stage_fault": True,
     "cleanup_journal_drift": False,
     "terminal_cas_always_conflicts": False,
@@ -7973,6 +8293,33 @@ class TestAutomationWorldFailureNeverParks(unittest.TestCase):
         )
         self.assertFalse(os.path.isdir(canonical))
 
+    def test_prelaunch_requeue_failure_reopens_the_search(self) -> None:
+        """A failed preview requeue cannot rest under this daemon's lease."""
+        db, _canonical, claimed, lease = self._launch(
+            capture_completion=False,
+            authorize_launch=False,
+        )
+
+        updated, escaped = self._run(
+            db,
+            claimed,
+            lease,
+            _fixed_outcome_execute_fn(DispatchOutcome(
+                False,
+                "preview requeue UPDATE failed",
+                code=DISPATCH_CODE_REQUEUE_FAILED,
+            )),
+        )
+
+        self._assert_returned_to_search_pool(
+            db,
+            claimed,
+            updated,
+            escaped,
+            label="prelaunch_requeue_failed",
+            diagnostic="preview requeue UPDATE failed",
+        )
+
     # -- must-still-work guards ---------------------------------------------
 
     def test_a_successful_import_still_terminalizes_as_imported(self) -> None:
@@ -8111,6 +8458,8 @@ class TestAutomationWorldFailureNeverParks(unittest.TestCase):
             _WORLD_FAILURE_CLASSES[kind],
             f"{kind} changed its self-heal reachability",
         )
+        if not _WORLD_FAILURE_CLASSES[kind]:
+            self.assertIsInstance(escaped, AutomationOwnerFailStop)
 
     def _drive_world_failure(
         self,
@@ -8158,6 +8507,22 @@ class TestAutomationWorldFailureNeverParks(unittest.TestCase):
             )
             updated, escaped = self._run(
                 db, claimed, lease, _completion_stub_execute_fn(Completed()),
+            )
+            return db, claimed, updated, escaped
+        if kind == "prelaunch_requeue_failed":
+            db, _canonical, claimed, lease = self._launch(
+                capture_completion=False,
+                authorize_launch=False,
+            )
+            updated, escaped = self._run(
+                db,
+                claimed,
+                lease,
+                _fixed_outcome_execute_fn(DispatchOutcome(
+                    False,
+                    "generated preview requeue failed",
+                    code=DISPATCH_CODE_REQUEUE_FAILED,
+                )),
             )
             return db, claimed, updated, escaped
         if kind == "recoverable_terminal_stage_fault":
@@ -8523,6 +8888,17 @@ class TestTerminalStageInvariantCheckersTripOnViolations(unittest.TestCase):
         )
         assert violation is not None
         self.assertIn("left a torn owner", violation)
+
+    def test_silently_retained_live_owner_is_reported(self) -> None:
+        violation = terminal_stage_fault_violation(
+            fault=RuntimeError,
+            escaped=None,
+            job_status="running",
+            request_status="processing",
+            active_owner=1,
+        )
+        assert violation is not None
+        self.assertIn("returned to the live daemon", violation)
 
     def test_swallowed_fail_stop_is_reported(self) -> None:
         violation = terminal_stage_fault_violation(

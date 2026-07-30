@@ -5784,7 +5784,8 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
             "reused",
         )
 
-    def test_automation_job_with_valid_evidence_skips_materialization(self):
+    def test_automation_job_with_valid_evidence_materializes_before_reuse(self):
+        from lib.download_materialization import Materialized
         from lib.quality import SpectralAnalysisDetail, SpectralDetail
         from scripts import import_preview_worker
 
@@ -5849,9 +5850,7 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
 
             def _sentinel_materialize(*args, **kwargs):
                 sentinels["materialize_called"] = True
-                raise AssertionError(
-                    "_materialize_processing_dir must not be called when evidence is valid"
-                )
+                return Materialized()
 
             audit = SpectralDetail(
                 candidate=SpectralAnalysisDetail(
@@ -5893,7 +5892,7 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
 
         self.assertFalse(sentinels["preview_called"])
         self.assertFalse(sentinels["measure_called"])
-        self.assertFalse(sentinels["materialize_called"])
+        self.assertTrue(sentinels["materialize_called"])
         assert updated is not None
         self.assertEqual(updated.status, "queued")
         self.assertEqual(updated.preview_status, "evidence_ready")

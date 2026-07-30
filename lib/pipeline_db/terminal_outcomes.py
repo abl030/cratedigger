@@ -35,6 +35,7 @@ from lib.terminal_outcomes import (
     TerminalDenylist,
     TerminalDownloadAudit,
     TerminalOutcomeResult,
+    cleanup_journal_refusal_matches,
     operator_search_stop_is_current,
     validate_automation_terminal_declaration,
 )
@@ -880,20 +881,27 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
             job_id=job_id,
             scope=scope,
         )
-        expected_cleanup = _receipt_builtins(authority.cleanup_receipt)
-        if (
-            journal is None
-            or journal["completed_at"] is None
-            or journal["completed_receipt"] is None
-            or _receipt_builtins(journal["completed_receipt"])
-            != expected_cleanup
-            or journal["declared_result_status"]
-            != authority.declared_result_status
-            or journal["declared_reason"] != authority.declared_reason
-            or journal["evidence_revision"] != authority.evidence_revision
-        ):
+        receipt = authority.cleanup_receipt
+        refusal = authority.cleanup_refusal
+        receipt_matches = (
+            receipt is not None
+            and journal is not None
+            and journal["completed_at"] is not None
+            and journal["completed_receipt"] is not None
+            and _receipt_builtins(journal["completed_receipt"])
+            == _receipt_builtins(receipt)
+            and journal["declared_result_status"]
+            == authority.declared_result_status
+            and journal["declared_reason"] == authority.declared_reason
+            and journal["evidence_revision"] == authority.evidence_revision
+        )
+        refusal_matches = (
+            refusal is not None
+            and cleanup_journal_refusal_matches(refusal, journal)
+        )
+        if not receipt_matches and not refusal_matches:
             raise ImportJobTerminalConflict(
-                f"automation job {job_id} cleanup receipt is not exact"
+                f"automation job {job_id} cleanup disposition is not exact"
             )
 
         raw_result = job["result"]
@@ -933,10 +941,12 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                     "automation validation audit must be a JSON object"
                 )
             payload = decoded
-        cleanup = _receipt_builtins(authority.cleanup_receipt)
+        cleanup = _receipt_builtins(authority.cleanup_disposition)
         existing = payload.get(PROCESSING_CLEANUP_AUDIT_KEY)
         if existing is not None and existing != cleanup:
-            raise ValueError("validation audit contains another cleanup receipt")
+            raise ValueError(
+                "validation audit contains another cleanup disposition"
+            )
         payload[PROCESSING_CLEANUP_AUDIT_KEY] = cleanup
         return replace(
             audit,
@@ -953,7 +963,7 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
         merged = dict(json_dict(existing))
         merged.update(terminal)
         merged[PROCESSING_CLEANUP_RESULT_KEY] = _receipt_builtins(
-            authority.cleanup_receipt
+            authority.cleanup_disposition
         )
         if authority.completion_receipt is not None:
             completion = _receipt_builtins(authority.completion_receipt)
@@ -1181,19 +1191,38 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
         *,
         request_id: int,
         job_id: int,
+        authority: AutomationTerminalAuthority,
         boundary: Callable[[str], None],
     ) -> None:
-        cur = self._execute(
-            """
-            DELETE FROM processing_cleanup_journal
-            WHERE request_id = %s
-              AND job_id = %s
-              AND completed_receipt IS NOT NULL
-              AND completed_at IS NOT NULL
-            RETURNING job_id
-            """,
-            (request_id, job_id),
-        )
+        refusal = authority.cleanup_refusal
+        if refusal is not None and refusal.journal is None:
+            return
+        if refusal is None:
+            cur = self._execute(
+                """
+                DELETE FROM processing_cleanup_journal
+                WHERE request_id = %s
+                  AND job_id = %s
+                  AND completed_receipt IS NOT NULL
+                  AND completed_at IS NOT NULL
+                RETURNING job_id
+                """,
+                (request_id, job_id),
+            )
+        else:
+            assert refusal.journal is not None
+            cur = self._execute(
+                """
+                DELETE FROM processing_cleanup_journal
+                WHERE request_id = %s
+                  AND job_id = %s
+                  AND revision = %s
+                  AND completed_receipt IS NULL
+                  AND completed_at IS NULL
+                RETURNING job_id
+                """,
+                (request_id, job_id, refusal.journal.revision),
+            )
         if cur.fetchone() is None:
             raise ImportJobTerminalConflict(
                 "automation cleanup journal was not consumable"
@@ -1414,6 +1443,7 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
             self._consume_processing_cleanup_journal(
                 request_id=command.request_id,
                 job_id=command.import_job_id,
+                authority=authority,
                 boundary=boundary,
             )
             applied = self._finish_processing_request_last(
@@ -1617,6 +1647,7 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
             self._consume_processing_cleanup_journal(
                 request_id=command.request_id,
                 job_id=command.import_job_id,
+                authority=authority,
                 boundary=boundary,
             )
             applied = self._finish_processing_request_last(

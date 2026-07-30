@@ -18,6 +18,7 @@ from lib.dispatch import DispatchOutcome
 from lib.dispatch.types import PostCommitCleanup
 from lib.download_processing import Completed, CompletionFailed, CompletionResult
 from lib.import_execution import (
+    AutomationOwnerFailStop,
     CancellationToken,
     ExecutionLeaseSnapshot,
     OwnerSessionIdentity,
@@ -1529,12 +1530,14 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
                         ),
                     )
                 else:
+                    cleanup_receipt = authority.cleanup_receipt
+                    assert cleanup_receipt is not None
                     command = replace(
                         command,
                         automation=replace(
                             authority,
                             cleanup_receipt=msgspec.structs.replace(
-                                authority.cleanup_receipt,
+                                cleanup_receipt,
                                 details={"mutant": True},
                             ),
                         ),
@@ -1574,6 +1577,8 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
         )
         authority = prepared.automation
         assert authority is not None
+        cleanup_receipt = authority.cleanup_receipt
+        assert cleanup_receipt is not None
         reason = "operator declared wanted"
         evidence_revision = "evidence-declared-wanted"
         db._execute(
@@ -1595,7 +1600,7 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
             expected_job_status=authority.expected_job_status,
             expected_preview_status=authority.expected_preview_status,
             expected_execution_lease=authority.expected_execution_lease,
-            cleanup_receipt=authority.cleanup_receipt,
+            cleanup_receipt=cleanup_receipt,
             completion_receipt=authority.completion_receipt,
         )
         malformed = replace(
@@ -2502,20 +2507,18 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
                     fail_after_write=job_write_boundary,
                 )
                 try:
-                    # The terminal stage now CONTAINS this fault instead of
-                    # letting it escape and kill the importer process (the
-                    # shared serial lane for every request). Containment is
-                    # pinned by tests/test_import_queue.py; the invariant
-                    # this test owns -- the whole job-backed bundle rolls
-                    # back to its pre-fault state -- is asserted below and
-                    # is unchanged. A fault that failed to fire would leave
-                    # a completed terminal, so `after == before` still
-                    # proves the write actually faulted.
-                    self._run_job_backed_automation_result(
-                        failing,
-                        job_id,
-                        completion,
-                    )
+                    # The owner-atomic transaction contains every write, then
+                    # fail-stops the still-owning worker so lease-proven
+                    # recovery can reopen the request automatically. A fault
+                    # that failed to fire would leave a completed terminal, so
+                    # `after == before` still proves the write actually
+                    # faulted.
+                    with self.assertRaises(AutomationOwnerFailStop):
+                        self._run_job_backed_automation_result(
+                            failing,
+                            job_id,
+                            completion,
+                        )
                 finally:
                     failing.close()
 

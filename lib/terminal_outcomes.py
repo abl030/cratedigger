@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from dataclasses import dataclass, field, fields, replace
 from typing import TYPE_CHECKING, Literal
+
+import msgspec
 
 from lib.import_execution import ExecutionLeaseSnapshot
 from lib.import_queue import ImportJob
@@ -17,7 +20,10 @@ from lib.validation_envelope import (
 
 if TYPE_CHECKING:
     from lib.import_job_recovery_service import AutomationCompletionReceipt
-    from lib.pipeline_db.cleanup_journal import CleanupJournalReceipt
+    from lib.pipeline_db.cleanup_journal import (
+        CleanupJournalReceipt,
+        ProcessingCleanupJournalRow,
+    )
     from lib.pipeline_db.download_log import DownloadLogOutcome
 
 
@@ -110,6 +116,110 @@ class ImportJobTerminal:
             raise ValueError("failed import job requires an error")
 
 
+class CleanupJournalSnapshot(msgspec.Struct, frozen=True, kw_only=True):
+    """Exact incomplete cleanup-journal facts retained by a refusal."""
+
+    job_id: int
+    request_id: int
+    revision: int
+    action: str
+    source_path: str
+    source_manifest: list[dict[str, object]]
+    source_manifest_hash: str
+    destination_path: str | None
+    destination_manifest: list[dict[str, object]] | None
+    destination_manifest_hash: str | None
+    selected_destination_path: str | None
+    step_progress: dict[str, object]
+    declared_result_status: Literal["wanted", "imported"] | None
+    declared_reason: str | None
+    evidence_revision: str | None
+
+
+class CleanupJournalRefusalDisposition(
+    msgspec.Struct,
+    frozen=True,
+    kw_only=True,
+):
+    """Truthful terminal disposition for cleanup the executor refused."""
+
+    error_code: str
+    error_message: str
+    journal: CleanupJournalSnapshot | None
+    outcome: Literal["refused"] = "refused"
+    disposition: Literal["left_in_place"] = "left_in_place"
+
+    def __post_init__(self) -> None:
+        if not self.error_code.strip() or not self.error_message.strip():
+            raise ValueError("cleanup refusal error facts must be non-blank")
+
+
+def cleanup_journal_snapshot(
+    journal: ProcessingCleanupJournalRow,
+) -> CleanupJournalSnapshot:
+    """Detach the exact logical snapshot of one incomplete journal row."""
+    if (
+        journal["completed_receipt"] is not None
+        or journal["completed_at"] is not None
+    ):
+        raise ValueError("cleanup refusal requires an incomplete journal")
+    destination_manifest = journal["destination_manifest"]
+    return CleanupJournalSnapshot(
+        job_id=journal["job_id"],
+        request_id=journal["request_id"],
+        revision=journal["revision"],
+        action=journal["action"],
+        source_path=journal["source_path"],
+        source_manifest=[
+            deepcopy(entry) for entry in journal["source_manifest"]
+        ],
+        source_manifest_hash=journal["source_manifest_hash"],
+        destination_path=journal["destination_path"],
+        destination_manifest=(
+            None
+            if destination_manifest is None
+            else [deepcopy(entry) for entry in destination_manifest]
+        ),
+        destination_manifest_hash=journal["destination_manifest_hash"],
+        selected_destination_path=journal["selected_destination_path"],
+        step_progress=deepcopy(journal["step_progress"]),
+        declared_result_status=journal["declared_result_status"],
+        declared_reason=journal["declared_reason"],
+        evidence_revision=journal["evidence_revision"],
+    )
+
+
+def cleanup_journal_refusal_disposition(
+    journal: ProcessingCleanupJournalRow | None,
+    *,
+    error_code: str,
+    error_message: str,
+) -> CleanupJournalRefusalDisposition:
+    """Capture a refusal without claiming any filesystem effect completed."""
+    return CleanupJournalRefusalDisposition(
+        error_code=error_code,
+        error_message=error_message,
+        journal=(
+            None if journal is None else cleanup_journal_snapshot(journal)
+        ),
+    )
+
+
+def cleanup_journal_refusal_matches(
+    refusal: CleanupJournalRefusalDisposition,
+    journal: ProcessingCleanupJournalRow | None,
+) -> bool:
+    """Compare a terminal refusal with the exact currently locked journal."""
+    if refusal.journal is None:
+        return journal is None
+    if journal is None:
+        return False
+    try:
+        return refusal.journal == cleanup_journal_snapshot(journal)
+    except ValueError:
+        return False
+
+
 @dataclass(frozen=True)
 class AutomationTerminalAuthority:
     """Exact processing-owner proof required by an automation terminal write."""
@@ -117,11 +227,30 @@ class AutomationTerminalAuthority:
     expected_job_status: Literal["queued", "running", "recovery_required"]
     expected_preview_status: str | None
     expected_execution_lease: ExecutionLeaseSnapshot | None
-    cleanup_receipt: CleanupJournalReceipt
+    cleanup_receipt: CleanupJournalReceipt | None
     completion_receipt: AutomationCompletionReceipt | None = None
+    cleanup_refusal: CleanupJournalRefusalDisposition | None = None
     declared_result_status: Literal["wanted", "imported"] | None = None
     declared_reason: str | None = None
     evidence_revision: str | None = None
+
+    def __post_init__(self) -> None:
+        if (self.cleanup_receipt is None) == (self.cleanup_refusal is None):
+            raise ValueError(
+                "automation terminal authority requires exactly one cleanup "
+                "receipt or refusal"
+            )
+
+    @property
+    def cleanup_disposition(
+        self,
+    ) -> CleanupJournalReceipt | CleanupJournalRefusalDisposition:
+        receipt = self.cleanup_receipt
+        if receipt is not None:
+            return receipt
+        refusal = self.cleanup_refusal
+        assert refusal is not None
+        return refusal
 
 
 @dataclass(frozen=True)
@@ -243,6 +372,24 @@ def validate_automation_terminal_declaration(
     authority = command.automation
     if authority is None:
         return
+    transitions = tuple(
+        transition
+        for transition in (
+            command.initial_transition,
+            *command.post_audit_transitions,
+        )
+        if transition is not None
+    )
+    if authority.cleanup_refusal is not None and (
+        command.job.status != "failed"
+        or not transitions
+        or transitions[-1].target_status != "wanted"
+        or command.successful_terminal_acceptance
+        or command.audit.outcome != "failed"
+    ):
+        raise ValueError(
+            "cleanup refusal must fail the job and return the request to wanted"
+        )
     declaration = (
         authority.declared_result_status,
         authority.declared_reason,
@@ -269,14 +416,6 @@ def validate_automation_terminal_declaration(
             "automation recovery declaration must be valid and non-blank"
         )
 
-    transitions = tuple(
-        transition
-        for transition in (
-            command.initial_transition,
-            *command.post_audit_transitions,
-        )
-        if transition is not None
-    )
     if not transitions or transitions[-1].target_status != result_status:
         raise ValueError(
             "automation recovery transition contradicts declared result"

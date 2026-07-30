@@ -32,6 +32,7 @@ from lib.import_evidence import (
     ensure_candidate_evidence_for_action,
 )
 from lib.import_execution import (
+    AutomationOwnerFailStop,
     CancellationToken,
     ExecutionCancelled,
     ExecutionLeaseSnapshot,
@@ -412,9 +413,6 @@ def _materialize_automation_authority(
 
     cancellation_token.raise_if_cancelled()
     cfg = _resolve_runtime_config(runtime_config)
-    if os.path.isdir(authority.canonical_path):
-        cancellation_token.raise_if_cancelled()
-        return authority.canonical_path
     entry = reconstruct_grab_list_entry(
         authority.request,
         authority.state,
@@ -989,6 +987,13 @@ def process_claimed_preview_job(
         cancellation_token.raise_if_cancelled()
         db = _AutomationPreviewDB(db, execution_lease)
 
+    front_gate_source = (
+        automation_authority.canonical_path
+        if automation_authority is not None
+        else None
+    )
+    front_gate_action: str | None = None
+
     def handle_measurement_failed(result: ImportPreviewResult) -> ImportJob | None:
         terminal = _handle_measurement_failed(
             db,
@@ -1031,10 +1036,38 @@ def process_claimed_preview_job(
             failure=failure,
         ))
 
-    # Front-gate: if stored candidate evidence already passes the cheap
-    # snapshot guard, mark the job importable without invoking measurement.
-    # The post-measurement gate below remains as belt-and-braces for the
-    # fall-through path.
+    # Automation must first prove that the persisted canonical directory is
+    # the exact downloaded manifest. Candidate evidence intentionally ignores
+    # non-audio control debris and therefore cannot stand in for this boundary.
+    # The materializer has a safe fast path for an already-complete canonical
+    # directory and rejects partial, extra-entry, symlink and special-file
+    # destinations.
+    if automation_authority is not None:
+        assert cancellation_token is not None
+        try:
+            front_gate_source = _materialize_automation_authority(
+                db,
+                job,
+                automation_authority,
+                runtime_config=runtime_config,
+                cancellation_token=cancellation_token,
+                materialize_fn=automation_materialize_fn,
+            )
+        except (ExecutionCancelled, OwnerSessionLost):
+            raise
+        except Exception as exc:
+            logger.exception(
+                "Automation job %s failed exact canonical materialization",
+                job.id,
+            )
+            return handle_current_authority_failed(
+                f"{type(exc).__name__}: {exc}",
+                source_path=automation_authority.canonical_path,
+            )
+
+    # Front-gate: after materialization authority is proven, matching stored
+    # candidate evidence may skip measurement. The post-measurement gate below
+    # remains as belt-and-braces for the fall-through path.
     front_gate_result, front_gate_source, front_gate_action = _front_gate_check(
         db,
         job,
@@ -1518,7 +1551,10 @@ def _process_automation_claim(
                 runtime_config=runtime_config,
             )
             if authority is None:
-                return None
+                raise AutomationOwnerFailStop(
+                    f"claimed automation preview job {job.id} lost its exact "
+                    "processing authority"
+                )
             token.raise_if_cancelled()
             return process_fn(
                 stage_db,

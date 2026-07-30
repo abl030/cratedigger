@@ -36,6 +36,7 @@ from hypothesis.stateful import (
 import tests._hypothesis_profiles  # noqa: F401 - load active profile
 from lib import transitions
 from lib.import_execution import (
+    AutomationOwnerFailStop,
     CancellationToken,
     ExecutionLeaseSnapshot,
     ExecutionLivenessEvidence,
@@ -1252,15 +1253,17 @@ class TestProcessingLifecycleGenerated(unittest.TestCase):
 
         after_miss = _claim_progress_facts(db, job_id)
         if lane == "preview":
-            result = import_preview_worker.run_once(
-                db,
-                worker_id="generated-preview-progress",
-                stage_db_factory=lambda _dsn: _GeneratedStageSession(
+            with self.assertRaises(AutomationOwnerFailStop):
+                import_preview_worker.run_once(
                     db,
-                    acquire=True,
-                ),
-                execution_lease_factory=lambda **_kwargs: lease,
-            )
+                    worker_id="generated-preview-progress",
+                    stage_db_factory=lambda _dsn: _GeneratedStageSession(
+                        db,
+                        acquire=True,
+                    ),
+                    execution_lease_factory=lambda **_kwargs: lease,
+                )
+            result = None
         else:
             result = importer.run_once(
                 db,  # pyright: ignore[reportArgumentType]

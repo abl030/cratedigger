@@ -2,8 +2,17 @@
 
 from __future__ import annotations
 
+import os
+import sys
 import unittest
+from collections.abc import Mapping
 from pathlib import Path
+
+import psycopg2
+import psycopg2.extras
+
+sys.path.append(os.path.dirname(__file__))
+import conftest  # noqa: F401 - starts and migrates isolated PostgreSQL
 
 from scripts.cratedigger_deploy_hold import (
     CONTROL_DIR,
@@ -23,6 +32,7 @@ from scripts.cratedigger_deploy_hold import (
     DeployHoldError,
     JobState,
     LifecyclePreflight,
+    RealSystemdBackend,
     UnitState,
     acquire_hold,
     complete_release,
@@ -32,10 +42,237 @@ from scripts.cratedigger_deploy_hold import (
     recover_held,
     verify_held,
 )
+from scripts.pipeline_cli.query import _render_query_table
 from tests.fakes.deploy_hold import FakeDeployHoldBackend
 
 INVOCATION = "a" * 32
 REPO_ROOT = Path(__file__).resolve().parent.parent
+TEST_DSN = os.environ["TEST_DB_DSN"]
+
+
+class _PostgresLifecyclePreflightBackend(RealSystemdBackend):
+    """Run production preflight SQL and preserve pipeline-cli table output."""
+
+    def _pipeline_query(self, sql: str) -> str:
+        with (
+            psycopg2.connect(TEST_DSN) as conn,
+            conn.cursor(
+                cursor_factory=psycopg2.extras.RealDictCursor,
+            ) as cursor,
+        ):
+            cursor.execute(sql)
+            rows: list[Mapping[str, object]] = [
+                {str(key): value for key, value in row.items()}
+                for row in cursor.fetchall()
+            ]
+            columns = [
+                description.name
+                for description in (cursor.description or ())
+            ]
+        return "\n".join(_render_query_table(rows, columns))
+
+
+class TestLifecyclePreflightPostgresContract(unittest.TestCase):
+    """The strict hold's production SQL detects every dirty row shape."""
+
+    conn: psycopg2.extensions.connection
+
+    def setUp(self) -> None:
+        self.conn = psycopg2.connect(TEST_DSN)
+        with self.conn, self.conn.cursor() as cursor:
+            cursor.execute(
+                "TRUNCATE processing_cleanup_journal, import_jobs, "
+                "album_requests CASCADE"
+            )
+        self.backend = _PostgresLifecyclePreflightBackend()
+        self.request_sequence = 0
+
+    def tearDown(self) -> None:
+        self.conn.close()
+
+    def _request(
+        self,
+        *,
+        status: str,
+        active_download_state: dict[str, object] | None = None,
+    ) -> int:
+        self.request_sequence += 1
+        with self.conn, self.conn.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO album_requests (
+                    mb_release_id,
+                    artist_name,
+                    album_title,
+                    source,
+                    status,
+                    active_download_state
+                )
+                VALUES (%s, 'Artist', 'Album', 'request', %s, %s)
+                RETURNING id
+                """,
+                (
+                    f"deploy-hold-{self.request_sequence}",
+                    status,
+                    psycopg2.extras.Json(active_download_state)
+                    if active_download_state is not None
+                    else None,
+                ),
+            )
+            row = cursor.fetchone()
+            assert row is not None
+            return int(row[0])
+
+    def _automation_owner(self, *, status: str) -> tuple[int, int]:
+        request_id = self._request(status="wanted")
+        with self.conn, self.conn.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO import_jobs (
+                    job_type, status, request_id, payload, preview_status
+                )
+                VALUES (
+                    'automation_import', %s, %s, '{}'::jsonb, 'waiting'
+                )
+                RETURNING id
+                """,
+                (status, request_id),
+            )
+            row = cursor.fetchone()
+            assert row is not None
+            job_id = int(row[0])
+            cursor.execute(
+                """
+                UPDATE album_requests
+                SET status = 'processing',
+                    active_automation_import_job_id = %s
+                WHERE id = %s
+                """,
+                (job_id, request_id),
+            )
+        return request_id, job_id
+
+    def test_counts_active_automation_and_recovery_jobs(self) -> None:
+        self._automation_owner(status="queued")
+        self._automation_owner(status="recovery_required")
+
+        counts = self.backend.lifecycle_preflight()
+
+        self.assertEqual(counts.active_automation_jobs, 2)
+        self.assertEqual(counts.recovery_required_jobs, 1)
+        self.assertEqual(counts.dirty_downloading_rows, 0)
+        self.assertEqual(counts.malformed_enqueued_at_rows, 0)
+
+    def test_counts_each_dirty_downloading_marker(self) -> None:
+        markers: tuple[tuple[str, object], ...] = (
+            ("processing_started_at", "2026-07-30T00:00:01+00:00"),
+            ("current_path", "/processing/albums/exact-owner"),
+            ("import_subprocess_started_at", "2026-07-30T00:00:02+00:00"),
+        )
+        for marker, value in markers:
+            with self.subTest(marker=marker):
+                with self.conn, self.conn.cursor() as cursor:
+                    cursor.execute(
+                        "TRUNCATE processing_cleanup_journal, import_jobs, "
+                        "album_requests CASCADE"
+                    )
+                self._request(
+                    status="downloading",
+                    active_download_state={
+                        "enqueued_at": "2026-07-30T00:00:00+00:00",
+                        marker: value,
+                    },
+                )
+
+                counts = self.backend.lifecycle_preflight()
+
+                self.assertEqual(counts.dirty_downloading_rows, 1)
+                self.assertEqual(counts.malformed_enqueued_at_rows, 0)
+
+    def test_counts_each_malformed_enqueued_at_shape(self) -> None:
+        malformed: tuple[object, ...] = (
+            None,
+            "",
+            42,
+            "not-a-timestamp",
+        )
+        for value in malformed:
+            with self.subTest(value=value):
+                with self.conn, self.conn.cursor() as cursor:
+                    cursor.execute(
+                        "TRUNCATE processing_cleanup_journal, import_jobs, "
+                        "album_requests CASCADE"
+                    )
+                state: dict[str, object] = (
+                    {} if value is None else {"enqueued_at": value}
+                )
+                self._request(
+                    status="downloading",
+                    active_download_state=state,
+                )
+
+                counts = self.backend.lifecycle_preflight()
+
+                self.assertEqual(counts.dirty_downloading_rows, 0)
+                self.assertEqual(counts.malformed_enqueued_at_rows, 1)
+
+    def test_counts_sql_null_active_download_state_as_malformed(self) -> None:
+        self._request(status="downloading", active_download_state=None)
+
+        counts = self.backend.lifecycle_preflight()
+
+        self.assertEqual(counts.dirty_downloading_rows, 0)
+        self.assertEqual(counts.malformed_enqueued_at_rows, 1)
+
+    def test_migration_066_enforcement_catalog_is_fully_installed(self) -> None:
+        with self.conn, self.conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT (
+                         SELECT count(*) = 1
+                         FROM pg_index AS index_state
+                         JOIN pg_class AS index_class
+                           ON index_class.oid = index_state.indexrelid
+                         JOIN pg_class AS indexed_table
+                           ON indexed_table.oid = index_state.indrelid
+                         WHERE index_class.relname
+                                 = 'one_active_automation_import_per_request'
+                           AND indexed_table.relname = 'import_jobs'
+                           AND index_state.indisunique
+                           AND index_state.indisvalid
+                           AND index_state.indisready
+                           AND index_state.indpred IS NOT NULL
+                       ),
+                       (
+                         SELECT count(*) = 3
+                         FROM pg_constraint
+                         WHERE conname IN (
+                           'album_requests_active_automation_owner_unique',
+                           'album_requests_active_automation_owner_fk',
+                           'processing_cleanup_journal_job_request_fk'
+                         )
+                           AND convalidated
+                           AND condeferrable
+                           AND condeferred
+                       ),
+                       (
+                         SELECT count(*) = 3
+                         FROM pg_trigger
+                         WHERE tgname IN (
+                           'album_requests_complete_processing_owner',
+                           'import_jobs_complete_processing_owner',
+                           'processing_cleanup_journal_exact_owner'
+                         )
+                           AND NOT tgisinternal
+                           AND tgenabled = 'O'
+                           AND tgdeferrable
+                           AND tginitdeferred
+                       )
+                """
+            )
+            row = cursor.fetchone()
+
+        self.assertEqual(row, (True, True, True))
 
 
 class TestAcquireAuthoritativeHold(unittest.TestCase):

@@ -164,6 +164,7 @@ from lib.terminal_outcomes import (
     ImportTerminalOutcome,
     PreviewTerminalOutcome,
     TerminalOutcomeResult,
+    cleanup_journal_refusal_matches,
     operator_search_stop_is_current,
     validate_automation_terminal_declaration,
 )
@@ -2439,6 +2440,9 @@ class FakePipelineDB:
             ProcessingCleanupError,
             complete_owner_processing_cleanup,
         )
+        from lib.terminal_outcomes import (
+            cleanup_journal_refusal_disposition,
+        )
 
         if (
             decision.status != "dead"
@@ -2513,13 +2517,28 @@ class FakePipelineDB:
                 state = ActiveDownloadState.from_raw(raw_state)
                 if state.current_path is None:
                     return None
-                cleanup_receipt = complete_owner_processing_cleanup(
-                    self,
-                    request_id=request_id,
-                    job_id=job_id,
-                    source_path=os.path.abspath(state.current_path),
-                    owner_checkpoint=_noop_owner_checkpoint,
-                )
+                cleanup_refusal = None
+                try:
+                    cleanup_receipt = complete_owner_processing_cleanup(
+                        self,
+                        request_id=request_id,
+                        job_id=job_id,
+                        source_path=os.path.abspath(state.current_path),
+                        owner_checkpoint=_noop_owner_checkpoint,
+                    )
+                except ProcessingCleanupError as exc:
+                    cleanup_receipt = None
+                    cleanup_refusal = cleanup_journal_refusal_disposition(
+                        self._processing_cleanup_journals.get(
+                            (job_id, request_id)
+                        ),
+                        error_code=exc.code,
+                        error_message=str(exc),
+                    )
+                    detail = (
+                        f"{detail}; processor cleanup refused "
+                        f"({exc.code}): {exc}"
+                    )
                 completion_receipt = automation_completion_receipt(job)
                 expected_job_status = _job_terminal_stage(job.status)
                 if (
@@ -2557,6 +2576,7 @@ class FakePipelineDB:
                             expected_execution_lease=expected_execution_lease,
                             cleanup_receipt=cleanup_receipt,
                             completion_receipt=completion_receipt,
+                            cleanup_refusal=cleanup_refusal,
                         ),
                     ).with_job(ImportJobTerminal(
                         status="failed",
@@ -2573,7 +2593,6 @@ class FakePipelineDB:
                 AutomationRecoveryEvidenceChanged,
                 CleanupJournalConflict,
                 ImportJobTerminalConflict,
-                ProcessingCleanupError,
             ):
                 return None
             return terminal.job
@@ -3497,17 +3516,25 @@ class FakePipelineDB:
         journal = self._processing_cleanup_journals.get(
             (job_id, request_id)
         )
-        if (
-            journal is None
-            or journal["completed_receipt"] != authority.cleanup_receipt
-            or journal["completed_at"] is None
-            or journal["declared_result_status"]
-            != authority.declared_result_status
-            or journal["declared_reason"] != authority.declared_reason
-            or journal["evidence_revision"] != authority.evidence_revision
-        ):
+        receipt = authority.cleanup_receipt
+        refusal = authority.cleanup_refusal
+        receipt_matches = (
+            receipt is not None
+            and journal is not None
+            and journal["completed_receipt"] == receipt
+            and journal["completed_at"] is not None
+            and journal["declared_result_status"]
+            == authority.declared_result_status
+            and journal["declared_reason"] == authority.declared_reason
+            and journal["evidence_revision"] == authority.evidence_revision
+        )
+        refusal_matches = (
+            refusal is not None
+            and cleanup_journal_refusal_matches(refusal, journal)
+        )
+        if not receipt_matches and not refusal_matches:
             raise ImportJobTerminalConflict(
-                f"automation job {job_id} cleanup receipt is not exact"
+                f"automation job {job_id} cleanup disposition is not exact"
             )
         if authority.completion_receipt is not None:
             result = dict(job.get("result") or {})
@@ -3538,7 +3565,7 @@ class FakePipelineDB:
         )
         if not isinstance(payload, dict):
             raise TypeError("automation validation audit must be an object")
-        cleanup = msgspec.to_builtins(authority.cleanup_receipt)
+        cleanup = msgspec.to_builtins(authority.cleanup_disposition)
         existing = payload.get("processing_cleanup")
         if existing is not None and existing != cleanup:
             raise ValueError("automation cleanup audit conflicts")
@@ -3729,7 +3756,7 @@ class FakePipelineDB:
             result = dict(job_row.get("result") or {})
             result.update(command.job.result)
             result["processing_cleanup"] = msgspec.to_builtins(
-                authority.cleanup_receipt
+                authority.cleanup_disposition
             )
             if authority.completion_receipt is not None:
                 result["automation_completion"] = msgspec.to_builtins(
@@ -3743,10 +3770,12 @@ class FakePipelineDB:
             job_row["completed_at"] = now
             job_row["updated_at"] = now
             boundary(f"import_job.{command.job.status}")
-            del self._processing_cleanup_journals[
-                (command.import_job_id, command.request_id)
-            ]
-            boundary("processing_cleanup.consumed")
+            if authority.cleanup_refusal is None \
+                    or authority.cleanup_refusal.journal is not None:
+                del self._processing_cleanup_journals[
+                    (command.import_job_id, command.request_id)
+                ]
+                boundary("processing_cleanup.consumed")
             applied = self._fake_finish_processing_request(
                 request,
                 command,
@@ -3904,7 +3933,7 @@ class FakePipelineDB:
             result = dict(job_row.get("result") or {})
             result["preview"] = copy.deepcopy(command.preview_result)
             result["processing_cleanup"] = msgspec.to_builtins(
-                authority.cleanup_receipt
+                authority.cleanup_disposition
             )
             now = _utcnow()
             job_row.update({
@@ -3923,10 +3952,12 @@ class FakePipelineDB:
                 "updated_at": now,
             })
             boundary("import_job.preview_failed")
-            del self._processing_cleanup_journals[
-                (command.import_job_id, command.request_id)
-            ]
-            boundary("processing_cleanup.consumed")
+            if authority.cleanup_refusal is None \
+                    or authority.cleanup_refusal.journal is not None:
+                del self._processing_cleanup_journals[
+                    (command.import_job_id, command.request_id)
+                ]
+                boundary("processing_cleanup.consumed")
             transition = command.request_transition
             if transition is None:
                 raise ImportJobTerminalConflict(

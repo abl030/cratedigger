@@ -213,7 +213,11 @@ export async function disambRemove(pipelineId, btn) {
       httpStatus: r.status,
       payload: data,
       control: btn,
-      refetch: refetchProcessingRequest,
+      refetch: (requestId, generation) => refetchProcessingRequest(
+        requestId,
+        '',
+        generation,
+      ),
     })) {
       return;
     }

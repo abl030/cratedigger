@@ -652,7 +652,7 @@ def _rmdir_exact(
     relative_path: str,
     *,
     mutation_checkpoint: Callable[[], None],
-) -> None:
+) -> bool:
     if relative_path == ".":
         parent_path, name = os.path.split(source_path)
         relative_parent = None
@@ -679,7 +679,7 @@ def _rmdir_exact(
         try:
             child_fd = os.open(name, _DIR_FLAGS, dir_fd=parent_fd)
         except FileNotFoundError:
-            return
+            return False
         except OSError as exc:
             raise FilesystemAuthorityError(
                 f"cannot open cleanup directory {relative_path}: "
@@ -712,6 +712,7 @@ def _rmdir_exact(
             mutation_checkpoint()
             os.rmdir(name, dir_fd=parent_fd)
             _fsync(parent_fd)
+            return True
         finally:
             os.close(child_fd)
 
@@ -738,21 +739,24 @@ def _run_remove_source(
             "remove-source journal cannot carry a destination",
         )
     steps = _remove_steps(manifest)
+    progress = _progress_dict(row)
+    inspection, _in_progress = _assert_remove_resume_state(
+        row["source_path"],
+        manifest,
+        row["source_manifest_hash"],
+        progress,
+        steps,
+    )
+    remaining_entries = set(inspection.manifest)
+    root_exists = inspection.status != "missing"
     while True:
         progress = _progress_dict(row)
-        inspection, _in_progress = _assert_remove_resume_state(
-            row["source_path"],
-            manifest,
-            row["source_manifest_hash"],
-            progress,
-            steps,
-        )
         next_step = next(
             (step for step in steps if step.after_key not in progress),
             None,
         )
         if next_step is None:
-            if inspection.status != "missing":
+            if root_exists:
                 raise ProcessingCleanupError(
                     "manifest_drift",
                     "cleanup source still exists after every removal checkpoint",
@@ -764,31 +768,22 @@ def _run_remove_source(
             row = _append_checkpoint(db, row, key=next_step.before_key)
             _boundary(after_boundary, f"journaled:{next_step.label}")
             progress = _progress_dict(row)
-            inspection, _in_progress = _assert_remove_resume_state(
-                row["source_path"],
-                manifest,
-                row["source_manifest_hash"],
-                progress,
-                steps,
-            )
 
         current_entry = _entry_for_step(manifest, next_step)
         already_mutated = (
-            inspection.status == "missing"
+            not root_exists
             if next_step.relative_path == "."
-            else current_entry not in inspection.manifest
+            else current_entry not in remaining_entries
         )
         if not already_mutated:
             owner_checkpoint()
-            # Reinspect after the durable pre-checkpoint and immediately before
-            # mutation. A changed tree is never reconciled by inference.
-            inspection, _in_progress = _assert_remove_resume_state(
-                row["source_path"],
-                manifest,
-                row["source_manifest_hash"],
-                _progress_dict(row),
-                steps,
-            )
+            # The entry-level mutation helpers reopen through no-follow
+            # descriptors and verify the exact target immediately before the
+            # syscall. Future manifest members are verified when their own
+            # turn arrives, and unexpected additions make the containing
+            # directory removal fail. A resumed invocation always performs
+            # the full remaining-manifest inspection above before using this
+            # linear uninterrupted path.
             if next_step.operation == "unlink":
                 assert current_entry is not None
                 try:
@@ -807,9 +802,10 @@ def _run_remove_source(
                         "filesystem_mutation_failed",
                         f"cleanup unlink failed: {exc}",
                     ) from exc
+                remaining_entries.remove(current_entry)
             else:
                 try:
-                    _rmdir_exact(
+                    removed = _rmdir_exact(
                         row["source_path"],
                         next_step.relative_path,
                         mutation_checkpoint=owner_checkpoint,
@@ -824,6 +820,17 @@ def _run_remove_source(
                         "filesystem_mutation_failed",
                         f"cleanup directory removal failed: {exc}",
                     ) from exc
+                if not removed:
+                    raise ProcessingCleanupError(
+                        "manifest_drift",
+                        f"cleanup directory vanished before its mutation: "
+                        f"{next_step.relative_path}",
+                    )
+                if next_step.relative_path == ".":
+                    root_exists = False
+                else:
+                    assert current_entry is not None
+                    remaining_entries.remove(current_entry)
             _boundary(after_boundary, f"mutated:{next_step.label}")
 
         owner_checkpoint()

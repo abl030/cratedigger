@@ -1961,10 +1961,16 @@ export async function longTailDeleteRequest(id, control = null) {
  * cannot resurrect its stale actions.
  *
  * @param {number} requestId
- * @returns {Promise<{requestId: number, releaseId: string, status: string, owner: Object|null}>}
+ * @param {number} refreshGeneration
+ * @returns {Promise<{requestId: number, releaseId: string, status: string, owner: Object|null}|null>}
  */
-async function refetchLongTailProcessingRow(requestId) {
-  const projection = await refetchProcessingRequest(requestId);
+async function refetchLongTailProcessingRow(requestId, refreshGeneration) {
+  const projection = await refetchProcessingRequest(
+    requestId,
+    '',
+    refreshGeneration,
+  );
+  if (!projection) return null;
   if (projection.status !== 'wanted') {
     removeRowFromCohort(requestId);
   }

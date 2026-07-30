@@ -732,6 +732,16 @@ class SystemExecutionLivenessProbe:
         )
 
 
+class AutomationOwnerFailStop(RuntimeError):
+    """End a worker whose live lease still owns unfinished automation work.
+
+    The worker must exit so systemd can restart it and the shared liveness
+    service can prove the persisted execution dead before automatic recovery.
+    Returning to the daemon loop would keep the lease live and strand the
+    request in ``processing``.
+    """
+
+
 class ExecutionCancelled(RuntimeError):
     """Raised before the next mutation after execution cancellation."""
 

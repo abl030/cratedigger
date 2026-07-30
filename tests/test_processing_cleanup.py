@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import copy
+import os
 import tempfile
 import unittest
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from lib.import_execution import CancellationToken, ExecutionCancelled
 from lib.pipeline_db import (
@@ -287,6 +289,52 @@ class TestProcessingCleanupExecutor(unittest.TestCase):
             self.assertTrue(
                 all(value is True for value in receipt.step_progress.values())
             )
+
+    def test_uninterrupted_remove_hashes_each_source_byte_at_most_twice(
+        self,
+    ) -> None:
+        """Initial authority plus target verification stays linear in bytes."""
+        from lib import processing_cleanup
+
+        with tempfile.TemporaryDirectory() as raw:
+            source = Path(raw) / "source"
+            source.mkdir()
+            for track in range(1, 13):
+                (source / f"{track:02d}.flac").write_bytes(
+                    bytes([track]) * (track * 257)
+                )
+            source_bytes = sum(
+                path.stat().st_size
+                for path in source.iterdir()
+                if path.is_file()
+            )
+            store = _JournalStore(
+                _journal_row(
+                    action=PROCESSING_CLEANUP_REMOVE_SOURCE,
+                    source_path=str(source),
+                )
+            )
+            hashed_bytes = 0
+            read_opened_file = processing_cleanup._read_opened_file
+
+            def counting_read(opened_fd: int) -> tuple[int, str]:
+                nonlocal hashed_bytes
+                hashed_bytes += os.fstat(opened_fd).st_size
+                return read_opened_file(opened_fd)
+
+            with patch.object(
+                processing_cleanup,
+                "_read_opened_file",
+                side_effect=counting_read,
+            ):
+                execute_processing_cleanup(
+                    store,
+                    store.row,
+                    owner_checkpoint=lambda: None,
+                )
+
+            self.assertFalse(source.exists())
+            self.assertLessEqual(hashed_bytes, source_bytes * 2)
 
     def test_corrupt_and_wrong_match_quarantine_share_atomic_exact_tree_action(
         self,

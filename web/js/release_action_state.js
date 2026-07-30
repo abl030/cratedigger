@@ -70,6 +70,30 @@ import {
  * @property {ProcessingOwnerProjection|null} owner
  */
 
+/** @type {Map<number, number>} */
+const processingRefreshGenerations = new Map();
+
+/**
+ * Allocate one response-order fence for an affected request.
+ *
+ * @param {number} requestId
+ * @returns {number}
+ */
+function beginProcessingRefresh(requestId) {
+  const generation = (processingRefreshGenerations.get(requestId) || 0) + 1;
+  processingRefreshGenerations.set(requestId, generation);
+  return generation;
+}
+
+/**
+ * @param {number} requestId
+ * @param {number} generation
+ * @returns {boolean}
+ */
+function processingRefreshIsCurrent(requestId, generation) {
+  return processingRefreshGenerations.get(requestId) === generation;
+}
+
 /**
  * Authoritative request projection returned by the affected-row refresh.
  *
@@ -370,9 +394,14 @@ function announceProcessingLock(presentation) {
  *
  * @param {number} requestId
  * @param {string} releaseId
- * @returns {Promise<ProcessingRequestProjection>}
+ * @param {number|null} refreshGeneration
+ * @returns {Promise<ProcessingRequestProjection|null>}
  */
-export async function refetchProcessingRequest(requestId, releaseId = '') {
+export async function refetchProcessingRequest(
+  requestId,
+  releaseId = '',
+  refreshGeneration = null,
+) {
   const response = await fetch(`/api/pipeline/${requestId}`);
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   const data = await response.json();
@@ -395,6 +424,18 @@ export async function refetchProcessingRequest(requestId, releaseId = '') {
     typeof row.discogs_release_id === 'string' && row.discogs_release_id
   ) || releaseId;
   const owner = processingOwnerProjection(row.processing_owner);
+  const projection = {
+    requestId: requestProjectionId,
+    releaseId: projectedReleaseId,
+    status,
+    owner,
+  };
+  if (
+    refreshGeneration !== null
+    && !processingRefreshIsCurrent(requestId, refreshGeneration)
+  ) {
+    return null;
+  }
   if (projectedReleaseId) {
     updatePipelineStatus(
       projectedReleaseId,
@@ -408,12 +449,7 @@ export async function refetchProcessingRequest(requestId, releaseId = '') {
     status,
     owner,
   );
-  return {
-    requestId: requestProjectionId,
-    releaseId: projectedReleaseId,
-    status,
-    owner,
-  };
+  return projection;
 }
 
 /**
@@ -464,10 +500,11 @@ function reconcileProcessingRequest(requestId, status, owner) {
 }
 
 /**
- * @param {ProcessingRequestProjection|void} refreshed
+ * @param {ProcessingRequestProjection|null|void} refreshed
  * @param {ProcessingOwnerPresentation} fallback
  */
 function announceRefreshResult(refreshed, fallback) {
+  if (refreshed === null) return;
   const freshPresentation = refreshed
     ? processingOwnerPresentation(refreshed.status, refreshed.owner)
     : null;
@@ -487,7 +524,7 @@ function announceRefreshResult(refreshed, fallback) {
 
 /**
  * @param {HTMLElement} control
- * @param {() => Promise<ProcessingRequestProjection|void>} refetch
+ * @param {() => Promise<ProcessingRequestProjection|null|void>} refetch
  * @param {ProcessingOwnerPresentation} presentation
  */
 function exposeRefreshRetry(control, refetch, presentation) {
@@ -504,8 +541,11 @@ function exposeRefreshRetry(control, refetch, presentation) {
       const refreshed = await refetch();
       const stillOwnsFocus = ownsFocus && document.activeElement === retry;
       retry.remove();
+      if (refreshed === null) return;
       announceRefreshResult(refreshed, presentation);
-      if (stillOwnsFocus && control.isConnected) control.focus();
+      if (stillOwnsFocus && control.isConnected) {
+        control.focus({ preventScroll: true });
+      }
     } catch (_error) {
       retry.removeAttribute('aria-busy');
       announceProcessingLock(presentation);
@@ -523,7 +563,7 @@ function exposeRefreshRetry(control, refetch, presentation) {
  * @param {unknown} args.payload
  * @param {HTMLElement|null|undefined} [args.control]
  * @param {string} [args.releaseId]
- * @param {(requestId: number) => Promise<ProcessingRequestProjection|void>} [args.refetch]
+ * @param {(requestId: number, refreshGeneration: number) => Promise<ProcessingRequestProjection|null|void>} [args.refetch]
  * @returns {Promise<boolean>}
  */
 export async function handleProcessingLockedConflict({
@@ -541,8 +581,6 @@ export async function handleProcessingLockedConflict({
   const focusTarget = typeof document !== 'undefined'
     ? document.activeElement
     : null;
-  const scrollX = typeof window !== 'undefined' ? window.scrollX : 0;
-  const scrollY = typeof window !== 'undefined' ? window.scrollY : 0;
   let originLocked = false;
   let retryAnchor = null;
 
@@ -572,7 +610,9 @@ export async function handleProcessingLockedConflict({
           originLocked = true;
           retryAnchor = locked;
         }
-        if (candidateWasFocused && locked !== candidateControl) locked.focus();
+        if (candidateWasFocused && locked !== candidateControl) {
+          locked.focus({ preventScroll: true });
+        }
       }
     }
   }
@@ -584,20 +624,38 @@ export async function handleProcessingLockedConflict({
       conflict.requestId,
     );
     retryAnchor = locked;
-    if (originWasFocused && locked !== originatingControl) locked.focus();
+    if (originWasFocused && locked !== originatingControl) {
+      locked.focus({ preventScroll: true });
+    }
   }
   announceProcessingLock(presentation);
 
-  const refresh = refetch
-    ? () => refetch(conflict.requestId)
-    : () => refetchProcessingRequest(conflict.requestId, releaseId);
+  const refresh = async () => {
+    const generation = beginProcessingRefresh(conflict.requestId);
+    let refreshed;
+    try {
+      refreshed = refetch
+        ? await refetch(conflict.requestId, generation)
+        : await refetchProcessingRequest(
+          conflict.requestId,
+          releaseId,
+          generation,
+        );
+    } catch (error) {
+      if (!processingRefreshIsCurrent(conflict.requestId, generation)) {
+        return null;
+      }
+      throw error;
+    }
+    return processingRefreshIsCurrent(conflict.requestId, generation)
+      ? refreshed
+      : null;
+  };
   try {
     const refreshed = await refresh();
     announceRefreshResult(refreshed, presentation);
   } catch (_error) {
     if (retryAnchor) exposeRefreshRetry(retryAnchor, refresh, presentation);
-  } finally {
-    if (typeof window !== 'undefined') window.scrollTo(scrollX, scrollY);
   }
   return true;
 }

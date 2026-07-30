@@ -44,7 +44,9 @@ from lib.pipeline_db.terminal_outcomes import (
 )
 from lib.terminal_outcomes import (
     AutomationTerminalAuthority,
+    CleanupJournalRefusalDisposition,
     ImportJobTerminal,
+    cleanup_journal_refusal_disposition,
 )
 
 if TYPE_CHECKING:
@@ -2099,7 +2101,7 @@ class _ImportJobsMixin(
         expected_execution_lease: ExecutionLeaseSnapshot | None,
         reason: str,
     ) -> ImportJob | None:
-        """Resume the journaled cleanup, then close the owner into ``wanted``.
+        """Close a dead owner into ``wanted`` without inventing cleanup proof.
 
         Cleanup runs FIRST and while the dead owner is still attached, because
         the terminal bundle consumes the receipt it produces and the deferred
@@ -2107,11 +2109,12 @@ class _ImportJobsMixin(
         journal is resumed, never re-planned: its pre-checkpoints are the only
         record of which filesystem mutations already happened.
 
-        Returns ``None`` when the world is still too broken to close — an
-        uninspectable source, a journal that cannot finish, or an owner whose
-        evidence moved under us. The row then stays exactly as it was, for the
-        next re-probe. Never fabricate a receipt or a half-written outcome to
-        make a pass look successful.
+        A typed cleanup refusal is terminal evidence, not a reason to park or
+        to mutate the remaining tree by some broader fallback. The owner-atomic
+        bundle stores the refusal plus the exact incomplete journal snapshot,
+        consumes that matched journal, fails the job, and releases the request
+        to ``wanted``. A receipt is never fabricated. Ownership/CAS conflicts
+        still leave every database write rolled back for a later re-probe.
         """
         from lib.download import _local_completion_terminal_outcome
         from lib.download_reconstruction import reconstruct_grab_list_entry
@@ -2140,13 +2143,30 @@ class _ImportJobsMixin(
             def checkpoint() -> None:
                 self.require_automation_recovery_owner(cas)
 
-            cleanup_receipt = complete_owner_processing_cleanup(
-                self,
-                request_id=request_id,
-                job_id=job.id,
-                source_path=canonical_path,
-                owner_checkpoint=checkpoint,
-            )
+            cleanup_refusal: CleanupJournalRefusalDisposition | None = None
+            try:
+                cleanup_receipt = complete_owner_processing_cleanup(
+                    self,
+                    request_id=request_id,
+                    job_id=job.id,
+                    source_path=canonical_path,
+                    owner_checkpoint=checkpoint,
+                )
+            except ProcessingCleanupError as exc:
+                journal = self.get_processing_cleanup_journal(
+                    request_id=request_id,
+                    job_id=job.id,
+                )
+                cleanup_receipt = None
+                cleanup_refusal = cleanup_journal_refusal_disposition(
+                    journal,
+                    error_code=exc.code,
+                    error_message=str(exc),
+                )
+                detail = (
+                    f"{detail}; processor cleanup refused "
+                    f"({exc.code}): {exc}"
+                )
             completion_receipt = automation_completion_receipt(job)
             expected_job_status: Literal["queued", "running", "recovery_required"]
             expected_job_status = _job_terminal_stage(job.status)
@@ -2194,6 +2214,7 @@ class _ImportJobsMixin(
                         expected_execution_lease=expected_execution_lease,
                         cleanup_receipt=cleanup_receipt,
                         completion_receipt=completion_receipt,
+                        cleanup_refusal=cleanup_refusal,
                     ),
                 ).with_job(ImportJobTerminal(
                     status="failed",
@@ -2206,7 +2227,6 @@ class _ImportJobsMixin(
             AutomationRecoveryEvidenceChanged,
             CleanupJournalConflict,
             ImportJobTerminalConflict,
-            ProcessingCleanupError,
         ):
             logger.exception(
                 "Abandoned automation owner %s could not be closed yet (%s); "

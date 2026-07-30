@@ -4282,25 +4282,17 @@ class TestProcessingAutomationOwnerMigration(unittest.TestCase):
         """, (job_id, request_id))])
 
     @staticmethod
-    def _validate_and_commit_overlapping(
+    def _commit_overlapping(
         conn,
-        validated: threading.Barrier,
+        commit_ready: threading.Barrier,
     ) -> str:
-        outcome = "committed"
+        commit_ready.wait(timeout=10)
         try:
-            with conn.cursor() as cur:
-                cur.execute("SET CONSTRAINTS ALL IMMEDIATE")
+            conn.commit()
         except psycopg2.Error as exc:
             conn.rollback()
-            outcome = str(exc.pgcode)
-        validated.wait(timeout=10)
-        if outcome == "committed":
-            try:
-                conn.commit()
-            except psycopg2.Error as exc:
-                conn.rollback()
-                outcome = str(exc.pgcode)
-        return outcome
+            return str(exc.pgcode)
+        return "committed"
 
     def test_records_066_and_declares_the_new_columns(self) -> None:
         self.assertEqual(
@@ -4797,19 +4789,19 @@ class TestProcessingAutomationOwnerMigration(unittest.TestCase):
                     (job_id,),
                 )
 
-            validated = threading.Barrier(2)
+            commit_ready = threading.Barrier(2)
 
             with ThreadPoolExecutor(max_workers=2) as pool:
                 futures = [
                     pool.submit(
-                        self._validate_and_commit_overlapping,
+                        self._commit_overlapping,
                         journal_conn,
-                        validated,
+                        commit_ready,
                     ),
                     pool.submit(
-                        self._validate_and_commit_overlapping,
+                        self._commit_overlapping,
                         terminal_conn,
-                        validated,
+                        commit_ready,
                     ),
                 ]
                 results = [future.result(timeout=15) for future in futures]

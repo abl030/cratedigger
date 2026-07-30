@@ -41,6 +41,7 @@ from lib.download_processing import (
 )
 from lib.import_execution import (
     AutomationOwnerCheckpointDB,
+    AutomationOwnerFailStop,
     CancellationToken,
     ExecutionCancelled,
     ExecutionLeaseSnapshot,
@@ -1179,29 +1180,30 @@ def _self_heal_automation_world_failure(
     stage and captured completion receipt are the exact authority the terminal
     compare-and-set compares against.
 
-    Returns ``None`` when this execution cannot author an owner-atomic
-    terminal write at all. The row then stays ``running`` under its persisted
-    lease for startup recovery rather than gaining a half-written outcome;
-    never fabricate a write the owner authority refuses.
+    Raises :class:`AutomationOwnerFailStop` when this execution cannot author
+    an owner-atomic terminal write. The row stays ``running`` under its
+    persisted lease, but the exception ends this daemon so systemd restart and
+    lease-proven recovery can converge it automatically. Never return to the
+    daemon loop with that same lease still live, and never fabricate a write
+    the owner authority refuses.
     """
     from lib.download import _local_completion_terminal_outcome
     from lib.download_reconstruction import reconstruct_grab_list_entry
 
     request_id = job.request_id
     if request_id is None:
-        return None
+        raise AutomationOwnerFailStop(
+            f"automation job {job.id} lost its request before self-heal"
+        )
     detail = f"{_WORLD_FAILURE_AUDIT_PREFIX}: {reason}"
     try:
         row = db.get_request(request_id)
         raw_state = None if row is None else row.get("active_download_state")
         if row is None or raw_state is None:
-            logger.error(
-                "Import job %s has no owned download state to self-heal (%s); "
-                "leaving the row for lease-proven startup recovery",
-                job.id,
-                reason,
+            raise AutomationOwnerFailStop(
+                f"automation job {job.id} has no owned download state "
+                f"to self-heal ({reason})"
             )
-            return None
         state = ActiveDownloadState.from_raw(raw_state)
         pending = _local_completion_terminal_outcome(
             reconstruct_grab_list_entry(row, state),
@@ -1246,13 +1248,10 @@ def _self_heal_automation_world_failure(
                 expected_execution_lease=execution_lease,
             )
             if staged is None:
-                logger.error(
-                    "Import job %s could not stage its ambiguous close (%s); "
-                    "leaving the row for lease-proven startup recovery",
-                    job.id,
-                    reason,
+                raise AutomationOwnerFailStop(
+                    f"automation job {job.id} could not stage its ambiguous "
+                    f"self-heal ({reason})"
                 )
-                return None
             expected_job_status = "recovery_required"
         terminal = db.persist_import_terminal_outcome(
             replace(
@@ -1277,14 +1276,18 @@ def _self_heal_automation_world_failure(
         # raise again. Startup recovery owns the row once its lease is proven
         # dead.
         raise
-    except Exception:
+    except AutomationOwnerFailStop:
+        raise
+    except Exception as exc:
         logger.exception(
-            "Self-heal terminal write failed for import job %s (%s); leaving "
-            "the row for lease-proven startup recovery",
+            "Self-heal terminal write failed for import job %s (%s); "
+            "fail-stopping this worker for lease-proven recovery",
             job.id,
             reason,
         )
-        return None
+        raise AutomationOwnerFailStop(
+            f"automation job {job.id} self-heal failed: {reason}"
+        ) from exc
     logger.warning(
         "Import job %s returned request %s to the search pool after a world "
         "failure: %s",
@@ -1570,9 +1573,15 @@ def process_claimed_job(
             )
         ):
             if outcome.code == DISPATCH_CODE_REQUEUE_FAILED:
-                # The failed owner-aware CAS remains running for startup
-                # recovery. A job-only terminal writer must never hide it.
-                return None
+                return _self_heal_automation_world_failure(
+                    db,
+                    current,
+                    execution_lease=current_lease,
+                    cancellation_token=cancellation_token,
+                    owner_session_identity=owner_session_identity,
+                    reason=outcome.message,
+                    result=result,
+                )
             db.requeue_import_job_for_preview(
                 job.id,
                 reason=outcome.message,

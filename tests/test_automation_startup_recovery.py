@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -12,6 +13,7 @@ from typing import Literal
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401
 
+from lib import transitions
 from lib.import_execution import (
     ExecutionLeaseSnapshot,
     ExecutionLivenessDecision,
@@ -26,11 +28,21 @@ from lib.pipeline_db.import_jobs import (
     AutomationRecoveryCAS,
 )
 from lib.pipeline_db.rows import AlbumRequestRow, DownloadLogWithRequestRow
+from lib.pipeline_db.terminal_outcomes import ImportJobTerminalConflict
 from lib.processing_cleanup import (
     PROCESSING_CLEANUP_REMOVE_SOURCE,
+    ProcessingCleanupError,
     cleanup_manifest_builtins,
+    complete_owner_processing_cleanup,
     execute_processing_cleanup,
     inspect_processing_cleanup_source,
+)
+from lib.terminal_outcomes import (
+    AutomationTerminalAuthority,
+    ImportJobTerminal,
+    ImportTerminalOutcome,
+    TerminalDownloadAudit,
+    cleanup_journal_refusal_disposition,
 )
 from scripts import importer
 from tests.fakes import FakePipelineDB
@@ -112,6 +124,65 @@ def _seed_unrelated_importable_jobs(
 
 def _no_checkpoint() -> None:
     """No owner can change under a single-threaded test."""
+
+
+def _tree_snapshot(root: str) -> tuple[tuple[str, str, bytes | None], ...]:
+    """Capture every remaining entry beneath one test-owned filesystem root."""
+    entries: list[tuple[str, str, bytes | None]] = []
+    for current, directories, files in os.walk(root):
+        for name in sorted(directories):
+            entries.append((
+                os.path.relpath(os.path.join(current, name), root),
+                "directory",
+                None,
+            ))
+        for name in sorted(files):
+            path = os.path.join(current, name)
+            with open(path, "rb") as handle:
+                content = handle.read()
+            entries.append((os.path.relpath(path, root), "file", content))
+    return tuple(sorted(entries))
+
+
+def _database_snapshot(
+    db: PipelineDB,
+    *,
+    request_id: int,
+    job_id: int,
+) -> tuple[object, ...]:
+    return (
+        db.get_request(request_id),
+        db.get_import_job(job_id),
+        db.get_processing_cleanup_journal(
+            request_id=request_id,
+            job_id=job_id,
+        ),
+        tuple(
+            row
+            for row in db.get_log(limit=50)
+            if row["request_id"] == request_id
+        ),
+    )
+
+
+class _InjectedRecoveryTerminalFailure(RuntimeError):
+    """Deterministic fault after one owner-atomic terminal write."""
+
+
+class _FaultInjectingRecoveryPipelineDB(PipelineDB):
+    def __init__(self, dsn: str, *, fail_after_write: int) -> None:
+        super().__init__(dsn)
+        self.fail_after_write = fail_after_write
+        self.write_boundaries: list[str] = []
+
+    def _terminal_outcome_write_boundary(
+        self,
+        index: int,
+        label: str,
+    ) -> None:
+        self.write_boundaries.append(label)
+        if index == self.fail_after_write:
+            raise _InjectedRecoveryTerminalFailure(label)
 
 
 def _crash_cleanup_after_first_file(
@@ -424,6 +495,72 @@ class _StartupRecoveryContract:
         )
         self._assert_returned_to_search_pool(owner.id)
 
+    def test_persistent_cleanup_refusal_preserves_remaining_tree_and_closes(
+        self,
+    ) -> None:
+        """A refused exact journal is truthful terminal evidence, not a park."""
+        case = self._case()
+        path = self._album_dir(
+            "refused",
+            "01 - A.mp3",
+            "02 - B.mp3",
+        )
+        owner, lease = self._preview_owner(path)
+        self._journal(owner.id, path)
+        journal = self.db.get_processing_cleanup_journal(
+            request_id=self.request_id,
+            job_id=owner.id,
+        )
+        assert journal is not None
+        with open(os.path.join(path, "foreign.keep"), "wb") as handle:
+            handle.write(b"not in the exact journal")
+        filesystem_root = os.path.dirname(os.path.dirname(path))
+        before = _tree_snapshot(filesystem_root)
+
+        recovered = self._recover(owner.id, lease)
+
+        assert recovered is not None and recovered.result is not None
+        case.assertEqual(_tree_snapshot(filesystem_root), before)
+        self._assert_returned_to_search_pool(owner.id)
+        cleanup = recovered.result["processing_cleanup"]
+        assert isinstance(cleanup, dict)
+        case.assertEqual(cleanup["outcome"], "refused")
+        case.assertEqual(cleanup["disposition"], "left_in_place")
+        case.assertEqual(cleanup["error_code"], "manifest_drift")
+        snapshot = cleanup["journal"]
+        assert isinstance(snapshot, dict)
+        expected_snapshot: dict[str, object] = {
+            "job_id": journal["job_id"],
+            "request_id": journal["request_id"],
+            "revision": journal["revision"],
+            "action": journal["action"],
+            "source_path": journal["source_path"],
+            "source_manifest": list(journal["source_manifest"]),
+            "source_manifest_hash": journal["source_manifest_hash"],
+            "destination_path": journal["destination_path"],
+            "destination_manifest": journal["destination_manifest"],
+            "destination_manifest_hash": journal["destination_manifest_hash"],
+            "selected_destination_path": journal["selected_destination_path"],
+            "step_progress": journal["step_progress"],
+            "declared_result_status": journal["declared_result_status"],
+            "declared_reason": journal["declared_reason"],
+            "evidence_revision": journal["evidence_revision"],
+        }
+        for field, expected in expected_snapshot.items():
+            case.assertEqual(snapshot[field], expected, field)
+        latest = self._audit_rows()[0]
+        validation = latest["validation_result"]
+        if isinstance(validation, str):
+            validation = json.loads(validation)
+        assert isinstance(validation, dict)
+        case.assertEqual(validation["processing_cleanup"], cleanup)
+        case.assertIn("manifest_drift", str(latest["error_message"]))
+
+        # A later sweep has no owner or journal to re-enter.
+        case.assertIsNone(self._recover(owner.id, lease))
+        case.assertEqual(_tree_snapshot(filesystem_root), before)
+        case.assertEqual(len(self._audit_rows()), 1)
+
     def test_abandoned_launched_owner_reopens_the_search(self) -> None:
         """The canonical invariant-11 case: Beets may have already run."""
         case = self._case()
@@ -592,3 +729,156 @@ class TestAutomationStartupRecoveryPostgres(
 
     def tearDown(self) -> None:
         self.db.close()
+
+    def test_refusal_terminal_faults_roll_back_every_database_write(
+        self,
+    ) -> None:
+        db = self.db
+        assert isinstance(db, PipelineDB)
+        path = self._album_dir("refusal-faults", "01.flac", "02.flac")
+        owner, lease = self._preview_owner(path)
+        self._journal(owner.id, path)
+        with open(os.path.join(path, "foreign.keep"), "wb") as handle:
+            handle.write(b"journal drift")
+        filesystem_root = os.path.dirname(os.path.dirname(path))
+        filesystem_before = _tree_snapshot(filesystem_root)
+        before = _database_snapshot(
+            db,
+            request_id=self.request_id,
+            job_id=owner.id,
+        )
+        expected_boundaries = (
+            "download_log",
+            "import_job.failed",
+            "processing_cleanup.consumed",
+            "request.processing_to_wanted",
+        )
+
+        for fail_after, expected_label in enumerate(
+            expected_boundaries,
+            start=1,
+        ):
+            with self.subTest(boundary=expected_label):
+                writer = _FaultInjectingRecoveryPipelineDB(
+                    TEST_DSN,
+                    fail_after_write=fail_after,
+                )
+                try:
+                    with self.assertRaises(_InjectedRecoveryTerminalFailure):
+                        writer.recover_automation_import_job(
+                            owner.id,
+                            expected_execution_lease=lease,
+                            decision=_dead(lease),
+                            requeue_message="safe to replay",
+                            recovery_message="importer restarted mid-import",
+                        )
+                    self.assertEqual(
+                        writer.write_boundaries[-1],
+                        expected_label,
+                    )
+                finally:
+                    writer.close()
+                observer = PipelineDB(TEST_DSN)
+                try:
+                    self.assertEqual(
+                        _database_snapshot(
+                            observer,
+                            request_id=self.request_id,
+                            job_id=owner.id,
+                        ),
+                        before,
+                    )
+                finally:
+                    observer.close()
+                self.assertEqual(
+                    _tree_snapshot(filesystem_root),
+                    filesystem_before,
+                )
+
+    def test_refusal_journal_cas_race_is_rejected_before_first_write(
+        self,
+    ) -> None:
+        db = self.db
+        assert isinstance(db, PipelineDB)
+        path = self._album_dir("refusal-cas", "01.flac")
+        owner, lease = self._preview_owner(path)
+        self._journal(owner.id, path)
+        with open(os.path.join(path, "foreign.keep"), "wb") as handle:
+            handle.write(b"journal drift")
+        current = self.db.get_import_job(owner.id)
+        assert current is not None
+        with self.assertRaises(ProcessingCleanupError) as caught:
+            complete_owner_processing_cleanup(
+                self.db,
+                request_id=self.request_id,
+                job_id=owner.id,
+                source_path=path,
+                owner_checkpoint=_no_checkpoint,
+            )
+        journal = self.db.get_processing_cleanup_journal(
+            request_id=self.request_id,
+            job_id=owner.id,
+        )
+        assert journal is not None
+        refusal = cleanup_journal_refusal_disposition(
+            journal,
+            error_code=caught.exception.code,
+            error_message=str(caught.exception),
+        )
+        detail = (
+            f"{AUTOMATION_WORLD_FAILURE_AUDIT_PREFIX}: cleanup refused "
+            f"({caught.exception.code}): {caught.exception}"
+        )
+        command = ImportTerminalOutcome(
+            request_id=self.request_id,
+            import_job_id=owner.id,
+            initial_transition=(
+                transitions.RequestTransition.to_wanted(
+                    from_status="processing",
+                    attempt_type="validation",
+                )
+            ),
+            audit=TerminalDownloadAudit(
+                outcome="failed",
+                error_message=detail,
+            ),
+            job=ImportJobTerminal(
+                status="failed",
+                result={"automation_recovery_self_heal": {"reason": detail}},
+                message=detail,
+                error=detail,
+            ),
+            automation=AutomationTerminalAuthority(
+                expected_job_status="queued",
+                expected_preview_status=current.preview_status,
+                expected_execution_lease=lease,
+                cleanup_receipt=None,
+                cleanup_refusal=refusal,
+            ),
+        )
+        self.db.checkpoint_processing_cleanup_journal(
+            request_id=self.request_id,
+            job_id=owner.id,
+            expected_revision=journal["revision"],
+            step_progress={"concurrent_writer": True},
+        )
+        before = _database_snapshot(
+            db,
+            request_id=self.request_id,
+            job_id=owner.id,
+        )
+        filesystem_root = os.path.dirname(os.path.dirname(path))
+        filesystem_before = _tree_snapshot(filesystem_root)
+
+        with self.assertRaises(ImportJobTerminalConflict):
+            self.db.persist_import_terminal_outcome(command)
+
+        self.assertEqual(
+            _database_snapshot(
+                db,
+                request_id=self.request_id,
+                job_id=owner.id,
+            ),
+            before,
+        )
+        self.assertEqual(_tree_snapshot(filesystem_root), filesystem_before)

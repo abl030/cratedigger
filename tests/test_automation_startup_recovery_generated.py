@@ -250,6 +250,34 @@ def assert_unproven_execution_untouched(
         )
 
 
+def assert_cleanup_refusal_preserved_tree(
+    before: tuple[tuple[str, str, bytes | None], ...],
+    after: tuple[tuple[str, str, bytes | None], ...],
+) -> None:
+    """A cleanup refusal may not alter any remaining filesystem entry."""
+    if after != before:
+        raise AssertionError(
+            "cleanup refusal mutated, renamed, or deleted remaining filesystem"
+        )
+
+
+def _tree_snapshot(root: str) -> tuple[tuple[str, str, bytes | None], ...]:
+    entries: list[tuple[str, str, bytes | None]] = []
+    for current, directories, files in os.walk(root):
+        for name in sorted(directories):
+            entries.append((
+                os.path.relpath(os.path.join(current, name), root),
+                "directory",
+                None,
+            ))
+        for name in sorted(files):
+            path = os.path.join(current, name)
+            with open(path, "rb") as handle:
+                content = handle.read()
+            entries.append((os.path.relpath(path, root), "file", content))
+    return tuple(sorted(entries))
+
+
 class _World:
     """One generated abandoned-owner world, built with production writers."""
 
@@ -263,6 +291,7 @@ class _World:
     ) -> None:
         root = tempfile.mkdtemp(prefix="generated-startup-recovery-")
         case.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        self.root = root
         self.path = os.path.join(root, "albums", "generated-owner")
         os.makedirs(self.path)
         with open(os.path.join(self.path, "01 - Track.mp3"), "wb") as handle:
@@ -342,6 +371,16 @@ class _World:
                     source_manifest_hash=inspection.manifest_hash,
                 ),
             )
+
+    def make_cleanup_refuse(self, *, payload: bytes) -> None:
+        """Drift a real persisted journal so the real executor refuses it."""
+        if (
+            self.owner_id,
+            _REQUEST_ID,
+        ) not in self.db._processing_cleanup_journals:
+            raise AssertionError("cleanup refusal needs a persisted journal")
+        with open(os.path.join(self.path, "foreign.keep"), "wb") as handle:
+            handle.write(payload)
 
     def snapshot(self) -> ImportJob:
         job = self.db.get_import_job(self.owner_id)
@@ -487,6 +526,56 @@ class TestAutomationStartupRecoveryGenerated(unittest.TestCase):
             )
             assert_recovery_never_parks(world.db)
 
+    @settings(deadline=None)
+    @given(
+        lane=st.sampled_from(("preview", "import")),
+        launched=st.booleans(),
+        payload=st.binary(min_size=0, max_size=64),
+    )
+    @example(lane="preview", launched=False, payload=b"foreign")
+    @example(lane="import", launched=True, payload=b"foreign")
+    def test_refused_cleanup_preserves_every_remaining_entry_and_converges(
+        self,
+        *,
+        lane: Lane,
+        launched: bool,
+        payload: bytes,
+    ) -> None:
+        """Patrol refusal over both worker lanes and varied foreign content."""
+        from scripts import importer
+
+        world = _World(
+            self,
+            lane=lane,
+            launched=launched,
+            journal="present",
+        )
+        world.make_cleanup_refuse(payload=payload)
+        before = _tree_snapshot(world.root)
+
+        recovered = importer.recover_abandoned_automation_owners(
+            world.db,
+            liveness_probe=_DeadProbe(),
+        )
+
+        self.assertEqual([job.id for job in recovered], [world.owner_id])
+        assert_recovery_never_parks(world.db)
+        assert_cleanup_refusal_preserved_tree(
+            before,
+            _tree_snapshot(world.root),
+        )
+        job = world.db.get_import_job(world.owner_id)
+        assert job is not None and job.result is not None
+        cleanup = job.result["processing_cleanup"]
+        assert isinstance(cleanup, dict)
+        self.assertEqual(cleanup["outcome"], "refused")
+        self.assertEqual(cleanup["disposition"], "left_in_place")
+        self.assertEqual(cleanup["error_code"], "manifest_drift")
+        self.assertNotIn(
+            (world.owner_id, _REQUEST_ID),
+            world.db._processing_cleanup_journals,
+        )
+
 
 class TestInvariantCheckersTripOnViolations(unittest.TestCase):
     """Known-bad self-tests: a planted park must be caught."""
@@ -542,3 +631,11 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             )
 
         self.assertIn("unproven execution moved", str(caught.exception))
+
+    def test_refusal_checker_rejects_a_deleted_remaining_file(self) -> None:
+        before = (("albums/owner/01.flac", "file", b"audio"),)
+
+        with self.assertRaises(AssertionError) as caught:
+            assert_cleanup_refusal_preserved_tree(before, ())
+
+        self.assertIn("mutated, renamed, or deleted", str(caught.exception))

@@ -1419,7 +1419,11 @@ export async function forceImportWrongMatch(logId, btn) {
       httpStatus: r.status,
       payload: data,
       control: btn,
-      refetch: refetchProcessingRequest,
+      refetch: (requestId, generation) => refetchProcessingRequest(
+        requestId,
+        '',
+        generation,
+      ),
     })) {
       return;
     }
