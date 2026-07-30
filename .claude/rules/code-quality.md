@@ -98,6 +98,13 @@ delete its generated baseline/regeneration path and retain a direct
 zero-tolerance check; delete the scanner only when a configured tool enforces
 the same syntax.
 
+When either typing ratchet trips, do not stop at making it green. For every
+affected file and finding kind, finish with the committed count at least ten
+below the baseline at the start of the change, or at zero if fewer than ten
+remain, then regenerate the baseline. This is deliberately a convergence rule,
+not another checker: do not add stable-site, diff-aware, or history-aware
+machinery to catch delete-and-add laundering.
+
 ## HTTP request bodies — use `pydantic.BaseModel`
 
 Inbound HTTP bodies use a route-local `pydantic.BaseModel` and the shared
