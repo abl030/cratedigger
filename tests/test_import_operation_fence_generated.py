@@ -208,7 +208,10 @@ def _exercise_world(
     db = FakePipelineDB()
     request_id = _OPERATION_FENCE_REQUEST_ID
     release_id = "release-703"
-    source_path = "/tmp/fence-source"
+    source_path = str(beets.root / "fence-source")
+    os.makedirs(source_path, mode=0o700, exist_ok=True)
+    with open(os.path.join(source_path, "01.mp3"), "wb") as handle:
+        handle.write(b"generated fence audio")
     active_state = (
         {
             "current_path": source_path,
@@ -254,6 +257,7 @@ def _exercise_world(
     evidence = make_album_quality_evidence(
         mb_release_id=release_id,
         source_path=source_path,
+        files=snapshot_audio_files(source_path),
     )
     db.upsert_album_quality_evidence(evidence)
     persisted = db.find_album_quality_evidence(
@@ -298,7 +302,7 @@ def _exercise_world(
     elif world.authority == "status_changed":
         db.request(request_id)["status"] = "imported"
     elif world.authority == "source_changed":
-        launch_source = "/tmp/stale-source"
+        launch_source = str(beets.root / "stale-source")
 
     beets_invocations: list[int] = []
 

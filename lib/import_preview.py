@@ -50,9 +50,11 @@ from lib.fs_authority import (
 from lib.import_execution import CancellationToken, ExecutionCancelled
 from lib.measurement import (
     ExistingSpectralResolver,
+    MeasurementDB,
     PreimportMeasurement,
     SpectralDetailAnalyzer,
     analyze_spectral_audit_path,
+    attach_existing_spectral_audit,
     inspect_local_files,
     measure_preimport_state,
     spectral_detail_from_persisted_source,
@@ -63,9 +65,10 @@ from lib.processing_paths import (
     processing_preview_dir,
 )
 from lib.quality import (
-    EVIDENCE_SUBJECT_SOURCE,
-    LOSSLESS_CODECS,
+    EVIDENCE_PROVENANCE_MEASURED,
+    EVIDENCE_SUBJECT_INSTALLED,
     QUALITY_DECISION_IMPORT_STAGE_DECISIONS,
+    SPECTRAL_USABLE_GRADES,
     AlbumQualityEvidence,
     AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
@@ -86,10 +89,12 @@ from lib.quality import (
     SpectralMeasurement,
     TargetQualityContract,
     V0ProbeEvidence,
+    candidate_preimport_rejection,
     classify_full_pipeline_decision,
     classify_quality_import_stages,
     compute_effective_override_bitrate,
     full_pipeline_decision,
+    has_mixed_lossless_and_lossy,
     interpret_measurement,
     interpret_spectral_evidence,
     quality_gate_decision,
@@ -101,6 +106,7 @@ from lib.quality_evidence import (
     audit_v0_probe_from_metric,
     current_evidence_rebuild_reasons,
     evidence_from_measurement,
+    has_lossless_source_lineage,
     load_or_backfill_current_evidence,
     neutral_v0_metric_from_probe,
     persist_candidate_evidence_from_import_result,
@@ -596,7 +602,7 @@ def _lossless_candidate_spectral_failure(
         return "lossless candidate spectral analysis did not run"
     if candidate.error:
         return candidate.error
-    if candidate.grade in (None, "error"):
+    if candidate.grade not in SPECTRAL_USABLE_GRADES:
         return "lossless candidate spectral analysis returned no usable grade"
     return None
 
@@ -662,7 +668,7 @@ def _cleanup_preview_artifacts(
 
 
 @runtime_checkable
-class ImportPreviewDB(QualityEvidenceDB, Protocol):
+class ImportPreviewDB(QualityEvidenceDB, MeasurementDB, Protocol):
     """The PipelineDB surface the preview entry points use (#409).
 
     Extends ``QualityEvidenceDB`` because the handle is forwarded into the
@@ -743,7 +749,7 @@ def persist_exact_current_spectral_from_attempt(
         measured_existing is None
         or not measured_existing.attempted
         or measured_existing.error is not None
-        or measured_existing.grade in (None, "error")
+        or measured_existing.grade not in SPECTRAL_USABLE_GRADES
     ):
         if measured_existing is None:
             reason = "attempt returned no HAVE spectral result"
@@ -842,15 +848,38 @@ def persist_exact_current_spectral_from_attempt(
             "stale",
             "current evidence changed during HAVE spectral persistence",
         )
-    loaded_measurement = loaded.measurement
-    if not persisted and (
-        loaded_measurement.spectral_grade is None
-        and loaded_measurement.spectral_bitrate_kbps is None
-    ):
+    if not persisted:
         return EvidenceBuildResult(
             loaded,
             "stale",
             "exact current evidence rejected HAVE spectral persistence",
+        )
+    loaded_measurement = loaded.measurement
+    expected_fact = (
+        measured_existing.grade,
+        measured_existing.bitrate_kbps,
+        EVIDENCE_SUBJECT_INSTALLED,
+        EVIDENCE_PROVENANCE_MEASURED,
+        measured_existing.cliff_hz,
+        measured_existing.codec_family,
+        measured_existing.ultrasonic_deficit_db,
+        measured_existing.spectral_measurement_version,
+    )
+    loaded_fact = (
+        loaded_measurement.spectral_grade,
+        loaded_measurement.spectral_bitrate_kbps,
+        loaded_measurement.spectral_subject,
+        loaded_measurement.spectral_provenance,
+        loaded_measurement.cliff_hz,
+        loaded_measurement.codec_family,
+        loaded_measurement.ultrasonic_deficit_db,
+        loaded_measurement.spectral_measurement_version,
+    )
+    if loaded_fact != expected_fact:
+        return EvidenceBuildResult(
+            loaded,
+            "failed",
+            "accepted HAVE spectral persistence did not store the fresh fact",
         )
     return EvidenceBuildResult(loaded, "ready")
 
@@ -891,10 +920,7 @@ def load_persisted_existing_spectral(
     measurement = current_evidence.measurement
     return (
         current_evidence,
-        spectral_detail_from_persisted_source(
-            measurement.spectral_grade,
-            measurement.spectral_bitrate_kbps,
-        ),
+        spectral_detail_from_persisted_source(measurement),
         True,
     )
 
@@ -1149,16 +1175,19 @@ def plan_current_evidence_enrichment(
 ) -> EnrichmentPlan:
     """Pure decision: measure exactly the missing HAVE pieces.
 
-    Mirrors the once-only guards of the persist/claim helpers: any spectral
-    field present means the scan already happened; a V0 metric or the
-    attempted marker means the research probe already ran. Complete rows
-    therefore cost nothing to re-plan.
+    A reusable ordinary spectral fact needs a recognized album grade. Missing,
+    errored, and unrecognized grades remain incomplete even when a legacy
+    bitrate survived. R19 lossless-source lineage is the exception: its source
+    proof/V0 anchor remains authority because scanning the installed derivative
+    would describe the wrong bytes. A V0 metric or the attempted marker means
+    the research probe already ran. Complete rows therefore cost nothing to
+    re-plan.
     """
     measurement = evidence.measurement
     return EnrichmentPlan(
         spectral=(
-            measurement.spectral_grade is None
-            and measurement.spectral_bitrate_kbps is None
+            measurement.spectral_grade not in SPECTRAL_USABLE_GRADES
+            and not has_lossless_source_lineage(evidence)
         ),
         v0=(
             evidence.v0_metric is None
@@ -1538,18 +1567,7 @@ def preserve_existing_source_spectral(
     """
     if current_evidence is None:
         return False
-    converted_from = (
-        current_evidence.measurement.was_converted_from or ""
-    ).lower()
-    if converted_from in LOSSLESS_CODECS:
-        return True
-    if current_evidence.verified_lossless_proof is not None:
-        return True
-    v0_metric = current_evidence.v0_metric
-    return (
-        v0_metric is not None
-        and v0_metric.subject == EVIDENCE_SUBJECT_SOURCE
-    )
+    return has_lossless_source_lineage(current_evidence)
 
 
 # Verdict values for `ImportPreviewResult.verdict`. After U5 the
@@ -1960,22 +1978,25 @@ def measure_and_persist_candidate_evidence(
       3. Materialize into a temp copy so the harness has an isolated working
          dir (matches existing preview behavior).
       4. Inspect the temp copy for filetype / bitrate / vbr hints.
-      5. Call ``measure_preimport_state`` (the pure measurement helper — no
-         denylist writes, no decision branches). This runs the audio integrity
-         gate, bad-hash gate, spectral gate, and persists on-disk spectral
-         state to ``album_requests`` per issue #90 propagation.
+      5. Call ``measure_preimport_state`` in candidate-only mode (the pure
+         measurement helper — no denylist writes or policy branches).
       6. If the measurement carries an importer-rejecting fact (audio_corrupt,
-         bad_audio_hash, nested layout, empty fileset), persist evidence
-         straight from the measurement (no harness call) and return
-         ``evidence_ready``. The importer's
+         bad_audio_hash, nested layout, empty fileset, or mixed source), the
+         canonical quality predicate permits skipping irrelevant work. Persist
+         candidate evidence straight from the measurement without loading,
+         resolving, analyzing, or writing HAVE, then return ``evidence_ready``.
+         The importer's
          ``full_pipeline_decision_from_evidence`` (U11) reads those facts off
-         the persisted evidence row and rejects via the four-fact early-exit
+         the persisted evidence row and rejects via the five-fact early-exit
          branches upstream of the quality gate.
-      7. Otherwise, run ``run_import_one`` in dry-run mode to produce an
+      7. Otherwise, authorize the exact current snapshot and independently
+         project its complete spectral fact or measure and persist the missing
+         component once.
+      8. Run ``run_import_one`` in dry-run mode to produce an
          ``ImportResult`` with ``source_measurement``. Persist evidence built
          from both the measurement (U1 facts) and the import result (audio
          measurement, spectral, V0 probe).
-      8. Return ``evidence_ready`` when persistence succeeded; otherwise
+      9. Return ``evidence_ready`` when persistence succeeded; otherwise
          ``measurement_failed`` with the appropriate ``MeasurementFailureReason``.
     """
     from lib.config import read_runtime_config
@@ -2011,44 +2032,6 @@ def measure_and_persist_candidate_evidence(
         )
 
     cfg = runtime_config or read_runtime_config()
-    (
-        current_evidence,
-        existing_spectral_evidence,
-        _current_evidence_authoritative,
-    ) = load_persisted_existing_spectral(db, request_id)
-    load_current = current_evidence_loader or load_current_evidence_for_preview
-    current_result = load_current(
-        db,
-        request_id=request_id,
-        mb_release_id=mbid,
-        quality_ranks=cfg.quality_ranks,
-        beets_library_root=getattr(cfg, "beets_directory", ""),
-        preloaded_evidence=current_evidence,
-    )
-    if current_result.status == "empty_current":
-        current_evidence = None
-        existing_spectral_evidence = SpectralAnalysisDetail(attempted=False)
-    elif current_result.status != "ready" or current_result.evidence is None:
-        return _measurement_failed_result(
-            mode="path",
-            reason="measurement_crashed",
-            decision="current_evidence_failed",
-            detail=(
-                f"{current_result.status}: "
-                f"{current_result.reason or 'current authority unavailable'}"
-            ),
-            request_id=request_id,
-            download_log_id=download_log_id,
-            source_path=audit_path,
-        )
-    else:
-        current_evidence = current_result.evidence
-        current_m = current_evidence.measurement
-        existing_spectral_evidence = spectral_detail_from_persisted_source(
-            current_m.spectral_grade,
-            current_m.spectral_bitrate_kbps,
-        )
-    preserve_have_source = preserve_existing_source_spectral(current_evidence)
 
     repair = repair_fn or repair_mp3_headers
     owns_path = path_is_within_root(path, processing_albums_dir(cfg.processing_dir))
@@ -2119,27 +2102,21 @@ def measure_and_persist_candidate_evidence(
                 download_min_bitrate_bps=inspection.min_bitrate_bps,
                 download_is_vbr=inspection.is_vbr,
                 cfg=cfg,
-                # db=None / request_id=None: HAVE spectral state is persisted
-                # later via the content-addressed AlbumQualityEvidence row that
-                # the importer reads. Preview is a pure measurement surface.
-                db=None,
+                # The DB is read-only authority for candidate bad-audio-hash
+                # checks. request_id stays unset so this candidate-only pass
+                # cannot write legacy request spectral state; HAVE is handled
+                # later through content-addressed AlbumQualityEvidence.
+                db=db,
                 request_id=None,
-                existing_spectral_evidence=existing_spectral_evidence,
-                preserve_existing_source_spectral=preserve_have_source,
+                defer_existing_spectral=True,
+                mixed_source_snapshot=has_mixed_lossless_and_lossy(
+                    source_snapshot,
+                ),
                 precomputed_inspection=inspection,
                 spectral_detail_analyzer=spectral_detail_analyzer,
                 existing_spectral_resolver=existing_spectral_resolver,
             )
             _checkpoint(cancellation_token)
-            spectral_result = persist_exact_current_spectral_from_attempt(
-                db,
-                request_id=request_id,
-                current_evidence=current_evidence,
-                measured_existing=measurement.spectral_audit.existing,
-                measured_existing_path=measurement.existing_spectral_path,
-            )
-            if spectral_result.evidence is not None:
-                current_evidence = spectral_result.evidence
         except ExecutionCancelled:
             raise
         except AudioValidationMeasurementError as exc:
@@ -2164,41 +2141,18 @@ def measure_and_persist_candidate_evidence(
                 source_path=audit_path,
             )
 
-        # Integrity facts are authoritative even when the same corrupt
-        # lossless source also prevents spectral analysis from producing a
-        # grade. Persist/reject the concrete decode failure instead of
-        # demoting it to the secondary measurement failure.
-        measurement_rejecting = (
-            measurement.audio_corrupt
-            or measurement.matched_bad_hash_id is not None
-            or measurement.folder_layout == "nested"
-            or (measurement.audio_file_count == 0 and not source_snapshot)
+        # Ask the one quality-policy surface whether these candidate facts
+        # make HAVE irrelevant.  Candidate integrity is measured and persisted
+        # before current evidence is loaded, resolved, analyzed, or CAS-written.
+        candidate_rejection = candidate_preimport_rejection(
+            audio_corrupt=measurement.audio_corrupt,
+            matched_bad_audio_hash_id=measurement.matched_bad_hash_id,
+            folder_layout=measurement.folder_layout,
+            audio_file_count=measurement.audio_file_count,
+            files=source_snapshot,
         )
-        spectral_failure = _lossless_candidate_spectral_failure(
-            measurement,
-            lossless_candidate=measurement.lossless_candidate,
-        )
-        if spectral_failure is not None and not measurement_rejecting:
-            return _measurement_failed_result(
-                mode="path",
-                reason="measurement_crashed",
-                decision="spectral_analysis_failed",
-                detail=spectral_failure,
-                request_id=request_id,
-                download_log_id=download_log_id,
-                source_path=audit_path,
-                import_result=ImportResult(spectral=measurement.spectral_audit),
-            )
-
-        # --- Measurement-only evidence path ---
-        # When the measurement carries any importer-rejecting fact, skip the
-        # harness (it would either fail or produce misleading state) and
-        # persist evidence straight from the measurement. The importer's
-        # ``full_pipeline_decision_from_evidence`` (U11) reads those facts
-        # off the persisted evidence row and rejects via the four-fact
-        # early-exit branches.
         audit_result = ImportResult(spectral=measurement.spectral_audit)
-        if measurement_rejecting:
+        if candidate_rejection is not None:
             try:
                 _checkpoint(cancellation_token)
                 evidence_result = (
@@ -2232,24 +2186,148 @@ def measure_and_persist_candidate_evidence(
                     mode="path",
                     reason="evidence_persist_failed",
                     decision=f"evidence_{evidence_result.status}",
-                    detail=evidence_result.reason or f"evidence_{evidence_result.status}",
+                    detail=(
+                        evidence_result.reason
+                        or f"evidence_{evidence_result.status}"
+                    ),
                     request_id=request_id,
                     download_log_id=download_log_id,
                     source_path=audit_path,
                     import_result=audit_result,
                 )
-            decision_hint = _measurement_decision_hint(measurement)
             return _evidence_ready_result(
                 mode="path",
-                decision=decision_hint,
-                reason=decision_hint,
-                detail=f"measurement persisted: {decision_hint}",
-                stage_chain=[f"measure_preimport:{decision_hint}"],
+                decision=candidate_rejection,
+                reason=candidate_rejection,
+                detail=f"measurement persisted: {candidate_rejection}",
+                stage_chain=[f"measure_preimport:{candidate_rejection}"],
+                request_id=request_id,
+                download_log_id=download_log_id,
+                source_path=audit_path,
+                import_result=audit_result,
+            )
+
+        spectral_failure = _lossless_candidate_spectral_failure(
+            measurement,
+            lossless_candidate=measurement.lossless_candidate,
+        )
+        if spectral_failure is not None:
+            return _measurement_failed_result(
+                mode="path",
+                reason="measurement_crashed",
+                decision="spectral_analysis_failed",
+                detail=spectral_failure,
                 request_id=request_id,
                 download_log_id=download_log_id,
                 source_path=audit_path,
                 import_result=ImportResult(spectral=measurement.spectral_audit),
             )
+
+        (
+            current_evidence,
+            _,
+            _current_evidence_authoritative,
+        ) = load_persisted_existing_spectral(db, request_id)
+        load_current = (
+            current_evidence_loader or load_current_evidence_for_preview
+        )
+        current_result = load_current(
+            db,
+            request_id=request_id,
+            mb_release_id=mbid,
+            quality_ranks=cfg.quality_ranks,
+            beets_library_root=getattr(cfg, "beets_directory", ""),
+            preloaded_evidence=current_evidence,
+        )
+        reuse_have_evidence = False
+        if current_result.status == "empty_current":
+            current_evidence = None
+            existing_spectral_evidence = SpectralAnalysisDetail(
+                attempted=False,
+            )
+        elif (
+            current_result.status != "ready"
+            or current_result.evidence is None
+        ):
+            return _measurement_failed_result(
+                mode="path",
+                reason="measurement_crashed",
+                decision="current_evidence_failed",
+                detail=(
+                    f"{current_result.status}: "
+                    f"{current_result.reason or 'current authority unavailable'}"
+                ),
+                request_id=request_id,
+                download_log_id=download_log_id,
+                source_path=audit_path,
+            )
+        else:
+            current_evidence = current_result.evidence
+            existing_spectral_evidence = (
+                spectral_detail_from_persisted_source(
+                    current_evidence.measurement,
+                )
+            )
+            reuse_have_evidence = not (
+                plan_current_evidence_enrichment(current_evidence).spectral
+            )
+            try:
+                measurement = attach_existing_spectral_audit(
+                    measurement,
+                    path=preview_path,
+                    mb_release_id=mbid,
+                    cfg=cfg,
+                    existing_spectral_evidence=existing_spectral_evidence,
+                    reuse_existing_spectral_evidence=reuse_have_evidence,
+                    preserve_existing_source_spectral=(
+                        preserve_existing_source_spectral(current_evidence)
+                    ),
+                    spectral_detail_analyzer=spectral_detail_analyzer,
+                    existing_spectral_resolver=existing_spectral_resolver,
+                )
+            except Exception as exc:  # noqa: BLE001 - boundary converts collaborator failures
+                return _measurement_failed_result(
+                    mode="path",
+                    reason="measurement_crashed",
+                    decision="measurement_crashed",
+                    detail=f"{type(exc).__name__}: {exc}",
+                    request_id=request_id,
+                    download_log_id=download_log_id,
+                    source_path=audit_path,
+                )
+
+        # HAVE durability is a prerequisite only after IN can advance.
+        if (
+            current_evidence is not None
+            and not reuse_have_evidence
+        ):
+            spectral_result = persist_exact_current_spectral_from_attempt(
+                db,
+                request_id=request_id,
+                current_evidence=current_evidence,
+                measured_existing=measurement.spectral_audit.existing,
+                measured_existing_path=measurement.existing_spectral_path,
+            )
+            if (
+                spectral_result.status != "ready"
+                or spectral_result.evidence is None
+            ):
+                return _measurement_failed_result(
+                    mode="path",
+                    reason="evidence_persist_failed",
+                    decision="evidence_persist_failed",
+                    detail=(
+                        f"{spectral_result.status}: "
+                        f"{spectral_result.reason or 'HAVE spectral evidence was not persisted'}"
+                    ),
+                    request_id=request_id,
+                    download_log_id=download_log_id,
+                    source_path=audit_path,
+                    import_result=ImportResult(
+                        spectral=measurement.spectral_audit,
+                    ),
+                )
+            current_evidence = spectral_result.evidence
 
         # --- Harness path: measurement allows continuing ---
         existing_v0_probe: V0ProbeEvidence | None = None
@@ -2563,25 +2641,6 @@ def measure_and_persist_candidate_evidence(
         )
 
 
-def _measurement_decision_hint(measurement: Any) -> str:
-    """Derive a short label for measurement-only evidence_ready returns.
-
-    Used purely for log/decision-string display — the importer's
-    ``full_pipeline_decision_from_evidence`` (U11) makes the actual reject
-    call from the persisted evidence via its four-fact early-exit branches.
-    Order mirrors that decider's evaluation order.
-    """
-    if measurement.audio_corrupt:
-        return "audio_corrupt"
-    if measurement.matched_bad_hash_id is not None:
-        return "bad_audio_hash"
-    if measurement.folder_layout == "nested":
-        return "nested_layout"
-    if measurement.audio_file_count == 0:
-        return "empty_fileset"
-    return "evidence_ready"
-
-
 def preview_import_from_path(
     db: ImportPreviewDB,
     *,
@@ -2591,6 +2650,8 @@ def preview_import_from_path(
     download_log_id: int | None = None,
     import_job_id: int | None = None,
     persist_candidate_evidence: bool = False,
+    spectral_detail_analyzer: SpectralDetailAnalyzer | None = None,
+    existing_spectral_resolver: ExistingSpectralResolver | None = None,
     _already_isolated: bool = False,
     cancellation_token: CancellationToken | None = None,
 ) -> ImportPreviewResult:
@@ -2647,48 +2708,6 @@ def preview_import_from_path(
     from lib.config import read_runtime_config
 
     cfg = read_runtime_config()
-    (
-        preloaded_current_evidence,
-        _,
-        _,
-    ) = load_persisted_existing_spectral(db, request_id)
-    current_authority = _authorize_current_evidence_for_preview(
-        db,
-        request_id=request_id,
-        mb_release_id=mbid,
-        quality_ranks=cfg.quality_ranks,
-        beets_library_root=getattr(cfg, "beets_directory", ""),
-        preloaded_evidence=preloaded_current_evidence,
-    )
-    if current_authority.status == "empty_current":
-        # Authoritative absence: stale linked HAVE facts describe no current
-        # bytes and cannot influence candidate measurement or decision inputs.
-        current_evidence = None
-        existing_spectral_evidence = SpectralAnalysisDetail(attempted=False)
-    elif (
-        current_authority.status != "ready"
-        or current_authority.evidence is None
-    ):
-        return _measurement_failed_result(
-            mode="path",
-            reason="measurement_crashed",
-            decision="current_evidence_failed",
-            detail=(
-                f"{current_authority.status}: "
-                f"{current_authority.reason or 'current authority unavailable'}"
-            ),
-            request_id=request_id,
-            download_log_id=download_log_id,
-            source_path=path,
-        )
-    else:
-        current_evidence = current_authority.evidence
-        current_measurement = current_evidence.measurement
-        existing_spectral_evidence = spectral_detail_from_persisted_source(
-            current_measurement.spectral_grade,
-            current_measurement.spectral_bitrate_kbps,
-        )
-    preserve_have_source = preserve_existing_source_spectral(current_evidence)
 
     # Every preview runs against one bounded, descriptor-copied private
     # snapshot.  The download-log entry point has already made that snapshot;
@@ -2735,60 +2754,29 @@ def preview_import_from_path(
         except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
             pass
 
-        source_snapshot = None
-        if persist_candidate_evidence:
-            try:
-                source_snapshot = snapshot_audio_files(preview_path)
-            except OSError as exc:
-                return _preview_result(
-                    mode="path",
-                    verdict=PREVIEW_VERDICT_UNCERTAIN,
-                    decision="evidence_snapshot_failed",
-                    reason="evidence_snapshot_failed",
-                    detail=str(exc),
-                    request_id=request_id,
-                    download_log_id=download_log_id,
-                    source_path=path,
-                )
-            if not source_snapshot:
-                # Empty source snapshot: evidence persistence requires at
-                # least one file, so surface the empty fileset as uncertain.
-                return _preview_result(
-                    mode="path",
-                    verdict=PREVIEW_VERDICT_UNCERTAIN,
-                    decision="evidence_empty_fileset",
-                    reason="evidence_empty_fileset",
-                    detail="no audio files found",
-                    request_id=request_id,
-                    download_log_id=download_log_id,
-                    source_path=path,
-                )
-        inspection = inspect_local_files(preview_path)
-        if inspection.has_nested_audio:
-            detail = (
-                "Audio files are in subdirectories — flatten the folder "
-                "before import."
-            )
+        try:
+            source_snapshot = snapshot_audio_files(preview_path)
+        except OSError as exc:
             return _preview_result(
                 mode="path",
-                verdict=PREVIEW_VERDICT_CONFIDENT_REJECT,
-                decision="nested_layout",
-                reason="nested_layout",
-                detail=detail,
-                stage_chain=["preimport_nested:reject_nested"],
+                verdict=PREVIEW_VERDICT_UNCERTAIN,
+                decision="evidence_snapshot_failed",
+                reason="evidence_snapshot_failed",
+                detail=str(exc),
                 request_id=request_id,
                 download_log_id=download_log_id,
                 source_path=path,
-                cleanup_eligible=True,
             )
+        inspection = inspect_local_files(preview_path)
 
         # Preview measures; never decides. Mirror the measure-and-persist
         # pattern: collect facts via ``measure_preimport_state`` (no denylist
         # writes, no decision branches), then surface the five folder/audio-
         # integrity facts as a confident reject for the CLI/triage UI.
-        # ``db=None`` / ``request_id=None``: HAVE spectral state belongs to the
-        # persisted ``AlbumQualityEvidence`` row that the importer reads —
-        # preview is a pure measurement surface.
+        # The DB is read-only authority for the current curator bad-hash
+        # corpus. request_id stays unset so classify preview cannot write
+        # legacy request spectral state; HAVE belongs to content-addressed
+        # evidence.
         try:
             _checkpoint(cancellation_token)
             measurement = measure_preimport_state(
@@ -2799,24 +2787,15 @@ def preview_import_from_path(
                 download_min_bitrate_bps=inspection.min_bitrate_bps,
                 download_is_vbr=inspection.is_vbr,
                 cfg=cfg,
-                db=None,
+                db=db,
                 request_id=None,
-                existing_spectral_evidence=(
-                    existing_spectral_evidence
+                defer_existing_spectral=True,
+                mixed_source_snapshot=has_mixed_lossless_and_lossy(
+                    source_snapshot,
                 ),
-                preserve_existing_source_spectral=preserve_have_source,
                 precomputed_inspection=inspection,
             )
             _checkpoint(cancellation_token)
-            spectral_result = persist_exact_current_spectral_from_attempt(
-                db,
-                request_id=request_id,
-                current_evidence=current_evidence,
-                measured_existing=measurement.spectral_audit.existing,
-                measured_existing_path=measurement.existing_spectral_path,
-            )
-            if spectral_result.evidence is not None:
-                current_evidence = spectral_result.evidence
         except ExecutionCancelled:
             raise
         except AudioValidationMeasurementError as exc:
@@ -2841,43 +2820,67 @@ def preview_import_from_path(
                 source_path=path,
             )
 
-        # Four-fact reject (mirror worker-mode lines 517-522). ``nested_layout``
-        # is already handled by the ``inspection.has_nested_audio`` branch
-        # above; ``empty_fileset`` is handled by the ``not source_snapshot``
-        # branch on the persist path. At this site only ``audio_corrupt`` and
-        # ``bad_audio_hash`` can fire — but we check ``folder_layout``/
-        # ``audio_file_count`` defensively so the measurement-derived facts
-        # stay the single source of truth.
-        audio_corrupt = measurement.audio_corrupt
-        bad_audio_hash = measurement.matched_bad_hash_id is not None
-        nested_layout = measurement.folder_layout == "nested"
-        empty_fileset = measurement.audio_file_count == 0
-        if audio_corrupt or bad_audio_hash or nested_layout or empty_fileset:
-            scenario = (
-                "audio_corrupt" if audio_corrupt
-                else "bad_audio_hash" if bad_audio_hash
-                else "nested_layout" if nested_layout
-                else "empty_fileset"
-            )
+        candidate_rejection = candidate_preimport_rejection(
+            audio_corrupt=measurement.audio_corrupt,
+            matched_bad_audio_hash_id=measurement.matched_bad_hash_id,
+            folder_layout=measurement.folder_layout,
+            audio_file_count=measurement.audio_file_count,
+            files=source_snapshot,
+        )
+        if candidate_rejection is not None:
+            if persist_candidate_evidence:
+                evidence_result = persist_candidate_evidence_from_measurement(
+                    db,
+                    mb_release_id=mbid,
+                    source_path=path,
+                    measurement=measurement,
+                    download_log_id=download_log_id,
+                    import_job_id=import_job_id,
+                    files=source_snapshot,
+                )
+                if evidence_result.status != "ready":
+                    return _measurement_failed_result(
+                        mode="path",
+                        reason="evidence_persist_failed",
+                        decision=f"evidence_{evidence_result.status}",
+                        detail=(
+                            evidence_result.reason
+                            or f"evidence_{evidence_result.status}"
+                        ),
+                        request_id=request_id,
+                        download_log_id=download_log_id,
+                        source_path=path,
+                        import_result=ImportResult(
+                            spectral=measurement.spectral_audit,
+                        ),
+                    )
             detail: str | None = None
-            if audio_corrupt:
+            if candidate_rejection == "audio_corrupt":
                 detail = measurement.audio_error
                 if detail is None and measurement.corrupt_files:
                     detail = (
                         f"{len(measurement.corrupt_files)} files failed ffmpeg decode"
                     )
-            elif bad_audio_hash and measurement.matched_bad_track_path:
+            elif (
+                candidate_rejection == "bad_audio_hash"
+                and measurement.matched_bad_track_path
+            ):
                 detail = (
                     f"matched bad_audio_hash id={measurement.matched_bad_hash_id} "
                     f"on track {measurement.matched_bad_track_path}"
                 )
+            elif candidate_rejection == "nested_layout":
+                detail = (
+                    "Audio files are in subdirectories — flatten the folder "
+                    "before import."
+                )
             return _preview_result(
                 mode="path",
                 verdict=PREVIEW_VERDICT_CONFIDENT_REJECT,
-                decision=scenario,
-                reason=scenario,
+                decision=candidate_rejection,
+                reason=candidate_rejection,
                 detail=detail,
-                stage_chain=[f"preimport:{scenario}"],
+                stage_chain=[f"preimport:{candidate_rejection}"],
                 request_id=request_id,
                 download_log_id=download_log_id,
                 source_path=path,
@@ -2899,6 +2902,96 @@ def preview_import_from_path(
                 source_path=path,
                 import_result=ImportResult(spectral=measurement.spectral_audit),
             )
+
+        (
+            preloaded_current_evidence,
+            _,
+            _,
+        ) = load_persisted_existing_spectral(db, request_id)
+        current_authority = _authorize_current_evidence_for_preview(
+            db,
+            request_id=request_id,
+            mb_release_id=mbid,
+            quality_ranks=cfg.quality_ranks,
+            beets_library_root=getattr(cfg, "beets_directory", ""),
+            preloaded_evidence=preloaded_current_evidence,
+        )
+        reuse_have_evidence = False
+        if current_authority.status == "empty_current":
+            current_evidence = None
+            existing_spectral_evidence = SpectralAnalysisDetail(
+                attempted=False,
+            )
+        elif (
+            current_authority.status != "ready"
+            or current_authority.evidence is None
+        ):
+            return _measurement_failed_result(
+                mode="path",
+                reason="measurement_crashed",
+                decision="current_evidence_failed",
+                detail=(
+                    f"{current_authority.status}: "
+                    f"{current_authority.reason or 'current authority unavailable'}"
+                ),
+                request_id=request_id,
+                download_log_id=download_log_id,
+                source_path=path,
+            )
+        else:
+            current_evidence = current_authority.evidence
+            existing_spectral_evidence = (
+                spectral_detail_from_persisted_source(
+                    current_evidence.measurement,
+                )
+            )
+            reuse_have_evidence = not (
+                plan_current_evidence_enrichment(current_evidence).spectral
+            )
+            measurement = attach_existing_spectral_audit(
+                measurement,
+                path=preview_path,
+                mb_release_id=mbid,
+                cfg=cfg,
+                existing_spectral_evidence=existing_spectral_evidence,
+                reuse_existing_spectral_evidence=reuse_have_evidence,
+                preserve_existing_source_spectral=(
+                    preserve_existing_source_spectral(current_evidence)
+                ),
+                spectral_detail_analyzer=spectral_detail_analyzer,
+                existing_spectral_resolver=existing_spectral_resolver,
+            )
+
+        # As above, only an IN candidate that can advance needs the measured
+        # current snapshot to be durable before classification continues.
+        if current_evidence is not None and not reuse_have_evidence:
+            spectral_result = persist_exact_current_spectral_from_attempt(
+                db,
+                request_id=request_id,
+                current_evidence=current_evidence,
+                measured_existing=measurement.spectral_audit.existing,
+                measured_existing_path=measurement.existing_spectral_path,
+            )
+            if (
+                spectral_result.status != "ready"
+                or spectral_result.evidence is None
+            ):
+                return _measurement_failed_result(
+                    mode="path",
+                    reason="evidence_persist_failed",
+                    decision="evidence_persist_failed",
+                    detail=(
+                        f"{spectral_result.status}: "
+                        f"{spectral_result.reason or 'HAVE spectral evidence was not persisted'}"
+                    ),
+                    request_id=request_id,
+                    download_log_id=download_log_id,
+                    source_path=path,
+                    import_result=ImportResult(
+                        spectral=measurement.spectral_audit,
+                    ),
+                )
+            current_evidence = spectral_result.evidence
 
         override_min_bitrate = compute_effective_override_bitrate(
             (
@@ -2957,19 +3050,6 @@ def preview_import_from_path(
         evidence_status: str | None = None
         evidence_reason: str | None = None
         if persist_candidate_evidence:
-            if source_snapshot is None:
-                detail = "source files changed while preview was running"
-                return _preview_result(
-                    mode="path",
-                    verdict=PREVIEW_VERDICT_UNCERTAIN,
-                    decision="source_changed_during_preview",
-                    reason="source_changed_during_preview",
-                    detail=detail,
-                    request_id=request_id,
-                    download_log_id=download_log_id,
-                    source_path=path,
-                    import_result=run.import_result,
-                )
             try:
                 _checkpoint(cancellation_token)
                 evidence = persist_candidate_evidence_from_import_result(

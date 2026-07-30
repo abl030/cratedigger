@@ -25,11 +25,11 @@ import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import msgspec
 
-from lib.audio_hash import AudioHashError, hash_audio_content
+from lib.audio_hash import hash_audio_content
 from lib.json_narrow import json_dict as _json_dict
 from lib.json_narrow import json_list as _json_list
 
@@ -37,8 +37,8 @@ from lib.json_narrow import json_list as _json_list
 # (includes wav, alac); the bad-hash gate filters to this subset so legitimate
 # wav/alac albums don't trip a per-track warning every validation cycle.
 _BAD_HASH_SUPPORTED_EXTS: frozenset[str] = frozenset({"flac", "mp3", "m4a", "aac", "ogg", "opus"})
-from lib.pipeline_db import RequestSpectralStateUpdate
 from lib.quality import (
+    AudioQualityMeasurement,
     AudioValidationMeasurementError,
     AudioValidationReport,
     CodecFamily,
@@ -52,9 +52,31 @@ from lib.util import validate_audio
 
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
-    from lib.pipeline_db import PipelineDB
+    from lib.pipeline_db import BadAudioHashRow, RequestSpectralStateUpdate
 
 logger = logging.getLogger("cratedigger")
+
+
+class BadAudioHashDB(Protocol):
+    """Current curator bad-audio-hash authority."""
+
+    def has_any_bad_audio_hashes(self) -> bool: ...
+
+    def lookup_bad_audio_hash(
+        self,
+        hash_value: bytes,
+        audio_format: str,
+    ) -> BadAudioHashRow | None: ...
+
+
+class MeasurementDB(BadAudioHashDB, Protocol):
+    """DB authority used by pre-import fact collection."""
+
+    def update_spectral_state(
+        self,
+        request_id: int,
+        update: RequestSpectralStateUpdate,
+    ) -> bool: ...
 
 
 # Lazy import proxy — keeps sox out of import-time deps.
@@ -178,19 +200,27 @@ def collect_release_attempt_spectral_audit(
     analyzer: SpectralDetailAnalyzer,
     existing_resolver: ExistingSpectralResolver,
     candidate_detail: SpectralAnalysisDetail | None = None,
+    existing_detail: SpectralAnalysisDetail | None = None,
 ) -> tuple[SpectralDetail, ExistingSpectralAuditLookup]:
     """Own conditional HAVE collection for every attempted-import adapter.
 
     A lossless source converted to Opus/V0 keeps the source-side spectral
     measurement as its authoritative HAVE provenance; analyzing that installed
-    derivative can rewrite a transcode-like FLAC as apparently genuine. Every
-    other exact-release copy is analyzed from the files currently on disk.
+    derivative can rewrite a transcode-like FLAC as apparently genuine.
+    Content-addressed candidate and HAVE facts may be projected through
+    ``candidate_detail`` / ``existing_detail`` after their callers prove the
+    respective snapshots still match; otherwise the exact paths are analyzed.
     """
     candidate = (
         candidate_detail
         if candidate_detail is not None
         else _fail_soft_spectral_analysis(candidate_path, analyzer)
     )
+    if existing_detail is not None:
+        return (
+            SpectralDetail(candidate=candidate, existing=existing_detail),
+            ExistingSpectralAuditLookup(),
+        )
     try:
         lookup = (
             existing_resolver(mb_release_id)
@@ -255,10 +285,11 @@ def existing_spectral_resolver_for_config(
 
 
 def spectral_detail_from_persisted_source(
-    grade: object,
-    bitrate_kbps: object,
+    measurement: AudioQualityMeasurement,
 ) -> SpectralAnalysisDetail:
-    """Project durable pre-conversion fields into attempt-audit shape."""
+    """Project the complete durable spectral fact into attempt-audit shape."""
+    grade = measurement.spectral_grade
+    bitrate_kbps = measurement.spectral_bitrate_kbps
     spectral_grade = grade if isinstance(grade, str) and grade else None
     spectral_bitrate = (
         bitrate_kbps if isinstance(bitrate_kbps, int) else None
@@ -267,6 +298,10 @@ def spectral_detail_from_persisted_source(
         attempted=spectral_grade is not None or spectral_bitrate is not None,
         grade=spectral_grade,
         bitrate_kbps=spectral_bitrate,
+        cliff_hz=measurement.cliff_hz,
+        codec_family=measurement.codec_family,
+        ultrasonic_deficit_db=measurement.ultrasonic_deficit_db,
+        spectral_measurement_version=measurement.spectral_measurement_version,
     )
 
 
@@ -519,7 +554,7 @@ def _needs_spectral_check(
 
 def _persist_spectral_state(
     *,
-    db: PipelineDB,
+    db: MeasurementDB,
     request_id: int,
     existing_spectral: SpectralMeasurement | None,
 ) -> SpectralMeasurement | None:
@@ -539,6 +574,8 @@ def _persist_spectral_state(
 
     Returns the measurement actually written (or None if nothing to write).
     """
+    from lib.pipeline_db import RequestSpectralStateUpdate
+
     if existing_spectral is None:
         return None
     try:
@@ -589,14 +626,14 @@ def _iter_audio_files(path: str) -> list[Path]:
 
 def _check_bad_audio_hashes(
     paths: list[Path],
-    db: PipelineDB,
+    db: BadAudioHashDB,
 ) -> _BadHashMatch | None:
     """Return the first matched bad-hash row, or None.
 
-    Hashing or DB-lookup failures on a single track are non-fatal: the bad-hash
-    gate is a *defense*, not a *requirement*, so a hashing error on one file
-    must not block the entire validation pipeline. Each failure is logged at
-    WARNING and skipped; the loop continues to the next track.
+    Once the curator's bad-hash corpus is non-empty, every supported candidate
+    track must be checked authoritatively. Hashing or lookup failures therefore
+    propagate to the preview boundary, which records a measurement failure and
+    retries instead of silently accepting an incompletely checked candidate.
     """
     for p in paths:
         ext = p.suffix.lstrip(".").lower()
@@ -605,21 +642,32 @@ def _check_bad_audio_hashes(
             # them yet; skip silently rather than logging a warning per track
             # for every legitimate album in those formats.
             continue
-        try:
-            digest = hash_audio_content(p, ext)
-        except AudioHashError:
-            logger.warning(
-                "bad-hash gate: failed to hash %s, skipping", p, exc_info=True)
-            continue
-        try:
-            row = db.lookup_bad_audio_hash(digest, ext)
-        except Exception:
-            logger.warning(
-                "bad-hash gate: lookup failed for %s, skipping", p, exc_info=True)
-            continue
+        digest = hash_audio_content(p, ext)
+        row = db.lookup_bad_audio_hash(digest, ext)
         if row is not None:
             return _BadHashMatch(bad_hash_id=row.id, track_path=str(p))
     return None
+
+
+def find_current_bad_audio_hash_match(
+    *,
+    path: str,
+    db: BadAudioHashDB,
+    audio_files: list[Path] | None = None,
+) -> _BadHashMatch | None:
+    """Check the current curator corpus against one exact action snapshot.
+
+    This intentionally runs independently of persisted candidate measurement:
+    the audio bytes may be unchanged while the curator adds a newly discovered
+    bad-rip hash. Failures propagate so callers retry rather than accepting an
+    incompletely checked candidate.
+    """
+    if not db.has_any_bad_audio_hashes():
+        return None
+    return _check_bad_audio_hashes(
+        audio_files if audio_files is not None else _iter_audio_files(path),
+        db,
+    )
 
 
 def _filetype_band(download_filetype: str) -> str:
@@ -641,10 +689,13 @@ def measure_preimport_state(
     download_min_bitrate_bps: int | None,
     download_is_vbr: bool | None,
     cfg: CratediggerConfig,
-    db: PipelineDB | None = None,
+    db: MeasurementDB | None = None,
     request_id: int | None = None,
     existing_spectral_evidence: SpectralAnalysisDetail | None = None,
+    reuse_existing_spectral_evidence: bool = False,
     preserve_existing_source_spectral: bool = False,
+    defer_existing_spectral: bool = False,
+    mixed_source_snapshot: bool = False,
     precomputed_inspection: LocalFileInspection | None = None,
     spectral_detail_analyzer: SpectralDetailAnalyzer | None = None,
     existing_spectral_resolver: ExistingSpectralResolver | None = None,
@@ -660,7 +711,7 @@ def measure_preimport_state(
 
     As of U11 there is exactly one decision function: persisted evidence
     flows into ``lib.quality.full_pipeline_decision_from_evidence``, whose
-    four early-exit branches handle the folder/audio-integrity facts that
+    five early-exit branches handle the folder/audio-integrity facts that
     used to live in the deleted ``preimport_decide``. Callers invoke
     ``measure_preimport_state`` to gather the facts, persist them to
     ``AlbumQualityEvidence``, and let the unified decider decide.
@@ -674,9 +725,24 @@ def measure_preimport_state(
         download_min_bitrate_bps: Caller-supplied container min bitrate (bps).
         download_is_vbr: Caller-supplied VBR hint.
         cfg: Runtime CratediggerConfig.
-        db: Pipeline DB — pass to enable spectral audit persistence and
-            bad-hash lookup.
-        request_id: Required when ``db`` is supplied.
+        db: Pipeline DB — pass to enable authoritative bad-hash lookup and,
+            when ``request_id`` is also supplied, legacy request spectral
+            persistence.
+        request_id: Optional request owner for legacy spectral persistence.
+            Candidate-only preview deliberately leaves this unset.
+        existing_spectral_evidence: Persisted HAVE detail from a separately
+            resolved current-evidence row.
+        reuse_existing_spectral_evidence: The caller has authorized that row
+            against the exact current Beets release and content snapshot, and
+            its spectral grade is complete. Re-project it without resolving or
+            analyzing HAVE again.
+        defer_existing_spectral: Gather candidate facts only. The caller will
+            authorize and attach HAVE evidence after the canonical candidate
+            integrity predicate confirms that HAVE can affect the attempt.
+        mixed_source_snapshot: The addressed candidate snapshot contains both
+            lossless and lossy files. This is a measured file-set fact used
+            only to avoid irrelevant spectral work; quality policy still owns
+            the rejection.
 
     Returns:
         PreimportMeasurement with all gate facts populated. Audio-corrupt and
@@ -710,12 +776,13 @@ def measure_preimport_state(
     # harness-bound codecs populate it in import_one.py.
     persisted_existing = (
         existing_spectral_evidence
-        or SpectralAnalysisDetail(attempted=False)
+        if not defer_existing_spectral and existing_spectral_evidence is not None
+        else SpectralAnalysisDetail(attempted=False)
     )
-    audit_analyzer = spectral_detail_analyzer or analyze_spectral_audit_path
-    audit_resolver = (
-        existing_spectral_resolver
-        or existing_spectral_resolver_for_config(cfg)
+    reusable_existing = (
+        persisted_existing
+        if defer_existing_spectral or reuse_existing_spectral_evidence
+        else None
     )
     spectral_audit = SpectralDetail(
         candidate=SpectralAnalysisDetail(attempted=False),
@@ -735,17 +802,6 @@ def measure_preimport_state(
         audio_corrupt = True
         audio_error = audio_result.error
         corrupt_files = [name for name, _ in audio_result.failed_files]
-        spectral_audit, existing_lookup = collect_release_attempt_spectral_audit(
-            path,
-            mb_release_id,
-            existing_spectral_evidence=persisted_existing,
-            preserve_existing_source_spectral=(
-                preserve_existing_source_spectral
-            ),
-            analyzer=audit_analyzer,
-            existing_resolver=audit_resolver,
-        )
-        existing_spectral_path = existing_lookup.path
         return PreimportMeasurement(
             corrupt_files=corrupt_files,
             audio_validation=audio_validation,
@@ -774,52 +830,37 @@ def measure_preimport_state(
     matched_bad_hash_id: int | None = None
     matched_bad_track_path: str | None = None
     if db is not None:
-        try:
-            any_bad = db.has_any_bad_audio_hashes()
-        except Exception:
+        match = find_current_bad_audio_hash_match(
+            path=path,
+            db=db,
+            audio_files=audio_files_for_count,
+        )
+        if match is not None:
+            matched_bad_hash_id = match.bad_hash_id
+            matched_bad_track_path = match.track_path
             logger.warning(
-                "bad-hash gate: has_any_bad_audio_hashes probe failed, skipping",
-                exc_info=True)
-            any_bad = False
-        if any_bad:
-            match = _check_bad_audio_hashes(audio_files_for_count, db)
-            if match is not None:
-                matched_bad_hash_id = match.bad_hash_id
-                matched_bad_track_path = match.track_path
-                logger.warning(
-                    f"BAD HASH MATCH: {label} "
-                    f"hash_id={match.bad_hash_id} track={match.track_path}")
-                spectral_audit, existing_lookup = collect_release_attempt_spectral_audit(
-                    path,
-                    mb_release_id,
-                    existing_spectral_evidence=persisted_existing,
-                    preserve_existing_source_spectral=(
-                        preserve_existing_source_spectral
-                    ),
-                    analyzer=audit_analyzer,
-                    existing_resolver=audit_resolver,
-                )
-                existing_spectral_path = existing_lookup.path
-                return PreimportMeasurement(
-                    corrupt_files=[],
-                    audio_validation=audio_validation,
-                    audio_corrupt=False,
-                    matched_bad_hash_id=matched_bad_hash_id,
-                    matched_bad_track_path=matched_bad_track_path,
-                    folder_layout=folder_layout,
-                    audio_file_count=audio_file_count,
-                    filetype_band=filetype_band,
-                    lossless_candidate=lossless_candidate,
-                    min_bitrate_kbps=(
-                        download_min_bitrate_bps // 1000
-                        if download_min_bitrate_bps
-                        and download_min_bitrate_bps >= 1000 else
-                        download_min_bitrate_bps
-                    ),
-                    is_vbr=download_is_vbr,
-                    existing_spectral_path=existing_spectral_path,
-                    spectral_audit=spectral_audit,
-                )
+                f"BAD HASH MATCH: {label} "
+                f"hash_id={match.bad_hash_id} track={match.track_path}")
+            return PreimportMeasurement(
+                corrupt_files=[],
+                audio_validation=audio_validation,
+                audio_corrupt=False,
+                matched_bad_hash_id=matched_bad_hash_id,
+                matched_bad_track_path=matched_bad_track_path,
+                folder_layout=folder_layout,
+                audio_file_count=audio_file_count,
+                filetype_band=filetype_band,
+                lossless_candidate=lossless_candidate,
+                min_bitrate_kbps=(
+                    download_min_bitrate_bps // 1000
+                    if download_min_bitrate_bps
+                    and download_min_bitrate_bps >= 1000 else
+                    download_min_bitrate_bps
+                ),
+                is_vbr=download_is_vbr,
+                existing_spectral_path=existing_spectral_path,
+                spectral_audit=spectral_audit,
+            )
 
     # --- Resolve VBR / min_bitrate / avg bitrate / layout via filesystem inspection ---
     # ``precomputed_inspection`` lets the force-import path (which already
@@ -852,6 +893,39 @@ def measure_preimport_state(
     else:
         min_bitrate_kbps = download_min_bitrate_bps
 
+    # These candidate file-set facts are already complete and make spectral
+    # collection irrelevant.  Return the facts without touching either side's
+    # analyzer; the canonical quality predicate decides what they mean.
+    if defer_existing_spectral and (
+        folder_layout == "nested"
+        or audio_file_count == 0
+        or mixed_source_snapshot
+    ):
+        return PreimportMeasurement(
+            corrupt_files=corrupt_files,
+            audio_validation=audio_validation,
+            audio_corrupt=audio_corrupt,
+            audio_error=audio_error,
+            matched_bad_hash_id=matched_bad_hash_id,
+            matched_bad_track_path=matched_bad_track_path,
+            existing_spectral_path=existing_spectral_path,
+            folder_layout=folder_layout,
+            audio_file_count=audio_file_count,
+            filetype_band=filetype_band,
+            lossless_candidate=lossless_candidate,
+            min_bitrate_kbps=min_bitrate_kbps,
+            is_vbr=download_is_vbr,
+            spectral_audit=spectral_audit,
+        )
+
+    # Candidate integrity has now passed. Only at this point may preview
+    # construct HAVE authority or call either side's spectral analyzer.
+    audit_analyzer = spectral_detail_analyzer or analyze_spectral_audit_path
+    audit_resolver = (
+        existing_spectral_resolver
+        or existing_spectral_resolver_for_config(cfg)
+    )
+
     # --- Spectral gate ---
     # Threshold: cfg.quality_ranks.mp3_vbr.excellent. This controls whether a
     # VBR MP3 is scanned; it is not itself transcode-decision evidence.
@@ -875,6 +949,7 @@ def measure_preimport_state(
             ),
             analyzer=audit_analyzer,
             existing_resolver=audit_resolver,
+            existing_detail=reusable_existing,
         )
         existing_spectral_path = existing_lookup.path
         candidate_audit = spectral_audit.candidate
@@ -938,6 +1013,7 @@ def measure_preimport_state(
             analyzer=audit_analyzer,
             existing_resolver=audit_resolver,
             candidate_detail=spectral_audit.candidate,
+            existing_detail=reusable_existing,
         )
         existing_spectral_path = existing_lookup.path
 
@@ -976,5 +1052,77 @@ def measure_preimport_state(
         lossless_candidate=lossless_candidate,
         min_bitrate_kbps=min_bitrate_kbps,
         is_vbr=download_is_vbr,
+        spectral_audit=spectral_audit,
+    )
+
+
+def attach_existing_spectral_audit(
+    measurement: PreimportMeasurement,
+    *,
+    path: str,
+    mb_release_id: str,
+    cfg: CratediggerConfig,
+    existing_spectral_evidence: SpectralAnalysisDetail,
+    reuse_existing_spectral_evidence: bool,
+    preserve_existing_source_spectral: bool,
+    spectral_detail_analyzer: SpectralDetailAnalyzer | None = None,
+    existing_spectral_resolver: ExistingSpectralResolver | None = None,
+) -> PreimportMeasurement:
+    """Attach authorized HAVE spectral facts without re-analyzing candidate.
+
+    Candidate-first preview calls this only after canonical quality policy
+    confirms that no candidate-integrity rejection already makes HAVE
+    irrelevant. ``measurement.spectral_audit.candidate`` is always projected
+    into the two-sided attempt audit, even when it records an intentional
+    ``attempted=False`` for a harness-bound codec.
+    """
+    persisted_existing = existing_spectral_evidence
+    reusable_existing = (
+        persisted_existing if reuse_existing_spectral_evidence else None
+    )
+    audit_analyzer = spectral_detail_analyzer or analyze_spectral_audit_path
+    audit_resolver = (
+        existing_spectral_resolver
+        or existing_spectral_resolver_for_config(cfg)
+    )
+    spectral_audit, existing_lookup = collect_release_attempt_spectral_audit(
+        path,
+        mb_release_id,
+        existing_spectral_evidence=persisted_existing,
+        preserve_existing_source_spectral=preserve_existing_source_spectral,
+        analyzer=audit_analyzer,
+        existing_resolver=audit_resolver,
+        candidate_detail=measurement.spectral_audit.candidate,
+        existing_detail=reusable_existing,
+    )
+    existing_audit = spectral_audit.existing
+    assert existing_audit is not None
+    measured_existing = SpectralMeasurement.from_parts(
+        existing_audit.grade,
+        existing_audit.bitrate_kbps,
+        cliff_hz=existing_audit.cliff_hz,
+        codec_family=existing_audit.codec_family,
+        ultrasonic_deficit_db=existing_audit.ultrasonic_deficit_db,
+        spectral_measurement_version=(
+            existing_audit.spectral_measurement_version
+        ),
+    )
+    # Preserve the existing policy input: HAVE spectral only participates in
+    # pre-harness comparison when candidate spectral measurement succeeded.
+    existing_spectral = (
+        measured_existing
+        if measurement.download_spectral is not None
+        else None
+    )
+    existing_min_bitrate = (
+        existing_lookup.min_bitrate_kbps
+        if measurement.download_spectral is not None
+        else None
+    )
+    return msgspec.structs.replace(
+        measurement,
+        existing_spectral=existing_spectral,
+        existing_min_bitrate=existing_min_bitrate,
+        existing_spectral_path=existing_lookup.path,
         spectral_audit=spectral_audit,
     )

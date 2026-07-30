@@ -76,18 +76,7 @@ def _make_source(root: str, name: str) -> str:
 
 
 def _evidence_files(source: str) -> list[AlbumQualityEvidenceFile]:
-    full = os.path.join(source, "01.mp3")
-    stat = os.stat(full)
-    return [
-        AlbumQualityEvidenceFile(
-            relative_path="01.mp3",
-            size_bytes=int(stat.st_size),
-            mtime_ns=int(stat.st_mtime_ns),
-            extension="mp3",
-            container="mp3",
-            codec="mp3",
-        )
-    ]
+    return snapshot_audio_files(source)
 
 
 def _evidence(
@@ -266,6 +255,13 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
         delete_source = _make_source(self.tmp, "delete-source")
         keep_source = _make_source(self.tmp, "keep-source")
         stale_source = _make_source(self.tmp, "stale-source")
+        for source, suffix in (
+            (delete_source, b"-delete"),
+            (keep_source, b"-keep"),
+            (stale_source, b"-stale"),
+        ):
+            with open(os.path.join(source, "01.mp3"), "ab") as handle:
+                handle.write(suffix)
 
         delete_id = _log_wrong_match(self.db, 1, delete_source)
         self.db.set_download_log_candidate_evidence(
@@ -274,7 +270,6 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
                 self.db,
                 _evidence(
                     delete_source,
-                    mb_release_id="mbid-delete",
                     matched_bad_audio_hash=True,
                 ),
             ),
@@ -285,14 +280,14 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
             keep_id,
             _store_evidence(
                 self.db,
-                _evidence(keep_source, mb_release_id="mbid-keep"),
+                _evidence(keep_source),
             ),
         )
 
         stale_id = _log_wrong_match(self.db, 1, stale_source)
         self.db.set_download_log_candidate_evidence(
             stale_id,
-            _store_evidence(self.db, _evidence(stale_source, mb_release_id="mbid-stale")),
+            _store_evidence(self.db, _evidence(stale_source)),
         )
         with open(os.path.join(stale_source, "02.mp3"), "wb") as handle:
             handle.write(b"changed")
@@ -513,6 +508,10 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
     def test_final_outcomes_persist_recents_triage_audit(self) -> None:
         delete_source = _make_source(self.tmp, "audit-delete-source")
         keep_source = _make_source(self.tmp, "audit-keep-source")
+        with open(os.path.join(delete_source, "01.mp3"), "ab") as handle:
+            handle.write(b"-delete")
+        with open(os.path.join(keep_source, "01.mp3"), "ab") as handle:
+            handle.write(b"-keep")
 
         delete_id = _log_wrong_match(self.db, 1, delete_source)
         self.db.set_download_log_candidate_evidence(
@@ -521,7 +520,6 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
                 self.db,
                 _evidence(
                     delete_source,
-                    mb_release_id="audit-delete",
                     matched_bad_audio_hash=True,
                 ),
             ),
@@ -532,7 +530,7 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
             keep_id,
             _store_evidence(
                 self.db,
-                _evidence(keep_source, mb_release_id="audit-keep"),
+                _evidence(keep_source),
             ),
         )
 
@@ -1227,8 +1225,8 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
             OUTCOME_DELETED_VERIFIED_LOSSLESS_PARENT,
         )
 
-    def test_mbid_missing_passes_current_none_to_reducer(self) -> None:
-        """Request without an MBID skips the helper and feeds current=None."""
+    def test_mbid_missing_cannot_authorize_candidate_evidence(self) -> None:
+        """Request without an exact identity cannot use linked evidence."""
         self.db.seed_request(make_request_row(
             id=2,
             status="wanted",
@@ -1251,10 +1249,11 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
             result = cleanup_wrong_match(self.db, log_id, cfg=_cfg())
 
         self.mock_current_evidence_helper.assert_not_called()
-        decider.assert_called_once()
-        _candidate_arg, current_arg = decider.call_args.args[:2]
-        self.assertIsNone(current_arg)
-        self.assertEqual(result.outcome, OUTCOME_KEPT_WOULD_IMPORT)
+        decider.assert_not_called()
+        self.assertEqual(
+            result.outcome,
+            OUTCOME_SKIPPED_CANDIDATE_EVIDENCE_MISSING,
+        )
 
 
 if TYPE_CHECKING:

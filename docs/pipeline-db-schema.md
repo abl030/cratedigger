@@ -33,8 +33,8 @@ Key fields:
 - `mb_release_id TEXT NOT NULL` — the MusicBrainz release this evidence
   describes.
 - `snapshot_fingerprint TEXT NOT NULL` — SHA-256 over the per-file tuple
-  `(relative_path, size_bytes, extension, container, codec)`, sorted by
-  `relative_path`, JSON-encoded with stable key order. Computed by
+  `(relative_path, size_bytes, extension, container, codec, content_sha256)`,
+  sorted by `relative_path`, JSON-encoded with stable key order. Computed by
   `lib.quality_evidence.snapshot_fingerprint`.
 - `source_path TEXT NOT NULL` — the on-disk root where measurement
   happened.
@@ -105,11 +105,14 @@ Key fields:
   research opportunity, including a probe that produced no metric.
 - `current_enrichment_required BOOLEAN` — monotonic marker set when a changed
   installed snapshot is linked before its exact spectral/V0 enrichment has
-  completed. Action loaders require the row's neutral enrichment facts while
-  this marker is true, so an unchanged retry cannot turn a newly linked but
+  completed. Action loaders require either a recognized usable spectral grade
+  or R19 lossless-source authority (a source V0 anchor / verified proof whose
+  installed derivative must not be scanned). While this marker is true they
+  additionally require the row's neutral V0 enrichment fact or once-only
+  attempt marker, so an unchanged retry cannot turn a newly linked but
   unenriched row into authority. Source-subject facts may survive the rebuild;
-  missing installed-subject facts must be measured anew. Same-address upserts
-  combine the marker with logical OR and cannot clear it.
+  missing ordinary installed-subject facts must be measured anew. Same-address
+  upserts combine the marker with logical OR and cannot clear it.
 - `verified_lossless BOOLEAN` plus `verified_lossless_provenance`,
   `verified_lossless_source`, `verified_lossless_classifier`,
   `verified_lossless_detail` — the proof object is the sole writable owner of
@@ -149,8 +152,10 @@ Each active evidence row owns typed file-snapshot rows:
 - `evidence_id BIGINT` — FK to `album_quality_evidence(id) ON DELETE CASCADE`.
 - `ordinal INTEGER` and `relative_path TEXT` — stable sorted snapshot order.
 - `size_bytes BIGINT`, `mtime_ns BIGINT`, `extension TEXT`,
-  `container TEXT`, `codec TEXT` — file identity and container facts used to
-  decide whether cached evidence is still valid.
+  `container TEXT`, `codec TEXT` — inventory and container facts.
+- `content_sha256 TEXT NULL` — SHA-256 of the exact file bytes. Migration 068
+  intentionally leaves historical rows NULL; a NULL digest cannot authorize
+  reuse, so normal preview rebuilds that snapshot from current bytes.
 
 Action provenance such as reused/recomputed/backfilled/fallback outcomes is not
 stored in these evidence tables; preview/import/cleanup result surfaces own

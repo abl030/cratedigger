@@ -4,6 +4,7 @@ Extracted verbatim from the monolithic ``lib/quality.py`` (issue #477).
 Pure move: every definition is AST-identical to the original.
 """
 
+import re
 from datetime import datetime
 from typing import Literal, Self
 
@@ -176,6 +177,10 @@ class AudioQualityMeasurement(msgspec.Struct, frozen=True):
                     "ultrasonic_deficit_db/spectral_measurement_version) "
                     "require a spectral grade"
                 )
+        elif self.spectral_grade not in SPECTRAL_USABLE_GRADES:
+            errors.append(
+                "spectral grade must be a recognized complete outcome"
+            )
         elif self.spectral_subject is None or self.spectral_provenance is None:
             errors.append(
                 "spectral grade requires subject and provenance"
@@ -263,6 +268,9 @@ class AlbumQualityEvidenceFile(msgspec.Struct, frozen=True):
     # this Struct shape are non-corrupt by default — the decision function
     # only rejects when at least one file's ``decode_ok`` is False.
     decode_ok: bool = True
+    # Migration 068 deliberately leaves historical rows NULL. A NULL digest
+    # can be displayed and rebuilt, but it can never authorize snapshot reuse.
+    content_sha256: str | None = None
 
     def validation_errors(self) -> list[str]:
         errors: list[str] = []
@@ -276,6 +284,13 @@ class AlbumQualityEvidenceFile(msgspec.Struct, frozen=True):
             errors.append(f"{self.relative_path}: extension is required")
         if not self.container:
             errors.append(f"{self.relative_path}: container is required")
+        if (
+            self.content_sha256 is not None
+            and re.fullmatch(r"[0-9a-f]{64}", self.content_sha256) is None
+        ):
+            errors.append(
+                f"{self.relative_path}: content_sha256 must be lowercase SHA-256"
+            )
         return errors
 
 
@@ -647,6 +662,15 @@ COMPARISON_BASIS_BRANCHES: frozenset[str] = frozenset({
 })
 """Every branch tag ``compare_quality()`` may emit. The generated
 basis-consistency property patrols this taxonomy against the decision."""
+
+
+SPECTRAL_USABLE_GRADES: frozenset[str] = frozenset({
+    "genuine",
+    "marginal",
+    "suspect",
+    "likely_transcode",
+})
+"""Complete spectral outcomes that may participate in a quality decision."""
 
 
 SPECTRAL_TRANSCODE_GRADES: frozenset[str] = frozenset({"suspect", "likely_transcode"})

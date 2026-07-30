@@ -360,6 +360,7 @@ class TestImportOperationFence(unittest.TestCase):
 
             candidate = ensure_candidate_evidence_for_action(
                 db,
+                mb_release_id="release-42",
                 source_path=action_path,
                 import_job_id=claimed.id,
             )

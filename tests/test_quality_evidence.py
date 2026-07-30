@@ -1105,6 +1105,20 @@ class TestCaptureFieldsAreOneAtomicFactWithSpectralGrade(unittest.TestCase):
         )
         self.assertEqual(measurement.new_row_validation_errors(), [])
 
+    def test_unrecognized_grade_is_not_storable_decision_authority(self):
+        measurement = AudioQualityMeasurement(
+            min_bitrate_kbps=192,
+            format="MP3",
+            spectral_grade="banana",
+            spectral_subject="source",
+            spectral_provenance="measured",
+        )
+
+        self.assertTrue(any(
+            "recognized complete outcome" in error
+            for error in measurement.new_row_validation_errors()
+        ))
+
 
 class TestBlankSourcePathPolicy(unittest.TestCase):
     """A blank ``source_path`` is action-incomplete (download_log 37206).
@@ -1144,13 +1158,13 @@ class TestBlankSourcePathPolicy(unittest.TestCase):
 
 
 class TestAudioSnapshotMatches(unittest.TestCase):
-    """Snapshot equality must ignore mtime_ns.
+    """Snapshot equality proves bytes while ignoring mtime_ns.
 
     virtiofs has been observed to return slightly different
     ``st_mtime_ns`` between back-to-back ``stat`` calls on the same
-    file. The comparison key is (relative_path, size_bytes, extension,
-    container, codec); mtime_ns stays in the struct as a forensic
-    field but does not participate in equality.
+    file. The content digest detects byte changes independently; mtime_ns
+    stays in the struct as a forensic field but does not participate in
+    equality.
     """
 
     def setUp(self) -> None:
@@ -1182,6 +1196,18 @@ class TestAudioSnapshotMatches(unittest.TestCase):
         captured = snapshot_audio_files(self.root)
         with open(os.path.join(self.root, "01.mp3"), "ab") as f:
             f.write(b"appended bytes")
+
+        self.assertFalse(audio_snapshot_matches(self.root, captured))
+
+    def test_snapshot_mismatch_when_same_size_bytes_change(self):
+        """Exact reuse cannot be spoofed by replacing bytes at equal length."""
+        captured = snapshot_audio_files(self.root)
+        track = os.path.join(self.root, "01.mp3")
+        with open(track, "r+b") as handle:
+            original = handle.read()
+            handle.seek(0)
+            handle.write(b"X" * len(original))
+            handle.truncate()
 
         self.assertFalse(audio_snapshot_matches(self.root, captured))
 

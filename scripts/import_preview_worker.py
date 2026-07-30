@@ -53,6 +53,7 @@ from lib.import_preview import (
     load_persisted_existing_spectral,
     measure_and_persist_candidate_evidence,
     persist_exact_current_spectral_from_attempt,
+    plan_current_evidence_enrichment,
     prepare_current_evidence_for_failure,
     preserve_existing_source_spectral,
     remove_preview_snapshot,
@@ -89,6 +90,8 @@ from lib.quality import (
     ImportResult,
     MeasurementFailure,
     SpectralAnalysisDetail,
+    SpectralDetail,
+    candidate_preimport_rejection_from_evidence,
 )
 from lib.quality_evidence import (
     EvidenceBuildResult,
@@ -249,9 +252,16 @@ def _candidate_evidence_ready_for_job(
         return False, f"candidate evidence id {evidence_id} not found"
     if not evidence.snapshot_fingerprint:
         return False, "candidate evidence has empty snapshot fingerprint"
+    if job.request_id is None:
+        return False, "candidate evidence job has no request"
+    request: dict[str, object] = db.get_request(job.request_id) or {}
+    mb_release_id = str(request.get("mb_release_id") or "")
+    if not mb_release_id:
+        return False, "candidate evidence request has no exact release identity"
     action_path = result.action_path or source_path
     candidate = ensure_candidate_evidence_for_action(
         db,
+        mb_release_id=mb_release_id,
         source_path=action_path,
         import_job_id=job.id,
     )
@@ -553,7 +563,10 @@ def _reused_evidence_preview_payload(
     provenance so the reused path is distinguishable from the measured
     path.
     """
-    del evidence  # measurement is recorded in the evidence row itself
+    candidate_rejection = candidate_preimport_rejection_from_evidence(
+        evidence,
+    )
+    decision = candidate_rejection or "candidate_evidence_reused"
     # ``msgspec.to_builtins`` returns ``Any``; ``msgspec.convert`` recovers
     # the parameterized dict shape (established wire-boundary adapter,
     # CLAUDE.md "Wire-boundary types") instead of an ``isinstance`` assert,
@@ -561,11 +574,10 @@ def _reused_evidence_preview_payload(
     payload = msgspec.convert(
         msgspec.to_builtins(ImportPreviewResult(
             mode="reused",
-            verdict="would_import",
-            would_import=True,
-            decision="candidate_evidence_reused",
-            reason="candidate_evidence_reused",
-            stage_chain=["preview:candidate_evidence_reused"],
+            verdict=PREVIEW_VERDICT_EVIDENCE_READY,
+            decision=decision,
+            reason=decision,
+            stage_chain=[f"preview:{decision}"],
             request_id=job.request_id,
             download_log_id=_download_log_id_from_job(job),
             source_path=source_path,
@@ -626,6 +638,12 @@ def _front_gate_check(
     measurement path) and the caller should fall through. A non-None
     result with ``status == 'ready'`` means measurement can be skipped.
     """
+    request: dict[str, object] = (
+        db.get_request(job.request_id) or {}
+        if job.request_id is not None
+        else {}
+    )
+    mb_release_id = str(request.get("mb_release_id") or "")
     if job.job_type == IMPORT_JOB_FORCE:
         raw_path: str | None = None
         try:
@@ -639,6 +657,7 @@ def _front_gate_check(
             )
             result = load_candidate(
                 db,
+                mb_release_id=mb_release_id,
                 source_path=action_path,
                 download_log_id=download_log_id,
                 import_job_id=job.id,
@@ -679,6 +698,7 @@ def _front_gate_check(
     try:
         result = load_candidate_evidence_for_source(
             db,
+            mb_release_id=mb_release_id,
             source_path=source_path,
             download_log_id=_download_log_id_from_job(job),
             import_job_id=job.id,
@@ -758,6 +778,9 @@ def execute_preview_job(
     cancellation_token: CancellationToken | None = None,
     candidate_measurement_fn: Callable[..., ImportPreviewResult] | None = None,
     automation_materialize_fn: Callable[..., object] | None = None,
+    spectral_detail_analyzer: SpectralDetailAnalyzer | None = None,
+    existing_spectral_resolver: ExistingSpectralResolver | None = None,
+    current_evidence_loader: Callable[..., EvidenceBuildResult] | None = None,
 ) -> ImportPreviewResult:
     measure_candidate = (
         candidate_measurement_fn or measure_and_persist_candidate_evidence
@@ -782,6 +805,9 @@ def execute_preview_job(
             import_job_id=job.id,
             runtime_config=cfg,
             repair_fn=_noop_header_repair,
+            spectral_detail_analyzer=spectral_detail_analyzer,
+            existing_spectral_resolver=existing_spectral_resolver,
+            current_evidence_loader=current_evidence_loader,
         )
         return msgspec.structs.replace(result, action_path=action_path)
     preview_input = _preview_input(
@@ -796,6 +822,9 @@ def execute_preview_job(
         db,
         import_job_id=job.id,
         cancellation_token=cancellation_token,
+        spectral_detail_analyzer=spectral_detail_analyzer,
+        existing_spectral_resolver=existing_spectral_resolver,
+        current_evidence_loader=current_evidence_loader,
         **preview_input,
     )
 
@@ -1036,6 +1065,31 @@ def process_claimed_preview_job(
             failure=failure,
         ))
 
+    def handle_have_persistence_failed(
+        detail: str,
+        *,
+        source_path: str,
+        audit: SpectralDetail,
+    ) -> ImportJob | None:
+        failure = MeasurementFailure(
+            reason="evidence_persist_failed",
+            detail=detail,
+            source_path=source_path,
+        )
+        return handle_measurement_failed(ImportPreviewResult(
+            mode="path",
+            verdict=PREVIEW_VERDICT_MEASUREMENT_FAILED,
+            decision="evidence_persist_failed",
+            reason="evidence_persist_failed",
+            detail=detail,
+            source_path=source_path,
+            action_path=front_gate_action,
+            request_id=job.request_id,
+            download_log_id=_download_log_id_from_job(job),
+            import_result=ImportResult(spectral=audit),
+            failure=failure,
+        ))
+
     # Automation must first prove that the persisted canonical directory is
     # the exact downloaded manifest. Candidate evidence intentionally ignores
     # non-audio control debris and therefore cannot stand in for this boundary.
@@ -1081,11 +1135,18 @@ def process_claimed_preview_job(
         and front_gate_result.evidence is not None
         and front_gate_source is not None
     ):
+        candidate_preimport_reject = (
+            candidate_preimport_rejection_from_evidence(
+                front_gate_result.evidence,
+            )
+            is not None
+        )
         persisted_existing = SpectralAnalysisDetail(attempted=False)
         preserve_have_source = False
+        reuse_have_evidence = False
         mb_release_id = ""
         current_evidence = None
-        if job.request_id is not None:
+        if job.request_id is not None and not candidate_preimport_reject:
             try:
                 # ``db`` is the worker's untyped handle, so
                 # ``db.get_request(...)`` is ``Any``; declaring ``req``'s own
@@ -1134,8 +1195,12 @@ def process_claimed_preview_job(
                 else:
                     current_evidence = current_result.evidence
                     persisted_existing = spectral_detail_from_persisted_source(
-                        current_evidence.measurement.spectral_grade,
-                        current_evidence.measurement.spectral_bitrate_kbps,
+                        current_evidence.measurement,
+                    )
+                    reuse_have_evidence = not (
+                        plan_current_evidence_enrichment(
+                            current_evidence,
+                        ).spectral
                     )
                 preserve_have_source = preserve_existing_source_spectral(
                     current_evidence,
@@ -1155,7 +1220,12 @@ def process_claimed_preview_job(
         # type to infer its parameter from (otherwise its parameter type is
         # unknown under strict mode).
         audit_resolver: ExistingSpectralResolver | None = existing_spectral_resolver
-        if audit_resolver is None:
+        if audit_resolver is None and candidate_preimport_reject:
+            # The canonical candidate decision already rejects these bytes.
+            # Keep the audit structurally complete without touching HAVE or
+            # loading runtime Beets authority that cannot affect the verdict.
+            audit_resolver = lambda _release_id: ExistingSpectralAuditLookup()
+        elif audit_resolver is None:
             try:
                 audit_cfg = _resolve_runtime_config(runtime_config)
             except Exception as exc:
@@ -1183,28 +1253,39 @@ def process_claimed_preview_job(
             # The front-gate already proved this exact content snapshot owns
             # complete candidate evidence. Re-project its persisted spectral
             # fact into the attempt audit instead of analyzing the same bytes
-            # again. HAVE remains separate below: ordinary installed bytes
-            # are still freshly analyzed for this replacement attempt.
+            # again. HAVE remains independently authorized by its own exact
+            # current-evidence snapshot below.
             candidate_detail=spectral_detail_from_persisted_source(
-                front_gate_result.evidence.measurement.spectral_grade,
-                front_gate_result.evidence.measurement.spectral_bitrate_kbps,
+                front_gate_result.evidence.measurement,
+            ),
+            # The current loader independently resolved the exact Beets
+            # release and matched its content snapshot. A complete HAVE fact
+            # therefore owns the same once-per-snapshot reuse contract as the
+            # candidate side.
+            existing_detail=(
+                persisted_existing
+                if reuse_have_evidence
+                else (
+                    SpectralAnalysisDetail(attempted=False)
+                    if candidate_preimport_reject
+                    else None
+                )
             ),
         )
         if cancellation_token is not None:
             cancellation_token.raise_if_cancelled()
-        # The reuse fast path skips measurement but must still make its
-        # HAVE scan durable BEFORE the importer decides — an audit-only
-        # scan left the decision spectrally blind (download_log 37206).
-        # The persist helper's own guards keep this once-only, exact-path,
-        # exact-snapshot; failures are fail-soft like the audit itself.
+        # Incomplete HAVE evidence still requires one scan, made durable
+        # BEFORE the importer decides — an audit-only scan left the decision
+        # spectrally blind (download_log 37206). Complete matching evidence is
+        # projected above and neither scanned nor rewritten.
         if (
             job.request_id is not None
             and current_evidence is not None
-            and not preserve_have_source
-            and have_lookup.path is not None
+            and not reuse_have_evidence
+            and not candidate_preimport_reject
         ):
             try:
-                persist_exact_current_spectral_from_attempt(
+                spectral_result = persist_exact_current_spectral_from_attempt(
                     db,
                     request_id=job.request_id,
                     current_evidence=current_evidence,
@@ -1213,11 +1294,29 @@ def process_claimed_preview_job(
                 )
             except (ExecutionCancelled, OwnerSessionLost):
                 raise
-            except Exception:
+            except Exception as exc:
                 logger.exception(
                     "Unable to persist reused-path HAVE spectral for "
                     "request %s",
                     job.request_id,
+                )
+                return handle_have_persistence_failed(
+                    f"{type(exc).__name__}: {exc}",
+                    source_path=front_gate_source,
+                    audit=audit,
+                )
+            if (
+                spectral_result.status != "ready"
+                or spectral_result.evidence is None
+            ):
+                detail = (
+                    f"{spectral_result.status}: "
+                    f"{spectral_result.reason or 'HAVE spectral evidence was not persisted'}"
+                )
+                return handle_have_persistence_failed(
+                    detail,
+                    source_path=front_gate_source,
+                    audit=audit,
                 )
         reused_payload = _reused_evidence_preview_payload(
             job,
@@ -1256,6 +1355,9 @@ def process_claimed_preview_job(
                 cancellation_token=cancellation_token,
                 candidate_measurement_fn=candidate_measurement_fn,
                 automation_materialize_fn=automation_materialize_fn,
+                spectral_detail_analyzer=spectral_detail_analyzer,
+                existing_spectral_resolver=existing_spectral_resolver,
+                current_evidence_loader=current_evidence_loader,
             )
     except (ExecutionCancelled, OwnerSessionLost):
         raise

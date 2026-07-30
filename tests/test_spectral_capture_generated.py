@@ -559,7 +559,7 @@ class TestExtensionSlicesNeverFeedCliffDetectionProperty(unittest.TestCase):
 # and ::test_same_snapshot_repair_preserves_installed_facts).
 # ---------------------------------------------------------------------------
 
-_SPECTRAL_GRADES = ("genuine", "marginal", "suspect", "likely_transcode", "error")
+_SPECTRAL_GRADES = ("genuine", "marginal", "suspect", "likely_transcode")
 
 # The two branches of backfill_current_evidence_from_album_info that carry
 # a stored spectral grade forward (lib/quality_evidence.py): a "source"

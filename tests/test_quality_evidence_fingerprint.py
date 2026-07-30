@@ -1,12 +1,4 @@
-"""Tests for ``snapshot_fingerprint`` in ``lib.quality_evidence``.
-
-The fingerprint is the addressing key for the post-rekey
-``album_quality_evidence`` table (plan U1/U2/U3 in
-``docs/plans/2026-05-16-002-refactor-evidence-canonical-cleanup-plan.md``).
-The formula is load-bearing: U2's SQL migration computes the same hash from
-the existing ``album_quality_evidence_files`` rows, so a Python-vs-SQL drift
-would scramble the post-deploy lookup.
-"""
+"""Tests for ``snapshot_fingerprint`` in ``lib.quality_evidence``."""
 from __future__ import annotations
 
 import hashlib
@@ -28,6 +20,7 @@ def _make_file(
     container: str = "flac",
     codec: str | None = "flac",
     decode_ok: bool = True,
+    content_sha256: str | None = "a" * 64,
 ) -> AlbumQualityEvidenceFile:
     return AlbumQualityEvidenceFile(
         relative_path=relative_path,
@@ -37,6 +30,7 @@ def _make_file(
         container=container,
         codec=codec,
         decode_ok=decode_ok,
+        content_sha256=content_sha256,
     )
 
 
@@ -51,8 +45,8 @@ class TestSnapshotFingerprintFormula(unittest.TestCase):
             _make_file(relative_path="track01.flac", size_bytes=111, codec=None),
         ]
         expected_payload = [
-            ["track01.flac", 111, "flac", "flac", None],
-            ["track02.flac", 222, "flac", "flac", "flac"],
+            ["track01.flac", 111, "flac", "flac", None, "a" * 64],
+            ["track02.flac", 222, "flac", "flac", "flac", "a" * 64],
         ]
         expected_json = json.dumps(
             expected_payload,
@@ -97,6 +91,15 @@ class TestSnapshotFingerprintFormula(unittest.TestCase):
     def test_codec_changes_fingerprint(self):
         baseline = snapshot_fingerprint([_make_file(codec="flac")])
         changed = snapshot_fingerprint([_make_file(codec="alac")])
+        self.assertNotEqual(baseline, changed)
+
+    def test_content_digest_changes_fingerprint(self):
+        baseline = snapshot_fingerprint([
+            _make_file(content_sha256="a" * 64),
+        ])
+        changed = snapshot_fingerprint([
+            _make_file(content_sha256="b" * 64),
+        ])
         self.assertNotEqual(baseline, changed)
 
     def test_mtime_does_not_change_fingerprint(self):

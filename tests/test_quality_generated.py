@@ -63,6 +63,7 @@ from lib.quality import (
     SpectralEvidenceFacts,
     TargetQualityContract,
     VerifiedLosslessProof,
+    candidate_preimport_rejection_from_evidence,
     classify_full_pipeline_decision,
     compute_effective_override_bitrate,
     decision_class_kbps,
@@ -3240,6 +3241,14 @@ class TestGeneratedEvidenceDecider(unittest.TestCase):
 
         self.assertIsInstance(result["imported"], bool)
         expected_key = _expected_early_exit_key(candidate)
+        self.assertEqual(
+            candidate_preimport_rejection_from_evidence(candidate),
+            (
+                _EARLY_EXIT_FACT_NAMES[expected_key]
+                if expected_key is not None
+                else None
+            ),
+        )
         if expected_key is None:
             for key, reject_value in _EARLY_EXIT_REJECT_VALUES.items():
                 self.assertNotEqual(

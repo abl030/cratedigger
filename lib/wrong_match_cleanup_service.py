@@ -307,6 +307,8 @@ def _cleanup_wrong_match(
             request_id=request_id,
             reason="request_missing",
         )
+    mb_release_id_raw = request.get("mb_release_id")
+    mb_release_id = str(mb_release_id_raw) if mb_release_id_raw else ""
 
     raw_path = validation_failed_path(entry.get("validation_result"))
     if not raw_path:
@@ -349,7 +351,12 @@ def _cleanup_wrong_match(
             reason="active_import_job",
         )
 
-    candidate = _load_candidate_evidence(db, download_log_id, resolved_path)
+    candidate = _load_candidate_evidence(
+        db,
+        download_log_id,
+        resolved_path,
+        mb_release_id=mb_release_id,
+    )
     if (
         candidate.evidence is None
         and candidate.outcome == OUTCOME_SKIPPED_CANDIDATE_EVIDENCE_STALE
@@ -359,6 +366,7 @@ def _cleanup_wrong_match(
             request_id=request_id,
             download_log_id=download_log_id,
             source_path=resolved_path,
+            mb_release_id=mb_release_id,
             preview_fn=preview_fn,
         )
     if candidate.evidence is None:
@@ -371,12 +379,10 @@ def _cleanup_wrong_match(
         )
 
     runtime_cfg = cfg if cfg is not None else _runtime_config()
-    mb_release_id_raw = request.get("mb_release_id")
-    mb_release_id = str(mb_release_id_raw) if mb_release_id_raw else None
     beets_library_root = getattr(runtime_cfg, "beets_directory", "") or ""
     current_evidence: AlbumQualityEvidence | None = None
     current_evidence_status: str | None = None
-    if mb_release_id is not None:
+    if mb_release_id:
         current_result = load_current_evidence_for_action(
             db,
             request_id=request_id,
@@ -687,9 +693,12 @@ def _load_candidate_evidence(
     db: WrongMatchCleanupDB,
     download_log_id: int,
     source_path: str,
+    *,
+    mb_release_id: str,
 ) -> _LoadedEvidence:
     result = load_candidate_evidence_for_source(
         db,
+        mb_release_id=mb_release_id,
         source_path=source_path,
         download_log_id=download_log_id,
     )
@@ -714,6 +723,7 @@ def _refresh_stale_candidate_evidence(
     request_id: int,
     download_log_id: int,
     source_path: str,
+    mb_release_id: str,
     preview_fn: Any,
 ) -> _LoadedEvidence:
     """Re-measure a stale candidate and reload its evidence (issue #271).
@@ -767,7 +777,12 @@ def _refresh_stale_candidate_evidence(
             f"evidence_refresh_failed: {detail}",
         )
 
-    reloaded = _load_candidate_evidence(db, download_log_id, source_path)
+    reloaded = _load_candidate_evidence(
+        db,
+        download_log_id,
+        source_path,
+        mb_release_id=mb_release_id,
+    )
     if reloaded.evidence is None:
         return _LoadedEvidence(
             None,

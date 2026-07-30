@@ -59,6 +59,7 @@ class _EvidenceMixin(_PipelineDBBase):
                 "container": file.container,
                 "codec": file.codec,
                 "decode_ok": file.decode_ok,
+                "content_sha256": file.content_sha256,
             }
             for ordinal, file in enumerate(evidence.files)
         ]
@@ -132,13 +133,46 @@ class _EvidenceMixin(_PipelineDBBase):
                     -- pair valid (genuine legitimately has no bitrate); an
                     -- empty or bitrate-only v4 stale writer preserves the
                     -- whole stored pair so it cannot erase an attempt-time
-                    -- scan. When the incoming row establishes lossless
-                    -- lineage, however, an installed-subject stored tuple is
-                    -- stale by definition and is cleared atomically. A
-                    -- legacy row is replaced wholesale during its v4 rebuild,
-                    -- including when the new fact is absent.
+                    -- scan. Historical non-null grades outside the canonical
+                    -- vocabulary are poison rather than successful facts, so
+                    -- a rebuild clears their whole eight-column tuple. When
+                    -- the incoming row establishes lossless lineage, an
+                    -- installed-subject stored tuple is likewise stale by
+                    -- definition and is cleared atomically. A legacy row is
+                    -- replaced wholesale during its v4 rebuild, including
+                    -- when the new fact is absent.
                     spectral_grade = CASE WHEN
                         album_quality_evidence.lineage_version < 4 OR
+                        (
+                            NUM_NONNULLS(
+                                album_quality_evidence.spectral_grade,
+                                album_quality_evidence.spectral_bitrate_kbps,
+                                album_quality_evidence.spectral_subject,
+                                album_quality_evidence.spectral_provenance,
+                                album_quality_evidence.cliff_hz,
+                                album_quality_evidence.codec_family,
+                                album_quality_evidence.ultrasonic_deficit_db,
+                                album_quality_evidence.spectral_measurement_version
+                            ) > 0 AND
+                            NOT COALESCE(
+                                album_quality_evidence.spectral_grade IN (
+                                    'genuine', 'marginal', 'suspect',
+                                    'likely_transcode'
+                                ) AND
+                                album_quality_evidence.spectral_subject IN (
+                                    'installed', 'source'
+                                ) AND
+                                album_quality_evidence.spectral_provenance IN (
+                                    'measured', 'carried'
+                                ) AND NOT (
+                                    album_quality_evidence.spectral_subject =
+                                        'installed' AND
+                                    album_quality_evidence.spectral_provenance =
+                                        'carried'
+                                ),
+                                FALSE
+                            )
+                        ) OR
                         EXCLUDED.spectral_grade IS NOT NULL OR
                         (
                             album_quality_evidence.spectral_subject =
@@ -155,6 +189,36 @@ class _EvidenceMixin(_PipelineDBBase):
                         ELSE album_quality_evidence.spectral_grade END,
                     spectral_bitrate_kbps = CASE WHEN
                         album_quality_evidence.lineage_version < 4 OR
+                        (
+                            NUM_NONNULLS(
+                                album_quality_evidence.spectral_grade,
+                                album_quality_evidence.spectral_bitrate_kbps,
+                                album_quality_evidence.spectral_subject,
+                                album_quality_evidence.spectral_provenance,
+                                album_quality_evidence.cliff_hz,
+                                album_quality_evidence.codec_family,
+                                album_quality_evidence.ultrasonic_deficit_db,
+                                album_quality_evidence.spectral_measurement_version
+                            ) > 0 AND
+                            NOT COALESCE(
+                                album_quality_evidence.spectral_grade IN (
+                                    'genuine', 'marginal', 'suspect',
+                                    'likely_transcode'
+                                ) AND
+                                album_quality_evidence.spectral_subject IN (
+                                    'installed', 'source'
+                                ) AND
+                                album_quality_evidence.spectral_provenance IN (
+                                    'measured', 'carried'
+                                ) AND NOT (
+                                    album_quality_evidence.spectral_subject =
+                                        'installed' AND
+                                    album_quality_evidence.spectral_provenance =
+                                        'carried'
+                                ),
+                                FALSE
+                            )
+                        ) OR
                         EXCLUDED.spectral_grade IS NOT NULL OR
                         (
                             album_quality_evidence.spectral_subject =
@@ -171,6 +235,36 @@ class _EvidenceMixin(_PipelineDBBase):
                         ELSE album_quality_evidence.spectral_bitrate_kbps END,
                     spectral_subject = CASE WHEN
                         album_quality_evidence.lineage_version < 4 OR
+                        (
+                            NUM_NONNULLS(
+                                album_quality_evidence.spectral_grade,
+                                album_quality_evidence.spectral_bitrate_kbps,
+                                album_quality_evidence.spectral_subject,
+                                album_quality_evidence.spectral_provenance,
+                                album_quality_evidence.cliff_hz,
+                                album_quality_evidence.codec_family,
+                                album_quality_evidence.ultrasonic_deficit_db,
+                                album_quality_evidence.spectral_measurement_version
+                            ) > 0 AND
+                            NOT COALESCE(
+                                album_quality_evidence.spectral_grade IN (
+                                    'genuine', 'marginal', 'suspect',
+                                    'likely_transcode'
+                                ) AND
+                                album_quality_evidence.spectral_subject IN (
+                                    'installed', 'source'
+                                ) AND
+                                album_quality_evidence.spectral_provenance IN (
+                                    'measured', 'carried'
+                                ) AND NOT (
+                                    album_quality_evidence.spectral_subject =
+                                        'installed' AND
+                                    album_quality_evidence.spectral_provenance =
+                                        'carried'
+                                ),
+                                FALSE
+                            )
+                        ) OR
                         EXCLUDED.spectral_grade IS NOT NULL OR
                         (
                             album_quality_evidence.spectral_subject =
@@ -187,6 +281,36 @@ class _EvidenceMixin(_PipelineDBBase):
                         ELSE album_quality_evidence.spectral_subject END,
                     spectral_provenance = CASE WHEN
                         album_quality_evidence.lineage_version < 4 OR
+                        (
+                            NUM_NONNULLS(
+                                album_quality_evidence.spectral_grade,
+                                album_quality_evidence.spectral_bitrate_kbps,
+                                album_quality_evidence.spectral_subject,
+                                album_quality_evidence.spectral_provenance,
+                                album_quality_evidence.cliff_hz,
+                                album_quality_evidence.codec_family,
+                                album_quality_evidence.ultrasonic_deficit_db,
+                                album_quality_evidence.spectral_measurement_version
+                            ) > 0 AND
+                            NOT COALESCE(
+                                album_quality_evidence.spectral_grade IN (
+                                    'genuine', 'marginal', 'suspect',
+                                    'likely_transcode'
+                                ) AND
+                                album_quality_evidence.spectral_subject IN (
+                                    'installed', 'source'
+                                ) AND
+                                album_quality_evidence.spectral_provenance IN (
+                                    'measured', 'carried'
+                                ) AND NOT (
+                                    album_quality_evidence.spectral_subject =
+                                        'installed' AND
+                                    album_quality_evidence.spectral_provenance =
+                                        'carried'
+                                ),
+                                FALSE
+                            )
+                        ) OR
                         EXCLUDED.spectral_grade IS NOT NULL OR
                         (
                             album_quality_evidence.spectral_subject =
@@ -208,6 +332,36 @@ class _EvidenceMixin(_PipelineDBBase):
                     -- fact, now eight columns wide instead of four.
                     cliff_hz = CASE WHEN
                         album_quality_evidence.lineage_version < 4 OR
+                        (
+                            NUM_NONNULLS(
+                                album_quality_evidence.spectral_grade,
+                                album_quality_evidence.spectral_bitrate_kbps,
+                                album_quality_evidence.spectral_subject,
+                                album_quality_evidence.spectral_provenance,
+                                album_quality_evidence.cliff_hz,
+                                album_quality_evidence.codec_family,
+                                album_quality_evidence.ultrasonic_deficit_db,
+                                album_quality_evidence.spectral_measurement_version
+                            ) > 0 AND
+                            NOT COALESCE(
+                                album_quality_evidence.spectral_grade IN (
+                                    'genuine', 'marginal', 'suspect',
+                                    'likely_transcode'
+                                ) AND
+                                album_quality_evidence.spectral_subject IN (
+                                    'installed', 'source'
+                                ) AND
+                                album_quality_evidence.spectral_provenance IN (
+                                    'measured', 'carried'
+                                ) AND NOT (
+                                    album_quality_evidence.spectral_subject =
+                                        'installed' AND
+                                    album_quality_evidence.spectral_provenance =
+                                        'carried'
+                                ),
+                                FALSE
+                            )
+                        ) OR
                         EXCLUDED.spectral_grade IS NOT NULL OR
                         (
                             album_quality_evidence.spectral_subject =
@@ -224,6 +378,36 @@ class _EvidenceMixin(_PipelineDBBase):
                         ELSE album_quality_evidence.cliff_hz END,
                     codec_family = CASE WHEN
                         album_quality_evidence.lineage_version < 4 OR
+                        (
+                            NUM_NONNULLS(
+                                album_quality_evidence.spectral_grade,
+                                album_quality_evidence.spectral_bitrate_kbps,
+                                album_quality_evidence.spectral_subject,
+                                album_quality_evidence.spectral_provenance,
+                                album_quality_evidence.cliff_hz,
+                                album_quality_evidence.codec_family,
+                                album_quality_evidence.ultrasonic_deficit_db,
+                                album_quality_evidence.spectral_measurement_version
+                            ) > 0 AND
+                            NOT COALESCE(
+                                album_quality_evidence.spectral_grade IN (
+                                    'genuine', 'marginal', 'suspect',
+                                    'likely_transcode'
+                                ) AND
+                                album_quality_evidence.spectral_subject IN (
+                                    'installed', 'source'
+                                ) AND
+                                album_quality_evidence.spectral_provenance IN (
+                                    'measured', 'carried'
+                                ) AND NOT (
+                                    album_quality_evidence.spectral_subject =
+                                        'installed' AND
+                                    album_quality_evidence.spectral_provenance =
+                                        'carried'
+                                ),
+                                FALSE
+                            )
+                        ) OR
                         EXCLUDED.spectral_grade IS NOT NULL OR
                         (
                             album_quality_evidence.spectral_subject =
@@ -240,6 +424,36 @@ class _EvidenceMixin(_PipelineDBBase):
                         ELSE album_quality_evidence.codec_family END,
                     ultrasonic_deficit_db = CASE WHEN
                         album_quality_evidence.lineage_version < 4 OR
+                        (
+                            NUM_NONNULLS(
+                                album_quality_evidence.spectral_grade,
+                                album_quality_evidence.spectral_bitrate_kbps,
+                                album_quality_evidence.spectral_subject,
+                                album_quality_evidence.spectral_provenance,
+                                album_quality_evidence.cliff_hz,
+                                album_quality_evidence.codec_family,
+                                album_quality_evidence.ultrasonic_deficit_db,
+                                album_quality_evidence.spectral_measurement_version
+                            ) > 0 AND
+                            NOT COALESCE(
+                                album_quality_evidence.spectral_grade IN (
+                                    'genuine', 'marginal', 'suspect',
+                                    'likely_transcode'
+                                ) AND
+                                album_quality_evidence.spectral_subject IN (
+                                    'installed', 'source'
+                                ) AND
+                                album_quality_evidence.spectral_provenance IN (
+                                    'measured', 'carried'
+                                ) AND NOT (
+                                    album_quality_evidence.spectral_subject =
+                                        'installed' AND
+                                    album_quality_evidence.spectral_provenance =
+                                        'carried'
+                                ),
+                                FALSE
+                            )
+                        ) OR
                         EXCLUDED.spectral_grade IS NOT NULL OR
                         (
                             album_quality_evidence.spectral_subject =
@@ -256,6 +470,36 @@ class _EvidenceMixin(_PipelineDBBase):
                         ELSE album_quality_evidence.ultrasonic_deficit_db END,
                     spectral_measurement_version = CASE WHEN
                         album_quality_evidence.lineage_version < 4 OR
+                        (
+                            NUM_NONNULLS(
+                                album_quality_evidence.spectral_grade,
+                                album_quality_evidence.spectral_bitrate_kbps,
+                                album_quality_evidence.spectral_subject,
+                                album_quality_evidence.spectral_provenance,
+                                album_quality_evidence.cliff_hz,
+                                album_quality_evidence.codec_family,
+                                album_quality_evidence.ultrasonic_deficit_db,
+                                album_quality_evidence.spectral_measurement_version
+                            ) > 0 AND
+                            NOT COALESCE(
+                                album_quality_evidence.spectral_grade IN (
+                                    'genuine', 'marginal', 'suspect',
+                                    'likely_transcode'
+                                ) AND
+                                album_quality_evidence.spectral_subject IN (
+                                    'installed', 'source'
+                                ) AND
+                                album_quality_evidence.spectral_provenance IN (
+                                    'measured', 'carried'
+                                ) AND NOT (
+                                    album_quality_evidence.spectral_subject =
+                                        'installed' AND
+                                    album_quality_evidence.spectral_provenance =
+                                        'carried'
+                                ),
+                                FALSE
+                            )
+                        ) OR
                         EXCLUDED.spectral_grade IS NOT NULL OR
                         (
                             album_quality_evidence.spectral_subject =
@@ -395,12 +639,13 @@ class _EvidenceMixin(_PipelineDBBase):
                     extension TEXT,
                     container TEXT,
                     codec TEXT,
-                    decode_ok BOOLEAN
+                    decode_ok BOOLEAN,
+                    content_sha256 TEXT
                 )
             )
             INSERT INTO album_quality_evidence_files (
                 evidence_id, ordinal, relative_path, size_bytes, mtime_ns,
-                extension, container, codec, decode_ok
+                extension, container, codec, decode_ok, content_sha256
             )
             SELECT upserted.id, file_rows.ordinal, file_rows.relative_path,
                    file_rows.size_bytes, file_rows.mtime_ns,
@@ -413,7 +658,8 @@ class _EvidenceMixin(_PipelineDBBase):
                            TRUE
                        )
                        ELSE COALESCE(file_rows.decode_ok, TRUE)
-                   END
+                   END,
+                   file_rows.content_sha256
             FROM upserted
             CROSS JOIN delete_complete
             CROSS JOIN file_rows
@@ -488,7 +734,7 @@ class _EvidenceMixin(_PipelineDBBase):
         files_cur = self._execute(
             """
             SELECT relative_path, size_bytes, mtime_ns, extension, container,
-                   codec, decode_ok
+                   codec, decode_ok, content_sha256
             FROM album_quality_evidence_files
             WHERE evidence_id = %s
             ORDER BY relative_path
@@ -519,7 +765,7 @@ class _EvidenceMixin(_PipelineDBBase):
         files_cur = self._execute(
             """
             SELECT relative_path, size_bytes, mtime_ns, extension, container,
-                   codec, decode_ok
+                   codec, decode_ok, content_sha256
             FROM album_quality_evidence_files
             WHERE evidence_id = %s
             ORDER BY relative_path
@@ -942,6 +1188,7 @@ class _EvidenceMixin(_PipelineDBBase):
                     container=file["container"],
                     codec=file.get("codec"),
                     decode_ok=bool(file["decode_ok"]) if "decode_ok" in file else True,
+                    content_sha256=file.get("content_sha256"),
                 )
                 for file in file_rows
             ],
