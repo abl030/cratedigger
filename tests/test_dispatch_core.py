@@ -182,6 +182,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                   candidate_kwargs: dict[str, object] | None = None,
                   beets_staging_dir: str | None = None,
                   slskd_download_dir: str | None = None,
+                  processing_dir: str | None = None,
                   path_parent: str | None = None,
                   post_dispatch_fn: Callable[
                       [DispatchOutcome, FakePipelineDB, str], None,
@@ -201,6 +202,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             verified_lossless_target=verified_lossless_target,
             beets_staging_dir=beets_staging_dir or "/staging",
             slskd_download_dir=slskd_download_dir or "/slskd",
+            processing_dir=processing_dir or "./processing",
         )
         dl_info = DownloadInfo(username=source_username)
 
@@ -406,6 +408,54 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 dispatched["db"].download_logs[-1].validation_result or "{}",
             )
             self.assertEqual(audit["processing_cleanup"], receipt)
+
+    def test_audio_corrupt_processing_owner_quarantines_on_its_own_root(self):
+        with tempfile.TemporaryDirectory() as root:
+            processing = os.path.join(root, "private-processing")
+            albums = os.path.join(processing, "albums")
+            incoming = os.path.join(root, "Incoming")
+            os.makedirs(os.path.join(albums, "failed_imports"))
+            os.makedirs(incoming)
+            observed: dict[str, object] = {}
+
+            def post_dispatch(
+                result: DispatchOutcome,
+                db: FakePipelineDB,
+                source: str,
+            ) -> None:
+                del result, db
+                with open(os.path.join(source, "01.flac"), "wb") as handle:
+                    handle.write(b"bad")
+                observed["source"] = source
+
+            dispatched = self._dispatch(
+                candidate_kwargs={"audio_corrupt": True},
+                path_parent=albums,
+                processing_dir=processing,
+                beets_staging_dir=incoming,
+                post_dispatch_fn=post_dispatch,
+            )
+
+            source = observed["source"]
+            assert isinstance(source, str)
+            completed_job = dispatched["db"].get_import_job(1)
+            assert completed_job is not None
+            receipt = (completed_job.result or {})["processing_cleanup"]
+            assert isinstance(receipt, dict)
+            target = receipt["selected_destination_path"]
+            assert isinstance(target, str)
+            self.assertTrue(target.startswith(os.path.join(
+                albums,
+                "failed_imports",
+                "bad_files",
+            )))
+            self.assertFalse(target.startswith(incoming))
+            self.assertFalse(os.path.exists(source))
+            self.assertTrue(os.path.exists(os.path.join(target, "01.flac")))
+            self.assertEqual(
+                os.stat(albums).st_dev,
+                os.stat(target).st_dev,
+            )
 
     def test_successful_import_creates_one_log_row(self):
         r = self._dispatch()

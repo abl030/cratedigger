@@ -2570,9 +2570,13 @@ class TestDispatchImport(unittest.TestCase):
         from lib.dispatch import dispatch_import_core
         from lib.quality import SpectralAnalysisDetail, SpectralDetail
 
-        staging_root = tempfile.mkdtemp()
-        source = os.path.join(staging_root, "auto-import", "Artist", "Album")
+        root = tempfile.mkdtemp()
+        processing_dir = os.path.join(root, "processing")
+        processing_albums = os.path.join(processing_dir, "albums")
+        staging_root = os.path.join(root, "Incoming")
+        source = os.path.join(processing_albums, "Artist - Album")
         os.makedirs(source)
+        os.makedirs(staging_root)
         with open(os.path.join(source, "track.mp3"), "w", encoding="utf-8") as f:
             f.write("x")
 
@@ -2629,6 +2633,7 @@ class TestDispatchImport(unittest.TestCase):
         cfg = CratediggerConfig(
             beets_harness_path=_HARNESS,
             beets_staging_dir=staging_root,
+            processing_dir=processing_dir,
             pipeline_db_enabled=True,
         )
         try:
@@ -2666,7 +2671,7 @@ class TestDispatchImport(unittest.TestCase):
 
                 finalize_claimed_dispatch(db, claimed, outcome)
         finally:
-            shutil.rmtree(staging_root, ignore_errors=True)
+            shutil.rmtree(root, ignore_errors=True)
 
         self.assertEqual(db.download_logs[0].outcome, "rejected")
         self.assertEqual(db.download_logs[0].beets_scenario,
@@ -2691,8 +2696,10 @@ class TestDispatchImport(unittest.TestCase):
         quarantine = completed_job.result["processing_cleanup"]
         self.assertIsNotNone(quarantine["destination_path"])
         assert quarantine["destination_path"] is not None
-        self.assertIn("duplicate-remove-guard",
-                      quarantine["destination_path"])
+        self.assertTrue(quarantine["destination_path"].startswith(
+            os.path.join(processing_albums, "duplicate-remove-guard"),
+        ))
+        self.assertFalse(quarantine["destination_path"].startswith(staging_root))
         self.assertFalse(os.path.exists(source))
 
     def _assert_world_failure_self_heal(

@@ -2323,6 +2323,7 @@ in {
         "d ${cfg.stateDir} 0755 ${cfg.user} ${cfg.group} -"
         "d ${cfg.processingDir} 0700 ${cfg.user} ${cfg.group} -"
         "d ${cfg.processingDir}/albums 0700 ${cfg.user} ${cfg.group} -"
+        "d ${cfg.processingDir}/albums/failed_imports 0700 ${cfg.user} ${cfg.group} -"
         "d ${cfg.processingDir}/preview 0700 ${cfg.user} ${cfg.group} -"
         # Only ephemeral preview children are age-cleaned.  Canonical albums
         # are durable in-flight state and are never a tmpfiles cleanup target.

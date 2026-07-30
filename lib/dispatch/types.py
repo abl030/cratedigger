@@ -72,7 +72,7 @@ DISPATCH_CODE_IMPORT_MANIFEST_REJECTED = "import_manifest_rejected"
 # can never delete the user's only copy of the source. Auto-import dispatches
 # under ``bv_result.scenario``, which on that path is always ``strong_match``
 # (``lib/beets.py`` sets ``valid`` and that name in one statement) and never
-# appears here — its staging dir under ``/Incoming`` is always safe to remove
+# appears here — its exact-owner processing source is always safe to remove
 # (see issue #89).
 FORCE_IMPORT_SCENARIOS: frozenset[str] = frozenset({"force_import"})
 

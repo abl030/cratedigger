@@ -258,10 +258,10 @@ def _handle_valid_result(
     execution_lease: ExecutionLeaseSnapshot | None = None,
     owner_session_identity: OwnerSessionIdentity | None = None,
 ) -> DispatchOutcome | None:
-    """Stage a valid exact-release result and dispatch request imports.
+    """Dispatch a valid exact-release result from its authoritative path.
 
-    The release advisory lock is acquired before the staged move. Redownloads
-    only stage for manual review and mark the request done.
+    Request imports remain at their durable processing-owner path. Redownloads
+    move to manual-review staging and mark the request done.
     """
     from contextlib import nullcontext
 
@@ -325,7 +325,7 @@ def _handle_valid_result(
                 f"AUTO-IMPORT DEFERRED: {album_data.artist} - "
                 f"{album_data.title} — release lock held by another "
                 f"process (mbid={album_data.mb_release_id}); skipping "
-                "staged move and dispatch. Files stay at "
+                "dispatch. Files stay at "
                 f"{staged_album.current_path} so the next cycle can "
                 "idempotently resume from process_completed_album."
             )
@@ -345,22 +345,31 @@ def _handle_valid_result(
                 deferred=True,
             )
 
-        _checkpoint(cancellation_token)
-        dest = staged_album.move_to(
-            stage_to_ai_path(
-                artist=album_data.artist,
-                title=album_data.title,
-                staging_dir=ctx.cfg.beets_staging_dir,
-                request_id=request_id,
-                auto_import=will_auto_import,
-            ),
-            cancellation_token=cancellation_token,
-        )
+        if will_auto_import:
+            # The processing handoff persisted this exact path as immutable
+            # owner provenance. Beets launch, journaled cleanup, and terminal
+            # acknowledgement all fence on the same value, so relocating the
+            # folder here would split live filesystem state from its durable
+            # authority.
+            dest = staged_album.current_path
+        else:
+            _checkpoint(cancellation_token)
+            dest = staged_album.move_to(
+                stage_to_ai_path(
+                    artist=album_data.artist,
+                    title=album_data.title,
+                    staging_dir=ctx.cfg.beets_staging_dir,
+                    request_id=request_id,
+                    auto_import=False,
+                ),
+                cancellation_token=cancellation_token,
+            )
         _checkpoint(cancellation_token)
         album_data.import_folder = dest
         log_validation_result(album_data, bv_result, ctx.cfg, dest_path=dest)
         logger.info(
-            f"STAGED: {album_data.artist} - {album_data.title} "
+            f"{'PROCESSING SOURCE' if will_auto_import else 'STAGED'}: "
+            f"{album_data.artist} - {album_data.title} "
             f"(scenario={bv_result.scenario}, "
             f"distance={bv_result.distance:.4f}) → {dest}"
         )

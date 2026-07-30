@@ -298,13 +298,21 @@ def _run_dispatch(
             was_converted=world.was_converted,
         )
 
+    dl_info = DownloadInfo(username=world.source_username)
+
+    root = tempfile.mkdtemp()
+    processing_dir = os.path.join(root, "processing")
+    processing_albums = os.path.join(processing_dir, "albums")
+    incoming = os.path.join(root, "Incoming")
+    os.makedirs(os.path.join(processing_albums, "failed_imports"))
+    os.makedirs(incoming)
+    tmpdir = tempfile.mkdtemp(dir=processing_albums)
     cfg = CratediggerConfig(
         beets_harness_path=_HARNESS,
         pipeline_db_enabled=True,
+        processing_dir=processing_dir,
+        beets_staging_dir=incoming,
     )
-    dl_info = DownloadInfo(username=world.source_username)
-
-    tmpdir = tempfile.mkdtemp()
     try:
         del queued  # retained argument for existing generated call sites
         db = FakePipelineDB()
@@ -454,7 +462,7 @@ def _run_dispatch(
         else:
             finalize_claimed_dispatch(db, claimed, result)
     finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        shutil.rmtree(root, ignore_errors=True)
     return {"db": db, "result": result}
 
 
