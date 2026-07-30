@@ -478,7 +478,32 @@ class TestStagedAlbumCancellation(unittest.TestCase):
                 b"audio",
             )
 
-    def test_cross_filesystem_move_fails_closed_without_recursive_fallback(
+    def test_monitored_move_creates_missing_destination_parents(
+        self,
+    ) -> None:
+        token = CancellationToken()
+        with tempfile.TemporaryDirectory() as raw:
+            source = pathlib.Path(raw, "source")
+            source.mkdir()
+            (source / "01.flac").write_bytes(b"audio")
+            destination = pathlib.Path(
+                raw,
+                "Incoming",
+                "auto-import",
+                "Artist",
+                "Album",
+            )
+
+            result = StagedAlbum(str(source)).move_to(
+                str(destination),
+                cancellation_token=token,
+            )
+
+            self.assertEqual(result, str(destination))
+            self.assertEqual((destination / "01.flac").read_bytes(), b"audio")
+            self.assertFalse(source.exists())
+
+    def test_monitored_move_supports_cross_filesystem_fallback(
         self,
     ) -> None:
         token = CancellationToken()
@@ -491,18 +516,15 @@ class TestStagedAlbumCancellation(unittest.TestCase):
             with patch(
                 "lib.staged_album.os.rename",
                 side_effect=OSError(errno.EXDEV, "cross-device link"),
-            ), patch(
-                "lib.staged_album.shutil.move",
-                side_effect=AssertionError("recursive fallback ran"),
-            ) as fallback, self.assertRaises(OSError):
-                StagedAlbum(str(source)).move_to(
+            ):
+                result = StagedAlbum(str(source)).move_to(
                     str(destination),
                     cancellation_token=token,
                 )
 
-            fallback.assert_not_called()
-            self.assertEqual((source / "01.flac").read_bytes(), b"audio")
-            self.assertFalse(destination.exists())
+            self.assertEqual(result, str(destination))
+            self.assertEqual((destination / "01.flac").read_bytes(), b"audio")
+            self.assertFalse(source.exists())
 
 
 class TestMonitoredImportOneCancellation(unittest.TestCase):

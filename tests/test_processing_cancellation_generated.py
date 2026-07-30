@@ -1,5 +1,6 @@
 """Generated fail-stop patrol for staged filesystem mutations."""
 
+import errno
 import os
 import shutil
 import tempfile
@@ -101,6 +102,61 @@ def _known_bad_preflight_only_move(
     shutil.rmtree(staged.current_path)
 
 
+def assert_staged_move_supports_production_layout(
+    *,
+    file_count: int,
+    missing_parent_depth: int,
+    cross_filesystem: bool,
+    move_fn: MoveFn,
+) -> None:
+    """A monitored move keeps the ordinary staging filesystem contract."""
+    with tempfile.TemporaryDirectory() as raw:
+        source = os.path.join(raw, "source")
+        destination = os.path.join(
+            raw,
+            *(f"missing-{index}" for index in range(missing_parent_depth)),
+            "album",
+        )
+        os.mkdir(source)
+        expected = {f"{index:02d}.flac" for index in range(file_count)}
+        for name in expected:
+            with open(os.path.join(source, name), "wb") as handle:
+                handle.write(name.encode())
+
+        token = CancellationToken()
+        if cross_filesystem:
+            with patch(
+                "lib.staged_album.os.rename",
+                side_effect=OSError(errno.EXDEV, "cross-device link"),
+            ):
+                move_fn(StagedAlbum(source), destination, token)
+        else:
+            move_fn(StagedAlbum(source), destination, token)
+
+        if set(os.listdir(destination)) != expected:
+            raise AssertionError("staged move did not preserve every source entry")
+        if os.path.exists(source):
+            raise AssertionError("staged move did not consume its source directory")
+
+
+def _known_bad_rename_only_move(
+    staged: StagedAlbum,
+    destination: str,
+    token: CancellationToken,
+) -> None:
+    """Mutant: requires existing parents and one filesystem."""
+    token.raise_if_cancelled()
+    os.mkdir(destination)
+    for name in os.listdir(staged.current_path):
+        token.raise_if_cancelled()
+        os.rename(
+            os.path.join(staged.current_path, name),
+            os.path.join(destination, name),
+        )
+    token.raise_if_cancelled()
+    os.rmdir(staged.current_path)
+
+
 def assert_recursive_cleanup_is_fail_stop(
     remove_fn: Callable[[int, str, CancellationToken], None],
 ) -> None:
@@ -162,6 +218,27 @@ class TestStagedMoveCancellationGenerated(unittest.TestCase):
             move_fn=_production_move,
         )
 
+    @given(
+        file_count=st.integers(min_value=1, max_value=6),
+        missing_parent_depth=st.integers(min_value=0, max_value=3),
+        cross_filesystem=st.booleans(),
+    )
+    @example(file_count=1, missing_parent_depth=3, cross_filesystem=False)
+    @example(file_count=1, missing_parent_depth=0, cross_filesystem=True)
+    def test_every_production_staging_layout_is_supported(
+        self,
+        *,
+        file_count: int,
+        missing_parent_depth: int,
+        cross_filesystem: bool,
+    ) -> None:
+        assert_staged_move_supports_production_layout(
+            file_count=file_count,
+            missing_parent_depth=missing_parent_depth,
+            cross_filesystem=cross_filesystem,
+            move_fn=_production_move,
+        )
+
     def test_checker_rejects_preflight_only_known_bad_mutant(self) -> None:
         with self.assertRaisesRegex(
             AssertionError,
@@ -171,6 +248,15 @@ class TestStagedMoveCancellationGenerated(unittest.TestCase):
                 file_count=3,
                 cancel_at=2,
                 move_fn=_known_bad_preflight_only_move,
+            )
+
+    def test_layout_checker_rejects_rename_only_known_bad_mutant(self) -> None:
+        with self.assertRaises(OSError):
+            assert_staged_move_supports_production_layout(
+                file_count=1,
+                missing_parent_depth=0,
+                cross_filesystem=True,
+                move_fn=_known_bad_rename_only_move,
             )
 
     def test_recursive_cleanup_checks_every_child_mutation(self) -> None:
