@@ -3,7 +3,7 @@
 Slice-level coverage for ``measure_preimport_state`` lives in
 ``tests/test_integration_slices.py::TestBadAudioHashSlice``. These tests
 exercise the ``_check_bad_audio_hashes`` helper and the empty-table /
-hashing-error / DB-error fall-through behavior of the gate.
+hashing-error / DB-error fail-closed behavior of the gate.
 """
 
 from __future__ import annotations
@@ -22,6 +22,31 @@ from tests.fakes import FakePipelineDB
 
 class TestAttemptSpectralAudit(unittest.TestCase):
     """Attempt audit scans ordinary HAVE and preserves lossless provenance."""
+
+    def test_persisted_projection_keeps_the_complete_atomic_spectral_fact(self):
+        from lib.measurement import spectral_detail_from_persisted_source
+        from lib.quality import AudioQualityMeasurement
+
+        detail = spectral_detail_from_persisted_source(
+            AudioQualityMeasurement(
+                spectral_grade="suspect",
+                spectral_bitrate_kbps=128,
+                spectral_subject="installed",
+                spectral_provenance="measured",
+                cliff_hz=15_750,
+                codec_family="mp3",
+                ultrasonic_deficit_db=11.25,
+                spectral_measurement_version=2,
+            ),
+        )
+
+        self.assertTrue(detail.attempted)
+        self.assertEqual(detail.grade, "suspect")
+        self.assertEqual(detail.bitrate_kbps, 128)
+        self.assertEqual(detail.cliff_hz, 15_750)
+        self.assertEqual(detail.codec_family, "mp3")
+        self.assertEqual(detail.ultrasonic_deficit_db, 11.25)
+        self.assertEqual(detail.spectral_measurement_version, 2)
 
     def test_shared_owner_keeps_lookup_and_analyzer_failures_independent(self):
         from lib.measurement import (
@@ -405,7 +430,7 @@ class TestCheckBadAudioHashes(unittest.TestCase):
             hashes=[BadAudioHashInput(hash_value=digest, audio_format="mp3")],
         )
 
-        match = _check_bad_audio_hashes([mp3], db)  # type: ignore[arg-type]
+        match = _check_bad_audio_hashes([mp3], db)
 
         self.assertIsNotNone(match)
         assert match is not None  # narrow for pyright
@@ -415,7 +440,7 @@ class TestCheckBadAudioHashes(unittest.TestCase):
     def test_returns_none_when_no_match(self):
         db = FakePipelineDB()
         match = _check_bad_audio_hashes(
-            [FIXTURE_DIR / "sine_440.mp3"], db,  # type: ignore[arg-type]
+            [FIXTURE_DIR / "sine_440.mp3"], db,
         )
         self.assertIsNone(match)
 
@@ -434,52 +459,49 @@ class TestCheckBadAudioHashes(unittest.TestCase):
             hashes=[BadAudioHashInput(hash_value=digest, audio_format="mp3")],
         )
 
-        # 11 imaginary tracks (paths that won't exist; their hash attempts
-        # will fail and be skipped) plus the real fixture last.
+        # 11 unsupported paths are intentionally skipped, then the real
+        # supported fixture must be hashed and matched.
         paths: list[Path] = [
-            FIXTURE_DIR / f"missing_track_{i:02d}.mp3" for i in range(1, 12)
+            FIXTURE_DIR / f"unsupported_track_{i:02d}" for i in range(1, 12)
         ]
         paths.append(mp3)
 
-        match = _check_bad_audio_hashes(paths, db)  # type: ignore[arg-type]
+        match = _check_bad_audio_hashes(paths, db)
         self.assertIsNotNone(match)
         assert match is not None
         self.assertEqual(match.track_path, str(mp3))
 
-    def test_hashing_failure_logs_and_continues(self):
-        """When ``hash_audio_content`` raises, the gate continues; if no
-        later track matches, returns None (gate falls through)."""
+    def test_hashing_failure_aborts_incomplete_measurement(self):
+        """A supported track that cannot be hashed must retry preview."""
         from lib.audio_hash import AudioHashError
 
         db = FakePipelineDB()
         # Direct lookup mock; never reached because hashing always fails.
-        with patch(
+        with self.assertRaisesRegex(AudioHashError, "boom"), patch(
             "lib.measurement.hash_audio_content",
             side_effect=AudioHashError("boom"),
         ), patch.object(db, "lookup_bad_audio_hash") as lookup:
-            match = _check_bad_audio_hashes(
-                [FIXTURE_DIR / "sine_440.mp3"], db,  # type: ignore[arg-type]
+            _check_bad_audio_hashes(
+                [FIXTURE_DIR / "sine_440.mp3"], db,
             )
-        self.assertIsNone(match)
         lookup.assert_not_called()
 
-    def test_db_lookup_failure_logs_and_continues(self):
-        """``lookup_bad_audio_hash`` raising must not crash the gate."""
+    def test_db_lookup_failure_aborts_incomplete_measurement(self):
+        """A failed authoritative lookup must retry preview."""
         db = FakePipelineDB()
-        with patch.object(
+        with self.assertRaisesRegex(RuntimeError, "db down"), patch.object(
             db, "lookup_bad_audio_hash", side_effect=RuntimeError("db down"),
         ):
-            match = _check_bad_audio_hashes(
-                [FIXTURE_DIR / "sine_440.mp3"], db,  # type: ignore[arg-type]
+            _check_bad_audio_hashes(
+                [FIXTURE_DIR / "sine_440.mp3"], db,
             )
-        self.assertIsNone(match)
 
     def test_skips_paths_without_extensions(self):
         """A path without an extension is skipped (not hashed)."""
         db = FakePipelineDB()
         with patch("lib.measurement.hash_audio_content") as h:
             match = _check_bad_audio_hashes(
-                [Path("/tmp/no_extension")], db,  # type: ignore[arg-type]
+                [Path("/tmp/no_extension")], db,
             )
         self.assertIsNone(match)
         h.assert_not_called()
@@ -545,6 +567,30 @@ class TestBadAudioHashGateFastPath(unittest.TestCase):
         self.assertEqual(db.has_any_bad_audio_hashes_calls, 1)
         self.assertEqual(db.lookup_bad_audio_hash_calls, [])
         hashfn.assert_not_called()
+
+    def test_empty_table_probe_failure_aborts_incomplete_measurement(self):
+        """The preview boundary must retry when bad-hash authority is down."""
+        from lib.config import CratediggerConfig
+        from lib.measurement import measure_preimport_state
+
+        db = FakePipelineDB()
+        with self.assertRaisesRegex(RuntimeError, "bad hash DB unavailable"), \
+             patch.object(
+                 db,
+                 "has_any_bad_audio_hashes",
+                 side_effect=RuntimeError("bad hash DB unavailable"),
+             ):
+            measure_preimport_state(
+                path=str(FIXTURE_DIR),
+                mb_release_id="mbid-probe-failure",
+                label="Probe Failure",
+                download_filetype="mp3",
+                download_min_bitrate_bps=320_000,
+                download_is_vbr=False,
+                cfg=CratediggerConfig(audio_check_mode="off"),
+                db=db,
+                request_id=None,
+            )
 
 
 class TestMeasurePreimportState(unittest.TestCase):

@@ -619,12 +619,13 @@ def _run_world(world: PreviewFailureWorld) -> PreviewFailureObservation:
             def capture_snapshot(
                 _db: object,
                 *,
+                mb_release_id: str,
                 source_path: str,
                 download_log_id: int | None = None,
                 import_job_id: int | None = None,
             ) -> EvidenceBuildResult:
                 nonlocal force_snapshot_path, force_snapshot_bytes
-                del download_log_id, import_job_id
+                del mb_release_id, download_log_id, import_job_id
                 force_snapshot_path = source_path
                 with open(
                     os.path.join(force_snapshot_path, f"01.{extension}"),

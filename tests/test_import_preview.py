@@ -8,7 +8,9 @@ import unittest
 from contextlib import AbstractContextManager
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+
+import msgspec
 
 from lib.config import CratediggerConfig
 from lib.dispatch.types import ImportOneRun
@@ -123,6 +125,10 @@ class TestSpectralAuditMerge(unittest.TestCase):
             ),
             ("grade_none", SpectralAnalysisDetail(attempted=True, grade=None)),
             ("grade_error", SpectralAnalysisDetail(attempted=True, grade="error")),
+            (
+                "grade_unrecognized",
+                SpectralAnalysisDetail(attempted=True, grade="banana"),
+            ),
         )
         for name, candidate in cases:
             with self.subTest(name=name):
@@ -581,6 +587,288 @@ class TestImportPreviewPath(unittest.TestCase):
         ))
         return beets
 
+    def test_new_candidate_reuses_complete_matching_have_snapshot(self):
+        """HAVE reuse is independent of whether candidate evidence exists."""
+        from lib.measurement import ExistingSpectralAuditLookup
+
+        db = self._db()
+        candidate = self._source_dir()
+        existing = self._source_dir()
+        try:
+            with open(os.path.join(existing, "01.mp3"), "ab") as handle:
+                handle.write(b"-installed-have")
+            evidence = make_album_quality_evidence(
+                mb_release_id="mbid-42",
+                source_path=existing,
+                files=snapshot_audio_files(existing),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=320,
+                    avg_bitrate_kbps=320,
+                    median_bitrate_kbps=320,
+                    format="MP3",
+                    spectral_grade="genuine",
+                    spectral_bitrate_kbps=128,
+                    spectral_subject="installed",
+                    spectral_provenance="measured",
+                ),
+                on_disk_v0_research_attempted=True,
+            )
+            db.upsert_album_quality_evidence(evidence)
+            current = db.find_album_quality_evidence(
+                mb_release_id=evidence.mb_release_id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert current is not None and current.id is not None
+            db.set_request_current_evidence(42, current.id)
+            download_log_id = db.log_download(
+                42,
+                outcome="rejected",
+                validation_result={"failed_path": candidate},
+            )
+            calls: list[str] = []
+
+            def analyze(path: str) -> SpectralAnalysisDetail:
+                role = "have" if path == existing else "candidate"
+                calls.append(role)
+                return SpectralAnalysisDetail(
+                    attempted=True,
+                    grade="suspect" if role == "have" else "genuine",
+                    bitrate_kbps=96 if role == "have" else 192,
+                )
+
+            run = ImportOneRun(
+                command=("import_one",),
+                returncode=0,
+                stdout="",
+                stderr="",
+                import_result=ImportResult(
+                    decision="import",
+                    source_measurement=AudioQualityMeasurement(
+                        min_bitrate_kbps=320,
+                        avg_bitrate_kbps=320,
+                        median_bitrate_kbps=320,
+                        format="MP3",
+                        spectral_grade="genuine",
+                        spectral_bitrate_kbps=192,
+                        spectral_subject="source",
+                        spectral_provenance="measured",
+                    ),
+                ),
+            )
+            with patch(
+                "lib.beets_db.BeetsDB",
+                return_value=self._beets_current(existing),
+            ), patch(
+                "lib.import_preview.inspect_local_files",
+                return_value=LocalFileInspection(
+                    filetype="mp3",
+                    min_bitrate_bps=320_000,
+                    avg_bitrate_bps=320_000,
+                    is_vbr=False,
+                ),
+            ):
+                result = measure_and_persist_candidate_evidence(
+                    db,
+                    request_id=42,
+                    path=candidate,
+                    download_log_id=download_log_id,
+                    runtime_config=_preview_config(),
+                    run_import_fn=lambda **_kwargs: run,
+                    spectral_detail_analyzer=analyze,
+                    existing_spectral_resolver=lambda _mbid: (
+                        ExistingSpectralAuditLookup(path=existing)
+                    ),
+                )
+
+            self.assertEqual(result.verdict, "evidence_ready", result)
+            self.assertEqual(
+                calls,
+                ["candidate"],
+                "a new candidate must not force unchanged complete HAVE bytes "
+                "through the analyzer",
+            )
+            linked = db.load_album_quality_evidence_by_id(current.id)
+            self.assertEqual(linked, current)
+        finally:
+            shutil.rmtree(candidate, ignore_errors=True)
+            shutil.rmtree(existing, ignore_errors=True)
+
+    def test_new_candidate_fails_when_required_have_scan_cannot_persist(self):
+        """A full preview cannot outrun failed HAVE evidence persistence."""
+        from lib.measurement import ExistingSpectralAuditLookup
+
+        db = self._db()
+        candidate = self._source_dir()
+        existing = self._source_dir()
+        try:
+            with open(os.path.join(existing, "01.mp3"), "ab") as handle:
+                handle.write(b"-installed-have")
+            evidence = make_album_quality_evidence(
+                mb_release_id="mbid-42",
+                source_path=existing,
+                files=snapshot_audio_files(existing),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=320,
+                    avg_bitrate_kbps=320,
+                    median_bitrate_kbps=320,
+                    format="MP3",
+                ),
+                on_disk_v0_research_attempted=True,
+            )
+            db.upsert_album_quality_evidence(evidence)
+            current = db.find_album_quality_evidence(
+                mb_release_id=evidence.mb_release_id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert current is not None and current.id is not None
+            db.set_request_current_evidence(42, current.id)
+            download_log_id = db.log_download(
+                42,
+                outcome="rejected",
+                validation_result={"failed_path": candidate},
+            )
+            harness_called = False
+
+            def run_import(**_kwargs: object) -> ImportOneRun:
+                nonlocal harness_called
+                harness_called = True
+                raise AssertionError(
+                    "harness must not run without durable HAVE evidence"
+                )
+
+            with patch(
+                "lib.beets_db.BeetsDB",
+                return_value=self._beets_current(existing),
+            ), patch(
+                "lib.import_preview.inspect_local_files",
+                return_value=LocalFileInspection(
+                    filetype="mp3",
+                    min_bitrate_bps=320_000,
+                    avg_bitrate_bps=320_000,
+                    is_vbr=False,
+                ),
+            ), patch.object(
+                db,
+                "persist_current_spectral_measurement",
+                return_value=False,
+            ):
+                result = measure_and_persist_candidate_evidence(
+                    db,
+                    request_id=42,
+                    path=candidate,
+                    download_log_id=download_log_id,
+                    runtime_config=_preview_config(),
+                    run_import_fn=run_import,
+                    spectral_detail_analyzer=lambda path: (
+                        SpectralAnalysisDetail(
+                            attempted=True,
+                            grade=(
+                                "suspect" if path == existing else "genuine"
+                            ),
+                            bitrate_kbps=(
+                                96 if path == existing else 192
+                            ),
+                        )
+                    ),
+                    existing_spectral_resolver=lambda _mbid: (
+                        ExistingSpectralAuditLookup(path=existing)
+                    ),
+                )
+
+            self.assertEqual(result.verdict, "measurement_failed")
+            self.assertEqual(result.decision, "evidence_persist_failed")
+            self.assertIn("stale", result.detail or "")
+            self.assertFalse(harness_called)
+        finally:
+            shutil.rmtree(candidate, ignore_errors=True)
+            shutil.rmtree(existing, ignore_errors=True)
+
+    def test_candidate_spectral_failure_outranks_have_persistence_failure(self):
+        """A failed IN proof is primary when neither side can advance."""
+
+        db = self._db()
+        candidate = self._source_dir()
+        existing = self._source_dir()
+        try:
+            evidence = make_album_quality_evidence(
+                mb_release_id="mbid-42",
+                source_path=existing,
+                files=snapshot_audio_files(existing),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=320,
+                    avg_bitrate_kbps=320,
+                    median_bitrate_kbps=320,
+                    format="MP3",
+                ),
+                on_disk_v0_research_attempted=True,
+            )
+            db.upsert_album_quality_evidence(evidence)
+            current = db.find_album_quality_evidence(
+                mb_release_id=evidence.mb_release_id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert current is not None and current.id is not None
+            db.set_request_current_evidence(42, current.id)
+            download_log_id = db.log_download(
+                42,
+                outcome="rejected",
+                validation_result={"failed_path": candidate},
+            )
+            measurement = PreimportMeasurement(
+                lossless_candidate=True,
+                folder_layout="flat",
+                audio_file_count=1,
+                spectral_audit=SpectralDetail(
+                    candidate=SpectralAnalysisDetail(
+                        attempted=True,
+                        error="candidate spectral decoder failed",
+                    ),
+                    existing=SpectralAnalysisDetail(
+                        attempted=True,
+                        grade="suspect",
+                        bitrate_kbps=96,
+                    ),
+                ),
+                existing_spectral_path=existing,
+            )
+
+            with patch(
+                "lib.beets_db.BeetsDB",
+                return_value=self._beets_current(existing),
+            ), patch(
+                "lib.import_preview.inspect_local_files",
+                return_value=LocalFileInspection(
+                    filetype="flac",
+                    min_bitrate_bps=900_000,
+                    avg_bitrate_bps=900_000,
+                    is_vbr=False,
+                ),
+            ), patch(
+                "lib.import_preview.measure_preimport_state",
+                return_value=measurement,
+            ), patch.object(
+                db,
+                "persist_current_spectral_measurement",
+                return_value=False,
+            ):
+                result = measure_and_persist_candidate_evidence(
+                    db,
+                    request_id=42,
+                    path=candidate,
+                    download_log_id=download_log_id,
+                    runtime_config=_preview_config(),
+                    run_import_fn=lambda **_kwargs: (_ for _ in ()).throw(
+                        AssertionError("harness must not run"),
+                    ),
+                )
+
+            self.assertEqual(result.verdict, "measurement_failed")
+            self.assertEqual(result.decision, "spectral_analysis_failed")
+            self.assertIn("candidate spectral decoder failed", result.detail or "")
+        finally:
+            shutil.rmtree(candidate, ignore_errors=True)
+            shutil.rmtree(existing, ignore_errors=True)
+
     def _seed_current_without_v0(
         self,
         db: FakePipelineDB,
@@ -872,7 +1160,6 @@ class TestImportPreviewPath(unittest.TestCase):
             assert linked is not None
             self.assertEqual(linked.source_path, source)
         finally:
-            import shutil
             shutil.rmtree(source, ignore_errors=True)
 
     def test_preview_loader_rebuilds_v1_current_evidence_for_import_attempt(self):
@@ -1060,6 +1347,147 @@ class TestImportPreviewPath(unittest.TestCase):
                 reloaded.measurement.spectral_provenance, "measured")
         finally:
             import shutil
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_rejected_have_cas_never_accepts_stale_nonnull_grade(self):
+        db = self._db()
+        source = self._source_dir()
+        try:
+            evidence = make_album_quality_evidence(
+                mb_release_id="mbid-42",
+                source_path=source,
+                files=snapshot_audio_files(source),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=192,
+                    avg_bitrate_kbps=192,
+                    median_bitrate_kbps=192,
+                    format="MP3",
+                    spectral_grade="error",
+                    spectral_subject="installed",
+                    spectral_provenance="measured",
+                ),
+            )
+            self.assertTrue(evidence.storage_validation_errors())
+            stored = msgspec.structs.replace(
+                evidence,
+                id=100,
+            )
+            db._store_album_quality_evidence(stored)
+            db.set_request_current_evidence(42, stored.id)
+
+            with patch.object(
+                db,
+                "persist_current_spectral_measurement",
+                return_value=False,
+            ):
+                result = persist_exact_current_spectral_from_attempt(
+                    db,
+                    request_id=42,
+                    current_evidence=stored,
+                    measured_existing=SpectralAnalysisDetail(
+                        attempted=True,
+                        grade="genuine",
+                        bitrate_kbps=160,
+                    ),
+                    measured_existing_path=source,
+                )
+
+            self.assertEqual(result.status, "stale")
+            self.assertNotEqual(result.status, "ready")
+        finally:
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_accepted_have_write_must_reload_the_exact_fresh_fact(self):
+        db = self._db()
+        source = self._source_dir()
+        try:
+            evidence = make_album_quality_evidence(
+                mb_release_id="mbid-42",
+                source_path=source,
+                files=snapshot_audio_files(source),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=192,
+                    avg_bitrate_kbps=192,
+                    median_bitrate_kbps=192,
+                    format="MP3",
+                    spectral_grade="suspect",
+                    spectral_bitrate_kbps=96,
+                    spectral_subject="installed",
+                    spectral_provenance="measured",
+                ),
+            )
+            db.upsert_album_quality_evidence(evidence)
+            stored = db.find_album_quality_evidence(
+                mb_release_id=evidence.mb_release_id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert stored is not None and stored.id is not None
+            db.set_request_current_evidence(42, stored.id)
+
+            with patch.object(
+                db,
+                "persist_current_spectral_measurement",
+                return_value=True,
+            ):
+                result = persist_exact_current_spectral_from_attempt(
+                    db,
+                    request_id=42,
+                    current_evidence=stored,
+                    measured_existing=SpectralAnalysisDetail(
+                        attempted=True,
+                        grade="genuine",
+                        bitrate_kbps=160,
+                    ),
+                    measured_existing_path=source,
+                )
+
+            self.assertEqual(result.status, "failed")
+            self.assertNotEqual(result.status, "ready")
+        finally:
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_unrecognized_fresh_have_grade_is_never_persisted(self):
+        db = self._db()
+        source = self._source_dir()
+        try:
+            evidence = make_album_quality_evidence(
+                mb_release_id="mbid-42",
+                source_path=source,
+                files=snapshot_audio_files(source),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=192,
+                    avg_bitrate_kbps=192,
+                    median_bitrate_kbps=192,
+                    format="MP3",
+                ),
+            )
+            db.upsert_album_quality_evidence(evidence)
+            stored = db.find_album_quality_evidence(
+                mb_release_id=evidence.mb_release_id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert stored is not None and stored.id is not None
+            db.set_request_current_evidence(42, stored.id)
+
+            with patch.object(
+                db,
+                "persist_current_spectral_measurement",
+                wraps=db.persist_current_spectral_measurement,
+            ) as persist:
+                result = persist_exact_current_spectral_from_attempt(
+                    db,
+                    request_id=42,
+                    current_evidence=stored,
+                    measured_existing=SpectralAnalysisDetail(
+                        attempted=True,
+                        grade="banana",
+                    ),
+                    measured_existing_path=source,
+                )
+
+            self.assertEqual(result.status, "incomplete")
+            persist.assert_not_called()
+        finally:
             shutil.rmtree(source, ignore_errors=True)
 
     def test_fresh_audit_never_overwrites_lossless_source_carried_grade(self):
@@ -1279,7 +1707,7 @@ class TestImportPreviewPath(unittest.TestCase):
         finally:
             shutil.rmtree(source, ignore_errors=True)
 
-    def test_measurement_worker_wires_have_scan_into_current_evidence(self):
+    def test_measurement_integrity_reject_does_not_touch_have(self):
         db = self._db()
         source = self._source_dir()
         try:
@@ -1303,35 +1731,19 @@ class TestImportPreviewPath(unittest.TestCase):
             )
             assert current is not None and current.id is not None
             db.set_request_current_evidence(42, current.id)
-            measurement = PreimportMeasurement(
-                audio_corrupt=True,
-                corrupt_files=["01.mp3"],
-                audio_validation=make_audio_corrupt_validation_report(
-                    "01.mp3",
-                ),
-                folder_layout="flat",
-                audio_file_count=1,
-                existing_spectral_path=source,
-                spectral_audit=SpectralDetail(
-                    candidate=SpectralAnalysisDetail(
-                        attempted=True,
-                        grade="likely_transcode",
-                        bitrate_kbps=96,
-                    ),
-                    existing=SpectralAnalysisDetail(
-                        attempted=True,
-                        grade="genuine",
-                        bitrate_kbps=96,
-                    ),
-                ),
-            )
             candidate = make_album_quality_evidence(
                 mb_release_id="mbid-42-candidate"
             )
+            forbidden_current = Mock(
+                side_effect=AssertionError("HAVE evidence must not load"),
+            )
+            forbidden_resolver = Mock(
+                side_effect=AssertionError("HAVE path must not resolve"),
+            )
+            forbidden_analyzer = Mock(
+                side_effect=AssertionError("spectral analysis must not run"),
+            )
             with patch(
-                "lib.beets_db.BeetsDB",
-                return_value=self._beets_current(source),
-            ), patch(
                 "lib.config.read_runtime_config",
                 return_value=_preview_runtime_config(
                     beets_harness_path="/fake/harness/run_beets_harness.sh",
@@ -1340,27 +1752,32 @@ class TestImportPreviewPath(unittest.TestCase):
             ), patch(
                 "lib.import_preview.inspect_local_files",
                 return_value=LocalFileInspection(filetype="mp3"),
-            ), patch(
-                "lib.import_preview.measure_preimport_state",
-                return_value=measurement,
             ):
                 result = measure_and_persist_candidate_evidence(
                     db,
                     request_id=42,
                     path=source,
+                    current_evidence_loader=forbidden_current,
+                    existing_spectral_resolver=forbidden_resolver,
+                    spectral_detail_analyzer=forbidden_analyzer,
                     persist_measurement_fn=(
                         lambda *args, **kwargs: EvidenceBuildResult(
                             candidate,
                             "ready",
                         )
                     ),
+                    repair_fn=lambda _path: None,
                 )
 
             self.assertEqual(result.verdict, "evidence_ready")
+            self.assertEqual(result.decision, "audio_corrupt")
+            forbidden_current.assert_not_called()
+            forbidden_resolver.assert_not_called()
+            forbidden_analyzer.assert_not_called()
             persisted = db.load_album_quality_evidence_by_id(current.id)
             assert persisted is not None
-            self.assertEqual(persisted.measurement.spectral_grade, "genuine")
-            self.assertEqual(persisted.measurement.spectral_bitrate_kbps, 96)
+            self.assertIsNone(persisted.measurement.spectral_grade)
+            self.assertIsNone(persisted.measurement.spectral_bitrate_kbps)
         finally:
             import shutil
             shutil.rmtree(source, ignore_errors=True)
@@ -1678,7 +2095,9 @@ class TestImportPreviewPath(unittest.TestCase):
         # bitrate/spectral/V0/override input may survive into the dry run.
         self.assertIsNone(self._direct_preview_override(db))
 
-    def test_direct_preview_ambiguous_current_fails_before_measurement(self):
+    def test_direct_preview_measures_candidate_before_ambiguous_current_fails(
+        self,
+    ):
         db = self._db()
         source = self._source_dir()
         fake_beets = FakeBeetsDB()
@@ -1695,6 +2114,10 @@ class TestImportPreviewPath(unittest.TestCase):
                 lambda **_kwargs: fake_beets,
             ), patch(
                 "lib.import_preview.measure_preimport_state",
+                return_value=PreimportMeasurement(
+                    folder_layout="flat",
+                    audio_file_count=1,
+                ),
             ) as mock_measure:
                 preview = preview_import_from_path(
                     db,
@@ -1705,11 +2128,14 @@ class TestImportPreviewPath(unittest.TestCase):
             self.assertEqual(preview.verdict, "measurement_failed")
             self.assertEqual(preview.decision, "current_evidence_failed")
             self.assertIn("ambiguous_current", preview.detail or "")
-            mock_measure.assert_not_called()
+            mock_measure.assert_called_once()
+            self.assertTrue(
+                mock_measure.call_args.kwargs["defer_existing_spectral"],
+            )
         finally:
             shutil.rmtree(source, ignore_errors=True)
 
-    def test_measurement_worker_stale_have_enrichment_fails_before_measurement(
+    def test_measurement_worker_stale_have_enrichment_fails_after_candidate(
         self,
     ):
         """A lost HAVE authority cannot degrade into an absent comparison."""
@@ -1725,7 +2151,14 @@ class TestImportPreviewPath(unittest.TestCase):
 
             with patch(
                 "lib.import_preview.inspect_local_files",
+                return_value=LocalFileInspection(filetype="mp3"),
             ) as inspect, patch(
+                "lib.import_preview.measure_preimport_state",
+                return_value=PreimportMeasurement(
+                    folder_layout="flat",
+                    audio_file_count=1,
+                ),
+            ) as measure, patch(
                 "lib.import_preview.run_import_one",
             ) as run_import:
                 result = measure_and_persist_candidate_evidence(
@@ -1733,12 +2166,15 @@ class TestImportPreviewPath(unittest.TestCase):
                     request_id=42,
                     path=source,
                     current_evidence_loader=stale_current,
+                    runtime_config=_preview_runtime_config(),
+                    repair_fn=lambda _path: None,
                 )
 
             self.assertEqual(result.verdict, "measurement_failed")
             self.assertEqual(result.decision, "current_evidence_failed")
             self.assertIn("stale", result.detail or "")
-            inspect.assert_not_called()
+            inspect.assert_called_once()
+            measure.assert_called_once()
             run_import.assert_not_called()
         finally:
             shutil.rmtree(source, ignore_errors=True)
@@ -1817,6 +2253,14 @@ class TestImportPreviewPath(unittest.TestCase):
                         return_value=PreimportMeasurement(
                             folder_layout="flat",
                             audio_file_count=1,
+                            existing_spectral_path=current,
+                            spectral_audit=SpectralDetail(
+                                existing=SpectralAnalysisDetail(
+                                    attempted=True,
+                                    grade="genuine",
+                                    bitrate_kbps=128,
+                                ),
+                            ),
                         ),
                     ) as mock_measure, patch(
                         "lib.import_preview.run_import_one",
@@ -1826,16 +2270,19 @@ class TestImportPreviewPath(unittest.TestCase):
                             db,
                             request_id=42,
                             path=candidate,
+                            spectral_detail_analyzer=lambda _path: (
+                                SpectralAnalysisDetail(
+                                    attempted=True,
+                                    grade="genuine",
+                                    bitrate_kbps=128,
+                                )
+                            ),
                         )
 
                     measurement_args = mock_measure.call_args.kwargs
-                    self.assertFalse(
-                        measurement_args["preserve_existing_source_spectral"]
+                    self.assertTrue(
+                        measurement_args["defer_existing_spectral"],
                     )
-                    if poisoned_identity:
-                        self.assertIsNone(
-                            measurement_args["existing_spectral_evidence"].grade
-                        )
                     refreshed = db.load_album_quality_evidence_by_id(
                         db.get_request_current_evidence_id(42)
                     )
@@ -2288,7 +2735,7 @@ class TestImportPreviewPath(unittest.TestCase):
         finally:
             shutil.rmtree(source, ignore_errors=True)
 
-    def test_production_preview_prepares_have_before_candidate_ready(self):
+    def test_production_preview_persists_candidate_reject_without_have(self):
         order: list[str] = []
 
         class RecordingPipelineDB(FakePipelineDB):
@@ -2363,7 +2810,7 @@ class TestImportPreviewPath(unittest.TestCase):
             self.assertEqual(result.verdict, "evidence_ready")
             self.assertEqual(
                 order,
-                ["prepare_have", "measure_candidate", "persist_candidate"],
+                ["measure_candidate", "persist_candidate"],
             )
         finally:
             import shutil
@@ -2534,9 +2981,34 @@ class TestImportPreviewPath(unittest.TestCase):
         without writing to the denylist. The importer's unified reject path
         (U11) owns the denylist write.
         """
+        from pathlib import Path
+
+        from lib.audio_hash import hash_audio_content
+        from lib.pipeline_db import BadAudioHashInput
+
         db = self._db()
         source = self._source_dir()
         try:
+            fixture = (
+                os.path.join(
+                    os.path.dirname(__file__),
+                    "fixtures",
+                    "audio_hash",
+                    "sine_440.mp3",
+                )
+            )
+            shutil.copy2(fixture, os.path.join(source, "01.mp3"))
+            db.add_bad_audio_hashes(
+                request_id=42,
+                reported_username="curator",
+                reason="known bad rip",
+                hashes=[
+                    BadAudioHashInput(
+                        hash_value=hash_audio_content(Path(fixture), "mp3"),
+                        audio_format="mp3",
+                    ),
+                ],
+            )
             with patch("lib.config.read_runtime_config",
                        return_value=_preview_runtime_config(
                            beets_harness_path="/fake/harness/run_beets_harness.sh",
@@ -2547,13 +3019,6 @@ class TestImportPreviewPath(unittest.TestCase):
                            filetype="mp3",
                            min_bitrate_bps=128000,
                            is_vbr=False,
-                       )), \
-                 patch("lib.import_preview.measure_preimport_state",
-                       return_value=PreimportMeasurement(
-                           matched_bad_hash_id=7,
-                           matched_bad_track_path="01.mp3",
-                           folder_layout="flat",
-                           audio_file_count=0,
                        )), \
                  patch("lib.import_preview.run_import_one") as mock_run:
                 preview = preview_import_from_path(
@@ -2568,7 +3033,6 @@ class TestImportPreviewPath(unittest.TestCase):
             self.assertEqual(db.denylist, [])
             mock_run.assert_not_called()
         finally:
-            import shutil
             shutil.rmtree(source, ignore_errors=True)
 
     def test_measurement_crash_degrades_to_uncertain_instead_of_raising(self):
@@ -2985,6 +3449,55 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
         return SpectralAnalysisDetail(
             attempted=True, grade="genuine", bitrate_kbps=96,
         )
+
+    def test_unusable_grade_is_incomplete_and_remeasured(self):
+        from lib.import_preview import plan_current_evidence_enrichment
+
+        for grade in ("", "error", "banana"):
+            with self.subTest(grade=grade):
+                evidence = make_album_quality_evidence(
+                    mb_release_id="mbid-42",
+                    measurement=AudioQualityMeasurement(
+                        min_bitrate_kbps=320,
+                        avg_bitrate_kbps=320,
+                        median_bitrate_kbps=320,
+                        format="MP3",
+                        spectral_grade=grade,
+                        spectral_subject="installed",
+                        spectral_provenance="measured",
+                    ),
+                )
+
+                self.assertTrue(evidence.storage_validation_errors())
+                self.assertTrue(
+                    plan_current_evidence_enrichment(evidence).spectral,
+                )
+
+    def test_lossless_source_anchor_is_complete_without_derivative_scan(self):
+        from lib.import_preview import plan_current_evidence_enrichment
+        from lib.quality import EVIDENCE_SUBJECT_SOURCE, AlbumQualityV0Metric
+
+        evidence = make_album_quality_evidence(
+            mb_release_id="source-authority",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=129,
+                avg_bitrate_kbps=129,
+                median_bitrate_kbps=129,
+                format="Opus",
+            ),
+            v0_metric=AlbumQualityV0Metric(
+                min_bitrate_kbps=187,
+                avg_bitrate_kbps=213,
+                median_bitrate_kbps=210,
+                subject=EVIDENCE_SUBJECT_SOURCE,
+                provenance="carried",
+            ),
+            codec="opus",
+            container="opus",
+            storage_format="Opus",
+        )
+
+        self.assertFalse(plan_current_evidence_enrichment(evidence).spectral)
 
     def _enrich(self, db, analyzer, probe):
         def load_current(db_arg, **_kwargs):

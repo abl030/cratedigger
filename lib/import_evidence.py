@@ -24,6 +24,7 @@ from lib.beets_db import (
 from lib.quality import (
     EVIDENCE_SUBJECT_SOURCE,
     LOSSLESS_CODECS,
+    SPECTRAL_USABLE_GRADES,
     AlbumQualityEvidence,
     QualityRankConfig,
 )
@@ -33,6 +34,7 @@ from lib.quality_evidence import (
     audio_snapshot_matches,
     backfill_current_evidence_from_album_info,
     current_evidence_rebuild_reasons,
+    has_lossless_source_lineage,
     load_candidate_evidence_for_source,
     load_or_backfill_current_evidence,
     snapshot_audio_files,
@@ -150,6 +152,7 @@ class CurrentEvidenceActionResult(msgspec.Struct, frozen=True):
 def ensure_candidate_evidence_for_action(
     db: QualityEvidenceDB,
     *,
+    mb_release_id: str,
     source_path: str,
     download_log_id: int | None = None,
     import_job_id: int | None = None,
@@ -157,17 +160,20 @@ def ensure_candidate_evidence_for_action(
     """Load valid candidate evidence for a mutating action or fail closed.
 
     Candidate evidence is addressed by release identity plus the audio
-    snapshot, not by its observed filesystem location. Rejected downloads
-    may move into ``failed_imports`` after preview, but ``evidence.source_path``
-    remains the immutable capture-time path. The ``source_path`` argument is
-    the fingerprint-validated transient action path; the claimed import-job
-    payload carries it to the launch fence separately. This is the shared
-    action boundary for automation, force, and rescue imports; callers must
-    not grow a job-type-specific relocation exception.
+    snapshot, not by its observed filesystem location. The linked evidence
+    must match ``mb_release_id`` before any of its integrity facts can decide
+    the action. Rejected downloads may move into ``failed_imports`` after
+    preview, but ``evidence.source_path`` remains the immutable capture-time
+    path. The ``source_path`` argument is the fingerprint-validated transient
+    action path; the claimed import-job payload carries it to the launch fence
+    separately. This is the shared action boundary for automation, force, and
+    rescue imports; callers must not grow a job-type-specific relocation
+    exception.
     """
 
     loaded = load_candidate_evidence_for_source(
         db,
+        mb_release_id=mb_release_id,
         source_path=source_path,
         download_log_id=download_log_id,
         import_job_id=import_job_id,
@@ -414,24 +420,17 @@ def _current_action_incomplete_reasons(
         reasons.append(
             "lossless-source V0 metric is required for converted current evidence"
         )
-    if evidence.current_enrichment_required:
-        reasons.extend(_current_action_missing_enrichment_reasons(evidence))
-    return reasons
-
-
-def _current_action_missing_enrichment_reasons(
-    evidence: AlbumQualityEvidence,
-) -> list[str]:
-    """Require neutral installed facts before a newly changed snapshot acts."""
-
-    reasons: list[str] = []
     measurement = evidence.measurement
     if (
-        measurement.spectral_grade is None
-        and measurement.spectral_bitrate_kbps is None
+        measurement.spectral_grade not in SPECTRAL_USABLE_GRADES
+        and not has_lossless_source_lineage(evidence)
     ):
-        reasons.append("exact current snapshot still needs installed spectral enrichment")
+        reasons.append(
+            "exact current snapshot still needs usable spectral enrichment"
+        )
     if (
+        evidence.current_enrichment_required
+        and
         evidence.v0_metric is None
         and not evidence.on_disk_v0_research_attempted
     ):
@@ -564,6 +563,6 @@ def _snapshot_guard_from_candidate_status(status: str) -> str:
         return SNAPSHOT_GUARD_STALE
     if status in {"missing", "unowned", "empty_fileset"}:
         return SNAPSHOT_GUARD_MISSING
-    if status == "failed":
+    if status in {"failed", "identity_mismatch"}:
         return SNAPSHOT_GUARD_FAILED
     return SNAPSHOT_GUARD_MATCHED

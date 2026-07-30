@@ -159,23 +159,35 @@ def assert_exact_current_spectral_persisted(
         raise AssertionError("attempt scan did not populate exact current evidence")
 
 
-def assert_enrichment_plan_never_remeasures(evidence, plan) -> None:
-    """Independent checker: enrichment only measures what is missing."""
+def assert_enrichment_plan_measures_exactly_missing(evidence, plan) -> None:
+    """Independent checker: enrichment measures exactly unusable/missing facts."""
 
     measurement = evidence.measurement
-    if plan.spectral and (
-        measurement.spectral_grade is not None
-        or measurement.spectral_bitrate_kbps is not None
-    ):
+    spectral_required = measurement.spectral_grade not in (
+        "genuine",
+        "marginal",
+        "suspect",
+        "likely_transcode",
+    )
+    if plan.spectral and not spectral_required:
         raise AssertionError(
             "enrichment plan re-measures spectral evidence that already exists"
         )
-    if plan.v0 and (
-        evidence.v0_metric is not None
-        or evidence.on_disk_v0_research_attempted
-    ):
+    if not plan.spectral and spectral_required:
+        raise AssertionError(
+            "enrichment plan skipped unusable or missing spectral evidence"
+        )
+    v0_required = (
+        evidence.v0_metric is None
+        and not evidence.on_disk_v0_research_attempted
+    )
+    if plan.v0 and not v0_required:
         raise AssertionError(
             "enrichment plan re-researches V0 evidence that already exists"
+        )
+    if not plan.v0 and v0_required:
+        raise AssertionError(
+            "enrichment plan skipped missing V0 research evidence"
         )
 
 
@@ -258,15 +270,32 @@ class TestQualityLineagePins(unittest.TestCase):
     def test_enrichment_plan_checker_rejects_planted_remeasure(self):
         graded = make_album_quality_evidence()  # default: genuine spectral
         with self.assertRaisesRegex(AssertionError, "spectral"):
-            assert_enrichment_plan_never_remeasures(
+            assert_enrichment_plan_measures_exactly_missing(
                 graded, EnrichmentPlan(spectral=True, v0=False),
             )
         attempted = make_album_quality_evidence(
             on_disk_v0_research_attempted=True,
         )
         with self.assertRaisesRegex(AssertionError, "V0"):
-            assert_enrichment_plan_never_remeasures(
+            assert_enrichment_plan_measures_exactly_missing(
                 attempted, EnrichmentPlan(spectral=False, v0=True),
+            )
+
+    def test_enrichment_plan_checker_rejects_unusable_grade_skip(self):
+        unusable = make_album_quality_evidence(
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=320,
+                avg_bitrate_kbps=320,
+                median_bitrate_kbps=320,
+                format="MP3",
+                spectral_grade="error",
+            ),
+            on_disk_v0_research_attempted=True,
+        )
+        with self.assertRaisesRegex(AssertionError, "unusable"):
+            assert_enrichment_plan_measures_exactly_missing(
+                unusable,
+                EnrichmentPlan(spectral=False, v0=False),
             )
 
     def test_failure_enrichment_checker_rejects_unlinked_installed_release(self):
@@ -327,7 +356,15 @@ class TestQualityLineagePins(unittest.TestCase):
     @given(
         grade=st.one_of(
             st.none(),
-            st.sampled_from(("genuine", "suspect", "likely_transcode")),
+            st.sampled_from((
+                "",
+                "error",
+                "banana",
+                "genuine",
+                "marginal",
+                "suspect",
+                "likely_transcode",
+            )),
         ),
         spectral_bitrate=st.one_of(
             st.none(), st.integers(min_value=32, max_value=500),
@@ -342,6 +379,7 @@ class TestQualityLineagePins(unittest.TestCase):
     def test_generated_enrichment_plan_measures_exactly_the_missing_pieces(
         self, grade, spectral_bitrate, v0_present, v0_attempted,
     ):
+        stored_bitrate = spectral_bitrate if grade is not None else None
         evidence = make_album_quality_evidence(
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=320,
@@ -349,7 +387,9 @@ class TestQualityLineagePins(unittest.TestCase):
                 median_bitrate_kbps=320,
                 format="MP3",
                 spectral_grade=grade,
-                spectral_bitrate_kbps=spectral_bitrate,
+                spectral_bitrate_kbps=stored_bitrate,
+                spectral_subject="installed" if grade is not None else None,
+                spectral_provenance="measured" if grade is not None else None,
             ),
             v0_metric=(
                 AlbumQualityV0Metric(
@@ -363,11 +403,20 @@ class TestQualityLineagePins(unittest.TestCase):
             ),
             on_disk_v0_research_attempted=v0_attempted,
         )
+        if grade in ("", "error", "banana"):
+            self.assertTrue(evidence.storage_validation_errors())
+        else:
+            self.assertEqual(evidence.storage_validation_errors(), [])
         plan = plan_current_evidence_enrichment(evidence)
-        assert_enrichment_plan_never_remeasures(evidence, plan)
+        assert_enrichment_plan_measures_exactly_missing(evidence, plan)
         self.assertEqual(
             plan.spectral,
-            grade is None and spectral_bitrate is None,
+            grade not in (
+                "genuine",
+                "marginal",
+                "suspect",
+                "likely_transcode",
+            ),
         )
         self.assertEqual(plan.v0, not v0_present and not v0_attempted)
 
@@ -683,6 +732,9 @@ class TestQualityLineagePins(unittest.TestCase):
                     format="AAC",
                 ),
             )
+            action_linked = action_db.load_album_quality_evidence_by_id(
+                action_db.get_request_current_evidence_id(42),
+            )
 
         assert_import_attempt_uses_v3_current_evidence(
             initial_lineage=1,
@@ -691,7 +743,9 @@ class TestQualityLineagePins(unittest.TestCase):
         self.assertEqual(current.measurement.min_bitrate_kbps, minimum)
         self.assertEqual(current.measurement.avg_bitrate_kbps, average)
         self.assertEqual(current.measurement.median_bitrate_kbps, median)
-        action_evidence = action.evidence
+        self.assertTrue(action.available)
+        action_evidence = action_linked
+        assert action_evidence is not None
         assert_action_refresh_carries_only_source_facts(
             decision_lineage=(
                 action_evidence.lineage_version

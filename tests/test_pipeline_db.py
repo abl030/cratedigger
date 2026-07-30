@@ -6322,6 +6322,7 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
                     extension="flac",
                     container="flac",
                     codec="flac",
+                    content_sha256="b" * 64,
                 ),
                 AlbumQualityEvidenceFile(
                     relative_path="01 - Alpha.flac",
@@ -6330,6 +6331,7 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
                     extension="flac",
                     container="flac",
                     codec="flac",
+                    content_sha256="a" * 64,
                 ),
             ],
             codec="flac",
@@ -6379,6 +6381,10 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         self.assertEqual(
             [file.relative_path for file in loaded.files],
             ["01 - Alpha.flac", "02 - Beta.flac"],
+        )
+        self.assertEqual(
+            [file.content_sha256 for file in loaded.files],
+            ["a" * 64, "b" * 64],
         )
         assert loaded.v0_metric is not None
         self.assertEqual(loaded.v0_metric.avg_bitrate_kbps, 228)
@@ -6891,6 +6897,149 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
                 self.assertIsNone(loaded.measurement.spectral_bitrate_kbps)
                 self.assertIsNone(loaded.measurement.spectral_subject)
                 self.assertIsNone(loaded.measurement.spectral_provenance)
+
+    def test_rebuild_clears_historical_invalid_source_spectral_atomically(self):
+        """R19 keeps valid source facts, never a poisoned legacy grade."""
+        from lib.quality import AlbumQualityV0Metric
+
+        mbid = "merge-invalid-source-grade"
+        existing = self._seed(
+            mb_release_id=mbid,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=128,
+                avg_bitrate_kbps=128,
+                median_bitrate_kbps=128,
+                format="Opus",
+                spectral_grade="genuine",
+                spectral_bitrate_kbps=96,
+                spectral_subject="source",
+                spectral_provenance="measured",
+                cliff_hz=16_000,
+                codec_family="mp3",
+                ultrasonic_deficit_db=42.0,
+                spectral_measurement_version=2,
+            ),
+            v0_metric=AlbumQualityV0Metric(
+                avg_bitrate_kbps=225,
+                subject="source",
+                provenance="measured",
+            ),
+            codec="opus",
+            container="opus",
+            storage_format="Opus",
+        )
+        self.db.upsert_album_quality_evidence(existing)
+        self.db._execute(
+            """
+            UPDATE album_quality_evidence
+            SET spectral_grade = 'error'
+            WHERE mb_release_id = %s AND snapshot_fingerprint = %s
+            """,
+            (mbid, existing.snapshot_fingerprint),
+        )
+        incoming = msgspec.structs.replace(
+            existing,
+            measurement=msgspec.structs.replace(
+                existing.measurement,
+                spectral_grade=None,
+                spectral_bitrate_kbps=None,
+                spectral_subject=None,
+                spectral_provenance=None,
+                cliff_hz=None,
+                codec_family=None,
+                ultrasonic_deficit_db=None,
+                spectral_measurement_version=None,
+            ),
+        )
+
+        self.db.upsert_album_quality_evidence(incoming)
+
+        loaded = self.db.find_album_quality_evidence(
+            mb_release_id=mbid,
+            snapshot_fingerprint=existing.snapshot_fingerprint,
+        )
+        assert loaded is not None
+        self.assertIsNone(loaded.measurement.spectral_grade)
+        self.assertIsNone(loaded.measurement.spectral_bitrate_kbps)
+        self.assertIsNone(loaded.measurement.spectral_subject)
+        self.assertIsNone(loaded.measurement.spectral_provenance)
+        self.assertIsNone(loaded.measurement.cliff_hz)
+        self.assertIsNone(loaded.measurement.codec_family)
+        self.assertIsNone(loaded.measurement.ultrasonic_deficit_db)
+        self.assertIsNone(loaded.measurement.spectral_measurement_version)
+
+    def test_rebuild_clears_historical_gradeless_capture_atomically(self):
+        """A NULL grade cannot preserve dangling members of the same fact."""
+        from lib.quality import AlbumQualityV0Metric
+
+        mbid = "merge-gradeless-source-capture"
+        existing = self._seed(
+            mb_release_id=mbid,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=128,
+                avg_bitrate_kbps=128,
+                median_bitrate_kbps=128,
+                format="Opus",
+                spectral_grade="genuine",
+                spectral_bitrate_kbps=96,
+                spectral_subject="source",
+                spectral_provenance="measured",
+                cliff_hz=16_000,
+                codec_family="mp3",
+                ultrasonic_deficit_db=42.0,
+                spectral_measurement_version=2,
+            ),
+            v0_metric=AlbumQualityV0Metric(
+                avg_bitrate_kbps=225,
+                subject="source",
+                provenance="measured",
+            ),
+            codec="opus",
+            container="opus",
+            storage_format="Opus",
+        )
+        self.db.upsert_album_quality_evidence(existing)
+        self.db._execute(
+            """
+            UPDATE album_quality_evidence
+            SET spectral_grade = NULL,
+                spectral_bitrate_kbps = NULL,
+                spectral_subject = NULL,
+                spectral_provenance = NULL
+            WHERE mb_release_id = %s AND snapshot_fingerprint = %s
+            """,
+            (mbid, existing.snapshot_fingerprint),
+        )
+        incoming = msgspec.structs.replace(
+            existing,
+            measurement=msgspec.structs.replace(
+                existing.measurement,
+                spectral_grade=None,
+                spectral_bitrate_kbps=None,
+                spectral_subject=None,
+                spectral_provenance=None,
+                cliff_hz=None,
+                codec_family=None,
+                ultrasonic_deficit_db=None,
+                spectral_measurement_version=None,
+            ),
+        )
+
+        self.db.upsert_album_quality_evidence(incoming)
+
+        loaded = self.db.find_album_quality_evidence(
+            mb_release_id=mbid,
+            snapshot_fingerprint=existing.snapshot_fingerprint,
+        )
+        assert loaded is not None
+        self.assertIsNone(loaded.measurement.spectral_grade)
+        self.assertIsNone(loaded.measurement.spectral_bitrate_kbps)
+        self.assertIsNone(loaded.measurement.spectral_subject)
+        self.assertIsNone(loaded.measurement.spectral_provenance)
+        self.assertIsNone(loaded.measurement.cliff_hz)
+        self.assertIsNone(loaded.measurement.codec_family)
+        self.assertIsNone(loaded.measurement.ultrasonic_deficit_db)
+        self.assertIsNone(loaded.measurement.spectral_measurement_version)
 
     def test_v0_research_attempt_marker_is_monotonic_on_upsert(self):
         evidence = self._seed(

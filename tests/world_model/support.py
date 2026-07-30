@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
@@ -177,8 +178,9 @@ class PreviewBoundaryObservation:
     during the preview step; on a first-import reuse it stays empty because
     the candidate fact is projected (``candidate_detail``) rather than
     re-analyzed and there is no installed HAVE to scan, so a non-empty value
-    means the reuse branch invoked the analyzer (an installed-HAVE scan on an
-    upgrade, or a regression that stopped projecting the candidate fact).
+    means the reuse branch invoked the analyzer (a required installed-HAVE
+    scan when current evidence is absent/incomplete, or a regression that
+    stopped projecting a complete matching candidate/HAVE fact).
     ``candidate_status`` is the worker's own provenance tag (``"reused"`` on
     the fast path).
     """
@@ -825,6 +827,7 @@ class LifecycleWorld:
             cancellation_token = CancellationToken()
             front_gate_probe = load_candidate_evidence_for_source(
                 self.db,
+                mb_release_id=str(request.get("mb_release_id") or ""),
                 source_path=source_path,
                 import_job_id=claimed.id,
             )
@@ -1105,6 +1108,7 @@ class LifecycleWorld:
         *,
         verified_lossless: bool = False,
         codec: str | None = None,
+        reuse_current_bytes: bool = False,
     ) -> bool:
         row = self._require_request(request_id)
         before_verified_proof = self._request_has_verified_proof(request_id)
@@ -1133,7 +1137,14 @@ class LifecycleWorld:
             self.beets.incoming_root
             / f"dispatch-{request_id}-{self._dispatch_counter:04d}"
         )
-        self.beets.stage_release(attempt, source_dir=staged_path)
+        if reuse_current_bytes:
+            self._stage_current_album_bytes(
+                release=attempt,
+                current=before_album,
+                destination=staged_path,
+            )
+        else:
+            self.beets.stage_release(attempt, source_dir=staged_path)
         min_bitrate = 900 if attempt.codec.casefold() == "flac" else 245
         measurement = AudioQualityMeasurement(
             min_bitrate_kbps=min_bitrate,
@@ -1335,6 +1346,7 @@ class LifecycleWorld:
         *,
         codec: str | None = None,
         verified_lossless: bool = False,
+        reuse_current_bytes: bool = False,
     ) -> bool:
         """Drive the production force-import entry point over a real source."""
 
@@ -1354,7 +1366,14 @@ class LifecycleWorld:
             / "failed_imports"
             / f"force-{request_id}-{self._dispatch_counter:04d}"
         )
-        self.beets.stage_release(attempt, source_dir=origin)
+        if reuse_current_bytes:
+            self._stage_current_album_bytes(
+                release=attempt,
+                current=before_album,
+                destination=origin,
+            )
+        else:
+            self.beets.stage_release(attempt, source_dir=origin)
         min_bitrate = 900 if attempt.codec.casefold() == "flac" else 245
         measurement = AudioQualityMeasurement(
             min_bitrate_kbps=min_bitrate,
@@ -2046,6 +2065,28 @@ class LifecycleWorld:
             ),
             None,
         )
+
+    @staticmethod
+    def _stage_current_album_bytes(
+        *,
+        release: BeetsWorldRelease,
+        current: LibraryAlbumSnapshot | None,
+        destination: Path,
+    ) -> None:
+        """Stage an explicitly byte-identical retry from the installed album."""
+
+        if current is None:
+            raise AssertionError("byte-identical retry requires an installed album")
+        if len(current.item_paths) != release.track_count:
+            raise AssertionError(
+                "installed track count does not match byte-identical retry: "
+                f"{len(current.item_paths)} != {release.track_count}"
+            )
+        destination.mkdir(parents=True)
+        extension = release.codec.casefold()
+        for track, source_path in enumerate(current.item_paths, start=1):
+            target = destination / f"{track:02d} Track {track}.{extension}"
+            shutil.copyfile(source_path, target)
 
     @staticmethod
     def _album_fingerprint(album: LibraryAlbumSnapshot | None) -> str | None:

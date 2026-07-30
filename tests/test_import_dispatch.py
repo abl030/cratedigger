@@ -38,6 +38,7 @@ from lib.quality import (
     QUALITY_FLAC_ONLY,
     QUALITY_UPGRADE_TIERS,
     V0_PROBE_LOSSLESS_SOURCE,
+    AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
     CodecFamily,
@@ -233,6 +234,7 @@ def _claim_dispatch_job(
     request_id: int = 42,
     evidence_kwargs=None,
     candidate_evidence=None,
+    candidate_release_id: str | None = None,
 ):
     """Create the production-shaped job/evidence authority for a core test."""
     from lib.import_evidence import (
@@ -250,6 +252,11 @@ def _claim_dispatch_job(
         with open(fixture_track, "wb") as handle:
             handle.write(b"fixture audio")
     files = snapshot_audio_files(path)
+    if candidate_evidence is not None and candidate_evidence.audio_corrupt:
+        files = [
+            msgspec.structs.replace(file, decode_ok=index != 0)
+            for index, file in enumerate(files)
+        ]
     request = db.request(request_id)
     request["mb_release_id"] = release_id
     preview_lease: ExecutionLeaseSnapshot | None = None
@@ -286,17 +293,18 @@ def _claim_dispatch_job(
             request_id=request_id,
             payload={"download_log_id": 1, "failed_path": path},
         )
+    evidence_release_id = candidate_release_id or release_id
     evidence = (
         msgspec.structs.replace(
             candidate_evidence,
-            mb_release_id=release_id,
+            mb_release_id=evidence_release_id,
             source_path=path,
             files=files,
             snapshot_fingerprint=snapshot_fingerprint(files),
         )
         if candidate_evidence is not None
         else make_album_quality_evidence(
-            mb_release_id=release_id,
+            mb_release_id=evidence_release_id,
             source_path=path,
             files=files,
             **(evidence_kwargs or {}),
@@ -304,7 +312,7 @@ def _claim_dispatch_job(
     )
     db.upsert_album_quality_evidence(evidence)
     persisted = db.find_album_quality_evidence(
-        mb_release_id=release_id,
+        mb_release_id=evidence_release_id,
         snapshot_fingerprint=evidence.snapshot_fingerprint,
     )
     assert persisted is not None and persisted.id is not None
@@ -1908,8 +1916,14 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
         force: bool,
         db: FakePipelineDB | None = None,
         candidate=None,
+        drift_candidate_before_dispatch: bool = False,
+        drift_candidate_during_have: bool = False,
+        drift_current_during_candidate_revalidation: bool = False,
+        add_bad_hash_during_have: bool = False,
+        candidate_release_id: str | None = None,
     ):
         from lib.dispatch import dispatch_import_core
+        from lib.dispatch.evidence_gate import _load_evidence_import_gate
         from lib.import_evidence import (
             ActionEvidenceProvenance,
             CandidateEvidenceActionResult,
@@ -1935,8 +1949,16 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            with open(os.path.join(tmpdir, "01 - Track.mp3"), "wb") as handle:
-                handle.write(b"fixture audio")
+            track_path = os.path.join(tmpdir, "01 - Track.mp3")
+            shutil.copy2(
+                os.path.join(
+                    os.path.dirname(__file__),
+                    "fixtures",
+                    "audio_hash",
+                    "sine_440.mp3",
+                ),
+                track_path,
+            )
             candidate = msgspec.structs.replace(
                 candidate,
                 mb_release_id="test-mbid",
@@ -1952,7 +1974,14 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
                 release_id="test-mbid",
                 force=force,
                 candidate_evidence=candidate,
+                candidate_release_id=candidate_release_id,
             )
+            if drift_candidate_before_dispatch:
+                with open(
+                    os.path.join(tmpdir, "01 - Track.mp3"),
+                    "ab",
+                ) as handle:
+                    handle.write(b"late drift")
             persisted = candidate_result.evidence
             candidate_result = msgspec.structs.replace(
                 candidate_result,
@@ -1960,6 +1989,75 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
             )
             cancellation_token = (
                 CancellationToken() if execution_lease is not None else None
+            )
+            current_load_count = 0
+
+            def load_current(*_args, **_kwargs):
+                nonlocal current_load_count
+                current_load_count += 1
+                if add_bad_hash_during_have:
+                    from pathlib import Path
+
+                    from lib.audio_hash import hash_audio_content
+                    from lib.pipeline_db import BadAudioHashInput
+
+                    db.add_bad_audio_hashes(
+                        request_id=42,
+                        reported_username="curator",
+                        reason="identified during HAVE analysis",
+                        hashes=[
+                            BadAudioHashInput(
+                                hash_value=hash_audio_content(
+                                    Path(track_path),
+                                    "mp3",
+                                ),
+                                audio_format="mp3",
+                            ),
+                        ],
+                    )
+                if drift_candidate_during_have:
+                    with open(
+                        os.path.join(tmpdir, "01 - Track.mp3"),
+                        "ab",
+                    ) as handle:
+                        handle.write(b"drift during HAVE")
+                if (
+                    drift_current_during_candidate_revalidation
+                    and current_load_count == 2
+                    and current_result.evidence is not None
+                ):
+                    installed_path = (
+                        current_result.provenance.installed_path
+                    )
+                    if installed_path is None:
+                        raise AssertionError(
+                            "current drift fixture needs an installed path"
+                        )
+                    relative_path = (
+                        current_result.evidence.files[0].relative_path
+                    )
+                    with open(
+                        os.path.join(installed_path, relative_path),
+                        "ab",
+                    ) as handle:
+                        handle.write(b"drift during candidate revalidation")
+                return current_result
+
+            current_loader = MagicMock(side_effect=load_current)
+            gate_mock = (
+                MagicMock(
+                    side_effect=AssertionError(
+                        "HAVE gate must not run for stale candidate bytes"
+                    ),
+                )
+                if drift_candidate_before_dispatch
+                or candidate_release_id is not None
+                else None
+            )
+            evidence_gate = (
+                gate_mock
+                if gate_mock is not None
+                else _load_evidence_import_gate
             )
             with patch_dispatch_externals() as ext, patch(
                 "lib.dispatch.subprocess_runner.parse_import_result",
@@ -1984,9 +2082,8 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
                     candidate_import_job_id=claimed.id,
                     prevalidated_candidate_result=candidate_result,
                     quality_gate_fn=noop_quality_gate,
-                    current_evidence_loader=(
-                        lambda *_args, **_kwargs: current_result
-                    ),
+                    evidence_gate_fn=evidence_gate,
+                    current_evidence_loader=current_loader,
                     execution_lease=execution_lease,
                     cancellation_token=cancellation_token,
                     owner_session_identity=owner_session_identity,
@@ -1995,6 +2092,10 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
                         if execution_lease is not None else None
                     ),
                 )
+            if drift_candidate_before_dispatch or candidate_release_id is not None:
+                assert gate_mock is not None
+                gate_mock.assert_not_called()
+                current_loader.assert_not_called()
         return db, claimed, outcome, ext
 
     def _persist_failed_outcome(self, db, claimed, outcome) -> None:
@@ -2019,6 +2120,181 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
                 fail_closed=True,
             ),
         )
+
+    def test_late_candidate_drift_requeues_before_have_gate(self) -> None:
+        _db, _claimed, outcome, ext = self._dispatch_with_current_result(
+            self._failed_current_result("must remain untouched"),
+            force=False,
+            drift_candidate_before_dispatch=True,
+        )
+        self.assertEqual(outcome.code, "requeued_for_preview")
+        ext.run.assert_not_called()
+
+    def test_candidate_drift_during_have_requeues_before_decision(self) -> None:
+        _db, _claimed, outcome, ext = self._dispatch_with_current_result(
+            self._failed_current_result("must not become terminal"),
+            force=False,
+            drift_candidate_during_have=True,
+        )
+        self.assertEqual(outcome.code, "requeued_for_preview")
+        ext.run.assert_not_called()
+
+    def test_have_drift_during_candidate_revalidation_requeues_before_beets(
+        self,
+    ) -> None:
+        from lib.import_evidence import (
+            ActionEvidenceProvenance,
+            CurrentEvidenceActionResult,
+        )
+
+        with tempfile.TemporaryDirectory() as current_path:
+            current_track = os.path.join(current_path, "01 - Track.mp3")
+            shutil.copy2(
+                os.path.join(
+                    os.path.dirname(__file__),
+                    "fixtures",
+                    "audio_hash",
+                    "sine_440.mp3",
+                ),
+                current_track,
+            )
+            current_files = snapshot_audio_files(current_path)
+            current = make_album_quality_evidence(
+                mb_release_id="test-mbid",
+                source_path=current_path,
+                files=current_files,
+            )
+            current_result = CurrentEvidenceActionResult(
+                evidence=current,
+                provenance=ActionEvidenceProvenance(
+                    current_status="loaded",
+                    snapshot_guard="matched",
+                    installed_path=current_path,
+                ),
+            )
+
+            _db, _claimed, outcome, ext = self._dispatch_with_current_result(
+                current_result,
+                force=False,
+                drift_current_during_candidate_revalidation=True,
+            )
+
+        self.assertEqual(outcome.code, "requeued_for_preview")
+        ext.run.assert_not_called()
+
+    def test_have_fk_change_invalidates_action_authority(self) -> None:
+        from lib.dispatch.types import EvidenceImportGate
+        from lib.import_evidence import (
+            ActionEvidenceProvenance,
+            CurrentEvidenceActionResult,
+        )
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, mb_release_id="test-mbid"))
+        with tempfile.TemporaryDirectory() as current_path:
+            current_track = os.path.join(current_path, "01 - Track.mp3")
+            shutil.copy2(
+                os.path.join(
+                    os.path.dirname(__file__),
+                    "fixtures",
+                    "audio_hash",
+                    "sine_440.mp3",
+                ),
+                current_track,
+            )
+            current_files = snapshot_audio_files(current_path)
+            current = make_album_quality_evidence(
+                mb_release_id="test-mbid",
+                source_path=current_path,
+                files=current_files,
+            )
+            db.upsert_album_quality_evidence(current)
+            persisted = db.find_album_quality_evidence(
+                mb_release_id=current.mb_release_id,
+                snapshot_fingerprint=current.snapshot_fingerprint,
+            )
+            assert persisted is not None and persisted.id is not None
+            db.set_request_current_evidence(42, persisted.id)
+
+            replacement = make_album_quality_evidence(
+                mb_release_id="test-mbid",
+                source_path="/library/replacement",
+            )
+            db.upsert_album_quality_evidence(replacement)
+            replacement = db.find_album_quality_evidence(
+                mb_release_id=replacement.mb_release_id,
+                snapshot_fingerprint=replacement.snapshot_fingerprint,
+            )
+            assert replacement is not None and replacement.id is not None
+            db.set_request_current_evidence(42, replacement.id)
+
+            current_result = CurrentEvidenceActionResult(
+                evidence=persisted,
+                provenance=ActionEvidenceProvenance(
+                    current_status="loaded",
+                    snapshot_guard="matched",
+                    installed_path=current_path,
+                ),
+            )
+            result = dispatch_core_module._revalidate_current_action(
+                db,
+                gate=EvidenceImportGate(
+                    current=persisted,
+                    current_status="loaded",
+                    current_path=current_path,
+                    current_snapshot_guard="matched",
+                ),
+                request_id=42,
+                mb_release_id="test-mbid",
+                quality_ranks=QualityRankConfig.defaults(),
+                current_evidence_loader=(
+                    lambda *_args, **_kwargs: current_result
+                ),
+                beets_library_db_path="/tmp/beets.db",
+                beets_library_root="/tmp/library",
+            )
+
+        assert isinstance(result, str)
+        self.assertIn("link changed", result)
+
+    def test_automation_wrong_release_candidate_fk_requeues_before_have(self) -> None:
+        db, _claimed, outcome, ext = self._dispatch_with_current_result(
+            self._failed_current_result("must remain untouched"),
+            force=False,
+            candidate=make_album_quality_evidence(
+                mb_release_id="wrong-release",
+                audio_corrupt=True,
+            ),
+            candidate_release_id="wrong-release",
+        )
+        self.assertEqual(outcome.code, "requeued_for_preview")
+        self.assertEqual(db.download_logs, [])
+        ext.run.assert_not_called()
+
+    def test_force_wrong_release_candidate_fk_requeues_before_have(self) -> None:
+        db, _claimed, outcome, ext = self._dispatch_with_current_result(
+            self._failed_current_result("must remain untouched"),
+            force=True,
+            candidate=make_album_quality_evidence(
+                mb_release_id="wrong-release",
+                audio_corrupt=True,
+            ),
+            candidate_release_id="wrong-release",
+        )
+        self.assertEqual(outcome.code, "requeued_for_preview")
+        self.assertEqual(db.request(42)["status"], "unsearchable")
+        self.assertEqual(db.download_logs, [])
+        ext.run.assert_not_called()
+
+    def test_bad_hash_added_during_have_rejects_before_launch(self) -> None:
+        _db, _claimed, outcome, ext = self._dispatch_with_current_result(
+            self._failed_current_result("must yield to candidate integrity"),
+            force=False,
+            add_bad_hash_during_have=True,
+        )
+        self.assertEqual(outcome.code, "quality_pipeline_rejected")
+        self.assertIn("bad_audio_hash", outcome.message)
+        ext.run.assert_not_called()
 
     def test_force_import_fail_closed_current_analysis_preserves_operator_status(self) -> None:
         db, claimed, outcome, ext = self._dispatch_with_current_result(
@@ -2072,6 +2348,65 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
         self.assertEqual(db.denylist, [])
         self.assertEqual(db.cooldowns_applied, ["bad-peer"])
         self.assertIn("bad-peer", db.user_cooldowns)
+        ext.run.assert_not_called()
+
+    def test_candidate_integrity_reject_outranks_failed_have_analysis(self) -> None:
+        candidate = make_album_quality_evidence(
+            mb_release_id="test-mbid",
+            audio_corrupt=True,
+            audio_error="decoder rejected source",
+        )
+
+        _db, _claimed, outcome, ext = self._dispatch_with_current_result(
+            self._failed_current_result("RuntimeError: HAVE analyzer failed"),
+            force=False,
+            candidate=candidate,
+        )
+
+        self.assertFalse(outcome.success)
+        self.assertEqual(outcome.code, "quality_pipeline_rejected")
+        self.assertNotEqual(outcome.code, "have_analysis_error")
+        ext.run.assert_not_called()
+
+    def test_non_integrity_quality_reject_cannot_mask_failed_have(self) -> None:
+        from lib.quality import (
+            candidate_preimport_rejection_from_evidence,
+            full_pipeline_decision_from_evidence,
+        )
+
+        candidate = make_album_quality_evidence(
+            mb_release_id="test-mbid",
+            codec="flac",
+            container="flac",
+            storage_format="FLAC",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=900,
+                avg_bitrate_kbps=1_000,
+                median_bitrate_kbps=980,
+                format="FLAC",
+                is_cbr=False,
+                spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=128,
+                spectral_subject="source",
+                spectral_provenance="measured",
+            ),
+        )
+        self.assertIsNone(
+            candidate_preimport_rejection_from_evidence(candidate),
+        )
+        self.assertFalse(
+            full_pipeline_decision_from_evidence(candidate, None)["imported"],
+            "candidate is a real non-integrity quality rejection",
+        )
+
+        _db, _claimed, outcome, ext = self._dispatch_with_current_result(
+            self._failed_current_result("RuntimeError: HAVE analyzer failed"),
+            force=False,
+            candidate=candidate,
+        )
+
+        self.assertEqual(outcome.code, "have_analysis_error")
+        self.assertNotEqual(outcome.code, "quality_pipeline_rejected")
         ext.run.assert_not_called()
 
     def test_missing_have_is_not_an_analysis_failure(self) -> None:
@@ -2155,31 +2490,44 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
         request = db.request(42)
         request["status"] = "downloading"
         request["active_download_state"] = {"files": [], "filetype": "mp3"}
-        healthy = CurrentEvidenceActionResult(
-            evidence=make_album_quality_evidence(
-                mb_release_id="test-mbid",
-                source_path="/library/Test Artist/Test Album",
-                measurement=AudioQualityMeasurement(
-                    min_bitrate_kbps=96,
-                    avg_bitrate_kbps=96,
-                    median_bitrate_kbps=96,
-                    format="MP3",
-                    spectral_grade="genuine",
+        with tempfile.TemporaryDirectory() as current_path:
+            shutil.copy2(
+                os.path.join(
+                    os.path.dirname(__file__),
+                    "fixtures",
+                    "audio_hash",
+                    "sine_440.mp3",
                 ),
-            ),
-            provenance=ActionEvidenceProvenance(
-                current_status="loaded",
-                snapshot_guard="matched",
-            ),
-        )
-        db, _second_claimed, second, second_ext = (
-            self._dispatch_with_current_result(
-            healthy,
-            force=True,
-            db=db,
-            candidate=candidate,
+                os.path.join(current_path, "01 - Track.mp3"),
             )
-        )
+            current_files = snapshot_audio_files(current_path)
+            healthy = CurrentEvidenceActionResult(
+                evidence=make_album_quality_evidence(
+                    mb_release_id="test-mbid",
+                    source_path=current_path,
+                    files=current_files,
+                    measurement=AudioQualityMeasurement(
+                        min_bitrate_kbps=96,
+                        avg_bitrate_kbps=96,
+                        median_bitrate_kbps=96,
+                        format="MP3",
+                        spectral_grade="genuine",
+                    ),
+                ),
+                provenance=ActionEvidenceProvenance(
+                    current_status="loaded",
+                    snapshot_guard="matched",
+                    installed_path=current_path,
+                ),
+            )
+            db, _second_claimed, second, second_ext = (
+                self._dispatch_with_current_result(
+                    healthy,
+                    force=True,
+                    db=db,
+                    candidate=candidate,
+                )
+            )
 
         second_ext.run.assert_called_once()
         self.assertNotEqual(second.code, "have_analysis_error")
@@ -3450,6 +3798,208 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
         self.assertEqual(db.download_logs[0].outcome, "rejected")
         self.assertEqual(db.download_logs[0].beets_detail, decode_error)
         self.assertEqual(db.download_logs[0].error_message, decode_error)
+
+
+class TestEvidenceImportGateHaveAudit(unittest.TestCase):
+    @staticmethod
+    def _load_gate(db, **kwargs):
+        from lib.dispatch.evidence_gate import _load_evidence_import_gate
+
+        return _load_evidence_import_gate(db, **kwargs)
+
+    def test_unrecognized_attempt_have_grade_fails_closed(self):
+        from lib.import_evidence import (
+            ActionEvidenceProvenance,
+            CandidateEvidenceActionResult,
+            CurrentEvidenceActionResult,
+        )
+        from lib.quality import SpectralAnalysisDetail
+
+        db = FakePipelineDB()
+        candidate = make_album_quality_evidence(
+            mb_release_id="test-mbid",
+        )
+        current = make_album_quality_evidence(
+            mb_release_id="test-mbid",
+        )
+        candidate_result = CandidateEvidenceActionResult(
+            evidence=candidate,
+            provenance=ActionEvidenceProvenance(candidate_status="reused"),
+        )
+        current_result = CurrentEvidenceActionResult(
+            evidence=current,
+            provenance=ActionEvidenceProvenance(
+                current_status="loaded",
+                installed_path="/library/current",
+            ),
+        )
+
+        gate = self._load_gate(
+            db,
+            request_id=42,
+            mb_release_id="test-mbid",
+            path="/candidate",
+            quality_ranks=QualityRankConfig.defaults(),
+            candidate_import_job_id=1,
+            candidate_download_log_id=None,
+            prevalidated_candidate_result=candidate_result,
+            attempt_existing_spectral=SpectralAnalysisDetail(
+                attempted=True,
+                grade="banana",
+            ),
+            attempt_have_audit_available=True,
+            current_evidence_loader=lambda *_args, **_kwargs: current_result,
+        )
+
+        self.assertIsNone(gate.current)
+        self.assertEqual(gate.current_status, "failed")
+        self.assertIn("usable", gate.current_reason or "")
+
+    def test_lossless_source_lineage_does_not_require_installed_attempt(self):
+        from lib.import_evidence import (
+            ActionEvidenceProvenance,
+            CandidateEvidenceActionResult,
+            CurrentEvidenceActionResult,
+        )
+        from lib.quality import SpectralAnalysisDetail
+
+        db = FakePipelineDB()
+        candidate = make_album_quality_evidence(mb_release_id="test-mbid")
+        current = make_album_quality_evidence(
+            mb_release_id="test-mbid",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=121,
+                avg_bitrate_kbps=128,
+                median_bitrate_kbps=127,
+                format="Opus",
+                was_converted_from="flac",
+            ),
+            v0_metric=AlbumQualityV0Metric(
+                subject="source",
+                provenance="carried",
+                min_bitrate_kbps=245,
+                avg_bitrate_kbps=256,
+                median_bitrate_kbps=252,
+            ),
+        )
+        candidate_result = CandidateEvidenceActionResult(
+            evidence=candidate,
+            provenance=ActionEvidenceProvenance(candidate_status="reused"),
+        )
+        current_result = CurrentEvidenceActionResult(
+            evidence=current,
+            provenance=ActionEvidenceProvenance(
+                current_status="loaded",
+                installed_path="/library/current",
+            ),
+        )
+
+        gate = self._load_gate(
+            db,
+            request_id=42,
+            mb_release_id="test-mbid",
+            path="/candidate",
+            quality_ranks=QualityRankConfig.defaults(),
+            candidate_import_job_id=1,
+            candidate_download_log_id=None,
+            prevalidated_candidate_result=candidate_result,
+            attempt_existing_spectral=SpectralAnalysisDetail(attempted=False),
+            attempt_have_audit_available=True,
+            current_evidence_loader=lambda *_args, **_kwargs: current_result,
+        )
+
+        self.assertIs(gate.current, current)
+        self.assertEqual(gate.current_status, "loaded")
+        self.assertIsNone(gate.current_reason)
+
+    def test_candidate_integrity_reject_never_loads_have(self):
+        from lib.import_evidence import (
+            ActionEvidenceProvenance,
+            CandidateEvidenceActionResult,
+        )
+        from lib.quality import SpectralAnalysisDetail
+
+        db = FakePipelineDB()
+        clean = make_album_quality_evidence(mb_release_id="test-mbid")
+        mp3_file = AlbumQualityEvidenceFile(
+            relative_path="01.mp3",
+            size_bytes=1,
+            mtime_ns=1,
+            extension="mp3",
+            container="mp3",
+            codec="mp3",
+        )
+        flac_file = AlbumQualityEvidenceFile(
+            relative_path="02.flac",
+            size_bytes=1,
+            mtime_ns=1,
+            extension="flac",
+            container="flac",
+            codec="flac",
+        )
+        candidates = (
+            make_album_quality_evidence(
+                mb_release_id="test-mbid",
+                audio_corrupt=True,
+                audio_error="decoder rejected source",
+            ),
+            msgspec.structs.replace(
+                clean,
+                matched_bad_audio_hash_id=91,
+                matched_bad_audio_hash_path="01.mp3",
+            ),
+            msgspec.structs.replace(clean, folder_layout="nested"),
+            msgspec.structs.replace(
+                clean,
+                files=[],
+                audio_file_count=0,
+            ),
+            msgspec.structs.replace(
+                clean,
+                files=[mp3_file, flac_file],
+                audio_file_count=2,
+            ),
+        )
+
+        for candidate in candidates:
+            with self.subTest(
+                decision=candidate.audio_corrupt
+                or candidate.matched_bad_audio_hash_id
+                or candidate.folder_layout
+                or len(candidate.files),
+            ):
+                candidate_result = CandidateEvidenceActionResult(
+                    evidence=candidate,
+                    provenance=ActionEvidenceProvenance(
+                        candidate_status="reused",
+                    ),
+                )
+                current_loader = MagicMock(
+                    side_effect=AssertionError(
+                        "candidate integrity rejection must not load HAVE evidence"
+                    ),
+                )
+
+                gate = self._load_gate(
+                    db,
+                    request_id=42,
+                    mb_release_id="test-mbid",
+                    path="/candidate",
+                    quality_ranks=QualityRankConfig.defaults(),
+                    candidate_import_job_id=1,
+                    candidate_download_log_id=None,
+                    prevalidated_candidate_result=candidate_result,
+                    attempt_existing_spectral=SpectralAnalysisDetail(
+                        attempted=False,
+                    ),
+                    attempt_have_audit_available=True,
+                    current_evidence_loader=current_loader,
+                )
+
+                self.assertIs(gate.candidate, candidate)
+                self.assertIsNone(gate.current)
+                self.assertIsNone(gate.current_status)
+                current_loader.assert_not_called()
 
 
 class TestLoadQualityGateState(unittest.TestCase):

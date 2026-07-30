@@ -11,11 +11,17 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import msgspec
 
+from lib.measurement import (
+    BadAudioHashDB,
+    find_current_bad_audio_hash_match,
+)
 from lib.quality import (
     EVIDENCE_PROVENANCE_CARRIED,
     EVIDENCE_PROVENANCE_MEASURED,
     EVIDENCE_SUBJECT_INSTALLED,
     EVIDENCE_SUBJECT_SOURCE,
+    LOSSLESS_CODECS,
+    SPECTRAL_USABLE_GRADES,
     V0_PROBE_LOSSLESS_SOURCE,
     V0_PROBE_NATIVE_LOSSY_RESEARCH,
     V0_PROBE_ON_DISK_RESEARCH,
@@ -38,7 +44,7 @@ if TYPE_CHECKING:
 
 
 @runtime_checkable
-class QualityEvidenceDB(Protocol):
+class QualityEvidenceDB(BadAudioHashDB, Protocol):
     """The PipelineDB surface the evidence persist/load helpers use (#409).
 
     Shared by ``lib/import_evidence.py`` (which forwards its handle into
@@ -94,6 +100,23 @@ class QualityEvidenceDB(Protocol):
     def get_request_current_evidence_id(
         self, request_id: int,
     ) -> int | None: ...
+
+
+def has_lossless_source_lineage(evidence: AlbumQualityEvidence) -> bool:
+    """Whether installed bytes are governed by lossless-source authority."""
+
+    converted_from = (
+        evidence.measurement.was_converted_from or ""
+    ).lower()
+    v0_metric = evidence.v0_metric
+    return (
+        converted_from in LOSSLESS_CODECS
+        or evidence.verified_lossless_proof is not None
+        or (
+            v0_metric is not None
+            and v0_metric.subject == EVIDENCE_SUBJECT_SOURCE
+        )
+    )
 
 
 _AUDIO_EXTENSIONS = {
@@ -193,7 +216,7 @@ def derive_filetype_band(files: list[AlbumQualityEvidenceFile]) -> str:
 
 
 def snapshot_audio_files(root: str) -> list[AlbumQualityEvidenceFile]:
-    """Build sorted active snapshot rows for audio files under ``root``."""
+    """Build sorted byte-exact snapshot rows for audio files under ``root``."""
 
     if not os.path.isdir(root):
         return []
@@ -210,21 +233,56 @@ def snapshot_audio_files(root: str) -> list[AlbumQualityEvidenceFile]:
                 continue
             full_path = os.path.join(dirpath, filename)
             try:
-                stat = os.stat(full_path)
+                with open(full_path, "rb") as handle:
+                    before = os.fstat(handle.fileno())
+                    digest = hashlib.sha256()
+                    while chunk := handle.read(1024 * 1024):
+                        digest.update(chunk)
+                    after = os.fstat(handle.fileno())
+                path_after = os.stat(full_path)
             except OSError as exc:
                 raise SnapshotAudioFilesError(
-                    f"could not stat audio file {full_path}: {exc}"
+                    f"could not hash audio file {full_path}: {exc}"
                 ) from exc
+            stable_identity = (
+                before.st_dev,
+                before.st_ino,
+                before.st_size,
+                before.st_mtime_ns,
+                before.st_ctime_ns,
+            )
+            if (
+                stable_identity
+                != (
+                    after.st_dev,
+                    after.st_ino,
+                    after.st_size,
+                    after.st_mtime_ns,
+                    after.st_ctime_ns,
+                )
+                or stable_identity
+                != (
+                    path_after.st_dev,
+                    path_after.st_ino,
+                    path_after.st_size,
+                    path_after.st_mtime_ns,
+                    path_after.st_ctime_ns,
+                )
+            ):
+                raise SnapshotAudioFilesError(
+                    f"audio file changed while hashing: {full_path}"
+                )
             relative_path = os.path.relpath(full_path, root)
             container = ext.lstrip(".")
             files.append(
                 AlbumQualityEvidenceFile(
                     relative_path=relative_path,
-                    size_bytes=int(stat.st_size),
-                    mtime_ns=int(stat.st_mtime_ns),
+                    size_bytes=int(after.st_size),
+                    mtime_ns=int(after.st_mtime_ns),
                     extension=container,
                     container=container,
                     codec=container,
+                    content_sha256=digest.hexdigest(),
                 )
             )
     if walk_errors:
@@ -235,28 +293,27 @@ def snapshot_audio_files(root: str) -> list[AlbumQualityEvidenceFile]:
 def snapshot_fingerprint(files: list[AlbumQualityEvidenceFile]) -> str:
     """SHA-256 fingerprint of an audio inventory used as the evidence row key.
 
-    This is the canonical addressing key for ``album_quality_evidence`` after
-    the rekey landed in plan ``2026-05-16-002`` (U1/U2/U3). The exact formula
-    is load-bearing: U2's SQL migration computes the same hash from each
-    row's ``album_quality_evidence_files`` records, so a Python-vs-SQL drift
-    here would scramble post-deploy lookup and break dedupe.
+    This is the canonical addressing key for ``album_quality_evidence``. The
+    original migration-021 formula used only inventory metadata; migration
+    068 adds the per-file byte digest. Historical rows retain their old key
+    and a NULL digest, so they fail the freshness guard and rebuild naturally.
 
     Formula (must be mirrored exactly by U2's migration):
 
     1. For each file, build a tuple ``[relative_path, size_bytes, extension,
-       container, codec]`` as a JSON array. ``codec`` may be ``None`` and is
-       rendered as JSON ``null``.
+       container, codec, content_sha256]`` as a JSON array. Nullable values
+       are rendered as JSON ``null``.
     2. Sort the per-file tuples by ``relative_path`` ascending.
     3. JSON-encode the sorted list with ``sort_keys=False``,
        ``separators=(",", ":")`` (no whitespace), ``ensure_ascii=False``.
-       Each file becomes e.g. ``["track01.flac",12345,"flac","flac","flac"]``.
+       Each file becomes e.g.
+       ``["track01.flac",12345,"flac","flac","flac","a1..."]``.
     4. SHA-256 hex digest of the UTF-8 bytes of that JSON string.
 
     Fields chosen mirror ``_snapshot_match_key`` so freshness and identity
-    stay coherent. ``mtime_ns`` is deliberately excluded — see the
-    ``_snapshot_match_key`` docstring for why (ID3 tag mutation, virtiofs
-    flake). ``decode_ok`` is excluded too: it is per-file evidence written
-    by the measurement gate, not an identity attribute.
+    stay coherent. ``mtime_ns`` remains excluded because touching unchanged
+    bytes must not churn evidence identity. ``decode_ok`` is per-file evidence
+    written by the measurement gate, not an identity attribute.
 
     The empty list hashes the JSON encoding of ``[]`` (``"[]"`` → a stable,
     defined 64-char digest), not an error.
@@ -270,6 +327,7 @@ def snapshot_fingerprint(files: list[AlbumQualityEvidenceFile]) -> str:
                 file.extension,
                 file.container,
                 file.codec,
+                file.content_sha256,
             ]
             for file in files
         ),
@@ -286,15 +344,14 @@ def snapshot_fingerprint(files: list[AlbumQualityEvidenceFile]) -> str:
 
 def _snapshot_match_key(
     file: AlbumQualityEvidenceFile,
-) -> tuple[str, int, str, str, str | None]:
+) -> tuple[str, int, str, str, str | None, str | None]:
     """Stable identity tuple for snapshot equality.
 
-    Excludes ``mtime_ns`` because virtiofs has been observed to return
-    slightly different ``st_mtime_ns`` between back-to-back ``stat``
-    calls on the same file. Size + path + extension/container/codec is
-    sufficient to detect any content change that matters here.
-    ``mtime_ns`` stays in the persisted struct as a forensic field but
-    does not gate freshness.
+    ``content_sha256`` proves the exact bytes; path, size, and codec metadata
+    prove the inventory shape. ``mtime_ns`` stays forensic-only because
+    virtiofs can vary it and a metadata-only touch does not change content.
+    A historical NULL digest cannot equal a freshly snapshotted non-NULL
+    digest, so pre-migration rows are rebuilt instead of reused.
     """
     return (
         file.relative_path,
@@ -302,6 +359,7 @@ def _snapshot_match_key(
         file.extension,
         file.container,
         file.codec,
+        file.content_sha256,
     )
 
 
@@ -311,7 +369,7 @@ def audio_snapshot_matches(
 ) -> bool:
     """Return whether ``root`` still has the recorded active audio snapshot.
 
-    Compares on stable identity (path/size/codec) only. See
+    Compares exact bytes plus stable inventory identity. See
     :func:`_snapshot_match_key` for why ``mtime_ns`` is excluded.
     """
 
@@ -402,6 +460,7 @@ def _apply_measurement_facts_to_files(
                 container=f.container,
                 codec=f.codec,
                 decode_ok=False,
+                content_sha256=f.content_sha256,
             ))
         else:
             out.append(f)
@@ -1059,7 +1118,7 @@ def backfill_current_evidence_from_album_info(
             existing.snapshot_fingerprint == result.evidence.snapshot_fingerprint
         )
         carry_spectral = (
-            existing_measurement.spectral_grade is not None
+            existing_measurement.spectral_grade in SPECTRAL_USABLE_GRADES
             and existing_measurement.spectral_subject == EVIDENCE_SUBJECT_SOURCE
         )
         measurement = result.evidence.measurement
@@ -1085,7 +1144,7 @@ def backfill_current_evidence_from_album_info(
             )
         elif (
             same_snapshot
-            and existing_measurement.spectral_grade is not None
+            and existing_measurement.spectral_grade in SPECTRAL_USABLE_GRADES
             and existing_measurement.spectral_subject == EVIDENCE_SUBJECT_INSTALLED
             and existing_measurement.spectral_provenance
             == EVIDENCE_PROVENANCE_MEASURED
@@ -1202,6 +1261,7 @@ def backfill_current_evidence_from_album_info(
 def load_candidate_evidence_for_source(
     db: QualityEvidenceDB,
     *,
+    mb_release_id: str,
     source_path: str,
     download_log_id: int | None = None,
     import_job_id: int | None = None,
@@ -1210,9 +1270,10 @@ def load_candidate_evidence_for_source(
 
     Walks explicit ownership only: ``import_jobs.candidate_evidence_id`` when
     ``import_job_id`` is provided, then ``download_log.candidate_evidence_id``.
-    It never falls back to another job on the same request. Once a candidate
-    evidence row is found, ``audio_snapshot_matches`` confirms it still
-    describes the audio at ``source_path``.
+    It never falls back to another job on the same request. The linked row must
+    name the expected exact release before its snapshot or integrity facts can
+    authorize an action. Once that identity matches, ``audio_snapshot_matches``
+    confirms it still describes the audio at ``source_path``.
     """
 
     if download_log_id is None and import_job_id is None:
@@ -1238,6 +1299,17 @@ def load_candidate_evidence_for_source(
             "missing",
             f"candidate evidence id {evidence_id} not found",
         )
+    from lib.beets_db import exact_release_identity_matches
+
+    if not exact_release_identity_matches(
+        mb_release_id,
+        evidence.mb_release_id,
+    ):
+        return EvidenceBuildResult(
+            None,
+            "identity_mismatch",
+            "candidate evidence exact release identity does not match request",
+        )
     if not audio_snapshot_matches(source_path, evidence.files):
         return EvidenceBuildResult(
             None,
@@ -1247,6 +1319,34 @@ def load_candidate_evidence_for_source(
     errors = evidence.policy_incomplete_reasons()
     if errors:
         return EvidenceBuildResult(None, "incomplete", "; ".join(errors))
+
+    # Candidate evidence is content-addressed, but the curator's bad-hash
+    # corpus is independent mutable authority. Re-check it at every action
+    # boundary so adding a newly discovered bad rip invalidates an otherwise
+    # reusable exact snapshot without repeating spectral analysis.
+    if evidence.matched_bad_audio_hash_id is None:
+        match = find_current_bad_audio_hash_match(
+            path=source_path,
+            db=db,
+        )
+        if match is not None:
+            evidence = msgspec.structs.replace(
+                evidence,
+                matched_bad_audio_hash_id=match.bad_hash_id,
+                matched_bad_audio_hash_path=match.track_path,
+            )
+            db.upsert_album_quality_evidence(evidence)
+            persisted = db.find_album_quality_evidence(
+                mb_release_id=evidence.mb_release_id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            if persisted is None:
+                return EvidenceBuildResult(
+                    None,
+                    "failed",
+                    "bad-audio-hash evidence update was not durable",
+                )
+            evidence = persisted
     return EvidenceBuildResult(evidence, "ready")
 
 

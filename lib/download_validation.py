@@ -192,6 +192,7 @@ def _process_beets_validation(
         db = ctx.pipeline_db_source._get_db()
         candidate_result = ensure_candidate_evidence_for_action(
             db,
+            mb_release_id=album_data.mb_release_id,
             source_path=current_path,
             import_job_id=import_job_id,
         )

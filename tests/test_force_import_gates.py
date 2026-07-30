@@ -463,7 +463,7 @@ class TestNoCandidateSpectralAdoptedAsHave(unittest.TestCase):
             download_min_bitrate_bps=320_000,
             download_is_vbr=False,
             cfg=cfg,
-            db=db,  # type: ignore[arg-type]
+            db=db,
             request_id=42,
             precomputed_inspection=LocalFileInspection(
                 filetype="mp3", min_bitrate_bps=320_000, is_vbr=False),
@@ -699,7 +699,7 @@ class TestPreimportDoesNotReadRequestSpectral(unittest.TestCase):
                 download_min_bitrate_bps=192_000,
                 download_is_vbr=False,
                 cfg=cfg,
-                db=db,  # type: ignore[arg-type]
+                db=db,
                 request_id=42,
             )
 
@@ -749,7 +749,7 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
                     download_min_bitrate_bps=None,
                     download_is_vbr=None,   # simulates resumed download
                     cfg=cfg,
-                    db=db,  # type: ignore[arg-type]
+                    db=db,
                     request_id=1,
                 )
             self.assertEqual(
@@ -806,7 +806,7 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
                     download_min_bitrate_bps=126_000,
                     download_is_vbr=True,
                     cfg=cfg,
-                    db=db,  # type: ignore[arg-type]
+                    db=db,
                     request_id=1,
                 )
             self.assertEqual(
@@ -860,7 +860,7 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
                     download_min_bitrate_bps=220_000,
                     download_is_vbr=True,
                     cfg=cfg,
-                    db=db,  # type: ignore[arg-type]
+                    db=db,
                     request_id=1,
                 )
             self.assertEqual(
@@ -911,7 +911,7 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
                     download_min_bitrate_bps=None,
                     download_is_vbr=True,
                     cfg=cfg,
-                    db=db,  # type: ignore[arg-type]
+                    db=db,
                     request_id=1,
                 )
             self.assertEqual(
@@ -953,7 +953,7 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
                 download_min_bitrate_bps=None,
                 download_is_vbr=None,
                 cfg=cfg,
-                db=db,  # type: ignore[arg-type]
+                db=db,
                 request_id=1,
             )
         self.assertEqual(
@@ -1010,7 +1010,7 @@ class TestFallbackSkippedWhenBeetsFindsNoAlbum(unittest.TestCase):
                 download_min_bitrate_bps=192_000,
                 download_is_vbr=False,
                 cfg=cfg,
-                db=db,  # type: ignore[arg-type]
+                db=db,
                 request_id=42,
             )
 
