@@ -183,7 +183,7 @@ For the multi-disc flow the key facts are:
 
 `lib/staged_album.py::staged_filename` (lines 29-34) prepends `Disk N - `
 to the filename when `disk_count > 1`. So a multi-disc download lands
-in a single staging directory under `/Incoming/auto-import/` with
+in one exact processing-owner directory with
 filenames like `Disk 1 - 01 - Pi.flac`, `Disk 1 - 02 - Bertie.flac`,
 …, `Disk 2 - 01 - Prelude.flac`, …. This is the auto-import flatten
 that the `preimport_nested` gate (`lib/quality/gates.py`) is
@@ -191,7 +191,7 @@ expected to find pre-flattened. Force-import accepts an existing rejected
 folder and trips the shared `nested_layout` gate if it contains raw
 subfolders.
 
-The beets harness sees a flat staging dir with disk-numbered prefixes
+The beets harness sees that flat owned dir with disk-numbered prefixes
 and does its match against the full multi-disc release on MB. Beets'
 tagging then writes the files into the library with the configured
 per-disc path template.

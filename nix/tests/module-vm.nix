@@ -1232,6 +1232,7 @@ pkgs.testers.nixosTest {
     machine.succeed("test $(id -u cratedigger) -ne 0")
     machine.succeed("test \"$(stat -c %U:%G:%a /var/lib/cratedigger/processing)\" = cratedigger:beets-library:700")
     machine.succeed("test \"$(stat -c %U:%G:%a /var/lib/cratedigger/processing/albums)\" = cratedigger:beets-library:700")
+    machine.succeed("test \"$(stat -c %U:%G:%a /var/lib/cratedigger/processing/albums/failed_imports)\" = cratedigger:beets-library:700")
     machine.succeed("test \"$(stat -c %U:%G:%a /var/lib/cratedigger/processing/preview)\" = cratedigger:beets-library:700")
     machine.succeed("runuser -u cratedigger -- mkdir /var/lib/cratedigger/processing/preview/vm-nonroot-snapshot")
     machine.fail("runuser -u unrelated-user -- test -r /var/lib/cratedigger/processing/preview")

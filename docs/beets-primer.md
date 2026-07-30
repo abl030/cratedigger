@@ -155,7 +155,7 @@ fetchart:
 | `/mnt/virtio/cratedigger/beets-db/beets-library.db` | SQLite database — the DB source of truth |
 | `/mnt/virtio/cratedigger/beets-db/beets-import.log` | Import log |
 | `/mnt/virtio/Music/AI` | Staging area — raw copies from `/Me`, pre-import |
-| `/mnt/virtio/Music/Incoming` | Processing staging root — `/Incoming/auto-import` for request auto-imports, `/Incoming/post-validation` for redownload/manual-review staging |
+| `/mnt/virtio/Music/Incoming` | Auxiliary import staging — `/Incoming/auto-import` for YouTube rescues, `/Incoming/post-validation` for redownload/manual-review staging; Soulseek request imports stay at their exact processing-owner path |
 | `/mnt/virtio/Music/Re-download` | Re-download queue — each album has a README.md explaining why |
 
 ### File Organization

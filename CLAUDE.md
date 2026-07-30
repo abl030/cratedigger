@@ -137,11 +137,13 @@ docs/             — subsystem docs; docs/solutions/ = compounding lessons (gre
 Web UI / CLI → PostgreSQL (wanted → downloading → processing → imported; wanted ↔ unsearchable)
    Phase 1: poll_active_downloads()   Phase 2: get_wanted() → search + enqueue
    completed download → validate vs exact release ID (dist ≤ 0.15)
-   source=request    → stage /Incoming/auto-import  → import_one.py (spectral → convert → quality gate) → /Beets
+   source=request    → keep exact processing owner path → import_one.py (spectral → convert → quality gate) → /Beets
    source=redownload → stage /Incoming/post-validation (manual review only, never auto-imported)
 ```
 
-**Don't assume a path under `/Incoming` is a redownload** — request imports can be mid-move or mid-import there too. Schema fields, JSONB audit blobs, and the force-import flow: `docs/pipeline-db-schema.md`.
+**Don't assume a path under `/Incoming` is a redownload** — YouTube rescues
+still enter through `/Incoming/auto-import`. Schema fields, JSONB audit blobs,
+and the force-import flow: `docs/pipeline-db-schema.md`.
 
 ## CLI ⇄ API surface symmetry
 

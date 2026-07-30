@@ -68,7 +68,11 @@ from lib.import_execution import (
     checkpoint_automation_owner,
     read_process_start_ticks,
 )
-from lib.processing_paths import normalize_source_dirs
+from lib.processing_paths import (
+    normalize_source_dirs,
+    path_is_within_root,
+    processing_albums_dir,
+)
 from lib.quality import (
     AlbumQualityEvidenceDecisionFacts,
     DownloadInfo,
@@ -96,6 +100,23 @@ if TYPE_CHECKING:
     from lib.quality import SpectralDetail
 
 logger = logging.getLogger("cratedigger")
+
+
+def _processing_quarantine_root(
+    source_path: str,
+    cfg: CratediggerConfig,
+) -> str:
+    """Keep exact-owner quarantine on the canonical source filesystem.
+
+    Sources outside private processing retain their configured Incoming
+    quarantine. Any Cratedigger-owned source beneath ``processing/albums``
+    instead quarantines beneath that same private root, so cleanup remains one
+    journaled atomic rename regardless of where the operator mounts Incoming.
+    """
+    albums_root = processing_albums_dir(cfg.processing_dir)
+    if path_is_within_root(source_path, albums_root):
+        return albums_root
+    return cfg.beets_staging_dir
 
 
 @dataclass(frozen=True)
@@ -189,8 +210,8 @@ def _describe_rejection(
         detail = _guard_failure_detail(import_result)
         duplicate_guard_path = path
         duplicate_guard_staging_dir = (
-            cfg.beets_staging_dir
-            if cfg is not None and cfg.beets_staging_dir
+            _processing_quarantine_root(path, cfg)
+            if cfg is not None
             else os.path.dirname(os.path.abspath(path))
         )
         guard = import_result.postflight.duplicate_remove_guard
@@ -972,7 +993,10 @@ def dispatch_import_core(
                         quality_ranks=(
                             cfg.quality_ranks if cfg is not None else None
                         ),
-                        audio_quarantine_root=beets_cfg.beets_staging_dir,
+                        audio_quarantine_root=_processing_quarantine_root(
+                            path,
+                            beets_cfg,
+                        ),
                         preserve_corrupt_source=force,
                     )
                 quality_evidence_action_file = _write_quality_evidence_action_file(
@@ -1018,8 +1042,9 @@ def dispatch_import_core(
             # material (typically failed_imports/…). Tell the harness to keep
             # lossless originals intact until the quality decision — on
             # downgrade/transcode_downgrade verdicts we exit before deletion so
-            # the user's FLACs survive (#111). Auto-import stages to disposable
-            # /Incoming and does not need the flag.
+            # the user's FLACs survive (#111). An automatic request import runs
+            # from its disposable, exact-owner processing path and does not
+            # need the flag.
             quality_rank_config_json = (
                 cfg.quality_ranks.to_json() if cfg is not None else None
             )
@@ -1390,7 +1415,7 @@ def dispatch_import_core(
                     # directory is now empty), which keeps the wrong-matches
                     # tab honest and prevents duplicate re-imports of an
                     # already-imported album. Auto-import scenarios always
-                    # clean — their staging dir under ``/Incoming`` is
+                    # clean — their exact-owner processing source is
                     # disposable by design.
                     post_commit_staged_path = path
         except ExecutionCancelled:

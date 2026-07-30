@@ -58,10 +58,13 @@ measurement itself failed and cannot blame the peer.
 Preview persists completed content facts in
 `album_quality_evidence.audio_validation`, then the importer alone decides via
 `full_pipeline_decision_from_evidence`. Corrupt audio follows the standard
-denylist plus post-terminal `failed_imports/bad_files` quarantine path and
-resumes searching. Quarantine atomically renames the complete source directory
-and fails closed with the original untouched when that rename is unavailable.
-The quarantine plan excludes both post-import Wrong Matches deletion passes.
+denylist plus `failed_imports/bad_files` quarantine path and resumes searching.
+Request-owned processing keeps that quarantine beneath the same private
+processing root, so the exact-owner cleanup journal can atomically rename the
+complete source directory before terminal acknowledgement even when Incoming
+is another filesystem. Other importer lanes retain their configured staging
+quarantine. The quarantine plan excludes both post-import Wrong Matches
+deletion passes.
 A `measurement_failed` attempt writes no denylist and its
 retained source path is protected from the disk reaper. Diagnostics are capped
 at 16 files and 2 KiB per normalized stderr excerpt; success carries no

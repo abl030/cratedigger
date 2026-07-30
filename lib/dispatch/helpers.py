@@ -28,7 +28,7 @@ def _should_cleanup_path(scenario: str, action: DispatchAction) -> bool:
     Issue #89 rules:
 
     * Auto-import (scenario not in ``FORCE_IMPORT_SCENARIOS``) always
-      cleans its disposable ``/Incoming`` staging dir.
+      cleans its disposable processing-owner source.
     * Force-import paths pass the user's ``wrong_matches/…`` folder (or a
       legacy ``failed_imports/…`` folder) — cleanup is only safe on a
       successful import

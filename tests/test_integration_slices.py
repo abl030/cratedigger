@@ -3386,28 +3386,10 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
         namespaces_used = {ns for ns, _key in db.advisory_lock_calls}
         self.assertNotIn(ADVISORY_LOCK_NAMESPACE_RELEASE, namespaces_used)
 
-    def test_auto_staging_does_not_rewrite_request_lifecycle_path(self):
+    def test_processing_owner_imports_from_its_canonical_path(self):
         from lib import download_validation as validation_mod
-        from lib.pipeline_db import (
-            ADVISORY_LOCK_NAMESPACE_RELEASE,
-            release_id_to_lock_key,
-        )
         from lib.quality import ValidationResult
         from tests.fakes import RecordingDispatchCore
-
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=42,
-            mb_release_id=self.MBID,
-            status="downloading",
-            active_download_state={
-                "filetype": "mp3",
-                "enqueued_at": "2026-04-03T12:00:00+00:00",
-                "files": [],
-                "current_path": None,
-            },
-        ))
-
         from tests.helpers import make_ctx_with_fake_db
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3417,11 +3399,25 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
             with open(track_path, "w") as fp:
                 fp.write("fake audio")
 
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=42,
+                mb_release_id=self.MBID,
+                status="processing",
+                active_automation_import_job_id=99,
+                active_download_state={
+                    "filetype": "mp3",
+                    "enqueued_at": "2026-04-03T12:00:00+00:00",
+                    "files": [],
+                    "current_path": processing_dir,
+                },
+            ))
             cfg = CratediggerConfig(
                 beets_harness_path=_HARNESS,
                 pipeline_db_enabled=True,
                 beets_distance_threshold=0.15,
                 beets_staging_dir=os.path.join(tmpdir, "beets-staging"),
+                beets_tracking_file=os.path.join(tmpdir, "tracking.log"),
             )
             ctx = make_ctx_with_fake_db(db, cfg=cfg)
             entry = GrabListEntry(
@@ -3445,53 +3441,9 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
                 distance=0.05,
                 scenario="strong_match",
             )
-            move_saw_release_lock = False
-
-            original_advisory_lock = db.advisory_lock
-
-            @contextmanager
-            def tracking_advisory_lock(namespace: int, key: int):
-                nonlocal move_saw_release_lock
-                with original_advisory_lock(namespace, key) as acquired:
-                    if (
-                        acquired
-                        and namespace == ADVISORY_LOCK_NAMESPACE_RELEASE
-                        and key == release_id_to_lock_key(self.MBID)
-                    ):
-                        move_saw_release_lock = True
-                        try:
-                            yield acquired
-                        finally:
-                            move_saw_release_lock = False
-                    else:
-                        yield acquired
-
-            original_move_to = StagedAlbum.move_to
-
-            def checked_move_to(
-                album,
-                dest,
-                *,
-                cancellation_token=None,
-            ):
-                self.assertTrue(move_saw_release_lock)
-                return original_move_to(
-                    album,
-                    dest,
-                    cancellation_token=cancellation_token,
-                )
 
             dispatch = RecordingDispatchCore()
-            with patch.object(
-                db,
-                "advisory_lock",
-                side_effect=tracking_advisory_lock,
-            ), patch.object(
-                StagedAlbum,
-                "move_to",
-                autospec=True,
-                side_effect=checked_move_to,
-            ):
+            with patch.object(StagedAlbum, "move_to") as move_to:
                 outcome = validation_mod._handle_valid_result(
                     entry,
                     bv_result,
@@ -3502,21 +3454,16 @@ class TestHandleValidResultReleaseLock(unittest.TestCase):
 
             assert outcome is not None
             self.assertTrue(outcome.success)
-            staged_path = os.path.join(
-                cfg.beets_staging_dir,
-                "auto-import",
-                "Test Artist",
-                "Test Album [request-42]",
-            )
-            self.assertEqual(staged_album.current_path, staged_path)
-            self.assertTrue(os.path.exists(os.path.join(staged_path, "01 - Track.mp3")))
-            self.assertFalse(os.path.exists(processing_dir))
-            self.assertFalse(move_saw_release_lock)
-            self.assertIsNone(
+            move_to.assert_not_called()
+            self.assertEqual(staged_album.current_path, processing_dir)
+            self.assertTrue(os.path.exists(track_path))
+            self.assertFalse(os.path.exists(cfg.beets_staging_dir))
+            self.assertEqual(
                 db.request(42)["active_download_state"]["current_path"],
+                processing_dir,
             )
             self.assertEqual(len(dispatch.calls), 1)
-            self.assertEqual(dispatch.calls[0].path, staged_path)
+            self.assertEqual(dispatch.calls[0].path, processing_dir)
 
     def test_auto_path_not_blocked_when_processing_dir_is_under_staging_root(self):
         """The duplicate-import guard must not quarantine the source processing dir."""

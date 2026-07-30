@@ -261,16 +261,19 @@ Audio-integrity failures split at the evidence boundary:
 - Stable readable bytes that the strict audio-only FFmpeg policy cannot fully
   decode become `audio_corrupt` content evidence. The importer remains the
   only decision owner: it rejects through
-  `full_pipeline_decision_from_evidence`, deny-lists the source peer, commits
-  the terminal row, and only then moves the retained source under the
-  configured `<beets_staging_dir>/failed_imports/bad_files/`.
-  The complete source directory moves by one atomic rename; a cross-filesystem
-  or other rename failure leaves the original directory untouched. Once this
-  archival move is planned, neither force-source cleanup nor the independent
-  Wrong Matches convergence reducer receives either retained path.
-  `validation_result.post_commit_quarantine` records the exact source,
-  destination, move result, and any bounded error; `failed_path` points at the
-  surviving copy.
+  `full_pipeline_decision_from_evidence`, deny-lists the source peer, and
+  archives the retained source as part of terminal convergence. Exact-owner request
+  imports move under
+  `<processing_dir>/albums/failed_imports/bad_files/` while ownership is still
+  attached; keeping source and destination beneath the same private root makes
+  the journaled archival transfer one atomic rename regardless of where
+  Incoming is mounted. The cleanup receipt is consumed by the terminal
+  transaction. Sources outside private processing, such as YouTube imports,
+  retain their configured
+  `<beets_staging_dir>/failed_imports/bad_files/` quarantine; private
+  force-import action copies use the processing-local path. Once an archival
+  move is planned, neither force-source cleanup nor the independent Wrong
+  Matches convergence reducer receives either retained path.
 - Permissions, changed/vanished paths, unavailable/interrupted FFmpeg, and
   persistence failures are `measurement_failed`. Their typed report lives in
   the preview/job validation payload, they never write a denylist, and the
