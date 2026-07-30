@@ -580,6 +580,44 @@ Under these semantics the fraud bar becomes "zero fraud albums *receive
 proof*" — achievable, and honest even on the false side: a 1982 digital
 master genuinely has no spectral proof of full-band content.
 
+### What "verified lossless" actually claims (reframed 2026-07-30)
+
+The Apple arm falsified the unqualified version of that bar. "Zero fraud
+albums receive proof" holds for the three classes it was measured against and
+**fails at ~91% for Apple CVBR-256 → FLAC**. The stamp cannot honestly mean
+"proven bit-faithful to a lossless source."
+
+Operator decision: **keep the name, bound the claim.**
+
+> *"verified lossless inasmuch as we can — we still call it verified lossless
+> but at least now we know what we can't know"*
+
+So `verified_lossless` means, precisely:
+
+> **No evidence of lossy origin was found by the tests we have.** Not "this is
+> bit-faithful to a lossless source." The tests are the in-window cliff, the
+> album ceiling, and the ultrasonic deficit; their measured competence is
+> recorded in this document, class by class.
+
+This is not a weakening dressed up as a definition — it is the strongest claim
+the evidence supports, and it is strictly more useful than an unqualified one
+because its failure modes are *enumerated* rather than unknown. The three
+things it buys:
+
+- **A false proof is now a bounded risk, not an open one.** The one class that
+  defeats the gate is named, measured, and is the lowest perceptual severity of
+  any (a near-transparent source). We know what we cannot know.
+- **The archivist invariant survives.** The system still never auto-decides
+  anything irreversible on this: a denial withholds proof, never rejects,
+  denylists or accuses.
+- **It stays falsifiable.** Any future discriminator that separates the Apple
+  class moves the boundary, and this document is where the boundary is written
+  down. The V0/Opus probe axis has already been tried and failed.
+
+Operator surfaces must not imply more than this. Copy that reads as
+"guaranteed bit-perfect" is wrong; copy that reads as "we found nothing
+suspicious, and here is what we can and cannot detect" is right.
+
 ---
 
 ## Verdict tiers — the gate's output must not be binary
@@ -712,21 +750,45 @@ caught it before it shipped.
 
 ## Documented residual classes (accepted, spectrally unsolvable)
 
-1. **Apple CVBR-256-sourced launders** — real ultrasonic energy, no cliff, no
-   ceiling; indistinguishable from lossless in every measured band, **confirmed
-   on all four arms** rather than asserted from training:
+1. **Apple CVBR-256-sourced launders — MEASURED 2026-07-30, and the gate does
+   not catch them.** Full result and method: `calibration-data/apple-arm/`.
+
+   The `.m4a` statistics below were always four-arm, and they showed
+   CVBR-256 indistinguishable from lossless in every measured band:
 
    | | TRAINING | ROUND-1 | ROUND-2 | ROUND-3 |
    |---|---|---|---|---|
    | apple-cvbr256 | 98% no-cliff / 49 dB | 99% / 48 | 96% / 47 | 98% / 45 |
    | **control-flac1644** | **99% no-cliff / 48 dB** | **100% / 47** | **99% / 47** | **99% / 44** |
 
+   **But the FLAC-container launder `t-apple256-flac` was never run through the
+   gate** — it exists only in `probe_pair.tsv.gz`, and the frozen scorer's
+   `FLAC_FRAUDS` set is mp3-128 / opus-96 / vorbis-q5. "Survives the v3 gate"
+   was an inference from the table above, not a result. A dedicated arm now
+   measures it:
+
+   | | T = 62 | T = 59.5 |
+   |---|---:|---:|
+   | launders reaching PROOF (n=17) | **10** | **10** |
+   | genuine controls reaching PROOF | 11 | 10 |
+   | conditional P(launder proof \| genuine proof) | 91% | **100%** |
+
+   At `T = 59.5` the launder proof-set is byte-for-byte the same album set as
+   the genuine proof-set — **zero discriminating power**. Pooled across two
+   arms: 91–92% conditional false accept. The seven denials are denials of
+   their *genuine originals* (quiet/HF-poor masters), not of the laundering.
+   Lowering the threshold does not help.
+
+   Mechanism: Apple CVBR-256 applies essentially no lowpass in the measured
+   band — 2.1 dB down at 21.5 kHz relative to each album's own reference — so
+   no leg has anything to see. Paired U delta, n=37: mean +1.88 dB, median
+   +0.57 dB, against a four-arm safety margin of 2.04 dB.
+
    CVBR-256 is the dominant real-world AAC population (iTunes Plus / Apple
-   Music). This is the only identified fraud class that survives the v3 gate,
-   and it remains the lowest perceptual severity of any (near-transparent
-   source). No cheap slice-shape discriminator exists; the distributions overlap
-   the controls almost completely. 402 paired examples are banked for any future
-   discriminator experiment.
+   Music). It remains the lowest perceptual severity of any fraud class
+   (near-transparent source), and no cheap discriminator is known — the
+   V0/Opus probe axis fails against it too. The 402 training pairs were
+   deleted with the encode trees; the new arm's 37 pairs are committed.
 2. **Quiet / no-HF material (the "Grouper class")** — albums with near-zero HF
    content anywhere provide no spectral evidence in either direction. Round 2
    showed this is **not a curiosity of two Grouper rows: it is 26% of a
@@ -753,7 +815,12 @@ proof):
 | mp3-128 → FLAC | in-window cliff (tier 1, 91% pooled) | 34/34 | 15/15 | 27/27 | 24/24 |
 | opus-96 → FLAC | ceiling + no-ultrasonic (tier 2, 97% pooled) | 34/34 | 15/15 | 27/27 | 24/24 |
 | vorbis-q5 → FLAC | ceiling / no-ultrasonic / cliff union | 34/34 | 15/15 | 27/27 | 24/24 |
-| apple-256 → FLAC | nothing — residual class 1 | — | — | — | — |
+| apple-256 → FLAC | **nothing — 10/17 reach proof** (dedicated arm, 2026-07-30) | not in arm | not in arm | not in arm | not in arm |
+
+The Apple row was `—` across all four arms because **the class was never in
+them**; it was added and measured separately. See `calibration-data/apple-arm/`
+and residual class 1. The three rows above it are the classes the zero-false-
+accept bar was actually established against.
 
 MP3-container frauds (exposed = the band assertion sits below the container
 class). Non-blocking — these can never receive lossless proof:

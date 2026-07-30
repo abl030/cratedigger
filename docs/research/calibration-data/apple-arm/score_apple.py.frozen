@@ -1,0 +1,80 @@
+"""Run the FROZEN v3 gate over the Apple arm.
+
+`score_v3.py` in this directory is a byte-identical copy of
+`docs/research/calibration-data/score_v3.py.frozen`; its `load` / `gate` /
+`_window_legs` are imported and driven, never edited. No multiwin file is
+supplied, so the gate runs SINGLE-WINDOW (window 0 = the production
+30s-from-start window) exactly as plan §1.5b specifies for production.
+"""
+import json
+import os
+import sys
+
+HERE = "/home/abl030/.claude/jobs/fb229c18/tmp"
+TAG = sys.argv[1] if len(sys.argv) > 1 else "apple"
+THRESHOLDS = [62.0, 59.5]
+
+sys.argv = ["score_v3", f"{HERE}/results-{TAG}.tsv", f"{HERE}/extended-{TAG}.tsv",
+            f"{HERE}/__no_multiwin__.tsv", "62"]
+sys.path.insert(0, HERE)
+import score_v3  # noqa: E402
+
+albums = score_v3.load()
+prod = {(a["variant"], a["slug"]): a for a in json.load(open(f"{HERE}/albums-{TAG}.json"))}
+
+rows = []
+for variant, per_slug in sorted(albums.items()):
+    for slug, (tr, cl, wins) in sorted(per_slug.items()):
+        rec = {"variant": variant, "slug": slug, "n": len(tr)}
+        for T in THRESHOLDS:
+            score_v3.T_ULTRA = T
+            denied, legs = score_v3.gate(tr, cl, wins)
+            rec[f"denied@{T:g}"] = denied
+            rec[f"legs@{T:g}"] = legs
+        # window-0 U, the frozen statistic, recomputed from the same vectors
+        vv = list(wins[0].values()) if 0 in wins else []
+        rec["U_win0"] = (sum(v[0] - sum(v[18:21]) / 3.0 for v in vv) / len(vv)) if vv else None
+        rec["U_prod"] = prod[(variant, slug)]["ultrasonic_deficit_db"]
+        rec["prod_grade"] = prod[(variant, slug)]["grade"]
+        rec["prod_cliff"] = prod[(variant, slug)]["cliff_hz"]
+        rec["cliff_frac<=19k"] = sum(1 for c, _d in cl if c and c <= 19000) / len(cl)
+        rows.append(rec)
+
+json.dump(rows, open(f"{HERE}/gate-{TAG}.json", "w"), indent=1)
+
+by = {}
+for r in rows:
+    by.setdefault(r["variant"], []).append(r)
+
+print(f"\n{'':<34}{'U(win0)':>9}  {'T=62':>16}  {'T=59.5':>16}")
+for variant in sorted(by):
+    print(f"\n--- {variant} ---")
+    for r in sorted(by[variant], key=lambda x: x["slug"]):
+        print(f"{r['slug'][:33]:<34}{r['U_win0']:>9.2f}  "
+              f"{('DENY ' + ','.join(r['legs@62'])) if r['denied@62'] else 'PROOF':>16}  "
+              f"{('DENY ' + ','.join(r['legs@59.5'])) if r['denied@59.5'] else 'PROOF':>16}")
+    for T in THRESHOLDS:
+        d = sum(1 for r in by[variant] if r[f"denied@{T:g}"])
+        print(f"    T={T:g}: denied {d}/{len(by[variant])}, reached PROOF {len(by[variant])-d}")
+
+# paired delta
+ctl = {r["slug"]: r for r in by.get("control-flac1644", [])}
+print("\n=== paired U: genuine vs its own Apple launder ===")
+for variant in sorted(by):
+    if variant == "control-flac1644":
+        continue
+    print(f"  [{variant}]")
+    deltas = []
+    for r in sorted(by[variant], key=lambda x: x["slug"]):
+        c = ctl.get(r["slug"])
+        if not c:
+            continue
+        d = r["U_win0"] - c["U_win0"]
+        deltas.append(d)
+        print(f"  {r['slug'][:33]:<34} genuine {c['U_win0']:6.2f}  launder {r['U_win0']:6.2f}  "
+              f"delta {d:+6.2f}")
+    if deltas:
+        deltas.sort()
+        n = len(deltas)
+        print(f"  n={n} mean {sum(deltas)/n:+.2f}  median {deltas[n//2]:+.2f}  "
+              f"min {deltas[0]:+.2f}  max {deltas[-1]:+.2f}")

@@ -1,0 +1,113 @@
+"""Build the t-apple256-flac launder arm.
+
+Per album: FLAC -> WAV (local) -> scp -> qaac --cvbr 256 -> scp back -> FLAC.
+Nothing is written outside /mnt/virtio/Music/apple-arm/.
+"""
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
+
+ROOT = "/mnt/virtio/Music/apple-arm"
+WAV = os.path.join(ROOT, "wav")
+LAUNDER = os.path.join(ROOT, "launder")
+WIN = "192.168.1.115"
+MANIFEST = os.environ.get(
+    "APPLE_ARM_MANIFEST", "/home/abl030/.claude/jobs/fb229c18/tmp/manifest.json")
+INDEX = os.environ.get("APPLE_ARM_INDEX", "index.json")
+
+
+def run(cmd, **kw):
+    r = subprocess.run(cmd, capture_output=True, text=True, errors="replace", **kw)
+    if r.returncode != 0:
+        raise RuntimeError(f"FAILED rc={r.returncode}: {cmd[:4]}\n{r.stderr[-800:]}")
+    return r
+
+
+def ssh(psargs):
+    return run(["env", "-u", "SSH_AUTH_SOCK", "ssh", WIN, psargs])
+
+
+def decode_one(args):
+    src, dst, bits = args
+    codec = "pcm_s24le" if str(bits) == "24" else "pcm_s16le"
+    run(["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", src,
+         "-map", "0:a", "-map_metadata", "-1", "-vn", "-c:a", codec,
+         "-f", "wav", dst])
+
+
+def encode_back(args):
+    """Launder: AAC -> 16-bit FLAC (the realistic 'looks like a CD rip' shape).
+    A parallel 24-bit copy is kept so the depth choice can be audited."""
+    src, dst, dst24 = args
+    run(["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", src,
+         "-map", "0:a", "-map_metadata", "-1", "-vn",
+         "-sample_fmt", "s16", "-c:a", "flac", dst])
+    run(["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", src,
+         "-map", "0:a", "-map_metadata", "-1", "-vn",
+         "-sample_fmt", "s32", "-c:a", "flac", dst24])
+
+
+def main():
+    albums = json.load(open(MANIFEST))
+    only = sys.argv[1:]
+    idx_path = os.path.join(ROOT, INDEX)
+    index = json.load(open(idx_path)) if os.path.exists(idx_path) else {}
+    for a in albums:
+        rid = str(a["request_id"])
+        if only and rid not in only:
+            continue
+        t0 = time.time()
+        wdir = os.path.join(WAV, rid)
+        ldir = os.path.join(LAUNDER, rid)
+        os.makedirs(wdir, exist_ok=True)
+        os.makedirs(ldir, exist_ok=True)
+        jobs, mapping = [], []
+        for i, t in enumerate(a["tracks"]):
+            name = f"{i:03d}"
+            jobs.append((t["path"], os.path.join(wdir, name + ".wav"), t["bits"]))
+            mapping.append({"idx": name, "src": t["path"], "sr": t["sr"], "bits": t["bits"]})
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            list(ex.map(decode_one, jobs))
+        sz = sum(os.path.getsize(j[1]) for j in jobs) / 2**30
+        print(f"[{rid}] decoded {len(jobs)} wav ({sz:.2f} GiB) {time.time()-t0:.0f}s", flush=True)
+
+        ssh(f"Remove-Item -Recurse -Force C:\\scratch\\{rid} -ErrorAction SilentlyContinue; "
+            f"New-Item -ItemType Directory -Force C:\\scratch\\{rid} | Out-Null")
+        run(["env", "-u", "SSH_AUTH_SOCK", "scp", "-q", "-r", wdir + "/.",
+             f"{WIN}:C:/scratch/{rid}/"])
+        print(f"[{rid}] uploaded {time.time()-t0:.0f}s", flush=True)
+
+        ssh(f"Get-ChildItem C:\\scratch\\{rid}\\*.wav | ForEach-Object "
+            f"{{ & C:\\Tools\\qaac\\qaac64.exe -s -v 256 -o "
+            f"($_.FullName -replace '\\.wav$','.m4a') $_.FullName }}")
+        print(f"[{rid}] encoded {time.time()-t0:.0f}s", flush=True)
+
+        mdir = os.path.join(ROOT, "m4a", rid)
+        os.makedirs(mdir, exist_ok=True)
+        run(["env", "-u", "SSH_AUTH_SOCK", "scp", "-q",
+             f"{WIN}:C:/scratch/{rid}/*.m4a", mdir + "/"])
+        got = sorted(f for f in os.listdir(mdir) if f.endswith(".m4a"))
+        if len(got) != len(jobs):
+            raise RuntimeError(f"[{rid}] expected {len(jobs)} m4a, got {len(got)}")
+
+        ldir24 = os.path.join(ROOT, "launder24", rid)
+        os.makedirs(ldir24, exist_ok=True)
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            list(ex.map(encode_back, [
+                (os.path.join(mdir, g), os.path.join(ldir, g[:-4] + ".flac"),
+                 os.path.join(ldir24, g[:-4] + ".flac")) for g in got]))
+        print(f"[{rid}] laundered {time.time()-t0:.0f}s", flush=True)
+
+        ssh(f"Remove-Item -Recurse -Force C:\\scratch\\{rid}")
+        shutil.rmtree(wdir)
+        index[rid] = {"album_dir": a["album_dir"], "launder_dir": ldir, "tracks": mapping}
+        json.dump(index, open(idx_path, "w"), indent=1)
+        print(f"[{rid}] DONE {time.time()-t0:.0f}s", flush=True)
+
+
+if __name__ == "__main__":
+    main()

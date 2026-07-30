@@ -1,0 +1,542 @@
+[
+ {
+  "variant": "control-flac1644",
+  "slug": "8916--2013 - Random Access Memories [88883716862]",
+  "n": 13,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 41.608416923076916,
+  "U_prod": 41.60841709679091,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "control-flac1644",
+  "slug": "8917--2014 - Syro [WARPCD247]",
+  "n": 12,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 42.96659641666667,
+  "U_prod": 42.966596294387806,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "control-flac1644",
+  "slug": "8918--1995 - Tri Repetae [WARPCD38]",
+  "n": 10,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 25.534620033333333,
+  "U_prod": 25.534620116353793,
+  "prod_grade": "genuine",
+  "prod_cliff": 15500,
+  "cliff_frac<=19k": 0.1
+ },
+ {
+  "variant": "control-flac1644",
+  "slug": "8919--1996 - Feed Me Weird Things",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 64.8525808888889,
+  "U_prod": 64.85258079071987,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "control-flac1644",
+  "slug": "8920--2011 - Hurry Up, We're Dreaming",
+  "n": 22,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 63.49694521212121,
+  "U_prod": 63.49694533418863,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "cliff_frac<=19k": 0.045454545454545456
+ },
+ {
+  "variant": "control-flac1644",
+  "slug": "8921--1999 - Californication",
+  "n": 15,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 47.01679908888889,
+  "U_prod": 47.01679910065411,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "control-flac1644",
+  "slug": "8922--2008 - Death Magnetic",
+  "n": 10,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 51.63580046666667,
+  "U_prod": 51.635800407487054,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "control-flac1644",
+  "slug": "8923--2001 - Jane Doe",
+  "n": 12,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 47.168435055555555,
+  "U_prod": 47.16843514586915,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "control-flac1644",
+  "slug": "8924--1984 - Tabula Rasa",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 62.0156525,
+  "U_prod": 62.0156523779763,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "control-flac1644",
+  "slug": "8925--1982 - The Goldberg Variations",
+  "n": 32,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 71.74388507291667,
+  "U_prod": 71.7438850251771,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "control-flac1644",
+  "slug": "8926--1987 - Kind of Blue [CK 40579]",
+  "n": 5,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 63.752211333333335,
+  "U_prod": 63.75221123980474,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "control-flac1644",
+  "slug": "8928--2016 - Man Made Object",
+  "n": 10,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 50.64702526666667,
+  "U_prod": 50.64702528080452,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "control-flac1644",
+  "slug": "8929--1996 - The Velvet Underground & Nico [31453 1250 2]",
+  "n": 11,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 55.67585875757575,
+  "U_prod": 55.675858784335055,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "control-flac1644",
+  "slug": "8931--1987 - Rumours [3010-2]",
+  "n": 11,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 49.40577575757575,
+  "U_prod": 49.40577586320689,
+  "prod_grade": "genuine",
+  "prod_cliff": 16000,
+  "cliff_frac<=19k": 0.09090909090909091
+ },
+ {
+  "variant": "control-flac1644",
+  "slug": "8932--1991 - Loveless [crecd 060]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 69.52504966666666,
+  "U_prod": 69.52504974470588,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "control-flac1644",
+  "slug": "8933--2014 - Ruins",
+  "n": 8,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 41.32659266666667,
+  "U_prod": 41.326592544832195,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "control-flac1644",
+  "slug": "8934--1998 - Stratosphere",
+  "n": 17,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 61.97286139215686,
+  "U_prod": 61.97286151211776,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "t-apple256-flac24",
+  "slug": "8916--2013 - Random Access Memories [88883716862]",
+  "n": 13,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 42.20065569230769,
+  "U_prod": 42.200655755368494,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "t-apple256-flac24",
+  "slug": "8917--2014 - Syro [WARPCD247]",
+  "n": 12,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 43.070609999999995,
+  "U_prod": 43.0706100075112,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "t-apple256-flac24",
+  "slug": "8918--1995 - Tri Repetae [WARPCD38]",
+  "n": 10,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 25.802991666666667,
+  "U_prod": 25.802991721467926,
+  "prod_grade": "genuine",
+  "prod_cliff": 15500,
+  "cliff_frac<=19k": 0.1
+ },
+ {
+  "variant": "t-apple256-flac24",
+  "slug": "8919--1996 - Feed Me Weird Things",
+  "n": 12,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 68.41912088888888,
+  "U_prod": 68.41912103543986,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "t-apple256-flac24",
+  "slug": "8920--2011 - Hurry Up, We're Dreaming",
+  "n": 22,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 71.14177666666667,
+  "U_prod": 71.14177664963889,
+  "prod_grade": "genuine",
+  "prod_cliff": 16500,
+  "cliff_frac<=19k": 0.13636363636363635
+ },
+ {
+  "variant": "t-apple256-flac24",
+  "slug": "8921--1999 - Californication",
+  "n": 15,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 47.13358262222222,
+  "U_prod": 47.13358230722089,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "t-apple256-flac24",
+  "slug": "8922--2008 - Death Magnetic",
+  "n": 10,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 52.52065613333334,
+  "U_prod": 52.52065622589612,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "t-apple256-flac24",
+  "slug": "8923--2001 - Jane Doe",
+  "n": 12,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 47.045520555555555,
+  "U_prod": 47.04552055763613,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "t-apple256-flac24",
+  "slug": "8924--1984 - Tabula Rasa",
+  "n": 4,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 83.33276583333334,
+  "U_prod": 83.33276582790783,
+  "prod_grade": "genuine",
+  "prod_cliff": 17500,
+  "cliff_frac<=19k": 0.25
+ },
+ {
+  "variant": "t-apple256-flac24",
+  "slug": "8925--1982 - The Goldberg Variations",
+  "n": 32,
+  "denied@62": true,
+  "legs@62": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "ceiling",
+   "no-ultrasonic"
+  ],
+  "U_win0": 83.13459921875,
+  "U_prod": 83.13459919098528,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "t-apple256-flac24",
+  "slug": "8926--1987 - Kind of Blue [CK 40579]",
+  "n": 5,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 78.20624646666667,
+  "U_prod": 78.20624641928403,
+  "prod_grade": "genuine",
+  "prod_cliff": 18500,
+  "cliff_frac<=19k": 0.2
+ },
+ {
+  "variant": "t-apple256-flac24",
+  "slug": "8928--2016 - Man Made Object",
+  "n": 10,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 54.10841230000001,
+  "U_prod": 54.1084123581402,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "t-apple256-flac24",
+  "slug": "8929--1996 - The Velvet Underground & Nico [31453 1250 2]",
+  "n": 11,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 55.716953181818184,
+  "U_prod": 55.716953127290616,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "t-apple256-flac24",
+  "slug": "8931--1987 - Rumours [3010-2]",
+  "n": 11,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 48.654199818181816,
+  "U_prod": 48.654199825582964,
+  "prod_grade": "genuine",
+  "prod_cliff": 16000,
+  "cliff_frac<=19k": 0.36363636363636365
+ },
+ {
+  "variant": "t-apple256-flac24",
+  "slug": "8932--1991 - Loveless [crecd 060]",
+  "n": 11,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 72.75634627272728,
+  "U_prod": 72.75634627925136,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "cliff_frac<=19k": 0.0
+ },
+ {
+  "variant": "t-apple256-flac24",
+  "slug": "8933--2014 - Ruins",
+  "n": 8,
+  "denied@62": false,
+  "legs@62": [],
+  "denied@59.5": false,
+  "legs@59.5": [],
+  "U_win0": 40.85826295833333,
+  "U_prod": 40.85826289062594,
+  "prod_grade": "genuine",
+  "prod_cliff": 13000,
+  "cliff_frac<=19k": 0.125
+ },
+ {
+  "variant": "t-apple256-flac24",
+  "slug": "8934--1998 - Stratosphere",
+  "n": 17,
+  "denied@62": true,
+  "legs@62": [
+   "no-ultrasonic"
+  ],
+  "denied@59.5": true,
+  "legs@59.5": [
+   "no-ultrasonic"
+  ],
+  "U_win0": 62.10274723529412,
+  "U_prod": 62.10274736100465,
+  "prod_grade": "genuine",
+  "prod_cliff": null,
+  "cliff_frac<=19k": 0.0
+ }
+]
