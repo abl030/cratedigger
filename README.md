@@ -71,7 +71,7 @@ are never reaped, but do not use the processing root for another service.
 
 Cratedigger is a Nix flake with a NixOS module. It deliberately builds its runtime (python env + beets) from **its own flake.lock** — the exact closure its test suite ran against — not your system's nixpkgs.
 
-You need: **NixOS**, **a dedicated slskd instance** (`services.slskd` is in nixpkgs), and disk for music. PostgreSQL is provisioned for you.
+You need: **NixOS**, **a dedicated slskd instance** (`services.slskd` is in nixpkgs), and disk for music. PostgreSQL is provisioned for you on the same host.
 
 ```nix
 {
@@ -126,6 +126,8 @@ You need: **NixOS**, **a dedicated slskd instance** (`services.slskd` is in nixp
 ```
 
 A complete, commented version of this (including slskd itself) is [`examples/cratedigger.nix`](examples/cratedigger.nix). Misconfigurations fail at eval time with messages that name the option to set. The quick-start deliberately overrides the module's root defaults with a non-root service user. Adapt its supplementary groups so that user can read the slskd API key and download tree, and give the library a setgid group-`users` layout (`2775` dirs) so media servers can both read album art and write metadata alongside it. Full recipe: [docs/nixos-module.md § "Running non-root + filesystem permissions"](docs/nixos-module.md#running-non-root--filesystem-permissions); worked example in [`examples/cratedigger.nix`](examples/cratedigger.nix).
+
+Keep the PostgreSQL data directory on a filesystem PostgreSQL supports locally; do not put it on virtiofs, NFS, FUSE, or the shared music filesystem. The sample's `pipelineDb.createLocally = true` is the safe default: NixOS owns the local database, directory, and service ordering. An external PostgreSQL DSN is an advanced deployment. If that server is an nspawn container backed by a host bind mount, the host directory must retain the container PostgreSQL user's mapped numeric UID/GID on every switch. In particular, a `systemd.tmpfiles.rules` `d` entry is reapplied and must not reset that bind root to `root:root`; PostgreSQL can keep running on open files and then panic at its next checkpoint.
 
 Before the first switch, use a runtime secret manager such as sops-nix to provision `/run/secrets/cratedigger.htpasswd` as a non-empty bcrypt htpasswd file owned `root:nginx` with mode `0440`. Keep the file outside `/nix/store`; missing or invalid material blocks the nginx start rather than exposing the UI.
 
