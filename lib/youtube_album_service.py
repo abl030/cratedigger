@@ -588,6 +588,9 @@ def resolve_youtube_album(
     seed_browse_id: str | None = None
     yt_album_responses: dict[str, dict[str, Any]] = {}
     deadline_message: str | None = None
+    attempted_non_seed_siblings = 0
+    retry_exhausted_non_seed_siblings = 0
+    last_sibling_retry_error: requests.exceptions.RetryError | None = None
     # Round 2 P2-4: accumulate the jitter so operators can see how
     # much of the wall-clock time is the anti-throttle pause vs real
     # network work. Logged at the resolve boundary and attached to
@@ -644,11 +647,20 @@ def resolve_youtube_album(
                 min_seconds=jitter_min,
                 max_seconds=jitter_max,
             )
+            attempted_non_seed_siblings += 1
             # Per-sibling get_album failures don't abort the whole resolve;
             # exclude the broken sibling instead.
             try:
                 yt_album_responses[other_browse_id] = _cached_get_album(
                     yt_client, cache, other_browse_id, refresh=refresh)
+            except requests.exceptions.RetryError as exc:
+                retry_exhausted_non_seed_siblings += 1
+                last_sibling_retry_error = exc
+                log.warning(
+                    "youtube_album_service: sibling get_album(%s) failed: %s",
+                    other_browse_id, exc,
+                )
+                continue
             except (YTMusicServerError, YTMusicUserError, YTMusicError,
                     requests.Timeout, requests.ConnectionError,
                     KeyError, IndexError) as exc:
@@ -657,6 +669,11 @@ def resolve_youtube_album(
                     other_browse_id, exc,
                 )
                 continue
+    except requests.exceptions.RetryError as exc:
+        yt_failure = (
+            "unresolved_mirror_unavailable",
+            f"YT retries exhausted: {exc}",
+        )
     except requests.Timeout as exc:
         yt_failure = ("unresolved_timeout", f"YT timeout: {exc}")
     except requests.ConnectionError as exc:
@@ -674,6 +691,19 @@ def resolve_youtube_album(
         # path. Treating these as parse failures (not 500s) keeps the
         # resolver resilient to schema drift in ytmusicapi outputs.
         yt_failure = ("youtube_parse_failed", f"YT parse failed: {exc}")
+
+    if (
+        yt_failure is None
+        and attempted_non_seed_siblings > 0
+        and retry_exhausted_non_seed_siblings == attempted_non_seed_siblings
+    ):
+        yt_failure = (
+            "unresolved_mirror_unavailable",
+            (
+                f"YT retries exhausted for every attempted non-seed sibling: "
+                f"{last_sibling_retry_error}"
+            ),
+        )
 
     if yt_failure is not None:
         failure_outcome, failure_msg = yt_failure

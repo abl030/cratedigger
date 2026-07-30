@@ -200,7 +200,23 @@ inside socket authorization, never credentials.
   `<identifier> [--refresh] [--json]`, with human-readable output by default
   and the full result available as JSON. It uses the configured database and
   mirrors and remains available when `web.enable = false`; it does not use the
-  optional web Unix socket.
+  optional web Unix socket or fall back to an HTTP adapter when that socket is
+  absent. Only a non-refresh lookup by an already-cached MusicBrainz
+  release-group identifier can return `ok` with `from_cache = true` without
+  contacting a mirror or YouTube Music. A Discogs lookup must consult the
+  configured mirror first because release IDs and master IDs share the integer
+  namespace; after the mirror establishes the master, the normal post-widen
+  durable-cache read may return `ok` with `from_cache = true`.
+
+  Exhausting the configured HTTP status retries raises the public typed
+  `requests.exceptions.RetryError` boundary. The resolver classifies that as
+  `unresolved_mirror_unavailable` without parsing nested exception text. A
+  refresh with an existing nonempty durable matrix returns those exact rows as
+  `ok` / `from_cache = true` and includes the availability detail; an absent or
+  empty refresh cache returns the unavailable outcome. A retry exhaustion while
+  fetching one non-seed sibling excludes that sibling and continues the matrix.
+  A direct `YTMusicServerError` for HTTP 429 remains the distinct
+  `unresolved_4xx_client` classification.
 - `pipeline-cli youtube-rescue` — Submit a YouTube Music rescue ingest.
 - `pipeline-cli upgrade` — Queue an exact release upgrade through its canonical web route.
 

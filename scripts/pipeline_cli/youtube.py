@@ -34,6 +34,7 @@ from lib.youtube_ingest_service import (
 from lib.youtube_ingest_service import (
     default_youtube_ingest_service_factory,
 )
+from lib.youtube_transport import build_youtube_client as _build_youtube_client
 
 if TYPE_CHECKING:
     from lib.pipeline_db.rows import AlbumRequestRow, DownloadLogWithEvidenceRow
@@ -173,59 +174,6 @@ class _RedisYoutubeCache:
                 key, ttl_seconds, value)
         except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
             pass
-
-
-def _build_youtube_client():
-    """Construct a ``YTMusic`` client with retry + jittered desktop
-    headers per the Key Technical Decisions (R5 / external research).
-
-    Lazy-imports ``requests``, ``urllib3``, and ``ytmusicapi`` so the
-    CLI's startup cost stays low and the rest of the script doesn't
-    pay for unused HTTP machinery.
-
-    Returns ``(yt_client, session)`` so the caller can close the
-    session in a ``finally`` block — without that, every CLI
-    invocation leaks the requests Session's connection pool. Round 2
-    P2-2: the web-route side already paired finding #18's close in a
-    ``finally``; this brings the CLI surface into parity per the
-    CLI ⇄ API symmetry rule.
-
-    The session binds a default ``(connect, read)`` timeout of
-    ``(5, 30)`` so an unresponsive YT endpoint can't pin the CLI
-    invocation forever (finding #4). ``requests`` exposes no
-    Session-level timeout config; a ``Session`` subclass defaulting
-    the ``request`` timeout kwarg is the established pattern.
-    """
-    import requests
-    from requests.adapters import HTTPAdapter
-    from urllib3.util.retry import Retry
-    from ytmusicapi import YTMusic
-
-    # Bind a default (connect, read) timeout so unresponsive remotes don't
-    # pin the worker forever. Per-call ``timeout=`` kwargs still override.
-    class _DefaultTimeoutSession(requests.Session):
-        def request(self, *args: Any, **kwargs: Any):
-            kwargs.setdefault("timeout", (5, 30))
-            return super().request(*args, **kwargs)
-
-    session = _DefaultTimeoutSession()
-    retry = Retry(
-        total=3,
-        backoff_factor=1.5,
-        status_forcelist=(429, 500, 502, 503, 504),
-        allowed_methods=frozenset(["GET", "POST"]),
-    )
-    adapter = HTTPAdapter(max_retries=retry)
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
-    session.headers.update({
-        "User-Agent": (
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Accept-Language": "en-US,en;q=0.9",
-    })
-    return YTMusic(requests_session=session, language="en"), session
 
 
 def cmd_youtube_album(db: YoutubeResolverDB, args: argparse.Namespace) -> int:

@@ -16,7 +16,8 @@ class FakeYTMusic:
 
     Exceptions to inject mirror the real ``ytmusicapi`` boundary:
     ``YTMusicServerError`` (4xx/5xx upstream), ``YTMusicUserError``
-    (malformed query), ``requests.Timeout`` / ``requests.ConnectionError``
+    (malformed query), ``requests.Timeout`` /
+    ``requests.ConnectionError`` / ``requests.exceptions.RetryError``
     (transport layer), and ``KeyError`` (parser drift / library version
     skew).
     """
@@ -180,5 +181,4 @@ class FakeYTMusic:
 # seed known releases; any un-seeded id raises ``HTTPError(404)`` by
 # default. See ``.claude/rules/test-fidelity.md`` § "Rule B".
 # ---------------------------------------------------------------------------
-
 

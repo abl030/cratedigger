@@ -82,7 +82,7 @@ TYPING_RATCHET_BASELINE: dict[str, dict[str, int]] = {
     "scripts/pipeline_cli/search_plan.py": {"any": 6},
     "scripts/pipeline_cli/show.py": {"any": 6},
     "scripts/pipeline_cli/triage.py": {"any": 5},
-    "scripts/pipeline_cli/youtube.py": {"any": 12},
+    "scripts/pipeline_cli/youtube.py": {"any": 10},
     "scripts/youtube_ingest_worker.py": {"any": 7},
     "tools/generate-ai-adapters.py": {"any": 8},
     "web/cache.py": {"any": 7},
@@ -92,7 +92,6 @@ TYPING_RATCHET_BASELINE: dict[str, dict[str, int]] = {
     "web/overlay.py": {"any": 2},
     "web/routes/_pydantic.py": {"any": 4},
     "web/routes/imports.py": {"any": 2},
-    "web/routes/youtube.py": {"any": 3},
     "web/triage_runner.py": {"any": 8},
     "web/wrong_match_file_service.py": {"any": 7},
 }
