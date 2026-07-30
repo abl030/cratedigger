@@ -811,6 +811,97 @@ class TestImportOperationFence(unittest.TestCase):
 
 @requires_postgres
 class TestImportOperationFencePostgres(unittest.TestCase):
+    def test_startup_recovery_removes_launched_force_action_copy(self) -> None:
+        from lib.config import CratediggerConfig
+        from lib.import_preview import force_action_copy_path
+        from scripts import importer
+
+        db = make_db()
+        self.addCleanup(db.close)
+        with tempfile.TemporaryDirectory() as root:
+            downloads = os.path.join(root, "downloads")
+            processing = os.path.join(root, "processing")
+            os.mkdir(downloads, 0o700)
+            os.mkdir(processing, 0o700)
+            os.mkdir(os.path.join(processing, "albums"), 0o700)
+            os.mkdir(os.path.join(processing, "preview"), 0o700)
+            cfg = CratediggerConfig(
+                slskd_download_dir=downloads,
+                processing_dir=processing,
+                audio_check_mode="off",
+            )
+            request_id = db.add_request(
+                artist_name="Fence",
+                album_title="Startup force cleanup",
+                source="request",
+                mb_release_id="release-pg-startup-force",
+                status="wanted",
+            )
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=request_id,
+                dedupe_key="force:postgres-startup-cleanup",
+                payload={
+                    "download_log_id": 1,
+                    "failed_path": "/failed-imports/startup-force",
+                },
+            )
+            action_path = force_action_copy_path(cfg, job.id)
+            os.mkdir(action_path, 0o700)
+            with open(os.path.join(action_path, "01.mp3"), "wb") as handle:
+                handle.write(b"private action copy")
+            evidence = make_album_quality_evidence(
+                mb_release_id="release-pg-startup-force",
+                source_path=action_path,
+                files=snapshot_audio_files(action_path),
+            )
+            db.upsert_album_quality_evidence(evidence)
+            persisted = db.find_album_quality_evidence(
+                mb_release_id=evidence.mb_release_id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert persisted is not None and persisted.id is not None
+            self.assertTrue(db.set_import_job_candidate_evidence(
+                job.id,
+                persisted.id,
+            ))
+            self.assertIsNotNone(db.mark_import_job_preview_importable(
+                job.id,
+                preview_result={
+                    "verdict": "evidence_ready",
+                    "action_path": action_path,
+                },
+            ))
+            claimed = claim_next_import_job(db, worker_id="postgres-worker")
+            assert claimed is not None
+            self.assertIsNotNone(db.authorize_import_job_launch(
+                claimed.id,
+                request_id=request_id,
+                release_id="release-pg-startup-force",
+                source_path="/failed-imports/startup-force",
+            ))
+            terminalized = db.recover_running_import_jobs(
+                requeue_message="safe retry",
+                recovery_message="startup ambiguity",
+            )
+            self.assertEqual([item.id for item in terminalized], [job.id])
+            self.assertEqual(terminalized[0].status, "failed")
+            self.assertTrue(os.path.exists(action_path))
+
+            with patch("lib.config.read_runtime_config", return_value=cfg):
+                recovered = importer.recover_abandoned_running_jobs(
+                    cast(Any, db),
+                )
+
+            self.assertEqual(recovered, [])
+            self.assertFalse(os.path.exists(action_path))
+            stored = db.get_import_job(job.id)
+            assert stored is not None and stored.result is not None
+            cleanup = stored.result["force_action_cleanup"]
+            assert isinstance(cleanup, dict)
+            self.assertEqual(cleanup["action_path"], action_path)
+            self.assertTrue(cleanup["removed"])
+
     def test_relocated_evidence_path_does_not_override_job_authority(self) -> None:
         db = make_db()
         self.addCleanup(db.close)

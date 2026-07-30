@@ -1502,6 +1502,38 @@ class FakePipelineDB:
         ))
         return [ImportJob.from_row(copy.deepcopy(row)) for row in rows]
 
+    def list_terminal_force_action_cleanup_jobs(self) -> list[ImportJob]:
+        rows: list[dict[str, Any]] = []
+        for row in self._import_jobs:
+            if (
+                row.get("job_type") != IMPORT_JOB_FORCE
+                or row.get("status") not in ("completed", "failed")
+            ):
+                continue
+            preview = row.get("preview_result")
+            action_path = (
+                preview.get("action_path")
+                if isinstance(preview, dict) else None
+            )
+            if not isinstance(action_path, str) or not action_path:
+                continue
+            result = row.get("result")
+            cleanup = (
+                result.get("force_action_cleanup")
+                if isinstance(result, dict) else None
+            )
+            removed = (
+                cleanup.get("removed")
+                if isinstance(cleanup, dict) else None
+            )
+            if removed is not True:
+                rows.append(row)
+        rows.sort(key=lambda row: (
+            _as_datetime(row.get("created_at")),
+            int(row["id"]),
+        ))
+        return [ImportJob.from_row(copy.deepcopy(row)) for row in rows]
+
     def _import_job_candidate_rows(
         self,
         *,

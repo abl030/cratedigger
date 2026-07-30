@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import unittest
 from dataclasses import dataclass
 from unittest.mock import patch
@@ -25,6 +26,7 @@ from lib.import_queue import (
     youtube_import_payload,
 )
 from lib.quality import DownloadInfo
+from lib.quality_evidence import snapshot_audio_files
 from scripts.importer import (
     _WORLD_FAILURE_AUDIT_PREFIX,
     _execution_lease_from_job,
@@ -167,6 +169,34 @@ def assert_operation_fence(
             f"{job_type} ambiguous operation changed request status to "
             f"{row['status']!r}; force/YouTube own no request lifecycle to "
             "self-heal"
+        )
+
+
+def assert_startup_force_action_lifecycle(
+    *,
+    launched: bool,
+    final_status: str,
+    action_path: str,
+) -> None:
+    """Terminal recovery removes its copy; retry recovery retains it."""
+    action_exists = os.path.exists(action_path)
+    if launched:
+        if final_status != "failed":
+            raise AssertionError(
+                f"launched force recovery ended {final_status!r}, want 'failed'"
+            )
+        if action_exists:
+            raise AssertionError(
+                "terminal force recovery leaked its private action copy"
+            )
+        return
+    if final_status != "queued":
+        raise AssertionError(
+            f"unlaunched force recovery ended {final_status!r}, want 'queued'"
+        )
+    if not action_exists:
+        raise AssertionError(
+            "retryable force recovery deleted the action copy it still needs"
         )
 
 
@@ -503,6 +533,134 @@ class TestGeneratedImportOperationFence(unittest.TestCase):
                 )
                 self.assertFalse(replay_claimed)
 
+    def test_startup_recovery_releases_only_terminal_force_actions(self) -> None:
+        """Generated file-count worlds pin startup action-copy ownership."""
+        for launched in (False, True):
+            interrupted_worlds = (False, True) if launched else (False,)
+            for interrupted_after_terminal in interrupted_worlds:
+                for file_count in (0, 1, 3):
+                    with self.subTest(
+                        launched=launched,
+                        interrupted_after_terminal=interrupted_after_terminal,
+                        file_count=file_count,
+                    ), tempfile.TemporaryDirectory() as root:
+                        self._assert_startup_force_action_world(
+                            root=root,
+                            launched=launched,
+                            interrupted_after_terminal=(
+                                interrupted_after_terminal
+                            ),
+                            file_count=file_count,
+                        )
+
+    def _assert_startup_force_action_world(
+        self,
+        *,
+        root: str,
+        launched: bool,
+        interrupted_after_terminal: bool,
+        file_count: int,
+    ) -> None:
+        from lib.import_preview import force_action_copy_path
+        from scripts import importer
+
+        downloads = os.path.join(root, "downloads")
+        processing = os.path.join(root, "processing")
+        os.mkdir(downloads, 0o700)
+        os.mkdir(processing, 0o700)
+        os.mkdir(os.path.join(processing, "albums"), 0o700)
+        os.mkdir(os.path.join(processing, "preview"), 0o700)
+        cfg = CratediggerConfig(
+            slskd_download_dir=downloads,
+            processing_dir=processing,
+            audio_check_mode="off",
+        )
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=_OPERATION_FENCE_REQUEST_ID,
+            mb_release_id="generated-startup-force",
+            status="wanted",
+        ))
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=_OPERATION_FENCE_REQUEST_ID,
+            dedupe_key=(
+                "force:generated-startup:"
+                f"{int(launched)}:{int(interrupted_after_terminal)}:"
+                f"{file_count}"
+            ),
+            payload={
+                "download_log_id": 703,
+                "failed_path": "/failed/generated-startup-force",
+            },
+        )
+        action_path = force_action_copy_path(cfg, job.id)
+        os.mkdir(action_path, 0o700)
+        for index in range(file_count):
+            with open(
+                os.path.join(action_path, f"{index:02d}.mp3"),
+                "wb",
+            ) as handle:
+                handle.write(f"audio-{index}".encode())
+        evidence = make_album_quality_evidence(
+            mb_release_id="generated-startup-force",
+            source_path=action_path,
+            files=snapshot_audio_files(action_path),
+        )
+        db.upsert_album_quality_evidence(evidence)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_import_job_candidate_evidence(
+            job.id,
+            persisted.id,
+        )
+        db.mark_import_job_preview_importable(
+            job.id,
+            preview_result={
+                "verdict": "evidence_ready",
+                "action_path": action_path,
+            },
+        )
+        claimed = claim_next_import_job(
+            db,
+            worker_id="generated-old-worker",
+        )
+        assert claimed is not None
+        if launched:
+            assert db.authorize_import_job_launch(
+                claimed.id,
+                request_id=_OPERATION_FENCE_REQUEST_ID,
+                release_id="generated-startup-force",
+                source_path="/failed/generated-startup-force",
+            ) is not None
+        if interrupted_after_terminal:
+            terminalized = db.recover_running_import_jobs(
+                requeue_message="safe retry",
+                recovery_message="startup ambiguity",
+            )
+            assert [item.id for item in terminalized] == [job.id]
+            assert terminalized[0].status == "failed"
+            assert os.path.exists(action_path)
+
+        with patch(
+            "lib.config.read_runtime_config",
+            return_value=cfg,
+        ):
+            importer.recover_abandoned_running_jobs(
+                db,  # type: ignore[arg-type]
+            )
+
+        final = db.get_import_job(job.id)
+        assert final is not None
+        assert_startup_force_action_lifecycle(
+            launched=launched,
+            final_status=final.status,
+            action_path=action_path,
+        )
+
 
 class TestImportOperationFenceChecker(unittest.TestCase):
     def _db(self, **overrides: object) -> FakePipelineDB:
@@ -589,6 +747,18 @@ class TestImportOperationFenceChecker(unittest.TestCase):
                 beets_invocations=[703],
                 replay_claimed=False,
                 db=self._db(status="unsearchable"),
+            )
+
+    def test_checker_rejects_leaked_terminal_force_action_copy(self) -> None:
+        """Known-bad: a terminal force job left its private copy behind."""
+        with tempfile.TemporaryDirectory() as leaked_path, self.assertRaisesRegex(
+            AssertionError,
+            "leaked its private action copy",
+        ):
+            assert_startup_force_action_lifecycle(
+                launched=True,
+                final_status="failed",
+                action_path=leaked_path,
             )
 
 

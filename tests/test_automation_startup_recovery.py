@@ -358,6 +358,41 @@ class _StartupRecoveryContract:
             recovery_message="importer restarted mid-import",
         )
 
+    def _mark_historical_recovery_required(self, job_id: int) -> None:
+        """Plant the exact pre-#942 parked owner shape for compatibility."""
+        lease_fields = (
+            "execution_invocation_id",
+            "execution_host_boot_id",
+            "execution_systemd_unit",
+            "execution_worker_pid",
+            "execution_worker_start_ticks",
+            "execution_beets_pid",
+            "execution_beets_start_ticks",
+        )
+        if isinstance(self.db, FakePipelineDB):
+            row = next(
+                item for item in self.db._import_jobs
+                if item["id"] == job_id
+            )
+            row["status"] = "recovery_required"
+            row["worker_id"] = None
+            row["heartbeat_at"] = None
+            for field in lease_fields:
+                row[field] = None
+            return
+        assignments = ", ".join(f"{field} = NULL" for field in lease_fields)
+        self.db._execute(
+            f"""
+            UPDATE import_jobs
+            SET status = 'recovery_required',
+                worker_id = NULL,
+                heartbeat_at = NULL,
+                {assignments}
+            WHERE id = %s
+            """,
+            (job_id,),
+        )
+
     # --- assertions -----------------------------------------------------
 
     def _assert_returned_to_search_pool(self, job_id: int) -> None:
@@ -456,6 +491,23 @@ class _StartupRecoveryContract:
             os.path.exists(path),
             "recovery abandoned the journaled cleanup instead of resuming it",
         )
+        self._assert_returned_to_search_pool(owner.id)
+
+    def test_historical_recovery_required_owner_converges_automatically(
+        self,
+    ) -> None:
+        """A pre-#942 parked owner remains readable but never stays parked."""
+        from scripts.importer import recover_abandoned_automation_owners
+
+        path = self._album_dir("historical", "01 - Historical.mp3")
+        owner, _lease = self._preview_owner(path)
+        self._journal(owner.id, path)
+        self._mark_historical_recovery_required(owner.id)
+
+        recovered = recover_abandoned_automation_owners(self.db)
+
+        self._case().assertEqual([item.id for item in recovered], [owner.id])
+        self._case().assertFalse(os.path.exists(path))
         self._assert_returned_to_search_pool(owner.id)
 
     def test_persistent_cleanup_refusal_preserves_remaining_tree_and_closes(

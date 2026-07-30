@@ -102,8 +102,7 @@ operation.
 | `/api/import-jobs` | GET | List recent import queue jobs |
 | `/api/import-jobs/timeline` | GET | List active queued/running/recovery-required import jobs in importer order, with server-classified display fields |
 | `/api/import-jobs/<id>` | GET | Poll a single import queue job |
-| `/api/import-jobs/<id>/recovery` | GET | Inspect exact automation recovery evidence, liveness, cleanup progress, and opaque revision |
-| `/api/import-jobs/<id>/recovery` | POST | Revision-bound explicit close (`wanted|imported`) or fresh retry of an ambiguous automation owner |
+| `/api/import-jobs/<id>/recovery` | GET | Inspect read-only exact-owner recovery evidence, liveness, and cleanup progress for any import job; historical `recovery_required` rows remain readable |
 | `/api/library/artist?name=...` | GET | Albums by artist from beets library (MB vs Discogs source) |
 | `/api/discogs/search?q=...` | GET | Search Discogs mirror (artist or release mode via `type=` param) |
 | `/api/discogs/artist/<id>` | GET | Artist's normalized catalogue identities, including exact masterless releases (via mirror `/masters/all` + `/appearances`) |

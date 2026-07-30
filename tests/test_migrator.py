@@ -5029,6 +5029,135 @@ class TestProcessingAutomationOwnerMigration(unittest.TestCase):
         finally:
             _drop_database(name)
 
+    def test_067_preserves_historical_recovery_owner_and_cleanup_journal(
+        self,
+    ) -> None:
+        """Dropping operator declarations leaves runtime recovery evidence."""
+        name = "cratedigger_test_processing_owner_067_recovery_history"
+        dsn = _create_fresh_database(name)
+        try:
+            with tempfile.TemporaryDirectory() as migrations_dir:
+                for migration in discover_migrations(DEFAULT_MIGRATIONS_DIR):
+                    if migration.version <= 66:
+                        shutil.copy2(migration.path, migrations_dir)
+                apply_migrations(dsn, migrations_dir)
+
+                conn = psycopg2.connect(dsn)
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            INSERT INTO album_requests (
+                                mb_release_id, artist_name, album_title,
+                                source, status, active_download_state
+                            )
+                            VALUES (
+                                'mig067-recovery-history', 'A', 'B', 'request',
+                                'wanted',
+                                '{"current_path": "/processing/history", '
+                                '"files": []}'::jsonb
+                            )
+                            RETURNING id
+                        """)
+                        request_row = cur.fetchone()
+                        self.assertIsNotNone(request_row)
+                        assert request_row is not None
+                        request_id = int(request_row[0])
+                        cur.execute("""
+                            INSERT INTO import_jobs (
+                                job_type, status, request_id, payload,
+                                preview_status, result, message
+                            )
+                            VALUES (
+                                'automation_import', 'recovery_required', %s,
+                                '{}'::jsonb, 'evidence_ready', '{}'::jsonb,
+                                'historical operator recovery'
+                            )
+                            RETURNING id
+                        """, (request_id,))
+                        job_row = cur.fetchone()
+                        self.assertIsNotNone(job_row)
+                        assert job_row is not None
+                        job_id = int(job_row[0])
+                        cur.execute("""
+                            UPDATE album_requests
+                            SET status = 'processing',
+                                active_automation_import_job_id = %s
+                            WHERE id = %s
+                        """, (job_id, request_id))
+                        cur.execute("""
+                            INSERT INTO processing_cleanup_journal (
+                                job_id, request_id, action, source_path,
+                                source_manifest, source_manifest_hash,
+                                declared_result_status, declared_reason,
+                                evidence_revision
+                            )
+                            VALUES (
+                                %s, %s, 'no_op', '/processing/history',
+                                '[]'::jsonb, 'empty-manifest-sha256',
+                                'wanted', 'historical declared close',
+                                'history-revision'
+                            )
+                        """, (job_id, request_id))
+                    conn.commit()
+                except BaseException:
+                    conn.rollback()
+                    raise
+                finally:
+                    conn.close()
+
+                apply_migrations(dsn, DEFAULT_MIGRATIONS_DIR)
+
+                conn = psycopg2.connect(dsn)
+                conn.autocommit = True
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            SELECT status, active_automation_import_job_id
+                            FROM album_requests WHERE id = %s
+                        """, (request_id,))
+                        self.assertEqual(
+                            cur.fetchone(),
+                            ("processing", job_id),
+                        )
+                        cur.execute("""
+                            SELECT status, request_id, preview_status
+                            FROM import_jobs WHERE id = %s
+                        """, (job_id,))
+                        self.assertEqual(
+                            cur.fetchone(),
+                            ("recovery_required", request_id, "evidence_ready"),
+                        )
+                        cur.execute("""
+                            SELECT action, source_path, source_manifest_hash,
+                                   completed_at
+                            FROM processing_cleanup_journal
+                            WHERE job_id = %s AND request_id = %s
+                        """, (job_id, request_id))
+                        self.assertEqual(
+                            cur.fetchone(),
+                            (
+                                "no_op",
+                                "/processing/history",
+                                "empty-manifest-sha256",
+                                None,
+                            ),
+                        )
+                        cur.execute("""
+                            SELECT column_name
+                            FROM information_schema.columns
+                            WHERE table_name = 'processing_cleanup_journal'
+                              AND column_name IN (
+                                  'declared_result_status',
+                                  'declared_reason',
+                                  'evidence_revision'
+                              )
+                        """)
+                        self.assertEqual(cur.fetchall(), [])
+                finally:
+                    conn.close()
+        finally:
+            _drop_database(name)
+
 
 @requires_postgres
 class TestLosslessLineageSpectralSubjectMigration(unittest.TestCase):

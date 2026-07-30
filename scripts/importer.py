@@ -1984,6 +1984,11 @@ def recover_abandoned_running_jobs(
         recovered.extend(batch)
         if len(batch) < batch_size:
             break
+    # The terminal job is the durable retry edge across a process kill or a
+    # transient cleanup failure. Successful exact-path cleanup is recorded in
+    # the job result; every missing/failed marker is retried on this startup.
+    for job in db.list_terminal_force_action_cleanup_jobs():
+        _record_terminal_force_action_cleanup(db, job, job)
     recovered.extend(recover_abandoned_automation_owners(
         db,
         liveness_probe=liveness_probe,

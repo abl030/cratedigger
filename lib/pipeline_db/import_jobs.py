@@ -698,6 +698,20 @@ class _ImportJobsMixin(
         """)
         return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]
 
+    def list_terminal_force_action_cleanup_jobs(self) -> list[ImportJob]:
+        """Return terminal force jobs whose private copies need convergence."""
+        cur = self._execute("""
+            SELECT *
+            FROM import_jobs
+            WHERE job_type = 'force_import'
+              AND status IN ('completed', 'failed')
+              AND NULLIF(preview_result->>'action_path', '') IS NOT NULL
+              AND result #>> '{force_action_cleanup,removed}'
+                  IS DISTINCT FROM 'true'
+            ORDER BY created_at ASC, id ASC
+        """)
+        return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]
+
 
     def peek_import_job_candidates(
         self,
