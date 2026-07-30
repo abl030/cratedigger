@@ -8,7 +8,7 @@ import tempfile
 import threading
 import time
 import unittest
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import replace as dataclass_replace
 from datetime import UTC, datetime, timedelta
@@ -23,6 +23,7 @@ import tests._hypothesis_profiles  # noqa: F401
 from lib.config import CratediggerConfig
 from lib.dispatch import (
     DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
+    DISPATCH_CODE_REQUEUE_FAILED,
     DispatchOutcome,
 )
 from lib.download_processing import (
@@ -7025,18 +7026,27 @@ class TestForcePreviewPathAuthority(unittest.TestCase):
 
 # --- Owned-processor cleanup + terminal stage --------------------------------
 #
-# Two invariants of the automation branch of ``process_claimed_job``, stated
+# Three invariants of the automation branch of ``process_claimed_job``, stated
 # before the code:
 #
 #   1. Every fault the post-execution stage can raise either reaches the
-#      caller unchanged (execution/owner-session fail-stop) or is converted
-#      into ``recovery_required`` — it never escapes and kills the importer
-#      process, which drains the shared queue for every request.
+#      caller unchanged (execution/owner-session fail-stop) or is handled — it
+#      never escapes and kills the importer process, which drains the shared
+#      queue for every request.
 #   2. The owned-processor cleanup intent is journalled as an immutable,
 #      unamendable plan, so it must refuse an unusable configured quarantine
 #      root instead of resolving it against the importer's CWD.
+#   3. The automation importer NEVER parks a request for human adjudication. A
+#      failure that leaves the world in an unexpected state is recorded as
+#      audit evidence (so it reads in Recents) and the request goes straight
+#      back to the search pool: the request is the source of truth and the next
+#      cycle rebuilds everything derived from it. ``recovery_required`` behind
+#      ``status='processing'`` is never a resting state, because ``get_wanted``
+#      (``WHERE status = 'wanted'``) would never select that request again — the
+#      album would silently stop being acquired with nothing telling the
+#      operator the world needed fixing.
 #
-# Both checkers are module-level so the known-bad self-tests below can call
+# All checkers are module-level so the known-bad self-tests below can call
 # them directly.
 
 _TERMINAL_STAGE_FAIL_STOP: tuple[type[BaseException], ...] = (
@@ -7057,11 +7067,69 @@ _TERMINAL_STAGE_FAULTS: tuple[type[BaseException], ...] = (
 )
 
 
+# A request outside these statuses is a request the pipeline has stopped
+# acquiring: ``get_wanted`` only ever selects ``wanted``.
+_WORLD_FAILURE_SEARCHABLE = frozenset({"wanted", "imported"})
+
+
+def automation_world_failure_violation(
+    *,
+    label: str,
+    escaped: BaseException | None,
+    job_status: str,
+    request_status: str,
+    active_owner: int | None,
+) -> str | None:
+    """Return why one automation world failure broke invariant 3.
+
+    Exactly two end states are legal:
+
+    * the self-heal committed — the job is terminally ``failed``, the request is
+      searchable again and no automation owner is attached; or
+    * no owner-atomic write was authorized at all — the row is untouched, still
+      ``running`` under its persisted lease and still the exact owner, for
+      lease-proven startup recovery. Never fabricate a write the owner
+      authority refuses.
+
+    ``recovery_required`` is never legal: it strands ``processing`` behind an
+    inactive job that ``get_wanted`` cannot see.
+    """
+    if escaped is not None:
+        return (
+            f"{label} escaped process_claimed_job as "
+            f"{type(escaped).__name__}"
+        )
+    if job_status == "recovery_required":
+        return f"{label} parked the job for human intervention"
+    if job_status == "failed":
+        if request_status not in _WORLD_FAILURE_SEARCHABLE:
+            return (
+                f"{label} self-healed the job but left the request "
+                f"{request_status}"
+            )
+        if active_owner is not None:
+            return (
+                f"{label} self-healed the job but left automation owner "
+                f"{active_owner} attached"
+            )
+        return None
+    if job_status == "running":
+        if request_status != "processing" or active_owner is None:
+            return (
+                f"{label} left a torn owner: job running, request "
+                f"{request_status}, owner {active_owner}"
+            )
+        return None
+    return f"{label} left the job at {job_status}"
+
+
 def terminal_stage_fault_violation(
     *,
     fault: type[BaseException],
     escaped: BaseException | None,
     job_status: str,
+    request_status: str,
+    active_owner: int | None,
 ) -> str | None:
     """Return why one injected terminal-stage fault broke invariant 1."""
     if issubclass(fault, _TERMINAL_STAGE_FAIL_STOP):
@@ -7069,15 +7137,19 @@ def terminal_stage_fault_violation(
             return f"fail-stop {fault.__name__} did not reach the caller"
         if job_status != "running":
             return f"fail-stop {fault.__name__} moved the job to {job_status}"
+        if request_status != "processing" or active_owner is None:
+            return (
+                f"fail-stop {fault.__name__} released the owner: request "
+                f"{request_status}, owner {active_owner}"
+            )
         return None
-    if escaped is not None:
-        return (
-            f"{fault.__name__} escaped process_claimed_job as "
-            f"{type(escaped).__name__}"
-        )
-    if job_status != "recovery_required":
-        return f"{fault.__name__} left the job at {job_status}"
-    return None
+    return automation_world_failure_violation(
+        label=fault.__name__,
+        escaped=escaped,
+        job_status=job_status,
+        request_status=request_status,
+        active_owner=active_owner,
+    )
 
 
 def quarantine_intent_violation(
@@ -7131,19 +7203,46 @@ class _TerminalBoundaryFaultDB(FakePipelineDB):
 _TERMINAL_STAGE_RELEASE = "terminal-stage-release"
 
 
+def assert_world_failure_audit(
+    case: unittest.TestCase,
+    db: FakePipelineDB,
+    *,
+    diagnostic: str,
+) -> None:
+    """Assert one Recents-visible audit row carries the world diagnostic.
+
+    The label is read from the production module, never retyped here, so the
+    pin cannot assert copy no producer emits.
+    """
+    from scripts import importer
+
+    rows = [row for row in db.download_logs if row.outcome == "failed"]
+    case.assertTrue(rows, "no download_log row recorded the world failure")
+    message = rows[-1].error_message or ""
+    case.assertIn(importer._WORLD_FAILURE_AUDIT_PREFIX, message)
+    case.assertIn(diagnostic, message)
+
+
 def launch_automation_owner(
     db: FakePipelineDB,
     canonical_path: str,
     *,
     request_id: int = 42,
     capture_completion: bool = True,
+    authorize_launch: bool = True,
+    retry_counters: Mapping[str, int] | None = None,
 ) -> tuple[ImportJob, ExecutionLeaseSnapshot]:
-    """Drive the real lifecycle to a launch-authorized running owner."""
+    """Drive the real lifecycle to a running (by default launched) owner."""
     from lib.import_job_recovery_service import AutomationCompletionReceipt
 
+    if capture_completion and not authorize_launch:
+        raise AssertionError(
+            "a completion receipt cannot exist before launch authorization"
+        )
     db.seed_request(make_request_row(
         id=request_id,
         mb_release_id=_TERMINAL_STAGE_RELEASE,
+        **dict(retry_counters or {}),
     ))
     job = handoff_automation_owner(
         db,
@@ -7183,14 +7282,15 @@ def launch_automation_owner(
         execution_lease=lease,
     )
     assert claimed is not None
-    authorized = db.authorize_import_job_launch(
-        job.id,
-        request_id=request_id,
-        release_id=_TERMINAL_STAGE_RELEASE,
-        source_path=canonical_path,
-        expected_execution_lease=lease,
-    )
-    assert authorized is not None
+    if authorize_launch:
+        authorized = db.authorize_import_job_launch(
+            job.id,
+            request_id=request_id,
+            release_id=_TERMINAL_STAGE_RELEASE,
+            source_path=canonical_path,
+            expected_execution_lease=lease,
+        )
+        assert authorized is not None
     if capture_completion:
         child = db.record_import_job_beets_child(
             job.id,
@@ -7321,10 +7421,17 @@ class TestAutomationTerminalStageFaultRouting(unittest.TestCase):
                 escaped = exc
         return updated, escaped
 
-    def test_cleanup_failure_recovers_the_job_instead_of_killing_the_worker(
-        self,
-    ) -> None:
-        """A journal that no longer names the canonical owner is recoverable."""
+    def test_cleanup_failure_never_parks_the_request(self) -> None:
+        """A journal that no longer names the canonical owner is not parked.
+
+        The cleanup cannot complete, so no terminal bundle can consume its
+        receipt and no owner-atomic write is authorable. The row therefore stays
+        ``running`` under its persisted lease for startup recovery instead of
+        being parked as ``recovery_required`` behind ``processing``. The debris
+        the unfinished cleanup leaves under ``processing/albums/`` is the
+        documented residual — a fresh attempt gets its own attempt-scoped
+        canonical folder, so it cannot collide.
+        """
         db = FakePipelineDB()
         canonical = self._canonical_dir()
         claimed, lease = launch_automation_owner(db, canonical)
@@ -7333,30 +7440,24 @@ class TestAutomationTerminalStageFaultRouting(unittest.TestCase):
         updated, escaped = self._run_terminal_stage(db, claimed, lease)
 
         self.assertIsNone(escaped)
+        self.assertIsNone(updated)
         stored = db.get_import_job(claimed.id)
-        assert stored is not None and updated is not None
-        self.assertEqual(stored.status, "recovery_required")
-        self.assertEqual(updated.status, "recovery_required")
-        self.assertIn(
-            "automation cleanup journal changed canonical source path",
-            stored.message or "",
-        )
-        # The owner is untouched: the request keeps its processing owner and
-        # the canonical album survives for operator recovery.
-        self.assertEqual(db.request(42)["status"], "processing")
+        assert stored is not None
+        self.assertNotEqual(stored.status, "recovery_required")
         self.assertTrue(os.path.isdir(canonical))
+        row = db.request(42)
         self.assertIsNone(
             terminal_stage_fault_violation(
                 fault=RuntimeError,
                 escaped=escaped,
                 job_status=stored.status,
+                request_status=str(row["status"]),
+                active_owner=row["active_automation_import_job_id"],
             )
         )
 
-    def test_terminal_persist_conflict_recovers_instead_of_killing_worker(
-        self,
-    ) -> None:
-        """The terminal compare-and-set losing its row is recoverable."""
+    def test_terminal_persist_conflict_never_parks_the_request(self) -> None:
+        """A terminal CAS that loses its row every time is not parked."""
         from lib.pipeline_db.terminal_outcomes import ImportJobTerminalConflict
 
         class ConflictDB(_TerminalBoundaryFaultDB):
@@ -7369,17 +7470,67 @@ class TestAutomationTerminalStageFaultRouting(unittest.TestCase):
         updated, escaped = self._run_terminal_stage(db, claimed, lease)
 
         self.assertIsNone(escaped)
+        self.assertIsNone(updated)
         stored = db.get_import_job(claimed.id)
-        assert stored is not None and updated is not None
-        self.assertEqual(stored.status, "recovery_required")
-        self.assertIn("ImportJobTerminalConflict", stored.message or "")
-        self.assertEqual(db.request(42)["status"], "processing")
+        assert stored is not None
+        self.assertNotEqual(stored.status, "recovery_required")
+        row = db.request(42)
         self.assertIsNone(
             terminal_stage_fault_violation(
                 fault=ImportJobTerminalConflict,
                 escaped=escaped,
                 job_status=stored.status,
+                request_status=str(row["status"]),
+                active_owner=row["active_automation_import_job_id"],
             )
+        )
+
+    def test_recoverable_terminal_fault_self_heals_when_the_retry_can_write(
+        self,
+    ) -> None:
+        """A malformed first bundle self-heals on the second, valid write.
+
+        This is the terminal-stage fault that CAN reach a terminal write: only
+        the first ``persist_import_terminal_outcome`` call fails, so the
+        self-heal's own minimal bundle commits and the request rejoins the
+        search pool.
+        """
+        class FaultOnceDB(_TerminalBoundaryFaultDB):
+            calls = 0
+
+            def _terminal_outcome_write_boundary(
+                self, index: int, label: str,
+            ) -> None:
+                del index, label
+                if type(self).calls == 0:
+                    type(self).calls = 1
+                    raise RuntimeError("injected first-bundle fault")
+
+        db = FaultOnceDB()
+        canonical = self._canonical_dir()
+        claimed, lease = launch_automation_owner(db, canonical)
+
+        updated, escaped = self._run_terminal_stage(db, claimed, lease)
+
+        self.assertIsNone(escaped)
+        assert updated is not None
+        self.assertEqual(updated.status, "failed")
+        stored = db.get_import_job(claimed.id)
+        assert stored is not None
+        row = db.request(42)
+        self.assertIsNone(
+            terminal_stage_fault_violation(
+                fault=RuntimeError,
+                escaped=escaped,
+                job_status=stored.status,
+                request_status=str(row["status"]),
+                active_owner=row["active_automation_import_job_id"],
+            )
+        )
+        self.assertEqual(row["status"], "wanted")
+        self.assertIsNone(row["active_automation_import_job_id"])
+        assert_world_failure_audit(
+            self, db, diagnostic="injected first-bundle fault",
         )
 
     def test_execution_cancellation_in_the_terminal_stage_still_fail_stops(
@@ -7402,19 +7553,23 @@ class TestAutomationTerminalStageFaultRouting(unittest.TestCase):
         assert stored is not None
         # Fail-stop leaves the row running for lease-proven startup recovery.
         self.assertEqual(stored.status, "running")
-        self.assertEqual(db.request(42)["status"], "processing")
+        row = db.request(42)
+        self.assertEqual(row["status"], "processing")
+        self.assertEqual(row["active_automation_import_job_id"], claimed.id)
         self.assertIsNone(
             terminal_stage_fault_violation(
                 fault=ExecutionCancelled,
                 escaped=escaped,
                 job_status=stored.status,
+                request_status=str(row["status"]),
+                active_owner=row["active_automation_import_job_id"],
             )
         )
 
     def test_owner_session_loss_in_the_terminal_stage_still_fail_stops(
         self,
     ) -> None:
-        """Must-still-work: a dead pinned session cannot write recovery."""
+        """Must-still-work: a dead pinned session cannot self-heal either."""
         class LostDB(_TerminalBoundaryFaultDB):
             fault = OwnerSessionLost
 
@@ -7428,11 +7583,16 @@ class TestAutomationTerminalStageFaultRouting(unittest.TestCase):
         stored = db.get_import_job(claimed.id)
         assert stored is not None
         self.assertEqual(stored.status, "running")
+        row = db.request(42)
+        self.assertEqual(row["status"], "processing")
+        self.assertEqual(row["active_automation_import_job_id"], claimed.id)
         self.assertIsNone(
             terminal_stage_fault_violation(
                 fault=OwnerSessionLost,
                 escaped=escaped,
                 job_status=stored.status,
+                request_status=str(row["status"]),
+                active_owner=row["active_automation_import_job_id"],
             )
         )
 
@@ -7454,10 +7614,13 @@ class TestAutomationTerminalStageFaultRouting(unittest.TestCase):
 
         stored = db.get_import_job(claimed.id)
         assert stored is not None
+        row = db.request(42)
         violation = terminal_stage_fault_violation(
             fault=fault,
             escaped=escaped,
             job_status=stored.status,
+            request_status=str(row["status"]),
+            active_owner=row["active_automation_import_job_id"],
         )
         self.assertIsNone(violation, violation)
 
@@ -7620,6 +7783,675 @@ class TestAutomationCleanupQuarantineRoot(unittest.TestCase):
         self.assertIsNone(violation, violation)
 
 
+# Every distinct world-failure class the automation branch of
+# ``process_claimed_job`` can reach, and whether an owner-atomic terminal write
+# is authorable for it. The two ``False`` rows are not policy exceptions: the
+# cleanup could not complete (so no receipt exists to consume) or the terminal
+# CAS refuses every bundle. Both leave the row untouched and ``running`` under
+# its persisted lease — never parked.
+_WORLD_FAILURE_CLASSES: dict[str, bool] = {
+    "execute_crash_after_launch": True,
+    "beets_acknowledgement_ambiguous": True,
+    "no_terminal_outcome_pre_launch": True,
+    "missing_completion_receipt": True,
+    "recoverable_terminal_stage_fault": True,
+    "cleanup_journal_drift": False,
+    "terminal_cas_always_conflicts": False,
+}
+
+
+class TestAutomationWorldFailureNeverParks(unittest.TestCase):
+    """Invariant 3 — a world failure re-opens the search, never parks it.
+
+    Every pin here drives the REAL ``process_claimed_job`` automation branch
+    and asserts the DOMAIN outcome: the request rejoins the search pool, the
+    exact processing owner is cleared, the diagnostic is recorded as a
+    ``download_log`` row an operator can read in Recents, and no job is left in
+    ``recovery_required``.
+    """
+
+    def _launch(
+        self,
+        *,
+        capture_completion: bool = True,
+        authorize_launch: bool = True,
+        retry_counters: Mapping[str, int] | None = None,
+        db: FakePipelineDB | None = None,
+    ) -> tuple[FakePipelineDB, str, ImportJob, ExecutionLeaseSnapshot]:
+        owner_db = FakePipelineDB() if db is None else db
+        canonical = terminal_stage_canonical_dir(self)
+        claimed, lease = launch_automation_owner(
+            owner_db,
+            canonical,
+            capture_completion=capture_completion,
+            authorize_launch=authorize_launch,
+            retry_counters=retry_counters,
+        )
+        return owner_db, canonical, claimed, lease
+
+    def _run(
+        self,
+        db: FakePipelineDB,
+        claimed: ImportJob,
+        lease: ExecutionLeaseSnapshot,
+        execute_fn: Callable[..., DispatchOutcome],
+    ) -> tuple[ImportJob | None, BaseException | None]:
+        from scripts import importer
+
+        token = CancellationToken()
+        escaped: BaseException | None = None
+        updated: ImportJob | None = None
+        with db._pin_owner_session(token) as owner_session_identity:
+            try:
+                updated = importer.process_claimed_job(
+                    db,  # pyright: ignore[reportArgumentType]
+                    claimed,
+                    ctx=object(),
+                    execute_fn=execute_fn,
+                    execution_lease=lease,
+                    cancellation_token=token,
+                    owner_session_identity=owner_session_identity,
+                )
+            except BaseException as exc:  # noqa: BLE001 - the policy under test
+                escaped = exc
+        return updated, escaped
+
+    def _assert_returned_to_search_pool(
+        self,
+        db: FakePipelineDB,
+        claimed: ImportJob,
+        updated: ImportJob | None,
+        escaped: BaseException | None,
+        *,
+        label: str,
+        diagnostic: str,
+    ) -> None:
+        stored = db.get_import_job(claimed.id)
+        assert stored is not None
+        row = db.request(42)
+        violation = automation_world_failure_violation(
+            label=label,
+            escaped=escaped,
+            job_status=stored.status,
+            request_status=str(row["status"]),
+            active_owner=row["active_automation_import_job_id"],
+        )
+        self.assertIsNone(violation, violation)
+        # The positive half the checker cannot demand: the write COMMITTED.
+        assert updated is not None
+        self.assertEqual(updated.status, "failed")
+        self.assertEqual(stored.status, "failed")
+        self.assertEqual(row["status"], "wanted")
+        self.assertIsNone(row["active_automation_import_job_id"])
+        self.assertIsNone(row["active_download_state"])
+        assert_world_failure_audit(self, db, diagnostic=diagnostic)
+
+    # -- one deterministic pin per converted failure class -------------------
+
+    def test_crash_after_launch_returns_the_request_to_the_search_pool(
+        self,
+    ) -> None:
+        """An exception escaping a launched execution self-heals."""
+        db, _canonical, claimed, lease = self._launch()
+
+        def execute(*_args: object, **_kwargs: object) -> DispatchOutcome:
+            raise RuntimeError("beets wrapper vanished mid-import")
+
+        updated, escaped = self._run(db, claimed, lease, execute)
+
+        self._assert_returned_to_search_pool(
+            db, claimed, updated, escaped,
+            label="execute_crash_after_launch",
+            diagnostic="RuntimeError: beets wrapper vanished mid-import",
+        )
+
+    def test_ambiguous_beets_acknowledgement_reopens_the_search(self) -> None:
+        """The canonical "did Beets mutate the library?" ambiguity self-heals.
+
+        The outcome comes from the REAL producer
+        (``lib.dispatch.core._capture_automation_completion``) losing its
+        capture CAS, not from a hand-typed code/message pair.
+        """
+        db, canonical, claimed, lease = self._launch(capture_completion=False)
+        ambiguous = _real_ambiguous_completion_outcome(
+            db, claimed, canonical, lease,
+        )
+        self.assertEqual(ambiguous.code, "beets_acknowledgement_ambiguous")
+
+        def execute(*_args: object, **_kwargs: object) -> DispatchOutcome:
+            return ambiguous
+
+        updated, escaped = self._run(db, claimed, lease, execute)
+
+        self._assert_returned_to_search_pool(
+            db, claimed, updated, escaped,
+            label="beets_acknowledgement_ambiguous",
+            diagnostic=ambiguous.message,
+        )
+
+    def test_processor_without_a_terminal_outcome_reopens_the_search(
+        self,
+    ) -> None:
+        """A pre-launch processor that returns no owner-atomic bundle."""
+        db, _canonical, claimed, lease = self._launch(
+            capture_completion=False,
+            authorize_launch=False,
+        )
+
+        def execute(*_args: object, **_kwargs: object) -> DispatchOutcome:
+            return DispatchOutcome(False, "processor produced nothing")
+
+        updated, escaped = self._run(db, claimed, lease, execute)
+
+        self._assert_returned_to_search_pool(
+            db, claimed, updated, escaped,
+            label="no_terminal_outcome_pre_launch",
+            diagnostic=(
+                "Automation processor returned no owner-atomic terminal outcome"
+            ),
+        )
+
+    def test_missing_completion_receipt_reopens_the_search(self) -> None:
+        """A launched job with no captured receipt self-heals, not parks.
+
+        The owner authority refuses a ``running`` terminal write without the
+        receipt, so this is the one class that transits ``recovery_required``
+        to close — and it must not REST there.
+        """
+        db, canonical, claimed, lease = self._launch(capture_completion=False)
+        updated, escaped = self._run(
+            db,
+            claimed,
+            lease,
+            _completion_stub_execute_fn(Completed()),
+        )
+
+        self._assert_returned_to_search_pool(
+            db, claimed, updated, escaped,
+            label="missing_completion_receipt",
+            diagnostic="Automation completion receipt is missing or invalid",
+        )
+        self.assertFalse(os.path.isdir(canonical))
+
+    # -- must-still-work guards ---------------------------------------------
+
+    def test_a_successful_import_still_terminalizes_as_imported(self) -> None:
+        """Must-still-work: self-healing did not break the happy path."""
+        db, canonical, claimed, lease = self._launch()
+
+        updated, escaped = self._run(
+            db,
+            claimed,
+            lease,
+            _completion_stub_execute_fn(
+                CompletionDispatched(
+                    outcome=DispatchOutcome(True, "Imported by dispatch"),
+                ),
+            ),
+        )
+
+        self.assertIsNone(escaped)
+        assert updated is not None
+        self.assertEqual(updated.status, "completed")
+        row = db.request(42)
+        self.assertEqual(row["status"], "imported")
+        self.assertIsNone(row["active_automation_import_job_id"])
+        self.assertFalse(os.path.isdir(canonical))
+        self.assertEqual(
+            [row.outcome for row in db.download_logs], ["success"],
+        )
+
+    def test_execution_cancellation_does_not_self_heal(self) -> None:
+        """Must-still-work: a cancelled execution fail-stops, never writes.
+
+        ``ExecutionCancelled`` is what dispatch raises when this execution's
+        authority is revoked mid-flight. It must reach the caller untouched:
+        the self-heal write would need the same revoked authority.
+        """
+        db, canonical, claimed, lease = self._launch()
+
+        def execute(*_args: object, **_kwargs: object) -> DispatchOutcome:
+            raise ExecutionCancelled("owner_session_reverification_failed")
+
+        updated, escaped = self._run(db, claimed, lease, execute)
+
+        self.assertIsInstance(escaped, ExecutionCancelled)
+        self.assertIsNone(updated)
+        stored = db.get_import_job(claimed.id)
+        assert stored is not None
+        self.assertEqual(stored.status, "running")
+        row = db.request(42)
+        self.assertEqual(row["status"], "processing")
+        self.assertEqual(row["active_automation_import_job_id"], claimed.id)
+        self.assertEqual(db.download_logs, [])
+        self.assertTrue(os.path.isdir(canonical))
+
+    def test_owner_session_loss_does_not_self_heal(self) -> None:
+        """Must-still-work: a dead pinned session cannot self-heal either."""
+        class LostDB(_TerminalBoundaryFaultDB):
+            fault = OwnerSessionLost
+
+        db, _canonical, claimed, lease = self._launch(db=LostDB())
+
+        updated, escaped = self._run(
+            db,
+            claimed,
+            lease,
+            _completion_stub_execute_fn(
+                CompletionDispatched(
+                    outcome=DispatchOutcome(True, "Imported by dispatch"),
+                ),
+            ),
+        )
+
+        self.assertIsInstance(escaped, OwnerSessionLost)
+        self.assertIsNone(updated)
+        stored = db.get_import_job(claimed.id)
+        assert stored is not None
+        self.assertEqual(stored.status, "running")
+        row = db.request(42)
+        self.assertEqual(row["status"], "processing")
+        self.assertEqual(row["active_automation_import_job_id"], claimed.id)
+
+    def test_self_heal_retains_retry_counters_so_backoff_grows(self) -> None:
+        """A repeatedly broken world backs off instead of hot-looping."""
+        db, _canonical, claimed, lease = self._launch(
+            retry_counters={
+                "search_attempts": 5,
+                "download_attempts": 4,
+                "validation_attempts": 3,
+            },
+        )
+
+        def execute(*_args: object, **_kwargs: object) -> DispatchOutcome:
+            raise RuntimeError("the world is still wrong")
+
+        updated, escaped = self._run(db, claimed, lease, execute)
+
+        self._assert_returned_to_search_pool(
+            db, claimed, updated, escaped,
+            label="retained_counters",
+            diagnostic="RuntimeError: the world is still wrong",
+        )
+        row = db.request(42)
+        # Retained, not cleared — and the failed attempt is recorded, so the
+        # next retry is scheduled further out.
+        self.assertEqual(row["search_attempts"], 5)
+        self.assertEqual(row["download_attempts"], 4)
+        self.assertEqual(row["validation_attempts"], 4)
+        self.assertIsNotNone(row["next_retry_after"])
+        self.assertIsNotNone(row["last_attempt_at"])
+
+    # -- generated property over the whole failure-class space --------------
+
+    @given(kind=st.sampled_from(sorted(_WORLD_FAILURE_CLASSES)))
+    def test_generated_no_world_failure_ever_parks_the_request(
+        self,
+        kind: str,
+    ) -> None:
+        """Property: invariant 3 holds for every automation world failure."""
+        db, claimed, updated, escaped = self._drive_world_failure(kind)
+
+        stored = db.get_import_job(claimed.id)
+        assert stored is not None
+        row = db.request(42)
+        violation = automation_world_failure_violation(
+            label=kind,
+            escaped=escaped,
+            job_status=stored.status,
+            request_status=str(row["status"]),
+            active_owner=row["active_automation_import_job_id"],
+        )
+        self.assertIsNone(violation, violation)
+        self.assertNotEqual(stored.status, "recovery_required")
+        # Sharper than the checker alone: a class that CAN self-heal must, and
+        # a class that cannot must leave the row exactly as it found it.
+        self.assertEqual(
+            updated is not None,
+            _WORLD_FAILURE_CLASSES[kind],
+            f"{kind} changed its self-heal reachability",
+        )
+
+    def _drive_world_failure(
+        self,
+        kind: str,
+    ) -> tuple[
+        FakePipelineDB, ImportJob, ImportJob | None, BaseException | None,
+    ]:
+        """Reach one named world-failure class through the real branch."""
+        if kind == "execute_crash_after_launch":
+            db, _canonical, claimed, lease = self._launch()
+
+            def crash(*_args: object, **_kwargs: object) -> DispatchOutcome:
+                raise RuntimeError("generated crash")
+
+            updated, escaped = self._run(db, claimed, lease, crash)
+            return db, claimed, updated, escaped
+        if kind == "beets_acknowledgement_ambiguous":
+            db, canonical, claimed, lease = self._launch(
+                capture_completion=False,
+            )
+            ambiguous = _real_ambiguous_completion_outcome(
+                db, claimed, canonical, lease,
+            )
+            updated, escaped = self._run(
+                db, claimed, lease, _fixed_outcome_execute_fn(ambiguous),
+            )
+            return db, claimed, updated, escaped
+        if kind == "no_terminal_outcome_pre_launch":
+            db, _canonical, claimed, lease = self._launch(
+                capture_completion=False,
+                authorize_launch=False,
+            )
+            updated, escaped = self._run(
+                db,
+                claimed,
+                lease,
+                _fixed_outcome_execute_fn(
+                    DispatchOutcome(False, "generated empty bundle"),
+                ),
+            )
+            return db, claimed, updated, escaped
+        if kind == "missing_completion_receipt":
+            db, _canonical, claimed, lease = self._launch(
+                capture_completion=False,
+            )
+            updated, escaped = self._run(
+                db, claimed, lease, _completion_stub_execute_fn(Completed()),
+            )
+            return db, claimed, updated, escaped
+        if kind == "recoverable_terminal_stage_fault":
+            class FaultOnceDB(_TerminalBoundaryFaultDB):
+                calls = 0
+
+                def _terminal_outcome_write_boundary(
+                    self, index: int, label: str,
+                ) -> None:
+                    del index, label
+                    if type(self).calls == 0:
+                        type(self).calls = 1
+                        raise RuntimeError("generated first-bundle fault")
+
+            db, _canonical, claimed, lease = self._launch(db=FaultOnceDB())
+            updated, escaped = self._run(
+                db,
+                claimed,
+                lease,
+                _completion_stub_execute_fn(
+                    CompletionDispatched(
+                        outcome=DispatchOutcome(True, "Imported by dispatch"),
+                    ),
+                ),
+            )
+            return db, claimed, updated, escaped
+        if kind == "cleanup_journal_drift":
+            from lib.pipeline_db import CleanupJournalIntent
+            from lib.processing_cleanup import (
+                PROCESSING_CLEANUP_NO_OP,
+                cleanup_manifest_builtins,
+                cleanup_manifest_hash,
+            )
+
+            db, canonical, claimed, lease = self._launch()
+            db.create_processing_cleanup_journal(
+                request_id=42,
+                job_id=claimed.id,
+                intent=CleanupJournalIntent(
+                    action=PROCESSING_CLEANUP_NO_OP,
+                    source_path=os.path.join(canonical, "superseded"),
+                    source_manifest=cleanup_manifest_builtins(()),
+                    source_manifest_hash=cleanup_manifest_hash(()),
+                ),
+            )
+            updated, escaped = self._run(
+                db,
+                claimed,
+                lease,
+                _completion_stub_execute_fn(
+                    CompletionDispatched(
+                        outcome=DispatchOutcome(True, "Imported by dispatch"),
+                    ),
+                ),
+            )
+            return db, claimed, updated, escaped
+        if kind == "terminal_cas_always_conflicts":
+            from lib.pipeline_db.terminal_outcomes import (
+                ImportJobTerminalConflict,
+            )
+
+            class ConflictDB(_TerminalBoundaryFaultDB):
+                fault = ImportJobTerminalConflict
+
+            db, _canonical, claimed, lease = self._launch(db=ConflictDB())
+            updated, escaped = self._run(
+                db,
+                claimed,
+                lease,
+                _completion_stub_execute_fn(
+                    CompletionDispatched(
+                        outcome=DispatchOutcome(True, "Imported by dispatch"),
+                    ),
+                ),
+            )
+            return db, claimed, updated, escaped
+        raise AssertionError(f"unknown world-failure class {kind!r}")
+
+
+def _real_ambiguous_completion_outcome(
+    db: FakePipelineDB,
+    job: ImportJob,
+    canonical_path: str,
+    lease: ExecutionLeaseSnapshot,
+) -> DispatchOutcome:
+    """Make the REAL producer emit its ambiguous-acknowledgement outcome.
+
+    ``_capture_automation_completion`` returns the ambiguity exactly when its
+    capture compare-and-set loses, which a lease naming a child process the job
+    never recorded reproduces. Deriving the trigger and the message from the
+    producer keeps the pin falsifiable (test-fidelity Rule C).
+    """
+    from lib.dispatch.core import _capture_automation_completion
+
+    outcome = _capture_automation_completion(
+        db,  # pyright: ignore[reportArgumentType]
+        import_job_id=job.id,
+        request_id=42,
+        release_id=_TERMINAL_STAGE_RELEASE,
+        canonical_path=canonical_path,
+        returncode=0,
+        execution_lease=dataclass_replace(
+            lease,
+            beets=ProcessIdentity(424242, 424242),
+        ),
+    )
+    if outcome is None:
+        raise AssertionError(
+            "the completion capture unexpectedly succeeded; this pin needs a "
+            "conflicting lease to reach the ambiguity producer"
+        )
+    return outcome
+
+
+def _fixed_outcome_execute_fn(
+    outcome: DispatchOutcome,
+) -> Callable[..., DispatchOutcome]:
+    """Return an ``execute_fn`` yielding one already-built outcome."""
+    def execute(*_args: object, **_kwargs: object) -> DispatchOutcome:
+        return outcome
+
+    return execute
+
+
+def _completion_stub_execute_fn(
+    result: CompletionResult,
+) -> Callable[..., DispatchOutcome]:
+    """Run the REAL automation executor over one stubbed completion result.
+
+    Only the beets-mutating completion pipeline is stood in for; the fallback
+    terminal-outcome construction, dispatch-outcome mapping and every owner
+    write below it are production code.
+    """
+    def execute(
+        owner: FakePipelineDB,
+        owned_job: ImportJob,
+        *,
+        ctx: object = None,
+        execution_lease: ExecutionLeaseSnapshot,
+        cancellation_token: CancellationToken,
+        owner_session_identity: OwnerSessionIdentity,
+    ) -> DispatchOutcome:
+        from scripts import importer
+
+        def completed_processing(
+            *_args: object,
+            **_kwargs: object,
+        ) -> CompletionResult:
+            return result
+
+        return importer.execute_automation_import_job(
+            owner,  # pyright: ignore[reportArgumentType]
+            owned_job,
+            ctx=ctx,
+            execution_lease=execution_lease,
+            cancellation_token=cancellation_token,
+            owner_session_identity=owner_session_identity,
+            completed_processing_fn=completed_processing,
+        )
+
+    return execute
+
+
+class TestForceJobFailuresAreRecordedNotParked(unittest.TestCase):
+    """Invariant 3 for the non-owning job types.
+
+    A force or YouTube job never owns its request's ``processing`` status, so
+    there is nothing to self-heal — but it must still never park. The terminal
+    ``failed``/``completed`` status IS the surface, and it stops no request.
+    """
+
+    def _force_job(self, db: FakePipelineDB) -> ImportJob:
+        """Drive a real LAUNCH-AUTHORIZED force job.
+
+        Launch authorization is what made the old parking attempt succeed; a
+        pre-launch force job always fell through to the terminal status. So the
+        pins below only prove the policy change on a launched job.
+        """
+        db.seed_request(make_request_row(id=42, mb_release_id="force-release"))
+        source = tempfile.mkdtemp(prefix="cratedigger-force-never-parks-")
+        self.addCleanup(shutil.rmtree, source, ignore_errors=True)
+        with open(os.path.join(source, "01.mp3"), "wb") as handle:
+            handle.write(b"audio")
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            dedupe_key=force_import_dedupe_key(11),
+            payload=force_import_payload(
+                download_log_id=11,
+                failed_path=source,
+            ),
+        )
+        _seed_candidate_for_import_job(
+            db, job.id, mb_release_id="force-release",
+        )
+        assert db.mark_import_job_preview_importable(
+            job.id,
+            preview_result={"verdict": "would_import"},
+            message="ready",
+        ) is not None
+        claimed = claim_next_import_job(db, worker_id="worker")
+        assert claimed is not None
+        authorized = db.authorize_import_job_launch(
+            claimed.id,
+            request_id=42,
+            release_id="force-release",
+            source_path=source,
+        )
+        assert authorized is not None
+        return claimed
+
+    def _run(
+        self,
+        db: FakePipelineDB,
+        claimed: ImportJob,
+        execute_fn: Callable[..., DispatchOutcome],
+    ) -> ImportJob | None:
+        from scripts import importer
+
+        return importer.process_claimed_job(
+            db,  # pyright: ignore[reportArgumentType]
+            claimed,
+            ctx=object(),
+            execute_fn=execute_fn,
+        )
+
+    def test_crashed_force_job_is_failed_not_parked(self) -> None:
+        db = FakePipelineDB()
+        claimed = self._force_job(db)
+
+        def execute(*_args: object, **_kwargs: object) -> DispatchOutcome:
+            raise RuntimeError("force wrapper vanished")
+
+        updated = self._run(db, claimed, execute)
+
+        assert updated is not None
+        self.assertEqual(updated.status, "failed")
+        stored = db.get_import_job(claimed.id)
+        assert stored is not None
+        self.assertEqual(stored.status, "failed")
+        self.assertEqual(stored.error, "RuntimeError")
+
+    def test_bundleless_force_failure_is_failed_not_parked(self) -> None:
+        db = FakePipelineDB()
+        claimed = self._force_job(db)
+
+        updated = self._run(
+            db,
+            claimed,
+            _fixed_outcome_execute_fn(
+                DispatchOutcome(False, "force import produced no bundle"),
+            ),
+        )
+
+        assert updated is not None
+        self.assertEqual(updated.status, "failed")
+        self.assertEqual(updated.error, "force import produced no bundle")
+
+    def test_bundleless_force_success_is_completed_not_parked(self) -> None:
+        db = FakePipelineDB()
+        claimed = self._force_job(db)
+
+        updated = self._run(
+            db,
+            claimed,
+            _fixed_outcome_execute_fn(
+                DispatchOutcome(True, "force import committed"),
+            ),
+        )
+
+        assert updated is not None
+        self.assertEqual(updated.status, "completed")
+
+    def test_requeue_failed_after_launch_is_failed_not_parked(self) -> None:
+        db = FakePipelineDB()
+        claimed = self._force_job(db)
+
+        updated = self._run(
+            db,
+            claimed,
+            _fixed_outcome_execute_fn(
+                DispatchOutcome(
+                    False,
+                    "requeue UPDATE failed: boom",
+                    code=DISPATCH_CODE_REQUEUE_FAILED,
+                ),
+            ),
+        )
+
+        assert updated is not None
+        self.assertEqual(updated.status, "failed")
+        self.assertIn("requeue-to-preview failed", updated.message or "")
+
+
 class TestTerminalStageInvariantCheckersTripOnViolations(unittest.TestCase):
     """Known-bad self-tests: an unfalsifiable checker is not a checker."""
 
@@ -7628,24 +8460,77 @@ class TestTerminalStageInvariantCheckersTripOnViolations(unittest.TestCase):
             fault=RuntimeError,
             escaped=RuntimeError("boom"),
             job_status="running",
+            request_status="processing",
+            active_owner=1,
         )
         assert violation is not None
         self.assertIn("escaped process_claimed_job", violation)
 
-    def test_unrecovered_crash_is_reported(self) -> None:
+    def test_parked_job_is_reported(self) -> None:
+        """The whole point of invariant 3: parking is a violation."""
+        violation = terminal_stage_fault_violation(
+            fault=RuntimeError,
+            escaped=None,
+            job_status="recovery_required",
+            request_status="processing",
+            active_owner=1,
+        )
+        assert violation is not None
+        self.assertIn("parked the job for human intervention", violation)
+
+    def test_unknown_terminal_job_status_is_reported(self) -> None:
+        violation = terminal_stage_fault_violation(
+            fault=RuntimeError,
+            escaped=None,
+            job_status="queued",
+            request_status="processing",
+            active_owner=1,
+        )
+        assert violation is not None
+        self.assertIn("left the job at queued", violation)
+
+    def test_self_heal_that_left_the_request_processing_is_reported(
+        self,
+    ) -> None:
+        violation = terminal_stage_fault_violation(
+            fault=RuntimeError,
+            escaped=None,
+            job_status="failed",
+            request_status="processing",
+            active_owner=None,
+        )
+        assert violation is not None
+        self.assertIn("left the request processing", violation)
+
+    def test_self_heal_that_kept_the_owner_attached_is_reported(self) -> None:
+        violation = terminal_stage_fault_violation(
+            fault=RuntimeError,
+            escaped=None,
+            job_status="failed",
+            request_status="wanted",
+            active_owner=7,
+        )
+        assert violation is not None
+        self.assertIn("left automation owner 7 attached", violation)
+
+    def test_torn_running_owner_is_reported(self) -> None:
         violation = terminal_stage_fault_violation(
             fault=RuntimeError,
             escaped=None,
             job_status="running",
+            request_status="wanted",
+            active_owner=None,
         )
         assert violation is not None
-        self.assertIn("left the job at running", violation)
+        self.assertIn("left a torn owner", violation)
 
     def test_swallowed_fail_stop_is_reported(self) -> None:
         violation = terminal_stage_fault_violation(
             fault=ExecutionCancelled,
             escaped=None,
             job_status="recovery_required",
+            request_status="processing",
+            active_owner=1,
         )
         assert violation is not None
         self.assertIn("did not reach the caller", violation)
@@ -7655,9 +8540,22 @@ class TestTerminalStageInvariantCheckersTripOnViolations(unittest.TestCase):
             fault=OwnerSessionLost,
             escaped=OwnerSessionLost("gone"),
             job_status="failed",
+            request_status="processing",
+            active_owner=1,
         )
         assert violation is not None
         self.assertIn("moved the job to failed", violation)
+
+    def test_fail_stop_that_released_the_owner_is_reported(self) -> None:
+        violation = terminal_stage_fault_violation(
+            fault=OwnerSessionLost,
+            escaped=OwnerSessionLost("gone"),
+            job_status="running",
+            request_status="wanted",
+            active_owner=None,
+        )
+        assert violation is not None
+        self.assertIn("released the owner", violation)
 
     def test_cwd_derived_destination_is_reported(self) -> None:
         violation = quarantine_intent_violation(

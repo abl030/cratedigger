@@ -909,9 +909,57 @@ def _run_dispatch_finalization_world(
         ),
         "outcomes": [row.outcome for row in db.download_logs],
         "status": db.request(42)["status"],
+        "active_automation_import_job_id": (
+            db.request(42)["active_automation_import_job_id"]
+        ),
+        "validation_attempts": db.request(42)["validation_attempts"],
+        "error_message": (
+            last_log.error_message if last_log is not None else None
+        ),
         "job_status": final_job.status,
         "denylist": [(row.username, row.reason) for row in db.denylist],
     }
+
+
+def assert_automation_world_failure_self_heals(
+    outcome: dict[str, object],
+) -> None:
+    """A launched automation ambiguity self-heals; it must never park.
+
+    ``recovery_required`` behind ``processing`` is the removed policy: it left
+    the request outside ``get_wanted``'s selection forever, with no terminal
+    write for an operator to read. The current policy (#933, "nothing is ever
+    parked") instead converts every ambiguous world into exactly one
+    ``download_log`` audit row (so it reads in Recents), clears the exact
+    processing owner, records a validation attempt so backoff keeps growing
+    instead of resetting, and returns the request to ``wanted`` so the next
+    cycle re-derives the truth.
+    """
+    from scripts import importer
+
+    if outcome["job_status"] != "failed":
+        raise AssertionError(
+            "ambiguous automation completion parked at "
+            f"{outcome['job_status']!r} instead of self-healing"
+        )
+    if outcome["status"] != "wanted":
+        raise AssertionError(
+            f"self-healed job left the request {outcome['status']!r} "
+            "instead of wanted"
+        )
+    if outcome["active_automation_import_job_id"] is not None:
+        raise AssertionError("self-heal left the automation owner attached")
+    if outcome["validation_attempts"] != 1:
+        raise AssertionError(
+            "self-heal did not retain/record a validation attempt "
+            f"(got {outcome['validation_attempts']!r})"
+        )
+    error_message = outcome["error_message"]
+    message = error_message if isinstance(error_message, str) else ""
+    if importer._WORLD_FAILURE_AUDIT_PREFIX not in message:
+        raise AssertionError(
+            "no download_log audit row recorded the world failure"
+        )
 
 
 class TestAttemptAuditCheckerQualification(unittest.TestCase):
@@ -984,6 +1032,41 @@ class TestAttemptAuditCheckerQualification(unittest.TestCase):
                 persisted_candidate_grade="genuine",
                 expected_candidate_grade="genuine",
             )
+
+    def test_world_failure_checker_rejects_planted_parked_outcome(self):
+        """Known-bad: reviving the removed ``recovery_required`` park trips it."""
+        with self.assertRaises(AssertionError):
+            assert_automation_world_failure_self_heals({
+                "job_status": "recovery_required",
+                "status": "processing",
+                "active_automation_import_job_id": 7,
+                "validation_attempts": 0,
+                "error_message": None,
+            })
+
+    def test_world_failure_checker_rejects_zeroed_retry_counters(self):
+        """Known-bad: self-heal must retain/record the attempt, not reset it."""
+        from scripts import importer
+
+        with self.assertRaises(AssertionError):
+            assert_automation_world_failure_self_heals({
+                "job_status": "failed",
+                "status": "wanted",
+                "active_automation_import_job_id": None,
+                "validation_attempts": 0,
+                "error_message": f"{importer._WORLD_FAILURE_AUDIT_PREFIX}: boom",
+            })
+
+    def test_world_failure_checker_rejects_missing_audit_row(self):
+        """Known-bad: a silent self-heal with no Recents-visible trace trips it."""
+        with self.assertRaises(AssertionError):
+            assert_automation_world_failure_self_heals({
+                "job_status": "failed",
+                "status": "wanted",
+                "active_automation_import_job_id": None,
+                "validation_attempts": 1,
+                "error_message": "some unrelated failure",
+            })
 
 
 class TestAttemptAuditGenerated(unittest.TestCase):
@@ -1307,10 +1390,14 @@ class TestAttemptAuditGenerated(unittest.TestCase):
             "post_result_exception",
         }
         if mode in ambiguous_modes:
+            # #933: ambiguous automation completions no longer park as
+            # ``recovery_required`` behind a stuck ``processing`` request.
+            # They self-heal in the same frame the crash/timeout/no-JSON
+            # ambiguity is discovered.
             self.assertIsNone(audited["import_result"])
             self.assertIsNone(unaudited["import_result"])
-            self.assertEqual(audited["job_status"], "recovery_required")
-            self.assertEqual(unaudited["job_status"], "recovery_required")
+            assert_automation_world_failure_self_heals(audited)
+            assert_automation_world_failure_self_heals(unaudited)
         else:
             self.assertTrue(_persisted_attempt_has_exact_audit(
                 audited["import_result"], audit))

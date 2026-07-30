@@ -11,7 +11,7 @@ import time
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
-from typing import Any, Protocol, assert_never, runtime_checkable
+from typing import Any, Literal, Protocol, assert_never, runtime_checkable
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
@@ -95,6 +95,11 @@ logger = logging.getLogger("cratedigger-importer")
 RESTART_REQUEUE_MESSAGE = "Importer restarted while job was running; retry queued"
 RESTART_RECOVERY_MESSAGE = (
     "Recovery required: importer restarted after Beets launch authorization"
+)
+# Every automation world failure surfaces under this exact label, so one
+# Recents read tells the operator the request self-healed rather than stopped.
+_WORLD_FAILURE_AUDIT_PREFIX = (
+    "Automation world failure; request returned to the search pool"
 )
 IMPORT_CANDIDATE_SCAN_LIMIT = 32
 IMPORTER_SYSTEMD_UNIT = "cratedigger-importer.service"
@@ -1185,6 +1190,152 @@ class _ForceStageDB(Protocol):
     def close(self) -> None: ...
 
 
+def _self_heal_automation_world_failure(
+    db: PipelineDB,
+    job: ImportJob,
+    *,
+    execution_lease: ExecutionLeaseSnapshot,
+    cancellation_token: CancellationToken,
+    owner_session_identity: OwnerSessionIdentity,
+    reason: str,
+    result: dict[str, object],
+) -> ImportJob | None:
+    """Surface one world failure as audit evidence and re-open the search.
+
+    The automation importer never parks a request for human adjudication. A
+    fault that leaves the world in an unexpected state is surfaced as a
+    ``download_log`` row — so it reads in Recents — and the request goes
+    straight back to ``wanted``: the request is the source of truth and the
+    next cycle rebuilds everything derived from it, including the
+    "did Beets already mutate the library?" ambiguity (album present ->
+    upgrade/no-op, absent -> re-import). Parking instead left
+    ``status='processing'`` behind an inactive job, which ``get_wanted()``
+    never selects again — the album silently stopped being acquired, forever,
+    with nothing telling the operator the world needed fixing.
+
+    The ``processing -> wanted`` edge retains retry counters and records an
+    attempt, so a permanently broken world backs off instead of hot-looping.
+
+    ``job`` must be the freshly re-read owner row: its launch fence, preview
+    stage and captured completion receipt are the exact authority the terminal
+    compare-and-set compares against.
+
+    Returns ``None`` when this execution cannot author an owner-atomic
+    terminal write at all. The row then stays ``running`` under its persisted
+    lease for startup recovery rather than gaining a half-written outcome;
+    never fabricate a write the owner authority refuses.
+    """
+    from lib.download import _local_completion_terminal_outcome
+    from lib.download_reconstruction import reconstruct_grab_list_entry
+
+    request_id = job.request_id
+    if request_id is None:
+        return None
+    detail = f"{_WORLD_FAILURE_AUDIT_PREFIX}: {reason}"
+    try:
+        row = db.get_request(request_id)
+        raw_state = None if row is None else row.get("active_download_state")
+        if row is None or raw_state is None:
+            logger.error(
+                "Import job %s has no owned download state to self-heal (%s); "
+                "leaving the row for lease-proven startup recovery",
+                job.id,
+                reason,
+            )
+            return None
+        state = ActiveDownloadState.from_raw(raw_state)
+        pending = _local_completion_terminal_outcome(
+            reconstruct_grab_list_entry(row, state),
+            state,
+            request_id=request_id,
+            import_job_id=job.id,
+            transition=transitions.RequestTransition.to_wanted(
+                from_status="processing",
+                attempt_type="validation",
+            ),
+            outcome="failed",
+            detail=detail,
+            error_message=detail,
+        )
+        # Cleanup runs first and while the job is still the running owner: its
+        # checkpoint heartbeats a 'running' row, and the terminal bundle
+        # consumes the receipt it produces.
+        cleanup_receipt = _complete_automation_processing_cleanup(
+            db,
+            job,
+            DispatchOutcome(success=False, message=detail),
+            execution_lease=execution_lease,
+            cancellation_token=cancellation_token,
+            owner_session_identity=owner_session_identity,
+        )
+        completion_receipt = _automation_completion_from_job(job)
+        expected_job_status: Literal["running", "recovery_required"] = "running"
+        if (
+            job.beets_launch_authorized_at is not None
+            and completion_receipt is None
+        ):
+            # The owner authority refuses a ``running`` terminal write for a
+            # launched job that never captured its completion receipt — and
+            # that missing receipt IS the ambiguity this self-heal exists for.
+            # ``recovery_required`` is the one stage that CAS accepts without
+            # the receipt, so the ambiguity transits it and is closed in this
+            # same frame. The job never RESTS there: no request is left
+            # outside the search pool waiting for a human.
+            staged = db.mark_import_job_recovery_required(
+                job.id,
+                reason=reason,
+                expected_execution_lease=execution_lease,
+            )
+            if staged is None:
+                logger.error(
+                    "Import job %s could not stage its ambiguous close (%s); "
+                    "leaving the row for lease-proven startup recovery",
+                    job.id,
+                    reason,
+                )
+                return None
+            expected_job_status = "recovery_required"
+        terminal = db.persist_import_terminal_outcome(
+            replace(
+                pending,
+                automation=AutomationTerminalAuthority(
+                    expected_job_status=expected_job_status,
+                    expected_preview_status=job.preview_status,
+                    expected_execution_lease=execution_lease,
+                    cleanup_receipt=cleanup_receipt,
+                    completion_receipt=completion_receipt,
+                ),
+            ).with_job(ImportJobTerminal(
+                status="failed",
+                error=detail,
+                result=result,
+                message=detail,
+            ))
+        )
+    except (ExecutionCancelled, OwnerSessionLost):
+        # Fail-stop: this execution's authority is gone, so no further write on
+        # this session is trustworthy — including this self-heal, which would
+        # raise again. Startup recovery owns the row once its lease is proven
+        # dead.
+        raise
+    except Exception:
+        logger.exception(
+            "Self-heal terminal write failed for import job %s (%s); leaving "
+            "the row for lease-proven startup recovery",
+            job.id,
+            reason,
+        )
+        return None
+    logger.warning(
+        "Import job %s returned request %s to the search pool after a world "
+        "failure: %s",
+        job.id,
+        request_id,
+        reason,
+    )
+    return terminal.job
+
+
 def _automation_claim_is_current(
     db: _AutomationOwnerDB,
     job: ImportJob,
@@ -1405,23 +1556,27 @@ def process_claimed_job(
             if current_lease is None:
                 return None
             assert current is not None
+            assert cancellation_token is not None
+            assert owner_session_identity is not None
+            crash = f"{type(exc).__name__}: {exc}"
             if current.beets_launch_authorized_at is not None:
-                return db.mark_import_job_recovery_required(
-                    job.id,
-                    reason=f"{type(exc).__name__}: {exc}",
-                    expected_execution_lease=current_lease,
+                return _self_heal_automation_world_failure(
+                    db,
+                    current,
+                    execution_lease=current_lease,
+                    cancellation_token=cancellation_token,
+                    owner_session_identity=owner_session_identity,
+                    reason=crash,
+                    result={"success": False, "message": crash},
                 )
             return db.requeue_import_job_for_preview(
                 job.id,
-                reason=f"{type(exc).__name__}: {exc}",
+                reason=crash,
                 expected_execution_lease=current_lease,
             )
-        recovery = db.mark_import_job_recovery_required(
-            job.id,
-            reason=f"{type(exc).__name__}: {exc}",
-        )
-        if recovery is not None:
-            return recovery
+        # Force and YouTube jobs do not own their request's ``processing``
+        # status, so a crashed one has nothing to self-heal: the terminal
+        # failed status IS the surface, and it never stops the request.
         failed = db.mark_import_job_failed(
             job.id,
             error=type(exc).__name__,
@@ -1472,19 +1627,30 @@ def process_claimed_job(
                 or outcome.terminal_outcome is None
             )
         ):
-            return db.mark_import_job_recovery_required(
-                job.id,
+            # Beets was launched and did not acknowledge. Whether it mutated
+            # the library is unknowable from here and needs no adjudication:
+            # the next cycle re-reads the library from the request.
+            return _self_heal_automation_world_failure(
+                db,
+                current,
+                execution_lease=current_lease,
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
                 reason=outcome.message,
-                expected_execution_lease=current_lease,
+                result=result,
             )
         if outcome.terminal_outcome is None:
-            return db.mark_import_job_recovery_required(
-                job.id,
+            return _self_heal_automation_world_failure(
+                db,
+                current,
+                execution_lease=current_lease,
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
                 reason=(
                     "Automation processor returned no owner-atomic terminal "
                     "outcome"
                 ),
-                expected_execution_lease=current_lease,
+                result=result,
             )
         # The owned-processor cleanup and the terminal persist are the last
         # stage of a Beets-mutating execution, and both raise: seven owner
@@ -1492,8 +1658,7 @@ def process_claimed_job(
         # from the cleanup, ImportJobTerminalConflict from the terminal CAS.
         # An escape here kills the whole importer process — the shared,
         # serial lane for every request — where the identical class of crash
-        # before ``execute_fn`` is deliberately converted into an operator
-        # recovery. Route it the same way.
+        # escaping ``execute_fn`` self-heals the request. Route it the same way.
         try:
             cleanup_receipt = _complete_automation_processing_cleanup(
                 db,
@@ -1508,12 +1673,16 @@ def process_claimed_job(
                 current.beets_launch_authorized_at is not None
                 and completion_receipt is None
             ):
-                return db.mark_import_job_recovery_required(
-                    job.id,
+                return _self_heal_automation_world_failure(
+                    db,
+                    current,
+                    execution_lease=current_lease,
+                    cancellation_token=cancellation_token,
+                    owner_session_identity=owner_session_identity,
                     reason=(
                         "Automation completion receipt is missing or invalid"
                     ),
-                    expected_execution_lease=current_lease,
+                    result=result,
                 )
             pending = replace(
                 outcome.terminal_outcome,
@@ -1535,7 +1704,7 @@ def process_claimed_job(
             )
         except (ExecutionCancelled, OwnerSessionLost):
             # Fail-stop: this execution's authority is gone, so no further
-            # write on this session is trustworthy — including the recovery
+            # write on this session is trustworthy — including the self-heal
             # write below, which would raise again. Startup recovery owns
             # the row once its lease is proven dead.
             raise
@@ -1543,10 +1712,14 @@ def process_claimed_job(
             logger.exception(
                 "Automation terminal stage failed for import job %s", job.id,
             )
-            return db.mark_import_job_recovery_required(
-                job.id,
+            return _self_heal_automation_world_failure(
+                db,
+                current,
+                execution_lease=current_lease,
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
                 reason=f"{type(exc).__name__}: {exc}",
-                expected_execution_lease=current_lease,
+                result=result,
             )
         return terminal.job
     if outcome.success:
@@ -1587,12 +1760,9 @@ def process_claimed_job(
                 if merged is not None:
                     terminal_job = merged
             return _record_terminal_force_action_cleanup(db, job, terminal_job)
-        recovery = db.mark_import_job_recovery_required(
-            job.id,
-            reason="Beets returned without a terminal acknowledgement bundle",
-        )
-        if recovery is not None:
-            return recovery
+        # A force/YouTube success without a bundle is recorded, not parked: the
+        # job never owned the request's ``processing`` status, so the terminal
+        # completed status is the whole surface this outcome needs.
         completed = db.mark_import_job_completed(
             job.id,
             result=result,
@@ -1635,12 +1805,6 @@ def process_claimed_job(
             job.request_id,
             outcome.message,
         )
-        recovery = db.mark_import_job_recovery_required(
-            job.id,
-            reason=f"requeue-to-preview failed after launch: {outcome.message}",
-        )
-        if recovery is not None:
-            return recovery
         failed = db.mark_import_job_failed(
             job.id,
             error=outcome.message,
@@ -1683,12 +1847,8 @@ def process_claimed_job(
                 outcome,
             )
         return _record_terminal_force_action_cleanup(db, job, terminal_job)
-    recovery = db.mark_import_job_recovery_required(
-        job.id,
-        reason="Beets returned without a terminal acknowledgement bundle",
-    )
-    if recovery is not None:
-        return recovery
+    # Same as the success branch above: a bundle-less force/YouTube failure is
+    # recorded terminally rather than parked. No request is stopped by it.
     failed = db.mark_import_job_failed(
         job.id,
         error=outcome.message,

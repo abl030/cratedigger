@@ -475,55 +475,72 @@ class TestImportOperationFence(unittest.TestCase):
         self.assertEqual(retry.id, first.id)
         self.assertIsNone(claim_next_import_job(db, worker_id="new-worker-2"))
 
-    def test_launched_exception_becomes_recovery_required_not_failed(self) -> None:
+    def test_launched_exception_self_heals_the_search_pool(self) -> None:
+        """A launched automation exception self-heals; it no longer parks.
+
+        Beets was launched (``authorize_import_job_launch`` succeeded) when
+        the execution crashed, so whether Beets already mutated the library
+        is unknowable from here. The distinction from an ordinary failure
+        still matters: the old policy parked this exact case as
+        ``recovery_required`` for a human to adjudicate the ambiguity; the
+        current policy (#933, "nothing is ever parked") instead self-heals
+        it in the same frame — a ``download_log`` audit row records the
+        diagnostic (so it reads in Recents), the exact processing owner is
+        cleared, and the request returns to ``wanted`` so the next cycle
+        re-derives the truth. The job itself still ends terminally
+        ``failed`` and can never be replayed.
+        """
         from scripts import importer
 
         db = FakePipelineDB()
-        source_path = "/tmp/force"
+        source_path = "/incoming/Artist - Album [request-42]"
         db.seed_request(make_request_row(
             id=42,
             mb_release_id="release-42",
-            status="wanted",
+            status="downloading",
+            active_download_state={"current_path": source_path, "files": []},
         ))
-        job = db.enqueue_import_job(
-            IMPORT_JOB_FORCE,
-            request_id=42,
-            dedupe_key="force:exception",
-            payload={"download_log_id": 1, "failed_path": source_path},
-        )
-        fingerprint = _seed_candidate(
+        claimed, execution_lease = _claim_automation_job(
             db,
-            job.id,
             release_id="release-42",
             source_path=source_path,
         )
-        db.mark_import_job_preview_importable(job.id, preview_result={"ready": True})
-        claimed = claim_next_import_job(db, worker_id="worker")
-        assert claimed is not None
         authorized = db.authorize_import_job_launch(
             claimed.id,
             request_id=42,
             release_id="release-42",
             source_path=source_path,
+            expected_execution_lease=execution_lease,
         )
         assert authorized is not None
 
         def crash(*_args: object, **_kwargs: object) -> Any:
             raise RuntimeError("lost subprocess acknowledgement")
 
-        recovered = importer.process_claimed_job(
-            cast(Any, db),
-            authorized,
-            execute_fn=crash,
-        )
+        token = CancellationToken()
+        with db._pin_owner_session(token) as owner_session_identity:
+            recovered = importer.process_claimed_job(
+                cast(Any, db),
+                authorized,
+                execute_fn=crash,
+                execution_lease=execution_lease,
+                cancellation_token=token,
+                owner_session_identity=owner_session_identity,
+            )
 
         assert recovered is not None
-        self.assertEqual(recovered.status, IMPORT_JOB_RECOVERY_REQUIRED)
-        self.assertEqual(recovered.beets_launch_release_id, "release-42")
-        self.assertEqual(recovered.beets_launch_source_path, source_path)
-        self.assertEqual(recovered.beets_launch_snapshot_fingerprint, fingerprint)
+        self.assertEqual(recovered.status, "failed")
+        self.assertNotEqual(recovered.status, IMPORT_JOB_RECOVERY_REQUIRED)
         self.assertIn("lost subprocess acknowledgement", recovered.message or "")
+        request = db.request(42)
+        self.assertEqual(request["status"], "wanted")
+        self.assertIsNone(request["active_automation_import_job_id"])
         self.assertIsNone(claim_next_import_job(db, worker_id="replay-worker"))
+        audit_rows = [row for row in db.download_logs if row.outcome == "failed"]
+        self.assertTrue(audit_rows, "no download_log row recorded the world failure")
+        audit_message = audit_rows[-1].error_message or ""
+        self.assertIn(importer._WORLD_FAILURE_AUDIT_PREFIX, audit_message)
+        self.assertIn("lost subprocess acknowledgement", audit_message)
 
     def test_terminal_acknowledgement_prevents_recovery_replay(self) -> None:
         db = FakePipelineDB()

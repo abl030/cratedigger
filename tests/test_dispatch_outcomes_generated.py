@@ -22,6 +22,22 @@ recipes (no new scaffolding):
   ``_PREIMPORT_FACT_REJECT_DECISIONS`` frozenset (5 entries — the
   hand-written table is missing ``mixed_source``).
 
+The invariants these properties patrol (CLAUDE.md invariants 6 and 11 —
+"broken worlds surface and restart, nothing is ever parked"):
+
+* Every dispatch outcome is RECORDED where the operator reads it: exactly
+  one ``download_log`` row that renders through the real Recents lens, or —
+  for a caller-retained job that owns no request lifecycle and produced no
+  terminal bundle — a terminal ``failed`` job row carrying the diagnostic.
+  An ambiguous acknowledgement is audited like any other outcome; "ambiguity
+  writes no audit" was the pre-#933 policy and is now itself a violation.
+* No outcome parks anything: the owner job reaches a terminal queue status
+  (``recovery_required`` is an ACTIVE status, so resting there is parking),
+  no finished job stays attached as the request's automation owner, and an
+  automation request lands exactly ``wanted`` or ``imported`` with its owned
+  download state released.
+* Whatever ``dispatch_action(decision)`` prescribes is what landed in the DB.
+
 Two tiers, selected by ``CRATEDIGGER_HYPOTHESIS_PROFILE`` (see
 ``tests/_hypothesis_profiles.py``):
 
@@ -62,6 +78,11 @@ from lib.import_execution import (
     CancellationToken,
     ExecutionLeaseSnapshot,
     ProcessIdentity,
+)
+from lib.import_queue import (
+    IMPORT_JOB_ACTIVE_STATUSES,
+    IMPORT_JOB_AUTOMATION,
+    IMPORT_JOB_STATUSES,
 )
 from lib.quality import (
     QUALITY_DECISION_IMPORT_STAGE_DECISIONS,
@@ -127,6 +148,27 @@ _HAVE_ANALYSIS_FAILURES = (
     "snapshot changed during analysis",
     "RuntimeError: analyser crashed",
 )
+
+# --- CLAUDE.md invariant 11 vocabulary ------------------------------------
+# "Broken worlds surface and restart. Nothing is ever parked."
+#
+# Terminal queue statuses are DERIVED from production's own sets rather than
+# hand-listed: whatever the queue still counts as ACTIVE is by definition not
+# an exit, and ``recovery_required`` is one of those active statuses — a job
+# resting there is a request whose only exit is an operator command.
+_TERMINAL_IMPORT_JOB_STATUSES = frozenset(
+    IMPORT_JOB_STATUSES - IMPORT_JOB_ACTIVE_STATUSES
+)
+# The only two statuses a dispatched automation request may end in:
+# searchable again, or acquired.
+_RUNNABLE_TERMINAL_REQUEST_STATUSES = frozenset({"wanted", "imported"})
+# ``_run_dispatch``'s seed status. A force job owns no request lifecycle, so
+# the operator's starting status must survive its dispatch untouched; the
+# harness default and the checkers read the same constant so they cannot
+# drift apart.
+_CALLER_RETAINED_STATUS = "downloading"
+# The harness enqueues exactly one import job per generated world.
+_GENERATED_JOB_ID = 1
 
 
 def _preview_lease(job_id: int) -> ExecutionLeaseSnapshot:
@@ -222,14 +264,22 @@ def _run_dispatch(
     world: DispatchWorld,
     *,
     beets: BeetsWorld,
-    initial_status: str = "downloading",
+    initial_status: str = _CALLER_RETAINED_STATUS,
     force: bool = False,
     queued: bool = False,
+    terminalize: str = "production",
 ) -> dict:
     """Established recipe (mirrors
     ``tests/test_dispatch_core.py::TestDispatchCoreOrchestration._dispatch``)
     for driving the REAL ``dispatch_import_core`` with a generated decision
-    fed through the ``parse_import_result`` seam."""
+    fed through the ``parse_import_result`` seam.
+
+    ``terminalize="production"`` finalizes through the real queue owner
+    (``scripts.importer.process_claimed_job``). ``terminalize="park"`` is the
+    known-bad plant for the invariant-11 checkers below: it reproduces the
+    REMOVED pre-#933 policy by stopping the owner job in
+    ``recovery_required`` with the request still ``processing`` behind it —
+    a request whose only exit is an operator command."""
     from lib.dispatch import dispatch_import_core
 
     # Automation owns a request until one terminal wanted/imported outcome;
@@ -374,7 +424,28 @@ def _run_dispatch(
                     else None
                 ),
             )
-        if result.terminal_outcome is not None:
+        if terminalize == "park":
+            # Planted violation, not a production path: the owner job rests in
+            # ``recovery_required`` (an ACTIVE queue status) while the request
+            # stays ``processing`` behind it, exactly as the removed parking
+            # policy left it. The real writer is used so the plant is a world
+            # the pre-#933 importer genuinely produced.
+            from scripts.importer import _execution_lease_from_job
+
+            assert execution_lease is not None, (
+                "the parked plant only exists for automation worlds"
+            )
+            # Production re-reads the owner row for its lease (the child
+            # identity is recorded during the run), so the plant does too.
+            owner = db.get_import_job(import_job_id)
+            assert owner is not None
+            owner_lease = _execution_lease_from_job(owner)
+            assert db.mark_import_job_recovery_required(
+                import_job_id,
+                reason="planted pre-#933 parking policy",
+                expected_execution_lease=owner_lease,
+            ) is not None, "parked plant could not stage recovery_required"
+        elif result.terminal_outcome is not None:
             from lib.terminal_outcomes import ImportJobTerminal
 
             if force:
@@ -806,37 +877,174 @@ def assert_download_log_row_created(db: FakePipelineDB, *, min_count: int = 1) -
             f"download_log row has empty/None outcome: {last!r}")
 
 
+def assert_request_never_parked(
+    db: FakePipelineDB,
+    *,
+    retained_status: str = _CALLER_RETAINED_STATUS,
+) -> None:
+    """CLAUDE.md invariant 11: nothing a dispatch touches is ever parked.
+
+    Whatever the outcome — accepted, rejected, or an ambiguous world failure
+    — the finalized world must hold no state whose only exit is a human
+    command. The owner job reaches a terminal queue status (production counts
+    ``recovery_required`` as ACTIVE, so resting there IS parking), no active
+    automation owner stays attached, and the request itself is left runnable:
+    an automation owner's request lands exactly ``wanted`` (searchable again)
+    or ``imported`` (acquired) with its owned download state released, while a
+    force job owns no request lifecycle so the operator's starting status
+    survives unless the outcome legitimately moved it to a runnable one.
+    """
+    job = db.get_import_job(_GENERATED_JOB_ID)
+    if job is None:
+        raise AssertionError(
+            "dispatch finalized with no import job row to read")
+    if job.status not in _TERMINAL_IMPORT_JOB_STATUSES:
+        raise AssertionError(
+            f"{job.job_type} job {job.id} rested in non-terminal status "
+            f"{job.status!r}; invariant 11 forbids a queue state whose only "
+            f"exit is an operator command (terminal: "
+            f"{sorted(_TERMINAL_IMPORT_JOB_STATUSES)})")
+    row = db.request(42)
+    if row["active_automation_import_job_id"] is not None:
+        raise AssertionError(
+            "terminal dispatch left active_automation_import_job_id="
+            f"{row['active_automation_import_job_id']!r} attached; the "
+            "request is owned by a finished job and get_wanted() will never "
+            "select it again")
+    status = row["status"]
+    if status == "processing":
+        raise AssertionError(
+            "terminal dispatch left the request in 'processing' behind an "
+            "inactive job — the silent stop invariant 11 exists to forbid")
+    if job.job_type == IMPORT_JOB_AUTOMATION:
+        if status not in _RUNNABLE_TERMINAL_REQUEST_STATUSES:
+            raise AssertionError(
+                f"automation terminal left status={status!r}, want one of "
+                f"{sorted(_RUNNABLE_TERMINAL_REQUEST_STATUSES)}")
+        if row["active_download_state"] is not None:
+            raise AssertionError(
+                "automation terminal left owned download state attached")
+    elif status not in _RUNNABLE_TERMINAL_REQUEST_STATUSES | {retained_status}:
+        raise AssertionError(
+            f"caller-retained terminal left status={status!r}, want the "
+            f"operator's {retained_status!r} or one of "
+            f"{sorted(_RUNNABLE_TERMINAL_REQUEST_STATUSES)}")
+
+
+def assert_outcome_is_operator_visible(
+    db: FakePipelineDB, outcome: DispatchOutcome,
+) -> None:
+    """Invariant 11's first step: the outcome is RECORDED, never silent.
+
+    Every dispatch that produced a terminal outcome bundle, and every
+    automation outcome whether it produced one or not (an ambiguous
+    automation world failure self-heals through its own audit row), writes
+    exactly one ``download_log`` row — and that row must render for the
+    operator through the REAL Recents projection rather than a taxonomy
+    re-listed here. A force/YouTube job owns no request lifecycle, so a
+    bundle-less failure of one carries its diagnostic on the terminal job
+    row instead; it still may not be silent.
+    """
+    job = db.get_import_job(_GENERATED_JOB_ID)
+    if job is None:
+        raise AssertionError(
+            "dispatch finalized with no import job row to read")
+    automation = job.job_type == IMPORT_JOB_AUTOMATION
+    if outcome.terminal_outcome is None and not automation:
+        if job.status != "failed":
+            raise AssertionError(
+                f"bundle-less caller-retained outcome left job status="
+                f"{job.status!r}, want 'failed' — the job row is this "
+                "outcome's only operator surface")
+        if not (job.message or job.error):
+            raise AssertionError(
+                "bundle-less caller-retained failure recorded no readable "
+                "message or error for the operator")
+        return
+    assert_download_log_row_created(db)
+    if len(db.download_logs) != 1:
+        raise AssertionError(
+            f"one dispatch wrote {len(db.download_logs)} audit rows; the "
+            "operator reads exactly one per outcome")
+    log = db.download_logs[-1]
+    # Drive the production Recents lens (``get_log``'s imported/problems
+    # outcome filters) instead of asserting against a copied outcome list:
+    # an outcome string no operator view selects is an invisible outcome.
+    lens = "imported" if outcome.success else "rejected"
+    visible = db.get_log(outcome_filter=lens)
+    if not any(int(entry["id"]) == log.id for entry in visible):
+        raise AssertionError(
+            f"audit row outcome={log.outcome!r} never renders under the "
+            f"operator's {lens!r} Recents filter — the outcome is invisible")
+
+
+def assert_world_failure_self_heals(
+    db: FakePipelineDB,
+    outcome: DispatchOutcome,
+    *,
+    retained_status: str = _CALLER_RETAINED_STATUS,
+) -> None:
+    """Invariant 11 for the ambiguous world, which is its canonical case.
+
+    A Beets child that was launched and never acknowledged leaves the world
+    unknowable from here: it may or may not have mutated the library. The
+    importer no longer adjudicates that with a human — it records the
+    ambiguity as audit evidence under its own world-failure label, returns
+    the request to the search pool with retry accounting retained (so a
+    permanently broken world backs off instead of hot-looping), and lets the
+    next cycle re-derive the truth from the request. "Ambiguity writes no
+    audit" was the OLD policy and is now itself a violation: the audit row is
+    how the operator learns the world needs fixing.
+    """
+    from scripts.importer import _WORLD_FAILURE_AUDIT_PREFIX
+
+    if outcome.success:
+        raise AssertionError("ambiguous acknowledgement reported success=True")
+    assert_request_never_parked(db, retained_status=retained_status)
+    assert_outcome_is_operator_visible(db, outcome)
+    job = db.get_import_job(_GENERATED_JOB_ID)
+    if job is None or job.job_type != IMPORT_JOB_AUTOMATION:
+        # A force/YouTube ambiguity never owned the request's ``processing``
+        # status, so its terminal job row (already proven above) is the whole
+        # surface this outcome needs.
+        return
+    row = db.request(42)
+    if row["status"] != "wanted":
+        raise AssertionError(
+            f"automation world failure left status={row['status']!r}, want "
+            "'wanted' — the request must go back into the search pool")
+    log = db.download_logs[-1]
+    detail = " ".join(
+        part for part in (log.beets_detail, log.error_message) if part
+    )
+    if _WORLD_FAILURE_AUDIT_PREFIX not in detail:
+        raise AssertionError(
+            "world-failure audit row does not carry the importer's own "
+            f"world-failure label {_WORLD_FAILURE_AUDIT_PREFIX!r}: "
+            f"{detail!r}")
+    if not row["validation_attempts"] or row["next_retry_after"] is None:
+        raise AssertionError(
+            "self-heal dropped retry accounting (validation_attempts="
+            f"{row['validation_attempts']!r}, next_retry_after="
+            f"{row['next_retry_after']!r}); invariant 11 backs a broken world "
+            "off with attempts plus growing backoff, never by parking it")
+
+
 def assert_dispatch_outcome_matches_routing(
     world: DispatchWorld, db: FakePipelineDB, outcome: DispatchOutcome,
 ) -> None:
     """The auditability + success/self-heal oracle for the legacy dispatch
     path: whatever ``dispatch_action(decision)`` prescribes is what actually
-    landed in the DB — for the no-JSON crash path AND every known decision
-    string.
+    landed in the DB — for the ambiguous no-JSON path AND every known
+    decision string.
     """
-    from lib.import_queue import IMPORT_JOB_AUTOMATION
-
     status = db.request(42)["status"]
 
     if world.mode == "no_json":
-        if db.download_logs:
-            raise AssertionError(
-                "no-JSON ambiguity wrote a terminal download audit")
-        job = db.get_import_job(1)
-        expected_status = (
-            "processing"
-            if job is not None and job.job_type == IMPORT_JOB_AUTOMATION
-            else "downloading"
-        )
-        if status != expected_status:
-            raise AssertionError(
-                f"no-JSON ambiguity left status={status!r}, "
-                f"want {expected_status!r}")
-        if job is None or job.status != "recovery_required":
-            raise AssertionError(
-                "no-JSON ambiguity did not stop in recovery_required")
-        if outcome.success:
-            raise AssertionError("no-JSON crash reported success=True")
+        # An unacknowledged Beets child is a broken world, not a parking
+        # ticket: ``dispatch_action`` has no routing for it, so the importer's
+        # self-heal is the routing (CLAUDE.md invariant 11).
+        assert_world_failure_self_heals(db, outcome)
         return
 
     assert_download_log_row_created(db)
@@ -1108,12 +1316,17 @@ class TestGeneratedDispatchOutcomes(unittest.TestCase):
         self.addCleanup(self.runtime.stop)
 
     @given(world=dispatch_worlds())
-    def test_terminal_outcomes_are_audited_and_ambiguity_is_not(self, world):
+    def test_every_outcome_is_audited_and_never_parks_the_request(self, world):
+        """CLAUDE.md invariant 11 over the whole dispatch world space.
+
+        Ambiguous worlds are included deliberately: under the removed policy
+        an unacknowledged Beets child wrote no audit and stopped in
+        ``recovery_required``, which is exactly the silent stop this property
+        now forbids.
+        """
         outcome = _run_dispatch(world, beets=self.beets)
-        if world.mode == "no_json":
-            self.assertEqual(outcome["db"].download_logs, [])
-        else:
-            assert_download_log_row_created(outcome["db"])
+        assert_outcome_is_operator_visible(outcome["db"], outcome["result"])
+        assert_request_never_parked(outcome["db"])
 
     @given(world=dispatch_worlds())
     def test_outcome_matches_dispatch_action_routing(self, world):
@@ -1471,6 +1684,117 @@ class TestGeneratedArchivalQuarantineIsolation(unittest.TestCase):
 class TestInvariantCheckersTripOnViolations(unittest.TestCase):
     """Known-bad self-tests: prove the harness detects what it claims to."""
 
+    def _ambiguous_world(self) -> DispatchWorld:
+        return DispatchWorld(
+            mode="no_json", decision=None, new_min_bitrate=None,
+            prev_min_bitrate=None, spectral_grade="genuine",
+            spectral_bitrate=None, was_converted=False,
+            requeue_on_failure=True, source_username="user1")
+
+    def _beets_world(self) -> BeetsWorld:
+        """One real-Beets scratch world for the dispatch-driven plants."""
+        beets = BeetsWorld(_REPO_ROOT)
+        self.addCleanup(beets.close)
+        runtime = patch.dict(os.environ, {
+            "CRATEDIGGER_RUNTIME_CONFIG": str(beets.poisoned_runtime_config()),
+            "BEETS_DB": str(beets.root / "poisoned-library.db"),
+        })
+        runtime.start()
+        self.addCleanup(runtime.stop)
+        return beets
+
+    def test_never_parked_checker_trips_on_parked_recovery_required_job(self):
+        """The removed policy IS the planted bug now.
+
+        Drives the real ambiguous dispatch and then closes it the way the
+        pre-#933 importer did: the owner job stops in ``recovery_required``
+        with the request still ``processing`` behind it.
+        """
+        outcome = _run_dispatch(
+            self._ambiguous_world(),
+            beets=self._beets_world(),
+            terminalize="park",
+        )
+        db = outcome["db"]
+        parked = db.get_import_job(_GENERATED_JOB_ID)
+        assert parked is not None
+        self.assertEqual(parked.status, "recovery_required")
+        self.assertEqual(db.request(42)["status"], "processing")
+        with self.assertRaisesRegex(AssertionError, "non-terminal status"):
+            assert_request_never_parked(db)
+        with self.assertRaisesRegex(AssertionError, "non-terminal status"):
+            assert_world_failure_self_heals(db, outcome["result"])
+        with self.assertRaisesRegex(AssertionError, "non-terminal status"):
+            assert_dispatch_outcome_matches_routing(
+                self._ambiguous_world(), db, outcome["result"])
+
+    def test_never_parked_checker_trips_on_retained_processing_owner(self):
+        """An owner pointer left attached is a request nothing selects again."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, status="wanted", mb_release_id="mbid-generated"))
+        job = handoff_automation_owner(
+            db,
+            42,
+            state={
+                "files": [],
+                "filetype": "mp3",
+                "enqueued_at": "2026-07-29T00:00:00+00:00",
+                "current_path": "/processing/albums/request-42",
+            },
+            canonical_path="/processing/albums/request-42",
+        )
+        # Planted mutant: dispatch returned without terminalizing, so the real
+        # handoff writer's ``processing`` + owner pointer are still in place.
+        self.assertEqual(job.id, _GENERATED_JOB_ID)
+        self.assertEqual(db.request(42)["status"], "processing")
+        with self.assertRaises(AssertionError):
+            assert_request_never_parked(db)
+
+    def test_audit_checker_trips_on_silent_and_invisible_world_failures(self):
+        """A self-heal the operator cannot read is still a silent stop."""
+        world = self._ambiguous_world()
+        outcome = _run_dispatch(world, beets=self._beets_world())
+        db = outcome["db"]
+        result = outcome["result"]
+        # Must-still-work guard: the real self-heal satisfies both checkers.
+        assert_world_failure_self_heals(db, result)
+        audit = db.download_logs[-1]
+        original = (audit.outcome, audit.beets_detail, audit.error_message)
+
+        with self.subTest(plant="no audit row at all"):
+            db.download_logs.clear()
+            with self.assertRaisesRegex(AssertionError, "download_log row"):
+                assert_outcome_is_operator_visible(db, result)
+            with self.assertRaisesRegex(AssertionError, "download_log row"):
+                assert_world_failure_self_heals(db, result)
+        db.download_logs.append(audit)
+
+        with self.subTest(plant="outcome no Recents filter selects"):
+            # 'curator_ban' is a real taxonomy value that neither the imported
+            # nor the problems lens selects, so the row exists and renders
+            # nowhere the operator looks.
+            audit.outcome = "curator_ban"
+            with self.assertRaisesRegex(AssertionError, "never renders"):
+                assert_outcome_is_operator_visible(db, result)
+
+        with self.subTest(plant="world-failure label stripped"):
+            audit.outcome = original[0]
+            audit.beets_detail = "beets said something"
+            audit.error_message = "beets said something"
+            with self.assertRaisesRegex(
+                AssertionError, "world-failure label",
+            ):
+                assert_world_failure_self_heals(db, result)
+
+        with self.subTest(plant="retry accounting dropped"):
+            audit.beets_detail, audit.error_message = original[1], original[2]
+            row = db.request(42)
+            row["validation_attempts"] = 0
+            row["next_retry_after"] = None
+            with self.assertRaisesRegex(AssertionError, "retry accounting"):
+                assert_world_failure_self_heals(db, result)
+
     def test_log_row_checker_trips_on_empty_db(self):
         db = FakePipelineDB()
         with self.assertRaises(AssertionError):
@@ -1529,18 +1853,15 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         with self.assertRaises(AssertionError):
             assert_dispatch_outcome_matches_routing(world, db, outcome)
 
-    def test_routing_checker_trips_on_no_json_wrong_log_outcome(self):
+    def test_routing_checker_trips_on_ambiguity_reporting_success(self):
         db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
-        # Ambiguous no-JSON work must not write a terminal success audit.
+        db.seed_request(make_request_row(id=42, status="wanted"))
+        # Planted bug: an unacknowledged Beets child reported success, so the
+        # request would be recorded as acquired on evidence nobody has.
         db.log_download(request_id=42, outcome="success")
-        world = DispatchWorld(
-            mode="no_json", decision=None, new_min_bitrate=None,
-            prev_min_bitrate=None, spectral_grade="genuine",
-            spectral_bitrate=None, was_converted=False,
-            requeue_on_failure=True, source_username=None)
-        outcome = DispatchOutcome(success=False, message="")
-        with self.assertRaises(AssertionError):
+        world = self._ambiguous_world()
+        outcome = DispatchOutcome(success=True, message="")
+        with self.assertRaisesRegex(AssertionError, "reported success=True"):
             assert_dispatch_outcome_matches_routing(world, db, outcome)
 
     def test_preimport_caller_flag_checker_trips_when_flag_ignored(self):

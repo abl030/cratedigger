@@ -25,7 +25,11 @@ from lib.import_queue import (
     youtube_import_payload,
 )
 from lib.quality import DownloadInfo
-from scripts.importer import _execution_lease_from_job, process_claimed_job
+from scripts.importer import (
+    _WORLD_FAILURE_AUDIT_PREFIX,
+    _execution_lease_from_job,
+    process_claimed_job,
+)
 from tests.beets_world import BeetsWorld
 from tests.fakes import FakePipelineDB
 from tests.helpers import (
@@ -38,6 +42,12 @@ from tests.helpers import (
     noop_quality_gate,
     pinned_dispatch_authority,
 )
+
+# The request id every generated world seeds and self-heal checks read back.
+_OPERATION_FENCE_REQUEST_ID = 703
+# ``_exercise_world``'s seeded request status. Force/YouTube own no request
+# lifecycle, so an ambiguous operation of theirs must leave this untouched.
+_SEEDED_REQUEST_STATUS = "wanted"
 
 
 @dataclass(frozen=True)
@@ -79,31 +89,94 @@ def _dead_execution(
 
 def assert_operation_fence(
     *,
+    job_type: str,
     authorized: bool,
-    terminal_acknowledged: bool,
     final_status: str,
     beets_invocations: list[int],
     replay_claimed: bool,
+    db: FakePipelineDB,
+    request_id: int = _OPERATION_FENCE_REQUEST_ID,
 ) -> None:
-    """Every ambiguous authorized operation stops before an automatic replay."""
+    """Every ambiguous authorized operation stops before an automatic replay.
+
+    Ambiguity is read from what actually landed (``final_status``), not from
+    the caller's intent: a launch whose completion could not be positively
+    captured is ambiguous regardless of whether the Beets child itself
+    returned a clean result — a fake harness that never identifies its own
+    child (no ``on_spawn``) is exactly such a world, and it is exactly the
+    one the exact-owner completion capture exists to distrust.
+
+    CLAUDE.md invariant 11 ("broken worlds surface and restart, nothing is
+    ever parked") retired ``recovery_required`` as a resting state for an
+    ambiguous authorized operation — the removed policy stopped there for a
+    human command, which is exactly the park this now forbids. The owner job
+    instead terminalizes ``failed``. Automation additionally self-heals: its
+    request returns to the search pool with its owner cleared, and one
+    ``download_log`` audit row carries the world-failure label so the
+    operator reads it in Recents. Force/YouTube own no request lifecycle, so
+    an ambiguous operation of theirs leaves the request exactly as the
+    caller left it — the terminal job row alone is that outcome's surface.
+    """
     if len(beets_invocations) > 1:
         raise AssertionError("one operation identity reached Beets more than once")
-    if authorized and not terminal_acknowledged:
-        if final_status != IMPORT_JOB_RECOVERY_REQUIRED:
-            raise AssertionError("ambiguous Beets operation did not stop for recovery")
-        if replay_claimed:
-            raise AssertionError("ambiguous Beets operation became claimable")
-    if not authorized and beets_invocations:
-        raise AssertionError("Beets ran without exact current authority")
+    if not authorized:
+        if beets_invocations:
+            raise AssertionError("Beets ran without exact current authority")
+        return
+    if final_status == "completed":
+        # A genuine, positively-captured success. Nothing ambiguous to fence.
+        return
+    if final_status == IMPORT_JOB_RECOVERY_REQUIRED:
+        raise AssertionError(
+            f"{job_type} ambiguous Beets operation parked at "
+            "'recovery_required' — CLAUDE.md invariant 11 forbids a state "
+            "whose only exit is an operator command"
+        )
+    if final_status != "failed":
+        raise AssertionError(
+            f"{job_type} ambiguous Beets operation left job status "
+            f"{final_status!r}, want 'failed'"
+        )
+    if replay_claimed:
+        raise AssertionError("ambiguous Beets operation became claimable")
+    row = db.request(request_id)
+    if job_type == IMPORT_JOB_AUTOMATION:
+        if row["status"] != "wanted":
+            raise AssertionError(
+                f"automation self-heal left request status {row['status']!r}, "
+                "want 'wanted' — the request must go back into the search pool"
+            )
+        if row["active_automation_import_job_id"] is not None:
+            raise AssertionError(
+                "automation self-heal left the automation owner attached"
+            )
+        logs = db.download_logs
+        detail = " ".join(
+            part for part in (
+                logs[-1].beets_detail if logs else None,
+                logs[-1].error_message if logs else None,
+            ) if part
+        )
+        if not logs or _WORLD_FAILURE_AUDIT_PREFIX not in detail:
+            raise AssertionError(
+                "automation self-heal recorded no world-failure audit row "
+                f"carrying {_WORLD_FAILURE_AUDIT_PREFIX!r}"
+            )
+    elif row["status"] != _SEEDED_REQUEST_STATUS:
+        raise AssertionError(
+            f"{job_type} ambiguous operation changed request status to "
+            f"{row['status']!r}; force/YouTube own no request lifecycle to "
+            "self-heal"
+        )
 
 
 def _exercise_world(
     world: OperationWorld,
     *,
     beets: BeetsWorld,
-) -> tuple[bool, str, list[int], bool]:
+) -> tuple[bool, str, list[int], bool, FakePipelineDB]:
     db = FakePipelineDB()
-    request_id = 703
+    request_id = _OPERATION_FENCE_REQUEST_ID
     release_id = "release-703"
     source_path = "/tmp/fence-source"
     active_state = (
@@ -305,7 +378,7 @@ def _exercise_world(
 
     final = db.get_import_job(claimed.id)
     assert final is not None
-    return authorized, final.status, beets_invocations, replay_claimed
+    return authorized, final.status, beets_invocations, replay_claimed, db
 
 
 class TestGeneratedImportOperationFence(unittest.TestCase):
@@ -338,17 +411,18 @@ class TestGeneratedImportOperationFence(unittest.TestCase):
                     stale_dimension=stale_dimension,
                 ):
                     world = OperationWorld(job_type, stale_dimension, False)
-                    authorized, status, invocations, replay_claimed = _exercise_world(
-                        world, beets=self.beets
+                    authorized, status, invocations, replay_claimed, db = (
+                        _exercise_world(world, beets=self.beets)
                     )
                     self.assertFalse(authorized)
                     self.assertEqual(invocations, [])
                     assert_operation_fence(
+                        job_type=job_type,
                         authorized=authorized,
-                        terminal_acknowledged=False,
                         final_status=status,
                         beets_invocations=invocations,
                         replay_claimed=replay_claimed,
+                        db=db,
                     )
 
     def test_definitely_not_started_recovery_may_retry(self) -> None:
@@ -358,72 +432,163 @@ class TestGeneratedImportOperationFence(unittest.TestCase):
             IMPORT_JOB_YOUTUBE,
         ):
             with self.subTest(job_type=job_type):
-                authorized, _status, invocations, replay_claimed = _exercise_world(
-                    OperationWorld(job_type, "not_executed", False),
-                    beets=self.beets,
+                authorized, _status, invocations, replay_claimed, _db = (
+                    _exercise_world(
+                        OperationWorld(job_type, "not_executed", False),
+                        beets=self.beets,
+                    )
                 )
                 self.assertFalse(authorized)
                 self.assertTrue(replay_claimed)
                 self.assertEqual(invocations, [])
 
-    def test_may_have_started_recovery_never_replays(self) -> None:
+    def test_may_have_started_self_heals_never_replays(self) -> None:
+        """A launched-then-ambiguous operation self-heals (CLAUDE.md
+        invariant 11) instead of parking at ``recovery_required``, and the
+        self-healed job can never be automatically replay-claimed."""
         for job_type in (
             IMPORT_JOB_AUTOMATION,
             IMPORT_JOB_FORCE,
             IMPORT_JOB_YOUTUBE,
         ):
             with self.subTest(job_type=job_type):
-                authorized, status, invocations, replay_claimed = _exercise_world(
-                    OperationWorld(job_type, "current", False),
-                    beets=self.beets,
+                authorized, status, invocations, replay_claimed, db = (
+                    _exercise_world(
+                        OperationWorld(job_type, "current", False),
+                        beets=self.beets,
+                    )
                 )
                 assert_operation_fence(
+                    job_type=job_type,
                     authorized=authorized,
-                    terminal_acknowledged=False,
                     final_status=status,
                     beets_invocations=invocations,
                     replay_claimed=replay_claimed,
+                    db=db,
                 )
                 self.assertEqual(len(invocations), 1)
+                self.assertEqual(status, "failed")
 
-    def test_terminal_acknowledgement_prevents_recovery(self) -> None:
+    def test_terminal_acknowledgement_never_replays(self) -> None:
+        """Whatever an acknowledged operation terminalizes to, it is never
+        automatically replay-claimed. For automation this world is STILL
+        ambiguous — the fake Beets child is never positively identified
+        (no ``on_spawn``), so the exact-owner completion capture correctly
+        distrusts it and self-heals to ``failed`` exactly like the
+        launched-then-ambiguous world above; force/YouTube own no request
+        lifecycle and terminalize a genuine ``completed``."""
         for job_type in (
             IMPORT_JOB_AUTOMATION,
             IMPORT_JOB_FORCE,
             IMPORT_JOB_YOUTUBE,
         ):
             with self.subTest(job_type=job_type):
-                authorized, status, invocations, replay_claimed = _exercise_world(
-                    OperationWorld(job_type, "current", True),
-                    beets=self.beets,
+                authorized, status, invocations, replay_claimed, db = (
+                    _exercise_world(
+                        OperationWorld(job_type, "current", True),
+                        beets=self.beets,
+                    )
                 )
                 assert_operation_fence(
+                    job_type=job_type,
                     authorized=authorized,
-                    terminal_acknowledged=True,
                     final_status=status,
                     beets_invocations=invocations,
                     replay_claimed=replay_claimed,
+                    db=db,
                 )
                 self.assertEqual(
                     status,
-                    (
-                        IMPORT_JOB_RECOVERY_REQUIRED
-                        if job_type == IMPORT_JOB_AUTOMATION
-                        else "completed"
-                    ),
+                    "failed" if job_type == IMPORT_JOB_AUTOMATION else "completed",
                 )
                 self.assertFalse(replay_claimed)
 
 
 class TestImportOperationFenceChecker(unittest.TestCase):
+    def _db(self, **overrides: object) -> FakePipelineDB:
+        overrides.setdefault("status", "wanted")
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=_OPERATION_FENCE_REQUEST_ID, **overrides,
+        ))
+        return db
+
     def test_checker_rejects_the_old_automatic_replay_policy(self) -> None:
         with self.assertRaisesRegex(AssertionError, "more than once"):
             assert_operation_fence(
+                job_type=IMPORT_JOB_AUTOMATION,
                 authorized=True,
-                terminal_acknowledged=False,
                 final_status="queued",
                 beets_invocations=[703, 703],
                 replay_claimed=True,
+                db=self._db(),
+            )
+
+    def test_checker_rejects_planted_recovery_required_park(self) -> None:
+        """Known-bad: reviving the removed ``recovery_required`` rest state
+        (the pre-#933 policy this file used to require) trips the checker."""
+        with self.assertRaisesRegex(AssertionError, "recovery_required"):
+            assert_operation_fence(
+                job_type=IMPORT_JOB_AUTOMATION,
+                authorized=True,
+                final_status=IMPORT_JOB_RECOVERY_REQUIRED,
+                beets_invocations=[703],
+                replay_claimed=False,
+                db=self._db(
+                    status="processing", active_automation_import_job_id=7,
+                ),
+            )
+
+    def test_checker_rejects_replay_after_ambiguous_operation(self) -> None:
+        """Known-bad: an ambiguous operation whose job became claimable again."""
+        with self.assertRaisesRegex(AssertionError, "became claimable"):
+            assert_operation_fence(
+                job_type=IMPORT_JOB_FORCE,
+                authorized=True,
+                final_status="failed",
+                beets_invocations=[703],
+                replay_claimed=True,
+                db=self._db(),
+            )
+
+    def test_checker_rejects_automation_self_heal_with_owner_attached(self) -> None:
+        """Known-bad: self-heal that failed to clear the automation owner."""
+        with self.assertRaisesRegex(AssertionError, "owner attached"):
+            assert_operation_fence(
+                job_type=IMPORT_JOB_AUTOMATION,
+                authorized=True,
+                final_status="failed",
+                beets_invocations=[703],
+                replay_claimed=False,
+                db=self._db(
+                    status="wanted", active_automation_import_job_id=7,
+                ),
+            )
+
+    def test_checker_rejects_automation_self_heal_missing_audit_row(self) -> None:
+        """Known-bad: a silent self-heal with no Recents-visible trace."""
+        with self.assertRaisesRegex(AssertionError, "world-failure audit row"):
+            assert_operation_fence(
+                job_type=IMPORT_JOB_AUTOMATION,
+                authorized=True,
+                final_status="failed",
+                beets_invocations=[703],
+                replay_claimed=False,
+                db=self._db(status="wanted"),
+            )
+
+    def test_checker_rejects_force_import_self_healing_the_request(self) -> None:
+        """Known-bad: a force/YouTube job that mutated the caller's request
+        lifecycle — invariant 11 reserves that self-heal for automation,
+        which is the only job type that owns ``processing``."""
+        with self.assertRaisesRegex(AssertionError, "own no request lifecycle"):
+            assert_operation_fence(
+                job_type=IMPORT_JOB_FORCE,
+                authorized=True,
+                final_status="failed",
+                beets_invocations=[703],
+                replay_claimed=False,
+                db=self._db(status="unsearchable"),
             )
 
 

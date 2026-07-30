@@ -33,6 +33,7 @@ from lib.import_execution import (
     MonitoredProcessGroup,
     ProcessIdentity,
 )
+from lib.import_queue import ImportJob
 from lib.quality import (
     QUALITY_FLAC_ONLY,
     QUALITY_UPGRADE_TIERS,
@@ -2694,15 +2695,55 @@ class TestDispatchImport(unittest.TestCase):
                       quarantine["destination_path"])
         self.assertFalse(os.path.exists(source))
 
+    def _assert_world_failure_self_heal(
+        self,
+        db: FakePipelineDB,
+        job: ImportJob,
+        *,
+        diagnostic: str,
+    ) -> None:
+        """Invariant 11: a broken automation world surfaces and restarts.
+
+        The exact owner is released, the request rejoins the search pool with
+        the attempt counted, and the diagnostic reads in Recents as one
+        ``failed`` download_log row. ``recovery_required`` would instead
+        strand ``processing`` behind an inactive job that ``get_wanted``
+        never selects again — the album silently stops being acquired.
+        """
+        from tests.test_import_queue import (
+            assert_world_failure_audit,
+            automation_world_failure_violation,
+        )
+
+        row = db.request(42)
+        self.assertEqual(job.status, "failed")
+        self.assertEqual(row["status"], "wanted")
+        self.assertIsNone(row["active_automation_import_job_id"])
+        self.assertIsNone(automation_world_failure_violation(
+            label=diagnostic,
+            escaped=None,
+            job_status=job.status,
+            request_status=str(row["status"]),
+            active_owner=row["active_automation_import_job_id"],
+        ))
+        # Retry cadence is retained counters plus backoff, never parking.
+        self.assertEqual(row["validation_attempts"], 1)
+        self.assertIsNotNone(row["next_retry_after"])
+        assert_world_failure_audit(self, db, diagnostic=diagnostic)
+        # The self-healed job is terminal: nothing replays it behind the
+        # request that is already back in the pool.
+        self.assertIsNone(claim_next_import_job(db, worker_id="automatic-replay"))
+
     def test_no_json_result(self):
         r = self._dispatch(None)
         db = r["db"]
         job = db.get_import_job(1)
         assert job is not None
-        self.assertEqual(job.status, "recovery_required")
-        self.assertEqual(db.request(42)["status"], "processing")
-        self.assertEqual(db.download_logs, [])
-        self.assertIsNone(claim_next_import_job(db, worker_id="automatic-replay"))
+        self._assert_world_failure_self_heal(
+            db,
+            job,
+            diagnostic="Beets returned without a terminal result",
+        )
 
     def test_timeout(self):
         from lib.dispatch import dispatch_import_core
@@ -2765,10 +2806,11 @@ class TestDispatchImport(unittest.TestCase):
             )
 
         assert recovered is not None
-        self.assertEqual(recovered.status, "recovery_required")
-        self.assertEqual(db.request(42)["status"], "processing")
-        self.assertEqual(db.download_logs, [])
-        self.assertIsNone(claim_next_import_job(db, worker_id="automatic-replay"))
+        self._assert_world_failure_self_heal(
+            db,
+            recovered,
+            diagnostic="Import timed out after Beets launch",
+        )
 
     def test_exception(self):
         from lib.dispatch import dispatch_import_core
@@ -2831,10 +2873,14 @@ class TestDispatchImport(unittest.TestCase):
             )
 
         assert recovered is not None
-        self.assertEqual(recovered.status, "recovery_required")
-        self.assertEqual(db.request(42)["status"], "processing")
-        self.assertEqual(db.download_logs, [])
-        self.assertIsNone(claim_next_import_job(db, worker_id="automatic-replay"))
+        self._assert_world_failure_self_heal(
+            db,
+            recovered,
+            diagnostic=(
+                "Import failed after Beets launch without a terminal "
+                "acknowledgement"
+            ),
+        )
 
 
 class TestImportDispatchRescueCapture(unittest.TestCase):

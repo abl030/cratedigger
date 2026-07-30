@@ -475,8 +475,7 @@ def _capture_automation_completion(
     return DispatchOutcome(
         success=False,
         message=(
-            "Beets returned but exact completion capture conflicted; "
-            "operator recovery is required"
+            "Beets returned but exact completion capture conflicted"
         ),
         code="beets_acknowledgement_ambiguous",
     )
@@ -1113,8 +1112,7 @@ def dispatch_import_core(
                 return DispatchOutcome(
                     success=False,
                     message=(
-                        "Beets returned without a terminal result; "
-                        "operator recovery is required"
+                        "Beets returned without a terminal result"
                     ),
                     code="beets_acknowledgement_ambiguous",
                 )
@@ -1433,7 +1431,7 @@ def dispatch_import_core(
                     success=False,
                     message=(
                         "Import failed after Beets launch without a terminal "
-                        "acknowledgement; operator recovery is required"
+                        "acknowledgement"
                     ),
                     code="beets_acknowledgement_ambiguous",
                 )

@@ -1744,7 +1744,46 @@ class TestLosslessSourceLockedSlice(unittest.TestCase):
 
 
 class TestDispatchNoJsonResult(unittest.TestCase):
-    """Integration slice: missing terminal sentinel stops for recovery."""
+    """Integration slice: a missing terminal sentinel surfaces and restarts.
+
+    Invariant 11: an automation import that cannot prove what Beets did is
+    recorded as audit evidence and its request goes straight back to the
+    search pool, where the next cycle re-derives the library truth. Parking
+    it instead left ``processing`` behind an inactive job that ``get_wanted``
+    never selects again.
+    """
+
+    def _assert_world_failure_self_heal(
+        self,
+        db: FakePipelineDB,
+        job: ImportJob,
+        *,
+        diagnostic: str,
+    ) -> None:
+        """Assert the whole never-park end state for one world failure."""
+        from tests.test_import_queue import (
+            assert_world_failure_audit,
+            automation_world_failure_violation,
+        )
+
+        row = db.request(42)
+        self.assertEqual(job.status, "failed")
+        self.assertEqual(row["status"], "wanted")
+        self.assertIsNone(row["active_automation_import_job_id"])
+        self.assertIsNone(automation_world_failure_violation(
+            label=diagnostic,
+            escaped=None,
+            job_status=job.status,
+            request_status=str(row["status"]),
+            active_owner=row["active_automation_import_job_id"],
+        ))
+        # Retry cadence is retained counters plus backoff, never parking.
+        self.assertEqual(row["validation_attempts"], 1)
+        self.assertIsNotNone(row["next_retry_after"])
+        assert_world_failure_audit(self, db, diagnostic=diagnostic)
+        self.assertIsNone(
+            claim_next_import_job(db, worker_id="automatic-replay"),
+        )
 
     def test_success_preserves_full_import_result_and_exact_attempt_audit(self):
         from lib.dispatch import dispatch_import_core
@@ -1843,8 +1882,12 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         self.assertEqual(logged.postflight.beets_id, 77)
         self.assertIsNotNone(logged.comparison_basis)
 
-    def test_no_json_after_launch_requires_operator_recovery(self):
-        """No terminal sentinel cannot prove Beets left the library untouched."""
+    def test_no_json_after_launch_self_heals_to_wanted_with_audit(self):
+        """No terminal sentinel cannot prove what Beets did to the library.
+
+        That ambiguity needs no adjudication: it is recorded and the request
+        is re-searched, because the next cycle re-reads the library.
+        """
         from lib.dispatch import dispatch_import_core
         from lib.quality import SpectralAnalysisDetail, SpectralDetail
 
@@ -1901,14 +1944,15 @@ class TestDispatchNoJsonResult(unittest.TestCase):
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-        recovered = db.get_import_job(claimed.id)
-        assert recovered is not None
-        self.assertEqual(recovered.status, "recovery_required")
-        self.assertEqual(db.request(42)["status"], "processing")
-        self.assertEqual(db.download_logs, [])
-        self.assertIsNone(claim_next_import_job(db, worker_id="automatic-replay"))
+        healed = db.get_import_job(claimed.id)
+        assert healed is not None
+        self._assert_world_failure_self_heal(
+            db,
+            healed,
+            diagnostic="Beets returned without a terminal result",
+        )
 
-    def test_timeout_after_launch_requires_operator_recovery(self):
+    def test_timeout_after_launch_self_heals_to_wanted_with_audit(self):
         import subprocess as sp
 
         from lib.dispatch import dispatch_import_core
@@ -1966,14 +2010,15 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-        recovered = db.get_import_job(claimed.id)
-        assert recovered is not None
-        self.assertEqual(recovered.status, "recovery_required")
-        self.assertEqual(db.request(42)["status"], "processing")
-        self.assertEqual(db.download_logs, [])
-        self.assertIsNone(claim_next_import_job(db, worker_id="automatic-replay"))
+        healed = db.get_import_job(claimed.id)
+        assert healed is not None
+        self._assert_world_failure_self_heal(
+            db,
+            healed,
+            diagnostic="Import timed out after Beets launch",
+        )
 
-    def test_exception_after_launch_requires_operator_recovery(self):
+    def test_exception_after_launch_self_heals_to_wanted_with_audit(self):
         from lib.dispatch import dispatch_import_core
         from lib.dispatch.types import ImportOneRun
         from lib.quality import SpectralAnalysisDetail, SpectralDetail
@@ -2029,14 +2074,18 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-        recovered = db.get_import_job(claimed.id)
-        assert recovered is not None
-        self.assertEqual(recovered.status, "recovery_required")
-        self.assertEqual(db.request(42)["status"], "processing")
-        self.assertEqual(db.download_logs, [])
-        self.assertIsNone(claim_next_import_job(db, worker_id="automatic-replay"))
+        healed = db.get_import_job(claimed.id)
+        assert healed is not None
+        self._assert_world_failure_self_heal(
+            db,
+            healed,
+            diagnostic=(
+                "Import failed after Beets launch without a terminal "
+                "acknowledgement"
+            ),
+        )
 
-    def test_post_result_exception_requires_operator_recovery(self):
+    def test_post_result_exception_self_heals_to_wanted_with_audit(self):
         from lib.dispatch import dispatch_import_core
         from lib.dispatch.types import ImportOneRun
         from lib.quality import (
@@ -2122,12 +2171,16 @@ class TestDispatchNoJsonResult(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-        recovered = db.get_import_job(claimed.id)
-        assert recovered is not None
-        self.assertEqual(recovered.status, "recovery_required")
-        self.assertEqual(db.request(42)["status"], "processing")
-        self.assertEqual(db.download_logs, [])
-        self.assertIsNone(claim_next_import_job(db, worker_id="automatic-replay"))
+        healed = db.get_import_job(claimed.id)
+        assert healed is not None
+        self._assert_world_failure_self_heal(
+            db,
+            healed,
+            diagnostic=(
+                "Import failed after Beets launch without a terminal "
+                "acknowledgement"
+            ),
+        )
 
 
 class TestForceImportSlice(unittest.TestCase):
@@ -7761,10 +7814,33 @@ class TestProcessingOwnerPostgresFilesystemSlice(unittest.TestCase):
             )
             self.assertTrue(os.path.isdir(canonical_path))
 
-    def test_known_bad_importer_without_terminal_bundle_fails_closed(self) -> None:
+    def test_known_bad_importer_without_terminal_bundle_self_heals(
+        self,
+    ) -> None:
+        """Known-bad plant: an importer that skips its terminal bundle.
+
+        A ``success`` the importer never proved is not laundered into
+        ``imported`` — and under invariant 11 it is not parked either. On real
+        PostgreSQL and a real filesystem the world failure must land as audit
+        evidence, the request must rejoin the search pool with the attempt
+        counted, and the exact owner must be released while its cleanup
+        receipt is consumed.
+
+        ``automation_world_failure_violation`` is the named checker for that
+        end state, and the closing plant proves it still trips on the parked
+        world this slice used to assert — the state that stranded
+        ``processing`` behind an inactive job forever. The checker's full
+        known-bad battery is
+        ``TestTerminalStageInvariantCheckersTripOnViolations`` in
+        ``tests/test_import_queue.py``.
+        """
         from lib.dispatch import DispatchOutcome
         from scripts import importer
+        from tests.test_import_queue import automation_world_failure_violation
 
+        diagnostic = (
+            "Automation processor returned no owner-atomic terminal outcome"
+        )
         with tempfile.TemporaryDirectory() as root:
             request_id, job, canonical_path, _cfg = (
                 self._handoff_through_preview(root)
@@ -7793,15 +7869,53 @@ class TestProcessingOwnerPostgresFilesystemSlice(unittest.TestCase):
             request = self.db.get_request(request_id)
             current = self.db.get_import_job(job.id)
             assert request is not None and current is not None
-            self.assertIsNone(result)
             self.assertEqual(mutant_calls, [job.id])
-            self.assertEqual(current.status, "running")
-            self.assertEqual(request["status"], "processing")
-            self.assertEqual(
-                request["active_automation_import_job_id"],
-                job.id,
+            # The unprovable success never becomes an import.
+            assert result is not None
+            self.assertEqual(result.status, "failed")
+            self.assertEqual(current.status, "failed")
+            self.assertNotEqual(request["status"], "imported")
+            # The request is searchable again, the exact owner released, and
+            # the attempt is counted so a permanently broken world backs off
+            # instead of hot-looping.
+            self.assertEqual(request["status"], "wanted")
+            self.assertIsNone(request["active_automation_import_job_id"])
+            self.assertEqual(request["validation_attempts"], 1)
+            self.assertIsNotNone(request["next_retry_after"])
+            self.assertIsNone(automation_world_failure_violation(
+                label="importer without a terminal bundle",
+                escaped=None,
+                job_status=current.status,
+                request_status=str(request["status"]),
+                active_owner=request["active_automation_import_job_id"],
+            ))
+            # The failure reads in Recents: one real download_log row, read
+            # back through the production accessor, carries the production
+            # label and the diagnostic.
+            history = self.db.get_download_history(request_id)
+            self.assertEqual([row["outcome"] for row in history], ["failed"])
+            message = history[0]["error_message"] or ""
+            self.assertIn(importer._WORLD_FAILURE_AUDIT_PREFIX, message)
+            self.assertIn(diagnostic, message)
+            self.assertEqual(current.error, message)
+            # Cleanup ran while the job was still the attached owner, and the
+            # terminal write consumed its journalled receipt.
+            self.assertFalse(os.path.exists(canonical_path))
+            self.assertIsNone(self.db.get_processing_cleanup_journal(
+                request_id=request_id,
+                job_id=job.id,
+            ))
+            # Known-bad: the end state this slice used to assert is now the
+            # violation the checker exists to name.
+            parked = automation_world_failure_violation(
+                label="importer without a terminal bundle",
+                escaped=None,
+                job_status="recovery_required",
+                request_status="processing",
+                active_owner=job.id,
             )
-            self.assertTrue(os.path.isdir(canonical_path))
+            assert parked is not None
+            self.assertIn("parked the job for human intervention", parked)
 
 
 class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
