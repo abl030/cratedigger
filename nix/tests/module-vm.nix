@@ -333,8 +333,20 @@ pkgs.testers.nixosTest {
       "cratedigger-youtube-ingest"
       "cratedigger-web"
     ];
+    metadataGateServiceNames = [
+      "cratedigger"
+      "cratedigger-importer"
+      "cratedigger-import-preview-worker"
+      "cratedigger-youtube-ingest"
+      "cratedigger-web"
+    ];
     heldApplicationUnits = map (name: "${name}.service")
       heldApplicationServiceNames;
+    metadataGateStateDir = "/var/lib/cratedigger-metadata-gate";
+    metadataGateMainStartInhibitor =
+      "${metadataGateStateDir}/inhibit-cratedigger.service";
+    metadataGateYoutubeStartInhibitor =
+      "${metadataGateStateDir}/inhibit-cratedigger-youtube-ingest.service";
     importerSandboxProbe = pkgs.writeShellScript "cratedigger-importer-sandbox-probe" ''
       set -euo pipefail
       probe_dir=/var/lib/cratedigger/processing/sandbox-probe
@@ -378,29 +390,44 @@ pkgs.testers.nixosTest {
         exit 1
       fi
     '';
+    deployHoldPipelineCli = pkgs.writeShellScriptBin "pipeline-cli" ''
+      exec ${pkgs.util-linux}/bin/runuser -u cratedigger -- \
+        /run/current-system/sw/bin/pipeline-cli "$@"
+    '';
     deployHoldTool = pkgs.writeShellScriptBin "cratedigger-deploy-hold" ''
+      export PATH="${deployHoldPipelineCli}/bin:$PATH"
       exec ${pkgs.python3}/bin/python3 \
         ${cratediggerSrc}/scripts/cratedigger_deploy_hold.py "$@"
     '';
     metadataGateTool = pkgs.writeShellScriptBin "cratedigger-metadata-gate" ''
       set -euo pipefail
-      hold_dir=/run/cratedigger-metadata-gate/holds
+      state_dir=${metadataGateStateDir}
+      hold_dir="$state_dir/holds"
+      guarded_units=(cratedigger.timer cratedigger.service cratedigger-web.service cratedigger-importer.service cratedigger-import-preview-worker.service cratedigger-youtube-ingest.service)
+      resume_units=(cratedigger.service cratedigger.timer cratedigger-web.service cratedigger-importer.service cratedigger-import-preview-worker.service cratedigger-youtube-ingest.service)
+
+      ${pkgs.coreutils}/bin/install \
+        -d -o root -g root -m 0755 "$state_dir" "$hold_dir"
       case "''${1:-}" in
         hold)
           test "''${2:-}" = manual
-          install -d -m 0755 "$hold_dir"
           printf 'manual\n' > "$hold_dir/manual"
           ;;
         release)
           test "''${2:-}" = manual
-          rm -f "$hold_dir/manual"
+          ${pkgs.coreutils}/bin/rm -f "$hold_dir/manual"
           ;;
-        resume-if-clear)
-          test ! -e "$hold_dir/manual"
+        start-check|resume-if-clear)
+          test -z "$(
+            ${pkgs.findutils}/bin/find \
+              "$hold_dir" -mindepth 1 -maxdepth 1 -print -quit
+          )"
           ;;
         *) exit 64 ;;
       esac
     '';
+    metadataGateStartCheck =
+      "+${metadataGateTool}/bin/cratedigger-metadata-gate start-check";
     deployHoldBlocker = pkgs.writeShellScript "cratedigger-deploy-hold-blocker" ''
       set -euo pipefail
       while test -e /run/cratedigger-deploy-hold-blocker; do
@@ -716,9 +743,17 @@ pkgs.testers.nixosTest {
       (lib.genAttrs heldApplicationServiceNames (_: {
         after = ["cratedigger-test-config-hold.service"];
         requires = ["cratedigger-test-config-hold.service"];
-        serviceConfig.ExecCondition = [configHoldGate];
+        serviceConfig.ExecCondition = lib.mkAfter [configHoldGate];
+      }))
+      (lib.genAttrs metadataGateServiceNames (_: {
+        serviceConfig.ExecCondition = lib.mkBefore [metadataGateStartCheck];
       }))
       {
+        cratedigger.unitConfig.ConditionPathExists =
+          "!${metadataGateMainStartInhibitor}";
+        cratedigger-youtube-ingest.unitConfig.ConditionPathExists =
+          "!${metadataGateYoutubeStartInhibitor}";
+
         # Create the downstream-gate fixture once at boot. Keep this oneshot
         # active and unchanged across specialisation switches so activation
         # cannot recreate the marker after the test deliberately removes it.
@@ -954,6 +989,84 @@ pkgs.testers.nixosTest {
     machine.fail("systemctl cat cratedigger-web.service | grep -q cratedigger-pipeline-prestart")
     machine.succeed("systemctl cat cratedigger.service | grep -q cratedigger-pipeline-prestart")
 
+    # The deploy-hold helper verifies this independently deployed boundary
+    # before it mutates systemd. Keep the synthetic downstream fixture shaped
+    # exactly like production while composing its first-boot config hold.
+    controlled_start_conditions = {
+        "cratedigger.service": (
+            "ConditionPathExists="
+            "!/var/lib/cratedigger-metadata-gate/inhibit-cratedigger.service"
+        ),
+        "cratedigger-youtube-ingest.service": (
+            "ConditionPathExists="
+            "!/var/lib/cratedigger-metadata-gate/"
+            "inhibit-cratedigger-youtube-ingest.service"
+        ),
+    }
+    for service, condition in controlled_start_conditions.items():
+        source = machine.succeed(f"systemctl cat {service}")
+        assert source.splitlines().count(condition) == 1, (service, source)
+        execution = machine.succeed(
+            f"systemctl show {service} --property=ExecCondition --value"
+        )
+        assert "cratedigger-metadata-gate" in execution, (service, execution)
+        assert "cratedigger-test-config-hold" in execution, (service, execution)
+
+    for service in (
+        "cratedigger-web.service",
+        "cratedigger-importer.service",
+        "cratedigger-import-preview-worker.service",
+    ):
+        source = machine.succeed(f"systemctl cat {service}")
+        for condition in controlled_start_conditions.values():
+            inhibitor = condition.removeprefix("ConditionPathExists=!")
+            assert inhibitor not in source, (service, inhibitor, source)
+        execution = machine.succeed(
+            f"systemctl show {service} --property=ExecCondition --value"
+        )
+        assert "cratedigger-metadata-gate" in execution, (service, execution)
+        assert "cratedigger-test-config-hold" in execution, (service, execution)
+
+    # Qualify the helper's exact-singleton checker against real systemd. A
+    # duplicated drop-in condition must fail before a deployment receipt or
+    # any other hold state is created.
+    machine.succeed(
+        "install -d /run/systemd/system/cratedigger.service.d"
+    )
+    machine.succeed(
+        "printf '[Unit]\\nConditionPathExists="
+        "!/var/lib/cratedigger-metadata-gate/"
+        "inhibit-cratedigger.service\\n' "
+        "> /run/systemd/system/cratedigger.service.d/"
+        "duplicate-inhibitor.conf"
+    )
+    machine.succeed("systemctl daemon-reload")
+    duplicate_status, duplicate_output = machine.execute(
+        "timeout 10 cratedigger-deploy-hold acquire 2>&1"
+    )
+    assert duplicate_status != 0, duplicate_output
+    assert (
+        "controlled-start prerequisite changed for cratedigger.service"
+        in duplicate_output
+    ), duplicate_output
+    machine.fail("test -e /run/cratedigger-deploy-hold")
+    machine.succeed(
+        "rm -r /run/systemd/system/cratedigger.service.d"
+    )
+    machine.succeed("systemctl daemon-reload")
+
+    # The production hold's lifecycle preflight reads the root-only pgpass
+    # environment file before invoking pipeline-cli. The VM uses peer auth,
+    # so the value is intentionally synthetic while the boundary is real.
+    machine.succeed("install -d -o root -g root -m 0700 /run/secrets")
+    machine.succeed(
+        "printf 'PGPASSWORD=module-vm-unused\\n' "
+        "> /run/secrets/cratedigger-pgpass"
+    )
+    machine.succeed(
+        "chmod 0400 /run/secrets/cratedigger-pgpass"
+    )
+
     # Migrations recorded
     out = machine.succeed("sudo -u postgres psql cratedigger -At -c 'SELECT version FROM schema_migrations ORDER BY version'")
     versions = [v.strip() for v in out.strip().split() if v.strip()]
@@ -1034,14 +1147,16 @@ pkgs.testers.nixosTest {
         state = machine.succeed(f"systemctl show {service} --property=ActiveState --value").strip()
         assert state == "inactive", f"{service} not inactive after hold: {state}"
 
-    # Qualify idempotent post-switch verification and the staged release. The
-    # config ExecCondition keeps the controlled VM cycle cheap; PR1 owns real
-    # invocation capture/verification in the deploy workflow.
+    # Qualify idempotent post-switch verification and the staged release.
+    # First boot already proved the independent config hold. Remove only that
+    # synthetic prerequisite so the production-shaped metadata gate can start
+    # and observe the controlled workers during release.
     machine.succeed("rm -r /run/systemd/system/cratedigger-metadata-gate-watchdog.service.d")
     machine.succeed("systemctl daemon-reload")
     machine.succeed("cratedigger-deploy-hold verify-held")
     machine.succeed("rm /run/cratedigger-deploy-hold-blocker")
     machine.wait_until_succeeds("systemctl show cratedigger-deploy-hold-blocker.service --property=ActiveState --value | grep -qx inactive")
+    machine.succeed("rm /run/cratedigger-test-config-hold")
     machine.succeed("cratedigger-deploy-hold prepare-controlled")
     machine.succeed("cratedigger-deploy-hold open-main-timer")
     machine.succeed("cratedigger-deploy-hold finish-release aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
@@ -1060,7 +1175,6 @@ pkgs.testers.nixosTest {
     # Starting the main service remains safe: its idempotent pre-start render is
     # retained as a fallback and clears the test's deliberately stale lock. It
     # will fail because there is no real slskd.
-    machine.succeed("rm /run/cratedigger-test-config-hold")
     machine.succeed("systemctl start --no-block cratedigger.service")
     machine.wait_until_succeeds("test ! -f /var/lib/cratedigger/.cratedigger.lock")
     machine.succeed(
