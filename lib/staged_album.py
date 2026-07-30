@@ -63,9 +63,6 @@ class StagedAlbum:
         cancellation_token: CancellationToken | None = None,
     ) -> str:
         """Move album contents without inferring lifecycle ownership from path."""
-        if cancellation_token is not None:
-            return self._move_to_cancellable(dest, cancellation_token)
-
         source = os.path.abspath(self.current_path)
         target = os.path.abspath(dest)
         target_preexisted = os.path.isdir(target)
@@ -119,77 +116,6 @@ class StagedAlbum:
             ):
                 _checkpoint(cancellation_token)
                 shutil.rmtree(target, ignore_errors=True)
-            self.current_path = source
-            if rollback_failures:
-                first_source, first_target = rollback_failures[0]
-                raise RuntimeError(
-                    "Failed to roll back staged move cleanly after a staging "
-                    f"error: {first_target} -> {first_source}"
-                ) from exc
-            raise
-
-    def _move_to_cancellable(
-        self,
-        dest: str,
-        cancellation_token: CancellationToken,
-    ) -> str:
-        """Move with atomic same-filesystem mutations and no hidden fallback."""
-        source = os.path.abspath(self.current_path)
-        target = os.path.abspath(dest)
-        target_preexisted = os.path.isdir(target)
-
-        if source == target:
-            self.current_path = target
-            return self.current_path
-
-        moved_entries: list[tuple[str, str]] = []
-        try:
-            _checkpoint(cancellation_token)
-            if not target_preexisted:
-                # A missing parent is a configuration/recovery error. Avoid
-                # os.makedirs: it can perform several uncheckpointed writes.
-                os.mkdir(target)
-            for entry in sorted(os.listdir(source)):
-                source_entry = os.path.join(source, entry)
-                target_entry = os.path.join(target, entry)
-                _checkpoint(cancellation_token)
-                # Never inherit shutil.move's cross-filesystem recursive
-                # copy/delete fallback while processor ownership is monitored.
-                os.rename(source_entry, target_entry)
-                moved_entries.append((source_entry, target_entry))
-            self.current_path = target
-            _checkpoint(cancellation_token)
-            os.rmdir(source)
-            return self.current_path
-        except ExecutionCancelled:
-            # Completed atomic renames are durable recovery evidence. A stale
-            # worker must not roll them back or remove either partial tree.
-            raise
-        except Exception as exc:
-            rollback_failures: list[tuple[str, str]] = []
-            _checkpoint(cancellation_token)
-            for source_entry, target_entry in reversed(moved_entries):
-                if os.path.exists(target_entry):
-                    try:
-                        _checkpoint(cancellation_token)
-                        os.rename(target_entry, source_entry)
-                    except ExecutionCancelled:
-                        raise
-                    except Exception:
-                        rollback_failures.append((source_entry, target_entry))
-                        logger.exception(
-                            "Failed to roll back staged move %s -> %s",
-                            target_entry,
-                            source_entry,
-                        )
-            if (
-                not moved_entries
-                and not target_preexisted
-                and os.path.isdir(target)
-                and not os.listdir(target)
-            ):
-                _checkpoint(cancellation_token)
-                os.rmdir(target)
             self.current_path = source
             if rollback_failures:
                 first_source, first_target = rollback_failures[0]
