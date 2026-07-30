@@ -128,9 +128,6 @@ from lib.pipeline_db._shared import (
 from lib.pipeline_db.import_jobs import (
     AutomationRecoveryCAS,
     AutomationRecoveryEvidenceChanged,
-    AutomationRecoveryRetryApplied,
-    _decision_proves_exact_lease_dead,
-    _recovery_cleanup_matches,
     _recovery_owner_matches,
 )
 from lib.pipeline_db.terminal_outcomes import (
@@ -164,9 +161,10 @@ from lib.terminal_outcomes import (
     ImportTerminalOutcome,
     PreviewTerminalOutcome,
     TerminalOutcomeResult,
+    automation_world_failure_self_heal,
     cleanup_journal_refusal_matches,
     operator_search_stop_is_current,
-    validate_automation_terminal_declaration,
+    validate_automation_terminal_authority,
 )
 
 
@@ -1916,49 +1914,6 @@ class FakePipelineDB:
             return ImportJob.from_row(copy.deepcopy(row))
         return None
 
-    def mark_import_job_recovery_required(
-        self,
-        job_id: int,
-        *,
-        reason: str,
-        expected_execution_lease: ExecutionLeaseSnapshot | None = None,
-    ) -> ImportJob | None:
-        for row in self._import_jobs:
-            if (
-                row["id"] == job_id
-                and row.get("status") == "running"
-                and row.get("beets_launch_authorized_at") is not None
-                and (
-                    row.get("job_type") != IMPORT_JOB_AUTOMATION
-                    or (
-                        self._automation_job_has_authority(row)
-                        and self._execution_lease_matches(
-                            row,
-                            expected_execution_lease,
-                            include_child=True,
-                        )
-                    )
-                )
-            ):
-                now = _utcnow()
-                row["status"] = IMPORT_JOB_RECOVERY_REQUIRED
-                row["message"] = f"Recovery required: {reason}"
-                row["error"] = (
-                    "Automatic replay refused because Beets may have "
-                    "mutated the library"
-                )
-                row["worker_id"] = None
-                row["heartbeat_at"] = None
-                row["updated_at"] = now
-                return ImportJob.from_row(copy.deepcopy(row))
-        return None
-
-    def _automation_recovery_write_boundary(
-        self,
-        index: int,
-        label: str,
-    ) -> None:
-        del index, label
 
     def _automation_recovery_rows(
         self,
@@ -1993,348 +1948,6 @@ class FakePipelineDB:
                 "automation recovery owner evidence changed"
             )
 
-    def require_automation_recovery_cas(
-        self,
-        expected: AutomationRecoveryCAS,
-    ) -> None:
-        request, job, journal = self._automation_recovery_rows(expected)
-        if (
-            not _recovery_owner_matches(
-                expected,
-                request=request,
-                job=job,
-            )
-            or not _recovery_cleanup_matches(expected, journal)
-        ):
-            raise AutomationRecoveryEvidenceChanged(
-                "automation recovery evidence changed"
-            )
-
-    def retry_automation_import_recovery(
-        self,
-        expected: AutomationRecoveryCAS,
-        *,
-        expected_execution_lease: ExecutionLeaseSnapshot | None,
-        liveness: ExecutionLivenessDecision,
-        reason: str,
-        evidence_revision: str,
-    ) -> AutomationRecoveryRetryApplied | None:
-        reason = reason.strip()
-        if not reason:
-            raise ValueError("automation recovery retry requires a reason")
-        if not evidence_revision.strip():
-            raise ValueError(
-                "automation recovery retry requires an evidence revision"
-            )
-        if (
-            expected.job_status != IMPORT_JOB_RECOVERY_REQUIRED
-            or not _decision_proves_exact_lease_dead(
-                liveness,
-                expected_execution_lease,
-            )
-        ):
-            return None
-        with self.advisory_lock(
-            ADVISORY_LOCK_NAMESPACE_IMPORT,
-            expected.request_id,
-        ) as acquired:
-            if not acquired:
-                return None
-            request, row, journal = self._automation_recovery_rows(expected)
-            lease_matches = (
-                row is not None
-                and (
-                    all(
-                        row.get(field) is None
-                        for field in (
-                            "execution_invocation_id",
-                            "execution_host_boot_id",
-                            "execution_systemd_unit",
-                            "execution_worker_pid",
-                            "execution_worker_start_ticks",
-                            "execution_beets_pid",
-                            "execution_beets_start_ticks",
-                        )
-                    )
-                    if expected_execution_lease is None
-                    else self._execution_lease_matches(
-                        row,
-                        expected_execution_lease,
-                        include_child=True,
-                    )
-                )
-            )
-            if (
-                not lease_matches
-                or not _recovery_owner_matches(
-                    expected,
-                    request=request,
-                    job=row,
-                )
-                or not _recovery_cleanup_matches(expected, journal)
-            ):
-                return None
-            assert request is not None and row is not None
-            snapshot = copy.deepcopy((
-                self._requests,
-                self._import_jobs,
-                self._processing_cleanup_journals,
-                self._next_import_job_id,
-            ))
-            try:
-                original = ImportJob.from_row(copy.deepcopy(row))
-                result = copy.deepcopy(row.get("result") or {})
-                result["recovery_resolution"] = {
-                    "resolution": "retry",
-                    "reason": reason,
-                    "evidence_revision": evidence_revision,
-                }
-                now = _utcnow()
-                row.update({
-                    "status": "failed",
-                    "result": result,
-                    "message": (
-                        f"Operator authorized a fresh retry: {reason}"
-                    ),
-                    "error": (
-                        "Ambiguous Beets operation closed before fresh retry"
-                    ),
-                    "worker_id": None,
-                    "heartbeat_at": None,
-                    "completed_at": now,
-                    "updated_at": now,
-                })
-                self._automation_recovery_write_boundary(
-                    1,
-                    "old_job.failed",
-                )
-                retry = self._append_import_job(
-                    original.job_type,
-                    request_id=original.request_id,
-                    dedupe_key=original.dedupe_key,
-                    payload=msgspec.to_builtins(original.payload),
-                    message=(
-                        "Operator-authorized retry of recovery job "
-                        f"{original.id}: {reason}"
-                    ),
-                    expected_request_status=(
-                        original.expected_request_status
-                    ),
-                )
-                retry_row = next(
-                    item
-                    for item in self._import_jobs
-                    if item["id"] == retry.id
-                )
-                retry_row.update({
-                    "status": (
-                        IMPORT_JOB_RECOVERY_REQUIRED
-                        if journal is not None
-                        else "queued"
-                    ),
-                    "message": (
-                        "Recovery retry retargeted an unresolved processing "
-                        f"cleanup journal from job {original.id}; reconcile "
-                        "cleanup before replay"
-                        if journal is not None
-                        else retry_row["message"]
-                    ),
-                    "preview_status": original.preview_status,
-                    "preview_result": copy.deepcopy(original.preview_result),
-                    "preview_message": original.preview_message,
-                    "preview_error": original.preview_error,
-                    "preview_attempts": original.preview_attempts,
-                    "preview_completed_at": original.preview_completed_at,
-                    "importable_at": original.importable_at,
-                    "candidate_evidence_id": original.candidate_evidence_id,
-                })
-                retry = ImportJob.from_row(copy.deepcopy(retry_row))
-                self._automation_recovery_write_boundary(
-                    2,
-                    "retry_job.inserted",
-                )
-                retargeted: ProcessingCleanupJournalRow | None = None
-                if journal is not None:
-                    retargeted = self._processing_cleanup_journals.pop(
-                        (expected.job_id, expected.request_id)
-                    )
-                    retargeted["job_id"] = retry.id
-                    retargeted["revision"] += 1
-                    self._processing_cleanup_journals[
-                        (retry.id, expected.request_id)
-                    ] = retargeted
-                    self._automation_recovery_write_boundary(
-                        3,
-                        "cleanup_journal.retargeted",
-                    )
-                request["active_automation_import_job_id"] = retry.id
-                request["updated_at"] = _utcnow()
-                self._automation_recovery_write_boundary(
-                    4,
-                    "request.owner_retargeted",
-                )
-                return AutomationRecoveryRetryApplied(
-                    original=ImportJob.from_row(copy.deepcopy(row)),
-                    retry=retry,
-                    journal=copy.deepcopy(retargeted),
-                )
-            except Exception:
-                (
-                    self._requests,
-                    self._import_jobs,
-                    self._processing_cleanup_journals,
-                    self._next_import_job_id,
-                ) = snapshot
-                raise
-
-    def resolve_import_job_recovery(
-        self,
-        job_id: int,
-        *,
-        resolution: str,
-        reason: str,
-    ) -> tuple[ImportJob, ImportJob | None] | None:
-        candidate = next(
-            (
-                item for item in self._import_jobs
-                if item["id"] == job_id
-                and item.get("job_type") != IMPORT_JOB_AUTOMATION
-                and not self._is_attached_processing_owner(job_id)
-            ),
-            None,
-        )
-        if candidate is None:
-            return None
-        candidate_request_id = candidate.get("request_id")
-        if not isinstance(candidate_request_id, int):
-            return self._resolve_import_job_recovery_under_lock(
-                job_id,
-                resolution=resolution,
-                reason=reason,
-            )
-        with self.advisory_lock(
-            ADVISORY_LOCK_NAMESPACE_IMPORT,
-            candidate_request_id,
-        ) as acquired:
-            if not acquired:
-                return None
-            return self._resolve_import_job_recovery_under_lock(
-                job_id,
-                resolution=resolution,
-                reason=reason,
-            )
-
-    def _resolve_import_job_recovery_under_lock(
-        self,
-        job_id: int,
-        *,
-        resolution: str,
-        reason: str,
-    ) -> tuple[ImportJob, ImportJob | None] | None:
-        if resolution not in ("retry", "close"):
-            raise ValueError(f"Invalid import recovery resolution: {resolution}")
-        reason = reason.strip()
-        if not reason:
-            raise ValueError("Import recovery resolution requires a reason")
-        row = next(
-            (
-                item for item in self._import_jobs
-                if item["id"] == job_id
-                and item.get("status") == IMPORT_JOB_RECOVERY_REQUIRED
-                and item.get("job_type") != IMPORT_JOB_AUTOMATION
-            ),
-            None,
-        )
-        if row is None:
-            return None
-        if self._is_attached_processing_owner(job_id):
-            return None
-        original = ImportJob.from_row(copy.deepcopy(row))
-        if resolution == "retry":
-            request = self._requests.get(int(original.request_id or 0))
-            evidence = (
-                self._evidence_by_id.get(original.candidate_evidence_id)
-                if original.candidate_evidence_id is not None
-                else None
-            )
-            if (
-                request is None
-                or request.get("status")
-                != original.beets_launch_request_status
-                or request.get("mb_release_id")
-                != original.beets_launch_release_id
-                or evidence is None
-                or evidence.snapshot_fingerprint
-                != original.beets_launch_snapshot_fingerprint
-            ):
-                return None
-
-            expected_source = None
-            if original.job_type == "force_import":
-                if not isinstance(original.payload, ForceImportPayload):
-                    raise AssertionError("force_import payload type mismatch")
-                expected_source = original.payload.failed_path
-            elif original.job_type == "youtube_import":
-                if not isinstance(original.payload, YoutubeImportPayload):
-                    raise AssertionError("youtube_import payload type mismatch")
-                expected_source = original.payload.staged_path
-            else:
-                return None
-            if expected_source != original.beets_launch_source_path:
-                return None
-
-        now = _utcnow()
-        prior_result = row.get("result")
-        merged_result = (
-            copy.deepcopy(prior_result)
-            if isinstance(prior_result, dict)
-            else {}
-        )
-        merged_result["recovery_resolution"] = {
-            "resolution": resolution,
-            "reason": reason,
-        }
-        row["status"] = "failed"
-        row["result"] = merged_result
-        row["message"] = (
-            f"Operator authorized a fresh retry: {reason}"
-            if resolution == "retry"
-            else f"Operator resolved without replay: {reason}"
-        )
-        row["error"] = (
-            "Ambiguous Beets operation closed before fresh retry"
-            if resolution == "retry"
-            else "Ambiguous Beets operation closed by operator"
-        )
-        row["worker_id"] = None
-        row["heartbeat_at"] = None
-        row["completed_at"] = now
-        row["updated_at"] = now
-        resolved = ImportJob.from_row(copy.deepcopy(row))
-
-        retry: ImportJob | None = None
-        if resolution == "retry":
-            retry = self.enqueue_import_job(
-                original.job_type,
-                request_id=original.request_id,
-                dedupe_key=original.dedupe_key,
-                payload=msgspec.to_builtins(original.payload),
-                message=f"Operator-authorized retry of recovery job {original.id}",
-            )
-            if original.job_type != "force_import":
-                retry_row = next(
-                    item for item in self._import_jobs if item["id"] == retry.id
-                )
-                retry_row["preview_status"] = original.preview_status
-                retry_row["preview_result"] = copy.deepcopy(original.preview_result)
-                retry_row["preview_message"] = original.preview_message
-                retry_row["preview_error"] = original.preview_error
-                retry_row["preview_attempts"] = original.preview_attempts
-                retry_row["preview_completed_at"] = original.preview_completed_at
-                retry_row["importable_at"] = original.importable_at
-                retry_row["candidate_evidence_id"] = original.candidate_evidence_id
-                retry = ImportJob.from_row(copy.deepcopy(retry_row))
-        return resolved, retry
 
     def mark_import_job_failed(
         self,
@@ -2396,9 +2009,7 @@ class FakePipelineDB:
         for row in running[:limit]:
             now = _utcnow()
             launched = row.get("beets_launch_authorized_at") is not None
-            row["status"] = (
-                IMPORT_JOB_RECOVERY_REQUIRED if launched else "queued"
-            )
+            row["status"] = "failed" if launched else "queued"
             row["message"] = recovery_message if launched else requeue_message
             row["error"] = (
                 "Automatic replay refused because Beets may have mutated "
@@ -2409,6 +2020,7 @@ class FakePipelineDB:
             if not launched:
                 row["started_at"] = None
             row["heartbeat_at"] = None
+            row["completed_at"] = now if launched else None
             row["updated_at"] = now
             updated_jobs.append(ImportJob.from_row(copy.deepcopy(row)))
         return updated_jobs
@@ -2486,8 +2098,10 @@ class FakePipelineDB:
             journalled = (
                 (job_id, request_id) in self._processing_cleanup_journals
             )
-            staged_close = row.get("status") == IMPORT_JOB_RECOVERY_REQUIRED
-            if not launched and not journalled and not staged_close:
+            historical_recovery = (
+                row.get("status") == IMPORT_JOB_RECOVERY_REQUIRED
+            )
+            if not launched and not journalled and not historical_recovery:
                 row["status"] = "queued"
                 if row.get("preview_status") == "running":
                     row["preview_status"] = IMPORT_JOB_PREVIEW_WAITING
@@ -2541,19 +2155,6 @@ class FakePipelineDB:
                     )
                 completion_receipt = automation_completion_receipt(job)
                 expected_job_status = _job_terminal_stage(job.status)
-                if (
-                    launched
-                    and completion_receipt is None
-                    and not staged_close
-                ):
-                    staged = self.mark_import_job_recovery_required(
-                        job_id,
-                        reason=recovery_message,
-                        expected_execution_lease=expected_execution_lease,
-                    )
-                    if staged is None:
-                        return None
-                    expected_job_status = IMPORT_JOB_RECOVERY_REQUIRED
                 pending = _local_completion_terminal_outcome(
                     reconstruct_grab_list_entry(request, state),
                     state,
@@ -2582,9 +2183,7 @@ class FakePipelineDB:
                         status="failed",
                         error=detail,
                         result={
-                            "automation_recovery_self_heal": {
-                                "reason": recovery_message,
-                            },
+                            "automation_recovery_self_heal": recovery_message,
                         },
                         message=detail,
                     ))
@@ -3095,25 +2694,6 @@ class FakePipelineDB:
         job_id: int,
         intent: CleanupJournalIntent,
     ) -> ProcessingCleanupJournalRow:
-        declaration = (
-            intent.declared_result_status,
-            intent.declared_reason,
-            intent.evidence_revision,
-        )
-        if not all(value is None for value in declaration):
-            if any(value is None for value in declaration):
-                raise ValueError(
-                    "cleanup recovery declaration must be provided together"
-                )
-            assert intent.declared_reason is not None
-            assert intent.evidence_revision is not None
-            if (
-                not intent.declared_reason.strip()
-                or not intent.evidence_revision.strip()
-            ):
-                raise ValueError(
-                    "cleanup recovery declaration must be non-blank"
-                )
         self._require_fake_exact_processing_owner(
             request_id=request_id,
             job_id=job_id,
@@ -3146,11 +2726,6 @@ class FakePipelineDB:
                 == intent.destination_manifest_hash
                 and existing["selected_destination_path"]
                 == intent.selected_destination_path
-                and existing["declared_result_status"]
-                == intent.declared_result_status
-                and existing["declared_reason"] == intent.declared_reason
-                and existing["evidence_revision"]
-                == intent.evidence_revision
             )
             if not exact:
                 raise CleanupJournalConflict(
@@ -3172,9 +2747,6 @@ class FakePipelineDB:
             "destination_manifest_hash": intent.destination_manifest_hash,
             "selected_destination_path": intent.selected_destination_path,
             "step_progress": {},
-            "declared_result_status": intent.declared_result_status,
-            "declared_reason": intent.declared_reason,
-            "evidence_revision": intent.evidence_revision,
             "completed_receipt": None,
             "created_at": now,
             "updated_at": now,
@@ -3456,6 +3028,7 @@ class FakePipelineDB:
         request_id: int,
         job_id: int,
         authority: AutomationTerminalAuthority,
+        allow_missing_completion_receipt: bool = False,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         try:
             self._require_fake_exact_processing_owner(
@@ -3523,10 +3096,6 @@ class FakePipelineDB:
             and journal is not None
             and journal["completed_receipt"] == receipt
             and journal["completed_at"] is not None
-            and journal["declared_result_status"]
-            == authority.declared_result_status
-            and journal["declared_reason"] == authority.declared_reason
-            and journal["evidence_revision"] == authority.evidence_revision
         )
         refusal_matches = (
             refusal is not None
@@ -3547,6 +3116,7 @@ class FakePipelineDB:
             authority.expected_job_status == "running"
             and authority.expected_preview_status == "evidence_ready"
             and job.get("beets_launch_authorized_at") is not None
+            and not allow_missing_completion_receipt
         ):
             raise ImportJobTerminalConflict(
                 f"automation job {job_id} lacks its completion receipt"
@@ -3701,7 +3271,7 @@ class FakePipelineDB:
     ) -> TerminalOutcomeResult:
         authority = command.automation
         assert authority is not None
-        validate_automation_terminal_declaration(command)
+        validate_automation_terminal_authority(command)
         snapshot = self._terminal_state_snapshot()
         boundary_index = 0
 
@@ -3715,6 +3285,10 @@ class FakePipelineDB:
                 request_id=command.request_id,
                 job_id=command.import_job_id,
                 authority=authority,
+                allow_missing_completion_receipt=(
+                    automation_world_failure_self_heal(command)
+                    and authority.completion_receipt is None
+                ),
             )
             audit = self._fake_automation_audit(command.audit, authority)
             download_log_id = self._log_terminal_audit(

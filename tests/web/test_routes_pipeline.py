@@ -28,7 +28,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from tests.fakes import FakeBeetsDB
 from tests.helpers import (
-    claim_next_import_job,
     handoff_automation_owner,
     make_request_row,
 )
@@ -1767,31 +1766,6 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         )
         return job.id
 
-    def _mark_force_job_recovery(self, job_id: int) -> None:
-        from tests.helpers import make_album_quality_evidence
-
-        release_id = self.db.request(100)["mb_release_id"]
-        evidence = make_album_quality_evidence(
-            mb_release_id=release_id,
-            source_path="/tmp/Test Album",
-        )
-        self.db.upsert_album_quality_evidence(evidence)
-        persisted = self.db.find_album_quality_evidence(
-            mb_release_id=release_id,
-            snapshot_fingerprint=evidence.snapshot_fingerprint,
-        )
-        assert persisted is not None and persisted.id is not None
-        self.db.set_import_job_candidate_evidence(job_id, persisted.id)
-        row = next(row for row in self.db._import_jobs if row["id"] == job_id)
-        row.update({
-            "status": "recovery_required",
-            "beets_launch_authorized_at": datetime.now(UTC),
-            "beets_launch_release_id": release_id,
-            "beets_launch_source_path": "/tmp/Test Album",
-            "beets_launch_request_status": self.db.request(100)["status"],
-            "beets_launch_snapshot_fingerprint": evidence.snapshot_fingerprint,
-        })
-
     def test_import_jobs_contract(self):
         self._enqueue_force_job()
         status, data = self._get("/api/import-jobs")
@@ -1849,8 +1823,6 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(detail["completion"]["status"], "absent")
         self.assertEqual(detail["exact_library"]["status"], "unavailable")
         self.assertEqual(detail["cleanup_journal"]["status"], "missing")
-        self.assertTrue(detail["close_eligible"])
-        self.assertTrue(detail["evidence_revision"].startswith("sha256:"))
 
     def test_automation_recovery_detail_not_found_is_typed(self):
         status, data = self._get("/api/import-jobs/999999/recovery")
@@ -1859,116 +1831,14 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(data["outcome"], "not_found")
         self.assertIsNone(data["detail"])
 
-    def test_automation_recovery_action_not_found_is_typed(self):
+    def test_automation_recovery_post_route_is_absent(self):
         status, data = self._post("/api/import-jobs/999999/recovery", {
             "action": "retry",
             "reason": "missing operation",
         })
 
         self.assertEqual(status, 404)
-        self.assertEqual(data["outcome"], "not_found")
-        self.assertIsNone(data["job"])
-        self.assertIsNone(data["retry_job"])
-
-    def test_automation_recovery_actions_require_revision_and_close_result(
-        self,
-    ):
-        request_id = 406
-        self.db.seed_request(make_request_row(
-            id=request_id,
-            status="wanted",
-            mb_release_id="75dbf62e-7dd2-4ddc-b57b-9bad1758b6b0",
-        ))
-        job = handoff_automation_owner(
-            self.db,
-            request_id,
-            canonical_path="/processing/recovery-action",
-        )
-
-        status, data = self._post(f"/api/import-jobs/{job.id}/recovery", {
-            "action": "retry",
-            "reason": "missing revision",
-        })
-        self.assertEqual(status, 400)
-        self.assertIn("evidence", data["error"])
-
-        status, data = self._post(f"/api/import-jobs/{job.id}/recovery", {
-            "action": "close",
-            "reason": "missing explicit result",
-            "evidence_revision": "sha256:stale",
-        })
-        self.assertEqual(status, 400)
-        self.assertIn("result_status", data["error"])
-
-        with patch.object(
-            self.db,
-            "get_processing_cleanup_journal",
-            lambda *, request_id, job_id: None,
-            create=True,
-        ):
-            status, data = self._post(
-                f"/api/import-jobs/{job.id}/recovery",
-                {
-                    "action": "close",
-                    "reason": "stale evidence",
-                    "evidence_revision": "sha256:stale",
-                    "result_status": "wanted",
-                },
-            )
-        self.assertEqual(status, 409)
-        self.assertEqual(data["outcome"], "evidence_changed")
-        self.assertIsNotNone(data["detail"])
-        self.assertEqual(
-            self.db.request(request_id)["active_automation_import_job_id"],
-            job.id,
-        )
-
-    def test_automation_retry_with_journal_returns_accepted_recovery_required(
-        self,
-    ):
-        from lib.pipeline_db.cleanup_journal import CleanupJournalIntent
-        from lib.processing_cleanup import cleanup_manifest_hash
-
-        request_id = 407
-        canonical_path = "/processing/api-retained-cleanup"
-        self.db.seed_request(make_request_row(
-            id=request_id,
-            status="wanted",
-            mb_release_id="75dbf62e-7dd2-4ddc-b57b-9bad1758b6b0",
-        ))
-        job = handoff_automation_owner(
-            self.db,
-            request_id,
-            canonical_path=canonical_path,
-        )
-        next(row for row in self.db._import_jobs if row["id"] == job.id)[
-            "status"
-        ] = "recovery_required"
-        self.db.create_processing_cleanup_journal(
-            request_id=request_id,
-            job_id=job.id,
-            intent=CleanupJournalIntent(
-                action="no_op",
-                source_path=canonical_path,
-                source_manifest=(),
-                source_manifest_hash=cleanup_manifest_hash(()),
-            ),
-        )
-        detail_status, detail_data = self._get(
-            f"/api/import-jobs/{job.id}/recovery"
-        )
-        self.assertEqual(detail_status, 200)
-
-        status, data = self._post(f"/api/import-jobs/{job.id}/recovery", {
-            "action": "retry",
-            "reason": "retain unresolved cleanup",
-            "evidence_revision": detail_data["detail"]["evidence_revision"],
-        })
-
-        self.assertEqual(status, 202)
-        self.assertEqual(data["outcome"], "retry_recovery_required")
-        self.assertEqual(data["job"]["status"], "failed")
-        self.assertEqual(data["retry_job"]["status"], "recovery_required")
+        self.assertIn("error", data)
 
     def test_import_jobs_timeline_contract(self):
         self._enqueue_force_job()
@@ -2012,48 +1882,6 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         status, data = self._get("/api/import-jobs?request_id=abc")
         self.assertEqual(status, 400)
         self.assertIn("error", data)
-
-    def test_import_job_recovery_close_is_explicit_and_never_replays(self):
-        job_id = self._enqueue_force_job()
-        self._mark_force_job_recovery(job_id)
-
-        status, data = self._post(f"/api/import-jobs/{job_id}/recovery", {
-            "action": "close",
-            "reason": "Reconciled Beets and request state manually",
-        })
-
-        self.assertEqual(status, 200)
-        self.assertEqual(data["outcome"], "closed")
-        self.assertEqual(data["job"]["status"], "failed")
-        self.assertIsNone(data["retry_job"])
-        self.assertIsNone(claim_next_import_job(self.db, worker_id="replay"))
-
-    def test_import_job_recovery_retry_mints_new_operation(self):
-        job_id = self._enqueue_force_job()
-        self._mark_force_job_recovery(job_id)
-
-        status, data = self._post(f"/api/import-jobs/{job_id}/recovery", {
-            "action": "retry",
-            "reason": "Confirmed Beets did not apply the operation",
-        })
-
-        self.assertEqual(status, 202)
-        self.assertEqual(data["outcome"], "retry_queued")
-        self.assertEqual(data["job"]["status"], "failed")
-        self.assertNotEqual(data["retry_job"]["id"], job_id)
-        self.assertEqual(data["retry_job"]["status"], "queued")
-
-    def test_import_job_recovery_rejects_non_recovery_job(self):
-        job_id = self._enqueue_force_job()
-
-        status, data = self._post(f"/api/import-jobs/{job_id}/recovery", {
-            "action": "retry",
-            "reason": "Should not be accepted",
-        })
-
-        self.assertEqual(status, 409)
-        self.assertEqual(data["outcome"], "wrong_state")
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,4 +1,4 @@
-"""Operator evidence and resolution for ambiguous Beets operations.
+"""Read-only diagnostic evidence for ambiguous Beets operations.
 
 The automation recovery detail is deliberately observational.  In particular,
 it never infers a completed Beets operation from a path or from current-library
@@ -10,12 +10,6 @@ the dangerously stronger ``absent``.
 
 from __future__ import annotations
 
-import hashlib
-import json
-import logging
-from collections.abc import Mapping
-from contextlib import AbstractContextManager
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, Protocol
 
@@ -28,65 +22,20 @@ from lib.beets_db import (
     CurrentBeetsUnique,
 )
 from lib.import_execution import (
-    CancellationToken,
-    ExecutionCancelled,
     ExecutionLeaseSnapshot,
     ExecutionLivenessDecision,
     ExecutionLivenessProbe,
-    OwnerSessionIdentity,
-    OwnerSessionProbe,
     ProcessIdentity,
     ProcessObservation,
     probe_execution_liveness,
 )
 from lib.import_queue import ImportJob
-from lib.json_narrow import is_str_object_dict
-from lib.pipeline_db._core import OwnerSessionLost
-from lib.pipeline_db._shared import (
-    ADVISORY_LOCK_NAMESPACE_IMPORT,
-    ADVISORY_LOCK_NAMESPACE_RELEASE,
-    release_id_to_lock_key,
-)
-from lib.pipeline_db.cleanup_journal import (
-    CleanupJournalConflict,
-    CleanupJournalIntent,
-    CleanupJournalReceipt,
-    ProcessingCleanupJournalRow,
-)
-from lib.pipeline_db.import_jobs import (
-    AutomationRecoveryCAS,
-    AutomationRecoveryEvidenceChanged,
-    AutomationRecoveryRetryApplied,
-)
+from lib.pipeline_db.cleanup_journal import ProcessingCleanupJournalRow
 from lib.pipeline_db.rows import AlbumRequestRow
-from lib.pipeline_db.terminal_outcomes import ImportJobTerminalConflict
-from lib.processing_cleanup import (
-    PROCESSING_CLEANUP_NO_OP,
-    PROCESSING_CLEANUP_REMOVE_SOURCE,
-    ProcessingCleanupError,
-    cleanup_manifest_builtins,
-    cleanup_manifest_hash,
-    execute_processing_cleanup,
-    inspect_processing_cleanup_source,
-)
 from lib.quality.download_state import ActiveDownloadState
 from lib.release_identity import ReleaseIdentity
-from lib.terminal_outcomes import (
-    ImportTerminalOutcome,
-    TerminalOutcomeResult,
-    automation_recovery_close_outcome,
-)
 
-logger = logging.getLogger("cratedigger")
-
-
-RECOVERY_RESOLUTION_RETRY = "retry"
-RECOVERY_RESOLUTION_CLOSE = "close"
 AUTOMATION_COMPLETION_RESULT_KEY = "automation_completion"
-RECOVERY_RESOLUTIONS = frozenset({
-    RECOVERY_RESOLUTION_RETRY,
-    RECOVERY_RESOLUTION_CLOSE,
-})
 _AUTOMATION_ACTIVE_STATUSES = frozenset({
     "queued",
     "running",
@@ -113,18 +62,6 @@ CleanupJournalStatus = Literal[
 CanonicalPathStatus = Literal["captured", "absent", "unavailable"]
 
 
-class ImportRecoveryDB(Protocol):
-    def get_import_job(self, job_id: int) -> ImportJob | None: ...
-
-    def resolve_import_job_recovery(
-        self,
-        job_id: int,
-        *,
-        resolution: str,
-        reason: str,
-    ) -> tuple[ImportJob, ImportJob | None] | None: ...
-
-
 class AutomationRecoveryDetailDB(Protocol):
     """Read-only PipelineDB shape for the shared recovery projection."""
 
@@ -140,98 +77,11 @@ class AutomationRecoveryDetailDB(Protocol):
     ) -> ProcessingCleanupJournalRow | None: ...
 
 
-class AutomationRecoveryMutationDB(
-    AutomationRecoveryDetailDB,
-    Protocol,
-):
-    def advisory_lock(
-        self,
-        namespace: int,
-        key: int,
-    ) -> AbstractContextManager[bool]: ...
-
-    def resolve_import_job_recovery(
-        self,
-        job_id: int,
-        *,
-        resolution: str,
-        reason: str,
-    ) -> tuple[ImportJob, ImportJob | None] | None: ...
-
-    def _pin_owner_session(
-        self,
-        token: CancellationToken,
-    ) -> AbstractContextManager[OwnerSessionIdentity]: ...
-
-    def _probe_owner_session(
-        self,
-        identity: OwnerSessionIdentity,
-    ) -> OwnerSessionProbe: ...
-
-    def retry_automation_import_recovery(
-        self,
-        expected: AutomationRecoveryCAS,
-        *,
-        expected_execution_lease: ExecutionLeaseSnapshot | None,
-        liveness: ExecutionLivenessDecision,
-        reason: str,
-        evidence_revision: str,
-    ) -> AutomationRecoveryRetryApplied | None: ...
-
-    def require_automation_recovery_owner(
-        self,
-        expected: AutomationRecoveryCAS,
-    ) -> None: ...
-
-    def require_automation_recovery_cas(
-        self,
-        expected: AutomationRecoveryCAS,
-    ) -> None: ...
-
-    def create_processing_cleanup_journal(
-        self,
-        *,
-        request_id: int,
-        job_id: int,
-        intent: CleanupJournalIntent,
-    ) -> ProcessingCleanupJournalRow: ...
-
-    def checkpoint_processing_cleanup_journal(
-        self,
-        *,
-        request_id: int,
-        job_id: int,
-        expected_revision: int,
-        step_progress: Mapping[str, object],
-    ) -> ProcessingCleanupJournalRow: ...
-
-    def complete_processing_cleanup_journal(
-        self,
-        *,
-        request_id: int,
-        job_id: int,
-        expected_revision: int,
-        receipt: CleanupJournalReceipt,
-    ) -> ProcessingCleanupJournalRow: ...
-
-    def persist_import_terminal_outcome(
-        self,
-        command: ImportTerminalOutcome,
-    ) -> TerminalOutcomeResult: ...
-
-
 class AutomationRecoveryBeets(Protocol):
     def resolve_current_release(
         self,
         identity: ReleaseIdentity,
     ) -> CurrentBeetsResolution: ...
-
-
-class ImportRecoveryResolution(msgspec.Struct, frozen=True):
-    outcome: str
-    job: ImportJob | None = None
-    retry_job: ImportJob | None = None
-    message: str = ""
 
 
 class AutomationCompletionReceipt(msgspec.Struct, frozen=True):
@@ -362,9 +212,6 @@ class AutomationCleanupJournalSnapshot(msgspec.Struct, frozen=True):
     )
     completed_at: str | None = None
     completed_receipt: dict[str, object] | None = None
-    declared_result_status: Literal["wanted", "imported"] | None = None
-    declared_reason: str | None = None
-    declared_evidence_revision: str | None = None
     reason: str | None = None
 
 
@@ -381,9 +228,6 @@ class AutomationRecoveryDetail(msgspec.Struct, frozen=True):
     completion: AutomationCompletionObservation
     exact_library: AutomationExactLibraryObservation
     cleanup_journal: AutomationCleanupJournalSnapshot
-    evidence_revision: str
-    close_eligible: bool
-    close_block_reason: str | None
 
 
 class AutomationRecoveryDetailResult(msgspec.Struct, frozen=True):
@@ -395,141 +239,8 @@ class AutomationRecoveryDetailResult(msgspec.Struct, frozen=True):
         return msgspec.to_builtins(self)
 
 
-AutomationRecoveryActionOutcome = Literal[
-    "retry_queued",
-    "retry_recovery_required",
-    "closed",
-    "not_found",
-    "wrong_state",
-    "ineligible",
-    "execution_live",
-    "execution_unknown",
-    "evidence_changed",
-    "lock_unavailable",
-    "cleanup_uninspectable",
-    "cleanup_failed",
-]
-
-
-class AutomationRecoveryJobResponse(msgspec.Struct, frozen=True):
-    """JSON-safe import-job projection shared by both recovery adapters."""
-
-    id: int
-    job_type: str
-    status: str
-    request_id: int | None
-    dedupe_key: str | None
-    payload: dict[str, object]
-    result: dict[str, object] | None
-    message: str | None
-    error: str | None
-    attempts: int
-    worker_id: str | None
-    created_at: str | None
-    updated_at: str | None
-    started_at: str | None
-    heartbeat_at: str | None
-    completed_at: str | None
-    preview_status: str | None
-    preview_result: dict[str, object] | None
-    preview_message: str | None
-    preview_error: str | None
-    preview_attempts: int
-    preview_worker_id: str | None
-    preview_started_at: str | None
-    preview_heartbeat_at: str | None
-    preview_completed_at: str | None
-    importable_at: str | None
-    candidate_evidence_id: int | None
-    expected_request_status: str | None
-    beets_launch_authorized_at: str | None
-    beets_launch_release_id: str | None
-    beets_launch_source_path: str | None
-    beets_launch_request_status: str | None
-    beets_launch_snapshot_fingerprint: str | None
-    execution_invocation_id: str | None
-    execution_host_boot_id: str | None
-    execution_systemd_unit: str | None
-    execution_worker_pid: int | None
-    execution_worker_start_ticks: int | None
-    execution_beets_pid: int | None
-    execution_beets_start_ticks: int | None
-    deduped: bool
-
-
-class AutomationRecoveryActionResult(msgspec.Struct, frozen=True):
-    outcome: AutomationRecoveryActionOutcome
-    detail: AutomationRecoveryDetail | None = None
-    job: AutomationRecoveryJobResponse | None = None
-    retry_job: AutomationRecoveryJobResponse | None = None
-    message: str = ""
-
-    def to_dict(self) -> dict[str, object]:
-        return msgspec.to_builtins(self)
-
-
-@dataclass(frozen=True)
-class _AutomationRecoveryObservation:
-    result: AutomationRecoveryDetailResult
-    job: ImportJob | None
-    lease: ExecutionLeaseSnapshot | None
-    liveness: ExecutionLivenessDecision | None
-
-
 def _iso(value: datetime | None) -> str | None:
     return value.isoformat() if value is not None else None
-
-
-def automation_recovery_job_response(
-    job: ImportJob,
-) -> AutomationRecoveryJobResponse:
-    """Project one typed DB row into the recovery response wire contract."""
-    payload: dict[str, object] = msgspec.to_builtins(job.payload)
-    return AutomationRecoveryJobResponse(
-        id=job.id,
-        job_type=job.job_type,
-        status=job.status,
-        request_id=job.request_id,
-        dedupe_key=job.dedupe_key,
-        payload=payload,
-        result=job.result,
-        message=job.message,
-        error=job.error,
-        attempts=job.attempts,
-        worker_id=job.worker_id,
-        created_at=_iso(job.created_at),
-        updated_at=_iso(job.updated_at),
-        started_at=_iso(job.started_at),
-        heartbeat_at=_iso(job.heartbeat_at),
-        completed_at=_iso(job.completed_at),
-        preview_status=job.preview_status,
-        preview_result=job.preview_result,
-        preview_message=job.preview_message,
-        preview_error=job.preview_error,
-        preview_attempts=job.preview_attempts,
-        preview_worker_id=job.preview_worker_id,
-        preview_started_at=_iso(job.preview_started_at),
-        preview_heartbeat_at=_iso(job.preview_heartbeat_at),
-        preview_completed_at=_iso(job.preview_completed_at),
-        importable_at=_iso(job.importable_at),
-        candidate_evidence_id=job.candidate_evidence_id,
-        expected_request_status=job.expected_request_status,
-        beets_launch_authorized_at=_iso(job.beets_launch_authorized_at),
-        beets_launch_release_id=job.beets_launch_release_id,
-        beets_launch_source_path=job.beets_launch_source_path,
-        beets_launch_request_status=job.beets_launch_request_status,
-        beets_launch_snapshot_fingerprint=(
-            job.beets_launch_snapshot_fingerprint
-        ),
-        execution_invocation_id=job.execution_invocation_id,
-        execution_host_boot_id=job.execution_host_boot_id,
-        execution_systemd_unit=job.execution_systemd_unit,
-        execution_worker_pid=job.execution_worker_pid,
-        execution_worker_start_ticks=job.execution_worker_start_ticks,
-        execution_beets_pid=job.execution_beets_pid,
-        execution_beets_start_ticks=job.execution_beets_start_ticks,
-        deduped=job.deduped,
-    )
 
 
 def _validate_completion_receipt(
@@ -911,9 +622,6 @@ def _cleanup_snapshot(
             step_progress=step_progress,
             completed_at=_iso(completed_at),
             completed_receipt=completed_receipt,
-            declared_result_status=row["declared_result_status"],
-            declared_reason=row["declared_reason"],
-            declared_evidence_revision=row["evidence_revision"],
             reason=reason,
         )
     except Exception as exc:  # noqa: BLE001 - observation boundary
@@ -924,79 +632,6 @@ def _cleanup_snapshot(
         )
 
 
-def _close_block_reason(
-    *,
-    job: ImportJob,
-    request: AlbumRequestRow | None,
-    exact_active_owner: bool,
-    release: ReleaseIdentity | None,
-    path_status: CanonicalPathStatus,
-    liveness: AutomationExecutionLiveness,
-    cleanup: AutomationCleanupJournalSnapshot,
-) -> str | None:
-    if job.job_type != "automation_import":
-        return "not_automation_import"
-    if request is None:
-        return "request_unavailable"
-    if not exact_active_owner:
-        return "not_exact_processing_owner"
-    if job.status not in _AUTOMATION_ACTIVE_STATUSES:
-        return "owner_stage_ineligible"
-    if job.completed_at is not None:
-        return "owner_stage_inconsistent"
-    if liveness.status == "live":
-        return "execution_live"
-    if liveness.status == "unknown":
-        return "execution_liveness_unknown"
-    if release is None:
-        return "release_identity_unavailable"
-    if path_status == "absent":
-        return "canonical_path_absent"
-    if path_status == "unavailable":
-        return "canonical_path_unavailable"
-    if cleanup.status == "unavailable":
-        return "cleanup_journal_unavailable"
-    if cleanup.status == "incomplete" and (
-        cleanup.declared_result_status is None
-        or cleanup.declared_reason is None
-        or cleanup.declared_evidence_revision is None
-    ):
-        return "cleanup_journal_incomplete"
-    return None
-
-
-def _revision_payload(
-    detail: AutomationRecoveryDetail,
-) -> dict[str, object]:
-    payload: dict[str, object] = msgspec.to_builtins(detail)
-    payload.pop("evidence_revision")
-    payload.pop("close_eligible")
-    payload.pop("close_block_reason")
-    liveness = payload["execution_liveness"]
-    completion = payload["completion"]
-    library = payload["exact_library"]
-    cleanup = payload["cleanup_journal"]
-    assert is_str_object_dict(liveness)
-    assert is_str_object_dict(completion)
-    assert is_str_object_dict(library)
-    assert is_str_object_dict(cleanup)
-    liveness.pop("observed_at")
-    completion.pop("observed_at")
-    library.pop("observed_at")
-    cleanup.pop("observed_at")
-    return payload
-
-
-def _evidence_revision(detail: AutomationRecoveryDetail) -> str:
-    encoded = json.dumps(
-        _revision_payload(detail),
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-    ).encode()
-    return "sha256:" + hashlib.sha256(encoded).hexdigest()
-
-
 def _observe_automation_recovery(
     db: AutomationRecoveryDetailDB,
     beets: AutomationRecoveryBeets | None,
@@ -1004,18 +639,13 @@ def _observe_automation_recovery(
     *,
     liveness_probe: ExecutionLivenessProbe | None = None,
     observed_at: datetime | None = None,
-) -> _AutomationRecoveryObservation:
-    """Observe one job once and retain its exact liveness decision."""
+) -> AutomationRecoveryDetailResult:
+    """Observe one job through the fail-closed read model."""
     job = db.get_import_job(int(job_id))
     if job is None:
-        return _AutomationRecoveryObservation(
-            result=AutomationRecoveryDetailResult(
-                outcome="not_found",
-                message=f"Import job {job_id} not found",
-            ),
-            job=None,
-            lease=None,
-            liveness=None,
+        return AutomationRecoveryDetailResult(
+            outcome="not_found",
+            message=f"Import job {job_id} not found",
         )
     request = (
         None
@@ -1058,7 +688,7 @@ def _observe_automation_recovery(
         observed_at=observed,
     )
     persisted_lease, lease = _persisted_lease(job)
-    retained_cleanup_never_claimed = (
+    historical_retained_cleanup_never_claimed = (
         job.status == "recovery_required"
         and job.beets_launch_authorized_at is None
         and cleanup.status in {"incomplete", "completed"}
@@ -1073,7 +703,7 @@ def _observe_automation_recovery(
     elif lease is None and (
         (
             job.status != "queued"
-            and not retained_cleanup_never_claimed
+            and not historical_retained_cleanup_never_claimed
         )
         or job.beets_launch_authorized_at is not None
     ):
@@ -1101,15 +731,6 @@ def _observe_automation_recovery(
         beets,
         identity,
         observed_at=observed,
-    )
-    block_reason = _close_block_reason(
-        job=job,
-        request=request,
-        exact_active_owner=exact_active_owner,
-        release=identity,
-        path_status=path_status,
-        liveness=liveness,
-        cleanup=cleanup,
     )
     detail = AutomationRecoveryDetail(
         request=AutomationRecoveryRequest(
@@ -1149,23 +770,11 @@ def _observe_automation_recovery(
         completion=completion,
         exact_library=library,
         cleanup_journal=cleanup,
-        evidence_revision="",
-        close_eligible=block_reason is None,
-        close_block_reason=block_reason,
     )
-    detail = msgspec.structs.replace(
-        detail,
-        evidence_revision=_evidence_revision(detail),
-    )
-    return _AutomationRecoveryObservation(
-        result=AutomationRecoveryDetailResult(
-            outcome="ok",
-            detail=detail,
-            message="Automation recovery evidence observed",
-        ),
-        job=job,
-        lease=lease,
-        liveness=liveness_decision,
+    return AutomationRecoveryDetailResult(
+        outcome="ok",
+        detail=detail,
+        message="Automation recovery evidence observed",
     )
 
 
@@ -1184,599 +793,4 @@ def get_automation_recovery_detail(
         job_id,
         liveness_probe=liveness_probe,
         observed_at=observed_at,
-    ).result
-
-
-def _automation_recovery_cas(
-    detail: AutomationRecoveryDetail,
-    job: ImportJob,
-) -> AutomationRecoveryCAS:
-    if detail.request.request_id is None or detail.canonical_path is None:
-        raise ValueError("automation recovery owner evidence is incomplete")
-    cleanup = detail.cleanup_journal
-    cleanup_present = cleanup.status in {"incomplete", "completed"}
-    return AutomationRecoveryCAS(
-        request_id=detail.request.request_id,
-        job_id=job.id,
-        job_status=job.status,
-        preview_status=job.preview_status,
-        canonical_path=detail.canonical_path,
-        beets_launch_authorized_at=job.beets_launch_authorized_at,
-        beets_launch_release_id=job.beets_launch_release_id,
-        beets_launch_source_path=job.beets_launch_source_path,
-        beets_launch_request_status=job.beets_launch_request_status,
-        beets_launch_snapshot_fingerprint=(
-            job.beets_launch_snapshot_fingerprint
-        ),
-        execution_invocation_id=job.execution_invocation_id,
-        execution_host_boot_id=job.execution_host_boot_id,
-        execution_systemd_unit=job.execution_systemd_unit,
-        execution_worker_pid=job.execution_worker_pid,
-        execution_worker_start_ticks=job.execution_worker_start_ticks,
-        execution_beets_pid=job.execution_beets_pid,
-        execution_beets_start_ticks=job.execution_beets_start_ticks,
-        cleanup_job_id=cleanup.job_id if cleanup_present else None,
-        cleanup_request_id=(
-            cleanup.request_id if cleanup_present else None
-        ),
-        cleanup_revision=cleanup.revision if cleanup_present else None,
-        cleanup_progress=(
-            _json_object(cleanup.step_progress)
-            if cleanup_present
-            else None
-        ),
-    )
-
-
-def _json_object(value: object) -> dict[str, object]:
-    result: dict[str, object] = msgspec.to_builtins(value)
-    return result
-
-
-def _refreshed_action_result(
-    db: AutomationRecoveryDetailDB,
-    beets: AutomationRecoveryBeets | None,
-    job_id: int,
-    *,
-    outcome: AutomationRecoveryActionOutcome,
-    message: str,
-    liveness_probe: ExecutionLivenessProbe | None,
-) -> AutomationRecoveryActionResult:
-    refreshed = get_automation_recovery_detail(
-        db,
-        beets,
-        job_id,
-        liveness_probe=liveness_probe,
-    )
-    return AutomationRecoveryActionResult(
-        outcome=outcome,
-        detail=refreshed.detail,
-        message=message,
-    )
-
-
-def _automation_action_block(
-    observation: _AutomationRecoveryObservation,
-    *,
-    action: Literal["retry", "close"],
-) -> tuple[AutomationRecoveryActionOutcome, str] | None:
-    detail = observation.result.detail
-    assert detail is not None
-    if not detail.owner_stage.exact_active_owner:
-        return "wrong_state", "Job is not the exact processing owner"
-    if observation.liveness is None \
-            or detail.execution_liveness.status == "unknown":
-        return "execution_unknown", detail.execution_liveness.reason
-    if detail.execution_liveness.status == "live":
-        return "execution_live", detail.execution_liveness.reason
-    if action == "retry" and detail.owner_stage.job_status != "recovery_required":
-        return (
-            "wrong_state",
-            "Automation retry requires a recovery_required owner",
-        )
-    if detail.release is None:
-        return "ineligible", "Release identity is unavailable"
-    if detail.canonical_path_status != "captured":
-        return (
-            "ineligible",
-            detail.canonical_path_reason
-            or f"Canonical path is {detail.canonical_path_status}",
-        )
-    if detail.cleanup_journal.status == "unavailable":
-        return (
-            "ineligible",
-            detail.cleanup_journal.reason or "Cleanup journal is unavailable",
-        )
-    return None
-
-
-def _checkpoint_automation_recovery_close(
-    db: AutomationRecoveryMutationDB,
-    *,
-    token: CancellationToken,
-    owner_session_identity: OwnerSessionIdentity,
-    expected: AutomationRecoveryCAS,
-) -> None:
-    """Fail-stop unless the same live session still holds the exact owner."""
-    token.raise_if_cancelled()
-    probe = db._probe_owner_session(owner_session_identity)
-    if not probe.live:
-        token.cancel(f"owner_session_lost:{probe.reason}")
-        token.raise_if_cancelled()
-    db.require_automation_recovery_owner(expected)
-    token.raise_if_cancelled()
-
-
-def _apply_import_job_recovery(
-    db: AutomationRecoveryMutationDB,
-    beets: AutomationRecoveryBeets | None,
-    job_id: int,
-    *,
-    action: Literal["retry", "close"],
-    reason: str,
-    evidence_revision: str | None = None,
-    result_status: Literal["wanted", "imported"] | None = None,
-    liveness_probe: ExecutionLivenessProbe | None = None,
-) -> AutomationRecoveryActionResult:
-    """Apply one legacy or revisioned exact-owner recovery action."""
-    reason = reason.strip()
-    if not reason:
-        raise ValueError("recovery resolution requires a non-empty reason")
-
-    current = db.get_import_job(int(job_id))
-    if current is None:
-        return AutomationRecoveryActionResult(
-            outcome="not_found",
-            message=f"Import job {job_id} not found",
-        )
-    if current.job_type != "automation_import":
-        legacy = resolve_import_job_recovery(
-            db,
-            job_id,
-            resolution=action,
-            reason=reason,
-        )
-        if legacy.outcome == "not_found":
-            outcome: AutomationRecoveryActionOutcome = "not_found"
-        elif legacy.outcome in {"wrong_state", "authority_changed"}:
-            outcome = "wrong_state"
-        elif legacy.outcome == "retry_queued":
-            outcome = "retry_queued"
-        else:
-            outcome = "closed"
-        return AutomationRecoveryActionResult(
-            outcome=outcome,
-            job=(
-                None
-                if legacy.job is None
-                else automation_recovery_job_response(legacy.job)
-            ),
-            retry_job=(
-                None
-                if legacy.retry_job is None
-                else automation_recovery_job_response(legacy.retry_job)
-            ),
-            message=legacy.message,
-        )
-
-    if evidence_revision is None or not evidence_revision.strip():
-        raise ValueError(
-            "automation recovery requires --evidence-revision"
-        )
-    if action == "close" and result_status not in {"wanted", "imported"}:
-        raise ValueError(
-            "automation recovery close requires result_status "
-            "'wanted' or 'imported'"
-        )
-    if action == "retry" and result_status is not None:
-        raise ValueError("automation recovery retry does not accept result_status")
-
-    observed = _observe_automation_recovery(
-        db,
-        beets,
-        job_id,
-        liveness_probe=liveness_probe,
-    )
-    detail = observed.result.detail
-    if detail is None or observed.job is None:
-        return AutomationRecoveryActionResult(
-            outcome="not_found",
-            message=observed.result.message,
-        )
-    if evidence_revision != detail.evidence_revision:
-        return AutomationRecoveryActionResult(
-            outcome="evidence_changed",
-            detail=detail,
-            message="Automation recovery evidence changed; review and resubmit",
-        )
-    blocked = _automation_action_block(observed, action=action)
-    if blocked is not None:
-        return AutomationRecoveryActionResult(
-            outcome=blocked[0],
-            detail=detail,
-            message=blocked[1],
-        )
-    assert observed.liveness is not None
-    expected = _automation_recovery_cas(detail, observed.job)
-
-    if action == "retry":
-        with db.advisory_lock(
-            ADVISORY_LOCK_NAMESPACE_IMPORT,
-            expected.request_id,
-        ) as acquired:
-            if not acquired:
-                return AutomationRecoveryActionResult(
-                    outcome="lock_unavailable",
-                    detail=detail,
-                    message="Automation import owner is locked",
-                )
-            applied = db.retry_automation_import_recovery(
-                expected,
-                expected_execution_lease=observed.lease,
-                liveness=observed.liveness,
-                reason=reason,
-                evidence_revision=evidence_revision,
-            )
-        if applied is None:
-            return _refreshed_action_result(
-                db,
-                beets,
-                job_id,
-                outcome="evidence_changed",
-                message=(
-                    "Automation recovery evidence changed; review and resubmit"
-                ),
-                liveness_probe=liveness_probe,
-            )
-        retained_cleanup = applied.journal is not None
-        return AutomationRecoveryActionResult(
-            outcome=(
-                "retry_recovery_required"
-                if retained_cleanup
-                else "retry_queued"
-            ),
-            job=automation_recovery_job_response(applied.original),
-            retry_job=automation_recovery_job_response(applied.retry),
-            message=(
-                (
-                    f"Closed ambiguous job {job_id}, retargeted its cleanup "
-                    f"journal to automation job {applied.retry.id}, and kept "
-                    "the replacement recovery-required"
-                )
-                if retained_cleanup
-                else (
-                    f"Closed ambiguous job {job_id} and queued fresh "
-                    f"automation job {applied.retry.id}"
-                )
-            ),
-        )
-
-    assert result_status is not None
-    assert detail.release is not None
-    request_id = expected.request_id
-    release_key = release_id_to_lock_key(detail.release.release_id)
-    token = CancellationToken()
-    with (
-        db._pin_owner_session(token) as owner_session_identity,
-        db.advisory_lock(
-            ADVISORY_LOCK_NAMESPACE_IMPORT,
-            request_id,
-        ) as import_acquired,
-    ):
-        if not import_acquired:
-            return AutomationRecoveryActionResult(
-                outcome="lock_unavailable",
-                detail=detail,
-                message="Automation import owner is locked",
-            )
-        with db.advisory_lock(
-            ADVISORY_LOCK_NAMESPACE_RELEASE,
-            release_key,
-        ) as release_acquired:
-            if not release_acquired:
-                return AutomationRecoveryActionResult(
-                    outcome="lock_unavailable",
-                    detail=detail,
-                    message="Exact release is locked",
-                )
-            owner_checkpoint = lambda: _checkpoint_automation_recovery_close(
-                db,
-                token=token,
-                owner_session_identity=owner_session_identity,
-                expected=expected,
-            )
-            owner_checkpoint()
-            try:
-                db.require_automation_recovery_cas(expected)
-            except AutomationRecoveryEvidenceChanged:
-                return _refreshed_action_result(
-                    db,
-                    beets,
-                    job_id,
-                    outcome="evidence_changed",
-                    message=(
-                        "Automation recovery evidence changed; "
-                        "review and resubmit"
-                    ),
-                    liveness_probe=liveness_probe,
-                )
-
-            journal = db.get_processing_cleanup_journal(
-                request_id=request_id,
-                job_id=job_id,
-            )
-            if journal is None:
-                inspection = inspect_processing_cleanup_source(
-                    expected.canonical_path
-                )
-                if inspection.status == "uninspectable":
-                    return AutomationRecoveryActionResult(
-                        outcome="cleanup_uninspectable",
-                        detail=detail,
-                        message=(
-                            inspection.reason
-                            or "Canonical processing source is uninspectable"
-                        ),
-                    )
-                if inspection.status == "complete":
-                    action_name = PROCESSING_CLEANUP_REMOVE_SOURCE
-                    manifest = cleanup_manifest_builtins(
-                        inspection.manifest
-                    )
-                    manifest_hash = inspection.manifest_hash
-                    assert manifest_hash is not None
-                else:
-                    action_name = PROCESSING_CLEANUP_NO_OP
-                    manifest = ()
-                    manifest_hash = cleanup_manifest_hash(())
-                intent = CleanupJournalIntent(
-                    action=action_name,
-                    source_path=expected.canonical_path,
-                    source_manifest=manifest,
-                    source_manifest_hash=manifest_hash,
-                    declared_result_status=result_status,
-                    declared_reason=reason,
-                    evidence_revision=evidence_revision,
-                )
-                owner_checkpoint()
-                try:
-                    journal = db.create_processing_cleanup_journal(
-                        request_id=request_id,
-                        job_id=job_id,
-                        intent=intent,
-                    )
-                except CleanupJournalConflict:
-                    return _refreshed_action_result(
-                        db,
-                        beets,
-                        job_id,
-                        outcome="evidence_changed",
-                        message=(
-                            "Cleanup authority changed; review and resubmit"
-                        ),
-                        liveness_probe=liveness_probe,
-                    )
-            elif (
-                journal["declared_result_status"] != result_status
-                or journal["declared_reason"] != reason
-                or journal["evidence_revision"] is None
-            ):
-                return AutomationRecoveryActionResult(
-                    outcome="ineligible",
-                    detail=detail,
-                    message=(
-                        "Existing cleanup declaration does not match this close"
-                    ),
-                )
-
-            try:
-                completed = execute_processing_cleanup(
-                    db,
-                    journal,
-                    owner_checkpoint=owner_checkpoint,
-                )
-            except AutomationRecoveryEvidenceChanged:
-                return _refreshed_action_result(
-                    db,
-                    beets,
-                    job_id,
-                    outcome="evidence_changed",
-                    message=(
-                        "Automation recovery owner changed during cleanup"
-                    ),
-                    liveness_probe=liveness_probe,
-                )
-            except (CleanupJournalConflict, ProcessingCleanupError) as exc:
-                return AutomationRecoveryActionResult(
-                    outcome="cleanup_failed",
-                    detail=detail,
-                    message=str(exc),
-                )
-            receipt = completed["completed_receipt"]
-            if receipt is None:
-                return AutomationRecoveryActionResult(
-                    outcome="cleanup_failed",
-                    detail=detail,
-                    message="Cleanup completed without a typed receipt",
-                )
-            terminal_revision = completed["evidence_revision"]
-            if terminal_revision is None:
-                return AutomationRecoveryActionResult(
-                    outcome="cleanup_failed",
-                    detail=detail,
-                    message="Cleanup declaration lacks an evidence revision",
-                )
-            completion = (
-                detail.completion.receipt
-                if detail.completion.status == "captured"
-                else None
-            )
-            owner_job_status = detail.owner_stage.job_status
-            if owner_job_status == "queued":
-                expected_job_status: Literal[
-                    "queued", "running", "recovery_required"
-                ] = "queued"
-            elif owner_job_status == "running":
-                expected_job_status = "running"
-            elif owner_job_status == "recovery_required":
-                expected_job_status = "recovery_required"
-            else:
-                return AutomationRecoveryActionResult(
-                    outcome="wrong_state",
-                    detail=detail,
-                    message=(
-                        "Recovery owner changed to unsupported job status "
-                        f"{owner_job_status!r}"
-                    ),
-                )
-            command = automation_recovery_close_outcome(
-                request_id=request_id,
-                import_job_id=job_id,
-                result_status=result_status,
-                reason=reason,
-                evidence_revision=terminal_revision,
-                expected_job_status=expected_job_status,
-                expected_preview_status=detail.owner_stage.preview_status,
-                expected_execution_lease=observed.lease,
-                cleanup_receipt=receipt,
-                completion_receipt=completion,
-            )
-            owner_checkpoint()
-            try:
-                terminal = db.persist_import_terminal_outcome(command)
-            except (
-                AutomationRecoveryEvidenceChanged,
-                ImportJobTerminalConflict,
-                CleanupJournalConflict,
-            ):
-                return _refreshed_action_result(
-                    db,
-                    beets,
-                    job_id,
-                    outcome="evidence_changed",
-                    message=(
-                        "Automation recovery evidence changed before close"
-                    ),
-                    liveness_probe=liveness_probe,
-                )
-            return AutomationRecoveryActionResult(
-                outcome="closed",
-                job=automation_recovery_job_response(terminal.job),
-                message=(
-                    f"Closed automation job {job_id} as {result_status}"
-                ),
-            )
-
-
-def apply_import_job_recovery(
-    db: AutomationRecoveryMutationDB,
-    beets: AutomationRecoveryBeets | None,
-    job_id: int,
-    *,
-    action: Literal["retry", "close"],
-    reason: str,
-    evidence_revision: str | None = None,
-    result_status: Literal["wanted", "imported"] | None = None,
-    liveness_probe: ExecutionLivenessProbe | None = None,
-) -> AutomationRecoveryActionResult:
-    """Apply recovery and convert owner-session loss into fail-stop evidence."""
-    try:
-        return _apply_import_job_recovery(
-            db,
-            beets,
-            job_id,
-            action=action,
-            reason=reason,
-            evidence_revision=evidence_revision,
-            result_status=result_status,
-            liveness_probe=liveness_probe,
-        )
-    except (ExecutionCancelled, OwnerSessionLost) as exc:
-        if action != "close":
-            raise
-        return AutomationRecoveryActionResult(
-            outcome="cleanup_failed",
-            message=(
-                "Automation recovery close lost its pinned owner session: "
-                f"{exc}"
-            ),
-        )
-
-
-def resolve_import_job_recovery(
-    db: ImportRecoveryDB,
-    job_id: int,
-    *,
-    resolution: str,
-    reason: str,
-) -> ImportRecoveryResolution:
-    """Apply one explicit operator decision without inferring Beets state."""
-    if resolution not in RECOVERY_RESOLUTIONS:
-        raise ValueError(
-            "resolution must be 'retry' (operator confirmed not applied) "
-            "or 'close' (operator reconciled without replay)"
-        )
-    reason = reason.strip()
-    if not reason:
-        raise ValueError("recovery resolution requires a non-empty reason")
-
-    current = db.get_import_job(int(job_id))
-    if current is None:
-        return ImportRecoveryResolution(
-            outcome="not_found",
-            message=f"Import job {job_id} not found",
-        )
-    if current.status != "recovery_required":
-        return ImportRecoveryResolution(
-            outcome="wrong_state",
-            job=current,
-            message=(
-                f"Import job {job_id} is {current.status!r}, not "
-                "'recovery_required'"
-            ),
-        )
-
-    resolved = db.resolve_import_job_recovery(
-        int(job_id),
-        resolution=resolution,
-        reason=reason,
-    )
-    if resolved is None:
-        latest = db.get_import_job(int(job_id))
-        return ImportRecoveryResolution(
-            outcome="authority_changed",
-            job=latest,
-            message=(
-                "Recovery authority changed; inspect the request, release, "
-                "and source before trying again"
-            ),
-        )
-    job, retry_job = resolved
-    if job.job_type == "force_import" and job.preview_result is not None:
-        action_path = job.preview_result.get("action_path")
-        if isinstance(action_path, str) and action_path:
-            try:
-                from lib.config import read_runtime_config
-                from lib.import_preview import cleanup_force_action_copy_for_job
-
-                cleanup_force_action_copy_for_job(
-                    action_path,
-                    read_runtime_config(),
-                    import_job_id=job.id,
-                )
-            except Exception:
-                # The operator resolution is durable. A private deterministic
-                # copy can be reclaimed later; it must not undo that decision.
-                logger.exception(
-                    "Failed to remove resolved force action copy for job %s", job.id,
-                )
-    return ImportRecoveryResolution(
-        outcome=("retry_queued" if retry_job is not None else "closed"),
-        job=job,
-        retry_job=retry_job,
-        message=(
-            f"Queued fresh import job {retry_job.id}"
-            if retry_job is not None
-            else "Recovery closed without automatic replay"
-        ),
     )

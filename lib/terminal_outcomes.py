@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from copy import deepcopy
 from dataclasses import dataclass, field, fields, replace
 from typing import TYPE_CHECKING, Literal
@@ -11,7 +10,6 @@ import msgspec
 
 from lib.import_execution import ExecutionLeaseSnapshot
 from lib.import_queue import ImportJob
-from lib.json_narrow import is_str_object_dict
 from lib.transitions import RequestTransition, TransitionApplied
 from lib.validation_envelope import (
     VALIDATION_PROJECTION_UNSET,
@@ -131,9 +129,6 @@ class CleanupJournalSnapshot(msgspec.Struct, frozen=True, kw_only=True):
     destination_manifest_hash: str | None
     selected_destination_path: str | None
     step_progress: dict[str, object]
-    declared_result_status: Literal["wanted", "imported"] | None
-    declared_reason: str | None
-    evidence_revision: str | None
 
 
 class CleanupJournalRefusalDisposition(
@@ -183,9 +178,6 @@ def cleanup_journal_snapshot(
         destination_manifest_hash=journal["destination_manifest_hash"],
         selected_destination_path=journal["selected_destination_path"],
         step_progress=deepcopy(journal["step_progress"]),
-        declared_result_status=journal["declared_result_status"],
-        declared_reason=journal["declared_reason"],
-        evidence_revision=journal["evidence_revision"],
     )
 
 
@@ -230,9 +222,6 @@ class AutomationTerminalAuthority:
     cleanup_receipt: CleanupJournalReceipt | None
     completion_receipt: AutomationCompletionReceipt | None = None
     cleanup_refusal: CleanupJournalRefusalDisposition | None = None
-    declared_result_status: Literal["wanted", "imported"] | None = None
-    declared_reason: str | None = None
-    evidence_revision: str | None = None
 
     def __post_init__(self) -> None:
         if (self.cleanup_receipt is None) == (self.cleanup_refusal is None):
@@ -365,10 +354,52 @@ class TerminalOutcomeResult:
     cooled_down_users: frozenset[str] = field(default_factory=lambda: frozenset())
 
 
-def validate_automation_terminal_declaration(
+AUTOMATION_WORLD_FAILURE_RESULT_KEY = "automation_recovery_self_heal"
+
+
+def automation_world_failure_self_heal(
+    command: ImportTerminalOutcome,
+) -> bool:
+    """Return whether this is the exact fail-and-restart terminal shape."""
+    authority = command.automation
+    if authority is None:
+        return False
+    transitions = tuple(
+        transition
+        for transition in (
+            command.initial_transition,
+            *command.post_audit_transitions,
+        )
+        if transition is not None
+    )
+    reason = command.job.result.get(AUTOMATION_WORLD_FAILURE_RESULT_KEY)
+    expected_stage = (
+        authority.expected_job_status,
+        authority.expected_preview_status,
+    )
+    return (
+        (
+            expected_stage
+            in {
+                ("queued", "running"),
+                ("running", "evidence_ready"),
+            }
+            or authority.expected_job_status == "recovery_required"
+        )
+        and command.job.status == "failed"
+        and isinstance(reason, str)
+        and bool(reason.strip())
+        and bool(transitions)
+        and transitions[-1].target_status == "wanted"
+        and not command.successful_terminal_acceptance
+        and command.audit.outcome == "failed"
+    )
+
+
+def validate_automation_terminal_authority(
     command: ImportTerminalOutcome,
 ) -> None:
-    """Reject a recovery close whose command contradicts its declaration."""
+    """Validate the narrow terminal shapes that relax ordinary authority."""
     authority = command.automation
     if authority is None:
         return
@@ -390,153 +421,11 @@ def validate_automation_terminal_declaration(
         raise ValueError(
             "cleanup refusal must fail the job and return the request to wanted"
         )
-    declaration = (
-        authority.declared_result_status,
-        authority.declared_reason,
-        authority.evidence_revision,
-    )
-    if all(value is None for value in declaration):
-        return
-    if any(value is None for value in declaration):
-        raise ValueError(
-            "automation recovery declaration must be complete"
-        )
-    result_status = authority.declared_result_status
-    reason = authority.declared_reason
-    evidence_revision = authority.evidence_revision
-    assert result_status is not None
-    assert reason is not None
-    assert evidence_revision is not None
     if (
-        result_status not in ("wanted", "imported")
-        or not reason.strip()
-        or not evidence_revision.strip()
+        AUTOMATION_WORLD_FAILURE_RESULT_KEY in command.job.result
+        and not automation_world_failure_self_heal(command)
     ):
         raise ValueError(
-            "automation recovery declaration must be valid and non-blank"
+            "automation world-failure self-heal must fail the job, record a "
+            "failed audit, and return the request to wanted"
         )
-
-    if not transitions or transitions[-1].target_status != result_status:
-        raise ValueError(
-            "automation recovery transition contradicts declared result"
-        )
-    if command.job.status != "failed":
-        raise ValueError(
-            "automation recovery close must fail the ambiguous job"
-        )
-    if command.successful_terminal_acceptance:
-        raise ValueError(
-            "automation recovery close is not a successful worker acceptance"
-        )
-
-    recovery = {
-        "resolution": "close",
-        "result_status": result_status,
-        "reason": reason,
-        "evidence_revision": evidence_revision,
-    }
-    if (
-        command.audit.outcome != "failed"
-        or command.audit.error_message != reason
-        or command.job.result.get("recovery_resolution") != recovery
-    ):
-        raise ValueError(
-            "automation recovery audit contradicts declared result"
-        )
-    raw_validation = command.audit.validation_result
-    try:
-        validation: object = (
-            None if raw_validation is None else json.loads(raw_validation)
-        )
-    except json.JSONDecodeError as exc:
-        raise ValueError(
-            "automation recovery audit must be valid JSON"
-        ) from exc
-    if (
-        not is_str_object_dict(validation)
-        or validation.get("automation_recovery") != recovery
-    ):
-        raise ValueError(
-            "automation recovery validation audit omits its declaration"
-        )
-
-
-def automation_recovery_close_outcome(
-    *,
-    request_id: int,
-    import_job_id: int,
-    result_status: Literal["wanted", "imported"],
-    reason: str,
-    evidence_revision: str,
-    expected_job_status: Literal["queued", "running", "recovery_required"],
-    expected_preview_status: str | None,
-    expected_execution_lease: ExecutionLeaseSnapshot | None,
-    cleanup_receipt: CleanupJournalReceipt,
-    completion_receipt: AutomationCompletionReceipt | None,
-) -> ImportTerminalOutcome:
-    """Build the one canonical explicit automation recovery close command."""
-    reason = reason.strip()
-    if not reason:
-        raise ValueError("automation recovery close requires a reason")
-    if not evidence_revision.strip():
-        raise ValueError(
-            "automation recovery close requires an evidence revision"
-        )
-    imported = result_status == "imported"
-    recovery_audit = {
-        "valid": imported,
-        "scenario": "automation_recovery_close",
-        "detail": reason,
-        "automation_recovery": {
-            "resolution": "close",
-            "result_status": result_status,
-            "reason": reason,
-            "evidence_revision": evidence_revision,
-        },
-    }
-    return ImportTerminalOutcome(
-        request_id=request_id,
-        import_job_id=import_job_id,
-        initial_transition=(
-            RequestTransition.to_imported(from_status="processing")
-            if imported
-            else RequestTransition.to_wanted(from_status="processing")
-        ),
-        audit=TerminalDownloadAudit(
-            outcome="failed",
-            error_message=reason,
-            validation_result=json.dumps(
-                recovery_audit,
-                sort_keys=True,
-                separators=(",", ":"),
-            ),
-        ),
-        job=ImportJobTerminal(
-            status="failed",
-            result={
-                "recovery_resolution": {
-                    "resolution": "close",
-                    "result_status": result_status,
-                    "reason": reason,
-                    "evidence_revision": evidence_revision,
-                },
-            },
-            message=(
-                f"Operator reconciled automation import as {result_status}: "
-                f"{reason}"
-            ),
-            error=(
-                f"Automation recovery closed as {result_status} by operator"
-            ),
-        ),
-        automation=AutomationTerminalAuthority(
-            expected_job_status=expected_job_status,
-            expected_preview_status=expected_preview_status,
-            expected_execution_lease=expected_execution_lease,
-            cleanup_receipt=cleanup_receipt,
-            completion_receipt=completion_receipt,
-            declared_result_status=result_status,
-            declared_reason=reason,
-            evidence_revision=evidence_revision,
-        ),
-    )

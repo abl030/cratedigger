@@ -35,11 +35,8 @@ from lib.import_execution import (
 from lib.import_job_recovery_service import (
     AUTOMATION_COMPLETION_RESULT_KEY,
     AutomationCompletionReceipt,
-    AutomationRecoveryActionResult,
     AutomationRecoveryBeets,
-    AutomationRecoveryJobResponse,
     automation_completion_result_patch,
-    automation_recovery_job_response,
     get_automation_recovery_detail,
 )
 from lib.import_queue import ImportJob
@@ -282,29 +279,6 @@ def _detail(
 
 
 class TestAutomationRecoveryDetail(unittest.TestCase):
-    def test_action_job_projection_is_one_strict_wire_contract(self) -> None:
-        job = _job()
-        projected = automation_recovery_job_response(job)
-        result = AutomationRecoveryActionResult(
-            outcome="closed",
-            job=projected,
-            message="closed",
-        )
-
-        payload = result.to_dict()
-        job_payload = payload["job"]
-        self.assertIsInstance(job_payload, dict)
-        assert isinstance(job_payload, dict)
-        self.assertEqual(job_payload, job.to_json_dict())
-
-        malformed = msgspec.to_builtins(projected)
-        malformed["id"] = "7"
-        with self.assertRaises(msgspec.ValidationError):
-            msgspec.convert(
-                malformed,
-                type=AutomationRecoveryJobResponse,
-                strict=True,
-            )
 
     def test_liveness_uses_shared_live_reused_dead_child_boot_and_unknown_transcripts(
         self,
@@ -487,7 +461,7 @@ class TestAutomationRecoveryDetail(unittest.TestCase):
                 )
                 self.assertEqual(detail.exact_library.status, expected)
 
-    def test_revision_excludes_observation_time_but_binds_cleanup_progress(
+    def test_cleanup_progress_is_visible_without_operator_action_metadata(
         self,
     ) -> None:
         journal = ProcessingCleanupJournalRow(
@@ -503,9 +477,6 @@ class TestAutomationRecoveryDetail(unittest.TestCase):
             destination_manifest_hash=None,
             selected_destination_path=None,
             step_progress={"removed": 1},
-            declared_result_status=None,
-            declared_reason=None,
-            evidence_revision=None,
             completed_receipt=None,
             created_at=_OBSERVED,
             updated_at=_OBSERVED,
@@ -526,12 +497,9 @@ class TestAutomationRecoveryDetail(unittest.TestCase):
             probe=probe,
             observed_at=datetime(2026, 7, 30, tzinfo=UTC),
         )
-        self.assertEqual(first.evidence_revision, later.evidence_revision)
-        self.assertFalse(first.close_eligible)
-        self.assertEqual(
-            first.close_block_reason,
-            "cleanup_journal_incomplete",
-        )
+        self.assertEqual(first.cleanup_journal.revision, 3)
+        self.assertEqual(first.cleanup_journal.step_progress, {"removed": 1})
+        self.assertEqual(later.cleanup_journal.revision, 3)
 
         changed = copy.deepcopy(journal)
         changed["revision"] = 4
@@ -540,9 +508,10 @@ class TestAutomationRecoveryDetail(unittest.TestCase):
             _DetailDB(_job(), journal=changed),
             probe=probe,
         )
-        self.assertNotEqual(
-            first.evidence_revision,
-            after_checkpoint.evidence_revision,
+        self.assertEqual(after_checkpoint.cleanup_journal.revision, 4)
+        self.assertEqual(
+            after_checkpoint.cleanup_journal.step_progress,
+            {"removed": 2},
         )
 
     def test_missing_journal_is_visible_but_does_not_claim_cleanup_is_done(
@@ -558,8 +527,6 @@ class TestAutomationRecoveryDetail(unittest.TestCase):
             )),
         )
         self.assertEqual(detail.cleanup_journal.status, "missing")
-        self.assertTrue(detail.close_eligible)
-        self.assertIsNone(detail.close_block_reason)
 
         failed_probe = _detail(
             _DetailDB(_job(), journal_error=OSError("database unavailable")),
@@ -571,10 +538,9 @@ class TestAutomationRecoveryDetail(unittest.TestCase):
             )),
         )
         self.assertEqual(failed_probe.cleanup_journal.status, "unavailable")
-        self.assertFalse(failed_probe.close_eligible)
         self.assertEqual(
-            failed_probe.close_block_reason,
-            "cleanup_journal_unavailable",
+            failed_probe.cleanup_journal.reason,
+            "cleanup_journal_probe_failed:OSError",
         )
 
 
@@ -645,7 +611,6 @@ class TestAutomationRecoveryDetailPostgres(unittest.TestCase):
             self.assertEqual(detail.completion.status, "absent")
             self.assertEqual(detail.exact_library.status, "unavailable")
             self.assertEqual(detail.cleanup_journal.status, "missing")
-            self.assertTrue(detail.close_eligible)
 
 
 if __name__ == "__main__":

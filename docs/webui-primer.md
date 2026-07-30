@@ -232,8 +232,10 @@ operation.
 - **Processing action lock** — every request-shaped payload used by badges and
   actions carries `processing_owner: {job_id, status, preview_status}` or null.
   One presentation table maps that durable owner stage to queued for preview,
-  previewing, waiting to import, importing, or needs recovery. Mutating controls
-  remain focusable with `aria-disabled="true"` and a visible
+  previewing, waiting to import, importing, or historical needs-recovery.
+  Historical recovery detail is read-only while startup convergence continues
+  automatically. Mutating controls remain focusable with
+  `aria-disabled="true"` and a visible
   `aria-describedby` explanation; pointer, Enter, and Space do nothing. A
   typed stale-click conflict locks immediately, announces through `aria-live`,
   and refetches only that request while preserving tab/filter/expansion,

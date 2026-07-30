@@ -183,13 +183,13 @@ export function processingOwnerPresentation(pipelineStatus, rawOwner) {
     label = 'waiting to import';
   }
   const lockReason = label === 'needs recovery'
-    ? `Actions are locked because automation job #${owner.job_id} needs recovery.`
+    ? `Actions are locked while historical automation job #${owner.job_id} awaits automatic convergence.`
     : `Actions are locked while automation job #${owner.job_id} is ${label}.`;
   return {
     jobId: owner.job_id,
     label,
     lockReason,
-    accessibleDescription: `${lockReason} Open the exact owner recovery detail for status and operator actions.`,
+    accessibleDescription: `${lockReason} Open the read-only exact owner recovery detail.`,
     recoveryTarget: `/api/import-jobs/${owner.job_id}/recovery`,
     badgeClass,
   };

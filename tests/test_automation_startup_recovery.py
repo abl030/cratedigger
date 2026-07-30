@@ -25,7 +25,6 @@ from lib.pipeline_db import PipelineDB
 from lib.pipeline_db.cleanup_journal import CleanupJournalIntent
 from lib.pipeline_db.import_jobs import (
     AUTOMATION_WORLD_FAILURE_AUDIT_PREFIX,
-    AutomationRecoveryCAS,
 )
 from lib.pipeline_db.rows import AlbumRequestRow, DownloadLogWithRequestRow
 from lib.pipeline_db.terminal_outcomes import ImportJobTerminalConflict
@@ -44,7 +43,6 @@ from lib.terminal_outcomes import (
     TerminalDownloadAudit,
     cleanup_journal_refusal_disposition,
 )
-from scripts import importer
 from tests.fakes import FakePipelineDB
 from tests.helpers import (
     claim_next_import_job,
@@ -345,41 +343,6 @@ class _StartupRecoveryContract:
             ),
         )
 
-    def _recovery_cas(
-        self,
-        job: ImportJob,
-        canonical_path: str,
-    ) -> AutomationRecoveryCAS:
-        journal = self.db.get_processing_cleanup_journal(
-            request_id=self.request_id,
-            job_id=job.id,
-        )
-        assert journal is not None
-        return AutomationRecoveryCAS(
-            request_id=self.request_id,
-            job_id=job.id,
-            job_status=job.status,
-            preview_status=job.preview_status,
-            canonical_path=canonical_path,
-            beets_launch_authorized_at=job.beets_launch_authorized_at,
-            beets_launch_release_id=job.beets_launch_release_id,
-            beets_launch_source_path=job.beets_launch_source_path,
-            beets_launch_request_status=job.beets_launch_request_status,
-            beets_launch_snapshot_fingerprint=(
-                job.beets_launch_snapshot_fingerprint
-            ),
-            execution_invocation_id=job.execution_invocation_id,
-            execution_host_boot_id=job.execution_host_boot_id,
-            execution_systemd_unit=job.execution_systemd_unit,
-            execution_worker_pid=job.execution_worker_pid,
-            execution_worker_start_ticks=job.execution_worker_start_ticks,
-            execution_beets_pid=job.execution_beets_pid,
-            execution_beets_start_ticks=job.execution_beets_start_ticks,
-            cleanup_job_id=job.id,
-            cleanup_request_id=self.request_id,
-            cleanup_revision=journal["revision"],
-            cleanup_progress=dict(journal["step_progress"]),
-        )
 
     def _recover(
         self,
@@ -542,9 +505,6 @@ class _StartupRecoveryContract:
             "destination_manifest_hash": journal["destination_manifest_hash"],
             "selected_destination_path": journal["selected_destination_path"],
             "step_progress": journal["step_progress"],
-            "declared_result_status": journal["declared_result_status"],
-            "declared_reason": journal["declared_reason"],
-            "evidence_revision": journal["evidence_revision"],
         }
         for field, expected in expected_snapshot.items():
             case.assertEqual(snapshot[field], expected, field)
@@ -578,70 +538,6 @@ class _StartupRecoveryContract:
         self._assert_returned_to_search_pool(owner.id)
         case.assertFalse(os.path.exists(path))
 
-    def test_owner_stranded_mid_close_is_driven_to_completion(self) -> None:
-        """A crash inside the one-frame close window must not become a park."""
-        case = self._case()
-        path = self._album_dir("stranded")
-        owner, lease = self._launched_owner(path)
-        staged = self.db.mark_import_job_recovery_required(
-            owner.id,
-            reason="crashed inside the close window",
-            expected_execution_lease=lease,
-        )
-        assert staged is not None
-        case.assertEqual(staged.status, "recovery_required")
-
-        # The recovery query must still SEE it, or the park is permanent.
-        selected = self.db.list_automation_import_jobs_for_startup_recovery()
-        case.assertEqual([job.id for job in selected], [owner.id])
-
-        recovered = self._recover(owner.id, lease)
-
-        assert recovered is not None
-        self._assert_returned_to_search_pool(owner.id)
-
-    def test_operator_retry_replacement_converges_without_a_human(
-        self,
-    ) -> None:
-        """The last park: a retry's leaseless replacement still self-heals.
-
-        ``retry_automation_import_recovery`` mints the replacement owner at
-        ``recovery_required`` when it retargets an unresolved cleanup journal.
-        Rule C — the world here is produced by that real command, not staged by
-        hand — and the re-probe must converge it, because ``never_claimed`` is a
-        real death proof for an owner no execution ever took.
-        """
-        case = self._case()
-        path = self._album_dir("retry-replacement")
-        owner, lease = self._launched_owner(path)
-        self._journal(owner.id, path)
-        staged = self.db.mark_import_job_recovery_required(
-            owner.id,
-            reason="ambiguous launched operation",
-            expected_execution_lease=lease,
-        )
-        assert staged is not None
-        applied = self.db.retry_automation_import_recovery(
-            self._recovery_cas(staged, path),
-            expected_execution_lease=lease,
-            liveness=_dead(lease),
-            reason="operator authorized a fresh retry",
-            evidence_revision="evidence-revision-1",
-        )
-        assert applied is not None
-        replacement = applied.retry
-        # Precondition: a leaseless owner resting where only a human reaches it.
-        case.assertEqual(replacement.status, "recovery_required")
-        case.assertIsNone(replacement.execution_invocation_id)
-
-        recovered = importer.recover_abandoned_automation_owners(self.db)
-
-        case.assertEqual([job.id for job in recovered], [replacement.id])
-        self._assert_returned_to_search_pool(replacement.id)
-        case.assertFalse(
-            os.path.exists(path),
-            "the retargeted cleanup journal was not resumed",
-        )
 
     def test_unprovable_execution_is_never_recovered(self) -> None:
         """Must-still-work: liveness ambiguity may not steal a live import.
@@ -844,7 +740,7 @@ class TestAutomationStartupRecoveryPostgres(
             ),
             job=ImportJobTerminal(
                 status="failed",
-                result={"automation_recovery_self_heal": {"reason": detail}},
+                result={"automation_recovery_self_heal": detail},
                 message=detail,
                 error=detail,
             ),

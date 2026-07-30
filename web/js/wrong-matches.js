@@ -1281,7 +1281,11 @@ async function _pollImportJob(jobId, btn, logId) {
       if (job.status === 'recovery_required') {
         btn.textContent = 'Recovery required';
         btn.style.color = '#f88';
-        toast(job.message || 'Import needs operator recovery; it will not replay automatically', true);
+        toast(
+          job.message
+            || 'Historical recovery state; startup convergence will recheck the exact execution automatically',
+          true,
+        );
         invalidateWrongMatches();
         return;
       }

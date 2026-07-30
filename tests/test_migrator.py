@@ -4625,139 +4625,6 @@ class TestProcessingAutomationOwnerMigration(unittest.TestCase):
             [("completed",)],
         )
 
-    def test_ordered_retry_atomically_retargets_the_processing_owner(
-        self,
-    ) -> None:
-        request_id = self._request("retry")
-        old_job_id = self._owner(request_id)
-        replacement_job_id = self._job(request_id, status="failed")
-
-        self._transaction([
-            (
-                "UPDATE import_jobs SET status = 'failed' WHERE id = %s",
-                (old_job_id,),
-            ),
-            (
-                "UPDATE import_jobs SET status = 'queued' WHERE id = %s",
-                (replacement_job_id,),
-            ),
-            ("""
-                UPDATE album_requests
-                SET active_automation_import_job_id = %s
-                WHERE id = %s
-            """, (replacement_job_id, request_id)),
-        ])
-        self.assertEqual(
-            self._exec("""
-                SELECT request.status,
-                       request.active_automation_import_job_id,
-                       old_job.status,
-                       replacement_job.status
-                FROM album_requests AS request
-                JOIN import_jobs AS old_job ON old_job.id = %s
-                JOIN import_jobs AS replacement_job ON replacement_job.id = %s
-                WHERE request.id = %s
-            """, (old_job_id, replacement_job_id, request_id)),
-            [("processing", replacement_job_id, "failed", "queued")],
-        )
-
-    def test_retry_retargets_existing_cleanup_journal_byte_identically(
-        self,
-    ) -> None:
-        request_id = self._request("retry-journal")
-        old_job_id = self._owner(request_id)
-        self._exec("""
-            INSERT INTO processing_cleanup_journal (
-                job_id, request_id, revision, action, source_path,
-                source_manifest, source_manifest_hash, destination_path,
-                destination_manifest, destination_manifest_hash,
-                selected_destination_path, step_progress,
-                declared_result_status, declared_reason, evidence_revision
-            )
-            VALUES (
-                %s, %s, 7, 'move_tree', '/processing/source',
-                '[{"path": "01.flac", "size": 12}]'::jsonb, 'source-sha256',
-                '/processing/destination',
-                '[{"path": "01.flac", "size": 12}]'::jsonb,
-                'destination-sha256', '/processing/destination',
-                '{"published": true}'::jsonb, 'imported', 'accepted',
-                'evidence-v4'
-            )
-        """, (old_job_id, request_id))
-        before = self._exec("""
-            SELECT revision, action, source_path, source_manifest,
-                   source_manifest_hash, destination_path,
-                   destination_manifest, destination_manifest_hash,
-                   selected_destination_path, step_progress,
-                   declared_result_status, declared_reason, evidence_revision,
-                   completed_receipt, created_at, updated_at, completed_at
-            FROM processing_cleanup_journal
-            WHERE job_id = %s AND request_id = %s
-        """, (old_job_id, request_id))
-
-        conn = psycopg2.connect(TEST_DSN)
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE import_jobs SET status = 'failed' WHERE id = %s",
-                    (old_job_id,),
-                )
-                cur.execute("""
-                    INSERT INTO import_jobs (
-                        job_type, status, request_id, payload, preview_status
-                    )
-                    VALUES (
-                        'automation_import', 'queued', %s, '{}'::jsonb,
-                        'waiting'
-                    )
-                    RETURNING id
-                """, (request_id,))
-                replacement_row = cur.fetchone()
-                self.assertIsNotNone(replacement_row)
-                assert replacement_row is not None
-                replacement_job_id = int(replacement_row[0])
-                cur.execute("""
-                    UPDATE processing_cleanup_journal
-                    SET job_id = %s
-                    WHERE job_id = %s AND request_id = %s
-                """, (replacement_job_id, old_job_id, request_id))
-                cur.execute("""
-                    UPDATE album_requests
-                    SET active_automation_import_job_id = %s
-                    WHERE id = %s
-                """, (replacement_job_id, request_id))
-            conn.commit()
-        except BaseException:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
-
-        self.assertEqual(
-            self._exec("""
-                SELECT request.status,
-                       request.active_automation_import_job_id,
-                       old_job.status,
-                       replacement_job.status
-                FROM album_requests AS request
-                JOIN import_jobs AS old_job ON old_job.id = %s
-                JOIN import_jobs AS replacement_job ON replacement_job.id = %s
-                WHERE request.id = %s
-            """, (old_job_id, replacement_job_id, request_id)),
-            [("processing", replacement_job_id, "failed", "queued")],
-        )
-        after = self._exec("""
-            SELECT revision, action, source_path, source_manifest,
-                   source_manifest_hash, destination_path,
-                   destination_manifest, destination_manifest_hash,
-                   selected_destination_path, step_progress,
-                   declared_result_status, declared_reason, evidence_revision,
-                   completed_receipt, created_at, updated_at, completed_at
-            FROM processing_cleanup_journal
-            WHERE job_id = %s AND request_id = %s
-        """, (replacement_job_id, request_id))
-        self.assertEqual(after, before)
-
     def test_concurrent_journal_insert_and_owner_terminal_cannot_both_commit(
         self,
     ) -> None:
@@ -5039,47 +4906,35 @@ class TestProcessingAutomationOwnerMigration(unittest.TestCase):
                     selected_destination_path,
                 ))
 
-    def test_cleanup_journal_recovery_declaration_is_all_or_none(self) -> None:
-        request_id = self._request("declaration")
-        job_id = self._owner(request_id)
-        insert = """
-            INSERT INTO processing_cleanup_journal (
-                job_id, request_id, action, source_path,
-                source_manifest, source_manifest_hash,
-                declared_result_status, declared_reason, evidence_revision
-            )
-            VALUES (
-                %s, %s, 'no_op', '/processing/missing',
-                '[]'::jsonb, 'source-sha256', %s, %s, %s
-            )
-        """
-        for declaration in (
-            ("wanted", None, None),
-            (None, "operator reason", None),
-            (None, None, "evidence-v1"),
-            ("imported", " \t", "evidence-v1"),
-            ("wanted", "operator reason", "\n"),
-        ):
-            with self.subTest(
-                declaration=declaration,
-            ), self.assertRaises(psycopg2.errors.CheckViolation):
-                self._exec(
-                    insert,
-                    (job_id, request_id, *declaration),
-                )
-
-        self._exec(
-            insert,
-            (job_id, request_id, None, None, None),
+    def test_cleanup_journal_recovery_declaration_is_dropped(self) -> None:
+        self.assertEqual(
+            self._exec("""
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'processing_cleanup_journal'
+                  AND column_name IN (
+                      'declared_result_status',
+                      'declared_reason',
+                      'evidence_revision'
+                  )
+            """),
+            [],
         )
         self.assertEqual(
             self._exec("""
-                SELECT declared_result_status, declared_reason,
-                       evidence_revision
-                FROM processing_cleanup_journal
-                WHERE job_id = %s AND request_id = %s
-            """, (job_id, request_id)),
-            [(None, None, None)],
+                SELECT conname
+                FROM pg_constraint
+                WHERE conname =
+                      'processing_cleanup_journal_declaration_complete'
+            """),
+            [],
+        )
+        self.assertEqual(
+            self._exec(
+                "SELECT version FROM schema_migrations WHERE version = 67"
+            ),
+            [(67,)],
         )
 
     def test_migration_does_not_rewrite_historical_rows_or_adopt_jobs(

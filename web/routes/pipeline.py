@@ -17,10 +17,9 @@ was split out (#546 W4) into ``web/routes/pipeline_mutations.py``.
 
 import logging
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 import msgspec
-from pydantic import BaseModel, Field
 
 from lib.beets_db import CurrentBeetsUnique
 from lib.current_library_display import (
@@ -33,7 +32,6 @@ from lib.import_queue import ImportJob
 if TYPE_CHECKING:
     from lib.pipeline_db import LatestDownloadSummary
 
-from web.routes._pydantic import parse_body
 from web.routes._registry import RouteHandler, RouteRegistration, pattern_route, route
 from web.routes._server_access import _server
 
@@ -451,7 +449,7 @@ def get_import_job_recovery(
     params: dict[str, list[str]],
     job_id_str: str,
 ) -> None:
-    """Return the shared revisioned automation recovery observation."""
+    """Return the shared automation recovery diagnostic observation."""
     from lib.import_job_recovery_service import (
         get_automation_recovery_detail,
     )
@@ -466,71 +464,6 @@ def get_import_job_recovery(
         result.to_dict(),
         status=200 if result.outcome == "ok" else 404,
     )
-
-
-class ImportJobRecoveryRequest(BaseModel):
-    action: Literal["retry", "close"]
-    reason: str = Field(min_length=1, max_length=500)
-    evidence_revision: str | None = Field(default=None, min_length=1)
-    result_status: Literal["wanted", "imported"] | None = None
-
-
-def post_import_job_recovery(
-    h: RouteHandler,
-    body: dict[str, object],
-    job_id_str: str,
-) -> None:
-    """Apply an explicit operator decision to ambiguous Beets work."""
-    from lib.import_job_recovery_service import apply_import_job_recovery
-
-    req_body = parse_body(h, body or {}, ImportJobRecoveryRequest)
-    if req_body is None:
-        return
-    try:
-        job_id = int(job_id_str)
-        server = _server()
-        result = apply_import_job_recovery(
-            server._db(),
-            server._beets_db(),
-            job_id,
-            action=req_body.action,
-            reason=req_body.reason,
-            evidence_revision=req_body.evidence_revision,
-            result_status=req_body.result_status,
-        )
-    except ValueError as exc:
-        h._error(str(exc), 400)
-        return
-
-    payload = result.to_dict()
-    if result.outcome == "not_found":
-        h._json(payload, status=404)
-        return
-    if result.outcome in {
-        "wrong_state",
-        "ineligible",
-        "execution_live",
-        "execution_unknown",
-        "evidence_changed",
-        "cleanup_uninspectable",
-    }:
-        h._json(payload, status=409)
-        return
-    if result.outcome in {"lock_unavailable", "cleanup_failed"}:
-        h._json(payload, status=503)
-        return
-    h._json(
-        payload,
-        status=(
-            202
-            if result.outcome in {
-                "retry_queued",
-                "retry_recovery_required",
-            }
-            else 200
-        ),
-    )
-
 
 # ── Route tables ─────────────────────────────────────────────────
 
@@ -611,15 +544,7 @@ ROUTES: list[RouteRegistration] = [
     pattern_route(
         "GET", r"^/api/import-jobs/(\d+)/recovery$",
         get_import_job_recovery,
-        "Revisioned recovery evidence for one exact automation owner.",
-        classified=True,
-    ),
-    pattern_route(
-        "POST", r"^/api/import-jobs/(\d+)/recovery$",
-        post_import_job_recovery,
-        "Apply revisioned retry or explicit wanted/imported close recovery "
-        "to one exact automation owner; legacy force/YouTube behavior is "
-        "unchanged.",
+        "Read-only recovery diagnostics for one exact automation owner.",
         classified=True,
     ),
 ]

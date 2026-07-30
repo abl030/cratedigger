@@ -174,16 +174,6 @@ class _PipelineDBBase:
         job_id: int,
         scope: "_LockedCleanupScope",
     ) -> "ProcessingCleanupJournalRow | None": ...
-    def _retarget_processing_cleanup_journal_locked(
-        self,
-        cur: "_CleanupCursor",
-        *,
-        request_id: int,
-        old_job_id: int,
-        new_job_id: int,
-        expected_revision: int,
-        scope: "_LockedCleanupScope",
-    ) -> "ProcessingCleanupJournalRow | None": ...
     # Cross-cluster calls: declared here so the calling mixin type-checks;
     # resolved to the owning sibling mixin at runtime via the composed MRO.
     # - dashboard metrics aggregator -> search-plan cluster readiness:

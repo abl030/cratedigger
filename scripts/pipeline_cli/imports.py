@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import msgspec
 
@@ -30,7 +30,7 @@ from scripts.pipeline_cli.quality import _load_runtime_rank_config
 
 if TYPE_CHECKING:
     from lib.import_job_recovery_service import (
-        AutomationRecoveryMutationDB,
+        AutomationRecoveryDetailDB,
     )
     from lib.import_preview import ImportPreviewDB, ImportPreviewResult
     from lib.pipeline_db.rows import AlbumRequestRow, DownloadLogWithEvidenceRow
@@ -131,125 +131,36 @@ def cmd_import_jobs(db: _ImportJobsDB, args: argparse.Namespace) -> None:
 
 
 def cmd_import_job_recovery(
-    db: AutomationRecoveryMutationDB, args: argparse.Namespace,
+    db: AutomationRecoveryDetailDB, args: argparse.Namespace,
 ) -> int:
-    """Show or resolve one ambiguous Beets operation."""
+    """Show diagnostics for one ambiguous Beets operation."""
     from lib.import_job_recovery_service import (
-        apply_import_job_recovery,
         get_automation_recovery_detail,
     )
 
-    action = (
-        getattr(args, "recovery_action", None)
-        or getattr(args, "resolution", None)
-    )
-    if action == "show":
-        beets: BeetsDB | None = None
-        try:
-            beets = _open_recovery_beets(
-                getattr(args, "beets_db", None),
-                getattr(args, "beets_directory", None),
-            )
-        except Exception:  # noqa: BLE001 - unavailable is a typed observation
-            beets = None
-        if beets is None:
+    beets: BeetsDB | None = None
+    try:
+        beets = _open_recovery_beets(
+            getattr(args, "beets_db", None),
+            getattr(args, "beets_directory", None),
+        )
+    except Exception:  # noqa: BLE001 - unavailable is a typed observation
+        beets = None
+    if beets is None:
+        detail_result = get_automation_recovery_detail(
+            db,
+            None,
+            args.job_id,
+        )
+    else:
+        with beets:
             detail_result = get_automation_recovery_detail(
                 db,
-                None,
+                beets,
                 args.job_id,
             )
-        else:
-            with beets:
-                detail_result = get_automation_recovery_detail(
-                    db,
-                    beets,
-                    args.job_id,
-                )
-        print(json.dumps(detail_result.to_dict(), indent=2, sort_keys=True))
-        return 0 if detail_result.outcome == "ok" else 2
-    if action not in {"retry", "close"}:
-        print("  recovery action must be retry or close", file=sys.stderr)
-        return 2
-    if action == "retry":
-        typed_action: Literal["retry", "close"] = "retry"
-    else:
-        typed_action = "close"
-
-    current = db.get_import_job(args.job_id)
-    beets = None
-    if current is not None and current.job_type == "automation_import":
-        try:
-            beets = _open_recovery_beets(
-                getattr(args, "beets_db", None),
-                getattr(args, "beets_directory", None),
-            )
-        except Exception:  # noqa: BLE001 - typed unavailable observation
-            beets = None
-    try:
-        if beets is None:
-            result = apply_import_job_recovery(
-                db,
-                None,
-                args.job_id,
-                action=typed_action,
-                reason=args.reason,
-                evidence_revision=getattr(args, "evidence_revision", None),
-                result_status=getattr(args, "result_status", None),
-            )
-        else:
-            with beets:
-                result = apply_import_job_recovery(
-                    db,
-                    beets,
-                    args.job_id,
-                    action=typed_action,
-                    reason=args.reason,
-                    evidence_revision=getattr(
-                        args,
-                        "evidence_revision",
-                        None,
-                    ),
-                    result_status=getattr(args, "result_status", None),
-                )
-    except ValueError as exc:
-        print(f"  {exc}", file=sys.stderr)
-        return 3
-    if current is not None and current.job_type == "automation_import":
-        if result.outcome in {
-            "retry_queued",
-            "retry_recovery_required",
-            "closed",
-        }:
-            exit_code = 0
-        elif result.outcome == "not_found":
-            exit_code = 2
-        elif result.outcome in {"lock_unavailable", "cleanup_failed"}:
-            exit_code = 5
-        else:
-            exit_code = 4
-        print(
-            json.dumps(result.to_dict(), indent=2, sort_keys=True),
-            file=sys.stdout if exit_code == 0 else sys.stderr,
-        )
-        return exit_code
-    if result.outcome == "not_found":
-        print(f"  {result.message}", file=sys.stderr)
-        return 2
-    if result.outcome in {
-        "wrong_state",
-        "ineligible",
-        "execution_live",
-        "execution_unknown",
-        "evidence_changed",
-        "cleanup_uninspectable",
-    }:
-        print(f"  {result.message}", file=sys.stderr)
-        return 4
-    if result.outcome in {"lock_unavailable", "cleanup_failed"}:
-        print(f"  {result.message}", file=sys.stderr)
-        return 5
-    print(f"  [OK] {result.message}")
-    return 0
+    print(json.dumps(detail_result.to_dict(), indent=2, sort_keys=True))
+    return 0 if detail_result.outcome == "ok" else 2
 
 
 def _preview_values_from_args(args: argparse.Namespace) -> ImportPreviewValues:
@@ -393,7 +304,7 @@ def add_imports_subparsers(
 
     p_recovery = sub.add_parser(
         "import-job-recovery",
-        help="Inspect or resolve a recovery-required Beets import operation",
+        help="Inspect diagnostic evidence for one Beets import operation",
     )
     recovery_actions = p_recovery.add_subparsers(
         dest="recovery_action",
@@ -401,7 +312,7 @@ def add_imports_subparsers(
     )
     p_recovery_show = recovery_actions.add_parser(
         "show",
-        help="Show revisioned automation recovery evidence",
+        help="Show automation recovery diagnostics",
     )
     p_recovery_show.add_argument(
         "job_id",
@@ -418,46 +329,6 @@ def add_imports_subparsers(
         default=None,
         help="Library root paired with --beets-db",
     )
-    for recovery_action in ("retry", "close"):
-        p_recovery_action = recovery_actions.add_parser(
-            recovery_action,
-            help=(
-                "Queue a fresh operation after confirming no Beets mutation"
-                if recovery_action == "retry"
-                else "Close after manual reconciliation without replay"
-            ),
-        )
-        p_recovery_action.add_argument(
-            "job_id",
-            type=int,
-            help="Recovery import job ID",
-        )
-        p_recovery_action.add_argument(
-            "--reason",
-            required=True,
-            help="Operator audit reason for the resolution",
-        )
-        p_recovery_action.add_argument(
-            "--evidence-revision",
-            help="Opaque revision printed by import-job-recovery show",
-        )
-        p_recovery_action.add_argument(
-            "--beets-db",
-            default=None,
-            help="Explicit Beets SQLite override; requires --beets-directory",
-        )
-        p_recovery_action.add_argument(
-            "--beets-directory",
-            default=None,
-            help="Library root paired with --beets-db",
-        )
-        if recovery_action == "close":
-            p_recovery_action.add_argument(
-                "--result-status",
-                choices=["wanted", "imported"],
-                help="Explicit reconciled lifecycle result for automation",
-            )
-
     # import-preview
     p_preview = sub.add_parser("import-preview", help="Preview whether an import would pass")
     p_preview.add_argument("--download-log-id", type=int,
