@@ -740,6 +740,45 @@ class TestImporterWorker(unittest.TestCase):
         assert job.result is not None
         return job.result
 
+    def _launched_force_action_job(
+        self,
+        db: FakePipelineDB,
+        *,
+        dedupe_key: str,
+    ) -> tuple[ImportJob, str]:
+        from lib.import_preview import force_action_copy_path
+
+        db.seed_request(make_request_row(
+            id=42,
+            mb_release_id="startup-force-release",
+            status="wanted",
+        ))
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            dedupe_key=dedupe_key,
+            payload={
+                "download_log_id": 1,
+                "failed_path": "/tmp/startup-force-source",
+            },
+        )
+        _seed_candidate_for_import_job(
+            db,
+            job.id,
+            mb_release_id="startup-force-release",
+        )
+        self._mark_importable(db, job)
+        action_path = force_action_copy_path(self._force_cfg, job.id)
+        claimed = claim_next_import_job(db, worker_id="old-worker")
+        assert claimed is not None
+        assert db.authorize_import_job_launch(
+            claimed.id,
+            request_id=42,
+            release_id="startup-force-release",
+            source_path="/tmp/startup-force-source",
+        ) is not None
+        return claimed, action_path
+
     def test_force_stages_queued_before_automation_handoff_have_zero_effect(
         self,
     ) -> None:
@@ -1935,7 +1974,7 @@ class TestImporterWorker(unittest.TestCase):
         claimed = claim_next_import_job(db, worker_id="old-worker")
         assert claimed is not None
 
-        recovered = importer.recover_abandoned_running_jobs(cast(Any, db))
+        recovered = importer.recover_abandoned_running_jobs(db)
 
         self.assertEqual([job.id for job in recovered], [claimed.id])
         self.assertEqual(recovered[0].status, "queued")
@@ -1957,6 +1996,96 @@ class TestImporterWorker(unittest.TestCase):
         retried = db.get_import_job(claimed.id)
         assert retried is not None
         self.assertEqual(retried.attempts, 2)
+
+    def test_startup_recovery_removes_launched_force_action_copy(self) -> None:
+        """A terminal crash recovery releases the job's private album copy."""
+        from scripts import importer
+
+        db = FakePipelineDB()
+        job, action_path = self._launched_force_action_job(
+            db,
+            dedupe_key="force_import:startup-terminal-cleanup",
+        )
+        self.assertTrue(os.path.isdir(action_path))
+
+        recovered = importer.recover_abandoned_running_jobs(db)
+
+        self.assertEqual([item.id for item in recovered], [job.id])
+        self.assertEqual(recovered[0].status, "failed")
+        self.assertFalse(os.path.exists(action_path))
+        stored = db.get_import_job(job.id)
+        assert stored is not None
+        cleanup = self._result(stored)["force_action_cleanup"]
+        assert isinstance(cleanup, dict)
+        self.assertEqual(cleanup["action_path"], action_path)
+        self.assertTrue(cleanup["removed"])
+
+    def test_startup_retries_failed_force_action_cleanup(self) -> None:
+        """A transient filesystem refusal remains a durable startup task."""
+        from scripts import importer
+
+        db = FakePipelineDB()
+        job, action_path = self._launched_force_action_job(
+            db,
+            dedupe_key="force_import:startup-cleanup-retry",
+        )
+        with patch(
+            "lib.config.read_runtime_config",
+            side_effect=RuntimeError("temporary config refusal"),
+        ):
+            importer.recover_abandoned_running_jobs(db)
+
+        failed_cleanup_job = db.get_import_job(job.id)
+        assert failed_cleanup_job is not None
+        cleanup = self._result(
+            failed_cleanup_job
+        )["force_action_cleanup"]
+        assert isinstance(cleanup, dict)
+        self.assertFalse(cleanup["removed"])
+        self.assertTrue(os.path.isdir(action_path))
+
+        importer.recover_abandoned_running_jobs(db)
+
+        converged = db.get_import_job(job.id)
+        assert converged is not None
+        cleanup = self._result(converged)["force_action_cleanup"]
+        assert isinstance(cleanup, dict)
+        self.assertTrue(cleanup["removed"])
+        self.assertFalse(os.path.exists(action_path))
+
+    def test_startup_retries_force_cleanup_after_result_merge_failure(
+        self,
+    ) -> None:
+        """A kill-equivalent missing DB receipt re-drives idempotent cleanup."""
+        from scripts import importer
+
+        db = FakePipelineDB()
+        job, action_path = self._launched_force_action_job(
+            db,
+            dedupe_key="force_import:startup-cleanup-merge-retry",
+        )
+        with patch.object(
+            db,
+            "merge_import_job_result",
+            side_effect=RuntimeError("lost cleanup receipt"),
+        ):
+            importer.recover_abandoned_running_jobs(db)
+
+        self.assertFalse(os.path.exists(action_path))
+        unrecorded = db.get_import_job(job.id)
+        assert unrecorded is not None
+        self.assertNotIn(
+            "force_action_cleanup",
+            unrecorded.result or {},
+        )
+
+        importer.recover_abandoned_running_jobs(db)
+
+        converged = db.get_import_job(job.id)
+        assert converged is not None
+        cleanup = self._result(converged)["force_action_cleanup"]
+        assert isinstance(cleanup, dict)
+        self.assertTrue(cleanup["removed"])
 
     def test_importer_does_not_claim_job_waiting_for_preview(self):
         from scripts import importer
@@ -2518,6 +2647,11 @@ class TestImporterWorker(unittest.TestCase):
                 return []
 
             def list_automation_import_jobs_for_startup_recovery(
+                self,
+            ) -> list[ImportJob]:
+                return []
+
+            def list_terminal_force_action_cleanup_jobs(
                 self,
             ) -> list[ImportJob]:
                 return []
@@ -8273,9 +8407,9 @@ class TestAutomationWorldFailureNeverParks(unittest.TestCase):
     def test_missing_completion_receipt_reopens_the_search(self) -> None:
         """A launched job with no captured receipt self-heals, not parks.
 
-        The owner authority refuses a ``running`` terminal write without the
-        receipt, so this is the one class that transits ``recovery_required``
-        to close — and it must not REST there.
+        The narrow world-failure terminal shape accepts the missing receipt
+        while retaining the exact owner/lease CAS, so the request returns
+        directly to ``wanted`` without a ``recovery_required`` transit.
         """
         db, canonical, claimed, lease = self._launch(capture_completion=False)
         updated, escaped = self._run(

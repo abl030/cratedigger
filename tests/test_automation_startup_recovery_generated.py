@@ -438,7 +438,7 @@ class TestAutomationStartupRecoveryGenerated(unittest.TestCase):
             )
         else:
             recovered = importer.recover_abandoned_running_jobs(
-                world.db,  # pyright: ignore[reportArgumentType]
+                world.db,
                 liveness_probe=_DeadProbe(),
             )
 
