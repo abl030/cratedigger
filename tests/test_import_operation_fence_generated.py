@@ -649,9 +649,7 @@ class TestGeneratedImportOperationFence(unittest.TestCase):
             "lib.config.read_runtime_config",
             return_value=cfg,
         ):
-            importer.recover_abandoned_running_jobs(
-                db,  # type: ignore[arg-type]
-            )
+            importer.recover_abandoned_running_jobs(db)
 
         final = db.get_import_job(job.id)
         assert final is not None

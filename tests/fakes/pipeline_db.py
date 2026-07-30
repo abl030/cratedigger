@@ -1503,7 +1503,7 @@ class FakePipelineDB:
         return [ImportJob.from_row(copy.deepcopy(row)) for row in rows]
 
     def list_terminal_force_action_cleanup_jobs(self) -> list[ImportJob]:
-        rows: list[dict[str, Any]] = []
+        rows = []
         for row in self._import_jobs:
             if (
                 row.get("job_type") != IMPORT_JOB_FORCE

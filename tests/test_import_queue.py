@@ -1974,7 +1974,7 @@ class TestImporterWorker(unittest.TestCase):
         claimed = claim_next_import_job(db, worker_id="old-worker")
         assert claimed is not None
 
-        recovered = importer.recover_abandoned_running_jobs(cast(Any, db))
+        recovered = importer.recover_abandoned_running_jobs(db)
 
         self.assertEqual([job.id for job in recovered], [claimed.id])
         self.assertEqual(recovered[0].status, "queued")
@@ -2008,7 +2008,7 @@ class TestImporterWorker(unittest.TestCase):
         )
         self.assertTrue(os.path.isdir(action_path))
 
-        recovered = importer.recover_abandoned_running_jobs(cast(Any, db))
+        recovered = importer.recover_abandoned_running_jobs(db)
 
         self.assertEqual([item.id for item in recovered], [job.id])
         self.assertEqual(recovered[0].status, "failed")
@@ -2033,7 +2033,7 @@ class TestImporterWorker(unittest.TestCase):
             "lib.config.read_runtime_config",
             side_effect=RuntimeError("temporary config refusal"),
         ):
-            importer.recover_abandoned_running_jobs(cast(Any, db))
+            importer.recover_abandoned_running_jobs(db)
 
         failed_cleanup_job = db.get_import_job(job.id)
         assert failed_cleanup_job is not None
@@ -2044,7 +2044,7 @@ class TestImporterWorker(unittest.TestCase):
         self.assertFalse(cleanup["removed"])
         self.assertTrue(os.path.isdir(action_path))
 
-        importer.recover_abandoned_running_jobs(cast(Any, db))
+        importer.recover_abandoned_running_jobs(db)
 
         converged = db.get_import_job(job.id)
         assert converged is not None
@@ -2069,7 +2069,7 @@ class TestImporterWorker(unittest.TestCase):
             "merge_import_job_result",
             side_effect=RuntimeError("lost cleanup receipt"),
         ):
-            importer.recover_abandoned_running_jobs(cast(Any, db))
+            importer.recover_abandoned_running_jobs(db)
 
         self.assertFalse(os.path.exists(action_path))
         unrecorded = db.get_import_job(job.id)
@@ -2079,7 +2079,7 @@ class TestImporterWorker(unittest.TestCase):
             unrecorded.result or {},
         )
 
-        importer.recover_abandoned_running_jobs(cast(Any, db))
+        importer.recover_abandoned_running_jobs(db)
 
         converged = db.get_import_job(job.id)
         assert converged is not None

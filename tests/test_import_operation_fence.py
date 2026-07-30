@@ -889,9 +889,7 @@ class TestImportOperationFencePostgres(unittest.TestCase):
             self.assertTrue(os.path.exists(action_path))
 
             with patch("lib.config.read_runtime_config", return_value=cfg):
-                recovered = importer.recover_abandoned_running_jobs(
-                    cast(Any, db),
-                )
+                recovered = importer.recover_abandoned_running_jobs(db)
 
             self.assertEqual(recovered, [])
             self.assertFalse(os.path.exists(action_path))

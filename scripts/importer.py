@@ -172,6 +172,34 @@ class _AutomationRecoveryDB(Protocol):
     ) -> ImportJob | None: ...
 
 
+class _ForceActionCleanupDB(Protocol):
+    """Persistence surface for durable force-action cleanup receipts."""
+
+    def list_terminal_force_action_cleanup_jobs(self) -> list[ImportJob]: ...
+
+    def merge_import_job_result(
+        self,
+        job_id: int,
+        patch: dict[str, object],
+    ) -> ImportJob | None: ...
+
+
+class _StartupRecoveryDB(
+    _AutomationRecoveryDB,
+    _ForceActionCleanupDB,
+    Protocol,
+):
+    """Complete persistence surface used by the one-shot startup sweep."""
+
+    def recover_running_import_jobs(
+        self,
+        *,
+        requeue_message: str,
+        recovery_message: str,
+        limit: int = 50,
+    ) -> list[ImportJob]: ...
+
+
 def _run_post_commit_cleanup(
     db: _PostCommitCleanupDB,
     outcome: DispatchOutcome,
@@ -461,7 +489,7 @@ def _cleanup_terminal_force_action(job: ImportJob) -> dict[str, object] | None:
 
 
 def _record_terminal_force_action_cleanup(
-    db: PipelineDB,
+    db: _ForceActionCleanupDB,
     job: ImportJob,
     terminal_job: ImportJob | None,
 ) -> ImportJob | None:
@@ -1962,7 +1990,7 @@ def recover_abandoned_automation_owners(
 
 
 def recover_abandoned_running_jobs(
-    db: PipelineDB,
+    db: _StartupRecoveryDB,
     *,
     liveness_probe: ExecutionLivenessProbe | None = None,
 ) -> list[ImportJob]:
