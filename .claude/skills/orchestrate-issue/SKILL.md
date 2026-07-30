@@ -1,6 +1,6 @@
 ---
 name: orchestrate-issue
-description: Orchestrate a substantial Cratedigger issue end to end: understand the scope, coordinate the work, converge efficiently, ship, verify live, and close. Use for issue-sized delivery, not small patches, diagnosis-only work, or ordinary review.
+description: "Orchestrate a substantial Cratedigger issue end to end: understand the scope, coordinate the work, converge efficiently, ship, verify live, and close. Use for issue-sized delivery, not small patches, diagnosis-only work, or ordinary review."
 ---
 
 # Orchestrate Issue
@@ -11,7 +11,9 @@ judgment for the route through them.
 
 Repository instructions remain authoritative. Do not use Compound Engineering.
 Load the deploy skill when it is time to ship instead of duplicating its
-runbook here.
+runbook here. The independent-review gate below is an intentional, specific
+exception to client compatibility mappings that otherwise serialize subagent
+work in the main thread.
 
 ## Own the issue
 
@@ -23,8 +25,8 @@ evidence. The format does not matter.
 Choose the delivery shape that best fits the work: one PR or several,
 sequential or parallel, direct implementation or delegation. Agents,
 exact SHAs, detailed ledgers, and extra validation passes are tools to use when
-they reduce a concrete risk or shorten the critical path. They are not required
-ceremony.
+they reduce a concrete risk or shorten the critical path. Implementation
+delegation is optional; the independent subagent review below is mandatory.
 
 The orchestrator retains responsibility for scope, architecture, integration,
 merge decisions, deployment, and live proof even when work is delegated.
@@ -38,6 +40,22 @@ from direct whole-tree runs as ordinary convergence feedback.
 
 Review the meaningful converged tree as a whole. Review again when corrections
 materially change behavior or risk.
+
+Commission at least one independent, read-only subagent to review every
+meaningful converged PR diff before its first push. The reviewer must be
+previously uninvolved: it must not have implemented, planned, or diagnosed the
+change. Give it the issue contract and raw diff or exact refs, but not the
+orchestrator's conclusions; ask it to challenge the real production path,
+invariants, migration/runtime compatibility, and missing tests. Require ranked
+findings with exact evidence, or an explicit no-findings result with residual
+risks.
+
+Triage every finding yourself. Fix valid findings in one convergence pass and
+commission a fresh independent review when the corrections materially change
+behavior or risk. Record a concrete rationale for rejected findings. A green
+test suite or the orchestrator's own review does not substitute for this gate.
+If an independent subagent cannot be started, stop before push and surface the
+blocker; do not silently downgrade to self-review.
 
 Integrate current `main` at sensible boundaries rather than continuously
 chasing it. When the change is ready for its first push, invoke the `check`
