@@ -8,8 +8,6 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import msgspec
-
 from lib.beets_db import (
     AlbumInfo,
     CurrentBeetsItem,
@@ -136,7 +134,6 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
 
         result = ensure_candidate_evidence_for_action(
             self.db,
-            mb_release_id="release-1",
             source_path=self.root,
             download_log_id=self.download_log_id,
         )
@@ -145,25 +142,6 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
         self.assertEqual(result.provenance.candidate_status, "reused")
         self.assertEqual(result.provenance.snapshot_guard, "matched")
         self.assertFalse(result.provenance.fail_closed)
-
-    def test_wrong_release_candidate_fk_fails_closed_before_snapshot_use(self):
-        self._persist_candidate()
-
-        result = ensure_candidate_evidence_for_action(
-            self.db,
-            mb_release_id="different-release",
-            source_path=self.root,
-            download_log_id=self.download_log_id,
-        )
-
-        self.assertFalse(result.available)
-        self.assertIsNone(result.evidence)
-        self.assertEqual(result.provenance.candidate_status, "failed")
-        self.assertEqual(result.provenance.snapshot_guard, "failed")
-        self.assertIn(
-            "exact release identity",
-            result.provenance.fallback_reason or "",
-        )
 
     def test_matching_candidate_keeps_capture_path_at_moved_action_path(self):
         """Same bytes may move without rewriting capture-time evidence."""
@@ -186,7 +164,6 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
 
         result = ensure_candidate_evidence_for_action(
             self.db,
-            mb_release_id="release-1",
             source_path=self.root,
             download_log_id=self.download_log_id,
         )
@@ -211,30 +188,6 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
 
         result = ensure_candidate_evidence_for_action(
             self.db,
-            mb_release_id="release-1",
-            source_path=self.root,
-            download_log_id=self.download_log_id,
-        )
-
-        self.assertFalse(result.available)
-        self.assertIsNone(result.evidence)
-        self.assertEqual(result.provenance.candidate_status, "stale")
-        self.assertEqual(result.provenance.snapshot_guard, "stale")
-        self.assertTrue(result.provenance.fail_closed)
-
-    def test_same_size_candidate_replacement_fails_closed(self):
-        """A metadata-identical byte replacement cannot reuse old evidence."""
-        self._persist_candidate()
-        track = os.path.join(self.root, "01 - Track.mp3")
-        with open(track, "r+b") as handle:
-            original = handle.read()
-            handle.seek(0)
-            handle.write(b"X" * len(original))
-            handle.truncate()
-
-        result = ensure_candidate_evidence_for_action(
-            self.db,
-            mb_release_id="release-1",
             source_path=self.root,
             download_log_id=self.download_log_id,
         )
@@ -248,7 +201,6 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
     def test_missing_candidate_evidence_returns_fail_closed_provenance(self):
         result = ensure_candidate_evidence_for_action(
             self.db,
-            mb_release_id="release-1",
             source_path=self.root,
             download_log_id=self.download_log_id,
         )
@@ -311,7 +263,7 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
         assert linked is not None
         self.assertEqual(linked.source_path, "/tmp/disposable-candidate")
 
-    def test_matching_v1_current_rebuilds_but_waits_for_spectral_enrichment(self):
+    def test_matching_v1_current_evidence_rebuilds_as_v3(self):
         evidence = make_album_quality_evidence(
             mb_release_id="release-1",
             files=snapshot_audio_files(self.root),
@@ -342,16 +294,17 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
             ),
         )
 
-        self.assertFalse(result.available)
-        self.assertEqual(result.provenance.current_status, "failed")
-        self.assertIn("spectral", result.provenance.fallback_reason or "")
-        linked_id = self.db.get_request_current_evidence_id(42)
-        self.assertEqual(linked_id, persisted.id)
-        linked = self.db.load_album_quality_evidence_by_id(linked_id)
-        assert linked is not None
-        self.assertEqual(linked.lineage_version, 4)
-        self.assertEqual(linked.measurement.format, "AAC")
-        self.assertEqual(linked.measurement.avg_bitrate_kbps, 256)
+        self.assertTrue(result.available)
+        self.assertEqual(result.provenance.current_status, "backfilled")
+        self.assertIn("lineage_version", result.provenance.fallback_reason or "")
+        assert result.evidence is not None
+        self.assertEqual(result.evidence.lineage_version, 4)
+        self.assertEqual(result.evidence.measurement.format, "AAC")
+        self.assertEqual(result.evidence.measurement.avg_bitrate_kbps, 256)
+        self.assertEqual(
+            self.db.get_request_current_evidence_id(42),
+            persisted.id,
+        )
 
     def test_v1_lossless_transcode_rebuild_preserves_only_source_v0_metric(self):
         self.db.update_request_fields(
@@ -409,23 +362,19 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
         )
 
         self.assertTrue(result.available)
-        linked = self.db.load_album_quality_evidence_by_id(
-            self.db.get_request_current_evidence_id(42),
-        )
-        assert linked is not None
-        self.assertEqual(linked.lineage_version, 4)
+        assert result.evidence is not None
+        self.assertEqual(result.evidence.lineage_version, 4)
         # A v1 spectral result has no subject metadata, so it cannot be
-        # promoted during the rebuild. The explicitly source-subject V0
-        # metric remains safe authority and prevents a misleading scan of the
-        # installed Opus derivative.
-        self.assertIsNone(linked.measurement.spectral_grade)
-        self.assertIsNone(linked.measurement.spectral_bitrate_kbps)
-        assert linked.v0_metric is not None
+        # promoted as installed-HAVE authority during the rebuild.  The
+        # explicitly source-subject V0 metric remains safe to carry.
+        self.assertIsNone(result.evidence.measurement.spectral_grade)
+        self.assertIsNone(result.evidence.measurement.spectral_bitrate_kbps)
+        assert result.evidence.v0_metric is not None
         self.assertEqual(
-            linked.v0_metric.subject,
+            result.evidence.v0_metric.subject,
             "source",
         )
-        self.assertEqual(linked.v0_metric.avg_bitrate_kbps, 195)
+        self.assertEqual(result.evidence.v0_metric.avg_bitrate_kbps, 195)
 
     def test_missing_current_evidence_backfills_from_album_info(self):
         result = ensure_current_evidence_for_action(
@@ -445,9 +394,8 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
             ),
         )
 
-        self.assertFalse(result.available)
-        self.assertEqual(result.provenance.current_status, "failed")
-        self.assertIn("spectral", result.provenance.fallback_reason or "")
+        self.assertTrue(result.available)
+        self.assertEqual(result.provenance.current_status, "backfilled")
         # The FK is wired by the backfill production code.
         evidence_id = self.db.get_request_current_evidence_id(42)
         self.assertIsNotNone(evidence_id)
@@ -627,110 +575,6 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
             self.db.get_request_current_evidence_id(42),
             stale_evidence_id,
         )
-
-    def test_unusable_current_spectral_grade_fails_action_closed(self):
-        """Preview and importer agree on which persisted grades are usable."""
-
-        for grade in ("", "error", "banana"):
-            for enrichment_required in (False, True):
-                with self.subTest(
-                    grade=grade,
-                    enrichment_required=enrichment_required,
-                ):
-                    db = FakePipelineDB()
-                    db.seed_request(make_request_row(
-                        id=42,
-                        mb_release_id="release-1",
-                    ))
-                    evidence = make_album_quality_evidence(
-                        mb_release_id="release-1",
-                        source_path=self.root,
-                        files=snapshot_audio_files(self.root),
-                        measurement=AudioQualityMeasurement(
-                            min_bitrate_kbps=245,
-                            avg_bitrate_kbps=256,
-                            median_bitrate_kbps=252,
-                            format="MP3",
-                            spectral_grade=grade,
-                            spectral_subject="installed",
-                            spectral_provenance="measured",
-                        ),
-                        on_disk_v0_research_attempted=True,
-                        current_enrichment_required=enrichment_required,
-                    )
-                    self.assertTrue(evidence.storage_validation_errors())
-                    persisted = msgspec.structs.replace(
-                        evidence,
-                        id=100,
-                    )
-                    db._store_album_quality_evidence(persisted)
-                    db.set_request_current_evidence(42, persisted.id)
-
-                    def unchanged_backfill(
-                        _db,
-                        _persisted=persisted,
-                        **_kwargs,
-                    ):
-                        return EvidenceBuildResult(_persisted, "ready")
-
-                    result = ensure_current_evidence_for_action(
-                        db,
-                        request_id=42,
-                        mb_release_id="release-1",
-                        current_release=self._current_release(),
-                        backfill_builder=unchanged_backfill,
-                    )
-
-                    self.assertFalse(result.available)
-                    self.assertTrue(result.provenance.fail_closed)
-                    self.assertIn(
-                        "usable spectral enrichment",
-                        result.provenance.fallback_reason or "",
-                    )
-
-    def test_lossless_source_anchor_does_not_require_installed_spectral(self):
-        evidence = make_album_quality_evidence(
-            mb_release_id="release-1",
-            source_path=self.root,
-            files=snapshot_audio_files(self.root),
-            measurement=AudioQualityMeasurement(
-                min_bitrate_kbps=129,
-                avg_bitrate_kbps=129,
-                median_bitrate_kbps=129,
-                format="Opus",
-            ),
-            v0_metric=AlbumQualityV0Metric(
-                min_bitrate_kbps=187,
-                avg_bitrate_kbps=213,
-                median_bitrate_kbps=210,
-                subject="source",
-                provenance="carried",
-            ),
-            codec="opus",
-            container="opus",
-            storage_format="Opus",
-            on_disk_v0_research_attempted=True,
-        )
-        self.db.upsert_album_quality_evidence(evidence)
-        persisted = self.db.find_album_quality_evidence(
-            mb_release_id=evidence.mb_release_id,
-            snapshot_fingerprint=evidence.snapshot_fingerprint,
-        )
-        assert persisted is not None and persisted.id is not None
-        self.db.set_request_current_evidence(42, persisted.id)
-
-        result = ensure_current_evidence_for_action(
-            self.db,
-            request_id=42,
-            mb_release_id="release-1",
-            current_release=self._current_release(),
-            backfill_builder=lambda _db, **_kwargs: EvidenceBuildResult(
-                persisted,
-                "ready",
-            ),
-        )
-
-        self.assertTrue(result.available)
 
     def _persist_blank_path_current(self) -> int:
         """Legacy backfill shape: matching snapshot, empty source_path.

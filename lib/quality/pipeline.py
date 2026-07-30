@@ -9,7 +9,6 @@ Extracted verbatim from the monolithic ``lib/quality.py`` (issue #477).
 Pure move: every definition is AST-identical to the original.
 """
 
-from collections.abc import Sequence
 from typing import Any
 
 import msgspec
@@ -43,7 +42,6 @@ from lib.quality.evidence_types import (
     SPECTRAL_TRANSCODE_GRADES,
     V0_PROBE_LOSSLESS_SOURCE,
     AlbumQualityEvidence,
-    AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
     QualityComparisonBasis,
@@ -978,7 +976,6 @@ class QualityEvidenceActionPayload(msgspec.Struct, frozen=True):
 
     candidate: AlbumQualityEvidence
     current: AlbumQualityEvidence | None = None
-    current_path: str | None = None
     decision: dict[str, Any] = msgspec.field(default_factory=dict[str, object])
     decision_name: str | None = None
     target_format: str | None = None
@@ -1024,54 +1021,6 @@ def evidence_decision_name(
     ):
         return "spectral_reject"
     return default
-
-
-def candidate_preimport_rejection(
-    *,
-    audio_corrupt: bool,
-    matched_bad_audio_hash_id: int | None,
-    folder_layout: str,
-    audio_file_count: int,
-    files: Sequence[AlbumQualityEvidenceFile],
-) -> str | None:
-    """Return the canonical rejection for measured candidate-integrity facts.
-
-    This is the quality surface's production predicate for the five
-    pre-import integrity facts.  Measurement/dispatch callers may use it to
-    avoid work that cannot affect the result, but the importer still owns the
-    final decision through ``full_pipeline_decision_from_evidence``.
-    """
-    if audio_corrupt:
-        return "audio_corrupt"
-    if matched_bad_audio_hash_id is not None:
-        return "bad_audio_hash"
-    if folder_layout == "nested":
-        return "nested_layout"
-
-    # Legacy rows decode the SQL default 0 but may carry snapshot files.
-    # Only the explicit-and-corroborated zero case is an empty fileset.
-    effective_audio_file_count = (
-        len(files) if files else audio_file_count
-    )
-    if effective_audio_file_count == 0:
-        return "empty_fileset"
-    if has_mixed_lossless_and_lossy(files):
-        return "mixed_source"
-    return None
-
-
-def candidate_preimport_rejection_from_evidence(
-    candidate: AlbumQualityEvidence,
-) -> str | None:
-    """Apply the canonical candidate-integrity predicate to durable evidence."""
-    _require_evidence_ready("candidate", candidate)
-    return candidate_preimport_rejection(
-        audio_corrupt=candidate.audio_corrupt,
-        matched_bad_audio_hash_id=candidate.matched_bad_audio_hash_id,
-        folder_layout=candidate.folder_layout,
-        audio_file_count=candidate.audio_file_count,
-        files=candidate.files,
-    )
 
 
 def resolve_pipeline_decision_denylist(result: dict[str, object]) -> bool:
@@ -1513,30 +1462,38 @@ def full_pipeline_decision_from_evidence(
             "comparison_basis_if_stage1_deferred": None,
         })
 
-    candidate_preimport_rejection = (
-        candidate_preimport_rejection_from_evidence(candidate)
-    )
-    if candidate_preimport_rejection == "audio_corrupt":
+    if candidate.audio_corrupt:
         return _early_reject_result(
             preimport_audio="reject_corrupt",
         )
 
-    if candidate_preimport_rejection == "bad_audio_hash":
+    if candidate.matched_bad_audio_hash_id is not None:
         return _early_reject_result(
             preimport_bad_hash="reject_bad_hash",
         )
 
-    if candidate_preimport_rejection == "nested_layout":
+    if candidate.folder_layout == "nested":
         return _early_reject_result(
             preimport_nested="reject_nested",
         )
 
-    if candidate_preimport_rejection == "empty_fileset":
+    # Reconcile audio_file_count against snapshot files: legacy rows decode
+    # the SQL default 0 but may carry snapshot files. Only the
+    # explicit-and-corroborated zero case (count=0 AND no snapshot files)
+    # is the empty_fileset reject.
+    effective_audio_file_count = (
+        len(candidate.files) if candidate.files else candidate.audio_file_count
+    )
+    if effective_audio_file_count == 0:
         return _early_reject_result(
             preimport_empty_fileset="reject_empty",
         )
 
-    if candidate_preimport_rejection == "mixed_source":
+    # Mixed-source reject: lossless + lossy containers in the same folder.
+    # Cratedigger stays release-based — a partial FLAC+MP3 source must
+    # never get partially-imported and stamped verified-lossless. See
+    # ``has_mixed_lossless_and_lossy`` and the Fast Times reproduction.
+    if has_mixed_lossless_and_lossy(candidate.files):
         return _early_reject_result(
             preimport_mixed_source="reject_mixed_source",
         )

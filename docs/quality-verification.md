@@ -275,8 +275,7 @@ If a candidate-side required scan is missing or errors, preview records
 `measurement_failed`; if fresh analysis of an installed HAVE is missing or
 errors, dispatch records `have_analysis_error`. Both are environment failures,
 not quality verdicts: the request returns to ordinary wanted searching with no
-denylist or narrowing consequence. A later attempt reauthorizes both snapshots
-and measures whichever evidence remains missing, incomplete, or stale.
+denylist or narrowing consequence. A later attempt measures again from scratch.
 
 ### Tuning results (Mountain Goats library, 65 albums)
 
@@ -323,7 +322,7 @@ bitrate alone is not proof in the current policy.
 
 ## Downgrade prevention
 
-- `--override-min-bitrate` arg: preview/dispatch derive the comparison floor from exact linked current evidence, measuring it first when that content snapshot is incomplete or stale. When spectral says the installed files are 128 kbps but the container says 320 kbps (fake CBR), the spectral truth is used so genuine upgrades are not blocked. Request-row quality stamps never feed this value. **This existing-side spectral floor is one-sided, so it applies only when the symmetric clamp does NOT govern the pair (issue #813 Finding 1). The disarm predicate is exactly `_shared_spectral_bitrates`' firing condition — `spectral_classes_comparable` since issue #829 Phase 5 PR2b — and that identity is the argument: the override is safe to drop only because something else then represents the installed album by its real content. When the clamp governs, adding the one-sided override on top would compare the candidate's raw container bitrate against the existing's spectral floor and mint a phantom "better" for an identical transcode (Deerhunter *Rhapsody Original*, download_log 37725: a 256/spectral-192 candidate scored an upgrade over an identical 256/spectral-192 installed copy). Disarming on the WIDER "both sides have a class" would open a window where neither mechanism fires and a known-fake installed copy keeps its inflated container — download_log 29525, Clue to Kalo *Lily Perdida*: a CBR-320 HAVE graded `likely_transcode` with a cliff-derived class of 128 blocking a genuinely better VBR 234 candidate. Deerhunter is unreachable through that window: same codec, same basis, i.e. comparable.** The floor itself only ever consumes a class `lib/quality/spectral_interpretation.py` calls decision-grade — an invertible ladder (MP3, Vorbis q0–q4) with an authorizing album verdict. An AAC's natural rolloff, an Opus stream, an HE-AAC stream or an unresolved codec contributes nothing and the container bitrate stands (download 37946).
+- `--override-min-bitrate` arg: preview/dispatch derive the comparison floor from linked current evidence or the same attempt's fresh HAVE audit. When spectral says the installed files are 128 kbps but the container says 320 kbps (fake CBR), the spectral truth is used so genuine upgrades are not blocked. Request-row quality stamps never feed this value. **This existing-side spectral floor is one-sided, so it applies only when the symmetric clamp does NOT govern the pair (issue #813 Finding 1). The disarm predicate is exactly `_shared_spectral_bitrates`' firing condition — `spectral_classes_comparable` since issue #829 Phase 5 PR2b — and that identity is the argument: the override is safe to drop only because something else then represents the installed album by its real content. When the clamp governs, adding the one-sided override on top would compare the candidate's raw container bitrate against the existing's spectral floor and mint a phantom "better" for an identical transcode (Deerhunter *Rhapsody Original*, download_log 37725: a 256/spectral-192 candidate scored an upgrade over an identical 256/spectral-192 installed copy). Disarming on the WIDER "both sides have a class" would open a window where neither mechanism fires and a known-fake installed copy keeps its inflated container — download_log 29525, Clue to Kalo *Lily Perdida*: a CBR-320 HAVE graded `likely_transcode` with a cliff-derived class of 128 blocking a genuinely better VBR 234 candidate. Deerhunter is unreachable through that window: same codec, same basis, i.e. comparable.** The floor itself only ever consumes a class `lib/quality/spectral_interpretation.py` calls decision-grade — an invertible ladder (MP3, Vorbis q0–q4) with an authorizing album verdict. An AAC's natural rolloff, an Opus stream, an HE-AAC stream or an unresolved codec contributes nothing and the container bitrate stands (download 37946).
 - `ImportResult.verified_lossless_proof` is the sole acquisition claim. `AudioQualityMeasurement` contains only byte observations; evidence persistence derives its CHECK-tied convenience boolean from proof presence rather than re-deriving verification from a measurement.
 - Spectral request-state writes always go through `RequestSpectralStateUpdate` so the historical grade/bitrate stamps stay atomic. Active decisions use the linked evidence row's spectral fact, not those request scalars.
 - `--target-format` flag: when `target_format="lossless"` (or legacy `"flac"`), keeps lossless on disk. ALAC/WAV sources are normalized to FLAC via `FLAC_SPEC`. A temporary V0 probe is still produced when needed for provisional source comparison. Keeping a lossless container does not itself verify it; the import needs affirmative proof.
@@ -657,10 +656,7 @@ them via `import_jobs.candidate_evidence_id`,
 `download_log.candidate_evidence_id`, and
 `album_requests.current_evidence_id`. Triage walks the FK chain (direct →
 cross-walk via `request_id` → measure as last resort). Evidence is never
-deleted unless the files actually change. The fingerprint includes a SHA-256
-of every file's exact bytes, not only path and size: same-size replacement
-therefore mints a different snapshot. Historical file rows without a digest
-are deliberately non-reusable and rebuild through normal preview.
+deleted unless the files actually change.
 
 **`source_path` is immutable capture provenance, not live path authority.**
 It records where the evidence snapshot was first measured. A same-address
@@ -706,28 +702,14 @@ source acquisition fact, so it needs only its provenance marker.
 not immediately action authority.** The new content-addressed row must exist
 first so the preview-owned spectral and V0 writers can target its exact id and
 fingerprint. Such a rebuild sets `current_enrichment_required=true`; action
-loaders require either a recognized usable spectral grade or R19
-lossless-source authority, regardless of legacy marker state, and keep failing
-closed on every unchanged retry while this marker is true until the exact row
-also has either a V0 metric or the persisted once-only V0 attempt marker.
-Source-subject spectral/V0 facts may satisfy the gate because they survive byte
-changes by definition; ordinary installed-subject facts do not and must be
-measured again. A lossless-source row with a source V0 anchor or verified proof
-must not scan its installed transcode merely to fill a grade—the scan would
-describe the wrong bytes. Its attempt audit therefore records that no installed
-scan ran, and the importer accepts the linked source-lineage authority instead
-of misclassifying that deliberate omission as a HAVE-analysis failure. The
-marker is monotonic for a content address, so a
+loaders keep failing closed on every unchanged retry until that exact row has
+both a spectral result and either a V0 metric or the persisted once-only V0
+attempt marker. Source-subject spectral/V0 facts may satisfy the gate because
+they survive byte changes by definition; installed-subject facts do not and
+must be measured again. The marker is monotonic for a content address, so a
 same-address upsert from another writer cannot erase the retry gate. It need
 not be cleared after enrichment: completeness of the required facts is what
 makes the row authoritative.
-
-Candidate folder/audio-integrity rejection precedes all HAVE work. Preview and
-dispatch both ask the canonical quality predicate first; the importer still
-owns the final verdict through `full_pipeline_decision_from_evidence`. Once
-those candidate bytes carry a complete reject fact, neither boundary loads,
-enriches, scans, nor persists current evidence merely to reach the same
-verdict.
 
 **A genuine spectral grade does not prove source bitrate for fullband codecs.**
 Opus can retain a fullband cutoff at low bitrates, so a native Opus scan may
@@ -759,9 +741,9 @@ plans exactly the missing pieces (`plan_current_evidence_enrichment`, pure),
 measures the on-disk copy directly, and persists through the
 preview-owned helpers — measuring only the pieces the plan reports missing,
 never re-probing an already-attempted V0 snapshot (the V0 research marker is
-once-only), and refusing stale on-disk state. When a HAVE spectral measurement
-is required, its fresh result wins over a disagreeing incomplete/legacy value;
-a complete matching content snapshot is reused without another scan.
+once-only), and refusing stale on-disk state. (The HAVE spectral helper is
+*not* once-only — a fresh audit overwrites a disagreeing grade; see the
+fresh-audit-wins policy below.)
 Adapter
 or backfill failures and actual measurement work consume the per-cycle
 `CratediggerContext.evidence_enrichment_budget`; complete or authoritatively
@@ -795,43 +777,18 @@ another observation of that address. If the files have changed since capture,
 backfill writes
 a fresh row, repoints the FK, and persists the changed-snapshot enrichment
 gate described above. Either way enrichment can then complete the surviving
-row. The candidate-reuse preview fast path first verifies the byte-exact
-content snapshot
-and the linked row's exact release identity before any integrity or quality
-fact can decide the action, then projects the candidate spectral fact from
-that content-addressed evidence without scanning those bytes again. The
-curator bad-audio-hash corpus is independent mutable authority rather than a
-property frozen at evidence capture: every preview/import action rechecks the
-exact current candidate snapshot against that corpus, and durably adds a newly
-discovered match to the same evidence row before any HAVE work. Hash/lookup
-failure is a retryable measurement failure, never a clean result. Dispatch
-checks exact release identity, candidate freshness, and current bad-hash
-authority both before and after potentially long HAVE enrichment, so a
-poisoned FK, changed bytes, or curator authority changed during that window
-cannot drive a stale terminal decision. It independently resolves and
-byte-fingerprint-checks the exact installed release. Complete matching HAVE
-evidence is projected through the same once-per-snapshot contract independently
-of whether candidate evidence is reused or newly measured. Missing, unusable
-(`NULL`/empty/`error`/unrecognized grade), or changed HAVE evidence is scanned
-and persisted through `persist_exact_current_spectral_from_attempt` before the
-job becomes importable. After the final candidate revalidation, dispatch
-re-resolves HAVE and checks that its exact path, request FK, complete evidence
-row, and byte snapshot still match; drift requeues the job to preview instead
-of consuming stale facts. The action sidecar carries that resolved current
-path. After any candidate materialization, the pinned child resolves the exact
-release again and checks either the same path and bytes or the same absence
-immediately before Beets mutation. A rejected CAS is never inferred successful
-from whatever stale fields happen to remain, and an accepted write must reload
-the exact fresh grade/provenance tuple. A failed or stale persistence result is
-an audited world failure,
-so the request returns to runnable searching rather than importing against a
-spectrally blind current row. A changed candidate snapshot misses the front
-gate and runs full preview measurement again without forcing an unchanged
-complete HAVE snapshot through the analyzer.
+row. The candidate-reuse preview fast path first verifies the content
+snapshot, then projects the candidate spectral fact from that content-addressed
+evidence without scanning those bytes again. It separately persists the
+attempt-time HAVE scan through
+`persist_exact_current_spectral_from_attempt` before marking the job
+importable, so reused-evidence force and automation imports decide against the
+same completed HAVE the full measurement path would see. A changed candidate
+snapshot misses the front gate and runs full preview measurement again.
 
-**HAVE spectral persistence is fail-closed on absence, once per matching
-snapshot, and fresh-audit-wins when measurement is required (issue #815).**
-Three rules govern how the request's on-disk (HAVE) spectral fact is used:
+**HAVE spectral persistence is fail-closed on absence and fresh-audit-wins on
+disagreement (issue #815).** Two rules govern how the request's on-disk (HAVE)
+spectral fact is written:
 
 - **Bail, never infer.** The candidate download's spectral is NEVER adopted as
   the request's on-disk state. When the on-disk audit of the installed files
@@ -844,26 +801,18 @@ Three rules govern how the request's on-disk (HAVE) spectral fact is used:
   it drove a real library downgrade (request 4351, dl 37742). Same fail-closed
   doctrine as #762/#723 — if we cannot ascertain evidence of the on-disk files,
   we surface the absence rather than infer.
-- **Reuse complete matching evidence.** The current-evidence loader resolves
-  the exact Beets release and compares its audio snapshot with the linked
-  content-addressed row. When that snapshot still matches and its spectral
-  component is complete, preview projects the whole persisted atomic fact
-  (grade, bitrate, cliff, codec family, ultrasonic deficit, and measurement
-  version) without invoking the analyzer or rewriting that spectral fact.
-  Candidate and HAVE therefore share one invariant: measurements are once per
-  exact content snapshot.
 - **Fresh-audit-wins.** A SUCCESSFUL fresh on-disk HAVE audit of matched-
-  fingerprint bytes, when the snapshot is missing or incomplete, re-persists
-  grade + bitrate over a disagreeing persisted installed-subject value, with
+  fingerprint bytes (grade non-null, no error) re-persists grade + bitrate over
+  a disagreeing persisted installed-subject value, with
   `spectral_provenance='measured'` (`persist_current_spectral_measurement` and
   `persist_exact_current_spectral_from_attempt`). This replaced the old
   fill-only-if-NULL policy, which silently discarded a fresh genuine/160 audit
-  and let the frozen 128 landmine keep deciding. Guards preserved: a FAILED
-  fresh audit never clears a persisted grade (fail-soft `incomplete`), and an
-  R19 lossless-sourced row keeps its source spectral — an installed-derivative
-  scan is neither required nor persisted as its grade
-  (`preserve_existing_source_spectral` plus the DB CHECK
-  `album_quality_evidence_lossless_lineage_spectral_subject`).
+  and let the frozen 128 landmine keep deciding. The class self-heals at the
+  next preview, which always re-scans the installed bytes. Guards preserved: a
+  FAILED fresh audit never clears a persisted grade (fail-soft `incomplete`),
+  and an R19 lossless-sourced row keeps its source spectral — an installed-
+  derivative scan is never persisted as its grade (`preserve_existing_source_spectral`
+  plus the DB CHECK `album_quality_evidence_lossless_lineage_spectral_subject`).
 
 `spectral_provenance='measured'` means the analyzer ran over the exact bytes the
 snapshot fingerprint identifies; anything else is `'carried'` (a source-lineage
