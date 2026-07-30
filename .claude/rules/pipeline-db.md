@@ -41,9 +41,9 @@ paths:
   `RELEASE(release_id)` and stays pinned through filesystem/Beets work and the
   terminal commit. Runtime context borrows that session and must not reconnect.
 - Row locks inside owner transactions follow request, then all request jobs in
-  ID order, then cleanup journals in job-ID order. Recovery retry is the sole
-  in-processing owner replacement: it fails the ambiguous job, inserts a new
-  one, retargets a byte-identical journal, and updates the request pointer last.
+  ID order, then cleanup journals in job-ID order. There is no in-processing
+  owner replacement: world failures fail the exact job and return the request
+  to `wanted` through the owner-atomic terminal bundle.
 - Processor cleanup is a durable exact-path/manifest journal, not
   post-terminal best effort. Complete or typed no-op cleanup while the owner is
   attached; the terminal bundle consumes its receipt and only then clears

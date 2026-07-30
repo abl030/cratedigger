@@ -35,9 +35,10 @@ from lib.terminal_outcomes import (
     TerminalDenylist,
     TerminalDownloadAudit,
     TerminalOutcomeResult,
+    automation_world_failure_self_heal,
     cleanup_journal_refusal_matches,
     operator_search_stop_is_current,
-    validate_automation_terminal_declaration,
+    validate_automation_terminal_authority,
 )
 from lib.validation_envelope import derive_validation_log_columns
 
@@ -816,6 +817,7 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
         request_id: int,
         job_id: int,
         authority: AutomationTerminalAuthority,
+        allow_missing_completion_receipt: bool = False,
     ) -> tuple[dict[str, object], dict[str, object]]:
         scope = self._lock_processing_cleanup_scope(
             cur,
@@ -890,10 +892,6 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
             and journal["completed_receipt"] is not None
             and _receipt_builtins(journal["completed_receipt"])
             == _receipt_builtins(receipt)
-            and journal["declared_result_status"]
-            == authority.declared_result_status
-            and journal["declared_reason"] == authority.declared_reason
-            and journal["evidence_revision"] == authority.evidence_revision
         )
         refusal_matches = (
             refusal is not None
@@ -920,6 +918,7 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
             authority.expected_job_status == "running"
             and authority.expected_preview_status == "evidence_ready"
             and job["beets_launch_authorized_at"] is not None
+            and not allow_missing_completion_receipt
         ):
             raise ImportJobTerminalConflict(
                 f"automation job {job_id} lacks its completion receipt"
@@ -1397,7 +1396,7 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
     ) -> TerminalOutcomeResult:
         authority = command.automation
         assert authority is not None
-        validate_automation_terminal_declaration(command)
+        validate_automation_terminal_authority(command)
         boundary = self._boundary_emitter()
         cooled: set[str] = set()
         request_transitions = tuple(
@@ -1417,6 +1416,10 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                     request_id=command.request_id,
                     job_id=command.import_job_id,
                     authority=authority,
+                    allow_missing_completion_receipt=(
+                        automation_world_failure_self_heal(command)
+                        and authority.completion_receipt is None
+                    ),
                 )
             audit = self._automation_audit(command.audit, authority)
             download_log_id = self._insert_terminal_download_audit(

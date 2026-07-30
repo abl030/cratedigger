@@ -1276,135 +1276,6 @@ class TestImportJobQueueAPI(unittest.TestCase):
         )
         self.assertIsNone(missing)
 
-    def test_mark_import_job_recovery_required_round_trip(self):
-        from lib.import_queue import IMPORT_JOB_FORCE
-
-        source_path = "/tmp/recovery-required-round-trip"
-        job = self.db.enqueue_import_job(
-            IMPORT_JOB_FORCE,
-            request_id=self.req_id,
-            payload={"download_log_id": 1, "failed_path": source_path},
-        )
-        evidence = make_album_quality_evidence(
-            mb_release_id="queue-api-mbid",
-            source_path=source_path,
-        )
-        self.db.upsert_album_quality_evidence(evidence)
-        persisted = self.db.find_album_quality_evidence(
-            mb_release_id=evidence.mb_release_id,
-            snapshot_fingerprint=evidence.snapshot_fingerprint,
-        )
-        assert persisted is not None and persisted.id is not None
-        self.db.set_import_job_candidate_evidence(job.id, persisted.id)
-        self.db.mark_import_job_preview_importable(
-            job.id,
-            preview_result={"ready": True},
-        )
-        claimed = claim_next_import_job(self.db, worker_id="lost-worker")
-        assert claimed is not None
-        launched = self.db.authorize_import_job_launch(
-            claimed.id,
-            request_id=self.req_id,
-            release_id="queue-api-mbid",
-            source_path=source_path,
-        )
-        assert launched is not None
-
-        recovered = self.db.mark_import_job_recovery_required(
-            launched.id,
-            reason="worker acknowledgement lost",
-        )
-
-        assert recovered is not None
-        stored = self.db._execute(
-            """
-            SELECT status, message, error, worker_id, heartbeat_at
-            FROM import_jobs
-            WHERE id = %s
-            """,
-            (launched.id,),
-        ).fetchone()
-        assert stored is not None
-        reread = self.db.get_import_job(launched.id)
-        assert reread is not None
-        self.assertEqual(stored["status"], "recovery_required")
-        self.assertIn("worker acknowledgement lost", stored["message"] or "")
-        self.assertIn("may have mutated", stored["error"] or "")
-        self.assertIsNone(stored["worker_id"])
-        self.assertIsNone(stored["heartbeat_at"])
-        self.assertEqual(reread.status, stored["status"])
-
-    def test_recovery_retry_resets_preview_only_for_force_job(self):
-        """#853 Rule A: the retry insert keeps non-force preview authority."""
-        from lib.import_queue import IMPORT_JOB_FORCE, IMPORT_JOB_YOUTUBE
-
-        for job_type, status, source_path in (
-            (IMPORT_JOB_FORCE, "wanted", "/tmp/force-recovery"),
-            (IMPORT_JOB_YOUTUBE, "wanted", "/tmp/youtube-recovery"),
-        ):
-            with self.subTest(job_type=job_type):
-                request_id = self.db.add_request(
-                    mb_release_id=f"recovery-{job_type}",
-                    artist_name="Recovery",
-                    album_title=job_type,
-                    source="request",
-                    status=status,
-                )
-                job = self.db.enqueue_import_job(
-                    job_type,
-                    request_id=request_id,
-                    dedupe_key=f"recovery-preview:{job_type}",
-                    payload={"download_log_id": 1, "failed_path": source_path}
-                    if job_type == IMPORT_JOB_FORCE else {
-                        "staged_path": source_path,
-                        "request_id": request_id,
-                        "browse_id": "youtube-recovery",
-                        "download_log_id": 1,
-                    },
-                )
-                evidence = make_album_quality_evidence(
-                    mb_release_id=f"recovery-{job_type}", source_path=source_path,
-                )
-                self.db.upsert_album_quality_evidence(evidence)
-                persisted = self.db.find_album_quality_evidence(
-                    mb_release_id=evidence.mb_release_id,
-                    snapshot_fingerprint=evidence.snapshot_fingerprint,
-                )
-                assert persisted is not None and persisted.id is not None
-                self.db.set_import_job_candidate_evidence(job.id, persisted.id)
-                preview_result = {"verdict": "would_import", "case": job_type}
-                self.db.mark_import_job_preview_importable(
-                    job.id, preview_result=preview_result,
-                )
-                claimed = claim_next_import_job(self.db, worker_id="recovery-worker")
-                assert claimed is not None
-                assert self.db.authorize_import_job_launch(
-                    claimed.id,
-                    request_id=request_id,
-                    release_id=f"recovery-{job_type}",
-                    source_path=source_path,
-                ) is not None
-                recovery = self.db.mark_import_job_recovery_required(
-                    claimed.id, reason="ambiguous external mutation",
-                )
-                assert recovery is not None
-
-                resolved = self.db.resolve_import_job_recovery(
-                    recovery.id,
-                    resolution="retry",
-                    reason="operator reconciled mutation",
-                )
-
-                assert resolved is not None
-                _closed, retry = resolved
-                assert retry is not None
-                if job_type == IMPORT_JOB_FORCE:
-                    self.assertEqual(retry.preview_status, "waiting")
-                    self.assertIsNone(retry.preview_result)
-                    self.assertIsNone(retry.candidate_evidence_id)
-                else:
-                    self.assertEqual(retry.preview_result, preview_result)
-                    self.assertEqual(retry.candidate_evidence_id, persisted.id)
 
     def test_two_sessions_cannot_claim_same_job(self):
         from lib import pipeline_db
@@ -1851,7 +1722,8 @@ class TestImportJobQueueAPI(unittest.TestCase):
                 recovery_message="backend and child group proven absent",
             )
             self.assertEqual([item.id for item in recovered], [job.id])
-            self.assertEqual(recovered[0].status, "recovery_required")
+            self.assertEqual(recovered[0].status, "failed")
+            self.assertIsNotNone(recovered[0].completed_at)
 
     def test_unlaunched_jobs_can_be_requeued_after_worker_restart(self):
         from lib.import_queue import IMPORT_JOB_FORCE
@@ -2549,6 +2421,31 @@ class TestAutomationImportHandoff(unittest.TestCase):
             source_path="/processing/albums/exact-handoff",
             expected_execution_lease=importer_lease,
         ))
+        authorized = self.db._execute(
+            """
+            SELECT beets_launch_release_id, beets_launch_source_path,
+                   beets_launch_request_status,
+                   beets_launch_snapshot_fingerprint
+            FROM import_jobs
+            WHERE id = %s
+            """,
+            (job.id,),
+        ).fetchone()
+        assert authorized is not None
+        self.assertEqual(
+            (
+                authorized["beets_launch_release_id"],
+                authorized["beets_launch_source_path"],
+                authorized["beets_launch_request_status"],
+                authorized["beets_launch_snapshot_fingerprint"],
+            ),
+            (
+                "automation-handoff-real",
+                "/processing/albums/exact-handoff",
+                "processing",
+                evidence.snapshot_fingerprint,
+            ),
+        )
         child_row = self.db.record_import_job_beets_child(
             job.id,
             expected_execution_lease=importer_lease,
@@ -3258,47 +3155,6 @@ class TestProcessingOwnerGenericWriterGuards(unittest.TestCase):
         self.assertEqual(real_result.result, {"scan": "confirmed"})
         self.assertEqual(fake_result.result, {"scan": "confirmed"})
 
-    def test_generic_recovery_terminal_writer_rejects_attached_owner(self):
-        request_id, job = self._owned_real("recovery")
-        fake, fake_request_id, fake_job = self._owned_fake("recovery")
-        self.db._execute(
-            "UPDATE import_jobs SET status = 'recovery_required' WHERE id = %s",
-            (job.id,),
-        )
-        self.db.conn.commit()
-        fake_row = next(
-            row for row in fake._import_jobs if row["id"] == fake_job.id
-        )
-        fake_row["status"] = "recovery_required"
-        real_before = self.db.get_import_job(job.id)
-        fake_before = fake.get_import_job(fake_job.id)
-        real_request_before = self.db.get_request(request_id)
-        fake_request_before = copy.deepcopy(
-            fake.get_request(fake_request_id)
-        )
-
-        self.assertIsNone(
-            self.db.resolve_import_job_recovery(
-                job.id,
-                resolution="close",
-                reason="generic close must not consume an owner",
-            )
-        )
-        self.assertIsNone(
-            fake.resolve_import_job_recovery(
-                fake_job.id,
-                resolution="close",
-                reason="generic close must not consume an owner",
-            )
-        )
-
-        self.assertEqual(self.db.get_import_job(job.id), real_before)
-        self.assertEqual(fake.get_import_job(fake_job.id), fake_before)
-        self.assertEqual(self.db.get_request(request_id), real_request_before)
-        self.assertEqual(
-            fake.get_request(fake_request_id),
-            fake_request_before,
-        )
 
     def test_generic_status_writer_cannot_enter_processing(self):
         request_id = self.db.add_request(

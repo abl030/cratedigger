@@ -2815,7 +2815,6 @@ class TestAutomationImporterOwnership(unittest.TestCase):
             def __getattr__(self, name: str) -> object:
                 if not self.acquire and name in {
                     "requeue_import_job_for_preview",
-                    "mark_import_job_recovery_required",
                     "mark_import_job_failed",
                 }:
                     def forbidden_write(

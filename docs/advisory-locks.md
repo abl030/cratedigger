@@ -208,33 +208,30 @@ Destructive operator actions follow the same order. Ban-source always has a
 pipeline request and therefore takes IMPORT then RELEASE. Library-delete takes
 IMPORT then RELEASE when a request exists, and RELEASE only for a library-only
 album. Replace, force-import, direct pipeline delete, lifecycle/intent/quality
-changes, and recovery all acquire IMPORT before the durable owner reread.
+changes, and automated owner convergence all acquire IMPORT before the durable
+owner reread.
 Authority rejection is a 409 / CLI exit 4 with zero filesystem, audit, job, or
 request mutation.
 
 Inside a processing transaction, row locks have their own fixed order:
 request, every job for that request in ID order, then cleanup journals in job
 ID order. This lets deferred owner/journal integrity triggers serialize with
-handoff, terminalization, and recovery retry instead of validating an unlocked
-snapshot.
+handoff and terminalization instead of validating an unlocked snapshot.
 
-Recovery follows four asymmetric crash cases:
+Startup convergence follows three asymmetric crash cases:
 
 1. Before launch authorization, a positively dead execution may requeue the
    same exact owner.
-2. After authorization but before spawn, the conservative marker requires
-   operator recovery.
-3. During/after Beets or a rolled-back terminal bundle, the same owner remains
-   `recovery_required`; neither heartbeat age nor path/library inference can
-   authorize replay.
-4. After the terminal bundle commits, the owner is cleared, cleanup receipt
+2. After authorization, a positively dead execution records failed audit
+   evidence, completes or truthfully refuses its exact journaled cleanup,
+   fails the job, and returns the request to `wanted` in one terminal bundle.
+   Neither heartbeat age nor path/library inference can authorize this step.
+3. After the terminal bundle commits, the owner is cleared, cleanup receipt
    consumed, and the job is terminal.
 
-Explicit retry proves the old execution dead and atomically mints/retargets a
-fresh job. Explicit close declares `wanted` or `imported` and completes the
-exact manifest journal before the shared terminal transaction. Cleanup is
-therefore inside the owner boundary, not best-effort work after authority has
-been cleared.
+Historical `recovery_required` owners use case 2 after the same exact liveness
+proof. Cleanup remains inside the owner boundary, not best-effort work after
+authority has been cleared.
 
 ## Contention behaviour
 
@@ -282,7 +279,7 @@ watchdogs have stopped.
 | Witnessed automation handoff | `lib/pipeline_db/import_jobs.py` | `PipelineDB.handoff_automation_import` | IMPORT | `request_id` |
 | Automation preview owner scope | `scripts/import_preview_worker.py` | `_process_automation_claim` | IMPORT then RELEASE in the borrowed runtime path | `request_id`; `release_id_to_lock_key(release_id)` |
 | Automation importer owner scope | `scripts/importer.py` | `_process_automation_claim` | IMPORT then RELEASE | `request_id`; `release_id_to_lock_key(release_id)` |
-| Automation recovery close | `lib/import_job_recovery_service.py` | `apply_import_job_recovery` | IMPORT then RELEASE | `request_id`; `release_id_to_lock_key(release_id)` |
+| Automation startup convergence | `lib/pipeline_db/import_jobs.py` | `PipelineDB.recover_automation_import_job` | IMPORT then RELEASE | `request_id`; `release_id_to_lock_key(release_id)` |
 | Auto + force-import dispatch | `lib/dispatch/core.py` | `dispatch_import_core` | RELEASE | `release_id_to_lock_key(mb_release_id)` |
 | Direct Add / new-row Upgrade | `lib/request_creation_service.py` | `RequestCreationService.create_or_resume` | RELEASE then PLAN | `release_id_to_lock_key(creation.release_id)`; `request_id` |
 | Force-import outer | `lib/dispatch/entry_points.py` | `dispatch_import_from_db` | IMPORT | `request_id` |

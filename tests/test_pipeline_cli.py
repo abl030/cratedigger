@@ -683,41 +683,6 @@ class TestCmdImportJobRecovery(unittest.TestCase):
         self.assertIn("snapshot=", output)
         self.assertIn("authorized=", output)
 
-    def test_retry_reports_new_operation(self) -> None:
-        db, job_id = self._recovery_job()
-        args = SimpleNamespace(
-            job_id=job_id,
-            resolution="retry",
-            reason="Confirmed no Beets mutation",
-        )
-        stdout = io.StringIO()
-
-        with redirect_stdout(stdout):
-            rc = pipeline_cli.cmd_import_job_recovery(db, cast(Any, args))
-
-        self.assertEqual(rc, 0)
-        self.assertIn("Queued fresh import job", stdout.getvalue())
-        jobs = db.list_import_jobs()
-        self.assertEqual({job.status for job in jobs}, {"failed", "queued"})
-
-    def test_wrong_state_returns_conflict_exit(self) -> None:
-        db = FakePipelineDB()
-        job = db.enqueue_import_job(
-            "force_import",
-            request_id=42,
-            payload={"download_log_id": 1, "failed_path": "/tmp/not-recovery"},
-        )
-        args = SimpleNamespace(
-            job_id=job.id,
-            resolution="close",
-            reason="Not applicable",
-        )
-
-        with redirect_stderr(io.StringIO()):
-            rc = pipeline_cli.cmd_import_job_recovery(db, cast(Any, args))
-
-        self.assertEqual(rc, 4)
-
     def test_show_prints_same_typed_recovery_result(self) -> None:
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -768,9 +733,6 @@ class TestCmdImportJobRecovery(unittest.TestCase):
             payload["detail"]["cleanup_journal"]["status"],
             "missing",
         )
-        self.assertTrue(
-            payload["detail"]["evidence_revision"].startswith("sha256:")
-        )
 
     def test_show_not_found_uses_canonical_not_found_exit(self) -> None:
         db = FakePipelineDB()
@@ -793,233 +755,24 @@ class TestCmdImportJobRecovery(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertEqual(json.loads(stdout.getvalue())["outcome"], "not_found")
 
-    def test_service_validation_uses_canonical_semantic_exit(self) -> None:
-        db = FakePipelineDB()
-        args = argparse.Namespace(
-            recovery_action="retry",
-            job_id=999999,
-            reason="",
-            evidence_revision=None,
-            result_status=None,
-            beets_db=None,
-            beets_directory=None,
-        )
-
-        with redirect_stderr(io.StringIO()) as stderr:
-            rc = pipeline_cli.cmd_import_job_recovery(db, args)
-
-        self.assertEqual(rc, 3)
-        self.assertIn(
-            "recovery resolution requires a non-empty reason",
-            stderr.getvalue(),
-        )
-
-    def test_parser_exposes_forward_only_show_retry_close_verbs(self) -> None:
+    def test_parser_exposes_only_read_only_show(self) -> None:
         from scripts.pipeline_cli.routes_meta import _build_parser
 
         parser, _, _ = _build_parser()
         shown = parser.parse_args(["import-job-recovery", "show", "41"])
-        retried = parser.parse_args([
-            "import-job-recovery",
-            "retry",
-            "41",
-            "--reason",
-            "not applied",
-            "--evidence-revision",
-            "sha256:retry",
-        ])
-        closed = parser.parse_args([
-            "import-job-recovery",
-            "close",
-            "41",
-            "--reason",
-            "reconciled",
-            "--evidence-revision",
-            "sha256:close",
-            "--result-status",
-            "imported",
-        ])
 
         self.assertEqual((shown.recovery_action, shown.job_id), ("show", 41))
-        self.assertEqual(
-            (
-                retried.recovery_action,
-                retried.job_id,
-                retried.evidence_revision,
-            ),
-            ("retry", 41, "sha256:retry"),
-        )
-        self.assertEqual(
-            (
-                closed.recovery_action,
-                closed.job_id,
-                closed.evidence_revision,
-                closed.result_status,
-            ),
-            ("close", 41, "sha256:close", "imported"),
-        )
-
-    def test_automation_actions_require_revision_and_explicit_close_result(
-        self,
-    ) -> None:
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=44,
-            status="wanted",
-            mb_release_id="75dbf62e-7dd2-4ddc-b57b-9bad1758b6b0",
-        ))
-        job = handoff_automation_owner(
-            db,
-            44,
-            canonical_path="/processing/cli-action",
-        )
-        retry_args = argparse.Namespace(
-            recovery_action="retry",
-            job_id=job.id,
-            reason="missing evidence",
-            evidence_revision=None,
-            beets_db=None,
-            beets_directory=None,
-        )
-        close_args = argparse.Namespace(
-            recovery_action="close",
-            job_id=job.id,
-            reason="missing result",
-            evidence_revision="sha256:stale",
-            result_status=None,
-            beets_db=None,
-            beets_directory=None,
-        )
-        with patch(
-            "scripts.pipeline_cli.imports._open_recovery_beets",
-            side_effect=FileNotFoundError("beets unavailable"),
-        ):
-            with redirect_stderr(io.StringIO()) as retry_error:
-                retry_rc = pipeline_cli.cmd_import_job_recovery(
-                    db,
-                    retry_args,
-                )
-            with redirect_stderr(io.StringIO()) as close_error:
-                close_rc = pipeline_cli.cmd_import_job_recovery(
-                    db,
-                    close_args,
-                )
-        self.assertEqual(retry_rc, 3)
-        self.assertIn("evidence", retry_error.getvalue())
-        self.assertEqual(close_rc, 3)
-        self.assertIn("result_status", close_error.getvalue())
-
-    def test_automation_stale_revision_prints_refreshed_typed_detail(
-        self,
-    ) -> None:
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=45,
-            status="wanted",
-            mb_release_id="75dbf62e-7dd2-4ddc-b57b-9bad1758b6b0",
-        ))
-        job = handoff_automation_owner(
-            db,
-            45,
-            canonical_path="/processing/cli-stale",
-        )
-        args = argparse.Namespace(
-            recovery_action="close",
-            job_id=job.id,
-            reason="stale observation",
-            evidence_revision="sha256:stale",
-            result_status="wanted",
-            beets_db=None,
-            beets_directory=None,
-        )
-        stderr = io.StringIO()
-        with (
-            patch.object(
-                db,
-                "get_processing_cleanup_journal",
-                lambda *, request_id, job_id: None,
-                create=True,
-            ),
-            patch(
-                "scripts.pipeline_cli.imports._open_recovery_beets",
-                side_effect=FileNotFoundError("beets unavailable"),
-            ),
-            redirect_stderr(stderr),
-        ):
-            rc = pipeline_cli.cmd_import_job_recovery(
-                db,
-                args,
-            )
-        self.assertEqual(rc, 4)
-        payload = json.loads(stderr.getvalue())
-        self.assertEqual(payload["outcome"], "evidence_changed")
-        self.assertEqual(payload["detail"]["owner_stage"]["job_id"], job.id)
-        self.assertTrue(
-            payload["detail"]["evidence_revision"].startswith("sha256:")
-        )
-
-    def test_automation_retry_with_journal_reports_recovery_required_success(
-        self,
-    ) -> None:
-        from lib.import_job_recovery_service import (
-            get_automation_recovery_detail,
-        )
-        from lib.pipeline_db.cleanup_journal import CleanupJournalIntent
-        from lib.processing_cleanup import cleanup_manifest_hash
-
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=46,
-            status="wanted",
-            mb_release_id="75dbf62e-7dd2-4ddc-b57b-9bad1758b6b0",
-        ))
-        job = handoff_automation_owner(
-            db,
-            46,
-            canonical_path="/processing/cli-retained-cleanup",
-        )
-        next(row for row in db._import_jobs if row["id"] == job.id)[
-            "status"
-        ] = "recovery_required"
-        db.create_processing_cleanup_journal(
-            request_id=46,
-            job_id=job.id,
-            intent=CleanupJournalIntent(
-                action="no_op",
-                source_path="/processing/cli-retained-cleanup",
-                source_manifest=(),
-                source_manifest_hash=cleanup_manifest_hash(()),
-            ),
-        )
-        observed = get_automation_recovery_detail(db, None, job.id)
-        assert observed.detail is not None
-        args = argparse.Namespace(
-            recovery_action="retry",
-            job_id=job.id,
-            reason="retain unresolved cleanup",
-            evidence_revision=observed.detail.evidence_revision,
-            result_status=None,
-            beets_db=None,
-            beets_directory=None,
-        )
-        stdout = io.StringIO()
-
-        with (
-            patch(
-                "scripts.pipeline_cli.imports._open_recovery_beets",
-                side_effect=FileNotFoundError("beets unavailable"),
-            ),
-            redirect_stdout(stdout),
-        ):
-            rc = pipeline_cli.cmd_import_job_recovery(
-                db,
-                args,
-            )
-
-        self.assertEqual(rc, 0)
-        payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["outcome"], "retry_recovery_required")
-        self.assertEqual(payload["retry_job"]["status"], "recovery_required")
+        for removed_verb in ("retry", "close"):
+            with (
+                self.subTest(removed_verb=removed_verb),
+                redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit),
+            ):
+                parser.parse_args([
+                    "import-job-recovery",
+                    removed_verb,
+                    "41",
+                ])
 
 
 class TestCmdForceImport(unittest.TestCase):

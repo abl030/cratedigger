@@ -1823,7 +1823,8 @@ def recover_running_preview_jobs(
             decision=decision,
             requeue_message=RESTART_PREVIEW_MESSAGE,
             recovery_message=(
-                "Preview execution ended after launch; operator recovery required"
+                "Preview execution ended after launch; restarting request "
+                "acquisition"
             ),
         )
         if recovered_job is not None:

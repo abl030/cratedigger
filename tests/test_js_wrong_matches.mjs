@@ -146,16 +146,16 @@ console.log('_pollImportJob() leaves row visible after failed jobs — no full r
   assertEqual(dom.toast.className, 'toast error', 'failure toast is an error');
 }
 
-console.log('_pollImportJob() stops visibly when operator recovery is required');
+console.log('_pollImportJob() surfaces historical recovery while convergence continues');
 {
   const { calls, dom, btn } = await runPoll({
     status: 'recovery_required',
     message: 'Recovery required: Beets may have run',
   }, 100);
-  assertEqual(btn.textContent, 'Recovery required', 'button shows recovery stop');
+  assertEqual(btn.textContent, 'Recovery required', 'button shows historical recovery');
   assert(!calls.includes('/api/wrong-matches'),
     'does NOT refetch or imply the ambiguous operation completed');
-  assertEqual(dom.toast.className, 'toast error', 'recovery stop is prominent');
+  assertEqual(dom.toast.className, 'toast error', 'historical recovery is prominent');
 }
 
 console.log('forceImportWrongMatch() maps processing conflict to the shared locked row state');

@@ -2,7 +2,7 @@
 import logging
 import os
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -19,9 +19,7 @@ from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_PREVIEW_WAITING,
     AutomationHandoffResult,
-    ForceImportPayload,
     ImportJob,
-    YoutubeImportPayload,
     automation_import_dedupe_key,
     automation_import_payload,
     validate_job_type,
@@ -34,7 +32,6 @@ from lib.pipeline_db._core import _PipelineDBBase
 from lib.pipeline_db._shared import ADVISORY_LOCK_NAMESPACE_IMPORT
 from lib.pipeline_db.cleanup_journal import (
     CleanupJournalConflict,
-    ProcessingCleanupJournalRow,
     _CleanupJournalMixin,
 )
 from lib.pipeline_db.rows import AlbumRequestRow, album_request_row
@@ -63,8 +60,8 @@ AUTOMATION_WORLD_FAILURE_AUDIT_PREFIX = (
 )
 
 # The attached-owner stages a proven-dead recovery can drive. ``queued`` and
-# ``running`` are the two live lanes; ``recovery_required`` is a close that
-# stopped mid-frame, never a resting state (CLAUDE.md invariant 11).
+# ``running`` are the two current live lanes; historical ``recovery_required``
+# rows remain auto-convergent rather than resting indefinitely.
 _RECOVERABLE_OWNER_STAGES: frozenset[tuple[str, str | None]] = frozenset({
     ("queued", "running"),
     ("running", "evidence_ready"),
@@ -164,13 +161,6 @@ class AutomationRecoveryCAS(msgspec.Struct, frozen=True):
             )
 
 
-@dataclass(frozen=True)
-class AutomationRecoveryRetryApplied:
-    original: ImportJob
-    retry: ImportJob
-    journal: ProcessingCleanupJournalRow | None
-
-
 class AutomationRecoveryEvidenceChanged(RuntimeError):
     """The exact owner facts used by a recovery observation changed."""
 
@@ -210,27 +200,6 @@ def _decision_proves_exact_lease_dead(
 def _json_mapping(value: object) -> dict[str, object]:
     built = msgspec.to_builtins(value)
     return built if is_str_object_dict(built) else {}
-
-
-def _recovery_cleanup_matches(
-    expected: AutomationRecoveryCAS,
-    journal: ProcessingCleanupJournalRow | None,
-) -> bool:
-    if expected.cleanup_job_id is None:
-        return journal is None
-    assert expected.cleanup_request_id is not None
-    assert expected.cleanup_revision is not None
-    assert expected.cleanup_progress is not None
-    return (
-        journal is not None
-        and journal["job_id"] == expected.cleanup_job_id
-        and journal["request_id"] == expected.cleanup_request_id
-        and journal["revision"] == expected.cleanup_revision
-        and _json_mapping(journal["step_progress"])
-        == _json_mapping(expected.cleanup_progress)
-    )
-
-
 def _recovery_owner_matches(
     expected: AutomationRecoveryCAS,
     *,
@@ -702,11 +671,9 @@ class _ImportJobsMixin(
         ordering, and the query is intentionally unbounded so unrelated queue
         activity cannot hide a crashed owner.
 
-        ``recovery_required`` is included because it is no longer a resting
-        state (CLAUDE.md invariant 11): it is only ever the momentary authority
-        stage a close transits, so an owner still ATTACHED there is a world
-        that stopped mid-close and must be re-driven. Omitting it is how a
-        crash inside that one frame became a permanent, unalerted park.
+        Historical ``recovery_required`` is included because it is not a
+        resting state (CLAUDE.md invariant 11): an owner still attached there
+        must be re-driven through the current fail-to-wanted terminal bundle.
         """
         cur = self._execute("""
             SELECT job.*
@@ -1133,73 +1100,6 @@ class _ImportJobsMixin(
         ))
         row = cur.fetchone()
         return ImportJob.from_row(dict(row)) if row else None
-
-
-    def mark_import_job_recovery_required(
-        self,
-        job_id: int,
-        *,
-        reason: str,
-        expected_execution_lease: ExecutionLeaseSnapshot | None = None,
-    ) -> ImportJob | None:
-        """Stop a launched-but-unacknowledged job for operator recovery."""
-        lease = _lease_values(expected_execution_lease)
-        child = _child_lease_values(expected_execution_lease)
-        cur = self._execute("""
-            UPDATE import_jobs AS job
-            SET status = 'recovery_required',
-                message = %s,
-                error = %s,
-                worker_id = NULL,
-                heartbeat_at = NULL,
-                updated_at = NOW()
-            WHERE id = %s
-              AND status = 'running'
-              AND beets_launch_authorized_at IS NOT NULL
-              AND (
-                  job.job_type <> 'automation_import'
-                  OR (
-                      %s IS NOT NULL
-                      AND EXISTS (
-                          SELECT 1
-                          FROM album_requests AS request
-                          WHERE request.id = job.request_id
-                            AND request.status = 'processing'
-                            AND request.active_automation_import_job_id = job.id
-                      )
-                      AND job.preview_status = 'evidence_ready'
-                      AND job.execution_invocation_id = %s
-                      AND job.execution_host_boot_id = %s
-                      AND job.execution_systemd_unit = %s
-                      AND job.execution_worker_pid = %s
-                      AND job.execution_worker_start_ticks = %s
-                      AND job.execution_beets_pid IS NOT DISTINCT FROM %s
-                      AND job.execution_beets_start_ticks
-                          IS NOT DISTINCT FROM %s
-                  )
-              )
-            RETURNING *
-        """, (
-            f"Recovery required: {reason}",
-            "Automatic replay refused because Beets may have mutated the library",
-            job_id,
-            lease[0],
-            *lease,
-            *child,
-        ))
-        row = cur.fetchone()
-        return ImportJob.from_row(dict(row)) if row else None
-
-
-    def _automation_recovery_write_boundary(
-        self,
-        index: int,
-        label: str,
-    ) -> None:
-        """Post-write fault-injection seam; production deliberately does nothing."""
-        del index, label
-
-
     def require_automation_recovery_owner(
         self,
         expected: AutomationRecoveryCAS,
@@ -1239,567 +1139,6 @@ class _ImportJobsMixin(
             raise AutomationRecoveryEvidenceChanged(
                 "automation recovery owner evidence changed"
             )
-
-
-    def require_automation_recovery_cas(
-        self,
-        expected: AutomationRecoveryCAS,
-    ) -> None:
-        """Lock and compare the complete owner plus cleanup observation."""
-        with self._atomic(), self.conn.cursor(
-            cursor_factory=psycopg2.extras.RealDictCursor,
-        ) as cur:
-            scope = self._lock_processing_cleanup_scope(
-                cur,
-                request_id=expected.request_id,
-            )
-            cur.execute(
-                "SELECT * FROM album_requests WHERE id = %s",
-                (expected.request_id,),
-            )
-            request_raw = cur.fetchone()
-            cur.execute(
-                """
-                SELECT *
-                FROM import_jobs
-                WHERE id = %s AND request_id = %s
-                """,
-                (expected.job_id, expected.request_id),
-            )
-            job_raw = cur.fetchone()
-            journal = self._get_processing_cleanup_journal_locked(
-                request_id=expected.request_id,
-                job_id=expected.job_id,
-                scope=scope,
-            )
-            if (
-                not _recovery_owner_matches(
-                    expected,
-                    request=(
-                        None if request_raw is None else dict(request_raw)
-                    ),
-                    job=None if job_raw is None else dict(job_raw),
-                )
-                or not _recovery_cleanup_matches(expected, journal)
-            ):
-                self.conn.rollback()
-                raise AutomationRecoveryEvidenceChanged(
-                    "automation recovery evidence changed"
-                )
-            self.conn.commit()
-
-
-    def retry_automation_import_recovery(
-        self,
-        expected: AutomationRecoveryCAS,
-        *,
-        expected_execution_lease: ExecutionLeaseSnapshot | None,
-        liveness: ExecutionLivenessDecision,
-        reason: str,
-        evidence_revision: str,
-    ) -> AutomationRecoveryRetryApplied | None:
-        """Atomically replace one exact dead recovery owner with a fresh job."""
-        reason = reason.strip()
-        if not reason:
-            raise ValueError("automation recovery retry requires a reason")
-        if not evidence_revision.strip():
-            raise ValueError(
-                "automation recovery retry requires an evidence revision"
-            )
-        if expected.job_status != "recovery_required":
-            return None
-        if not _decision_proves_exact_lease_dead(
-            liveness,
-            expected_execution_lease,
-        ):
-            return None
-        if (
-            _lease_values(expected_execution_lease)
-            != (
-                expected.execution_invocation_id,
-                expected.execution_host_boot_id,
-                expected.execution_systemd_unit,
-                expected.execution_worker_pid,
-                expected.execution_worker_start_ticks,
-            )
-            or _child_lease_values(expected_execution_lease)
-            != (
-                expected.execution_beets_pid,
-                expected.execution_beets_start_ticks,
-            )
-        ):
-            return None
-
-        with self.advisory_lock(
-            ADVISORY_LOCK_NAMESPACE_IMPORT,
-            expected.request_id,
-        ) as acquired:
-            if not acquired:
-                return None
-            with self._atomic(), self.conn.cursor(
-                cursor_factory=psycopg2.extras.RealDictCursor,
-            ) as cur:
-                scope = self._lock_processing_cleanup_scope(
-                    cur,
-                    request_id=expected.request_id,
-                )
-                cur.execute(
-                    """
-                    SELECT *
-                    FROM album_requests
-                    WHERE id = %s
-                    """,
-                    (expected.request_id,),
-                )
-                request_raw = cur.fetchone()
-                cur.execute(
-                    """
-                    SELECT *
-                    FROM import_jobs
-                    WHERE id = %s AND request_id = %s
-                    """,
-                    (expected.job_id, expected.request_id),
-                )
-                job_raw = cur.fetchone()
-                journal = self._get_processing_cleanup_journal_locked(
-                    request_id=expected.request_id,
-                    job_id=expected.job_id,
-                    scope=scope,
-                )
-                if (
-                    not _recovery_owner_matches(
-                        expected,
-                        request=(
-                            None
-                            if request_raw is None
-                            else dict(request_raw)
-                        ),
-                        job=None if job_raw is None else dict(job_raw),
-                    )
-                    or not _recovery_cleanup_matches(expected, journal)
-                ):
-                    self.conn.rollback()
-                    return None
-                assert job_raw is not None
-                original = ImportJob.from_row(dict(job_raw))
-
-                recovery_result = {
-                    "recovery_resolution": {
-                        "resolution": "retry",
-                        "reason": reason,
-                        "evidence_revision": evidence_revision,
-                    },
-                }
-                cur.execute(
-                    """
-                    UPDATE import_jobs
-                    SET status = 'failed',
-                        result = COALESCE(result, '{}'::jsonb) || %s::jsonb,
-                        message = %s,
-                        error = %s,
-                        worker_id = NULL,
-                        heartbeat_at = NULL,
-                        completed_at = NOW(),
-                        updated_at = NOW()
-                    WHERE id = %s
-                      AND request_id = %s
-                      AND status = 'recovery_required'
-                    RETURNING *
-                    """,
-                    (
-                        psycopg2.extras.Json(recovery_result),
-                        f"Operator authorized a fresh retry: {reason}",
-                        "Ambiguous Beets operation closed before fresh retry",
-                        expected.job_id,
-                        expected.request_id,
-                    ),
-                )
-                resolved_raw = cur.fetchone()
-                if resolved_raw is None:
-                    self.conn.rollback()
-                    return None
-                self._automation_recovery_write_boundary(1, "old_job.failed")
-                resolved = ImportJob.from_row(dict(resolved_raw))
-
-                retry_status = (
-                    "recovery_required"
-                    if journal is not None
-                    else "queued"
-                )
-                retry_message = (
-                    "Recovery retry retargeted an unresolved processing "
-                    f"cleanup journal from job {original.id}; reconcile "
-                    "cleanup before replay"
-                    if journal is not None
-                    else (
-                        "Operator-authorized retry of recovery job "
-                        f"{original.id}: {reason}"
-                    )
-                )
-                cur.execute(
-                    """
-                    INSERT INTO import_jobs (
-                        job_type,
-                        status,
-                        request_id,
-                        dedupe_key,
-                        payload,
-                        message,
-                        preview_status,
-                        preview_result,
-                        preview_message,
-                        preview_error,
-                        preview_attempts,
-                        preview_completed_at,
-                        importable_at,
-                        candidate_evidence_id,
-                        expected_request_status
-                    )
-                    VALUES (
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s
-                    )
-                    RETURNING *
-                    """,
-                    (
-                        original.job_type,
-                        retry_status,
-                        original.request_id,
-                        original.dedupe_key,
-                        psycopg2.extras.Json(
-                            msgspec.to_builtins(original.payload)
-                        ),
-                        retry_message,
-                        original.preview_status,
-                        (
-                            None
-                            if original.preview_result is None
-                            else psycopg2.extras.Json(
-                                original.preview_result
-                            )
-                        ),
-                        original.preview_message,
-                        original.preview_error,
-                        original.preview_attempts,
-                        original.preview_completed_at,
-                        original.importable_at,
-                        original.candidate_evidence_id,
-                        original.expected_request_status,
-                    ),
-                )
-                retry_raw = cur.fetchone()
-                if retry_raw is None:
-                    raise RuntimeError(
-                        "automation recovery retry insert returned no row"
-                    )
-                retry = ImportJob.from_row(dict(retry_raw))
-                self._automation_recovery_write_boundary(2, "retry_job.inserted")
-
-                retargeted: ProcessingCleanupJournalRow | None = None
-                if journal is not None:
-                    retargeted = (
-                        self._retarget_processing_cleanup_journal_locked(
-                            cur,
-                            request_id=expected.request_id,
-                            old_job_id=expected.job_id,
-                            new_job_id=retry.id,
-                            expected_revision=journal["revision"],
-                            scope=scope,
-                        )
-                    )
-                    if retargeted is None:
-                        raise CleanupJournalConflict(
-                            "retarget_conflict",
-                            "cleanup journal disappeared during retry",
-                        )
-                    self._automation_recovery_write_boundary(
-                        3,
-                        "cleanup_journal.retargeted",
-                    )
-
-                cur.execute(
-                    """
-                    UPDATE album_requests
-                    SET active_automation_import_job_id = %s,
-                        updated_at = NOW()
-                    WHERE id = %s
-                      AND status = 'processing'
-                      AND active_automation_import_job_id = %s
-                    RETURNING id
-                    """,
-                    (
-                        retry.id,
-                        expected.request_id,
-                        expected.job_id,
-                    ),
-                )
-                if cur.fetchone() is None:
-                    raise AutomationRecoveryEvidenceChanged(
-                        "processing owner changed during recovery retry"
-                    )
-                self._automation_recovery_write_boundary(
-                    4,
-                    "request.owner_retargeted",
-                )
-                self.conn.commit()
-                return AutomationRecoveryRetryApplied(
-                    original=resolved,
-                    retry=retry,
-                    journal=retargeted,
-                )
-
-
-    def resolve_import_job_recovery(
-        self,
-        job_id: int,
-        *,
-        resolution: str,
-        reason: str,
-    ) -> tuple[ImportJob, ImportJob | None] | None:
-        """Resolve one recovery row, optionally creating a new operation.
-
-        ``retry`` closes the ambiguous operation and inserts a fresh job ID;
-        it never reuses the operation that may already have reached Beets.
-        ``close`` records that the operator reconciled the external state and
-        intentionally schedules no replay.
-        """
-        if resolution not in ("retry", "close"):
-            raise ValueError(f"Invalid import recovery resolution: {resolution}")
-        reason = reason.strip()
-        if not reason:
-            raise ValueError("Import recovery resolution requires a reason")
-
-        candidate_cur = self._execute(
-            "SELECT job.request_id FROM import_jobs AS job "
-            "WHERE job.id = %s "
-            "AND job.job_type <> 'automation_import' "
-            "AND NOT EXISTS ("
-            "    SELECT 1 FROM album_requests AS request "
-            "    WHERE request.active_automation_import_job_id = job.id"
-            ")",
-            (job_id,),
-        )
-        candidate = candidate_cur.fetchone()
-        if candidate is None:
-            return None
-        candidate_request_id = candidate["request_id"]
-        request_id = (
-            int(candidate_request_id)
-            if candidate_request_id is not None
-            else None
-        )
-        if request_id is None:
-            return self._resolve_import_job_recovery_under_lock(
-                job_id,
-                request_id=None,
-                resolution=resolution,
-                reason=reason,
-            )
-        with self.advisory_lock(
-            ADVISORY_LOCK_NAMESPACE_IMPORT,
-            request_id,
-        ) as acquired:
-            if not acquired:
-                return None
-            return self._resolve_import_job_recovery_under_lock(
-                job_id,
-                request_id=request_id,
-                resolution=resolution,
-                reason=reason,
-            )
-
-
-    def _resolve_import_job_recovery_under_lock(
-        self,
-        job_id: int,
-        *,
-        request_id: int | None,
-        resolution: str,
-        reason: str,
-    ) -> tuple[ImportJob, ImportJob | None] | None:
-        """Resolve after IMPORT, locking request before its recovery job."""
-        with self._atomic():
-            request_authority = None
-            if request_id is not None:
-                request_cur = self._execute("""
-                    SELECT status, mb_release_id
-                    FROM album_requests
-                    WHERE id = %s
-                    FOR UPDATE
-                """, (request_id,))
-                request_authority = request_cur.fetchone()
-                if request_authority is None:
-                    self.conn.rollback()
-                    return None
-            cur = self._execute(
-                "SELECT * FROM import_jobs AS job "
-                "WHERE job.id = %s "
-                "AND job.request_id IS NOT DISTINCT FROM %s "
-                "AND job.job_type <> 'automation_import' "
-                "AND NOT EXISTS ("
-                "    SELECT 1 FROM album_requests AS request "
-                "    WHERE request.active_automation_import_job_id = job.id"
-                ") "
-                "FOR UPDATE",
-                (job_id, request_id),
-            )
-            raw = cur.fetchone()
-            if raw is None or raw["status"] != "recovery_required":
-                self.conn.rollback()
-                return None
-            original = ImportJob.from_row(dict(raw))
-
-            if resolution == "retry":
-                evidence_cur = self._execute("""
-                    SELECT snapshot_fingerprint
-                    FROM album_quality_evidence
-                    WHERE id = %s
-                """, (original.candidate_evidence_id,))
-                evidence = evidence_cur.fetchone()
-                if (
-                    request_authority is None
-                    or evidence is None
-                    or request_authority["status"]
-                    != original.beets_launch_request_status
-                    or request_authority["mb_release_id"]
-                    != original.beets_launch_release_id
-                    or evidence["snapshot_fingerprint"]
-                    != original.beets_launch_snapshot_fingerprint
-                ):
-                    self.conn.rollback()
-                    return None
-
-                expected_source = None
-                if original.job_type == "force_import":
-                    if not isinstance(original.payload, ForceImportPayload):
-                        raise AssertionError("force_import payload type mismatch")
-                    expected_source = original.payload.failed_path
-                elif original.job_type == "youtube_import":
-                    if not isinstance(original.payload, YoutubeImportPayload):
-                        raise AssertionError("youtube_import payload type mismatch")
-                    expected_source = original.payload.staged_path
-                else:
-                    self.conn.rollback()
-                    return None
-                if expected_source != original.beets_launch_source_path:
-                    self.conn.rollback()
-                    return None
-
-            resolution_result = {
-                "recovery_resolution": {
-                    "resolution": resolution,
-                    "reason": reason,
-                },
-            }
-            resolved_cur = self._execute("""
-                UPDATE import_jobs
-                SET status = 'failed',
-                    result = COALESCE(result, '{}'::jsonb) || %s::jsonb,
-                    message = %s,
-                    error = %s,
-                    worker_id = NULL,
-                    heartbeat_at = NULL,
-                    completed_at = NOW(),
-                    updated_at = NOW()
-                WHERE id = %s
-                  AND status = 'recovery_required'
-                RETURNING *
-            """, (
-                psycopg2.extras.Json(resolution_result),
-                (
-                    f"Operator authorized a fresh retry: {reason}"
-                    if resolution == "retry"
-                    else f"Operator resolved without replay: {reason}"
-                ),
-                (
-                    "Ambiguous Beets operation closed before fresh retry"
-                    if resolution == "retry"
-                    else "Ambiguous Beets operation closed by operator"
-                ),
-                job_id,
-            ))
-            resolved_raw = resolved_cur.fetchone()
-            if resolved_raw is None:
-                self.conn.rollback()
-                return None
-            resolved = ImportJob.from_row(dict(resolved_raw))
-
-            retry: ImportJob | None = None
-            if resolution == "retry":
-                retry_cur = self._execute("""
-                    INSERT INTO import_jobs (
-                        job_type,
-                        request_id,
-                        dedupe_key,
-                        payload,
-                        message,
-                        preview_status,
-                        preview_result,
-                        preview_message,
-                        preview_error,
-                        preview_attempts,
-                        preview_completed_at,
-                        importable_at,
-                        candidate_evidence_id,
-                        expected_request_status
-                )
-                VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s
-                )
-                    RETURNING *
-                """, (
-                    original.job_type,
-                    original.request_id,
-                    original.dedupe_key,
-                    psycopg2.extras.Json(msgspec.to_builtins(original.payload)),
-                    f"Operator-authorized retry of recovery job {original.id}",
-                    (
-                        IMPORT_JOB_PREVIEW_WAITING
-                        if original.job_type == "force_import"
-                        else original.preview_status
-                    ),
-                    (
-                        None
-                        if original.job_type == "force_import"
-                        else (
-                            psycopg2.extras.Json(original.preview_result)
-                            if original.preview_result is not None
-                            else None
-                        )
-                    ),
-                    (
-                        None if original.job_type == "force_import"
-                        else original.preview_message
-                    ),
-                    (
-                        None if original.job_type == "force_import"
-                        else original.preview_error
-                    ),
-                    0 if original.job_type == "force_import" else original.preview_attempts,
-                    (
-                        None if original.job_type == "force_import"
-                        else original.preview_completed_at
-                    ),
-                    (
-                        None if original.job_type == "force_import"
-                        else original.importable_at
-                    ),
-                    (
-                        None if original.job_type == "force_import"
-                        else original.candidate_evidence_id
-                    ),
-                    original.expected_request_status,
-                ))
-                retry_raw = retry_cur.fetchone()
-                if retry_raw is None:
-                    raise RuntimeError("import recovery retry insert returned no row")
-                retry = ImportJob.from_row(dict(retry_raw))
-
-            self.conn.commit()
-        return resolved, retry
-
-
     def mark_import_job_failed(
         self,
         job_id: int,
@@ -1855,7 +1194,7 @@ class _ImportJobsMixin(
         recovery_message: str,
         limit: int = 50,
     ) -> list[ImportJob]:
-        """Recover abandoned jobs without replaying possible Beets effects."""
+        """Requeue unlaunched jobs and fail launched ambiguous operations."""
         cur = self._execute("""
             WITH running AS (
                 SELECT id, beets_launch_authorized_at
@@ -1869,7 +1208,7 @@ class _ImportJobsMixin(
             SET status = CASE
                     WHEN running.beets_launch_authorized_at IS NULL
                         THEN 'queued'
-                    ELSE 'recovery_required'
+                    ELSE 'failed'
                 END,
                 message = CASE
                     WHEN running.beets_launch_authorized_at IS NULL
@@ -1888,6 +1227,11 @@ class _ImportJobsMixin(
                     ELSE import_jobs.started_at
                 END,
                 heartbeat_at = NULL,
+                completed_at = CASE
+                    WHEN running.beets_launch_authorized_at IS NULL
+                        THEN NULL
+                    ELSE NOW()
+                END,
                 updated_at = NOW()
             FROM running
             WHERE import_jobs.id = running.id
@@ -1926,7 +1270,7 @@ class _ImportJobsMixin(
         LIVENESS AMBIGUITY IS NOT WORLD AMBIGUITY — do not "fix" this by
         recovering an unproven lease. Invariant 11 says an ambiguous WORLD
         (half-finished cleanup, unacknowledged Beets child) must be recorded
-        and restarted, and that is what the close above does. An unproven
+        and restarted, and that is what terminal convergence above does. An unproven
         EXECUTION is a different thing: it is an unfinished observation of one
         of our own processes, and treating it as dead would steal a live
         worker's request mid-flight, which is the one failure no later cycle
@@ -1935,11 +1279,10 @@ class _ImportJobsMixin(
         provable. So the gate below stays exact: status ``dead`` AND evidence
         about this exact lease, or nothing happens at all.
 
-        ``expected_execution_lease`` is ``None`` for an owner no execution ever
-        claimed — the leaseless replacement an operator retry mints when it
-        retargets an unresolved cleanup journal. ``never_claimed`` is a real
-        death proof, not a weakening of one, so such an owner converges on a
-        re-probe instead of resting where only an operator can reach it.
+        ``expected_execution_lease`` may be ``None`` only for an owner no
+        execution ever claimed. ``never_claimed`` is a real death proof, not a
+        weakening of one, so such an owner converges on a re-probe instead of
+        resting indefinitely.
         """
         if not _decision_proves_exact_lease_dead(
             decision,
@@ -1985,7 +1328,7 @@ class _ImportJobsMixin(
                     expected_execution_lease=expected_execution_lease,
                     requeue_message=requeue_message,
                 )
-            return self._close_abandoned_automation_owner(
+            return self._fail_abandoned_automation_owner(
                 job,
                 request_id=request_id,
                 expected_execution_lease=expected_execution_lease,
@@ -2093,7 +1436,7 @@ class _ImportJobsMixin(
             return ImportJob.from_row(dict(row))
 
 
-    def _close_abandoned_automation_owner(
+    def _fail_abandoned_automation_owner(
         self,
         job: ImportJob,
         *,
@@ -2101,7 +1444,7 @@ class _ImportJobsMixin(
         expected_execution_lease: ExecutionLeaseSnapshot | None,
         reason: str,
     ) -> ImportJob | None:
-        """Close a dead owner into ``wanted`` without inventing cleanup proof.
+        """Fail a dead owner into ``wanted`` without inventing cleanup proof.
 
         Cleanup runs FIRST and while the dead owner is still attached, because
         the terminal bundle consumes the receipt it produces and the deferred
@@ -2168,30 +1511,7 @@ class _ImportJobsMixin(
                     f"({exc.code}): {exc}"
                 )
             completion_receipt = automation_completion_receipt(job)
-            expected_job_status: Literal["queued", "running", "recovery_required"]
             expected_job_status = _job_terminal_stage(job.status)
-            if (
-                job.beets_launch_authorized_at is not None
-                and completion_receipt is None
-                and expected_job_status != "recovery_required"
-            ):
-                # The owner authority refuses a ``running`` terminal write for
-                # a launched job that never captured its completion receipt --
-                # and that missing receipt IS the ambiguity being closed.
-                # ``recovery_required`` is the one stage the CAS accepts
-                # without it, so the ambiguity transits that stage and is
-                # closed in this same frame. It never RESTS there: a crash
-                # inside this window leaves the owner ATTACHED at
-                # ``recovery_required``, which the recovery query deliberately
-                # selects so the next pass finishes the close.
-                staged = self.mark_import_job_recovery_required(
-                    job.id,
-                    reason=reason,
-                    expected_execution_lease=expected_execution_lease,
-                )
-                if staged is None:
-                    return None
-                expected_job_status = "recovery_required"
             pending = _local_completion_terminal_outcome(
                 reconstruct_grab_list_entry(row, state),
                 state,
@@ -2219,7 +1539,7 @@ class _ImportJobsMixin(
                 ).with_job(ImportJobTerminal(
                     status="failed",
                     error=detail,
-                    result={"automation_recovery_self_heal": {"reason": reason}},
+                    result={"automation_recovery_self_heal": reason},
                     message=detail,
                 ))
             )
@@ -2229,7 +1549,7 @@ class _ImportJobsMixin(
             ImportJobTerminalConflict,
         ):
             logger.exception(
-                "Abandoned automation owner %s could not be closed yet (%s); "
+                "Abandoned automation owner %s could not be failed yet (%s); "
                 "leaving it for the next liveness re-probe",
                 job.id,
                 reason,

@@ -201,8 +201,6 @@ ALLOWLIST: dict[str, str] = {
         "status transition over dead-lease rows; no dict payload",
     "recover_automation_import_job":
         "exact-owner status transition; no dict payload",
-    "retry_automation_import_recovery":
-        "exact-owner status/revision CAS; no dict payload",
     # Search-plan creators. Persisted plans are read back through
     # get_search_plan / plan-item readers in tests/test_pipeline_db.py
     # (TestPersistedSearchPlanCRUD), which the

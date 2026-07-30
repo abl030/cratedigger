@@ -6,9 +6,9 @@ for the whole bounded lifecycle:
 ``wanted -> downloading -> processing -> {wanted, imported}``
 
 It deliberately interleaves stale A/B download witnesses, exact and wrong job
-IDs, preview/import execution death, recovery retry/close, and operator
-invalidators.  A small independent oracle checks the ownership predicate,
-handoff witness, terminal all-or-none shape, and recovery retarget.
+IDs, preview/import execution death, automatic world-failure recovery, and
+operator invalidators. A small independent oracle checks the ownership
+predicate, handoff witness, and terminal all-or-none shape.
 
 Profiles, promotion policy, and fault-injection qualification:
 ``docs/generated-testing.md``.
@@ -43,27 +43,16 @@ from lib.import_execution import (
     OwnerSessionIdentity,
     ProcessIdentity,
 )
-from lib.import_job_recovery_service import (
-    apply_import_job_recovery,
-    get_automation_recovery_detail,
-)
 from lib.import_queue import (
     IMPORT_JOB_ACTIVE_STATUSES,
     IMPORT_JOB_FORCE,
     IMPORT_JOB_PREVIEW_EVIDENCE_READY,
     IMPORT_JOB_PREVIEW_RUNNING,
     IMPORT_JOB_PREVIEW_WAITING,
-    IMPORT_JOB_RECOVERY_REQUIRED,
     force_import_payload,
 )
-from lib.pipeline_db.cleanup_journal import CleanupJournalIntent
 from lib.pipeline_delete_service import delete_pipeline_request
-from lib.processing_cleanup import (
-    cleanup_manifest_hash,
-    execute_processing_cleanup,
-)
 from lib.quality import ActiveDownloadState
-from lib.terminal_outcomes import automation_recovery_close_outcome
 from tests.fakes import FakePipelineDB
 from tests.helpers import (
     claim_next_import_job,
@@ -91,7 +80,6 @@ LifecycleStage = Literal[
     "preview_running",
     "preview_ready",
     "import_running",
-    "recovery_required",
 ]
 
 
@@ -104,7 +92,6 @@ class _LifecycleOracle:
     preview_lease: ExecutionLeaseSnapshot | None = None
     import_lease: ExecutionLeaseSnapshot | None = None
     launched: bool = False
-    cleanup_journal_present: bool = False
 
 
 @dataclass(frozen=True)
@@ -264,10 +251,6 @@ class _GeneratedStageSession:
         return None
 
 
-class _InjectedLifecycleFailure(RuntimeError):
-    pass
-
-
 class _ChangedBootProbe:
     """A reproducible proof that the exact persisted execution is dead."""
 
@@ -349,44 +332,6 @@ def _assert_terminal_all_or_none(
         raise AssertionError(f"partial terminal bundle: {after!r}")
 
 
-def _assert_retry_retarget(
-    *,
-    old_job_id: int,
-    old_status: str,
-    new_job_id: int,
-    new_status: str,
-    request_owner_job_id: int | None,
-    old_journal_present: bool,
-    new_journal_revision: int | None,
-    expected_new_journal_revision: int | None,
-) -> None:
-    """The fresh job, request pointer, and journal move as one unit."""
-    if old_status != "failed":
-        raise AssertionError(
-            f"retry left old job {old_job_id} active as {old_status!r}"
-        )
-    expected_status = (
-        "recovery_required"
-        if expected_new_journal_revision is not None
-        else "queued"
-    )
-    if new_job_id == old_job_id or new_status != expected_status:
-        raise AssertionError(
-            f"retry did not create a fresh {expected_status} job: "
-            f"{old_job_id} -> {new_job_id} ({new_status!r})"
-        )
-    if request_owner_job_id != new_job_id:
-        raise AssertionError(
-            f"request still points at {request_owner_job_id!r}, "
-            f"want {new_job_id}"
-        )
-    if old_journal_present:
-        raise AssertionError("retry retained the cleanup journal on the old job")
-    if new_journal_revision != expected_new_journal_revision:
-        raise AssertionError(
-            "retry journal retarget mismatch: "
-            f"{new_journal_revision!r} != {expected_new_journal_revision!r}"
-        )
 
 
 def _mutant_owner_ignores_pointer(
@@ -429,30 +374,6 @@ def _database_snapshot(db: FakePipelineDB) -> object:
     ))
 
 
-def _terminal_facts(
-    db: FakePipelineDB,
-    *,
-    request_id: int,
-    job_id: int,
-) -> _TerminalFacts:
-    request = db.request(request_id)
-    job = db.get_import_job(job_id)
-    assert job is not None
-    return _TerminalFacts(
-        request_released=(
-            request["status"] == "wanted"
-            and request["active_automation_import_job_id"] is None
-        ),
-        audit_present=bool(db.get_download_history(request_id)),
-        job_terminal=job.status == "failed",
-        cleanup_consumed=(
-            db.get_processing_cleanup_journal(
-                request_id=request_id,
-                job_id=job_id,
-            )
-            is None
-        ),
-    )
 
 
 def _seed_candidate(
@@ -510,63 +431,6 @@ def _new_owner_db(
     return db, handoff.job.id
 
 
-def _launched_owner_db(
-    *,
-    witness: str = _WITNESS_A,
-) -> tuple[FakePipelineDB, int, ExecutionLeaseSnapshot]:
-    db, job_id = _new_owner_db(witness=witness)
-    preview_lease = _execution_lease("preview", job_id, 1)
-    claimed_preview = claim_next_import_preview_job(db, worker_id="generated-preview",
-    execution_lease=preview_lease,)
-    assert claimed_preview is not None and claimed_preview.id == job_id
-    _seed_candidate(
-        db,
-        job_id=job_id,
-        execution_lease=preview_lease,
-    )
-    assert db.mark_import_job_preview_importable(
-        job_id,
-        preview_result={"ready": True},
-        expected_execution_lease=preview_lease,
-    ) is not None
-    import_lease = _execution_lease("import", job_id, 2)
-    claimed_import = claim_next_import_job(db, worker_id="generated-import",
-    execution_lease=import_lease,)
-    assert claimed_import is not None and claimed_import.id == job_id
-    assert db.authorize_import_job_launch(
-        job_id,
-        request_id=_REQUEST_ID,
-        release_id=_RELEASE_ID,
-        source_path=_CANONICAL_PATH,
-        expected_execution_lease=import_lease,
-    ) is not None
-    return db, job_id, import_lease
-
-
-def _stage_launched_owner_for_close(
-    db: FakePipelineDB,
-    *,
-    job_id: int,
-    execution_lease: ExecutionLeaseSnapshot,
-) -> None:
-    """Put one launched owner into the momentary ``recovery_required`` stage.
-
-    ``recovery_required`` is no longer a resting state (CLAUDE.md invariant
-    11): startup recovery now closes an abandoned launched owner itself rather
-    than parking it, and the operator-facing close/retry commands below are the
-    only remaining consumers of the stage. Rule C — this stages it through the
-    one production writer that still produces it, ``mark_import_job_recovery_
-    required``, instead of a policy the recovery sweep no longer applies.
-    """
-    staged = db.mark_import_job_recovery_required(
-        job_id,
-        reason="generated ambiguous launched operation",
-        expected_execution_lease=execution_lease,
-    )
-    if staged is None or staged.status != IMPORT_JOB_RECOVERY_REQUIRED:
-        raise AssertionError(
-            f"launched owner could not be staged for close: {staged!r}"
-        )
 
 
 class ProcessingLifecycleMachine(RuleBasedStateMachine):
@@ -779,6 +643,8 @@ class ProcessingLifecycleMachine(RuleBasedStateMachine):
     )
     @rule(child_started=st.booleans())
     def recover_dead_import(self, child_started: bool) -> None:
+        from scripts import importer
+
         assert self.oracle.owner_job_id is not None
         assert self.oracle.import_lease is not None
         if child_started:
@@ -797,153 +663,20 @@ class ProcessingLifecycleMachine(RuleBasedStateMachine):
                 self.oracle.import_lease,
                 beets=child,
             )
-        _stage_launched_owner_for_close(
+        recovered = importer.recover_abandoned_automation_owners(
             self.db,
-            job_id=self.oracle.owner_job_id,
-            execution_lease=self.oracle.import_lease,
+            liveness_probe=_ChangedBootProbe(),
         )
-        self.oracle.stage = "recovery_required"
-
-    @precondition(
-        lambda self: self.oracle.stage == "recovery_required"
-        and self.oracle.owner_job_id is not None
-    )
-    @rule(with_journal=st.booleans())
-    def retry_recovery(self, with_journal: bool) -> None:
-        assert self.oracle.owner_job_id is not None
-        old_job_id = self.oracle.owner_job_id
-        journal = self.db.get_processing_cleanup_journal(
-            request_id=_REQUEST_ID,
-            job_id=old_job_id,
+        self.assert_or_raise(
+            [job.id for job in recovered] == [self.oracle.owner_job_id]
         )
-        if journal is None and with_journal:
-            journal = self.db.create_processing_cleanup_journal(
-                request_id=_REQUEST_ID,
-                job_id=old_job_id,
-                intent=CleanupJournalIntent(
-                    action="no_op",
-                    source_path=_CANONICAL_PATH,
-                    source_manifest=(),
-                    source_manifest_hash=cleanup_manifest_hash(()),
-                ),
-            )
-        old_revision = None if journal is None else journal["revision"]
-        probe = _ChangedBootProbe()
-        detail = get_automation_recovery_detail(
-            self.db,
-            None,
-            old_job_id,
-            liveness_probe=probe,
-        )
-        assert detail.detail is not None
-        result = apply_import_job_recovery(
-            self.db,
-            None,
-            old_job_id,
-            action="retry",
-            reason="generated exact-dead retry",
-            evidence_revision=detail.detail.evidence_revision,
-            liveness_probe=probe,
-        )
-        expected_outcome = (
-            "retry_recovery_required"
-            if journal is not None
-            else "retry_queued"
-        )
-        self.assert_or_raise(result.outcome == expected_outcome)
-        assert result.retry_job is not None
-        old = self.db.get_import_job(old_job_id)
-        new = self.db.get_import_job(result.retry_job.id)
-        assert old is not None and new is not None
-        moved = self.db.get_processing_cleanup_journal(
-            request_id=_REQUEST_ID,
-            job_id=result.retry_job.id,
-        )
-        _assert_retry_retarget(
-            old_job_id=old_job_id,
-            old_status=old.status,
-            new_job_id=new.id,
-            new_status=new.status,
-            request_owner_job_id=self.db.request(_REQUEST_ID)[
-                "active_automation_import_job_id"
-            ],
-            old_journal_present=(
-                self.db.get_processing_cleanup_journal(
-                    request_id=_REQUEST_ID,
-                    job_id=old_job_id,
-                )
-                is not None
-            ),
-            new_journal_revision=(
-                None if moved is None else moved["revision"]
-            ),
-            expected_new_journal_revision=(
-                None if old_revision is None else old_revision + 1
-            ),
-        )
-        if journal is not None:
-            self.assert_or_raise(claim_next_import_preview_job(self.db, worker_id="generated-must-not-replay-preview",
-            execution_lease=_execution_lease(
-                "preview",
-                new.id,
-                self.generation + 1,
-            ),) is None)
-            self.assert_or_raise(claim_next_import_job(self.db, worker_id="generated-must-not-replay-import",
-            execution_lease=_execution_lease(
-                "import",
-                new.id,
-                self.generation + 1,
-            ),) is None)
-        self.oracle.owner_job_id = new.id
-        self.oracle.stage = (
-            "recovery_required"
-            if journal is not None
-            else "preview_ready"
-        )
-        self.oracle.preview_lease = None
-        self.oracle.import_lease = None
-        self.oracle.launched = False
-        self.oracle.cleanup_journal_present = journal is not None
-
-    @precondition(
-        lambda self: self.oracle.stage == "recovery_required"
-        and self.oracle.owner_job_id is not None
-        and not self.oracle.cleanup_journal_present
-    )
-    @rule(result_status=st.sampled_from(("wanted", "imported")))
-    def close_recovery(
-        self,
-        result_status: Literal["wanted", "imported"],
-    ) -> None:
-        assert self.oracle.owner_job_id is not None
-        job_id = self.oracle.owner_job_id
-        probe = _ChangedBootProbe()
-        detail = get_automation_recovery_detail(
-            self.db,
-            None,
-            job_id,
-            liveness_probe=probe,
-        )
-        assert detail.detail is not None
-        result = apply_import_job_recovery(
-            self.db,
-            None,
-            job_id,
-            action="close",
-            reason="generated explicit recovery close",
-            evidence_revision=detail.detail.evidence_revision,
-            result_status=result_status,
-            liveness_probe=probe,
-        )
-        self.assert_or_raise(result.outcome == "closed")
-        self.oracle.status = result_status
+        self.oracle.status = "wanted"
         self.oracle.stage = "none"
         self.oracle.witness = None
         self.oracle.owner_job_id = None
         self.oracle.preview_lease = None
         self.oracle.import_lease = None
         self.oracle.launched = False
-        self.oracle.cleanup_journal_present = False
 
     @precondition(
         lambda self: self.oracle.status == "processing"
@@ -1076,13 +809,6 @@ class ProcessingLifecycleMachine(RuleBasedStateMachine):
         )
         job = self._current_job()
         assert job is not None
-        journal = self.db.get_processing_cleanup_journal(
-            request_id=_REQUEST_ID,
-            job_id=job.id,
-        )
-        self.assert_or_raise(
-            (journal is not None) == self.oracle.cleanup_journal_present
-        )
         expected_stage = {
             "preview_waiting": ("queued", IMPORT_JOB_PREVIEW_WAITING),
             "preview_running": ("queued", IMPORT_JOB_PREVIEW_RUNNING),
@@ -1092,10 +818,6 @@ class ProcessingLifecycleMachine(RuleBasedStateMachine):
             ),
             "import_running": (
                 "running",
-                IMPORT_JOB_PREVIEW_EVIDENCE_READY,
-            ),
-            "recovery_required": (
-                IMPORT_JOB_RECOVERY_REQUIRED,
                 IMPORT_JOB_PREVIEW_EVIDENCE_READY,
             ),
         }[self.oracle.stage]
@@ -1510,210 +1232,6 @@ class TestProcessingLifecycleGenerated(unittest.TestCase):
         self.assertEqual(job.preview_status, IMPORT_JOB_PREVIEW_WAITING)
         self.assertIsNone(job.execution_invocation_id)
 
-    @given(with_journal=st.booleans())
-    @example(with_journal=True)
-    def test_dead_import_retry_retargets_every_authority(
-        self,
-        with_journal: bool,
-    ) -> None:
-        db, old_job_id, lease = _launched_owner_db()
-        _stage_launched_owner_for_close(
-            db,
-            job_id=old_job_id,
-            execution_lease=lease,
-        )
-        old_revision: int | None = None
-        if with_journal:
-            journal = db.create_processing_cleanup_journal(
-                request_id=_REQUEST_ID,
-                job_id=old_job_id,
-                intent=CleanupJournalIntent(
-                    action="no_op",
-                    source_path=_CANONICAL_PATH,
-                    source_manifest=(),
-                    source_manifest_hash=cleanup_manifest_hash(()),
-                ),
-            )
-            old_revision = journal["revision"]
-        probe = _ChangedBootProbe()
-        observed = get_automation_recovery_detail(
-            db,
-            None,
-            old_job_id,
-            liveness_probe=probe,
-        )
-        assert observed.detail is not None
-
-        result = apply_import_job_recovery(
-            db,
-            None,
-            old_job_id,
-            action="retry",
-            reason="generated retry retarget",
-            evidence_revision=observed.detail.evidence_revision,
-            liveness_probe=probe,
-        )
-
-        self.assertEqual(
-            result.outcome,
-            (
-                "retry_recovery_required"
-                if with_journal
-                else "retry_queued"
-            ),
-        )
-        assert result.retry_job is not None
-        old = db.get_import_job(old_job_id)
-        new = db.get_import_job(result.retry_job.id)
-        assert old is not None and new is not None
-        moved = db.get_processing_cleanup_journal(
-            request_id=_REQUEST_ID,
-            job_id=new.id,
-        )
-        _assert_retry_retarget(
-            old_job_id=old_job_id,
-            old_status=old.status,
-            new_job_id=new.id,
-            new_status=new.status,
-            request_owner_job_id=db.request(_REQUEST_ID)[
-                "active_automation_import_job_id"
-            ],
-            old_journal_present=(
-                db.get_processing_cleanup_journal(
-                    request_id=_REQUEST_ID,
-                    job_id=old_job_id,
-                )
-                is not None
-            ),
-            new_journal_revision=(
-                None if moved is None else moved["revision"]
-            ),
-            expected_new_journal_revision=(
-                None if old_revision is None else old_revision + 1
-            ),
-        )
-        if with_journal:
-            self.assertIsNone(claim_next_import_preview_job(db, worker_id="generated-must-not-replay-preview",
-            execution_lease=_execution_lease("preview", new.id, 2),))
-            self.assertIsNone(claim_next_import_job(db, worker_id="generated-must-not-replay-import",
-            execution_lease=_execution_lease("import", new.id, 2),))
-
-    @given(result_status=st.sampled_from(("wanted", "imported")))
-    @example(result_status="imported")
-    def test_recovery_close_is_explicit_and_consumes_owner(
-        self,
-        result_status: Literal["wanted", "imported"],
-    ) -> None:
-        db, job_id, lease = _launched_owner_db()
-        _stage_launched_owner_for_close(
-            db,
-            job_id=job_id,
-            execution_lease=lease,
-        )
-        probe = _ChangedBootProbe()
-        observed = get_automation_recovery_detail(
-            db,
-            None,
-            job_id,
-            liveness_probe=probe,
-        )
-        assert observed.detail is not None
-
-        result = apply_import_job_recovery(
-            db,
-            None,
-            job_id,
-            action="close",
-            reason=f"generated explicit {result_status}",
-            evidence_revision=observed.detail.evidence_revision,
-            result_status=result_status,
-            liveness_probe=probe,
-        )
-
-        self.assertEqual(result.outcome, "closed")
-        request = db.request(_REQUEST_ID)
-        closed = db.get_import_job(job_id)
-        assert closed is not None
-        self.assertEqual(request["status"], result_status)
-        self.assertIsNone(request["active_automation_import_job_id"])
-        self.assertIsNone(request["active_download_state"])
-        self.assertEqual(closed.status, "failed")
-        self.assertIsNone(db.get_processing_cleanup_journal(
-            request_id=_REQUEST_ID,
-            job_id=job_id,
-        ))
-
-    @given(fail_after=st.integers(min_value=0, max_value=4))
-    @example(fail_after=3)
-    def test_terminal_bundle_is_all_or_none_at_every_write_boundary(
-        self,
-        fail_after: int,
-    ) -> None:
-        db, job_id = _new_owner_db()
-        reason = "generated terminal bundle"
-        evidence_revision = "generated-terminal-revision"
-        journal = db.create_processing_cleanup_journal(
-            request_id=_REQUEST_ID,
-            job_id=job_id,
-            intent=CleanupJournalIntent(
-                action="no_op",
-                source_path=_CANONICAL_PATH,
-                source_manifest=(),
-                source_manifest_hash=cleanup_manifest_hash(()),
-                declared_result_status="wanted",
-                declared_reason=reason,
-                evidence_revision=evidence_revision,
-            ),
-        )
-        completed = execute_processing_cleanup(
-            db,
-            journal,
-            owner_checkpoint=lambda: self.assertTrue(
-                _exact_processing_owner(db.request(_REQUEST_ID), job_id)
-            ),
-        )
-        receipt = completed["completed_receipt"]
-        assert receipt is not None
-        command = automation_recovery_close_outcome(
-            request_id=_REQUEST_ID,
-            import_job_id=job_id,
-            result_status="wanted",
-            reason=reason,
-            evidence_revision=evidence_revision,
-            expected_job_status="queued",
-            expected_preview_status=IMPORT_JOB_PREVIEW_WAITING,
-            expected_execution_lease=None,
-            cleanup_receipt=receipt,
-            completion_receipt=None,
-        )
-        before = _terminal_facts(
-            db,
-            request_id=_REQUEST_ID,
-            job_id=job_id,
-        )
-
-        if fail_after:
-            def fail_boundary(index: int, label: str) -> None:
-                if index == fail_after:
-                    raise _InjectedLifecycleFailure(label)
-
-            db._terminal_outcome_write_boundary = fail_boundary
-            with self.assertRaises(_InjectedLifecycleFailure):
-                db.persist_import_terminal_outcome(command)
-        else:
-            db.persist_import_terminal_outcome(command)
-
-        after = _terminal_facts(
-            db,
-            request_id=_REQUEST_ID,
-            job_id=job_id,
-        )
-        _assert_terminal_all_or_none(before, after)
-        if fail_after:
-            self.assertEqual(after, before)
-        else:
-            self.assertEqual(after, _TerminalFacts(True, True, True, True))
-
     @given(action=st.sampled_from(("delete", "search_stop")))
     @example(action="delete")
     def test_operator_invalidators_are_zero_mutation_while_owned(
@@ -1773,21 +1291,6 @@ class TestProcessingLifecycleGenerated(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "partial terminal bundle"):
             _assert_terminal_all_or_none(before, mutant)
 
-    def test_known_bad_retry_without_retarget_is_detected(self) -> None:
-        with self.assertRaisesRegex(
-            AssertionError,
-            "retry did not create a fresh recovery_required job",
-        ):
-            _assert_retry_retarget(
-                old_job_id=11,
-                old_status="failed",
-                new_job_id=12,
-                new_status="queued",
-                request_owner_job_id=11,
-                old_journal_present=False,
-                new_journal_revision=2,
-                expected_new_journal_revision=2,
-            )
 
     def test_known_bad_claim_before_lock_is_detected(self) -> None:
         cases: tuple[

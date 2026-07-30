@@ -11,7 +11,7 @@ import time
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
-from typing import Any, Literal, Protocol, assert_never, runtime_checkable
+from typing import Any, Protocol, assert_never, runtime_checkable
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
@@ -86,6 +86,7 @@ from lib.processing_cleanup import (
 )
 from lib.quality import ActiveDownloadFileState, ActiveDownloadState
 from lib.terminal_outcomes import (
+    AUTOMATION_WORLD_FAILURE_RESULT_KEY,
     AutomationTerminalAuthority,
     ImportJobTerminal,
     PendingImportTerminalOutcome,
@@ -1230,34 +1231,13 @@ def _self_heal_automation_world_failure(
             owner_session_identity=owner_session_identity,
         )
         completion_receipt = automation_completion_receipt(job)
-        expected_job_status: Literal["running", "recovery_required"] = "running"
-        if (
-            job.beets_launch_authorized_at is not None
-            and completion_receipt is None
-        ):
-            # The owner authority refuses a ``running`` terminal write for a
-            # launched job that never captured its completion receipt — and
-            # that missing receipt IS the ambiguity this self-heal exists for.
-            # ``recovery_required`` is the one stage that CAS accepts without
-            # the receipt, so the ambiguity transits it and is closed in this
-            # same frame. The job never RESTS there: no request is left
-            # outside the search pool waiting for a human.
-            staged = db.mark_import_job_recovery_required(
-                job.id,
-                reason=reason,
-                expected_execution_lease=execution_lease,
-            )
-            if staged is None:
-                raise AutomationOwnerFailStop(
-                    f"automation job {job.id} could not stage its ambiguous "
-                    f"self-heal ({reason})"
-                )
-            expected_job_status = "recovery_required"
+        terminal_result = dict(result)
+        terminal_result[AUTOMATION_WORLD_FAILURE_RESULT_KEY] = reason
         terminal = db.persist_import_terminal_outcome(
             replace(
                 pending,
                 automation=AutomationTerminalAuthority(
-                    expected_job_status=expected_job_status,
+                    expected_job_status="running",
                     expected_preview_status=job.preview_status,
                     expected_execution_lease=execution_lease,
                     cleanup_receipt=cleanup_receipt,
@@ -1266,7 +1246,7 @@ def _self_heal_automation_world_failure(
             ).with_job(ImportJobTerminal(
                 status="failed",
                 error=detail,
-                result=result,
+                result=terminal_result,
                 message=detail,
             ))
         )
@@ -1951,10 +1931,9 @@ def recover_abandoned_automation_owners(
         lease = _execution_lease_from_job(job)
         if lease is None and job.status != IMPORT_JOB_RECOVERY_REQUIRED:
             # A leaseless owner in a live lane is simply waiting to be claimed
-            # — normal, not abandoned. Only a leaseless owner stopped at
-            # ``recovery_required`` (the replacement an operator retry mints
-            # for an unresolved cleanup journal) is a park needing closure, and
-            # ``never_claimed`` is its exact death proof.
+            # — normal, not abandoned. A historical leaseless
+            # ``recovery_required`` owner still needs automatic convergence,
+            # and ``never_claimed`` is its exact death proof.
             continue
         decision = probe_execution_liveness(
             lease,

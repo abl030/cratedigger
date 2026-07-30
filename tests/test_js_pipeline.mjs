@@ -63,7 +63,7 @@ console.log('pipeline status controls disable invalid unsearchable transitions')
   });
   assertContains(processing, 'aria-disabled="true"', 'processing controls expose disabled semantics');
   assertContains(processing, 'aria-describedby=', 'processing controls name visible explanation');
-  assertContains(processing, 'job #420 needs recovery', 'processing explanation names exact owner');
+  assertContains(processing, 'job #420 awaits automatic convergence', 'processing explanation names exact owner');
   assertContains(processing, '/api/import-jobs/420/recovery', 'processing links exact recovery detail');
   assertExcludes(processing, ' disabled', 'processing controls remain focusable');
   assertExcludes(processing, 'window.updateStatus', 'processing controls cannot mutate lifecycle');

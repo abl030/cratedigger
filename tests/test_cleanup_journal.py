@@ -6,9 +6,6 @@ import os
 import sys
 import unittest
 
-import msgspec
-import psycopg2.extras
-
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401  (boots and migrates ephemeral PostgreSQL)
 
@@ -39,9 +36,6 @@ def _intent(*, action: str = "move_tree") -> CleanupJournalIntent:
         ),
         destination_manifest_hash="destination-sha256",
         selected_destination_path="/processing/destination",
-        declared_result_status="imported",
-        declared_reason="accepted exact pressing",
-        evidence_revision="evidence-v4",
     )
 
 
@@ -149,27 +143,6 @@ class TestCleanupJournalPersistence(CleanupJournalPostgresCase):
             ),
             created,
         )
-
-    def test_create_rejects_partial_or_blank_recovery_declaration(self) -> None:
-        request_id, job_id = self._processing_owner("declaration")
-        cases = (
-            {"declared_reason": None},
-            {"evidence_revision": None},
-            {"declared_result_status": None},
-            {"declared_reason": " \t"},
-            {"evidence_revision": "\n"},
-        )
-        for changes in cases:
-            with self.subTest(changes=changes), self.assertRaises(ValueError):
-                self.db.create_processing_cleanup_journal(
-                    request_id=request_id,
-                    job_id=job_id,
-                    intent=msgspec.structs.replace(_intent(), **changes),
-                )
-        self.assertIsNone(self.db.get_processing_cleanup_journal(
-            request_id=request_id,
-            job_id=job_id,
-        ))
 
     def test_create_rejects_wrong_owner_and_conflicting_intent(self) -> None:
         request_id, job_id = self._processing_owner("owner-a")
@@ -352,97 +325,6 @@ class TestCleanupJournalPersistence(CleanupJournalPostgresCase):
                 receipt=conflicting_receipt,
             )
         self.assertEqual(conflict.exception.kind, "receipt_conflict")
-
-    def test_retarget_changes_only_job_and_revision_in_callers_transaction(
-        self,
-    ) -> None:
-        request_id, old_job_id = self._processing_owner("retarget")
-        created = self.db.create_processing_cleanup_journal(
-            request_id=request_id,
-            job_id=old_job_id,
-            intent=_intent(),
-        )
-        checkpoint = self.db.checkpoint_processing_cleanup_journal(
-            request_id=request_id,
-            job_id=old_job_id,
-            expected_revision=created["revision"],
-            step_progress={"source_verified": True},
-        )
-
-        with self.db._atomic(), self.db.conn.cursor(
-            cursor_factory=psycopg2.extras.RealDictCursor,
-        ) as cur:
-            scope = self.db._lock_processing_cleanup_scope(
-                cur,
-                request_id=request_id,
-            )
-            cur.execute(
-                "UPDATE import_jobs SET status = 'failed' WHERE id = %s",
-                (old_job_id,),
-            )
-            cur.execute(
-                """
-                INSERT INTO import_jobs (
-                    job_type, status, request_id, payload, preview_status
-                )
-                VALUES (
-                    'automation_import', 'queued', %s, '{}'::jsonb,
-                    'waiting'
-                )
-                RETURNING id
-                """,
-                (request_id,),
-            )
-            new_job_id = int(cur.fetchone()["id"])
-            retargeted = (
-                self.db._retarget_processing_cleanup_journal_locked(
-                    cur,
-                    request_id=request_id,
-                    old_job_id=old_job_id,
-                    new_job_id=new_job_id,
-                    expected_revision=checkpoint["revision"],
-                    scope=scope,
-                )
-            )
-            self.assertIsNotNone(retargeted)
-            cur.execute(
-                """
-                UPDATE album_requests
-                SET active_automation_import_job_id = %s
-                WHERE id = %s
-                """,
-                (new_job_id, request_id),
-            )
-            self.db.conn.commit()
-
-        assert retargeted is not None
-        self.assertEqual(retargeted["job_id"], new_job_id)
-        self.assertEqual(
-            retargeted["revision"],
-            checkpoint["revision"] + 1,
-        )
-        for field in (
-            set(ProcessingCleanupJournalRow.__annotations__)
-            - {"job_id", "revision"}
-        ):
-            self.assertEqual(
-                retargeted[field],
-                checkpoint[field],
-                field,
-            )
-        self.assertIsNone(
-            self.db.get_processing_cleanup_journal(
-                request_id=request_id,
-                job_id=old_job_id,
-            )
-        )
-        self.assertEqual(
-            self.db.get_processing_cleanup_journal(
-                request_id=request_id,
-                job_id=new_job_id,
-            ),
-            retargeted,
-        )
 
 
 if __name__ == "__main__":

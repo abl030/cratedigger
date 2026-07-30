@@ -428,23 +428,15 @@ def _run_dispatch(
             # Planted violation, not a production path: the owner job rests in
             # ``recovery_required`` (an ACTIVE queue status) while the request
             # stays ``processing`` behind it, exactly as the removed parking
-            # policy left it. The real writer is used so the plant is a world
-            # the pre-#933 importer genuinely produced.
-            from scripts.importer import _execution_lease_from_job
-
-            assert execution_lease is not None, (
-                "the parked plant only exists for automation worlds"
+            # policy left it. There is deliberately no production writer left,
+            # so the known-bad self-test plants the impossible historical row.
+            owner_row = next(
+                row for row in db._import_jobs
+                if row["id"] == import_job_id
             )
-            # Production re-reads the owner row for its lease (the child
-            # identity is recorded during the run), so the plant does too.
-            owner = db.get_import_job(import_job_id)
-            assert owner is not None
-            owner_lease = _execution_lease_from_job(owner)
-            assert db.mark_import_job_recovery_required(
-                import_job_id,
-                reason="planted pre-#933 parking policy",
-                expected_execution_lease=owner_lease,
-            ) is not None, "parked plant could not stage recovery_required"
+            owner_row["status"] = "recovery_required"
+            owner_row["worker_id"] = None
+            owner_row["heartbeat_at"] = None
         elif result.terminal_outcome is not None:
             from lib.terminal_outcomes import ImportJobTerminal
 

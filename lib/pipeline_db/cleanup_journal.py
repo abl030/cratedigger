@@ -20,7 +20,6 @@ import psycopg2.extras
 from lib.pipeline_db._core import _PipelineDBBase
 from lib.pipeline_db._shared import _msgspec_json_dumps
 
-CleanupResultStatus = Literal["wanted", "imported"]
 CleanupReceiptOutcome = Literal["completed", "no_op"]
 CleanupJournalConflictKind = Literal[
     "request_missing",
@@ -54,9 +53,6 @@ class CleanupJournalIntent(msgspec.Struct, frozen=True, kw_only=True):
     destination_manifest: CleanupManifest | None = None
     destination_manifest_hash: str | None = None
     selected_destination_path: str | None = None
-    declared_result_status: CleanupResultStatus | None = None
-    declared_reason: str | None = None
-    evidence_revision: str | None = None
 
 
 class CleanupJournalReceipt(msgspec.Struct, frozen=True, kw_only=True):
@@ -90,9 +86,6 @@ class ProcessingCleanupJournalRow(TypedDict):
     destination_manifest_hash: str | None
     selected_destination_path: str | None
     step_progress: CleanupStepProgress
-    declared_result_status: CleanupResultStatus | None
-    declared_reason: str | None
-    evidence_revision: str | None
     completed_receipt: CleanupJournalReceipt | None
     created_at: datetime
     updated_at: datetime
@@ -187,21 +180,6 @@ def _validate_intent(intent: CleanupJournalIntent) -> None:
     _require_nonblank(intent.source_manifest_hash, "source_manifest_hash")
     _manifest_builtins(intent.source_manifest)
 
-    declaration = (
-        intent.declared_result_status,
-        intent.declared_reason,
-        intent.evidence_revision,
-    )
-    if not all(value is None for value in declaration):
-        if any(value is None for value in declaration):
-            raise ValueError(
-                "cleanup recovery declaration must be provided together"
-            )
-        assert intent.declared_reason is not None
-        assert intent.evidence_revision is not None
-        _require_nonblank(intent.declared_reason, "declared_reason")
-        _require_nonblank(intent.evidence_revision, "evidence_revision")
-
     destination = (
         intent.destination_path,
         intent.destination_manifest,
@@ -286,10 +264,6 @@ def _intent_matches_row(
         == intent.destination_manifest_hash
         and row["selected_destination_path"]
         == intent.selected_destination_path
-        and row["declared_result_status"]
-        == intent.declared_result_status
-        and row["declared_reason"] == intent.declared_reason
-        and row["evidence_revision"] == intent.evidence_revision
     )
 
 
@@ -483,13 +457,10 @@ class _CleanupJournalMixin(_PipelineDBBase):
                 destination_path,
                 destination_manifest,
                 destination_manifest_hash,
-                selected_destination_path,
-                declared_result_status,
-                declared_reason,
-                evidence_revision
+                selected_destination_path
             )
             VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             RETURNING *
             """,
@@ -510,9 +481,6 @@ class _CleanupJournalMixin(_PipelineDBBase):
                 ),
                 intent.destination_manifest_hash,
                 intent.selected_destination_path,
-                intent.declared_result_status,
-                intent.declared_reason,
-                intent.evidence_revision,
             ),
         )
         raw = cur.fetchone()
@@ -768,99 +736,3 @@ class _CleanupJournalMixin(_PipelineDBBase):
             )
             self.conn.commit()
             return row
-
-    def _retarget_processing_cleanup_journal_locked(
-        self,
-        cur: _CleanupCursor,
-        *,
-        request_id: int,
-        old_job_id: int,
-        new_job_id: int,
-        expected_revision: int,
-        scope: _LockedCleanupScope,
-    ) -> ProcessingCleanupJournalRow | None:
-        """Retarget during recovery's caller-owned atomic owner swap.
-
-        The caller must already hold the ordered scope locks and must retarget
-        the request owner in the same transaction.  This helper deliberately
-        does not commit.  Only ``job_id`` and ``revision`` change; every
-        journaled path, manifest, progress/receipt byte, and timestamp remains
-        untouched.
-        """
-        if expected_revision <= 0:
-            raise ValueError("expected_revision must be positive")
-        existing = self._get_processing_cleanup_journal_locked(
-            request_id=request_id,
-            job_id=old_job_id,
-            scope=scope,
-        )
-        if existing is None:
-            return None
-        if existing["revision"] != expected_revision:
-            raise CleanupJournalConflict(
-                "revision_conflict",
-                "cleanup retarget revision changed",
-            )
-        if any(
-            _row_int(row["job_id"], "job id") == new_job_id
-            for row in scope.journals
-        ):
-            raise CleanupJournalConflict(
-                "retarget_conflict",
-                "replacement owner already has a cleanup journal",
-            )
-        replacement = next(
-            (
-                row
-                for row in scope.jobs
-                if _row_int(row["id"], "job id") == new_job_id
-            ),
-            None,
-        )
-        # Recovery may insert the replacement after taking the ordered locks.
-        # Re-read that exact new key without deriving it from any path.
-        if replacement is None:
-            cur.execute(
-                """
-                SELECT id, request_id, job_type, status
-                FROM import_jobs
-                WHERE id = %s AND request_id = %s
-                """,
-                (new_job_id, request_id),
-            )
-            replacement = cur.fetchone()
-        if (
-            replacement is None
-            or replacement["job_type"] != "automation_import"
-            or replacement["status"]
-            not in ("queued", "running", "recovery_required")
-        ):
-            raise CleanupJournalConflict(
-                "retarget_conflict",
-                "replacement owner is not an active automation job",
-            )
-
-        cur.execute(
-            """
-            UPDATE processing_cleanup_journal
-            SET job_id = %s,
-                revision = revision + 1
-            WHERE job_id = %s
-              AND request_id = %s
-              AND revision = %s
-            RETURNING *
-            """,
-            (
-                new_job_id,
-                old_job_id,
-                request_id,
-                expected_revision,
-            ),
-        )
-        raw = cur.fetchone()
-        if raw is None:
-            raise CleanupJournalConflict(
-                "revision_conflict",
-                "cleanup retarget lost its revision CAS",
-            )
-        return cleanup_journal_row(raw)

@@ -26,7 +26,6 @@ from lib.import_execution import (
 )
 from lib.import_queue import IMPORT_JOB_FORCE, ImportJob
 from lib.pipeline_db import (
-    ADVISORY_LOCK_NAMESPACE_IMPORT,
     BACKOFF_BASE_MINUTES,
     PipelineDB,
 )
@@ -44,7 +43,6 @@ from lib.terminal_outcomes import (
     TerminalCooldown,
     TerminalDenylist,
     TerminalDownloadAudit,
-    automation_recovery_close_outcome,
 )
 from tests.fakes import FakePipelineDB
 from tests.fakes.download import RecordingProcessAlbum
@@ -703,87 +701,6 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
                     )
                 finally:
                     observer.close()
-
-    def test_recovery_serializes_before_automation_terminal_request_jobs(
-        self,
-    ) -> None:
-        """IMPORT prevents recovery job->request deadlock at terminalization."""
-        assert TEST_DSN is not None
-        seed, request_id, automation_job_id = _seed_running_import(
-            automation_state=True,
-        )
-        command = _prepare_automation_terminal_command(
-            seed,
-            request_id,
-            automation_job_id,
-        )
-        recovery = seed.enqueue_import_job(
-            IMPORT_JOB_FORCE,
-            request_id=request_id,
-            dedupe_key="force:terminal-recovery-overlap",
-            payload={
-                "download_log_id": request_id,
-                "failed_path": "/tmp/terminal-recovery-overlap",
-            },
-        )
-        seed._execute(
-            """
-            UPDATE import_jobs
-            SET status = 'recovery_required'
-            WHERE id = %s
-            """,
-            (recovery.id,),
-        )
-        seed.close()
-
-        request_locked = threading.Event()
-        release = threading.Event()
-        terminal = PausingAutomationTerminalPipelineDB(
-            TEST_DSN,
-            request_locked=request_locked,
-            release=release,
-        )
-        resolver = PipelineDB(TEST_DSN)
-        self.addCleanup(terminal.close)
-        self.addCleanup(resolver.close)
-        terminal_errors: list[BaseException] = []
-
-        def persist_terminal() -> None:
-            try:
-                with terminal.advisory_lock(
-                    ADVISORY_LOCK_NAMESPACE_IMPORT,
-                    request_id,
-                ) as acquired:
-                    self.assertTrue(acquired)
-                    terminal.persist_import_terminal_outcome(command)
-            except BaseException as exc:  # noqa: BLE001 - thread handoff
-                terminal_errors.append(exc)
-
-        worker = threading.Thread(target=persist_terminal)
-        worker.start()
-        self.assertTrue(request_locked.wait(timeout=10))
-        self.assertIsNone(
-            resolver.resolve_import_job_recovery(
-                recovery.id,
-                resolution="close",
-                reason="must serialize behind terminal owner",
-            )
-        )
-        release.set()
-        worker.join(timeout=10)
-        self.assertFalse(worker.is_alive())
-        self.assertEqual(terminal_errors, [])
-
-        resolved = resolver.resolve_import_job_recovery(
-            recovery.id,
-            resolution="close",
-            reason="terminal owner exited",
-        )
-        self.assertIsNotNone(resolved)
-        assert resolved is not None
-        closed, retry = resolved
-        self.assertEqual(closed.status, "failed")
-        self.assertIsNone(retry)
 
     def test_automation_terminal_bundle_is_all_or_none_at_every_boundary(
         self,
@@ -1562,78 +1479,6 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
                     )
                 finally:
                     observer.close()
-
-    def test_recovery_close_rejects_declared_transition_mismatch_before_write(
-        self,
-    ) -> None:
-        assert TEST_DSN is not None
-        db, request_id, job_id = _seed_running_import(
-            automation_state=True,
-        )
-        prepared = _prepare_automation_terminal_command(
-            db,
-            request_id,
-            job_id,
-        )
-        authority = prepared.automation
-        assert authority is not None
-        cleanup_receipt = authority.cleanup_receipt
-        assert cleanup_receipt is not None
-        reason = "operator declared wanted"
-        evidence_revision = "evidence-declared-wanted"
-        db._execute(
-            """
-            UPDATE processing_cleanup_journal
-            SET declared_result_status = 'wanted',
-                declared_reason = %s,
-                evidence_revision = %s
-            WHERE request_id = %s AND job_id = %s
-            """,
-            (reason, evidence_revision, request_id, job_id),
-        )
-        command = automation_recovery_close_outcome(
-            request_id=request_id,
-            import_job_id=job_id,
-            result_status="wanted",
-            reason=reason,
-            evidence_revision=evidence_revision,
-            expected_job_status=authority.expected_job_status,
-            expected_preview_status=authority.expected_preview_status,
-            expected_execution_lease=authority.expected_execution_lease,
-            cleanup_receipt=cleanup_receipt,
-            completion_receipt=authority.completion_receipt,
-        )
-        malformed = replace(
-            command,
-            initial_transition=transitions.RequestTransition.to_imported(
-                from_status="processing",
-            ),
-        )
-        before = _snapshot(db, request_id, job_id)
-        db.close()
-
-        writer = FaultInjectingPipelineDB(
-            TEST_DSN,
-            fail_after_write=999,
-        )
-        try:
-            with self.assertRaisesRegex(
-                ValueError,
-                "transition contradicts declared result",
-            ):
-                writer.persist_import_terminal_outcome(malformed)
-            self.assertEqual(writer.write_boundaries, [])
-        finally:
-            writer.close()
-
-        observer = PipelineDB(TEST_DSN)
-        try:
-            self.assertEqual(
-                _snapshot(observer, request_id, job_id),
-                before,
-            )
-        finally:
-            observer.close()
 
     def test_import_success_with_quality_requeue_is_all_or_none(self):
         def command(request_id: int, job_id: int) -> ImportTerminalOutcome:

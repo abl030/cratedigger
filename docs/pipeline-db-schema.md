@@ -183,10 +183,10 @@ that audit trail.
   `downloading → processing` is not part of that generic graph. The
   automation handoff owns it and atomically attaches the new job; exact-owner
   terminal commands privately perform `processing → wanted|imported`.
-  Recovery retry remains in `processing` while atomically replacing the
-  ambiguous owner job. Generic lifecycle, intent, quality, replacement,
-  force-import, ban/delete, and library-delete actions return
-  `processing_locked` instead of mutating an owned request.
+  A proven-dead world failure records audit evidence and performs
+  `processing → wanted` without replacing the owner job. Generic lifecycle,
+  intent, quality, replacement, force-import, ban/delete, and library-delete
+  actions return `processing_locked` instead of mutating an owned request.
 
   Once a row becomes `replaced`, its lifecycle, retry counters, scheduler
   fields, active download metadata, evidence pointer, and active search-plan
@@ -225,9 +225,11 @@ that audit trail.
   unique/FK/constraint-trigger bundle requires this pointer iff
   `status='processing'`, requires the named row to belong to this request, and
   requires that row to be an active `automation_import` job (`queued`,
-  `running`, or `recovery_required`). Historical terminal jobs are never
-  adopted. The owner pointer and `active_download_state` are cleared together
-  only by the exact-owner terminal transaction.
+  `running`, or historical `recovery_required`). Historical terminal jobs are
+  never adopted. New world failures do not enter `recovery_required`; they
+  record failure evidence and return the request to `wanted`. The owner pointer
+  and `active_download_state` are cleared together only by the exact-owner
+  terminal transaction.
 
 ## `download_log` — quality-tracking fields
 
@@ -285,13 +287,15 @@ Key fields:
 
 - `job_type TEXT` — active values are `force_import`, `automation_import`, and `youtube_import`. Historical `manual_import` rows remain readable but cannot be enqueued.
 - `status TEXT` — `queued`, `running`, `recovery_required`, `completed`, or
-  `failed`. `recovery_required` means Beets launch was durably authorized but
-  no terminal acknowledgement committed; it is active for dedupe purposes but
-  is never claimable by the importer.
+  `failed`. `recovery_required` remains readable for historical rows whose
+  Beets launch was durably authorized but no terminal acknowledgement
+  committed. No current writer creates that status; startup convergence closes
+  a positively dead historical row through the same fail-to-`wanted` terminal
+  bundle used for current abandoned executions.
 - `request_id INTEGER` — the related `album_requests.id`.
 - `dedupe_key TEXT` — active queue dedupe key. A partial unique index prevents
-  duplicate queued/running/recovery jobs while allowing a later job after an
-  explicit recovery resolution or ordinary completion.
+  duplicate queued/running/historical-recovery jobs while allowing a later job
+  after terminal convergence or ordinary completion.
 - `payload JSONB` — typed job input. `ImportJob.from_row` decodes it once into
   the strict Struct selected by `job_type`, rejecting unknown fields and wrong
   types before any database mutation and again when a row is projected. Force
@@ -355,24 +359,22 @@ Key fields:
 On importer/preview startup, a pre-existing automation execution changes only
 after the shared liveness probe positively proves its persisted execution
 dead. A dead pre-launch exact owner can requeue the same job. Once launch was
-authorized, the same owner becomes/remains `recovery_required`; missing or
-stale heartbeat alone is never death proof. A live or unknown execution is
-untouched. The importer also holds the DB advisory singleton lock, so an
-accidentally started second worker exits instead of recovering a live worker's
-job.
+authorized, a positively dead execution records failed audit evidence, finishes
+or truthfully refuses its exact journaled cleanup, fails the job, and returns
+the request to `wanted` atomically. Historical `recovery_required` owners take
+that same convergence path. Missing or stale heartbeat alone is never death
+proof; a live or unknown execution is untouched. The importer also holds the DB
+advisory singleton lock, so an accidentally started second worker exits instead
+of recovering a live worker's job.
 
 `GET /api/import-jobs/{id}/recovery` and
 `pipeline-cli import-job-recovery show JOB_ID` expose one
 `AutomationRecoveryDetail`: the exact owner/request/release/path, launch and
 lease snapshot, live/dead/unknown transcript, typed completion and exact
-library observations, cleanup state, close eligibility, and an opaque evidence
-revision. Retry/close submit that revision and re-observe before a locked CAS.
-Retry fails the ambiguous job, inserts a fresh job, byte-preservingly retargets
-any cleanup journal, and updates the request owner last. Close never infers
-whether Beets applied the import: the operator declares `wanted` or `imported`,
-provides a non-empty reason, and exact cleanup must complete before the shared
-terminal bundle clears ownership. Force-import and YouTube recovery retain
-their existing semantics.
+library observations, and cleanup state. This surface is read-only diagnostics;
+there is no retry/close mutation. Force-import and YouTube jobs whose exact
+launched execution dies become terminal `failed` rows rather than entering a
+human-gated state; request lifecycle remains owned by their existing flows.
 
 Covered job-backed terminal outcomes cross one DB transaction boundary. This
 includes force-import and validated automation dispatch outcomes, automation's
@@ -402,7 +404,7 @@ import authority. When workers are disabled, queued work remains safely
 non-runnable. Legacy completed/failed rows may carry `would_import` so
 historical terminal import history does not look like active preview backlog.
 Do not bulk-convert those rows; that would restore preview-decision authority.
-The Recents Imports endpoint lists active `queued`, `running`, and
+The Recents Imports endpoint lists active `queued`, `running`, and historical
 `recovery_required` jobs; terminal `completed`/`failed` rows remain durable
 audit history and must not be rendered as live queue work.
 
@@ -423,17 +425,15 @@ and request pointer to describe the same active processing owner.
 - `step_progress` records idempotent unlink/rmdir/rename progress. Every
   mutation is bracketed by the pinned owner-session cancellation check and a
   journal CAS.
-- `declared_result_status`, `declared_reason`, and `evidence_revision` persist
-  a recovery-close declaration across interruption.
 - `completed_receipt` and `completed_at` are both present or both absent. The
   terminal transaction consumes only a typed completed/no-op receipt matching
   the exact owner and pending outcome.
 
 Cleanup locks rows in the global request → request jobs by ID → journals by
-job ID order. Recovery retry may change only the journal's owner `job_id` and
-revision; paths, manifests, progress, declaration, and receipt remain
-byte-identical. A cleanup failure retains the request owner and journal for
-death-proven recovery rather than clearing authority or writing a second audit.
+job ID order. Only the exact attached owner may advance the journal. If the
+current worker cannot complete or truthfully refuse cleanup, it fail-stops with
+the owner and journal intact; a later exact death proof resumes automatic
+convergence rather than requiring an operator mutation.
 
 ## `download_log.import_result` JSONB
 
