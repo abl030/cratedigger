@@ -27,40 +27,29 @@ import msgspec
 
 from lib import download_processing, transitions
 from lib.dispatch import _build_download_info
-from lib.download_materialization import (
-    Materialized,
-    MaterializeFailed,
-    MaterializeGuarded,
-    MaterializeResult,
-    _evaluate_staged_path_readiness,
-    _materialize_processing_dir,
-)
 from lib.download_processing import (
-    Completed,
     CompletionDeferred,
-    CompletionDispatched,
-    CompletionFailed,
     CompletionResult,
     ProcessAlbumFn,
 )
 from lib.download_reconstruction import (
     reconstruct_grab_list_entry as _reconstruct_grab_list_entry,
 )
-from lib.download_recovery import (
-    classify_processing_path,
-    reconcile_processing_current_path,
-)
 from lib.grab_list import DownloadFile, GrabListEntry
-from lib.import_queue import (
-    IMPORT_JOB_AUTOMATION,
-    ImportJob,
-    automation_import_dedupe_key,
-    automation_import_payload,
+from lib.import_execution import (
+    CancellationToken,
+    ExecutionCancelled,
+    ExecutionLeaseSnapshot,
+    OwnerSessionIdentity,
 )
+from lib.import_queue import (
+    AutomationHandoffResult,
+    ImportJob,
+)
+from lib.pipeline_db._shared import ADVISORY_LOCK_NAMESPACE_IMPORT
 from lib.processing_paths import (
     attempt_fingerprint,
     canonical_folder_for_row,
-    directory_has_entries,
     processing_albums_dir,
 )
 from lib.quality import (
@@ -83,7 +72,6 @@ from lib.slskd_transfers import (
     match_transfer_for_attempt,
     slskd_do_enqueue,
 )
-from lib.staged_album import StagedAlbum
 from lib.terminal_outcomes import (
     PendingImportTerminalOutcome,
     TerminalDownloadAudit,
@@ -119,24 +107,12 @@ class DownloadDB(transitions.TransitionsDB, Protocol):
         self, username: str, config: CooldownConfig | None = None,
     ) -> bool: ...
 
-    def update_download_state(
-        self,
-        request_id: int,
-        state_json: str,
-        *,
-        expected_status: str = "downloading",
-    ) -> bool: ...
-
     def update_download_state_if_downloading(
         self,
         request_id: int,
         state_json: str,
         *,
         expected_enqueued_at: str,
-    ) -> bool: ...
-
-    def update_download_state_current_path(
-        self, request_id: int, current_path: str | None,
     ) -> bool: ...
 
     def log_download(
@@ -151,19 +127,14 @@ class DownloadDB(transitions.TransitionsDB, Protocol):
         transfer_detail: Any = None,
     ) -> int: ...
 
-    def enqueue_import_job(
+    def handoff_automation_import(
         self,
-        job_type: str,
         *,
-        request_id: int | None = None,
-        dedupe_key: str | None = None,
-        payload: dict[str, Any] | None = None,
-        message: str | None = None,
-    ) -> ImportJob: ...
-
-    def get_active_import_job_for_request(
-        self, request_id: int,
-    ) -> ImportJob | None: ...
+        request_id: int,
+        expected_enqueued_at: str,
+        canonical_path: str,
+        message: str,
+    ) -> AutomationHandoffResult: ...
 
     def get_import_job_candidate_evidence_id(
         self, import_job_id: int,
@@ -173,28 +144,7 @@ class DownloadDB(transitions.TransitionsDB, Protocol):
         self, download_log_id: int, evidence_id: int | None,
     ) -> None: ...
 
-    def abandon_auto_import_request(
-        self,
-        *,
-        request_id: int,
-        current_path: str,
-        soulseek_username: str | None,
-        filetype: str | None,
-        beets_detail: str,
-        outcome: str,
-        staged_path: str,
-        error_message: str,
-        validation_result: str | None,
-    ) -> int | None: ...
-
-
 MAX_FILE_RETRIES = 5
-# How long a completed download may keep failing local materialization
-# (e.g. an event-stamp that never arrives) before the poller stops
-# retrying and self-heals the request back to 'wanted' for re-download.
-# Generous relative to the 5-min cycle: the benign completion-vs-event
-# race resolves on the very next cycle.
-PROCESSING_MATERIALIZE_GRACE_S = 3600
 
 
 # === ActiveDownloadState building ===
@@ -204,19 +154,12 @@ def build_active_download_state(
     *,
     enqueued_at: str | None = None,
     last_progress_at: str | None = None,
-    processing_started_at: str | None = None,
-    import_subprocess_started_at: str | None = None,
-    current_path: str | None = None,
 ) -> ActiveDownloadState:
     """Build an ActiveDownloadState from a GrabListEntry.
 
-    Callers can pass the original enqueued_at/processing_started_at when
-    persisting updated retry state across polling cycles. The
-    ``import_subprocess_started_at`` flag is preserved through state
-    rebuilds so cycle-based retry persistence cannot accidentally clear
-    the resume guard's witness — only the terminal status transitions
-    (which NULL ``active_download_state`` inline) wipe it. See
-    ``docs/advisory-locks.md``.
+    Callers can pass the original timing witnesses when persisting updated
+    retry state across polling cycles. Processor ownership and its canonical
+    path are added only by the atomic handoff command.
     """
     enqueued_at_value = enqueued_at or datetime.now(UTC).isoformat()
     files = [
@@ -240,13 +183,8 @@ def build_active_download_state(
         enqueued_at=enqueued_at_value,
         last_progress_at=last_progress_at or enqueued_at_value,
         files=files,
-        processing_started_at=processing_started_at,
-        import_subprocess_started_at=import_subprocess_started_at,
-        current_path=(
-            current_path
-            if current_path is not None
-            else entry.import_folder
-        ),
+        processing_started_at=None,
+        current_path=None,
     )
 
 
@@ -427,89 +365,119 @@ def _enrich_have_evidence_after_failure(
         )
 
 
+def _owns_downloading_incarnation(
+    db: DownloadDB,
+    *,
+    request_id: int,
+    expected_enqueued_at: str,
+) -> bool:
+    """Re-read the exact downloader witness under the caller's IMPORT lock."""
+    row = db.get_request(request_id)
+    if (
+        row is None
+        or row.get("status") != "downloading"
+        or row.get("active_automation_import_job_id") is not None
+    ):
+        return False
+    raw_state = row.get("active_download_state")
+    if raw_state is None:
+        return False
+    try:
+        current = ActiveDownloadState.from_raw(raw_state)
+    except (
+        TypeError,
+        ValueError,
+        msgspec.DecodeError,
+        msgspec.ValidationError,
+    ):
+        return False
+    return current.enqueued_at == expected_enqueued_at
+
+
 def _timeout_album(
     entry: GrabListEntry,
     request_id: int,
     reason: str,
     ctx: CratediggerContext,
     *,
+    expected_enqueued_at: str,
     prepare_fn: Callable[..., str] | None = None,
     enrich_fn: Callable[..., str] | None = None,
-) -> None:
-    """Handle download timeout: cancel, log, reset to wanted."""
-    cancel_and_delete(entry.files, ctx)
-
-    total = len(entry.files)
-    completed = sum(1 for f in entry.files
-                    if f.status and f.status.state == "Completed, Succeeded")
-
-    dl_info = _build_download_info(entry)
-    reason = _enrich_timeout_reason(reason, entry.files)
-    transfer_detail = msgspec.to_builtins(_file_failure_details(entry.files))
-
-    logger.info(f"DOWNLOAD TIMEOUT: {entry.artist} - {entry.title} "
-                f"({completed}/{total} files done, reason={reason})")
-
-    db = ctx.pipeline_db_source._get_db()
-    # Capture/backfill HAVE before creating the audit row so Recents can
-    # distinguish this unchanged pre-import library snapshot from a later
-    # successful mutation. The helper is fail-soft; failure bookkeeping
-    # still proceeds unchanged.
-    prepared_outcome = _prepare_have_evidence_before_failure_log(
-        request_id,
-        entry.mb_release_id,
-        ctx,
-        prepare_fn=prepare_fn,
-    )
-    db.log_download(
-        request_id=request_id,
-        soulseek_username=dl_info.username,
-        filetype=dl_info.filetype,
-        outcome="timeout",
-        error_message=reason,
-        transfer_detail=transfer_detail,
-    )
-    for username in extract_usernames(entry.files):
-        if db.check_and_apply_cooldown(username):
-            ctx.cooled_down_users.add(username)
-    transitions.require_transition_applied(transitions.finalize_request(
-        db,
-        request_id,
-        transitions.RequestTransition.to_wanted(
-            from_status="downloading",
-            attempt_type="download",
-        ),
-    ))
-    _enrich_have_evidence_after_failure(
-        request_id,
-        entry.mb_release_id,
-        ctx,
-        prepared_outcome=prepared_outcome,
-        enrich_fn=enrich_fn,
-    )
-
-
-def _persist_updated_download_state(
-    db: DownloadDB,
-    request_id: int,
-    entry: GrabListEntry,
-    state: ActiveDownloadState,
 ) -> bool:
-    """Persist retry counters or processing markers back to JSONB."""
-    return db.update_download_state(
+    """Cancel and reset only while the exact download incarnation is current."""
+    db = ctx.pipeline_db_source._get_db()
+    with db.advisory_lock(
+        ADVISORY_LOCK_NAMESPACE_IMPORT,
         request_id,
-        build_active_download_state(
-            entry,
-            enqueued_at=state.enqueued_at,
-            last_progress_at=state.last_progress_at,
-            processing_started_at=state.processing_started_at,
-            import_subprocess_started_at=(
-                state.import_subprocess_started_at
+    ) as acquired:
+        if not acquired or not _owns_downloading_incarnation(
+            db,
+            request_id=request_id,
+            expected_enqueued_at=expected_enqueued_at,
+        ):
+            return False
+
+        cancel_and_delete(entry.files, ctx)
+
+        total = len(entry.files)
+        completed = sum(
+            1
+            for file in entry.files
+            if file.status and file.status.state == "Completed, Succeeded"
+        )
+
+        dl_info = _build_download_info(entry)
+        reason = _enrich_timeout_reason(reason, entry.files)
+        transfer_detail = msgspec.to_builtins(
+            _file_failure_details(entry.files),
+        )
+
+        logger.info(
+            "DOWNLOAD TIMEOUT: %s - %s (%s/%s files done, reason=%s)",
+            entry.artist,
+            entry.title,
+            completed,
+            total,
+            reason,
+        )
+
+        # Capture/backfill HAVE before creating the audit row so Recents can
+        # distinguish this unchanged pre-import library snapshot from a later
+        # successful mutation. The helper is fail-soft; failure bookkeeping
+        # still proceeds unchanged.
+        prepared_outcome = _prepare_have_evidence_before_failure_log(
+            request_id,
+            entry.mb_release_id,
+            ctx,
+            prepare_fn=prepare_fn,
+        )
+        db.log_download(
+            request_id=request_id,
+            soulseek_username=dl_info.username,
+            filetype=dl_info.filetype,
+            outcome="timeout",
+            error_message=reason,
+            transfer_detail=transfer_detail,
+        )
+        for username in extract_usernames(entry.files):
+            if db.check_and_apply_cooldown(username):
+                ctx.cooled_down_users.add(username)
+        transitions.require_transition_applied(transitions.finalize_request(
+            db,
+            request_id,
+            transitions.RequestTransition.to_wanted(
+                from_status="downloading",
+                attempt_type="download",
             ),
-            current_path=entry.import_folder,
-        ).to_json(),
-        expected_status="downloading",
-    )
+        ))
+        _enrich_have_evidence_after_failure(
+            request_id,
+            entry.mb_release_id,
+            ctx,
+            prepared_outcome=prepared_outcome,
+            enrich_fn=enrich_fn,
+        )
+        return True
 
 
 def harvest_terminal_transfer_evidence(ctx: CratediggerContext) -> None:
@@ -632,26 +600,21 @@ def harvest_terminal_transfer_evidence(ctx: CratediggerContext) -> None:
 
 def _run_completed_processing(
     entry: GrabListEntry,
-    request_id: int,
     state: ActiveDownloadState,
-    db: DownloadDB,
     ctx: CratediggerContext,
     *,
     import_job_id: int,
     process_album_fn: ProcessAlbumFn | None = None,
-    bundle_terminal_outcome: bool = False,
+    cancellation_token: CancellationToken | None = None,
+    execution_lease: ExecutionLeaseSnapshot | None = None,
+    owner_session_identity: OwnerSessionIdentity | None = None,
 ) -> CompletionResult:
-    """Run or resume local post-download processing for a completed album.
+    """Run exact-owner processing for a completed album.
 
     ``process_album_fn`` is an opt-in DI seam for tests that exercise the
-    outer transition flow without going through the full
+    importer mapping without going through the full
     ``process_completed_album`` body. Defaults to the real production
-    function so callers in ``scripts/importer.py`` are unchanged.
-
-    ``bundle_terminal_outcome`` is set only by the import-job owner. It
-    returns the local fallback request transition plus mandatory audit as
-    typed intent for ``process_claimed_job`` to commit with the job. The
-    default retains the direct/no-job transition behavior.
+    function.
 
     The default is resolved via the ``download_processing`` module
     reference (not a from-import binding) so that patching
@@ -664,107 +627,26 @@ def _run_completed_processing(
         else download_processing.process_completed_album
     )
 
-    if state.processing_started_at is None:
-        if entry.import_folder is None:
-            entry.import_folder = canonical_folder_for_row(
-                entry,
-                processing_albums_dir(ctx.cfg.processing_dir),
-            )
-        state.processing_started_at = datetime.now(UTC).isoformat()
-        if not _persist_updated_download_state(db, request_id, entry, state):
-            return CompletionDeferred(
-                detail="request_state_changed_before_local_processing",
-            )
+    if state.processing_started_at is None or state.current_path is None:
+        return CompletionDeferred(
+            detail="processing_owner_handoff_incomplete",
+        )
 
     try:
-        result = _process(
+        return _process(
             entry,
             ctx,
             import_job_id=import_job_id,
+            cancellation_token=cancellation_token,
+            execution_lease=execution_lease,
+            owner_session_identity=owner_session_identity,
         )
+    except ExecutionCancelled:
+        raise
     except Exception:
         logger.exception(f"Error processing completed download {entry.artist} - {entry.title} "
                          f"— will retry local processing next cycle")
         return CompletionDeferred(detail="unhandled_exception_during_local_processing")
-
-    # Ownership return from ``process_completed_album`` (see
-    # ``CompletionResult`` in lib/download_processing.py):
-    # - Completed           → processing succeeded; flip to 'imported' if
-    #   status is still 'downloading'.
-    # - CompletionFailed    → a non-deferred failure path returned; reset
-    #   to 'wanted' only if the request row is still 'downloading'.
-    # - CompletionDispatched → dispatch/finalization already owned request
-    #   transitions; return the summary to the queue owner only.
-    # - CompletionDeferred  → leave the row untouched. This covers
-    #   release-lock contention, guarded post-move staged paths, and
-    #   ownership-less request rejects that require manual recovery. Do
-    #   NOT touch state here.
-    if isinstance(result, CompletionDeferred):
-        return result
-
-    if isinstance(result, CompletionDispatched):
-        return result
-
-    if isinstance(result, Completed):
-        refreshed = db.get_request(request_id)
-        transition = None
-        if refreshed and refreshed["status"] == "downloading":
-            transition = transitions.RequestTransition.to_imported(
-                from_status="downloading",
-            )
-        if bundle_terminal_outcome and transition is not None:
-            return Completed(terminal_outcome=_local_completion_terminal_outcome(
-                entry,
-                state,
-                request_id=request_id,
-                import_job_id=import_job_id,
-                transition=transition,
-                outcome="success",
-                detail="Local automation import processing completed",
-            ))
-        if transition is not None:
-            logger.info(
-                "  process_completed_album succeeded without setting status "
-                "— setting imported"
-            )
-            transitions.require_transition_applied(
-                transitions.finalize_request(db, request_id, transition)
-            )
-        return result
-
-    match result:
-        case CompletionFailed():
-            refreshed = db.get_request(request_id)
-            transition = None
-            if refreshed and refreshed["status"] == "downloading":
-                transition = transitions.RequestTransition.to_wanted(
-                    from_status="downloading",
-                    attempt_type="download",
-                )
-            if bundle_terminal_outcome and transition is not None:
-                return CompletionFailed(
-                    reason=result.reason,
-                    terminal_outcome=_local_completion_terminal_outcome(
-                        entry,
-                        state,
-                        request_id=request_id,
-                        import_job_id=import_job_id,
-                        transition=transition,
-                        outcome="failed",
-                        detail=result.reason,
-                        error_message=result.reason,
-                    ),
-                )
-            if transition is not None:
-                logger.warning(
-                    "  process_completed_album failed without setting status "
-                    "— resetting to wanted"
-                )
-                transitions.require_transition_applied(
-                    transitions.finalize_request(db, request_id, transition)
-                )
-            return result
-    assert_never(result)
 
 
 def _local_completion_terminal_outcome(
@@ -796,47 +678,6 @@ def _local_completion_terminal_outcome(
     )
 
 
-def _active_import_job_for_request(
-    db: DownloadDB, request_id: int,
-) -> ImportJob | None:
-    return db.get_active_import_job_for_request(request_id)
-
-
-def materialize_failure_action(
-    materialized: MaterializeResult,
-    processing_started_at: str | None,
-    now: datetime,
-    *,
-    grace_seconds: int = PROCESSING_MATERIALIZE_GRACE_S,
-) -> str:
-    """Decide what the poller does with a non-``Materialized`` outcome.
-
-    - ``"leave"`` — ``MaterializeGuarded`` means this caller must not apply
-      a generic reset: either manual recovery owns the path or a successful
-      abandonment already reset and audited it. (Also the no-op answer if
-      ``materialized`` is actually ``Materialized`` — callers only invoke
-      this after already excluding that case.)
-    - ``"retry"`` — ``MaterializeFailed`` within the grace window retries
-      next cycle (covers the benign completion-vs-event-write race,
-      which resolves on the next ingest).
-    - ``"reset"`` — ``MaterializeFailed`` past the grace window self-heals
-      the request back to 'wanted' for re-download.
-    """
-    if not isinstance(materialized, MaterializeFailed):
-        return "leave"
-    if processing_started_at is None:
-        return "retry"
-    try:
-        started = datetime.fromisoformat(processing_started_at)
-    except ValueError:
-        return "retry"
-    if started.tzinfo is None:
-        started = started.replace(tzinfo=UTC)
-    if (now - started).total_seconds() > grace_seconds:
-        return "reset"
-    return "retry"
-
-
 def _enqueue_completed_processing(
     entry: GrabListEntry,
     request_id: int,
@@ -844,204 +685,31 @@ def _enqueue_completed_processing(
     db: DownloadDB,
     ctx: CratediggerContext,
 ) -> ImportJob | None:
-    """Submit completed-download processing to the shared import queue."""
-    if state.processing_started_at is None:
-        raise ValueError("processing must be marked before importer enqueue")
-    if entry.import_folder is None:
-        entry.import_folder = (
-            state.current_path
-            or canonical_folder_for_row(entry, processing_albums_dir(ctx.cfg.processing_dir))
-        )
-    staged_album = StagedAlbum.from_entry(
+    """Commit exact processor ownership without touching the filesystem."""
+    canonical_path = canonical_folder_for_row(
         entry,
-        default_path=canonical_folder_for_row(
-            entry,
-            processing_albums_dir(ctx.cfg.processing_dir),
-        ),
+        processing_albums_dir(ctx.cfg.processing_dir),
     )
-    materialized = _materialize_processing_dir(
-        entry,
-        staged_album,
-        ctx,
-        persist_current_path=False,
-    )
-    if not isinstance(materialized, Materialized):
-        action = materialize_failure_action(
-            materialized,
-            state.processing_started_at,
-            datetime.now(UTC),
-        )
-        # ``materialize_failure_action`` answers "reset" only for
-        # ``MaterializeFailed`` (``MaterializeGuarded`` is always
-        # "leave"), so the reason is always available here — the
-        # isinstance keeps that typed rather than casting it away.
-        if action == "reset" and isinstance(materialized, MaterializeFailed):
-            detail = (
-                "Completed download could not be materialized within "
-                f"{PROCESSING_MATERIALIZE_GRACE_S}s of processing start; "
-                "resetting to wanted for re-download"
-            )
-            logger.error(
-                "MATERIALIZE GRACE EXPIRED: request_id=%s %s - %s reason=%s — %s",
-                request_id,
-                entry.artist,
-                entry.title,
-                materialized.reason,
-                detail,
-            )
-            dl_info = _build_download_info(entry)
-            prepared_outcome = _prepare_have_evidence_before_failure_log(
-                request_id,
-                entry.mb_release_id,
-                ctx,
-            )
-            db.log_download(
-                request_id=request_id,
-                soulseek_username=dl_info.username,
-                filetype=dl_info.filetype,
-                outcome="failed",
-                # ``error_message`` stays the grace sentence; the machine
-                # reason rides alongside it so the row records WHY the
-                # materialize never succeeded, not merely that it didn't.
-                # Seven distinct causes used to land here indistinguishable
-                # (issue #868).
-                beets_detail=materialized.reason,
-                error_message=detail,
-            )
-            # Issue #822 item 4: apply the standard user cooldown on this
-            # reset, exactly consistent with the retry/timeout paths
-            # (_timeout_album) -- without it, a future phantom-complete
-            # mechanism could loop with the same peer at zero cost.
-            # Authority: "to the cooldown issue, yes apply the
-            # cooldown." — https://github.com/abl030/cratedigger/issues/822#issuecomment-5042163957
-            for username in extract_usernames(entry.files):
-                if db.check_and_apply_cooldown(username):
-                    ctx.cooled_down_users.add(username)
-            transitions.require_transition_applied(transitions.finalize_request(
-                db,
-                request_id,
-                transitions.RequestTransition.to_wanted(
-                    from_status="downloading",
-                    attempt_type="download",
-                ),
-            ))
-            _enrich_have_evidence_after_failure(
-                request_id,
-                entry.mb_release_id,
-                ctx,
-                prepared_outcome=prepared_outcome,
-            )
-            return None
-        logger.warning(
-            "Completed download for request %s could not be materialized "
-            "for import preview; leaving it for the next poll cycle",
-            request_id,
-        )
-        return None
-    entry.import_folder = staged_album.current_path
-    job = db.enqueue_import_job(
-        IMPORT_JOB_AUTOMATION,
+    result = db.handoff_automation_import(
         request_id=request_id,
-        dedupe_key=automation_import_dedupe_key(request_id),
-        payload=automation_import_payload(),
+        expected_enqueued_at=state.enqueued_at,
+        canonical_path=canonical_path,
         message=f"Automation import queued for {entry.artist} - {entry.title}",
     )
-    if job.deduped:
+    if result.committed:
+        assert result.job is not None
         logger.info(
-            "Automation import already active for request %s "
-            "(job %s)",
+            "Transferred request %s to automation import job %s",
             request_id,
-            job.id,
+            result.job.id,
         )
-    else:
-        logger.info(
-            "Queued automation import for request %s as job %s",
-            request_id,
-            job.id,
-        )
-    return job
-
-
-def _processing_path_ready_for_importer(
-    entry: GrabListEntry,
-    request_id: int,
-    state: ActiveDownloadState,
-    db: DownloadDB,
-    ctx: CratediggerContext,
-) -> bool:
-    """Fail closed before enqueueing a job that cannot resume local files.
-
-    Thin wrapper around the ONE shared staged-path-readiness decision
-    (``lib.download_materialization._evaluate_staged_path_readiness``, issue
-    #509) — the same decision ``_materialize_processing_dir`` uses for
-    its own non-canonical branch, so this pre-enqueue gate and the
-    materialize step it precedes can never drift apart again. This
-    wrapper only translates the tagged result into this caller's
-    ``bool`` contract and applies this gate's own, deliberately
-    different reaction to failure: an IMMEDIATE reset to 'wanted', not
-    the grace-windowed retry/reset ``materialize_failure_action``
-    applies when the same tag surfaces later from
-    ``_enqueue_completed_processing``'s own materialize call. That
-    difference is intentional and tested (``test_poll_missing_
-    persisted_current_path_resets_to_wanted``) — this gate exists to
-    fail closed before even attempting a heavier materialize/enqueue,
-    not to duplicate the grace window a first materialize attempt
-    already earned.
-    """
-    if state.processing_started_at is None or state.current_path is None:
-        return True
-
-    current_path_location = classify_processing_path(
-        current_path=state.current_path,
-        artist=entry.artist,
-        title=entry.title,
-        year=entry.year,
-        request_id=request_id,
-        staging_dir=ctx.cfg.beets_staging_dir,
-        canonical_root=processing_albums_dir(ctx.cfg.processing_dir),
-        attempt_fingerprint=attempt_fingerprint(
-            [(f.username, f.filename) for f in entry.files],
-        ),
-    )
-    if current_path_location.kind == "canonical":
-        # The canonical processing folder may not exist yet — the
-        # importer materializes it from the completed slskd files as
-        # its first step. Nothing to check here.
-        return True
-
-    staged_album = StagedAlbum.from_entry(entry, default_path=state.current_path)
-    result = _evaluate_staged_path_readiness(
-        entry, staged_album, current_path_location, db,
-    )
-    if isinstance(result, Materialized):
-        return True
-    if isinstance(result, MaterializeGuarded):
-        return False
-
-    assert isinstance(result, MaterializeFailed)
-    transitions.require_transition_applied(transitions.finalize_request(
-        db,
+        return result.job
+    logger.info(
+        "Automation handoff rejected for request %s: %s",
         request_id,
-        transitions.RequestTransition.to_wanted(
-            from_status="downloading",
-            attempt_type="download",
-        ),
-    ))
-    db.log_download(
-        request_id=request_id,
-        soulseek_username=None,
-        filetype=state.filetype,
-        outcome="failed",
-        beets_detail=result.reason,
-        error_message=result.reason,
+        result.outcome,
     )
-    logger.warning(
-        "PRE-ENQUEUE GATE RESET: request_id=%s reason=%s current_path=%s",
-        request_id,
-        result.reason,
-        state.current_path,
-    )
-    return False
+    return None
 
 
 def _decode_valid_download_incarnations(
@@ -1158,8 +826,9 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
     # Issue #146: stamp authoritative local paths from slskd's
     # DownloadFileComplete events before processing. Runs even with no
     # downloading rows so the cursor keeps tracking the feed. An ingest
-    # failure stamps nothing this cycle — completions ride the
-    # materialize grace window — and never blocks polling.
+    # failure stamps nothing this cycle. Polling still publishes processor
+    # ownership for a completed transfer; the processor then enforces the
+    # event-stamped source-path contract.
     try:
         from lib.slskd_events import ingest_download_file_events
         ingest_result = ingest_download_file_events(db, ctx.slskd)
@@ -1167,7 +836,7 @@ def poll_active_downloads(ctx: CratediggerContext) -> None:
     except Exception:
         logger.exception(
             "SLSKD EVENTS: ingest failed — nothing stamped this cycle; "
-            "completions ride the materialize grace window")
+            "processor source-path validation remains authoritative")
 
     # Refresh after EVERY ingest outcome, including a raised ingest error.
     # Admission is the exact (request_id, enqueued_at text) pair that existed
@@ -1219,75 +888,25 @@ def _poll_one_active_download(
 ) -> None:
     """Build poll facts, persist one reduced state, then dispatch one effect."""
     request_id = row["id"]
-    active_import_job = _active_import_job_for_request(db, request_id)
-
-    recovery_decision = None
-    if (
-        state.processing_started_at is not None
-        and active_import_job is None
-    ):
-        recovery_decision = reconcile_processing_current_path(
-            current_path=state.current_path,
-            artist=row["artist_name"],
-            title=row["album_title"],
-            year=str(row["year"] or ""),
-            request_id=request_id,
-            staging_dir=ctx.cfg.beets_staging_dir,
-            canonical_root=processing_albums_dir(ctx.cfg.processing_dir),
-            has_entries=directory_has_entries,
-            attempt_fingerprint=attempt_fingerprint(
-                [(f.username, f.filename) for f in state.files],
-            ),
-        )
 
     file_snapshots: list[PollFileSnapshot] = []
-    completion_current_path = None
-    if (
-        state.processing_started_at is None
-        and active_import_job is None
-    ):
-        initial_entry = _reconstruct_grab_list_entry(row, state)
-        completion_current_path = canonical_folder_for_row(
-            initial_entry,
-            processing_albums_dir(ctx.cfg.processing_dir),
+    for file in state.files:
+        transfer = match_transfer_for_attempt(
+            cycle_snapshot,
+            file.filename,
+            username=file.username,
+            not_before=state.enqueued_at,
         )
-        for file in state.files:
-            transfer = match_transfer_for_attempt(
-                cycle_snapshot,
-                file.filename,
-                username=file.username,
-                not_before=state.enqueued_at,
-            )
-            file_snapshots.append(PollFileSnapshot(
-                transfer_id=transfer.id if transfer is not None else None,
-                state=transfer.state if transfer is not None else None,
-                bytes_transferred=(
-                    transfer.bytes_transferred if transfer is not None else 0
-                ),
-                exception=transfer.exception if transfer is not None else None,
-            ))
+        file_snapshots.append(PollFileSnapshot(
+            transfer_id=transfer.id if transfer is not None else None,
+            state=transfer.state if transfer is not None else None,
+            bytes_transferred=(
+                transfer.bytes_transferred if transfer is not None else 0
+            ),
+            exception=transfer.exception if transfer is not None else None,
+        ))
 
-    snapshot = PollCycleSnapshot(
-        files=file_snapshots,
-        active_import_job_id=(
-            active_import_job.id if active_import_job is not None else None
-        ),
-        active_import_job_status=(
-            active_import_job.status if active_import_job is not None else None
-        ),
-        processing_current_path=(
-            recovery_decision.selected_location.path
-            if recovery_decision is not None
-            and recovery_decision.selected_location is not None
-            else None
-        ),
-        processing_blocked_reason=(
-            recovery_decision.blocked_reason
-            if recovery_decision is not None
-            else None
-        ),
-        completion_current_path=completion_current_path,
-    )
+    snapshot = PollCycleSnapshot(files=file_snapshots)
     now = datetime.now(UTC)
     result = reduce_poll_cycle(
         state,
@@ -1300,68 +919,13 @@ def _poll_one_active_download(
         ),
     )
 
-    # The reducer returns the whole observation state, so every valid row
-    # persists unconditionally here while this worker still owns the same
-    # downloading incarnation. Losing that guard means a concurrent status
-    # transition or newer attempt won; its state and every downstream side
-    # effect take precedence.
     reduced_state = result.state
     assert reduced_state is not None
-    if not db.update_download_state_if_downloading(
-            request_id,
-            reduced_state.to_json(),
-            expected_enqueued_at=state.enqueued_at,
-        ):
-        return
-
     verdict = result.verdict
     if verdict.decision == PollCycleDecision.reset_missing_state:
         raise AssertionError(
             "admitted poll incarnation unexpectedly reduced as missing state",
         )
-    if verdict.decision == PollCycleDecision.wait_import_job:
-        logger.info(
-            "Request %s is waiting on importer job %s (%s)",
-            request_id,
-            verdict.import_job_id,
-            verdict.import_job_status,
-        )
-        return
-
-    if verdict.decision == PollCycleDecision.wait_processing_recovery:
-        assert recovery_decision is not None
-        if verdict.reason == "multiple_populated_paths":
-            rendered_candidates = ", ".join(
-                f"{location.short_label}={location.path}"
-                for location in recovery_decision.populated_locations
-            )
-            logger.error(
-                "MID-PROCESS RESUME BLOCKED: request_id=%s %s - %s "
-                "found multiple populated recovery paths (%s). "
-                "Manual recovery is required.",
-                request_id,
-                row["artist_name"],
-                row["album_title"],
-                rendered_candidates,
-            )
-            return
-        if verdict.reason == "legacy_shared_only":
-            logger.error(
-                "LEGACY STAGED RESUME BLOCKED: request_id=%s %s - %s "
-                "persisted current_path=%s could not be resumed, "
-                "canonical_path=%s has no files, "
-                "and staged_path=%s is ambiguous across editions. "
-                "Manual recovery is required.",
-                request_id,
-                row["artist_name"],
-                row["album_title"],
-                reduced_state.current_path,
-                recovery_decision.canonical_path,
-                recovery_decision.legacy_shared_path,
-            )
-            return
-        raise AssertionError(f"unknown processing recovery block: {verdict.reason}")
-
     state = reduced_state
     transfer_ids = {
         (file.username, file.filename): observation.transfer_id
@@ -1374,16 +938,71 @@ def _poll_one_active_download(
         transfer_ids=transfer_ids,
     )
 
-    if verdict.decision == PollCycleDecision.processing:
-        if not _processing_path_ready_for_importer(
-            entry,
+    # A retry-count increment is evidence that a retry was actually attempted,
+    # not merely observed as eligible. Serialize the witnessed state write and
+    # slskd effect under IMPORT so lock contention cannot consume retry budget.
+    if verdict.decision == PollCycleDecision.retry_files:
+        with db.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_IMPORT,
             request_id,
-            state,
-            db,
-            ctx,
-        ):
-            return
-        _enqueue_completed_processing(entry, request_id, state, db, ctx)
+        ) as acquired:
+            if not acquired or not _owns_downloading_incarnation(
+                db,
+                request_id=request_id,
+                expected_enqueued_at=state.enqueued_at,
+            ):
+                return
+            if not db.update_download_state_if_downloading(
+                request_id,
+                state.to_json(),
+                expected_enqueued_at=state.enqueued_at,
+            ):
+                return
+            if not _owns_downloading_incarnation(
+                db,
+                request_id=request_id,
+                expected_enqueued_at=state.enqueued_at,
+            ):
+                return
+            for retry_filename in verdict.files_to_retry:
+                for file in entry.files:
+                    if file.filename == retry_filename:
+                        retries_used = file.retry or 0
+                        logger.info(
+                            "Re-enqueue failed file (%s/%s retries): %s",
+                            retries_used,
+                            MAX_FILE_RETRIES,
+                            retry_filename,
+                        )
+                        requeue = slskd_do_enqueue(
+                            file.username,
+                            [{"filename": file.filename, "size": file.size}],
+                            file.file_dir,
+                            ctx,
+                            request_id=request_id,
+                            attempt_fp=attempt_fingerprint([
+                                (item.username, item.filename)
+                                for item in entry.files
+                            ]),
+                            # A retry is still part of this exact attempt.
+                            not_before=state.enqueued_at,
+                        )
+                        if not requeue:
+                            logger.warning(
+                                "Failed to re-enqueue file: %s",
+                                retry_filename,
+                            )
+                        break
+        return
+
+    # Non-retry observations are persisted before their separately fenced
+    # downstream action. Losing this CAS means a concurrent status transition
+    # or newer attempt won; its state and effects take precedence.
+    if not db.update_download_state_if_downloading(
+        request_id,
+        state.to_json(),
+        expected_enqueued_at=state.enqueued_at,
+    ):
         return
 
     if verdict.decision == PollCycleDecision.wait_fresh_vanished:
@@ -1400,11 +1019,18 @@ def _poll_one_active_download(
             request_id,
             _vanished_timeout_reason(entry.files),
             ctx,
+            expected_enqueued_at=state.enqueued_at,
         )
         return
 
     if verdict.decision == PollCycleDecision.timeout_remote_queue:
-        _timeout_album(entry, request_id, verdict.reason, ctx)
+        _timeout_album(
+            entry,
+            request_id,
+            verdict.reason,
+            ctx,
+            expected_enqueued_at=state.enqueued_at,
+        )
         return
 
     if verdict.decision == PollCycleDecision.complete:
@@ -1413,45 +1039,26 @@ def _poll_one_active_download(
         return
 
     if verdict.decision == PollCycleDecision.timeout_all_errored:
-        _timeout_album(entry, request_id, verdict.reason, ctx)
+        _timeout_album(
+            entry,
+            request_id,
+            verdict.reason,
+            ctx,
+            expected_enqueued_at=state.enqueued_at,
+        )
         return
 
     if verdict.decision == PollCycleDecision.timeout_stalled:
-        _timeout_album(entry, request_id, verdict.reason, ctx)
+        _timeout_album(
+            entry,
+            request_id,
+            verdict.reason,
+            ctx,
+            expected_enqueued_at=state.enqueued_at,
+        )
         return
 
-    if verdict.decision == PollCycleDecision.retry_files:
-        for retry_filename in verdict.files_to_retry:
-            for file in entry.files:
-                if file.filename == retry_filename:
-                    retries_used = file.retry or 0
-                    logger.info(f"Re-enqueue failed file "
-                                f"({retries_used}/{MAX_FILE_RETRIES} retries): "
-                                f"{retry_filename}")
-                    requeue = slskd_do_enqueue(
-                        file.username,
-                        [{"filename": file.filename, "size": file.size}],
-                        file.file_dir, ctx,
-                        request_id=request_id,
-                        attempt_fp=attempt_fingerprint(
-                            [(f.username, f.filename) for f in entry.files]),
-                        # issue #822 item 3: same attempt boundary the
-                        # poll/harvest matchers already use for this row
-                        # (not_before=state.enqueued_at) -- a per-file
-                        # retry is still part of THIS attempt, not a fresh
-                        # one, so the original enqueue time is the correct
-                        # lower bound for reconciling its transfer ID.
-                        not_before=state.enqueued_at,
-                    )
-                    if not requeue:
-                        logger.warning(f"Failed to re-enqueue file: {retry_filename}")
-                    break
-
-        refreshed = db.get_request(request_id)
-        if refreshed and refreshed["status"] != "downloading":
-            return
-
-    elif verdict.decision != PollCycleDecision.in_progress:
+    if verdict.decision != PollCycleDecision.in_progress:
         assert_never(verdict.decision)
 
     # Still in progress — log and continue to next album
@@ -1490,23 +1097,6 @@ def grab_most_wanted(
     for album_id in grab_list:
         entry = grab_list[album_id]
         logger.info(f"Album: {entry.title} Artist: {entry.artist}")
-
-        # Legacy/test fallback: production find_download workers claim
-        # ownership before the slskd enqueue. Keep this only for callers that
-        # do not provide the worker-safe ownership collaborator.
-        request_id = entry.db_request_id
-        if request_id and getattr(ctx, "download_ownership", None) is None:
-            state = build_active_download_state(entry)
-            db = ctx.pipeline_db_source._get_db()
-            transitions.require_transition_applied(transitions.finalize_request(
-                db,
-                request_id,
-                transitions.RequestTransition.to_downloading(
-                    from_status="wanted",
-                    state_json=state.to_json(),
-                ),
-            ))
-            logger.info(f"  Set status=downloading, {len(entry.files)} files tracked")
 
     logger.info(f"Failed to grab: {len(failed_grab)}")
     for album in failed_grab:

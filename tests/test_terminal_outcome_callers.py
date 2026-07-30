@@ -21,7 +21,11 @@ from lib.terminal_outcomes import (
 )
 from scripts import import_preview_worker, importer
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_request_row
+from tests.helpers import (
+    claim_next_import_job,
+    claim_next_import_preview_job,
+    make_request_row,
+)
 
 
 def _seed_request(db: FakePipelineDB) -> None:
@@ -88,7 +92,7 @@ class TestTerminalOutcomeCallers(unittest.TestCase):
             payload={"download_log_id": 1, "failed_path": "/tmp/atomic"},
         )
         db.mark_import_job_preview_importable(job.id, preview_result={"ready": True})
-        claimed = db.claim_next_import_job(worker_id="atomic")
+        claimed = claim_next_import_job(db, worker_id="atomic")
         assert claimed is not None
         pending = PendingImportTerminalOutcome(
             request_id=42,
@@ -129,7 +133,7 @@ class TestTerminalOutcomeCallers(unittest.TestCase):
             request_id=42,
             payload={"download_log_id": 1, "failed_path": "/tmp/atomic"},
         )
-        claimed = db.claim_next_import_preview_job(worker_id="atomic-preview")
+        claimed = claim_next_import_preview_job(db, worker_id="atomic-preview")
         assert claimed is not None
         failure = MeasurementFailure(
             reason="source_vanished",

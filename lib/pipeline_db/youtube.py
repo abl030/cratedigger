@@ -343,37 +343,6 @@ class _YoutubeMixin(_PipelineDBBase):
         return ImportJob.from_row(dict(row)) if row is not None else None
 
 
-    def list_active_youtube_rescues(
-        self,
-        *,
-        limit: int = 50,
-    ) -> list[dict[str, Any]]:
-        """Return active YouTube rescue rows for API/operator visibility."""
-        cur = self._execute(
-            """
-            SELECT
-                dl.id AS download_log_id,
-                dl.request_id,
-                dl.source,
-                dl.outcome,
-                dl.youtube_metadata,
-                dl.created_at,
-                ar.artist_name,
-                ar.album_title,
-                ar.mb_release_id,
-                ar.status AS request_status
-            FROM download_log dl
-            JOIN album_requests ar ON ar.id = dl.request_id
-            WHERE dl.source = 'youtube'
-              AND dl.outcome = 'youtube_running'
-            ORDER BY dl.created_at ASC, dl.id ASC
-            LIMIT %s
-            """,
-            (int(limit),),
-        )
-        return [dict(row) for row in cur.fetchall()]
-
-
     # --- youtube_album_mappings (migration 034) ---
     #
     # The YouTube Music album resolver caches its scored matrix here:

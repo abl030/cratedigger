@@ -12,7 +12,6 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Protocol
 
-from lib import download_materialization
 from lib.dispatch import (
     DispatchCoreFn,
     DispatchOutcome,
@@ -30,6 +29,11 @@ from lib.grab_list import GrabListEntry
 from lib.import_evidence import (
     CandidateEvidenceActionResult,
     ensure_candidate_evidence_for_action,
+)
+from lib.import_execution import (
+    CancellationToken,
+    ExecutionLeaseSnapshot,
+    OwnerSessionIdentity,
 )
 from lib.import_manifest import (
     audio_relative_paths,
@@ -53,6 +57,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger("cratedigger")
 
 
+def _checkpoint(cancellation_token: CancellationToken | None) -> None:
+    if cancellation_token is not None:
+        cancellation_token.raise_if_cancelled()
+
+
 class HandleValidFn(Protocol):
     """Exact injection contract for the validated-result handoff."""
 
@@ -67,6 +76,9 @@ class HandleValidFn(Protocol):
         prevalidated_candidate_result: CandidateEvidenceActionResult | None = None,
         quality_gate_fn: QualityGateFn | None = None,
         dispatch_fn: DispatchCoreFn | None = None,
+        cancellation_token: CancellationToken | None = None,
+        execution_lease: ExecutionLeaseSnapshot | None = None,
+        owner_session_identity: OwnerSessionIdentity | None = None,
     ) -> DispatchOutcome | None: ...
 
 
@@ -82,6 +94,9 @@ class ValidateFn(Protocol):
         import_job_id: int,
         handle_valid_fn: HandleValidFn | None = None,
         dispatch_fn: DispatchCoreFn | None = None,
+        cancellation_token: CancellationToken | None = None,
+        execution_lease: ExecutionLeaseSnapshot | None = None,
+        owner_session_identity: OwnerSessionIdentity | None = None,
     ) -> DispatchOutcome | None: ...
 
 
@@ -116,6 +131,9 @@ def _process_beets_validation(
     import_job_id: int,
     handle_valid_fn: HandleValidFn | None = None,
     dispatch_fn: DispatchCoreFn | None = None,
+    cancellation_token: CancellationToken | None = None,
+    execution_lease: ExecutionLeaseSnapshot | None = None,
+    owner_session_identity: OwnerSessionIdentity | None = None,
 ) -> DispatchOutcome | None:
     """Validate one exact release and route its canonical result.
 
@@ -153,13 +171,16 @@ def _process_beets_validation(
             scenario="untracked_audio",
             error=manifest_detail,
             import_job_id=import_job_id,
+            cancellation_token=cancellation_token,
         )
+    _checkpoint(cancellation_token)
     bv_result = _bv(
         ctx.cfg.beets_harness_path,
         current_path,
         album_data.mb_release_id,
         ctx.cfg.beets_distance_threshold,
     )
+    _checkpoint(cancellation_token)
     usernames_pre = {f.username for f in album_data.files if f.username}
     bv_result.soulseek_username = (
         ", ".join(sorted(usernames_pre)) if usernames_pre else None
@@ -167,6 +188,7 @@ def _process_beets_validation(
     bv_result.download_folder = current_path
     bv_result.source_dirs = source_dirs_for_album(album_data)
     if bv_result.valid:
+        _checkpoint(cancellation_token)
         db = ctx.pipeline_db_source._get_db()
         candidate_result = ensure_candidate_evidence_for_action(
             db,
@@ -183,10 +205,23 @@ def _process_beets_validation(
                 db,
                 import_job_id=import_job_id,
                 reason=reason,
+                expected_execution_lease=execution_lease,
             )
         resolved_handle_valid = (
             handle_valid_fn if handle_valid_fn is not None else _handle_valid_result
         )
+        if cancellation_token is None:
+            return resolved_handle_valid(
+                album_data,
+                bv_result,
+                staged_album,
+                ctx,
+                import_job_id=import_job_id,
+                prevalidated_candidate_result=candidate_result,
+                dispatch_fn=dispatch_fn,
+                execution_lease=execution_lease,
+                owner_session_identity=owner_session_identity,
+            )
         return resolved_handle_valid(
             album_data,
             bv_result,
@@ -195,6 +230,9 @@ def _process_beets_validation(
             import_job_id=import_job_id,
             prevalidated_candidate_result=candidate_result,
             dispatch_fn=dispatch_fn,
+            cancellation_token=cancellation_token,
+            execution_lease=execution_lease,
+            owner_session_identity=owner_session_identity,
         )
     return _handle_rejected_result(
         album_data,
@@ -202,6 +240,7 @@ def _process_beets_validation(
         staged_album,
         ctx,
         import_job_id=import_job_id,
+        cancellation_token=cancellation_token,
     )
 
 
@@ -215,6 +254,9 @@ def _handle_valid_result(
     prevalidated_candidate_result: CandidateEvidenceActionResult | None = None,
     quality_gate_fn: QualityGateFn | None = None,
     dispatch_fn: DispatchCoreFn | None = None,
+    cancellation_token: CancellationToken | None = None,
+    execution_lease: ExecutionLeaseSnapshot | None = None,
+    owner_session_identity: OwnerSessionIdentity | None = None,
 ) -> DispatchOutcome | None:
     """Stage a valid exact-release result and dispatch request imports.
 
@@ -249,13 +291,8 @@ def _handle_valid_result(
             scenario="request_missing_request_id",
             error="missing_request_id",
             import_job_id=import_job_id,
+            cancellation_token=cancellation_token,
         )
-
-    current_path_location = download_materialization.classify_staged_album_location(
-        album_data,
-        staged_album,
-        ctx,
-    )
 
     if wants_auto_import and not album_data.mb_release_id:
         return _reject_request_auto_import(
@@ -267,36 +304,11 @@ def _handle_valid_result(
             scenario="request_missing_mbid",
             error="missing_mbid",
             import_job_id=import_job_id,
+            cancellation_token=cancellation_token,
         )
 
     will_auto_import = wants_auto_import
     pdb = None
-
-    if (
-        will_auto_import
-        and current_path_location.blocks_auto_import_dispatch
-        and download_materialization._import_subprocess_already_started(
-            ctx.pipeline_db_source._get_db(),
-            request_id,
-        )
-    ):
-        download_materialization._log_post_move_resume_blocked(
-            album_data,
-            current_path=staged_album.current_path,
-            detail=(
-                f"already lives at the {current_path_location.display_name}. "
-                "Automatic retry is disabled to avoid duplicate import; "
-                "manual recovery is required."
-            ),
-        )
-        return DispatchOutcome(
-            success=False,
-            message=(
-                "Auto-import may already have started for this staged "
-                f"album ({album_data.mb_release_id})"
-            ),
-            deferred=True,
-        )
 
     if will_auto_import and album_data.mb_release_id:
         pdb = ctx.pipeline_db_source._get_db()
@@ -317,6 +329,13 @@ def _handle_valid_result(
                 f"{staged_album.current_path} so the next cycle can "
                 "idempotently resume from process_completed_album."
             )
+            if execution_lease is not None:
+                return _requeue_import_job_to_preview(
+                    ctx.pipeline_db_source._get_db(),
+                    import_job_id=import_job_id,
+                    reason="release lock contention",
+                    expected_execution_lease=execution_lease,
+                )
             return DispatchOutcome(
                 success=False,
                 message=(
@@ -326,7 +345,7 @@ def _handle_valid_result(
                 deferred=True,
             )
 
-        db = ctx.pipeline_db_source._get_db()
+        _checkpoint(cancellation_token)
         dest = staged_album.move_to(
             stage_to_ai_path(
                 artist=album_data.artist,
@@ -335,8 +354,9 @@ def _handle_valid_result(
                 request_id=request_id,
                 auto_import=will_auto_import,
             ),
-            db=db,
+            cancellation_token=cancellation_token,
         )
+        _checkpoint(cancellation_token)
         album_data.import_folder = dest
         log_validation_result(album_data, bv_result, ctx.cfg, dest_path=dest)
         logger.info(
@@ -407,6 +427,7 @@ def _handle_valid_result(
                 else _check_quality_gate_core
             )
             if dispatch_fn is not None:
+                _checkpoint(cancellation_token)
                 return dispatch_fn(
                     path=dest,
                     mb_release_id=album_data.mb_release_id or "",
@@ -431,7 +452,11 @@ def _handle_valid_result(
                     candidate_download_log_id=None,
                     prevalidated_candidate_result=prevalidated_candidate_result,
                     quality_gate_fn=resolved_quality_gate_fn,
+                    execution_lease=execution_lease,
+                    cancellation_token=cancellation_token,
+                    owner_session_identity=owner_session_identity,
                 )
+            _checkpoint(cancellation_token)
             return dispatch_import_core(
                 path=dest,
                 mb_release_id=album_data.mb_release_id or "",
@@ -456,7 +481,11 @@ def _handle_valid_result(
                 candidate_download_log_id=None,
                 prevalidated_candidate_result=prevalidated_candidate_result,
                 quality_gate_fn=resolved_quality_gate_fn,
+                execution_lease=execution_lease,
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
             )
+        _checkpoint(cancellation_token)
         pending = ctx.pipeline_db_source.mark_done(
             album_data,
             bv_result,

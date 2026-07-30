@@ -8,12 +8,15 @@ Pure function tests (TestPopulateDlInfo*, TestCleanupStagedDir) test in/out.
 """
 import configparser
 import errno
+import inspect
 import json
 import os
 import shutil
 import subprocess as sp
 import tempfile
+import threading
 import unittest
+from collections.abc import Callable
 from contextlib import AbstractContextManager
 from datetime import UTC
 from typing import ClassVar, Never
@@ -22,6 +25,15 @@ from unittest.mock import MagicMock, patch
 import msgspec
 
 from lib.config import CratediggerConfig
+from lib.dispatch import core as dispatch_core_module
+from lib.import_execution import (
+    CancellationToken,
+    ExecutionCancelled,
+    ExecutionLeaseSnapshot,
+    MonitoredProcessGroup,
+    ProcessIdentity,
+)
+from lib.import_queue import ImportJob
 from lib.quality import (
     QUALITY_FLAC_ONLY,
     QUALITY_UPGRADE_TIERS,
@@ -47,6 +59,8 @@ from lib.quality_evidence import snapshot_audio_files, snapshot_fingerprint
 from tests.fakes import FakePipelineDB
 from tests.helpers import (
     RecordingQualityGate,
+    claim_next_import_job,
+    claim_next_import_preview_job,
     hermetic_beets_config_defaults,
     make_album_quality_evidence,
     make_ctx_with_fake_db,
@@ -55,6 +69,7 @@ from tests.helpers import (
     make_request_row,
     noop_quality_gate,
     patch_dispatch_externals,
+    pinned_dispatch_authority,
 )
 
 _HERMETIC_BEETS_DEFAULTS: AbstractContextManager[tuple[str, str]] | None = None
@@ -216,13 +231,15 @@ def _claim_dispatch_job(
     force: bool = False,
     request_id: int = 42,
     evidence_kwargs=None,
+    candidate_evidence=None,
 ):
     """Create the production-shaped job/evidence authority for a core test."""
     from lib.import_evidence import (
         ActionEvidenceProvenance,
         CandidateEvidenceActionResult,
     )
-    from lib.import_queue import IMPORT_JOB_AUTOMATION, IMPORT_JOB_FORCE
+    from lib.import_queue import IMPORT_JOB_FORCE
+    from tests.helpers import handoff_automation_owner
 
     # Production-shaped dispatch tests must persist the snapshot of the path
     # they later hand to the freshness guard.
@@ -234,21 +251,55 @@ def _claim_dispatch_job(
     files = snapshot_audio_files(path)
     request = db.request(request_id)
     request["mb_release_id"] = release_id
+    preview_lease: ExecutionLeaseSnapshot | None = None
     if not force:
         state = dict(request.get("active_download_state") or {})
+        state.setdefault("enqueued_at", "2026-07-29T00:00:00+00:00")
         state["current_path"] = path
+        state.setdefault("filetype", "mp3")
         state.setdefault("files", [])
-        request["active_download_state"] = state
-    job = db.enqueue_import_job(
-        IMPORT_JOB_FORCE if force else IMPORT_JOB_AUTOMATION,
-        request_id=request_id,
-        payload={"download_log_id": 1, "failed_path": path} if force else {},
-    )
-    evidence = make_album_quality_evidence(
-        mb_release_id=release_id,
-        source_path=path,
-        files=files,
-        **(evidence_kwargs or {}),
+        db.seed_request({
+            **request,
+            "status": "wanted",
+            "active_download_state": None,
+            "active_automation_import_job_id": None,
+        })
+        job = handoff_automation_owner(
+            db,
+            request_id,
+            state=state,
+            canonical_path=path,
+        )
+        preview_lease = ExecutionLeaseSnapshot(
+            host_boot_id="dispatch-test-boot",
+            invocation_id=f"dispatch-preview-{job.id}",
+            systemd_unit="cratedigger-import-preview-worker.service",
+            worker=ProcessIdentity(8101, 81001),
+        )
+        claimed_preview = claim_next_import_preview_job(db, worker_id="dispatch-preview",
+        execution_lease=preview_lease,)
+        assert claimed_preview is not None
+    else:
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=request_id,
+            payload={"download_log_id": 1, "failed_path": path},
+        )
+    evidence = (
+        msgspec.structs.replace(
+            candidate_evidence,
+            mb_release_id=release_id,
+            source_path=path,
+            files=files,
+            snapshot_fingerprint=snapshot_fingerprint(files),
+        )
+        if candidate_evidence is not None
+        else make_album_quality_evidence(
+            mb_release_id=release_id,
+            source_path=path,
+            files=files,
+            **(evidence_kwargs or {}),
+        )
     )
     db.upsert_album_quality_evidence(evidence)
     persisted = db.find_album_quality_evidence(
@@ -256,9 +307,33 @@ def _claim_dispatch_job(
         snapshot_fingerprint=evidence.snapshot_fingerprint,
     )
     assert persisted is not None and persisted.id is not None
-    db.set_import_job_candidate_evidence(job.id, persisted.id)
-    db.mark_import_job_preview_importable(job.id, preview_result={"ready": True})
-    claimed = db.claim_next_import_job(worker_id="dispatch-test")
+    if force:
+        db.set_import_job_candidate_evidence(job.id, persisted.id)
+        db.mark_import_job_preview_importable(
+            job.id,
+            preview_result={"ready": True},
+        )
+        execution_lease = None
+    else:
+        assert preview_lease is not None
+        db.set_import_job_candidate_evidence(
+            job.id,
+            persisted.id,
+            expected_execution_lease=preview_lease,
+        )
+        db.mark_import_job_preview_importable(
+            job.id,
+            preview_result={"ready": True},
+            expected_execution_lease=preview_lease,
+        )
+        execution_lease = ExecutionLeaseSnapshot(
+            host_boot_id="dispatch-test-boot",
+            invocation_id=f"dispatch-importer-{job.id}",
+            systemd_unit="cratedigger-importer.service",
+            worker=ProcessIdentity(8102, 81002),
+        )
+    claimed = claim_next_import_job(db, worker_id="dispatch-test",
+    execution_lease=execution_lease,)
     assert claimed is not None
     return claimed, CandidateEvidenceActionResult(
         evidence=persisted,
@@ -266,7 +341,331 @@ def _claim_dispatch_job(
             candidate_status="reused",
             snapshot_guard="matched",
         ),
-    )
+    ), execution_lease
+
+
+def _owned_test_runner(**kwargs):
+    """Exercise the legacy patched sp.run seam after persisting child proof."""
+    from lib.dispatch.subprocess_runner import run_import_one
+
+    on_spawn = kwargs.pop("on_spawn", None)
+    cancellation_token = kwargs.pop("cancellation_token", None)
+    kwargs.pop("owner_session_probe", None)
+    if on_spawn is not None:
+        on_spawn(os.getpid())
+    if cancellation_token is not None:
+        cancellation_token.raise_if_cancelled()
+    return run_import_one(**kwargs)
+
+
+class TestAutomationDispatchExecutionFence(unittest.TestCase):
+    """Production dispatch retains exact automation authority around Beets."""
+
+    def _world(self, root: str):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="wanted",
+            mb_release_id="test-mbid",
+        ))
+        claimed, candidate, execution_lease = _claim_dispatch_job(
+            db,
+            path=root,
+            release_id="test-mbid",
+        )
+        assert execution_lease is not None
+        return db, claimed, candidate, execution_lease
+
+    def _dispatch(
+        self,
+        *,
+        root: str,
+        db: FakePipelineDB,
+        claimed,
+        candidate,
+        execution_lease: ExecutionLeaseSnapshot,
+        token: CancellationToken,
+        runner,
+        evidence_gate_fn=None,
+    ):
+        from lib.dispatch import dispatch_import_core
+
+        kwargs = {}
+        if evidence_gate_fn is not None:
+            kwargs["evidence_gate_fn"] = evidence_gate_fn
+        with pinned_dispatch_authority(
+            db,
+            execution_lease,
+            cancellation_token=token,
+        ) as (pinned_token, owner_session_identity):
+            assert pinned_token is token
+            assert owner_session_identity is not None
+            return dispatch_import_core(
+                path=root,
+                mb_release_id="test-mbid",
+                request_id=42,
+                label="Test Artist - Test Album",
+                beets_harness_path=_HARNESS,
+                db=db,  # type: ignore[arg-type]
+                dl_info=DownloadInfo(filetype="mp3"),
+                distance=0.05,
+                scenario="strong_match",
+                files=[],
+                cfg=_full_dispatch_config(),
+                quality_gate_fn=noop_quality_gate,
+                candidate_import_job_id=claimed.id,
+                prevalidated_candidate_result=candidate,
+                execution_lease=execution_lease,
+                cancellation_token=pinned_token,
+                owner_session_identity=owner_session_identity,
+                run_import_fn=runner,
+                **kwargs,
+            )
+
+    def test_child_identity_is_persisted_before_wait_and_loss_stops_effects(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            db, claimed, candidate, execution_lease = self._world(root)
+            token = CancellationToken()
+            observations: list[str] = []
+
+            def lose_session_after_spawn(**kwargs):
+                current = db.get_import_job(claimed.id)
+                assert current is not None
+                self.assertIsNotNone(current.beets_launch_authorized_at)
+                self.assertIsNone(current.execution_beets_pid)
+                observations.append("authorized")
+
+                on_spawn = kwargs["on_spawn"]
+                on_spawn(os.getpid())
+                persisted = db.get_import_job(claimed.id)
+                assert persisted is not None
+                self.assertEqual(persisted.execution_beets_pid, os.getpid())
+                self.assertIsNotNone(persisted.execution_beets_start_ticks)
+                observations.append("child-persisted")
+
+                token.cancel("owner_session_lost")
+                token.raise_if_cancelled()
+                raise AssertionError("cancelled runner must not return")
+
+            with patch.object(
+                dispatch_core_module,
+                "_write_quality_evidence_action_file",
+                return_value=None,
+            ), patch.object(
+                dispatch_core_module,
+                "_refresh_current_evidence_after_import",
+            ) as refresh, patch.object(
+                dispatch_core_module,
+                "_write_album_sidecar_after_import",
+            ) as sidecar, self.assertRaisesRegex(
+                ExecutionCancelled,
+                "owner_session_lost",
+            ):
+                self._dispatch(
+                    root=root,
+                    db=db,
+                    claimed=claimed,
+                    candidate=candidate,
+                    execution_lease=execution_lease,
+                    token=token,
+                    runner=lose_session_after_spawn,
+                )
+
+            self.assertEqual(observations, ["authorized", "child-persisted"])
+            refresh.assert_not_called()
+            sidecar.assert_not_called()
+            persisted = db.get_import_job(claimed.id)
+            assert persisted is not None
+            self.assertEqual(persisted.status, "running")
+            self.assertEqual(
+                db.request(42)["active_automation_import_job_id"],
+                claimed.id,
+            )
+
+    def test_owner_change_immediately_before_launch_refuses_spawn(self) -> None:
+        from lib.dispatch.types import EvidenceImportGate
+
+        with tempfile.TemporaryDirectory() as root:
+            db, claimed, candidate, execution_lease = self._world(root)
+            token = CancellationToken()
+            runner = MagicMock()
+
+            def revoke_owner(*_args, **_kwargs):
+                request = db.request(42)
+                db.seed_request({
+                    **request,
+                    "active_automation_import_job_id": claimed.id + 100,
+                })
+                return EvidenceImportGate(candidate=candidate.evidence)
+
+            with patch.object(
+                dispatch_core_module,
+                "_write_quality_evidence_action_file",
+                return_value=None,
+            ):
+                outcome = self._dispatch(
+                    root=root,
+                    db=db,
+                    claimed=claimed,
+                    candidate=candidate,
+                    execution_lease=execution_lease,
+                    token=token,
+                    runner=runner,
+                    evidence_gate_fn=revoke_owner,
+                )
+
+            self.assertEqual(outcome.code, "launch_authority_conflict")
+            runner.assert_not_called()
+            persisted = db.get_import_job(claimed.id)
+            assert persisted is not None
+            self.assertIsNone(persisted.beets_launch_authorized_at)
+            self.assertIsNone(persisted.execution_beets_pid)
+
+    def test_completion_is_captured_before_every_post_beets_effect(
+        self,
+    ) -> None:
+        from lib.dispatch.types import ImportOneRun
+        from lib.quality_evidence import EvidenceBuildResult
+
+        with tempfile.TemporaryDirectory() as root:
+            db, claimed, candidate, execution_lease = self._world(root)
+            token = CancellationToken()
+            order: list[str] = []
+            original_capture = db.capture_automation_import_completion
+
+            def capture(*args, **kwargs):
+                order.append("completion-captured")
+                return original_capture(*args, **kwargs)
+
+            def runner(**kwargs):
+                kwargs["on_spawn"](os.getpid())
+                order.append("beets-returned")
+                return ImportOneRun(
+                    command=("import_one",),
+                    returncode=0,
+                    stdout="",
+                    stderr="",
+                    import_result=make_import_result(decision="import"),
+                )
+
+            def refresh_effect(*_args, **_kwargs):
+                order.append("evidence-refreshed")
+                return EvidenceBuildResult(
+                    evidence=None,
+                    status="failed",
+                    reason="synthetic post-effect fixture",
+                )
+
+            with patch.object(
+                db,
+                "capture_automation_import_completion",
+                side_effect=capture,
+            ), patch.object(
+                dispatch_core_module,
+                "_write_quality_evidence_action_file",
+                return_value="/tmp/automation-completion-action",
+            ), patch.object(
+                dispatch_core_module,
+                "_remove_quality_evidence_action_file",
+                side_effect=lambda _path: order.append("action-removed"),
+            ), patch.object(
+                dispatch_core_module,
+                "_refresh_current_evidence_after_import",
+                side_effect=refresh_effect,
+            ), patch.object(
+                dispatch_core_module,
+                "_write_album_sidecar_after_import",
+                side_effect=lambda *_args, **_kwargs: order.append(
+                    "sidecar-written"
+                ),
+            ), patch_dispatch_externals():
+                outcome = self._dispatch(
+                    root=root,
+                    db=db,
+                    claimed=claimed,
+                    candidate=candidate,
+                    execution_lease=execution_lease,
+                    token=token,
+                    runner=runner,
+                )
+
+            self.assertTrue(outcome.success)
+            self.assertEqual(order[:2], [
+                "beets-returned",
+                "completion-captured",
+            ])
+            capture_index = order.index("completion-captured")
+            self.assertGreater(order.index("action-removed"), capture_index)
+            for effect in ("evidence-refreshed", "sidecar-written"):
+                if effect in order:
+                    self.assertGreater(order.index(effect), capture_index)
+            persisted = db.get_import_job(claimed.id)
+            assert persisted is not None and persisted.result is not None
+            receipt = persisted.result["automation_completion"]
+            self.assertEqual(receipt["job_id"], claimed.id)
+            self.assertEqual(receipt["request_id"], 42)
+            self.assertEqual(receipt["canonical_path"], root)
+            self.assertEqual(receipt["returncode"], 0)
+
+    def test_completion_capture_conflict_stops_post_beets_effects(
+        self,
+    ) -> None:
+        from lib.dispatch.types import ImportOneRun
+
+        with tempfile.TemporaryDirectory() as root:
+            db, claimed, candidate, execution_lease = self._world(root)
+            token = CancellationToken()
+            runner_returned: list[bool] = []
+
+            def runner(**kwargs):
+                kwargs["on_spawn"](os.getpid())
+                runner_returned.append(True)
+                return ImportOneRun(
+                    command=("import_one",),
+                    returncode=0,
+                    stdout="",
+                    stderr="",
+                    import_result=make_import_result(decision="import"),
+                )
+
+            with patch.object(
+                db,
+                "capture_automation_import_completion",
+                return_value=None,
+            ), patch.object(
+                dispatch_core_module,
+                "_write_quality_evidence_action_file",
+                return_value="/tmp/automation-conflict-action",
+            ), patch.object(
+                dispatch_core_module,
+                "_remove_quality_evidence_action_file",
+            ) as remove_action, patch.object(
+                dispatch_core_module,
+                "_refresh_current_evidence_after_import",
+            ) as refresh, patch.object(
+                dispatch_core_module,
+                "_write_album_sidecar_after_import",
+            ) as sidecar, patch_dispatch_externals():
+                outcome = self._dispatch(
+                    root=root,
+                    db=db,
+                    claimed=claimed,
+                    candidate=candidate,
+                    execution_lease=execution_lease,
+                    token=token,
+                    runner=runner,
+                )
+
+            self.assertEqual(runner_returned, [True])
+            self.assertEqual(outcome.code, "beets_acknowledgement_ambiguous")
+            remove_action.assert_not_called()
+            refresh.assert_not_called()
+            sidecar.assert_not_called()
+            persisted = db.get_import_job(claimed.id)
+            assert persisted is not None
+            self.assertEqual(persisted.status, "running")
 
 
 def _dispatch_valid_result_cmd(
@@ -329,7 +728,7 @@ def _dispatch_valid_result_cmd(
 
             def dispatch_with_job(**kwargs):
                 db = ctx.pipeline_db_source._get_db()
-                claimed, candidate = _claim_dispatch_job(
+                claimed, candidate, execution_lease = _claim_dispatch_job(
                     db,
                     path=kwargs["path"],
                     release_id=kwargs["mb_release_id"],
@@ -337,7 +736,17 @@ def _dispatch_valid_result_cmd(
                 kwargs["candidate_import_job_id"] = claimed.id
                 kwargs["prevalidated_candidate_result"] = candidate
                 kwargs["current_evidence_loader"] = no_current_evidence
-                return dispatch_import_core(**kwargs)
+                kwargs["execution_lease"] = execution_lease
+                kwargs["run_import_fn"] = _owned_test_runner
+                cancellation_token = CancellationToken()
+                with pinned_dispatch_authority(
+                    db,
+                    execution_lease,
+                    cancellation_token=cancellation_token,
+                ) as (cancellation_token, owner_session_identity):
+                    kwargs["cancellation_token"] = cancellation_token
+                    kwargs["owner_session_identity"] = owner_session_identity
+                    return dispatch_import_core(**kwargs)
 
             outcome = _handle_valid_result(
                 album_data,
@@ -825,7 +1234,7 @@ class TestAudioCorruptPostCommitQuarantine(unittest.TestCase):
                 queued.id,
                 preview_result={"ready": True},
             )
-            claimed = db.claim_next_import_job(worker_id="force-corrupt")
+            claimed = claim_next_import_job(db, worker_id="force-corrupt")
             assert claimed is not None
 
             import_result = make_import_result(decision="audio_corrupt")
@@ -1240,7 +1649,7 @@ class TestRejectImportFromEvidenceDecisionCallerLifecycle(unittest.TestCase):
     ):
         from lib.dispatch import _reject_import_from_evidence_decision
         from lib.dispatch.types import ImportAttemptResult
-        from lib.import_queue import IMPORT_JOB_AUTOMATION
+        from lib.import_queue import IMPORT_JOB_FORCE
         from lib.quality import AudioQualityMeasurement, ImportResult
         from lib.terminal_outcomes import ImportJobTerminal
 
@@ -1266,9 +1675,12 @@ class TestRejectImportFromEvidenceDecisionCallerLifecycle(unittest.TestCase):
         import_job_id = None
         if pending:
             import_job_id = db.enqueue_import_job(
-                IMPORT_JOB_AUTOMATION,
+                IMPORT_JOB_FORCE,
                 request_id=42,
-                payload={},
+                payload={
+                    "download_log_id": 1,
+                    "failed_path": "/tmp/cratedigger-caller-lifecycle-test",
+                },
             ).id
         with patch_dispatch_externals():
             outcome = _reject_import_from_evidence_decision(
@@ -1402,15 +1814,12 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
             ActionEvidenceProvenance,
             CandidateEvidenceActionResult,
         )
-        from lib.import_queue import IMPORT_JOB_AUTOMATION, IMPORT_JOB_FORCE
-
         if db is None:
             db = FakePipelineDB()
             db.seed_request(make_request_row(
                 id=42,
-                status="unsearchable" if force else "downloading",
+                status="unsearchable" if force else "wanted",
                 search_filetype_override="lossless",
-                active_download_state={"files": [], "filetype": "flac"},
             ))
         if candidate is None:
             candidate = make_album_quality_evidence(
@@ -1428,18 +1837,6 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             with open(os.path.join(tmpdir, "01 - Track.mp3"), "wb") as handle:
                 handle.write(b"fixture audio")
-            request = db.request(42)
-            request["mb_release_id"] = "test-mbid"
-            request["active_download_state"] = {
-                "files": [],
-                "filetype": "flac",
-                "current_path": tmpdir,
-            }
-            job = db.enqueue_import_job(
-                IMPORT_JOB_FORCE if force else IMPORT_JOB_AUTOMATION,
-                request_id=42,
-                payload={"download_log_id": 1, "failed_path": tmpdir} if force else {},
-            )
             candidate = msgspec.structs.replace(
                 candidate,
                 mb_release_id="test-mbid",
@@ -1449,27 +1846,29 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
                     snapshot_audio_files(tmpdir),
                 ),
             )
-            db.upsert_album_quality_evidence(candidate)
-            persisted = db.find_album_quality_evidence(
-                mb_release_id=candidate.mb_release_id,
-                snapshot_fingerprint=candidate.snapshot_fingerprint,
+            claimed, candidate_result, execution_lease = _claim_dispatch_job(
+                db,
+                path=tmpdir,
+                release_id="test-mbid",
+                force=force,
+                candidate_evidence=candidate,
             )
-            assert persisted is not None and persisted.id is not None
-            db.set_import_job_candidate_evidence(job.id, persisted.id)
-            db.mark_import_job_preview_importable(
-                job.id,
-                preview_result={"ready": True},
-            )
-            claimed = db.claim_next_import_job(worker_id="have-analysis-test")
-            assert claimed is not None
+            persisted = candidate_result.evidence
             candidate_result = msgspec.structs.replace(
                 candidate_result,
                 evidence=persisted,
             )
+            cancellation_token = (
+                CancellationToken() if execution_lease is not None else None
+            )
             with patch_dispatch_externals() as ext, patch(
                 "lib.dispatch.subprocess_runner.parse_import_result",
                 return_value=make_import_result(decision="import"),
-            ):
+            ), pinned_dispatch_authority(
+                db,
+                execution_lease,
+                cancellation_token=cancellation_token,
+            ) as (cancellation_token, owner_session_identity):
                 outcome = dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="test-mbid",
@@ -1482,28 +1881,27 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
                     scenario="force_import" if force else "strong_match",
                     cfg=_full_dispatch_config(),
                     requeue_on_failure=not force,
-                    candidate_import_job_id=job.id,
+                    candidate_import_job_id=claimed.id,
                     prevalidated_candidate_result=candidate_result,
                     quality_gate_fn=noop_quality_gate,
                     current_evidence_loader=(
                         lambda *_args, **_kwargs: current_result
                     ),
+                    execution_lease=execution_lease,
+                    cancellation_token=cancellation_token,
+                    owner_session_identity=owner_session_identity,
+                    run_import_fn=(
+                        _owned_test_runner
+                        if execution_lease is not None else None
+                    ),
                 )
-        return db, outcome, ext
+        return db, claimed, outcome, ext
 
-    def _persist_failed_outcome(self, db, outcome) -> None:
-        from lib.terminal_outcomes import ImportJobTerminal
-
+    def _persist_failed_outcome(self, db, claimed, outcome) -> None:
         self.assertIsNotNone(outcome.terminal_outcome)
-        assert outcome.terminal_outcome is not None
-        db.persist_import_terminal_outcome(
-            outcome.terminal_outcome.with_job(ImportJobTerminal(
-                status="failed",
-                error=outcome.message,
-                result={"success": False},
-                message=outcome.message,
-            ))
-        )
+        from tests.helpers import finalize_claimed_dispatch
+
+        finalize_claimed_dispatch(db, claimed, outcome)
 
     def _failed_current_result(self, raw_error: str):
         from lib.import_evidence import (
@@ -1523,14 +1921,14 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
         )
 
     def test_force_import_fail_closed_current_analysis_preserves_operator_status(self) -> None:
-        db, outcome, ext = self._dispatch_with_current_result(
+        db, claimed, outcome, ext = self._dispatch_with_current_result(
             self._failed_current_result(
                 "PermissionError: [Errno 13] Permission denied"
             ),
             force=True,
         )
         db.set_cooldown_result(True)
-        self._persist_failed_outcome(db, outcome)
+        self._persist_failed_outcome(db, claimed, outcome)
 
         row = db.request(42)
         self.assertEqual(row["status"], "unsearchable")
@@ -1560,12 +1958,12 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
         ext.run.assert_not_called()
 
     def test_automatic_import_gets_the_same_non_quality_abort(self) -> None:
-        db, outcome, ext = self._dispatch_with_current_result(
+        db, claimed, outcome, ext = self._dispatch_with_current_result(
             self._failed_current_result("FileNotFoundError: path not found"),
             force=False,
         )
         db.set_cooldown_result(True)
-        self._persist_failed_outcome(db, outcome)
+        self._persist_failed_outcome(db, claimed, outcome)
 
         self.assertEqual(db.request(42)["status"], "wanted")
         self.assertEqual(db.download_logs[-1].outcome, "have_analysis_error")
@@ -1591,7 +1989,7 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
                 fail_closed=True,
             ),
         )
-        db, outcome, ext = self._dispatch_with_current_result(
+        db, _claimed, outcome, ext = self._dispatch_with_current_result(
             missing,
             force=False,
         )
@@ -1644,12 +2042,14 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
                 spectral_grade="genuine",
             ),
         )
-        db, first, first_ext = self._dispatch_with_current_result(
+        db, first_claimed, first, first_ext = (
+            self._dispatch_with_current_result(
             self._failed_current_result("analyser crashed"),
             force=True,
             candidate=candidate,
+            )
         )
-        self._persist_failed_outcome(db, first)
+        self._persist_failed_outcome(db, first_claimed, first)
         first_ext.run.assert_not_called()
 
         request = db.request(42)
@@ -1672,11 +2072,13 @@ class TestHaveAnalysisErrorAbort(unittest.TestCase):
                 snapshot_guard="matched",
             ),
         )
-        db, second, second_ext = self._dispatch_with_current_result(
+        db, _second_claimed, second, second_ext = (
+            self._dispatch_with_current_result(
             healthy,
             force=True,
             db=db,
             candidate=candidate,
+            )
         )
 
         second_ext.run.assert_called_once()
@@ -1732,48 +2134,23 @@ class TestDispatchImport(unittest.TestCase):
                 id=42, status=initial_status,
                 **request_overrides,
             ))
-            from lib.import_evidence import (
-                ActionEvidenceProvenance,
-                CandidateEvidenceActionResult,
+            claimed, candidate_result, execution_lease = _claim_dispatch_job(
+                db,
+                path=tmpdir,
+                release_id="test-mbid",
+                force=force,
             )
-            from lib.import_queue import (
-                IMPORT_JOB_AUTOMATION,
-                IMPORT_JOB_FORCE,
-            )
-
-            job = db.enqueue_import_job(
-                IMPORT_JOB_FORCE if force else IMPORT_JOB_AUTOMATION,
-                request_id=42,
-                payload={"download_log_id": 1, "failed_path": tmpdir} if force else {},
-            )
-            evidence = make_album_quality_evidence(
-                mb_release_id="test-mbid",
-                source_path=tmpdir,
-                files=snapshot_audio_files(tmpdir),
-            )
-            db.upsert_album_quality_evidence(evidence)
-            persisted = db.find_album_quality_evidence(
-                mb_release_id=evidence.mb_release_id,
-                snapshot_fingerprint=evidence.snapshot_fingerprint,
-            )
-            assert persisted is not None and persisted.id is not None
-            db.set_import_job_candidate_evidence(job.id, persisted.id)
-            db.mark_import_job_preview_importable(
-                job.id,
-                preview_result={"ready": True},
-            )
-            claimed = db.claim_next_import_job(worker_id="dispatch-test")
-            assert claimed is not None
             import_job_id = claimed.id
-            candidate_result = CandidateEvidenceActionResult(
-                evidence=persisted,
-                provenance=ActionEvidenceProvenance(
-                    candidate_status="reused",
-                    snapshot_guard="matched",
-                ),
+            cancellation_token = (
+                CancellationToken() if execution_lease is not None else None
             )
             with patch_dispatch_externals() as ext, \
-                 patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir):
+                 patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir), \
+                 pinned_dispatch_authority(
+                     db,
+                     execution_lease,
+                     cancellation_token=cancellation_token,
+                 ) as (cancellation_token, owner_session_identity):
                 outcome = dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="test-mbid",
@@ -1792,18 +2169,18 @@ class TestDispatchImport(unittest.TestCase):
                     requeue_on_failure=not force,
                     candidate_import_job_id=import_job_id,
                     prevalidated_candidate_result=candidate_result,
+                    execution_lease=execution_lease,
+                    cancellation_token=cancellation_token,
+                    owner_session_identity=owner_session_identity,
+                    run_import_fn=(
+                        _owned_test_runner
+                        if execution_lease is not None else None
+                    ),
                 )
             if outcome.terminal_outcome is not None:
-                from lib.terminal_outcomes import ImportJobTerminal
+                from tests.helpers import finalize_claimed_dispatch
 
-                db.persist_import_terminal_outcome(
-                    outcome.terminal_outcome.with_job(ImportJobTerminal(
-                        status="completed" if outcome.success else "failed",
-                        result={"success": outcome.success},
-                        message=outcome.message,
-                        error=None if outcome.success else outcome.message,
-                    ))
-                )
+                finalize_claimed_dispatch(db, claimed, outcome)
             else:
                 from tests.helpers import finalize_claimed_dispatch
                 finalize_claimed_dispatch(db, claimed, outcome)
@@ -2244,7 +2621,7 @@ class TestDispatchImport(unittest.TestCase):
             status="downloading",
             active_download_state={"files": [], "filetype": "mp3"},
         ))
-        claimed, candidate = _claim_dispatch_job(
+        claimed, candidate, execution_lease = _claim_dispatch_job(
             db,
             path=source,
             release_id="test-mbid",
@@ -2255,8 +2632,14 @@ class TestDispatchImport(unittest.TestCase):
             pipeline_db_enabled=True,
         )
         try:
+            cancellation_token = CancellationToken()
             with patch_dispatch_externals() as ext, \
-                 patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir):
+                 patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir), \
+                 pinned_dispatch_authority(
+                     db,
+                     execution_lease,
+                     cancellation_token=cancellation_token,
+                 ) as (cancellation_token, owner_session_identity):
                 outcome = dispatch_import_core(
                     path=source,
                     mb_release_id="test-mbid",
@@ -2273,28 +2656,15 @@ class TestDispatchImport(unittest.TestCase):
                     attempt_spectral_audit=audit,
                     candidate_import_job_id=claimed.id,
                     prevalidated_candidate_result=candidate,
+                    execution_lease=execution_lease,
+                    cancellation_token=cancellation_token,
+                    owner_session_identity=owner_session_identity,
+                    run_import_fn=_owned_test_runner,
                 )
                 assert outcome.terminal_outcome is not None
-                from lib.terminal_outcomes import ImportJobTerminal
-                terminal = db.persist_import_terminal_outcome(
-                    outcome.terminal_outcome.with_job(ImportJobTerminal(
-                        status="failed",
-                        error=outcome.message,
-                        result={"success": False},
-                        message=outcome.message,
-                    ))
-                )
-                from scripts.importer import _run_post_commit_cleanup
-                cleanup_result = _run_post_commit_cleanup(
-                    db,
-                    outcome,
-                    download_log_id=terminal.download_log_id,
-                )
-                if cleanup_result is not None:
-                    db.merge_import_job_result(
-                        claimed.id,
-                        {"post_commit_cleanup": cleanup_result},
-                    )
+                from tests.helpers import finalize_claimed_dispatch
+
+                finalize_claimed_dispatch(db, claimed, outcome)
         finally:
             shutil.rmtree(staging_root, ignore_errors=True)
 
@@ -2318,25 +2688,62 @@ class TestDispatchImport(unittest.TestCase):
         self.assertIsNone(persisted_guard.quarantine_path)
         completed_job = db.get_import_job(claimed.id)
         assert completed_job is not None and completed_job.result is not None
-        quarantine = completed_job.result["post_commit_cleanup"][
-            "duplicate_guard_quarantine"
-        ]
-        self.assertIsNotNone(quarantine["quarantine_path"])
-        assert quarantine["quarantine_path"] is not None
+        quarantine = completed_job.result["processing_cleanup"]
+        self.assertIsNotNone(quarantine["destination_path"])
+        assert quarantine["destination_path"] is not None
         self.assertIn("duplicate-remove-guard",
-                      quarantine["quarantine_path"])
+                      quarantine["destination_path"])
         self.assertFalse(os.path.exists(source))
+
+    def _assert_world_failure_self_heal(
+        self,
+        db: FakePipelineDB,
+        job: ImportJob,
+        *,
+        diagnostic: str,
+    ) -> None:
+        """Invariant 11: a broken automation world surfaces and restarts.
+
+        The exact owner is released, the request rejoins the search pool with
+        the attempt counted, and the diagnostic reads in Recents as one
+        ``failed`` download_log row. ``recovery_required`` would instead
+        strand ``processing`` behind an inactive job that ``get_wanted``
+        never selects again — the album silently stops being acquired.
+        """
+        from tests.test_import_queue import (
+            assert_world_failure_audit,
+            automation_world_failure_violation,
+        )
+
+        row = db.request(42)
+        self.assertEqual(job.status, "failed")
+        self.assertEqual(row["status"], "wanted")
+        self.assertIsNone(row["active_automation_import_job_id"])
+        self.assertIsNone(automation_world_failure_violation(
+            label=diagnostic,
+            escaped=None,
+            job_status=job.status,
+            request_status=str(row["status"]),
+            active_owner=row["active_automation_import_job_id"],
+        ))
+        # Retry cadence is retained counters plus backoff, never parking.
+        self.assertEqual(row["validation_attempts"], 1)
+        self.assertIsNotNone(row["next_retry_after"])
+        assert_world_failure_audit(self, db, diagnostic=diagnostic)
+        # The self-healed job is terminal: nothing replays it behind the
+        # request that is already back in the pool.
+        self.assertIsNone(claim_next_import_job(db, worker_id="automatic-replay"))
 
     def test_no_json_result(self):
         r = self._dispatch(None)
         db = r["db"]
         job = db.get_import_job(1)
         assert job is not None
-        self.assertEqual(job.status, "recovery_required")
-        self.assertEqual(db.request(42)["status"], "downloading")
-        self.assertEqual(db.download_logs, [])
-        self.assertIsNone(db.claim_next_import_job(
-            worker_id="automatic-replay"))
+        self._assert_world_failure_self_heal(
+            db,
+            job,
+            diagnostic="Beets returned without a terminal result",
+        )
 
     def test_timeout(self):
         from lib.dispatch import dispatch_import_core
@@ -2347,14 +2754,25 @@ class TestDispatchImport(unittest.TestCase):
             status="downloading",
             active_download_state={"files": [], "filetype": "mp3"},
         ))
-        claimed, candidate = _claim_dispatch_job(
+        claimed, candidate, execution_lease = _claim_dispatch_job(
             db,
             path="/tmp/dest",
             release_id="test-mbid",
         )
 
-        def execute(db_arg, _job, *, ctx=None):
+        def execute(
+            db_arg,
+            _job,
+            *,
+            ctx=None,
+            execution_lease=None,
+            cancellation_token=None,
+            owner_session_identity=None,
+        ):
             del ctx
+            assert execution_lease is not None
+            assert cancellation_token is not None
+            assert owner_session_identity is not None
             return dispatch_import_core(
                 path="/tmp/dest", mb_release_id="test-mbid",
                 request_id=42, label="Test",
@@ -2363,21 +2781,36 @@ class TestDispatchImport(unittest.TestCase):
                 dl_info=DownloadInfo(filetype="mp3"),
                 candidate_import_job_id=claimed.id,
                 prevalidated_candidate_result=candidate,
+                execution_lease=execution_lease,
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
+                run_import_fn=_owned_test_runner,
             )
 
-        with patch("lib.dispatch.subprocess_runner.sp.run",
-                   side_effect=sp.TimeoutExpired(cmd="test", timeout=1800)):
+        cancellation_token = CancellationToken()
+        with patch(
+            "lib.dispatch.subprocess_runner.sp.run",
+            side_effect=sp.TimeoutExpired(cmd="test", timeout=1800),
+        ), pinned_dispatch_authority(
+            db,
+            execution_lease,
+            cancellation_token=cancellation_token,
+        ) as (cancellation_token, owner_session_identity):
             recovered = process_claimed_job(
                 db,  # type: ignore[arg-type]
                 claimed,
                 execute_fn=execute,
+                execution_lease=execution_lease,
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
             )
 
         assert recovered is not None
-        self.assertEqual(recovered.status, "recovery_required")
-        self.assertEqual(db.request(42)["status"], "downloading")
-        self.assertEqual(db.download_logs, [])
-        self.assertIsNone(db.claim_next_import_job(worker_id="automatic-replay"))
+        self._assert_world_failure_self_heal(
+            db,
+            recovered,
+            diagnostic="Import timed out after Beets launch",
+        )
 
     def test_exception(self):
         from lib.dispatch import dispatch_import_core
@@ -2388,14 +2821,25 @@ class TestDispatchImport(unittest.TestCase):
             status="downloading",
             active_download_state={"files": [], "filetype": "mp3"},
         ))
-        claimed, candidate = _claim_dispatch_job(
+        claimed, candidate, execution_lease = _claim_dispatch_job(
             db,
             path="/tmp/dest",
             release_id="test-mbid",
         )
 
-        def execute(db_arg, _job, *, ctx=None):
+        def execute(
+            db_arg,
+            _job,
+            *,
+            ctx=None,
+            execution_lease=None,
+            cancellation_token=None,
+            owner_session_identity=None,
+        ):
             del ctx
+            assert execution_lease is not None
+            assert cancellation_token is not None
+            assert owner_session_identity is not None
             return dispatch_import_core(
                 path="/tmp/dest", mb_release_id="test-mbid",
                 request_id=42, label="Test",
@@ -2404,21 +2848,39 @@ class TestDispatchImport(unittest.TestCase):
                 dl_info=DownloadInfo(filetype="mp3"),
                 candidate_import_job_id=claimed.id,
                 prevalidated_candidate_result=candidate,
+                execution_lease=execution_lease,
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
+                run_import_fn=_owned_test_runner,
             )
 
-        with patch("lib.dispatch.subprocess_runner.sp.run",
-                   side_effect=RuntimeError("boom")):
+        cancellation_token = CancellationToken()
+        with patch(
+            "lib.dispatch.subprocess_runner.sp.run",
+            side_effect=RuntimeError("boom"),
+        ), pinned_dispatch_authority(
+            db,
+            execution_lease,
+            cancellation_token=cancellation_token,
+        ) as (cancellation_token, owner_session_identity):
             recovered = process_claimed_job(
                 db,  # type: ignore[arg-type]
                 claimed,
                 execute_fn=execute,
+                execution_lease=execution_lease,
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
             )
 
         assert recovered is not None
-        self.assertEqual(recovered.status, "recovery_required")
-        self.assertEqual(db.request(42)["status"], "downloading")
-        self.assertEqual(db.download_logs, [])
-        self.assertIsNone(db.claim_next_import_job(worker_id="automatic-replay"))
+        self._assert_world_failure_self_heal(
+            db,
+            recovered,
+            diagnostic=(
+                "Import failed after Beets launch without a terminal "
+                "acknowledgement"
+            ),
+        )
 
 
 class TestImportDispatchRescueCapture(unittest.TestCase):
@@ -2470,14 +2932,20 @@ class TestImportDispatchRescueCapture(unittest.TestCase):
 
         tmpdir = tempfile.mkdtemp()
         try:
-            claimed, candidate = _claim_dispatch_job(
+            claimed, candidate, execution_lease = _claim_dispatch_job(
                 db,
                 path=tmpdir,
                 release_id="test-mbid",
             )
+            cancellation_token = CancellationToken()
             with patch_dispatch_externals(), \
                  patch("lib.dispatch.subprocess_runner.parse_import_result",
-                       return_value=ir):
+                       return_value=ir), \
+                 pinned_dispatch_authority(
+                     db,
+                     execution_lease,
+                     cancellation_token=cancellation_token,
+                 ) as (cancellation_token, owner_session_identity):
                 outcome = dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="test-mbid",
@@ -2494,16 +2962,15 @@ class TestImportDispatchRescueCapture(unittest.TestCase):
                     quality_gate_fn=noop_quality_gate,
                     candidate_import_job_id=claimed.id,
                     prevalidated_candidate_result=candidate,
+                    execution_lease=execution_lease,
+                    cancellation_token=cancellation_token,
+                    owner_session_identity=owner_session_identity,
+                    run_import_fn=_owned_test_runner,
                 )
                 assert outcome.terminal_outcome is not None
-                from lib.terminal_outcomes import ImportJobTerminal
-                db.persist_import_terminal_outcome(
-                    outcome.terminal_outcome.with_job(ImportJobTerminal(
-                        status="completed",
-                        result={"success": True},
-                        message=outcome.message,
-                    ))
-                )
+                from tests.helpers import finalize_claimed_dispatch
+
+                finalize_claimed_dispatch(db, claimed, outcome)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
         return db
@@ -2648,14 +3115,20 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
             active_download_state={"files": [], "filetype": "mp3"},
         ))
         ir = make_import_result(decision="import")
-        claimed, candidate = _claim_dispatch_job(
+        claimed, candidate, execution_lease = _claim_dispatch_job(
             db,
             path="/tmp/dest",
             release_id="mbid-1",
         )
 
+        cancellation_token = CancellationToken()
         with patch_dispatch_externals() as ext, \
-             patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir):
+             patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir), \
+             pinned_dispatch_authority(
+                 db,
+                 execution_lease,
+                 cancellation_token=cancellation_token,
+             ) as (cancellation_token, owner_session_identity):
             dispatch_import_core(
                 path="/tmp/dest", mb_release_id="mbid-1",
                 request_id=42, label="Test Artist - Test Album",
@@ -2667,6 +3140,10 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
                 quality_gate_fn=noop_quality_gate,
                 candidate_import_job_id=claimed.id,
                 prevalidated_candidate_result=candidate,
+                execution_lease=execution_lease,
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
+                run_import_fn=_owned_test_runner,
             )
             return ext.run.call_args[0][0]
 
@@ -2747,7 +3224,7 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
             status="downloading",
             active_download_state={"files": [], "filetype": "mp3"},
         ))
-        claimed, candidate_result = _claim_dispatch_job(
+        claimed, candidate_result, execution_lease = _claim_dispatch_job(
             db,
             path="/tmp/dest",
             release_id="test-mbid",
@@ -2766,10 +3243,15 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
             },
         )
         assert candidate_result.evidence is not None
+        cancellation_token = CancellationToken()
         with patch_dispatch_externals() as ext, patch(
             "lib.dispatch.subprocess_runner.parse_import_result",
             return_value=make_import_result(decision="import"),
-        ):
+        ), pinned_dispatch_authority(
+            db,
+            execution_lease,
+            cancellation_token=cancellation_token,
+        ) as (cancellation_token, owner_session_identity):
             dispatch_import_core(
                 path="/tmp/dest",
                 mb_release_id="test-mbid",
@@ -2788,6 +3270,10 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
                         current=current,
                     )
                 ),
+                execution_lease=execution_lease,
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
+                run_import_fn=_owned_test_runner,
             )
             cmd = ext.run.call_args[0][0]
 
@@ -3451,14 +3937,20 @@ class TestQualityGateUsesIntent(unittest.TestCase):
         ))
         ir = make_import_result(decision="transcode_upgrade",
                                 new_min_bitrate=227)
-        claimed, candidate = _claim_dispatch_job(
+        claimed, candidate, execution_lease = _claim_dispatch_job(
             db,
             path="/tmp/dest",
             release_id="test-mbid",
         )
 
+        cancellation_token = CancellationToken()
         with patch_dispatch_externals(), \
-             patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir):
+             patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir), \
+             pinned_dispatch_authority(
+                 db,
+                 execution_lease,
+                 cancellation_token=cancellation_token,
+             ) as (cancellation_token, owner_session_identity):
             outcome = dispatch_import_core(
                 path="/tmp/dest", mb_release_id="test-mbid",
                 request_id=42, label="Test",
@@ -3469,16 +3961,15 @@ class TestQualityGateUsesIntent(unittest.TestCase):
                 quality_gate_fn=noop_quality_gate,
                 candidate_import_job_id=claimed.id,
                 prevalidated_candidate_result=candidate,
+                execution_lease=execution_lease,
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
+                run_import_fn=_owned_test_runner,
             )
         assert outcome.terminal_outcome is not None
-        from lib.terminal_outcomes import ImportJobTerminal
-        db.persist_import_terminal_outcome(
-            outcome.terminal_outcome.with_job(ImportJobTerminal(
-                status="completed",
-                result={"success": outcome.success},
-                message=outcome.message,
-            ))
-        )
+        from tests.helpers import finalize_claimed_dispatch
+
+        finalize_claimed_dispatch(db, claimed, outcome)
 
         row = db.request(42)
         self.assertEqual(row["status"], "wanted")
@@ -3687,23 +4178,29 @@ class TestDispatchJellyfinPinCaptureSlice(unittest.TestCase):
 
         tmpdir = tempfile.mkdtemp()
         try:
-            claimed, candidate = _claim_dispatch_job(
+            claimed, candidate, execution_lease = _claim_dispatch_job(
                 db,
                 path=tmpdir,
                 release_id="test-mbid",
             )
+            cancellation_token = CancellationToken()
             with patch_dispatch_externals(), \
                  patch("lib.dispatch.subprocess_runner.parse_import_result",
                        return_value=ir), \
                  patch("lib.util._jellyfin_get_json",
-                       side_effect=self._fake_get_json):
+                       side_effect=self._fake_get_json), \
+                 pinned_dispatch_authority(
+                     db,
+                     execution_lease,
+                     cancellation_token=cancellation_token,
+                 ) as (cancellation_token, owner_session_identity):
                 dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="test-mbid",
                     request_id=42,
                     label="Test Artist - Test Album",
                     beets_harness_path=_HARNESS,
-                    db=db,  # type: ignore[arg-type]
+                    db=db,  # pyright: ignore[reportArgumentType]
                     dl_info=DownloadInfo(filetype="mp3"),
                     distance=0.05,
                     scenario="strong_match",
@@ -3715,6 +4212,10 @@ class TestDispatchJellyfinPinCaptureSlice(unittest.TestCase):
                     prevalidated_candidate_result=candidate,
                     beets_library_db_path=beets_library_db,
                     beets_library_root=beets_library_root,
+                    execution_lease=execution_lease,
+                    cancellation_token=cancellation_token,
+                    owner_session_identity=owner_session_identity,
+                    run_import_fn=_owned_test_runner,
                 )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -3728,6 +4229,178 @@ class TestDispatchJellyfinPinCaptureSlice(unittest.TestCase):
         self.assertEqual(pin["children_item_ids"], ["tr-old-1"])
         self.assertEqual(pin["original_date_created"], self.ORIGINAL)
         self.assertEqual(pin["request_id"], 42)
+
+
+class _RecordingProcessGroup:
+    """Typed stand-in for the injected child-supervision group."""
+
+    def __init__(
+        self,
+        process: sp.Popen[bytes],
+        *,
+        returncode: int = 0,
+        log: list[str] | None = None,
+        wait_hook: Callable[[], None] | None = None,
+    ) -> None:
+        self.process = process
+        self.calls: list[str] = log if log is not None else []
+        self.waited_tokens: list[CancellationToken] = []
+        self.probe_results: list[bool] = []
+        # Set by ``terminate_and_wait``, so a test can block inside ``wait``
+        # until the deadline timer's termination has actually landed.
+        self.terminated = threading.Event()
+        self._returncode = returncode
+        self._wait_hook = wait_hook
+
+    @property
+    def pid(self) -> int:
+        return 4321
+
+    def terminate_and_wait(self, *, timeout: float = 5.0) -> int:
+        del timeout
+        self.calls.append("terminate_and_wait")
+        self.terminated.set()
+        return -15
+
+    def wait(
+        self,
+        token: CancellationToken,
+        *,
+        owner_session_probe: Callable[[], bool] | None = None,
+        probe_interval: float = 1.0,
+    ) -> int:
+        del probe_interval
+        self.calls.append("wait")
+        self.waited_tokens.append(token)
+        if owner_session_probe is not None:
+            self.probe_results.append(owner_session_probe())
+        if self._wait_hook is not None:
+            self._wait_hook()
+        return self._returncode
+
+
+class TestRunImportOneProcessGroupSeam(unittest.TestCase):
+    """``run_import_one`` supervises the child through an injected factory.
+
+    The seam exists so tests never replace ``MonitoredProcessGroup`` — a
+    ~120-line supervisor carrying SIGTERM->SIGKILL escalation, deadline
+    arithmetic and termination-idempotence locking — by patching the module
+    binding. Definition-time defaults are injected, never patched.
+    """
+
+    def test_default_factory_is_the_production_supervisor(self) -> None:
+        from lib.dispatch.subprocess_runner import run_import_one
+
+        default = inspect.signature(run_import_one).parameters[
+            "process_group_factory"
+        ].default
+        self.assertIs(default, MonitoredProcessGroup)
+
+    def test_injected_factory_supervises_the_spawned_child(self) -> None:
+        from lib.dispatch.subprocess_runner import run_import_one
+
+        token = CancellationToken()
+        events: list[str] = []
+        built: list[_RecordingProcessGroup] = []
+
+        def factory(process: sp.Popen[bytes]) -> _RecordingProcessGroup:
+            group = _RecordingProcessGroup(process, log=events)
+            built.append(group)
+            events.append("factory")
+            return group
+
+        with patch("lib.dispatch.subprocess_runner.sp.Popen") as popen:
+            run = run_import_one(
+                path="/tmp/source",
+                mb_release_id="release-1",
+                beets_harness_path="/tmp/harness/run",
+                cancellation_token=token,
+                on_spawn=lambda pid: events.append(f"spawn:{pid}"),
+                owner_session_probe=lambda: True,
+                process_group_factory=factory,
+            )
+
+        self.assertEqual(len(built), 1)
+        group = built[0]
+        # The factory wraps the REAL spawned handle, and the group it returns
+        # is what the runner supervises — pid, wait, and cancellation token.
+        self.assertIs(group.process, popen.return_value)
+        self.assertEqual(events, ["factory", "spawn:4321", "wait"])
+        self.assertEqual(group.waited_tokens, [token])
+        self.assertEqual(group.probe_results, [True])
+        self.assertEqual(run.returncode, 0)
+
+    def test_spawn_failure_terminates_the_injected_group(self) -> None:
+        from lib.dispatch.subprocess_runner import run_import_one
+
+        built: list[_RecordingProcessGroup] = []
+
+        def factory(process: sp.Popen[bytes]) -> _RecordingProcessGroup:
+            group = _RecordingProcessGroup(process)
+            built.append(group)
+            return group
+
+        def reject_child(_pid: int) -> None:
+            raise RuntimeError("child lease CAS rejected")
+
+        with (
+            patch("lib.dispatch.subprocess_runner.sp.Popen"),
+            self.assertRaisesRegex(RuntimeError, "child lease CAS rejected"),
+        ):
+            run_import_one(
+                path="/tmp/source",
+                mb_release_id="release-1",
+                beets_harness_path="/tmp/harness/run",
+                cancellation_token=CancellationToken(),
+                on_spawn=reject_child,
+                process_group_factory=factory,
+            )
+
+        self.assertEqual(len(built), 1)
+        self.assertEqual(built[0].calls, ["terminate_and_wait"])
+
+    def test_owner_cancellation_wins_when_the_deadline_also_fires(self) -> None:
+        from lib.dispatch.subprocess_runner import run_import_one
+
+        token = CancellationToken()
+        built: list[_RecordingProcessGroup] = []
+
+        def lose_owner_while_waiting() -> None:
+            token.cancel("owner_session_lost")
+            # The zero-second deadline timer terminates the group from its own
+            # thread; block until that has landed so the timeout and the
+            # ownership cancellation genuinely race.
+            self.assertTrue(built[0].terminated.wait(timeout=5.0))
+
+        def factory(process: sp.Popen[bytes]) -> _RecordingProcessGroup:
+            group = _RecordingProcessGroup(
+                process,
+                returncode=-15,
+                wait_hook=lose_owner_while_waiting,
+            )
+            built.append(group)
+            return group
+
+        with (
+            patch("lib.dispatch.subprocess_runner.sp.Popen"),
+            self.assertRaisesRegex(ExecutionCancelled, "owner_session_lost"),
+        ):
+            run_import_one(
+                path="/tmp/source",
+                mb_release_id="release-1",
+                beets_harness_path="/tmp/harness/run",
+                timeout=0,
+                cancellation_token=token,
+                process_group_factory=factory,
+            )
+
+        # Ownership loss is the stronger cause: TimeoutExpired must not
+        # displace it even though the deadline demonstrably expired and
+        # terminated the group. The two land on different threads, so only
+        # their occurrence is ordered evidence, not their sequence.
+        self.assertEqual(len(built), 1)
+        self.assertEqual(sorted(built[0].calls), ["terminate_and_wait", "wait"])
+        self.assertTrue(built[0].terminated.is_set())
 
 
 if __name__ == "__main__":

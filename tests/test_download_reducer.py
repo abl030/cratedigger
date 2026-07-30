@@ -138,7 +138,7 @@ class TestReducePollCycle(unittest.TestCase):
     def _snapshot(self, *files, **overrides):
         values = {"files": list(files)}
         values.update(overrides)
-        return PollCycleSnapshot(**values)  # type: ignore[arg-type]
+        return PollCycleSnapshot(**values)
 
     def _reduce(self, state, snapshot, **cfg_overrides):
         cfg_values = {
@@ -163,59 +163,6 @@ class TestReducePollCycle(unittest.TestCase):
             result.verdict.decision,
             PollCycleDecision.reset_missing_state,
         )
-
-    def test_active_import_job_gates_before_processing_recovery(self):
-        state = self._state(processing_started_at="2026-07-11T02:59:30+00:00")
-        result = self._reduce(
-            state,
-            self._snapshot(
-                active_import_job_id=17,
-                active_import_job_status="running",
-                processing_blocked_reason="multiple_populated_paths",
-            ),
-        )
-
-        self.assertEqual(result.state, state)
-        self.assertEqual(
-            result.verdict.decision,
-            PollCycleDecision.wait_import_job,
-        )
-        self.assertEqual(result.verdict.import_job_id, 17)
-        self.assertEqual(result.verdict.import_job_status, "running")
-
-    def test_processing_recovery_returns_selected_complete_state(self):
-        state = self._state(
-            processing_started_at="2026-07-11T02:59:30+00:00",
-            current_path="/old",
-        )
-        result = self._reduce(
-            state,
-            self._snapshot(processing_current_path="/recovered"),
-        )
-
-        assert result.state is not None
-        self.assertEqual(result.state.current_path, "/recovered")
-        self.assertEqual(
-            result.verdict.decision,
-            PollCycleDecision.processing,
-        )
-
-    def test_processing_recovery_block_leaves_state_actionable(self):
-        state = self._state(
-            processing_started_at="2026-07-11T02:59:30+00:00",
-            current_path="/persisted",
-        )
-        result = self._reduce(
-            state,
-            self._snapshot(processing_blocked_reason="legacy_shared_only"),
-        )
-
-        self.assertEqual(result.state, state)
-        self.assertEqual(
-            result.verdict.decision,
-            PollCycleDecision.wait_processing_recovery,
-        )
-        self.assertEqual(result.verdict.reason, "legacy_shared_only")
 
     def test_progress_snapshot_returns_new_state_without_mutating_input(self):
         state = self._state()
@@ -354,7 +301,7 @@ class TestReducePollCycle(unittest.TestCase):
         )
         self.assertEqual(result.verdict.files_to_retry, ["Album\\02.flac"])
 
-    def test_complete_marks_processing_before_dispatch(self):
+    def test_complete_leaves_processing_publication_to_atomic_handoff(self):
         state = self._state()
         result = self._reduce(
             state,
@@ -364,13 +311,12 @@ class TestReducePollCycle(unittest.TestCase):
                     state="Completed, Succeeded",
                     bytes_transferred=100,
                 ),
-                completion_current_path="/canonical",
             ),
         )
 
         assert result.state is not None
-        self.assertEqual(result.state.processing_started_at, self.NOW.isoformat())
-        self.assertEqual(result.state.current_path, "/canonical")
+        self.assertIsNone(result.state.processing_started_at)
+        self.assertIsNone(result.state.current_path)
         self.assertEqual(
             result.verdict.decision,
             PollCycleDecision.complete,

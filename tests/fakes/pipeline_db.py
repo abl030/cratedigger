@@ -9,9 +9,17 @@ from __future__ import annotations
 
 import copy
 import json
-from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
+import os
+from collections.abc import (
+    Callable,
+    Generator,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from typing import (
     TYPE_CHECKING,
@@ -37,6 +45,13 @@ if TYPE_CHECKING:
     from lib.quality import CandidateScore
 
 from lib import transitions
+from lib.import_execution import (
+    CancellationToken,
+    ExecutionLeaseSnapshot,
+    ExecutionLivenessDecision,
+    OwnerSessionIdentity,
+    OwnerSessionProbe,
+)
 from lib.import_queue import (
     IMPORT_JOB_ACTIVE_STATUSES,
     IMPORT_JOB_AUTOMATION,
@@ -46,15 +61,19 @@ from lib.import_queue import (
     IMPORT_JOB_PREVIEW_WAITING,
     IMPORT_JOB_RECOVERY_REQUIRED,
     IMPORT_JOB_YOUTUBE,
+    AutomationHandoffResult,
     ForceImportPayload,
     ImportJob,
     YoutubeImportPayload,
+    automation_import_dedupe_key,
+    automation_import_payload,
     validate_job_type,
     validate_payload,
     validate_preview_failure_status,
     validate_status,
 )
 from lib.pipeline_db import (
+    ADVISORY_LOCK_NAMESPACE_IMPORT,
     BACKOFF_BASE_MINUTES,
     BACKOFF_MAX_MINUTES,
     CURSOR_UPDATE_ADVANCED,
@@ -76,6 +95,9 @@ from lib.pipeline_db import (
     ActiveSearchPlan,
     BadAudioHashInput,
     BadAudioHashRow,
+    CleanupJournalConflict,
+    CleanupJournalIntent,
+    CleanupJournalReceipt,
     ConsumedAttemptInput,
     ConsumedAttemptResult,
     DownloadLogCounts,
@@ -84,6 +106,7 @@ from lib.pipeline_db import (
     NonConsumingAttemptInput,
     PersistedYoutubeRow,
     PlexTerminalPinStatus,
+    ProcessingCleanupJournalRow,
     ReplacedRequestMutationError,
     RequestSpectralStateUpdate,
     SearchPlanInspection,
@@ -96,9 +119,23 @@ from lib.pipeline_db import (
     TransferLedgerRow,
     WantedReconciliationCandidate,
 )
-from lib.pipeline_db._core import ReadOnlyQueryCursor
+from lib.pipeline_db._core import OwnerSessionLost, ReadOnlyQueryCursor
 from lib.pipeline_db._shared import (
+    ACQUISITION_REQUEST_STATUSES,
+    processing_owner_payload,
     validate_request_metadata_fields,
+)
+from lib.pipeline_db.import_jobs import (
+    AutomationRecoveryCAS,
+    AutomationRecoveryEvidenceChanged,
+    AutomationRecoveryRetryApplied,
+    _decision_proves_exact_lease_dead,
+    _recovery_cleanup_matches,
+    _recovery_owner_matches,
+)
+from lib.pipeline_db.terminal_outcomes import (
+    ImportJobTerminalConflict,
+    _terminal_edge_side_effects,
 )
 from lib.quality import (
     EVIDENCE_PROVENANCE_MEASURED,
@@ -107,6 +144,7 @@ from lib.quality import (
     LOSSLESS_CODECS,
     V0_PROBE_LOSSLESS_SOURCE,
     V0_PROBE_NATIVE_LOSSY_RESEARCH,
+    ActiveDownloadState,
     AlbumQualityEvidence,
     AlbumQualityV0Metric,
     CodecFamily,
@@ -121,11 +159,24 @@ from lib.search_scheduler import (
     search_cohort_slots,
 )
 from lib.terminal_outcomes import (
+    AutomationTerminalAuthority,
+    ImportJobTerminal,
     ImportTerminalOutcome,
     PreviewTerminalOutcome,
     TerminalOutcomeResult,
+    cleanup_journal_refusal_matches,
     operator_search_stop_is_current,
+    validate_automation_terminal_declaration,
 )
+
+
+def _noop_owner_checkpoint() -> None:
+    """Fake owner proof: the fake has no session, lease, or cancellation.
+
+    Production passes ``require_automation_recovery_owner`` here. The fake's
+    ownership checks already run inside ``recover_automation_import_job``, and
+    it has no concurrent writer to lose a race to.
+    """
 
 
 class _FakeTerminalTransitionsDB:
@@ -409,6 +460,10 @@ class FakePipelineDB:
         self._tracks: dict[int, list[dict[str, Any]]] = {}
         self.download_logs: list[DownloadLogRow] = []
         self._import_jobs: list[dict[str, Any]] = []
+        self._processing_cleanup_journals: dict[
+            tuple[int, int],
+            ProcessingCleanupJournalRow,
+        ] = {}
         self.search_logs: list[SearchLogRow] = []
         self.cycle_metrics: list[dict[str, Any]] = []
         # Distinct-peer roster mirroring `peer_observations` (#227).
@@ -482,10 +537,12 @@ class FakePipelineDB:
         self.recorded_attempts: list[tuple[int, str]] = []
         self.status_history: list[tuple[int, str]] = []
         self.update_download_state_calls: list[tuple[int, str]] = []
-        self.update_download_state_current_path_calls: list[tuple[int, str | None]] = []
-        self.mark_import_subprocess_started_calls: list[tuple[int, str]] = []
         self.advisory_lock_calls: list[tuple[int, int]] = []
         self.closed = False
+        self._owner_session_pin: tuple[
+            OwnerSessionIdentity,
+            CancellationToken,
+        ] | None = None
         self._next_request_id = 0
         self._next_download_log_id = 0
         self._next_import_job_id = 0
@@ -499,9 +556,9 @@ class FakePipelineDB:
         self._request_creation_race: tuple[str, str, bool, bool] | None = None
         self._request_creation_race_lookups = 0
         # Per-request failure injection for the active_download_state
-        # writers (issue #564 review): ``set_update_download_state_error``
-        # makes ``update_download_state`` (and, via delegation, its
-        # status-guarded ``_if_downloading`` variant) raise for one
+        # writer (issue #564 review): ``set_update_download_state_error``
+        # makes the witnessed ``update_download_state_if_downloading`` raise
+        # for one
         # request id — simulating a psycopg2 error at the UPDATE — so
         # per-row error-isolation contracts can be pinned.
         self._update_download_state_errors: dict[int, Exception] = {}
@@ -837,10 +894,9 @@ class FakePipelineDB:
     def set_update_download_state_error(
         self, request_id: int, error: Exception,
     ) -> None:
-        """Make ``update_download_state`` raise ``error`` for one request.
+        """Make the witnessed download-state writer raise for one request.
 
-        Also fires through ``update_download_state_if_downloading`` (it
-        delegates here), mirroring a production psycopg2 error at the
+        Mirrors a production psycopg2 error at the
         UPDATE: the call is recorded but the row is never mutated. Same
         targeted-seam style as ``set_cooldown_result`` /
         ``FakeSlskdUsers.set_directory_error``. Persistent for the
@@ -878,35 +934,196 @@ class FakePipelineDB:
             else self._advisory_lock_result)
         yield acquired
 
+    @contextmanager
+    def _pin_owner_session(
+        self,
+        token: CancellationToken,
+    ) -> Iterator[OwnerSessionIdentity]:
+        if self._owner_session_pin is not None:
+            raise RuntimeError("owner session is already pinned")
+        token.raise_if_cancelled()
+        if self.closed:
+            token.cancel("owner_session_pin_failed")
+            raise OwnerSessionLost("could not pin owner session")
+        identity = OwnerSessionIdentity(
+            connection_object_id=id(self),
+            backend_pid=1,
+        )
+        pin = (identity, token)
+        self._owner_session_pin = pin
+        try:
+            yield identity
+        finally:
+            if self._owner_session_pin is pin:
+                self._owner_session_pin = None
+
+    def _probe_owner_session(
+        self,
+        identity: OwnerSessionIdentity,
+        *,
+        deadline_seconds: float = 0.75,
+    ) -> OwnerSessionProbe:
+        if not 0 < deadline_seconds <= 1.0:
+            raise ValueError(
+                "owner-session probe deadline must be in (0, 1.0]"
+            )
+        pin = self._owner_session_pin
+        if pin is None:
+            return OwnerSessionProbe(
+                False,
+                "scope_not_pinned",
+                identity,
+                None,
+            )
+        expected, token = pin
+        if token.cancelled:
+            return OwnerSessionProbe(
+                False,
+                "execution_cancelled",
+                identity,
+                None,
+            )
+        if expected != identity:
+            return OwnerSessionProbe(
+                False,
+                "identity_mismatch",
+                identity,
+                None,
+            )
+        if self.closed:
+            token.cancel("owner_session_closed")
+            return OwnerSessionProbe(
+                False,
+                "connection_closed",
+                identity,
+                None,
+            )
+        return OwnerSessionProbe(
+            True,
+            "exact_backend",
+            identity,
+            identity.backend_pid,
+        )
+
     # --- import_jobs queue ---
 
-    def enqueue_import_job(
+    def _is_attached_processing_owner(self, job_id: int) -> bool:
+        return any(
+            request.get("status") == "processing"
+            and request.get("active_automation_import_job_id") == job_id
+            for request in self._requests.values()
+        )
+
+    def _automation_job_has_authority(self, row) -> bool:
+        request_id = row.get("request_id")
+        request = (
+            self._requests.get(int(request_id))
+            if request_id is not None
+            else None
+        )
+        return bool(
+            row.get("job_type") == IMPORT_JOB_AUTOMATION
+            and request is not None
+            and request.get("status") == "processing"
+            and request.get("active_automation_import_job_id") == row.get("id")
+        )
+
+    @staticmethod
+    def _execution_lease_matches(
+        row,
+        lease: ExecutionLeaseSnapshot | None,
+        *,
+        include_child: bool,
+    ) -> bool:
+        if lease is None:
+            return False
+        matches = (
+            row.get("execution_invocation_id") == lease.invocation_id
+            and row.get("execution_host_boot_id") == lease.host_boot_id
+            and row.get("execution_systemd_unit") == lease.systemd_unit
+            and row.get("execution_worker_pid") == lease.worker.pid
+            and row.get("execution_worker_start_ticks")
+            == lease.worker.start_ticks
+        )
+        if not matches or not include_child:
+            return matches
+        child = lease.beets
+        return (
+            row.get("execution_beets_pid")
+            == (child.pid if child is not None else None)
+            and row.get("execution_beets_start_ticks")
+            == (child.start_ticks if child is not None else None)
+        )
+
+    def _recovery_lease_matches(
+        self,
+        row,
+        lease: ExecutionLeaseSnapshot | None,
+    ) -> bool:
+        """Compare a recovery's expected lease, INCLUDING the leaseless case.
+
+        ``_execution_lease_matches`` refuses ``None`` because every other
+        caller means "no expectation supplied". Recovery is the one caller for
+        which ``None`` is a positive expectation: an owner no execution ever
+        claimed, which production compares with ``IS NOT DISTINCT FROM NULL``.
+        """
+        if lease is not None:
+            return self._execution_lease_matches(
+                row,
+                lease,
+                include_child=True,
+            )
+        return all(
+            row.get(column) is None
+            for column in (
+                "execution_invocation_id",
+                "execution_host_boot_id",
+                "execution_systemd_unit",
+                "execution_worker_pid",
+                "execution_worker_start_ticks",
+                "execution_beets_pid",
+                "execution_beets_start_ticks",
+            )
+        )
+
+    @staticmethod
+    def _persist_execution_lease(
+        row: dict[str, Any],
+        lease: ExecutionLeaseSnapshot,
+    ) -> None:
+        row["execution_invocation_id"] = lease.invocation_id
+        row["execution_host_boot_id"] = lease.host_boot_id
+        row["execution_systemd_unit"] = lease.systemd_unit
+        row["execution_worker_pid"] = lease.worker.pid
+        row["execution_worker_start_ticks"] = lease.worker.start_ticks
+        row["execution_beets_pid"] = (
+            lease.beets.pid if lease.beets is not None else None
+        )
+        row["execution_beets_start_ticks"] = (
+            lease.beets.start_ticks if lease.beets is not None else None
+        )
+
+    @staticmethod
+    def _clear_execution_lease(row) -> None:
+        row["execution_invocation_id"] = None
+        row["execution_host_boot_id"] = None
+        row["execution_systemd_unit"] = None
+        row["execution_worker_pid"] = None
+        row["execution_worker_start_ticks"] = None
+        row["execution_beets_pid"] = None
+        row["execution_beets_start_ticks"] = None
+
+    def _append_import_job(
         self,
         job_type: str,
         *,
-        request_id: int | None = None,
-        dedupe_key: str | None = None,
-        payload: dict[str, Any] | None = None,
-        message: str | None = None,
+        request_id: int | None,
+        dedupe_key: str | None,
+        payload,
+        message: str | None,
+        expected_request_status: str | None = None,
     ) -> ImportJob:
-        validate_job_type(job_type)
-        payload = validate_payload(job_type, payload or {})
-        if dedupe_key is not None:
-            existing = self._get_import_job_by_dedupe_key(dedupe_key)
-            if existing is not None:
-                return ImportJob.from_row(existing.to_dict(), deduped=True)
-        if job_type == IMPORT_JOB_YOUTUBE and request_id is not None:
-            for row in self._import_jobs:
-                if (
-                    row.get("job_type") == IMPORT_JOB_YOUTUBE
-                    and row.get("request_id") == request_id
-                    and row.get("status") in IMPORT_JOB_ACTIVE_STATUSES
-                ):
-                    raise ValueError(
-                        "active youtube_import already exists for "
-                        f"request_id={request_id}"
-                    )
-
+        """Mint one row after the caller has enforced its creation policy."""
         self._next_import_job_id += 1
         now = _utcnow()
         row: dict[str, Any] = {
@@ -938,18 +1155,174 @@ class FakePipelineDB:
             "importable_at": None,
             "candidate_evidence_id": None,
             "expected_request_status": (
-                self._requests.get(request_id, {}).get("status")
-                if request_id is not None
-                else None
+                expected_request_status
+                if expected_request_status is not None
+                else (
+                    self._requests.get(request_id, {}).get("status")
+                    if request_id is not None
+                    else None
+                )
             ),
             "beets_launch_authorized_at": None,
             "beets_launch_release_id": None,
             "beets_launch_source_path": None,
             "beets_launch_request_status": None,
             "beets_launch_snapshot_fingerprint": None,
+            "execution_invocation_id": None,
+            "execution_host_boot_id": None,
+            "execution_systemd_unit": None,
+            "execution_worker_pid": None,
+            "execution_worker_start_ticks": None,
+            "execution_beets_pid": None,
+            "execution_beets_start_ticks": None,
         }
         self._import_jobs.append(row)
         return ImportJob.from_row(copy.deepcopy(row))
+
+    def enqueue_import_job(
+        self,
+        job_type: str,
+        *,
+        request_id: int | None = None,
+        dedupe_key: str | None = None,
+        payload: dict[str, Any] | None = None,
+        message: str | None = None,
+    ) -> ImportJob:
+        validate_job_type(job_type)
+        if job_type == IMPORT_JOB_AUTOMATION:
+            raise ValueError(
+                "automation_import jobs may only be created by "
+                "handoff_automation_import"
+            )
+        payload = validate_payload(job_type, payload or {})
+        if dedupe_key is not None:
+            existing = self._get_import_job_by_dedupe_key(dedupe_key)
+            if existing is not None:
+                return ImportJob.from_row(existing.to_dict(), deduped=True)
+        if job_type == IMPORT_JOB_YOUTUBE and request_id is not None:
+            for row in self._import_jobs:
+                if (
+                    row.get("job_type") == IMPORT_JOB_YOUTUBE
+                    and row.get("request_id") == request_id
+                    and row.get("status") in IMPORT_JOB_ACTIVE_STATUSES
+                ):
+                    raise ValueError(
+                        "active youtube_import already exists for "
+                        f"request_id={request_id}"
+                    )
+
+        return self._append_import_job(
+            job_type,
+            request_id=request_id,
+            dedupe_key=dedupe_key,
+            payload=payload,
+            message=message,
+        )
+
+    def _automation_handoff_write_boundary(
+        self,
+        index: int,
+        label: str,
+    ) -> None:
+        """Post-write fault-injection seam; tests override or patch it."""
+
+    def _automation_handoff_enforce_witness(self) -> bool:
+        """Mirror the production witness-guard qualification seam."""
+        return True
+
+    def handoff_automation_import(
+        self,
+        *,
+        request_id: int,
+        expected_enqueued_at: str,
+        canonical_path: str,
+        message: str,
+    ) -> AutomationHandoffResult:
+        """In-memory transcript of the exact PostgreSQL handoff command."""
+        if not expected_enqueued_at:
+            raise ValueError("expected_enqueued_at must be non-empty")
+        if not canonical_path:
+            raise ValueError("canonical_path must be non-empty")
+
+        with self.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_IMPORT,
+            request_id,
+        ) as acquired:
+            if not acquired:
+                return AutomationHandoffResult("lock_unavailable")
+
+            request = self._requests.get(request_id)
+            if request is None:
+                return AutomationHandoffResult("request_missing")
+            if request.get("status") != "downloading":
+                return AutomationHandoffResult("not_downloading")
+            raw_state = request.get("active_download_state")
+            if raw_state is None:
+                return AutomationHandoffResult("missing_state")
+            if isinstance(raw_state, str):
+                try:
+                    state = json.loads(
+                        raw_state,
+                        parse_constant=_reject_nonstandard_json_constant,
+                    )
+                except ValueError:
+                    return AutomationHandoffResult("missing_state")
+            else:
+                state = copy.deepcopy(raw_state)
+            if not isinstance(state, dict):
+                return AutomationHandoffResult("missing_state")
+            if (
+                self._automation_handoff_enforce_witness()
+                and state.get("enqueued_at") != expected_enqueued_at
+            ):
+                return AutomationHandoffResult("witness_mismatch")
+            if request.get("active_automation_import_job_id") is not None:
+                return AutomationHandoffResult("owner_conflict")
+            if any(
+                row.get("job_type") == IMPORT_JOB_AUTOMATION
+                and row.get("request_id") == request_id
+                and row.get("status") in IMPORT_JOB_ACTIVE_STATUSES
+                for row in self._import_jobs
+            ):
+                return AutomationHandoffResult("owner_conflict")
+
+            request_before = copy.deepcopy(request)
+            job_count_before = len(self._import_jobs)
+            status_count_before = len(self.status_history)
+            try:
+                job = self._append_import_job(
+                    IMPORT_JOB_AUTOMATION,
+                    request_id=request_id,
+                    dedupe_key=automation_import_dedupe_key(request_id),
+                    payload=automation_import_payload(),
+                    message=message,
+                    expected_request_status="processing",
+                )
+                self._automation_handoff_write_boundary(
+                    1,
+                    "import_job.inserted",
+                )
+                now = _utcnow()
+                state["current_path"] = canonical_path
+                state["processing_started_at"] = now.isoformat()
+                request["status"] = "processing"
+                request["active_automation_import_job_id"] = job.id
+                request["active_download_state"] = state
+                request["updated_at"] = now
+                self.status_history.append((request_id, "processing"))
+                self._automation_handoff_write_boundary(
+                    2,
+                    "request.processing_owner",
+                )
+            except Exception:
+                request.clear()
+                request.update(request_before)
+                del self._import_jobs[job_count_before:]
+                del self.status_history[status_count_before:]
+                # PostgreSQL sequences are non-transactional. Deliberately do
+                # not rewind ``_next_import_job_id`` on rollback.
+                raise
+            return AutomationHandoffResult("committed", job)
 
     def get_import_job(self, job_id: int) -> ImportJob | None:
         for row in self._import_jobs:
@@ -1019,35 +1392,6 @@ class FakePipelineDB:
         ]
         rows.sort(key=lambda row: row["id"])
         return ImportJob.from_row(copy.deepcopy(rows[0])) if rows else None
-
-    def list_active_youtube_rescues(
-        self,
-        *,
-        limit: int = 50,
-    ) -> list[dict[str, Any]]:
-        rows: list[dict[str, Any]] = []
-        for entry in sorted(
-            self.download_logs,
-            key=lambda e: (e.created_at, e.id),
-        ):
-            if entry.source != "youtube" or entry.outcome != "youtube_running":
-                continue
-            req = self._requests.get(entry.request_id) or {}
-            rows.append({
-                "download_log_id": entry.id,
-                "request_id": entry.request_id,
-                "source": entry.source,
-                "outcome": entry.outcome,
-                "youtube_metadata": copy.deepcopy(entry.youtube_metadata),
-                "created_at": entry.created_at,
-                "artist_name": req.get("artist_name"),
-                "album_title": req.get("album_title"),
-                "mb_release_id": req.get("mb_release_id"),
-                "request_status": req.get("status"),
-            })
-            if len(rows) >= int(limit):
-                break
-        return rows
 
     def list_active_import_jobs_for_wrong_match(
         self,
@@ -1131,32 +1475,241 @@ class FakePipelineDB:
         rows = sorted(active_rows, key=sort_key)
         return [ImportJob.from_row(copy.deepcopy(row)) for row in rows[:limit]]
 
-    def claim_next_import_job(
+    def list_automation_import_jobs_for_startup_recovery(
+        self,
+    ) -> list[ImportJob]:
+        rows = [
+            row
+            for row in self._import_jobs
+            if self._automation_job_has_authority(row)
+            and (
+                (
+                    row.get("status") == "queued"
+                    and row.get("preview_status") == "running"
+                )
+                or (
+                    row.get("status") == "running"
+                    and row.get("preview_status")
+                    in IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES
+                )
+                # A still-attached ``recovery_required`` owner is a close that
+                # stopped mid-frame, never a resting state; recovery must be
+                # able to finish it.
+                or row.get("status") == IMPORT_JOB_RECOVERY_REQUIRED
+            )
+        ]
+        rows.sort(key=lambda row: (
+            _as_datetime(row.get("created_at")),
+            int(row["id"]),
+        ))
+        return [ImportJob.from_row(copy.deepcopy(row)) for row in rows]
+
+    def _import_job_candidate_rows(
         self,
         *,
-        worker_id: str | None = None,
-    ) -> ImportJob | None:
+        execution_lease: ExecutionLeaseSnapshot | None = None,
+    ) -> list[dict[str, object]]:
         queued = [
             row for row in self._import_jobs
             if row.get("status") == "queued"
             and row.get("preview_status") in IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES
+            and (
+                row.get("job_type") not in (
+                    IMPORT_JOB_AUTOMATION,
+                    IMPORT_JOB_FORCE,
+                )
+                or (
+                    row.get("job_type") == IMPORT_JOB_AUTOMATION
+                    and execution_lease is not None
+                    and execution_lease.beets is None
+                    and self._automation_job_has_authority(row)
+                )
+                or (
+                    row.get("job_type") == IMPORT_JOB_FORCE
+                    and row.get("request_id") is not None
+                    and self._force_job_request_is_current(
+                        row,
+                        request_id=int(row["request_id"]),
+                    )
+                )
+            )
         ]
         queued.sort(key=lambda row: (
             _as_datetime(row.get("importable_at")),
             _as_datetime(row.get("created_at")),
             row["id"],
         ))
-        if not queued:
+        return queued
+
+    def peek_import_job_candidates(
+        self,
+        *,
+        execution_lease: ExecutionLeaseSnapshot | None = None,
+        limit: int,
+        offset: int = 0,
+    ) -> list[ImportJob]:
+        if limit <= 0:
+            raise ValueError("import candidate limit must be positive")
+        if offset < 0:
+            raise ValueError("import candidate offset cannot be negative")
+        return [
+            ImportJob.from_row(copy.deepcopy(row))
+            for row in self._import_job_candidate_rows(
+                execution_lease=execution_lease,
+            )[offset:offset + limit]
+        ]
+
+    def claim_import_job_candidate(
+        self,
+        job_id: int,
+        *,
+        worker_id: str | None = None,
+    ) -> ImportJob | None:
+        row = next(
+            (
+                candidate
+                for candidate in self._import_jobs
+                if candidate.get("id") == job_id
+                and candidate.get("job_type") not in (
+                    IMPORT_JOB_AUTOMATION,
+                    IMPORT_JOB_FORCE,
+                )
+                and candidate.get("status") == "queued"
+                and candidate.get("preview_status")
+                in IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES
+            ),
+            None,
+        )
+        if row is None:
             return None
-        row = queued[0]
+        return self._claim_import_job_row(
+            row,
+            worker_id=worker_id,
+            execution_lease=None,
+        )
+
+    def claim_automation_import_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+        execution_lease: ExecutionLeaseSnapshot,
+    ) -> ImportJob | None:
+        row = next(
+            (
+                candidate
+                for candidate in self._import_jobs
+                if candidate["id"] == job_id
+                and candidate.get("request_id") == request_id
+                and candidate.get("job_type") == IMPORT_JOB_AUTOMATION
+                and candidate.get("status") == "queued"
+                and candidate.get("preview_status")
+                in IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES
+            ),
+            None,
+        )
+        if row is None or not self._automation_job_has_authority(row):
+            return None
+        return self._claim_import_job_row(
+            row,
+            worker_id=worker_id,
+            execution_lease=execution_lease,
+        )
+
+    def _force_job_request_is_current(
+        self,
+        row: Mapping[str, object],
+        *,
+        request_id: int,
+    ) -> bool:
+        request = self._requests.get(request_id)
+        return bool(
+            request is not None
+            and row.get("request_id") == request_id
+            and row.get("expected_request_status") is not None
+            and request.get("status") == row.get("expected_request_status")
+            and request.get("status") not in ("processing", "replaced")
+            and request.get("active_automation_import_job_id") is None
+        )
+
+    def claim_force_import_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+    ) -> ImportJob | None:
+        row = next(
+            (
+                candidate
+                for candidate in self._import_jobs
+                if candidate["id"] == job_id
+                and candidate.get("request_id") == request_id
+                and candidate.get("job_type") == IMPORT_JOB_FORCE
+                and candidate.get("status") == "queued"
+                and candidate.get("preview_status")
+                in IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES
+            ),
+            None,
+        )
+        if row is None or not self._force_job_request_is_current(
+            row,
+            request_id=request_id,
+        ):
+            return None
+        return self._claim_import_job_row(
+            row,
+            worker_id=worker_id,
+            execution_lease=None,
+        )
+
+    def _claim_import_job_row(
+        self,
+        row: dict[str, Any],
+        *,
+        worker_id: str | None,
+        execution_lease: ExecutionLeaseSnapshot | None,
+    ) -> ImportJob:
         now = _utcnow()
         row["status"] = "running"
         row["attempts"] = int(row.get("attempts") or 0) + 1
         row["worker_id"] = worker_id
         row["started_at"] = row.get("started_at") or now
         row["heartbeat_at"] = now
+        if execution_lease is not None:
+            self._persist_execution_lease(row, execution_lease)
         row["updated_at"] = now
         return ImportJob.from_row(copy.deepcopy(row))
+
+    def heartbeat_import_job(
+        self,
+        job_id: int,
+        *,
+        expected_execution_lease: ExecutionLeaseSnapshot | None = None,
+    ) -> bool:
+        for row in self._import_jobs:
+            if (
+                row["id"] != job_id
+                or row.get("status") != "running"
+                or row.get("preview_status")
+                not in IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES
+            ):
+                continue
+            if row.get("job_type") == IMPORT_JOB_AUTOMATION and (
+                not self._automation_job_has_authority(row)
+                or not self._execution_lease_matches(
+                    row,
+                    expected_execution_lease,
+                    include_child=True,
+                )
+            ):
+                return False
+            now = _utcnow()
+            row["heartbeat_at"] = now
+            row["updated_at"] = now
+            return True
+        return False
 
     def mark_import_job_completed(
         self,
@@ -1166,7 +1719,11 @@ class FakePipelineDB:
         message: str | None = None,
     ) -> ImportJob | None:
         for row in self._import_jobs:
-            if row["id"] == job_id and row.get("status") in ("queued", "running"):
+            if (
+                row["id"] == job_id
+                and row.get("job_type") != IMPORT_JOB_AUTOMATION
+                and row.get("status") in ("queued", "running")
+            ):
                 now = _utcnow()
                 row["status"] = "completed"
                 row["result"] = copy.deepcopy(result or {})
@@ -1184,6 +1741,7 @@ class FakePipelineDB:
         request_id: int,
         release_id: str,
         source_path: str,
+        expected_execution_lease: ExecutionLeaseSnapshot | None = None,
     ) -> ImportJob | None:
         request = self._requests.get(request_id)
         for row in self._import_jobs:
@@ -1214,7 +1772,17 @@ class FakePipelineDB:
             if job.job_type == IMPORT_JOB_AUTOMATION:
                 state = request.get("active_download_state")
                 if (
-                    request.get("status") != "downloading"
+                    request.get("status") != "processing"
+                    or request.get("active_automation_import_job_id") != job.id
+                    or row.get("preview_status")
+                    not in IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES
+                    or not self._execution_lease_matches(
+                        row,
+                        expected_execution_lease,
+                        include_child=True,
+                    )
+                    or expected_execution_lease is None
+                    or expected_execution_lease.beets is not None
                     or not isinstance(state, dict)
                     or state.get("current_path") != source_path
                 ):
@@ -1223,6 +1791,8 @@ class FakePipelineDB:
                 if (
                     not isinstance(job.payload, ForceImportPayload)
                     or job.payload.failed_path != source_path
+                    or request.get("status") == "processing"
+                    or request.get("active_automation_import_job_id") is not None
                 ):
                     return None
             elif job.job_type == IMPORT_JOB_YOUTUBE:
@@ -1246,17 +1816,129 @@ class FakePipelineDB:
             return ImportJob.from_row(copy.deepcopy(row))
         return None
 
+    def record_import_job_beets_child(
+        self,
+        job_id: int,
+        *,
+        expected_execution_lease: ExecutionLeaseSnapshot,
+        beets_pid: int,
+        beets_start_ticks: int,
+    ) -> ImportJob | None:
+        if beets_pid <= 0:
+            raise ValueError("beets_pid must be positive")
+        if beets_start_ticks < 0:
+            raise ValueError("beets_start_ticks must be non-negative")
+        for row in self._import_jobs:
+            if (
+                row["id"] == job_id
+                and row.get("job_type") == IMPORT_JOB_AUTOMATION
+                and row.get("status") == "running"
+                and row.get("preview_status")
+                in IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES
+                and row.get("beets_launch_authorized_at") is not None
+                and self._automation_job_has_authority(row)
+                and self._execution_lease_matches(
+                    row,
+                    expected_execution_lease,
+                    include_child=True,
+                )
+                and expected_execution_lease.beets is None
+            ):
+                row["execution_beets_pid"] = beets_pid
+                row["execution_beets_start_ticks"] = beets_start_ticks
+                row["updated_at"] = _utcnow()
+                return ImportJob.from_row(copy.deepcopy(row))
+        return None
+
+    def capture_automation_import_completion(
+        self,
+        job_id: int,
+        *,
+        expected_execution_lease: ExecutionLeaseSnapshot,
+        receipt: object,
+    ) -> ImportJob | None:
+        from lib.import_job_recovery_service import (
+            AutomationCompletionReceipt,
+            automation_completion_result_patch,
+        )
+
+        if expected_execution_lease.beets is None:
+            return None
+        try:
+            typed = msgspec.convert(
+                msgspec.to_builtins(receipt),
+                type=AutomationCompletionReceipt,
+                strict=True,
+            )
+            patch = automation_completion_result_patch(typed)
+        except (TypeError, ValueError, msgspec.ValidationError):
+            return None
+        for row in self._import_jobs:
+            request = self._requests.get(int(row.get("request_id") or 0))
+            state = (
+                request.get("active_download_state")
+                if request is not None
+                else None
+            )
+            existing = dict(row.get("result") or {})
+            if (
+                row.get("id") != job_id
+                or typed.job_id != job_id
+                or row.get("request_id") != typed.request_id
+                or row.get("job_type") != IMPORT_JOB_AUTOMATION
+                or row.get("status") != "running"
+                or row.get("preview_status") != "evidence_ready"
+                or row.get("completed_at") is not None
+                or row.get("beets_launch_authorized_at") is None
+                or row.get("beets_launch_release_id") != typed.release_id
+                or row.get("beets_launch_source_path")
+                != typed.canonical_path
+                or request is None
+                or request.get("status") != "processing"
+                or request.get("active_automation_import_job_id") != job_id
+                or not isinstance(state, dict)
+                or state.get("current_path") != typed.canonical_path
+                or not self._execution_lease_matches(
+                    row,
+                    expected_execution_lease,
+                    include_child=True,
+                )
+                or (
+                    "automation_completion" in existing
+                    and existing["automation_completion"]
+                    != patch["automation_completion"]
+                )
+            ):
+                continue
+            existing.update(patch)
+            row["result"] = existing
+            row["updated_at"] = _utcnow()
+            return ImportJob.from_row(copy.deepcopy(row))
+        return None
+
     def mark_import_job_recovery_required(
         self,
         job_id: int,
         *,
         reason: str,
+        expected_execution_lease: ExecutionLeaseSnapshot | None = None,
     ) -> ImportJob | None:
         for row in self._import_jobs:
             if (
                 row["id"] == job_id
                 and row.get("status") == "running"
                 and row.get("beets_launch_authorized_at") is not None
+                and (
+                    row.get("job_type") != IMPORT_JOB_AUTOMATION
+                    or (
+                        self._automation_job_has_authority(row)
+                        and self._execution_lease_matches(
+                            row,
+                            expected_execution_lease,
+                            include_child=True,
+                        )
+                    )
+                )
             ):
                 now = _utcnow()
                 row["status"] = IMPORT_JOB_RECOVERY_REQUIRED
@@ -1271,7 +1953,278 @@ class FakePipelineDB:
                 return ImportJob.from_row(copy.deepcopy(row))
         return None
 
+    def _automation_recovery_write_boundary(
+        self,
+        index: int,
+        label: str,
+    ) -> None:
+        del index, label
+
+    def _automation_recovery_rows(
+        self,
+        expected: AutomationRecoveryCAS,
+    ):
+        request = self._requests.get(expected.request_id)
+        job = next(
+            (
+                row
+                for row in self._import_jobs
+                if row["id"] == expected.job_id
+                and row.get("request_id") == expected.request_id
+            ),
+            None,
+        )
+        journal = self._processing_cleanup_journals.get(
+            (expected.job_id, expected.request_id)
+        )
+        return request, job, journal
+
+    def require_automation_recovery_owner(
+        self,
+        expected: AutomationRecoveryCAS,
+    ) -> None:
+        request, job, _journal = self._automation_recovery_rows(expected)
+        if not _recovery_owner_matches(
+            expected,
+            request=request,
+            job=job,
+        ):
+            raise AutomationRecoveryEvidenceChanged(
+                "automation recovery owner evidence changed"
+            )
+
+    def require_automation_recovery_cas(
+        self,
+        expected: AutomationRecoveryCAS,
+    ) -> None:
+        request, job, journal = self._automation_recovery_rows(expected)
+        if (
+            not _recovery_owner_matches(
+                expected,
+                request=request,
+                job=job,
+            )
+            or not _recovery_cleanup_matches(expected, journal)
+        ):
+            raise AutomationRecoveryEvidenceChanged(
+                "automation recovery evidence changed"
+            )
+
+    def retry_automation_import_recovery(
+        self,
+        expected: AutomationRecoveryCAS,
+        *,
+        expected_execution_lease: ExecutionLeaseSnapshot | None,
+        liveness: ExecutionLivenessDecision,
+        reason: str,
+        evidence_revision: str,
+    ) -> AutomationRecoveryRetryApplied | None:
+        reason = reason.strip()
+        if not reason:
+            raise ValueError("automation recovery retry requires a reason")
+        if not evidence_revision.strip():
+            raise ValueError(
+                "automation recovery retry requires an evidence revision"
+            )
+        if (
+            expected.job_status != IMPORT_JOB_RECOVERY_REQUIRED
+            or not _decision_proves_exact_lease_dead(
+                liveness,
+                expected_execution_lease,
+            )
+        ):
+            return None
+        with self.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_IMPORT,
+            expected.request_id,
+        ) as acquired:
+            if not acquired:
+                return None
+            request, row, journal = self._automation_recovery_rows(expected)
+            lease_matches = (
+                row is not None
+                and (
+                    all(
+                        row.get(field) is None
+                        for field in (
+                            "execution_invocation_id",
+                            "execution_host_boot_id",
+                            "execution_systemd_unit",
+                            "execution_worker_pid",
+                            "execution_worker_start_ticks",
+                            "execution_beets_pid",
+                            "execution_beets_start_ticks",
+                        )
+                    )
+                    if expected_execution_lease is None
+                    else self._execution_lease_matches(
+                        row,
+                        expected_execution_lease,
+                        include_child=True,
+                    )
+                )
+            )
+            if (
+                not lease_matches
+                or not _recovery_owner_matches(
+                    expected,
+                    request=request,
+                    job=row,
+                )
+                or not _recovery_cleanup_matches(expected, journal)
+            ):
+                return None
+            assert request is not None and row is not None
+            snapshot = copy.deepcopy((
+                self._requests,
+                self._import_jobs,
+                self._processing_cleanup_journals,
+                self._next_import_job_id,
+            ))
+            try:
+                original = ImportJob.from_row(copy.deepcopy(row))
+                result = copy.deepcopy(row.get("result") or {})
+                result["recovery_resolution"] = {
+                    "resolution": "retry",
+                    "reason": reason,
+                    "evidence_revision": evidence_revision,
+                }
+                now = _utcnow()
+                row.update({
+                    "status": "failed",
+                    "result": result,
+                    "message": (
+                        f"Operator authorized a fresh retry: {reason}"
+                    ),
+                    "error": (
+                        "Ambiguous Beets operation closed before fresh retry"
+                    ),
+                    "worker_id": None,
+                    "heartbeat_at": None,
+                    "completed_at": now,
+                    "updated_at": now,
+                })
+                self._automation_recovery_write_boundary(
+                    1,
+                    "old_job.failed",
+                )
+                retry = self._append_import_job(
+                    original.job_type,
+                    request_id=original.request_id,
+                    dedupe_key=original.dedupe_key,
+                    payload=msgspec.to_builtins(original.payload),
+                    message=(
+                        "Operator-authorized retry of recovery job "
+                        f"{original.id}: {reason}"
+                    ),
+                    expected_request_status=(
+                        original.expected_request_status
+                    ),
+                )
+                retry_row = next(
+                    item
+                    for item in self._import_jobs
+                    if item["id"] == retry.id
+                )
+                retry_row.update({
+                    "status": (
+                        IMPORT_JOB_RECOVERY_REQUIRED
+                        if journal is not None
+                        else "queued"
+                    ),
+                    "message": (
+                        "Recovery retry retargeted an unresolved processing "
+                        f"cleanup journal from job {original.id}; reconcile "
+                        "cleanup before replay"
+                        if journal is not None
+                        else retry_row["message"]
+                    ),
+                    "preview_status": original.preview_status,
+                    "preview_result": copy.deepcopy(original.preview_result),
+                    "preview_message": original.preview_message,
+                    "preview_error": original.preview_error,
+                    "preview_attempts": original.preview_attempts,
+                    "preview_completed_at": original.preview_completed_at,
+                    "importable_at": original.importable_at,
+                    "candidate_evidence_id": original.candidate_evidence_id,
+                })
+                retry = ImportJob.from_row(copy.deepcopy(retry_row))
+                self._automation_recovery_write_boundary(
+                    2,
+                    "retry_job.inserted",
+                )
+                retargeted: ProcessingCleanupJournalRow | None = None
+                if journal is not None:
+                    retargeted = self._processing_cleanup_journals.pop(
+                        (expected.job_id, expected.request_id)
+                    )
+                    retargeted["job_id"] = retry.id
+                    retargeted["revision"] += 1
+                    self._processing_cleanup_journals[
+                        (retry.id, expected.request_id)
+                    ] = retargeted
+                    self._automation_recovery_write_boundary(
+                        3,
+                        "cleanup_journal.retargeted",
+                    )
+                request["active_automation_import_job_id"] = retry.id
+                request["updated_at"] = _utcnow()
+                self._automation_recovery_write_boundary(
+                    4,
+                    "request.owner_retargeted",
+                )
+                return AutomationRecoveryRetryApplied(
+                    original=ImportJob.from_row(copy.deepcopy(row)),
+                    retry=retry,
+                    journal=copy.deepcopy(retargeted),
+                )
+            except Exception:
+                (
+                    self._requests,
+                    self._import_jobs,
+                    self._processing_cleanup_journals,
+                    self._next_import_job_id,
+                ) = snapshot
+                raise
+
     def resolve_import_job_recovery(
+        self,
+        job_id: int,
+        *,
+        resolution: str,
+        reason: str,
+    ) -> tuple[ImportJob, ImportJob | None] | None:
+        candidate = next(
+            (
+                item for item in self._import_jobs
+                if item["id"] == job_id
+                and item.get("job_type") != IMPORT_JOB_AUTOMATION
+                and not self._is_attached_processing_owner(job_id)
+            ),
+            None,
+        )
+        if candidate is None:
+            return None
+        candidate_request_id = candidate.get("request_id")
+        if not isinstance(candidate_request_id, int):
+            return self._resolve_import_job_recovery_under_lock(
+                job_id,
+                resolution=resolution,
+                reason=reason,
+            )
+        with self.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_IMPORT,
+            candidate_request_id,
+        ) as acquired:
+            if not acquired:
+                return None
+            return self._resolve_import_job_recovery_under_lock(
+                job_id,
+                resolution=resolution,
+                reason=reason,
+            )
+
+    def _resolve_import_job_recovery_under_lock(
         self,
         job_id: int,
         *,
@@ -1288,10 +2241,13 @@ class FakePipelineDB:
                 item for item in self._import_jobs
                 if item["id"] == job_id
                 and item.get("status") == IMPORT_JOB_RECOVERY_REQUIRED
+                and item.get("job_type") != IMPORT_JOB_AUTOMATION
             ),
             None,
         )
         if row is None:
+            return None
+        if self._is_attached_processing_owner(job_id):
             return None
         original = ImportJob.from_row(copy.deepcopy(row))
         if resolution == "retry":
@@ -1314,14 +2270,7 @@ class FakePipelineDB:
                 return None
 
             expected_source = None
-            if original.job_type == "automation_import":
-                state = request.get("active_download_state")
-                expected_source = (
-                    state.get("current_path")
-                    if isinstance(state, dict)
-                    else None
-                )
-            elif original.job_type == "force_import":
+            if original.job_type == "force_import":
                 if not isinstance(original.payload, ForceImportPayload):
                     raise AssertionError("force_import payload type mismatch")
                 expected_source = original.payload.failed_path
@@ -1333,13 +2282,6 @@ class FakePipelineDB:
                 return None
             if expected_source != original.beets_launch_source_path:
                 return None
-
-        if resolution == "retry" and original.job_type == "automation_import":
-            request = self._requests.get(int(original.request_id or 0))
-            state = request.get("active_download_state") if request else None
-            assert request is not None and isinstance(state, dict)
-            state.pop("import_subprocess_started_at", None)
-            request["updated_at"] = _utcnow()
 
         now = _utcnow()
         prior_result = row.get("result")
@@ -1403,7 +2345,11 @@ class FakePipelineDB:
         message: str | None = None,
     ) -> ImportJob | None:
         for row in self._import_jobs:
-            if row["id"] == job_id and row.get("status") in ("queued", "running"):
+            if (
+                row["id"] == job_id
+                and row.get("job_type") != IMPORT_JOB_AUTOMATION
+                and row.get("status") in ("queued", "running")
+            ):
                 now = _utcnow()
                 row["status"] = "failed"
                 row["result"] = copy.deepcopy(result or {})
@@ -1420,7 +2366,11 @@ class FakePipelineDB:
         patch: dict[str, Any],
     ) -> ImportJob | None:
         for row in self._import_jobs:
-            if row["id"] == job_id and row.get("status") in ("completed", "failed"):
+            if (
+                row["id"] == job_id
+                and row.get("status") in ("completed", "failed")
+                and not self._is_attached_processing_owner(job_id)
+            ):
                 result = row.get("result")
                 merged = copy.deepcopy(result) if isinstance(result, dict) else {}
                 merged.update(copy.deepcopy(patch))
@@ -1439,6 +2389,7 @@ class FakePipelineDB:
         running = [
             row for row in self._import_jobs
             if row.get("status") == "running"
+            and row.get("job_type") != IMPORT_JOB_AUTOMATION
         ]
         running.sort(key=lambda row: (_as_datetime(row.get("updated_at")), row["id"]))
         updated_jobs = []
@@ -1462,11 +2413,196 @@ class FakePipelineDB:
             updated_jobs.append(ImportJob.from_row(copy.deepcopy(row)))
         return updated_jobs
 
+    def recover_automation_import_job(
+        self,
+        job_id: int,
+        *,
+        expected_execution_lease: ExecutionLeaseSnapshot | None,
+        decision: ExecutionLivenessDecision,
+        requeue_message: str,
+        recovery_message: str,
+    ) -> ImportJob | None:
+        """Fake mirror of PipelineDB.recover_automation_import_job.
+
+        Mirrors by DELEGATION wherever the production path is not SQL: the same
+        cleanup resume, the same audit bundle builder, and the same terminal
+        command run here, so the two cannot drift on the part that decides
+        whether a request keeps being acquired.
+        """
+        from lib.download import _local_completion_terminal_outcome
+        from lib.download_reconstruction import reconstruct_grab_list_entry
+        from lib.pipeline_db.import_jobs import (
+            AUTOMATION_WORLD_FAILURE_AUDIT_PREFIX,
+            _job_terminal_stage,
+            automation_completion_receipt,
+        )
+        from lib.processing_cleanup import (
+            ProcessingCleanupError,
+            complete_owner_processing_cleanup,
+        )
+        from lib.terminal_outcomes import (
+            cleanup_journal_refusal_disposition,
+        )
+
+        if (
+            decision.status != "dead"
+            or decision.evidence.lease != expected_execution_lease
+        ):
+            return None
+        row = next(
+            (item for item in self._import_jobs if item["id"] == job_id),
+            None,
+        )
+        if (
+            row is None
+            or not self._automation_job_has_authority(row)
+            or not self._recovery_lease_matches(
+                row,
+                expected_execution_lease,
+            )
+            or row.get("completed_at") is not None
+            or not (
+                (
+                    row.get("status") == "queued"
+                    and row.get("preview_status") == "running"
+                )
+                or (
+                    row.get("status") == "running"
+                    and row.get("preview_status")
+                    in IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES
+                )
+                or row.get("status") == IMPORT_JOB_RECOVERY_REQUIRED
+            )
+        ):
+            return None
+        request_id = int(row["request_id"])
+        with self.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_IMPORT,
+            request_id,
+        ) as acquired:
+            if not acquired or not self._automation_job_has_authority(row):
+                return None
+            launched = row.get("beets_launch_authorized_at") is not None
+            journalled = (
+                (job_id, request_id) in self._processing_cleanup_journals
+            )
+            staged_close = row.get("status") == IMPORT_JOB_RECOVERY_REQUIRED
+            if not launched and not journalled and not staged_close:
+                row["status"] = "queued"
+                if row.get("preview_status") == "running":
+                    row["preview_status"] = IMPORT_JOB_PREVIEW_WAITING
+                row["message"] = requeue_message
+                row["error"] = None
+                row["worker_id"] = None
+                row["started_at"] = None
+                row["heartbeat_at"] = None
+                row["preview_worker_id"] = None
+                row["preview_started_at"] = None
+                row["preview_heartbeat_at"] = None
+                self._clear_execution_lease(row)
+                row["updated_at"] = _utcnow()
+                return ImportJob.from_row(copy.deepcopy(row))
+
+            job = ImportJob.from_row(copy.deepcopy(row))
+            detail = f"{AUTOMATION_WORLD_FAILURE_AUDIT_PREFIX}: {recovery_message}"
+            try:
+                request = self._requests.get(request_id)
+                raw_state = (
+                    None
+                    if request is None
+                    else request.get("active_download_state")
+                )
+                if request is None or raw_state is None:
+                    return None
+                state = ActiveDownloadState.from_raw(raw_state)
+                if state.current_path is None:
+                    return None
+                cleanup_refusal = None
+                try:
+                    cleanup_receipt = complete_owner_processing_cleanup(
+                        self,
+                        request_id=request_id,
+                        job_id=job_id,
+                        source_path=os.path.abspath(state.current_path),
+                        owner_checkpoint=_noop_owner_checkpoint,
+                    )
+                except ProcessingCleanupError as exc:
+                    cleanup_receipt = None
+                    cleanup_refusal = cleanup_journal_refusal_disposition(
+                        self._processing_cleanup_journals.get(
+                            (job_id, request_id)
+                        ),
+                        error_code=exc.code,
+                        error_message=str(exc),
+                    )
+                    detail = (
+                        f"{detail}; processor cleanup refused "
+                        f"({exc.code}): {exc}"
+                    )
+                completion_receipt = automation_completion_receipt(job)
+                expected_job_status = _job_terminal_stage(job.status)
+                if (
+                    launched
+                    and completion_receipt is None
+                    and not staged_close
+                ):
+                    staged = self.mark_import_job_recovery_required(
+                        job_id,
+                        reason=recovery_message,
+                        expected_execution_lease=expected_execution_lease,
+                    )
+                    if staged is None:
+                        return None
+                    expected_job_status = IMPORT_JOB_RECOVERY_REQUIRED
+                pending = _local_completion_terminal_outcome(
+                    reconstruct_grab_list_entry(request, state),
+                    state,
+                    request_id=request_id,
+                    import_job_id=job_id,
+                    transition=transitions.RequestTransition.to_wanted(
+                        from_status="processing",
+                        attempt_type="validation",
+                    ),
+                    outcome="failed",
+                    detail=detail,
+                    error_message=detail,
+                )
+                terminal = self.persist_import_terminal_outcome(
+                    replace(
+                        pending,
+                        automation=AutomationTerminalAuthority(
+                            expected_job_status=expected_job_status,
+                            expected_preview_status=job.preview_status,
+                            expected_execution_lease=expected_execution_lease,
+                            cleanup_receipt=cleanup_receipt,
+                            completion_receipt=completion_receipt,
+                            cleanup_refusal=cleanup_refusal,
+                        ),
+                    ).with_job(ImportJobTerminal(
+                        status="failed",
+                        error=detail,
+                        result={
+                            "automation_recovery_self_heal": {
+                                "reason": recovery_message,
+                            },
+                        },
+                        message=detail,
+                    ))
+                )
+            except (
+                AutomationRecoveryEvidenceChanged,
+                CleanupJournalConflict,
+                ImportJobTerminalConflict,
+            ):
+                return None
+            return terminal.job
+
     def requeue_import_job_for_preview(
         self,
         job_id: int,
         *,
         reason: str,
+        expected_execution_lease: ExecutionLeaseSnapshot | None = None,
     ) -> ImportJob | None:
         """Fake mirror of PipelineDB.requeue_import_job_for_preview.
 
@@ -1478,6 +2614,19 @@ class FakePipelineDB:
                 row["id"] == job_id
                 and row.get("status") == "running"
                 and row.get("beets_launch_authorized_at") is None
+                and (
+                    row.get("job_type") != IMPORT_JOB_AUTOMATION
+                    or (
+                        row.get("preview_status")
+                        in IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES
+                        and self._automation_job_has_authority(row)
+                        and self._execution_lease_matches(
+                            row,
+                            expected_execution_lease,
+                            include_child=True,
+                        )
+                    )
+                )
             ):
                 now = _utcnow()
                 row["status"] = "queued"
@@ -1489,24 +2638,156 @@ class FakePipelineDB:
                 row["heartbeat_at"] = None
                 row["preview_message"] = None
                 row["preview_error"] = None
+                if row.get("job_type") == IMPORT_JOB_AUTOMATION:
+                    self._clear_execution_lease(row)
                 row["updated_at"] = now
                 return ImportJob.from_row(copy.deepcopy(row))
         return None
 
-    def claim_next_import_preview_job(
+    def _import_preview_job_candidate_rows(
         self,
         *,
-        worker_id: str | None = None,
-    ) -> ImportJob | None:
+        execution_lease: ExecutionLeaseSnapshot | None = None,
+    ) -> list[dict[str, object]]:
         queued = [
             row for row in self._import_jobs
             if row.get("status") == "queued"
             and row.get("preview_status") == "waiting"
+            and (
+                row.get("job_type") not in (
+                    IMPORT_JOB_AUTOMATION,
+                    IMPORT_JOB_FORCE,
+                )
+                or (
+                    row.get("job_type") == IMPORT_JOB_AUTOMATION
+                    and execution_lease is not None
+                    and execution_lease.beets is None
+                    and self._automation_job_has_authority(row)
+                )
+                or (
+                    row.get("job_type") == IMPORT_JOB_FORCE
+                    and row.get("request_id") is not None
+                    and self._force_job_request_is_current(
+                        row,
+                        request_id=int(row["request_id"]),
+                    )
+                )
+            )
         ]
         queued.sort(key=lambda row: (_as_datetime(row.get("created_at")), row["id"]))
-        if not queued:
+        return queued
+
+    def peek_import_preview_job_candidates(
+        self,
+        *,
+        execution_lease: ExecutionLeaseSnapshot | None = None,
+        limit: int,
+        offset: int = 0,
+    ) -> list[ImportJob]:
+        if limit <= 0:
+            raise ValueError("preview candidate limit must be positive")
+        if offset < 0:
+            raise ValueError("preview candidate offset cannot be negative")
+        return [
+            ImportJob.from_row(copy.deepcopy(row))
+            for row in self._import_preview_job_candidate_rows(
+                execution_lease=execution_lease,
+            )[offset:offset + limit]
+        ]
+
+    def claim_import_preview_job_candidate(
+        self,
+        job_id: int,
+        *,
+        worker_id: str | None = None,
+    ) -> ImportJob | None:
+        row = next(
+            (
+                candidate
+                for candidate in self._import_jobs
+                if candidate.get("id") == job_id
+                and candidate.get("job_type") not in (
+                    IMPORT_JOB_AUTOMATION,
+                    IMPORT_JOB_FORCE,
+                )
+                and candidate.get("status") == "queued"
+                and candidate.get("preview_status") == "waiting"
+            ),
+            None,
+        )
+        if row is None:
             return None
-        row = queued[0]
+        return self._claim_import_preview_row(
+            row,
+            worker_id=worker_id,
+            execution_lease=None,
+        )
+
+    def claim_automation_import_preview_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+        execution_lease: ExecutionLeaseSnapshot,
+    ) -> ImportJob | None:
+        row = next(
+            (
+                candidate
+                for candidate in self._import_jobs
+                if candidate["id"] == job_id
+                and candidate.get("request_id") == request_id
+                and candidate.get("job_type") == IMPORT_JOB_AUTOMATION
+                and candidate.get("status") == "queued"
+                and candidate.get("preview_status") == "waiting"
+            ),
+            None,
+        )
+        if row is None or not self._automation_job_has_authority(row):
+            return None
+        return self._claim_import_preview_row(
+            row,
+            worker_id=worker_id,
+            execution_lease=execution_lease,
+        )
+
+    def claim_force_import_preview_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+    ) -> ImportJob | None:
+        row = next(
+            (
+                candidate
+                for candidate in self._import_jobs
+                if candidate["id"] == job_id
+                and candidate.get("request_id") == request_id
+                and candidate.get("job_type") == IMPORT_JOB_FORCE
+                and candidate.get("status") == "queued"
+                and candidate.get("preview_status") == "waiting"
+            ),
+            None,
+        )
+        if row is None or not self._force_job_request_is_current(
+            row,
+            request_id=request_id,
+        ):
+            return None
+        return self._claim_import_preview_row(
+            row,
+            worker_id=worker_id,
+            execution_lease=None,
+        )
+
+    def _claim_import_preview_row(
+        self,
+        row,
+        *,
+        worker_id: str | None,
+        execution_lease: ExecutionLeaseSnapshot | None,
+    ) -> ImportJob:
         now = _utcnow()
         row["preview_status"] = "running"
         row["preview_attempts"] = int(row.get("preview_attempts") or 0) + 1
@@ -1515,16 +2796,34 @@ class FakePipelineDB:
         row["preview_heartbeat_at"] = now
         row["preview_message"] = None
         row["preview_error"] = None
+        if execution_lease is not None:
+            self._persist_execution_lease(row, execution_lease)
         row["updated_at"] = now
         return ImportJob.from_row(copy.deepcopy(row))
 
-    def heartbeat_import_job_preview(self, job_id: int) -> bool:
+    def heartbeat_import_job_preview(
+        self,
+        job_id: int,
+        *,
+        expected_execution_lease: ExecutionLeaseSnapshot | None = None,
+    ) -> bool:
         for row in self._import_jobs:
             if (
                 row["id"] == job_id
                 and row.get("status") == "queued"
                 and row.get("preview_status") == "running"
             ):
+                if row.get("job_type") == IMPORT_JOB_AUTOMATION and (
+                    not self._automation_job_has_authority(row)
+                    or not self._execution_lease_matches(
+                        row,
+                        expected_execution_lease,
+                        include_child=True,
+                    )
+                    or expected_execution_lease is None
+                    or expected_execution_lease.beets is not None
+                ):
+                    return False
                 now = _utcnow()
                 row["preview_heartbeat_at"] = now
                 row["updated_at"] = now
@@ -1537,12 +2836,27 @@ class FakePipelineDB:
         *,
         preview_result: dict[str, Any] | None = None,
         message: str | None = None,
+        expected_execution_lease: ExecutionLeaseSnapshot | None = None,
     ) -> ImportJob | None:
         for row in self._import_jobs:
             if (
                 row["id"] == job_id
                 and row.get("status") == "queued"
                 and row.get("preview_status") in ("waiting", "running")
+                and (
+                    row.get("job_type") != IMPORT_JOB_AUTOMATION
+                    or (
+                        row.get("preview_status") == "running"
+                        and self._automation_job_has_authority(row)
+                        and self._execution_lease_matches(
+                            row,
+                            expected_execution_lease,
+                            include_child=True,
+                        )
+                        and expected_execution_lease is not None
+                        and expected_execution_lease.beets is None
+                    )
+                )
             ):
                 now = _utcnow()
                 row["preview_status"] = IMPORT_JOB_PREVIEW_EVIDENCE_READY
@@ -1553,6 +2867,8 @@ class FakePipelineDB:
                 row["importable_at"] = row.get("importable_at") or now
                 row["preview_worker_id"] = None
                 row["preview_heartbeat_at"] = None
+                if row.get("job_type") == IMPORT_JOB_AUTOMATION:
+                    self._clear_execution_lease(row)
                 row["updated_at"] = now
                 return ImportJob.from_row(copy.deepcopy(row))
         return None
@@ -1571,6 +2887,7 @@ class FakePipelineDB:
         for row in self._import_jobs:
             if (
                 row["id"] == job_id
+                and row.get("job_type") != IMPORT_JOB_AUTOMATION
                 and row.get("status") == "queued"
                 and row.get("preview_status") in ("waiting", "running")
             ):
@@ -1601,7 +2918,11 @@ class FakePipelineDB:
         cutoff = _utcnow() - older_than
         stale = []
         for row in self._import_jobs:
-            if row.get("status") != "queued" or row.get("preview_status") != "running":
+            if (
+                row.get("status") != "queued"
+                or row.get("preview_status") != "running"
+                or row.get("job_type") == IMPORT_JOB_AUTOMATION
+            ):
                 continue
             last = _as_datetime(
                 row.get("preview_heartbeat_at")
@@ -1634,6 +2955,7 @@ class FakePipelineDB:
             row for row in self._import_jobs
             if row.get("status") == "queued"
             and row.get("preview_status") == "running"
+            and row.get("job_type") != IMPORT_JOB_AUTOMATION
         ]
         running.sort(key=lambda row: (_as_datetime(row.get("updated_at")), row["id"]))
         updated_jobs = []
@@ -1651,11 +2973,40 @@ class FakePipelineDB:
 
     # --- PipelineDB interface methods ---
 
-    def get_request(self, request_id: int) -> AlbumRequestRow | None:
-        return cast(
-            "AlbumRequestRow | None",
-            copy.deepcopy(self._requests.get(request_id)),
+    def _request_presentation_copy(
+        self,
+        row,
+    ):
+        """Mirror the production pointer join without latest-job inference."""
+        projected = copy.deepcopy(dict(row))
+        owner_id = projected.get("active_automation_import_job_id")
+        owner = next(
+            (
+                job for job in self._import_jobs
+                if job.get("id") == owner_id
+            ),
+            None,
         )
+        projected["_processing_owner_job_id"] = (
+            owner.get("id") if owner is not None else None
+        )
+        projected["_processing_owner_status"] = (
+            owner.get("status") if owner is not None else None
+        )
+        projected["_processing_owner_preview_status"] = (
+            owner.get("preview_status") if owner is not None else None
+        )
+        projected["processing_owner"] = processing_owner_payload(projected)
+        projected.pop("_processing_owner_job_id")
+        projected.pop("_processing_owner_status")
+        projected.pop("_processing_owner_preview_status")
+        return projected
+
+    def get_request(self, request_id: int) -> AlbumRequestRow | None:
+        row = self._requests.get(request_id)
+        if row is None:
+            return None
+        return cast("AlbumRequestRow", self._request_presentation_copy(row))
 
     def _terminal_state_snapshot(self) -> tuple[object, ...]:
         return copy.deepcopy((
@@ -1667,6 +3018,7 @@ class FakePipelineDB:
             self.status_history,
             self.recorded_attempts,
             self.cooldowns_applied,
+            self._processing_cleanup_journals,
         ))
 
     def _restore_terminal_state(self, snapshot: tuple[object, ...]) -> None:
@@ -1679,10 +3031,214 @@ class FakePipelineDB:
             self.status_history,
             self.recorded_attempts,
             self.cooldowns_applied,
+            self._processing_cleanup_journals,
         ) = cast(Any, snapshot)
 
     def _terminal_outcome_write_boundary(self, index: int, label: str) -> None:
         del index, label
+
+    def get_processing_cleanup_journal(
+        self,
+        *,
+        request_id: int,
+        job_id: int,
+    ) -> ProcessingCleanupJournalRow | None:
+        row = self._processing_cleanup_journals.get((job_id, request_id))
+        return copy.deepcopy(row)
+
+    def _require_fake_exact_processing_owner(
+        self,
+        *,
+        request_id: int,
+        job_id: int,
+    ) -> None:
+        """Mirror ``_require_exact_processing_owner``'s typed conflict kinds.
+
+        Production raises three distinct ``CleanupJournalConflict`` kinds here
+        and callers catch the class, so the fake must too.
+        """
+        request = self._requests.get(request_id)
+        if request is None:
+            raise CleanupJournalConflict(
+                "request_missing",
+                f"cleanup request {request_id} does not exist",
+            )
+        if (
+            request.get("status") != "processing"
+            or request.get("active_automation_import_job_id") != job_id
+        ):
+            raise CleanupJournalConflict(
+                "owner_mismatch",
+                f"job {job_id} is not request {request_id}'s exact "
+                "processing owner",
+            )
+        job = next(
+            (row for row in self._import_jobs if row["id"] == job_id),
+            None,
+        )
+        if (
+            job is None
+            or job.get("request_id") != request_id
+            or job.get("job_type") != IMPORT_JOB_AUTOMATION
+            or job.get("status") not in IMPORT_JOB_ACTIVE_STATUSES
+        ):
+            raise CleanupJournalConflict(
+                "job_mismatch",
+                f"job {job_id} is not an active automation job for "
+                f"request {request_id}",
+            )
+
+    def create_processing_cleanup_journal(
+        self,
+        *,
+        request_id: int,
+        job_id: int,
+        intent: CleanupJournalIntent,
+    ) -> ProcessingCleanupJournalRow:
+        declaration = (
+            intent.declared_result_status,
+            intent.declared_reason,
+            intent.evidence_revision,
+        )
+        if not all(value is None for value in declaration):
+            if any(value is None for value in declaration):
+                raise ValueError(
+                    "cleanup recovery declaration must be provided together"
+                )
+            assert intent.declared_reason is not None
+            assert intent.evidence_revision is not None
+            if (
+                not intent.declared_reason.strip()
+                or not intent.evidence_revision.strip()
+            ):
+                raise ValueError(
+                    "cleanup recovery declaration must be non-blank"
+                )
+        self._require_fake_exact_processing_owner(
+            request_id=request_id,
+            job_id=job_id,
+        )
+        key = (job_id, request_id)
+        existing = self._processing_cleanup_journals.get(key)
+        manifest = msgspec.convert(
+            msgspec.to_builtins(intent.source_manifest),
+            type=list[dict[str, object]],
+        )
+        destination_manifest = (
+            None
+            if intent.destination_manifest is None
+            else msgspec.convert(
+                msgspec.to_builtins(intent.destination_manifest),
+                type=list[dict[str, object]],
+            )
+        )
+        if existing is not None:
+            exact = (
+                existing["action"] == intent.action
+                and existing["source_path"] == intent.source_path
+                and existing["source_manifest"] == manifest
+                and existing["source_manifest_hash"]
+                == intent.source_manifest_hash
+                and existing["destination_path"] == intent.destination_path
+                and existing["destination_manifest"]
+                == destination_manifest
+                and existing["destination_manifest_hash"]
+                == intent.destination_manifest_hash
+                and existing["selected_destination_path"]
+                == intent.selected_destination_path
+                and existing["declared_result_status"]
+                == intent.declared_result_status
+                and existing["declared_reason"] == intent.declared_reason
+                and existing["evidence_revision"]
+                == intent.evidence_revision
+            )
+            if not exact:
+                raise CleanupJournalConflict(
+                    "intent_conflict",
+                    "cleanup journal already contains a different exact intent",
+                )
+            return copy.deepcopy(existing)
+        now = _utcnow()
+        row: ProcessingCleanupJournalRow = {
+            "job_id": job_id,
+            "request_id": request_id,
+            "revision": 1,
+            "action": intent.action,
+            "source_path": intent.source_path,
+            "source_manifest": manifest,
+            "source_manifest_hash": intent.source_manifest_hash,
+            "destination_path": intent.destination_path,
+            "destination_manifest": destination_manifest,
+            "destination_manifest_hash": intent.destination_manifest_hash,
+            "selected_destination_path": intent.selected_destination_path,
+            "step_progress": {},
+            "declared_result_status": intent.declared_result_status,
+            "declared_reason": intent.declared_reason,
+            "evidence_revision": intent.evidence_revision,
+            "completed_receipt": None,
+            "created_at": now,
+            "updated_at": now,
+            "completed_at": None,
+        }
+        self._processing_cleanup_journals[key] = row
+        return copy.deepcopy(row)
+
+    def checkpoint_processing_cleanup_journal(
+        self,
+        *,
+        request_id: int,
+        job_id: int,
+        expected_revision: int,
+        step_progress: Mapping[str, object],
+    ) -> ProcessingCleanupJournalRow:
+        row = self._processing_cleanup_journals.get((job_id, request_id))
+        if row is None:
+            raise CleanupJournalConflict(
+                "journal_missing",
+                "cleanup journal does not exist for the exact owner",
+            )
+        if row["revision"] != expected_revision:
+            raise CleanupJournalConflict(
+                "revision_conflict",
+                "cleanup checkpoint revision changed",
+            )
+        row["revision"] += 1
+        row["step_progress"] = copy.deepcopy(dict(step_progress))
+        row["updated_at"] = _utcnow()
+        return copy.deepcopy(row)
+
+    def complete_processing_cleanup_journal(
+        self,
+        *,
+        request_id: int,
+        job_id: int,
+        expected_revision: int,
+        receipt: CleanupJournalReceipt,
+    ) -> ProcessingCleanupJournalRow:
+        row = self._processing_cleanup_journals.get((job_id, request_id))
+        if row is None:
+            raise CleanupJournalConflict(
+                "journal_missing",
+                "cleanup journal does not exist for the exact owner",
+            )
+        if row["revision"] != expected_revision:
+            raise CleanupJournalConflict(
+                "revision_conflict",
+                "cleanup completion revision changed",
+            )
+        if row["completed_receipt"] is not None:
+            if row["completed_receipt"] != receipt:
+                raise CleanupJournalConflict(
+                    "receipt_conflict",
+                    "cleanup journal already has a different completed receipt",
+                )
+            return copy.deepcopy(row)
+        now = _utcnow()
+        row["revision"] += 1
+        row["completed_receipt"] = receipt
+        row["completed_at"] = now
+        row["updated_at"] = now
+        return copy.deepcopy(row)
 
     def _apply_terminal_request_transition(
         self,
@@ -1769,6 +3325,8 @@ class FakePipelineDB:
         self,
         command: ImportTerminalOutcome,
     ) -> TerminalOutcomeResult:
+        if command.automation is not None:
+            return self._persist_automation_import_terminal_outcome(command)
         snapshot = self._terminal_state_snapshot()
         boundary_index = 0
 
@@ -1876,7 +3434,10 @@ class FakePipelineDB:
                     message=command.job.message,
                 )
             if job is None or job.request_id != command.request_id:
-                raise RuntimeError("import job terminal compare-and-set failed")
+                raise ImportJobTerminalConflict(
+                    f"import job {command.import_job_id} is no longer active "
+                    f"for request {command.request_id}"
+                )
             boundary(f"import_job.{command.job.status}")
         except Exception:
             self._restore_terminal_state(snapshot)
@@ -1889,10 +3450,355 @@ class FakePipelineDB:
             cooled_down_users=frozenset(cooled),
         )
 
+    def _require_fake_automation_terminal(
+        self,
+        *,
+        request_id: int,
+        job_id: int,
+        authority: AutomationTerminalAuthority,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        try:
+            self._require_fake_exact_processing_owner(
+                request_id=request_id,
+                job_id=job_id,
+            )
+        except CleanupJournalConflict as exc:
+            raise ImportJobTerminalConflict(str(exc)) from exc
+        request = self._requests.get(request_id)
+        job = next(
+            (
+                row
+                for row in self._import_jobs
+                if row["id"] == job_id
+                and row.get("request_id") == request_id
+            ),
+            None,
+        )
+        if request is None or job is None:
+            raise ImportJobTerminalConflict(
+                "automation terminal owner disappeared under lock"
+            )
+        if (
+            job.get("job_type") != IMPORT_JOB_AUTOMATION
+            or job.get("status") != authority.expected_job_status
+            or job.get("preview_status") != authority.expected_preview_status
+            or job.get("completed_at") is not None
+        ):
+            raise ImportJobTerminalConflict(
+                f"automation job {job_id} no longer has the exact terminal "
+                "stage"
+            )
+        lease = authority.expected_execution_lease
+        lease_matches = (
+            all(
+                job.get(field) is None
+                for field in (
+                    "execution_invocation_id",
+                    "execution_host_boot_id",
+                    "execution_systemd_unit",
+                    "execution_worker_pid",
+                    "execution_worker_start_ticks",
+                    "execution_beets_pid",
+                    "execution_beets_start_ticks",
+                )
+            )
+            if lease is None
+            else self._execution_lease_matches(
+                job,
+                lease,
+                include_child=True,
+            )
+        )
+        if not lease_matches:
+            raise ImportJobTerminalConflict(
+                f"automation job {job_id} execution lease changed"
+            )
+        journal = self._processing_cleanup_journals.get(
+            (job_id, request_id)
+        )
+        receipt = authority.cleanup_receipt
+        refusal = authority.cleanup_refusal
+        receipt_matches = (
+            receipt is not None
+            and journal is not None
+            and journal["completed_receipt"] == receipt
+            and journal["completed_at"] is not None
+            and journal["declared_result_status"]
+            == authority.declared_result_status
+            and journal["declared_reason"] == authority.declared_reason
+            and journal["evidence_revision"] == authority.evidence_revision
+        )
+        refusal_matches = (
+            refusal is not None
+            and cleanup_journal_refusal_matches(refusal, journal)
+        )
+        if not receipt_matches and not refusal_matches:
+            raise ImportJobTerminalConflict(
+                f"automation job {job_id} cleanup disposition is not exact"
+            )
+        if authority.completion_receipt is not None:
+            result = dict(job.get("result") or {})
+            expected = msgspec.to_builtins(authority.completion_receipt)
+            if result.get("automation_completion") != expected:
+                raise ImportJobTerminalConflict(
+                    f"automation job {job_id} completion receipt changed"
+                )
+        elif (
+            authority.expected_job_status == "running"
+            and authority.expected_preview_status == "evidence_ready"
+            and job.get("beets_launch_authorized_at") is not None
+        ):
+            raise ImportJobTerminalConflict(
+                f"automation job {job_id} lacks its completion receipt"
+            )
+        return request, job
+
+    @staticmethod
+    def _fake_automation_audit(
+        audit,
+        authority: AutomationTerminalAuthority,
+    ):
+        payload = (
+            {}
+            if not audit.validation_result
+            else json.loads(audit.validation_result)
+        )
+        if not isinstance(payload, dict):
+            raise TypeError("automation validation audit must be an object")
+        cleanup = msgspec.to_builtins(authority.cleanup_disposition)
+        existing = payload.get("processing_cleanup")
+        if existing is not None and existing != cleanup:
+            raise ValueError("automation cleanup audit conflicts")
+        payload["processing_cleanup"] = cleanup
+        return replace(
+            audit,
+            validation_result=json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
+
+    def _fake_finish_processing_request(
+        self,
+        request,
+        command: ImportTerminalOutcome,
+        boundary: Callable[[str], None],
+    ) -> tuple[transitions.TransitionApplied, ...]:
+        sequence = tuple(
+            transition
+            for transition in (
+                command.initial_transition,
+                *command.post_audit_transitions,
+            )
+            if transition is not None
+        )
+        if not sequence:
+            raise ImportJobTerminalConflict(
+                "automation terminal outcome has no private request edge"
+            )
+        applied: list[transitions.TransitionApplied] = []
+        virtual = "processing"
+        imported_seen = False
+        metadata_changed = False
+        counters = {
+            name: int(request.get(name) or 0)
+            for name in (
+                "search_attempts",
+                "download_attempts",
+                "validation_attempts",
+            )
+        }
+        retry_state_changed = False
+        attempt_backoff_minutes: int | None = None
+        for transition in sequence:
+            if transition.target_status not in {"wanted", "imported"}:
+                raise ValueError(
+                    "automation terminal edge must end wanted or imported"
+                )
+            previous = virtual
+            virtual = transition.target_status
+            # Retry-counter policy is read from the ONE canonical
+            # ``transitions.VALID_TRANSITIONS`` table, exactly as production's
+            # ``_finish_processing_request_last`` resolves it.  Restating a
+            # reset here would make the fake more permissive than the database
+            # it stands in for.
+            if _terminal_edge_side_effects(
+                previous,
+                virtual,
+            ).clear_retry_counters:
+                counters = dict.fromkeys(counters, 0)
+                retry_state_changed = True
+                attempt_backoff_minutes = None
+            if transition.attempt_type is not None:
+                if transition.attempt_type not in {
+                    "search",
+                    "download",
+                    "validation",
+                }:
+                    raise ValueError(
+                        f"Unknown attempt type: {transition.attempt_type!r}"
+                    )
+                key = f"{transition.attempt_type}_attempts"
+                prior_attempts = counters[key]
+                counters[key] = prior_attempts + 1
+                retry_state_changed = True
+                attempt_backoff_minutes = min(
+                    BACKOFF_BASE_MINUTES * (2 ** prior_attempts),
+                    BACKOFF_MAX_MINUTES,
+                )
+            fields = dict(transition.fields)
+            metadata_changed = metadata_changed or bool(fields)
+            if (
+                "min_bitrate" in fields
+                and "prev_min_bitrate" not in fields
+            ):
+                request["prev_min_bitrate"] = request.get("min_bitrate")
+            request.update(fields)
+            imported_seen = imported_seen or virtual == "imported"
+            applied.append(transitions.TransitionApplied(
+                request_id=command.request_id,
+                from_status=previous,
+                target_status=virtual,
+            ))
+        now = _utcnow()
+        if imported_seen and request.get("unfindable_category") is not None:
+            if request.get("rescued_at") is None:
+                request["rescued_at"] = now
+                request["prior_unfindable_category"] = request.get(
+                    "unfindable_category"
+                )
+            request["unfindable_category"] = None
+            request["unfindable_categorised_at"] = now
+        if metadata_changed:
+            boundary("request.processing_metadata")
+        request.update(counters)
+        if retry_state_changed:
+            request["next_retry_after"] = (
+                None
+                if attempt_backoff_minutes is None
+                else now + timedelta(minutes=attempt_backoff_minutes)
+            )
+            request["last_attempt_at"] = (
+                None if attempt_backoff_minutes is None else now
+            )
+        request["status"] = virtual
+        request["active_download_state"] = None
+        request["active_automation_import_job_id"] = None
+        request["updated_at"] = now
+        boundary(f"request.processing_to_{virtual}")
+        return tuple(applied)
+
+    def _log_terminal_audit(self, request_id: int, audit):
+        return self.log_download(
+            request_id=request_id,
+            **audit.as_log_kwargs(),
+        )
+
+    def _persist_automation_import_terminal_outcome(
+        self,
+        command: ImportTerminalOutcome,
+    ) -> TerminalOutcomeResult:
+        authority = command.automation
+        assert authority is not None
+        validate_automation_terminal_declaration(command)
+        snapshot = self._terminal_state_snapshot()
+        boundary_index = 0
+
+        def boundary(label: str) -> None:
+            nonlocal boundary_index
+            boundary_index += 1
+            self._terminal_outcome_write_boundary(boundary_index, label)
+
+        try:
+            request, job_row = self._require_fake_automation_terminal(
+                request_id=command.request_id,
+                job_id=command.import_job_id,
+                authority=authority,
+            )
+            audit = self._fake_automation_audit(command.audit, authority)
+            download_log_id = self._log_terminal_audit(
+                command.request_id,
+                audit,
+            )
+            boundary("download_log")
+            cooled: set[str] = set()
+            for entry in command.denylists:
+                before = len(self.denylist)
+                self.add_denylist(
+                    command.request_id,
+                    entry.username,
+                    entry.reason,
+                )
+                if len(self.denylist) > before:
+                    boundary("denylist")
+                if entry.apply_cooldown and self.check_and_apply_cooldown(
+                    entry.username
+                ):
+                    cfg = CooldownConfig()
+                    self.add_cooldown(
+                        entry.username,
+                        _utcnow() + timedelta(days=cfg.cooldown_days),
+                        f"{cfg.failure_threshold} consecutive failures",
+                    )
+                    cooled.add(entry.username)
+                    boundary("cooldown")
+            for entry in command.cooldowns:
+                if self.check_and_apply_cooldown(entry.username):
+                    cfg = CooldownConfig()
+                    self.add_cooldown(
+                        entry.username,
+                        _utcnow() + timedelta(days=cfg.cooldown_days),
+                        f"{cfg.failure_threshold} consecutive failures",
+                    )
+                    cooled.add(entry.username)
+                    boundary("cooldown")
+            result = dict(job_row.get("result") or {})
+            result.update(command.job.result)
+            result["processing_cleanup"] = msgspec.to_builtins(
+                authority.cleanup_disposition
+            )
+            if authority.completion_receipt is not None:
+                result["automation_completion"] = msgspec.to_builtins(
+                    authority.completion_receipt
+                )
+            now = _utcnow()
+            job_row["status"] = command.job.status
+            job_row["result"] = result
+            job_row["message"] = command.job.message
+            job_row["error"] = command.job.error
+            job_row["completed_at"] = now
+            job_row["updated_at"] = now
+            boundary(f"import_job.{command.job.status}")
+            if authority.cleanup_refusal is None \
+                    or authority.cleanup_refusal.journal is not None:
+                del self._processing_cleanup_journals[
+                    (command.import_job_id, command.request_id)
+                ]
+                boundary("processing_cleanup.consumed")
+            applied = self._fake_finish_processing_request(
+                request,
+                command,
+                boundary,
+            )
+            job = ImportJob.from_row(copy.deepcopy(job_row))
+        except Exception:
+            self._restore_terminal_state(snapshot)
+            raise
+        self.persist_import_terminal_outcome_calls.append(command)
+        return TerminalOutcomeResult(
+            download_log_id=download_log_id,
+            job=job,
+            transitions=applied,
+            cooled_down_users=frozenset(cooled),
+        )
+
     def persist_preview_terminal_outcome(
         self,
         command: PreviewTerminalOutcome,
     ) -> TerminalOutcomeResult:
+        if command.automation is not None:
+            return self._persist_automation_preview_terminal_outcome(command)
         snapshot = self._terminal_state_snapshot()
         boundary_index = 0
 
@@ -1922,9 +3828,9 @@ class FakePipelineDB:
                         command.request_transition,
                     )
                 ))
-            download_log_id = cast(Any, self.log_download)(
-                request_id=command.request_id,
-                **command.audit.as_log_kwargs(),
+            download_log_id = self._log_terminal_audit(
+                command.request_id,
+                command.audit,
             )
             self.set_download_log_candidate_evidence(
                 download_log_id,
@@ -1960,7 +3866,10 @@ class FakePipelineDB:
                 message=command.message,
             )
             if job is None or job.request_id != command.request_id:
-                raise RuntimeError("preview job terminal compare-and-set failed")
+                raise ImportJobTerminalConflict(
+                    f"preview job {command.import_job_id} is no longer active "
+                    f"for request {command.request_id}"
+                )
             boundary("import_job.preview_failed")
         except Exception:
             self._restore_terminal_state(snapshot)
@@ -1973,16 +3882,130 @@ class FakePipelineDB:
             cooled_down_users=frozenset(cooled),
         )
 
+    def _persist_automation_preview_terminal_outcome(
+        self,
+        command: PreviewTerminalOutcome,
+    ) -> TerminalOutcomeResult:
+        validate_preview_failure_status(command.preview_status)
+        authority = command.automation
+        assert authority is not None
+        snapshot = self._terminal_state_snapshot()
+        boundary_index = 0
+
+        def boundary(label: str) -> None:
+            nonlocal boundary_index
+            boundary_index += 1
+            self._terminal_outcome_write_boundary(boundary_index, label)
+
+        try:
+            request, job_row = self._require_fake_automation_terminal(
+                request_id=command.request_id,
+                job_id=command.import_job_id,
+                authority=authority,
+            )
+            audit = self._fake_automation_audit(command.audit, authority)
+            download_log_id = cast(Any, self.log_download)(
+                request_id=command.request_id,
+                **audit.as_log_kwargs(),
+            )
+            boundary("download_log")
+            cooled: set[str] = set()
+            for entry in command.denylists:
+                denied_before = len(self.denylist)
+                self.add_denylist(
+                    command.request_id,
+                    entry.username,
+                    entry.reason,
+                )
+                if len(self.denylist) > denied_before:
+                    boundary("denylist")
+                if entry.apply_cooldown and self.check_and_apply_cooldown(
+                    entry.username
+                ):
+                    cfg = CooldownConfig()
+                    self.add_cooldown(
+                        entry.username,
+                        _utcnow() + timedelta(days=cfg.cooldown_days),
+                        f"{cfg.failure_threshold} consecutive failures",
+                    )
+                    cooled.add(entry.username)
+                    boundary("cooldown")
+            result = dict(job_row.get("result") or {})
+            result["preview"] = copy.deepcopy(command.preview_result)
+            result["processing_cleanup"] = msgspec.to_builtins(
+                authority.cleanup_disposition
+            )
+            now = _utcnow()
+            job_row.update({
+                "status": "failed",
+                "preview_status": command.preview_status,
+                "preview_result": copy.deepcopy(command.preview_result),
+                "preview_message": command.message,
+                "preview_error": command.error,
+                "result": result,
+                "message": command.message,
+                "error": command.error,
+                "preview_completed_at": now,
+                "completed_at": now,
+                "preview_worker_id": None,
+                "preview_heartbeat_at": None,
+                "updated_at": now,
+            })
+            boundary("import_job.preview_failed")
+            if authority.cleanup_refusal is None \
+                    or authority.cleanup_refusal.journal is not None:
+                del self._processing_cleanup_journals[
+                    (command.import_job_id, command.request_id)
+                ]
+                boundary("processing_cleanup.consumed")
+            transition = command.request_transition
+            if transition is None:
+                raise ImportJobTerminalConflict(
+                    "automation terminal outcome has no private request edge"
+                )
+            request["status"] = transition.target_status
+            request.update(dict(transition.fields))
+            request["active_download_state"] = None
+            request["active_automation_import_job_id"] = None
+            request["updated_at"] = now
+            boundary(
+                f"request.processing_to_{transition.target_status}"
+            )
+            applied = (
+                transitions.TransitionApplied(
+                    request_id=command.request_id,
+                    from_status="processing",
+                    target_status=transition.target_status,
+                ),
+            )
+            job = ImportJob.from_row(copy.deepcopy(job_row))
+        except Exception:
+            self._restore_terminal_state(snapshot)
+            raise
+        self.persist_preview_terminal_outcome_calls.append(command)
+        return TerminalOutcomeResult(
+            download_log_id=download_log_id,
+            job=job,
+            transitions=applied,
+            cooled_down_users=frozenset(cooled),
+        )
+
     def get_request_by_mb_release_id(self, mb_release_id: str) -> AlbumRequestRow | None:
         for row in self._requests.values():
             if row.get("mb_release_id") == mb_release_id:
-                return cast("AlbumRequestRow", copy.deepcopy(row))
+                return cast(
+                    "AlbumRequestRow",
+                    self._request_presentation_copy(row),
+                )
         return None
 
     def get_request_by_discogs_release_id(self, discogs_release_id: str) -> AlbumRequestRow | None:
         for row in self._requests.values():
             if row.get("discogs_release_id") == discogs_release_id:
-                return cast("AlbumRequestRow", copy.deepcopy(row))
+                return cast(
+                    "AlbumRequestRow",
+                    self._request_presentation_copy(row),
+                )
         return None
 
     def get_request_by_release_id(self, release_id: object | None) -> AlbumRequestRow | None:
@@ -2052,9 +4075,16 @@ class FakePipelineDB:
         if status == "replaced":
             raise ValueError(
                 "status='replaced' is owned by supersede_request_mbid")
+        if status == "processing":
+            raise ValueError(
+                "status='processing' is owned by automation handoff")
         validate_request_metadata_fields(dict(extra))
         row = self._requests.get(request_id)
-        if row is None or row.get("status") == "replaced":
+        if (
+            row is None
+            or row.get("status") == "replaced"
+            or row.get("active_automation_import_job_id") is not None
+        ):
             return False
         source_status = expected_status or str(row["status"])
         if row["status"] != source_status:
@@ -2078,6 +4108,7 @@ class FakePipelineDB:
             row is not None
             and row.get("status") == expected_status
             and row.get("status") != "replaced"
+            and row.get("active_automation_import_job_id") is None
         )
 
     def mark_imported_with_rescue(
@@ -2106,7 +4137,11 @@ class FakePipelineDB:
             )
         validate_request_metadata_fields(dict(extra))
         row = self._requests.get(request_id)
-        if row is None or row.get("status") == "replaced":
+        if (
+            row is None
+            or row.get("status") == "replaced"
+            or row.get("active_automation_import_job_id") is not None
+        ):
             return False
         source_status = expected_status or str(row["status"])
         if row["status"] != source_status:
@@ -2151,7 +4186,11 @@ class FakePipelineDB:
                 + ", ".join(unknown)
             )
         row = self._requests.get(request_id)
-        if row is None or row.get("status") == "replaced":
+        if (
+            row is None
+            or row.get("status") == "replaced"
+            or row.get("active_automation_import_job_id") is not None
+        ):
             return False
         source_status = expected_status or str(row["status"])
         if row["status"] != source_status:
@@ -2281,30 +4320,6 @@ class FakePipelineDB:
         self.status_history.append((request_id, "downloading"))
         return True
 
-    def update_download_state(
-        self,
-        request_id: int,
-        state_json: str,
-        *,
-        expected_status: str = "downloading",
-    ) -> bool:
-        row = self._requests.get(request_id)
-        self.update_download_state_calls.append((request_id, state_json))
-        injected = self._update_download_state_errors.get(request_id)
-        if injected is not None:
-            # Mirror a psycopg2 error at the UPDATE: the attempt is
-            # recorded (like FakeSlskdAPI's failing calls) but the row
-            # is never mutated. See set_update_download_state_error.
-            raise injected
-        if row and row.get("status") == expected_status:
-            try:
-                row["active_download_state"] = json.loads(state_json)
-            except json.JSONDecodeError:
-                row["active_download_state"] = state_json
-            row["updated_at"] = _utcnow()
-            return True
-        return False
-
     def update_download_state_if_downloading(
         self,
         request_id: int,
@@ -2347,66 +4362,6 @@ class FakePipelineDB:
         if outgoing_state.get("enqueued_at") != expected_enqueued_at:
             return False
         row["active_download_state"] = outgoing_state
-        row["updated_at"] = _utcnow()
-        return True
-
-    def update_download_state_current_path(
-        self,
-        request_id: int,
-        current_path: str | None,
-    ) -> bool:
-        self.update_download_state_current_path_calls.append(
-            (request_id, current_path),
-        )
-        row = self._requests.get(request_id)
-        if (
-            row
-            and row.get("status") == "downloading"
-            and row.get("active_download_state") is not None
-        ):
-            state = row.get("active_download_state")
-            if isinstance(state, str):
-                try:
-                    state = json.loads(state)
-                except json.JSONDecodeError:
-                    state = {}
-            if not isinstance(state, dict):
-                state = {}
-            state["current_path"] = current_path
-            row["active_download_state"] = state
-            row["updated_at"] = _utcnow()
-            return True
-        return False
-
-    def mark_import_subprocess_started(
-        self,
-        request_id: int,
-        timestamp: str,
-    ) -> bool:
-        """Stamp ``import_subprocess_started_at`` on the active download
-        state. No-op when the row has no ``active_download_state``
-        (force-import path). See ``docs/advisory-locks.md``.
-        """
-        self.mark_import_subprocess_started_calls.append(
-            (request_id, timestamp),
-        )
-        row = self._requests.get(request_id)
-        if (
-            not row
-            or row.get("status") != "downloading"
-            or row.get("active_download_state") is None
-        ):
-            return False
-        state = row.get("active_download_state")
-        if isinstance(state, str):
-            try:
-                state = json.loads(state)
-            except json.JSONDecodeError:
-                return False
-        if not isinstance(state, dict):
-            return False
-        state["import_subprocess_started_at"] = timestamp
-        row["active_download_state"] = state
         row["updated_at"] = _utcnow()
         return True
 
@@ -2686,60 +4641,6 @@ class FakePipelineDB:
         )
         return [entry.id for entry in rows]
 
-    def abandon_auto_import_request(
-        self,
-        *,
-        request_id: int,
-        current_path: str,
-        soulseek_username: str | None,
-        filetype: str | None,
-        beets_detail: str,
-        outcome: str,
-        staged_path: str,
-        error_message: str,
-        validation_result: Any,
-    ) -> int | None:
-        row = self._requests.get(request_id)
-        if row is None or row.get("status") != "downloading":
-            return None
-        state = row.get("active_download_state")
-        if isinstance(state, str):
-            try:
-                state = json.loads(state)
-            except json.JSONDecodeError:
-                return None
-        if not isinstance(state, dict):
-            return None
-        if state.get("current_path") != current_path:
-            return None
-        if state.get("import_subprocess_started_at") is None:
-            return None
-
-        now = _utcnow()
-        row["status"] = "wanted"
-        row["active_download_state"] = None
-        row["updated_at"] = now
-        self.status_history.append((request_id, "wanted"))
-        self.record_attempt(
-            request_id,
-            "download",
-            expected_status="wanted",
-        )
-        log_kwargs: dict[str, Any] = {}
-        if validation_result is None:
-            log_kwargs["beets_scenario"] = "abandoned_auto_import"
-        return self.log_download(
-            request_id=request_id,
-            soulseek_username=soulseek_username,
-            filetype=filetype,
-            beets_detail=beets_detail,
-            outcome=outcome,
-            staged_path=staged_path,
-            error_message=error_message,
-            validation_result=validation_result,
-            **log_kwargs,
-        )
-
     def add_denylist(self, request_id: int, username: str,
                      reason: str | None = None) -> None:
         if any(
@@ -2831,21 +4732,6 @@ class FakePipelineDB:
             return entry.soulseek_username
         return None
 
-    def get_active_import_job_for_request(
-        self,
-        request_id: int,
-    ) -> ImportJob | None:
-        """Most recent queued/running import job for this request, or None."""
-        rows = [
-            row for row in self._import_jobs
-            if row.get("request_id") == request_id
-            and row.get("status") in IMPORT_JOB_ACTIVE_STATUSES
-        ]
-        if not rows:
-            return None
-        rows.sort(key=lambda row: row["id"], reverse=True)
-        return ImportJob.from_row(copy.deepcopy(rows[0]))
-
     def check_and_apply_cooldown(self, username: str,
                                   config: Any = None) -> bool:
         self.cooldowns_applied.append(username)
@@ -2862,7 +4748,11 @@ class FakePipelineDB:
     ) -> bool:
         self.recorded_attempts.append((request_id, attempt_type))
         row = self._requests.get(request_id)
-        if row and row.get("status") == expected_status != "replaced":
+        if (
+            row
+            and row.get("status") == expected_status != "replaced"
+            and row.get("active_automation_import_job_id") is None
+        ):
             col = f"{attempt_type}_attempts"
             now = _utcnow()
             row[col] = (row.get(col) or 0) + 1
@@ -3493,12 +5383,28 @@ class FakePipelineDB:
         self,
         import_job_id: int,
         evidence_id: int | None,
-    ) -> None:
+        *,
+        expected_execution_lease: ExecutionLeaseSnapshot | None = None,
+    ) -> bool:
         for row in self._import_jobs:
             if row.get("id") == import_job_id:
+                if row.get("job_type") == IMPORT_JOB_AUTOMATION and (
+                    row.get("status") != "queued"
+                    or row.get("preview_status") != "running"
+                    or not self._automation_job_has_authority(row)
+                    or not self._execution_lease_matches(
+                        row,
+                        expected_execution_lease,
+                        include_child=True,
+                    )
+                    or expected_execution_lease is None
+                    or expected_execution_lease.beets is not None
+                ):
+                    return False
                 row["candidate_evidence_id"] = evidence_id
                 row["updated_at"] = _utcnow()
-                return
+                return True
+        return False
 
     def set_download_log_candidate_evidence(
         self,
@@ -3629,7 +5535,11 @@ class FakePipelineDB:
     def clear_on_disk_quality_fields(self, request_id: int) -> None:
         self.clear_on_disk_quality_fields_calls.append(request_id)
         row = self._requests.get(request_id)
-        if row is None or row.get("status") == "replaced":
+        if (
+            row is None
+            or row.get("status") == "replaced"
+            or row.get("active_automation_import_job_id") is not None
+        ):
             return
         row["verified_lossless"] = False
         row["current_spectral_grade"] = None
@@ -3646,6 +5556,55 @@ class FakePipelineDB:
             [copy.deepcopy(r) for r in self._requests.values()
              if r.get("status") == "downloading"],
         )
+
+    def get_acquisition(
+        self,
+        *,
+        youtube_limit: int = 50,
+    ):
+        """In-memory mirror of the combined one-read acquisition query."""
+        self.query_counts["get_acquisition"] = (
+            self.query_counts.get("get_acquisition", 0) + 1
+        )
+        active = [
+            row for row in self._requests.values()
+            if row.get("status") in ACQUISITION_REQUEST_STATUSES
+        ]
+        active.sort(key=lambda row: (
+            _as_datetime(row.get("updated_at")),
+            int(row["id"]),
+        ))
+        youtube = []
+        youtube_limit = max(1, int(youtube_limit))
+        for entry in sorted(
+            self.download_logs,
+            key=lambda item: (item.created_at, item.id),
+        ):
+            if entry.source != "youtube" or entry.outcome != "youtube_running":
+                continue
+            request = self._requests.get(entry.request_id) or {}
+            youtube.append({
+                "download_log_id": entry.id,
+                "request_id": entry.request_id,
+                "source": entry.source,
+                "outcome": entry.outcome,
+                "youtube_metadata": copy.deepcopy(entry.youtube_metadata),
+                "created_at": entry.created_at,
+                "artist_name": request.get("artist_name"),
+                "album_title": request.get("album_title"),
+                "mb_release_id": request.get("mb_release_id"),
+                "request_status": request.get("status"),
+                "processing_owner": None,
+            })
+            if len(youtube) >= youtube_limit:
+                break
+        return {
+            "acquisition": [
+                self._request_presentation_copy(row)
+                for row in active
+            ],
+            "youtube_ingest": youtube,
+        }
 
     def update_request_fields(
         self,
@@ -3665,6 +5624,7 @@ class FakePipelineDB:
         if (
             not row
             or row.get("status") == "replaced"
+            or row.get("active_automation_import_job_id") is not None
             or (
                 expected_status is not None
                 and row.get("status") != expected_status
@@ -3980,6 +5940,9 @@ class FakePipelineDB:
         or ``*_attempts`` see the same NULL/0 defaults production
         callers get from PostgreSQL. Codex R7.
         """
+        if status == "processing":
+            raise ValueError(
+                "processing requests require an exact automation owner")
         self._assert_mb_release_id_unique(mb_release_id)
         self._next_request_id += 1
         rid = self._next_request_id
@@ -4034,6 +5997,8 @@ class FakePipelineDB:
             "current_lossless_source_v0_probe_avg_bitrate": None,
             "current_lossless_source_v0_probe_median_bitrate": None,
             "active_download_state": None,
+            # Migration 066 — exact active automation processor owner.
+            "active_automation_import_job_id": None,
             # U1 persisted-search-plans cursor fields.
             "active_plan_id": None,
             "next_plan_ordinal": 0,
@@ -4097,6 +6062,11 @@ class FakePipelineDB:
             raise SupersedeRaceError(
                 f"old request {old_request_id} already replaced"
             )
+        if old_row.get("active_automation_import_job_id") is not None:
+            raise SupersedeRaceError(
+                f"old request {old_request_id} gained a processing owner "
+                "before supersede"
+            )
         # Collision check.
         for r in self._requests.values():
             if r.get("mb_release_id") == new_mb_release_id:
@@ -4146,7 +6116,10 @@ class FakePipelineDB:
         """Reverse-lookup the descendant row of ``replaced_id``."""
         for row in self._requests.values():
             if row.get("replaces_request_id") == replaced_id:
-                return cast("AlbumRequestRow", copy.deepcopy(row))
+                return cast(
+                    "AlbumRequestRow",
+                    self._request_presentation_copy(row),
+                )
         return None
 
     def get_oldest_request_chain_created_at(
@@ -4187,7 +6160,7 @@ class FakePipelineDB:
                 continue
             if exclude_request_id is not None and row.get("id") == exclude_request_id:
                 continue
-            out.append(copy.deepcopy(row))
+            out.append(self._request_presentation_copy(row))
         out.sort(key=lambda r: r["id"], reverse=True)
         return cast("list[AlbumRequestRow]", out)
 
@@ -4209,10 +6182,10 @@ class FakePipelineDB:
         rows.sort(key=lambda r: int(r["id"]))
         return cast(
             "list[AlbumRequestRow]",
-            [copy.deepcopy(r) for r in rows],
+            [self._request_presentation_copy(r) for r in rows],
         )
 
-    def delete_request(self, request_id: int) -> None:
+    def delete_request(self, request_id: int) -> bool:
         """Delete a request and cascade to child tables.
 
         Real ``album_requests`` has ``ON DELETE CASCADE`` foreign keys
@@ -4221,6 +6194,14 @@ class FakePipelineDB:
         that here so fake-backed tests cannot observe an impossible
         post-delete state where child rows survive their parent.
         """
+        request = self._requests.get(request_id)
+        if (
+            request is not None
+            and request.get("active_automation_import_job_id") is not None
+        ):
+            return False
+        if request is None:
+            return False
         self._requests.pop(request_id, None)
         self._tracks.pop(request_id, None)
         self.download_logs = [
@@ -4245,6 +6226,7 @@ class FakePipelineDB:
             iid: item for iid, item in self.search_plan_items.items()
             if item.plan_id not in plan_ids_to_drop
         }
+        return True
 
     def get_wanted(self, limit: int | None = None) -> list[AlbumRequestRow]:
         """Return wanted requests past their retry gate.
@@ -4330,6 +6312,9 @@ class FakePipelineDB:
                     "min_bitrate": r.get("min_bitrate"),
                     "verified_lossless": verified,
                     "provisional_lossless": provisional,
+                    "processing_owner": self._request_presentation_copy(
+                        r
+                    )["processing_owner"],
                 }
         return out
 
@@ -4462,7 +6447,10 @@ class FakePipelineDB:
                 key=lambda r: _as_datetime(r.get("created_at")))
         if limit is not None:
             rows = rows[:int(limit)]
-        return cast("list[AlbumRequestRow]", [copy.deepcopy(r) for r in rows])
+        return cast(
+            "list[AlbumRequestRow]",
+            [self._request_presentation_copy(r) for r in rows],
+        )
 
     def search_requests(
         self, query: str, *, limit: int = 200, status: str | None = None,
@@ -4486,7 +6474,10 @@ class FakePipelineDB:
         ))
         return cast(
             "list[AlbumRequestRow]",
-            [copy.deepcopy(r) for r in rows[:int(limit)]],
+            [
+                self._request_presentation_copy(r)
+                for r in rows[:int(limit)]
+            ],
         )
 
     def _has_youtube_running(self, request_id: int) -> bool:
@@ -4586,10 +6577,10 @@ class FakePipelineDB:
         for row in self._requests.values():
             if mb_artist_id:
                 if row.get("mb_artist_id") == mb_artist_id or _legacy_name_match(row):
-                    rows.append(copy.deepcopy(row))
+                    rows.append(self._request_presentation_copy(row))
             else:
                 if needle in str(row.get("artist_name") or "").lower():
-                    rows.append(copy.deepcopy(row))
+                    rows.append(self._request_presentation_copy(row))
 
         def _sort_key(row: dict[str, Any]) -> tuple[bool, int, str]:
             year = row.get("year")
@@ -4768,7 +6759,8 @@ class FakePipelineDB:
 
     def _current_wanted_total(self) -> int:
         return sum(1 for req in self._requests.values()
-                   if req.get("status") in ("wanted", "downloading"))
+                   if req.get("status") in (
+                       "wanted", "downloading", "processing"))
 
     def _dashboard_wanted_trend(self, current_wanted: int) -> dict[str, Any]:
         now = _utcnow()
@@ -5058,7 +7050,7 @@ class FakePipelineDB:
 
     def _dashboard_coverage(self, now: datetime) -> dict[str, Any]:
         """Mirror the production coverage CTEs: backlog = wanted +
-        downloading; suspects = searched-in-24h rows ordered
+        downloading + processing; suspects = searched-in-24h rows ordered
         (searches_24h DESC, searches_6h DESC, id ASC) LIMIT 12 with
         reset_24h counting the HISTORICAL ``exhausted`` outcome and
         problem_24h restricted to timeout/error/empty_query;
@@ -5070,7 +7062,7 @@ class FakePipelineDB:
         found rows exist."""
         backlog = {
             int(r["id"]): r for r in self._requests.values()
-            if r.get("status") in ("wanted", "downloading")
+            if r.get("status") in ("wanted", "downloading", "processing")
         }
 
         # One pass over search_log per request: rollup of windowed

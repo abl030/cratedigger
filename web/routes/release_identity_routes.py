@@ -7,6 +7,7 @@ import json
 
 from pydantic import BaseModel, Field
 
+from lib import transitions
 from lib.pipeline_db import PipelineDB
 from lib.release_identity import detect_release_source, normalize_release_id
 from lib.replace_status import (
@@ -43,6 +44,24 @@ def _resolved_rg_applied_or_respond(
     )
     if applied:
         return True
+    row = db.get_request(request_id)
+    processing_locked = transitions.processing_locked_conflict(
+        row,
+        request_id,
+        "resolve_release_group",
+        expected_status=expected_status,
+    )
+    if processing_locked is not None:
+        payload = transitions.transition_conflict_payload(
+            processing_locked
+        )
+        payload.update({
+            "request_id": request_id,
+            "mb_release_group_id": None,
+            "status": RESOLVE_STATUS_CONFLICT,
+        })
+        h._json(payload, status=409)
+        return False
     h._json({
         "request_id": request_id,
         "mb_release_group_id": None,
@@ -346,6 +365,9 @@ def post_pipeline_replace(
         "error_message": result.error_message,
         "reason": result.reason,
         "warnings": list(result.warnings),
+        "processing_owner": transitions.processing_owner_payload(
+            result.processing_owner
+        ),
     }
     if result.outcome == RESULT_REPLACED:
         h._json(payload)
@@ -358,7 +380,12 @@ def post_pipeline_replace(
         RESULT_WRONG_STATE,
         RESULT_TARGET_COLLISION_REQUEST,
     ):
-        payload["error"] = result.error_message or "Wrong state"
+        payload["error"] = (
+            transitions.TransitionConflictKind.processing_locked.value
+            if result.reason
+            == transitions.TransitionConflictKind.processing_locked.value
+            else result.error_message or "Wrong state"
+        )
         h._json(payload, status=409)
         return
     if result.outcome in (

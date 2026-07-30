@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from lib.artist_catalogue import ArtistCatalogueRow
 from lib.pipeline_db import AlbumRequestRow
 from tests.fakes import FakeBeetsDB, FakePipelineDB
-from tests.helpers import make_request_row
+from tests.helpers import handoff_automation_owner, make_request_row
 from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
 from web.library_album_row import LibraryAlbumRow
 
@@ -47,11 +47,12 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
     RELEASE_GROUP_REQUIRED_FIELDS: ClassVar = {
         "id", "title", "country", "date", "format", "track_count", "status",
         "in_library", "beets_album_id", "pipeline_status", "pipeline_id",
-        "pipeline_verified_lossless", "pipeline_provisional",
+        "processing_owner", "pipeline_verified_lossless",
+        "pipeline_provisional",
     }
     RELEASE_DETAIL_REQUIRED_FIELDS: ClassVar = {
         "id", "title", "tracks", "in_library", "beets_album_id",
-        "pipeline_status", "pipeline_id",
+        "pipeline_status", "pipeline_id", "processing_owner",
     }
     RELEASE_TRACK_REQUIRED_FIELDS: ClassVar = {
         "disc_number", "track_number", "title", "length_seconds",
@@ -63,12 +64,12 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         "release_group_id", "title", "primary_type", "first_date",
         "release_ids", "pressings", "track_count", "unique_track_count",
         "covered_by", "library_status", "pipeline_status", "pipeline_id",
-        "tracks",
+        "processing_owner", "tracks",
     }
     DISAMBIGUATE_PRESSING_REQUIRED_FIELDS: ClassVar = {
         "release_id", "title", "date", "format", "track_count", "country",
         "recording_ids", "in_library", "beets_album_id", "pipeline_status",
-        "pipeline_id",
+        "pipeline_id", "processing_owner",
     }
     DISAMBIGUATE_TRACK_REQUIRED_FIELDS: ClassVar = {
         "recording_id", "title", "unique", "also_on",
@@ -180,6 +181,34 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         self.assertIsNone(data["albums"][0]["beets_album_id"])
         self.assertIsNone(data["albums"][0]["library_rank"])
         self.assertEqual(data["albums"][0]["release_group_title"], "Wanted Album")
+
+    def test_library_artist_projects_exact_processing_owner(self):
+        request_id = 43
+        self.db.seed_request(make_request_row(
+            id=request_id,
+            mb_release_id=self.RELEASE_ID,
+            mb_release_group_id=self.RG_ID,
+            mb_artist_id=self.ARTIST_ID,
+            artist_name="Test Artist",
+            album_title="Processing Album",
+            source="request",
+            status="wanted",
+            created_at=datetime(2026, 4, 1, 3, 47, 54, tzinfo=UTC),
+        ))
+        job = handoff_automation_owner(self.db, request_id)
+
+        with patch("web.server.get_library_artist", return_value=[]):
+            status, data = self._get(
+                f"/api/library/artist?name=Test%20Artist&mbid={self.ARTIST_ID}"
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["albums"][0]["pipeline_status"], "processing")
+        self.assertEqual(data["albums"][0]["processing_owner"], {
+            "job_id": job.id,
+            "status": job.status,
+            "preview_status": job.preview_status,
+        })
 
     def test_library_artist_route_dedups_pipeline_row_when_beets_row_has_same_release_id(self):
         import web.server as srv
@@ -602,6 +631,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         rg = data["release_groups"][0]
         self.assertEqual(rg["pipeline_status"], "wanted")
         self.assertEqual(rg["pipeline_id"], 8838)
+        self.assertIsNone(rg["processing_owner"])
 
     def test_artist_release_groups_pipeline_overlay_skips_replaced(self):
         """Replaced rows are frozen audit — they must not badge the rg."""
@@ -927,6 +957,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(data["library_min_bitrate"], 194)
         self.assertEqual(data["library_avg_bitrate"], 288)
         self.assertEqual(data["library_rank"], "transparent")
+        self.assertIsNone(data["processing_owner"])
 
     def test_release_detail_includes_beets_tracks_when_in_library(self):
         """In-library release with beets item rows → the payload carries
@@ -1117,10 +1148,12 @@ class TestDiscogsBrowseRouteContracts(_FakeDbWebServerCase):
     DISCOGS_MASTER_RELEASE_REQUIRED_FIELDS: ClassVar = {
         "id", "title", "country", "format",
         "in_library", "beets_album_id", "pipeline_status", "pipeline_id",
+        "processing_owner",
     }
     DISCOGS_RELEASE_REQUIRED_FIELDS: ClassVar = {
         "id", "title", "artist_name", "tracks",
         "in_library", "beets_album_id", "pipeline_status", "pipeline_id",
+        "processing_owner",
     }
     DISCOGS_ARTIST_REQUIRED_FIELDS: ClassVar = {
         "artist_id", "artist_name", "release_groups", "ungrouped_releases",

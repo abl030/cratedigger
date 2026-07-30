@@ -9,8 +9,11 @@ from scripts.cratedigger_deploy_hold import (
     MAIN_SERVICE,
     PHASE_HELD,
     SERVICE_UNITS,
+    START_INHIBITORS,
     TIMER_UNITS,
+    DeployHoldError,
     JobState,
+    LifecyclePreflight,
     UnitState,
 )
 
@@ -22,18 +25,28 @@ class FakeDeployHoldBackend:
         self,
         *,
         manual_hold: bool = False,
+        metadata_holds: set[str] | None = None,
         control_links: dict[str, str] | None = None,
         jobs: dict[str, JobState] | None = None,
         running_samples: dict[str, int] | None = None,
         failed_services: set[str] | None = None,
+        lifecycle_preflight: LifecyclePreflight | None = None,
+        controlled_start_contract_current: bool = True,
+        inhibitor_files: set[str] | None = None,
         interrupt_receipt_publication: bool = False,
         interrupt_receipt_retirement: bool = False,
     ) -> None:
         self.manual_hold = manual_hold
+        self.other_metadata_holds = set(metadata_holds or set())
         self.control_links = dict(control_links or {})
         self.jobs = dict(jobs or {})
         self.running_samples = dict(running_samples or {})
         self.failed_services = set(failed_services or set())
+        self.preflight = lifecycle_preflight or LifecyclePreflight(0, 0, 0, 0)
+        self.controlled_start_contract_current = (
+            controlled_start_contract_current
+        )
+        self.inhibitor_files = set(inhibitor_files or set())
         self.interrupt_receipt_publication = interrupt_receipt_publication
         self.interrupt_receipt_retirement = interrupt_receipt_retirement
         self.unit_states: dict[str, UnitState] = {
@@ -75,12 +88,21 @@ class FakeDeployHoldBackend:
         self.retired_receipt = False
         self.phase: str | None = None
         self.owned_links: set[str] = set()
+        self.owned_inhibitors: set[str] = set()
         self.owned_manual_hold = False
         self.ordinary_invocation: str | None = None
         self.events: list[tuple[str, ...]] = []
         self.cancelled_jobs: list[str] = []
         self.started_units: list[str] = []
         self.sleep_calls = 0
+
+    def verify_controlled_start_contract(self) -> None:
+        if not self.controlled_start_contract_current:
+            raise DeployHoldError("controlled-start prerequisite changed")
+
+    def lifecycle_preflight(self) -> LifecyclePreflight:
+        self.events.append(("lifecycle-preflight",))
+        return self.preflight
 
     def ensure_control_dir(self) -> None:
         pass
@@ -112,6 +134,7 @@ class FakeDeployHoldBackend:
         self.retired_receipt = True
         self.phase = None
         self.owned_links.clear()
+        self.owned_inhibitors.clear()
         self.owned_manual_hold = False
         self.ordinary_invocation = None
         if self.interrupt_receipt_retirement:
@@ -161,6 +184,35 @@ class FakeDeployHoldBackend:
     def owned_link_units(self) -> tuple[str, ...]:
         return tuple(sorted(self.owned_links))
 
+    def mark_inhibitor_owned(self, service: str) -> None:
+        if service not in START_INHIBITORS:
+            raise AssertionError(f"unexpected inhibitor service: {service}")
+        self.owned_inhibitors.add(service)
+        self.events.append(("own-inhibitor", service))
+
+    def unmark_inhibitor_owned(self, service: str) -> None:
+        self.owned_inhibitors.remove(service)
+        self.events.append(("disown-inhibitor", service))
+
+    def inhibitor_is_owned(self, service: str) -> bool:
+        return service in self.owned_inhibitors
+
+    def owned_inhibitor_units(self) -> tuple[str, ...]:
+        return tuple(sorted(self.owned_inhibitors))
+
+    def inhibitor_exists(self, service: str) -> bool:
+        return service in self.inhibitor_files
+
+    def create_start_inhibitor(self, service: str) -> None:
+        if service in self.inhibitor_files:
+            raise FileExistsError(service)
+        self.inhibitor_files.add(service)
+        self.events.append(("inhibitor-create", service))
+
+    def remove_start_inhibitor(self, service: str) -> None:
+        self.inhibitor_files.remove(service)
+        self.events.append(("inhibitor-remove", service))
+
     def write_ordinary_invocation(self, invocation_id: str) -> None:
         self.ordinary_invocation = invocation_id
         self.events.append(("ordinary-invocation", invocation_id))
@@ -177,14 +229,29 @@ class FakeDeployHoldBackend:
     def manual_hold_active(self) -> bool:
         return self.manual_hold
 
-    def metadata_gate(self, command: str) -> None:
+    def metadata_gate(self, command: str) -> int:
         self.events.append(("metadata-gate", command))
         if command == "hold manual":
             self.manual_hold = True
+            for service in SERVICE_UNITS:
+                state = self.unit_states[service]
+                if state.active_state == "active":
+                    self.unit_states[service] = UnitState(
+                        load_state=state.load_state,
+                        active_state="inactive",
+                        sub_state="dead",
+                    )
         elif command == "release manual":
             self.manual_hold = False
         elif command != "resume-if-clear":
             raise AssertionError(f"unexpected metadata gate command: {command}")
+        return 1 if self.manual_hold or self.other_metadata_holds else 0
+
+    def metadata_hold_reasons(self) -> tuple[str, ...]:
+        reasons = set(self.other_metadata_holds)
+        if self.manual_hold:
+            reasons.add("manual")
+        return tuple(sorted(reasons))
 
     def control_link_target(self, timer: str) -> str | None:
         return self.control_links.get(timer)

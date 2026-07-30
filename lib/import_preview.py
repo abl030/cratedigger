@@ -47,6 +47,7 @@ from lib.fs_authority import (
     open_regular_relative,
     remove_relative_tree,
 )
+from lib.import_execution import CancellationToken, ExecutionCancelled
 from lib.measurement import (
     ExistingSpectralResolver,
     PreimportMeasurement,
@@ -153,6 +154,26 @@ _PREVIEW_MAX_BYTES = 100 * 1024**3
 _PREVIEW_FREE_RESERVE_BYTES = 100 * 1024**2
 
 
+def _checkpoint(cancellation_token: CancellationToken | None) -> None:
+    if cancellation_token is not None:
+        cancellation_token.raise_if_cancelled()
+
+
+def _remove_relative_tree_cancellable(
+    parent_fd: int,
+    name: str,
+    cancellation_token: CancellationToken | None,
+) -> None:
+    if cancellation_token is None:
+        remove_relative_tree(parent_fd, name)
+        return
+    remove_relative_tree(
+        parent_fd,
+        name,
+        before_mutation=cancellation_token.raise_if_cancelled,
+    )
+
+
 @dataclass(frozen=True)
 class PreviewSnapshotLimits:
     """Bounded-copy policy for one isolated preview snapshot.
@@ -219,6 +240,7 @@ def _snapshot_opened_directory(
     limits: PreviewSnapshotLimits | None = None,
     available_bytes_fn: PreviewAvailableBytesFn | None = None,
     copy_fn: PreviewCopyFn | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> str:
     """Boundedly copy an already-held source directory into private preview.
 
@@ -243,6 +265,7 @@ def _snapshot_opened_directory(
                 free_reserve_bytes=effective_limits.free_reserve_bytes,
                 available_bytes_fn=effective_available_bytes,
             )
+            _checkpoint(cancellation_token)
             os.mkdir(snapshot_name, 0o700, dir_fd=preview_fd)
             made_snapshot = True
             snapshot_fd = os.open(
@@ -283,6 +306,7 @@ def _snapshot_opened_directory(
                                     raise FilesystemAuthorityError("snapshot contains non-directory")
                                 if depth >= effective_limits.max_depth:
                                     raise FilesystemAuthorityError("preview depth limit exceeded")
+                                _checkpoint(cancellation_token)
                                 os.mkdir(name, 0o700, dir_fd=destination_dir_fd)
                                 destination_child_fd = os.open(
                                     name,
@@ -307,6 +331,7 @@ def _snapshot_opened_directory(
                                 or copied_bytes + declared_size > effective_limits.max_bytes
                             ):
                                 raise FilesystemAuthorityError("preview snapshot limit exceeded")
+                            _checkpoint(cancellation_token)
                             destination_fd = os.open(
                                 name,
                                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
@@ -315,6 +340,7 @@ def _snapshot_opened_directory(
                             )
                             try:
                                 def assert_space_before_write(count: int) -> None:
+                                    _checkpoint(cancellation_token)
                                     _assert_preview_space(
                                         preview_fd,
                                         count,
@@ -341,10 +367,21 @@ def _snapshot_opened_directory(
 
             copy_directory(os.dup(source_root_fd), snapshot_fd, 0)
         return snapshot_path
+    except ExecutionCancelled:
+        # The private partial tree is recovery evidence. Removing it after
+        # cancellation would be a new mutation by an execution that no longer
+        # has durable authority.
+        raise
     except Exception:
         if made_snapshot:
+            _checkpoint(cancellation_token)
             with _preview_copy_lock(cfg) as preview_fd:
-                remove_relative_tree(preview_fd, snapshot_name)
+                _checkpoint(cancellation_token)
+                _remove_relative_tree_cancellable(
+                    preview_fd,
+                    snapshot_name,
+                    cancellation_token,
+                )
         raise
 
 
@@ -355,6 +392,7 @@ def _snapshot_authorized_directory(
     limits: PreviewSnapshotLimits | None = None,
     available_bytes_fn: PreviewAvailableBytesFn | None = None,
     copy_fn: PreviewCopyFn | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> str:
     """Snapshot a direct caller path through a held no-follow descriptor."""
     with open_directory_path(path) as source_fd:
@@ -364,6 +402,7 @@ def _snapshot_authorized_directory(
             limits=limits,
             available_bytes_fn=available_bytes_fn,
             copy_fn=copy_fn,
+            cancellation_token=cancellation_token,
         )
 
 
@@ -374,6 +413,7 @@ def snapshot_configured_quarantine_directory(
     limits: PreviewSnapshotLimits | None = None,
     available_bytes_fn: PreviewAvailableBytesFn | None = None,
     copy_fn: PreviewCopyFn | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> str:
     """Copy a failed/wrong-match folder from its held configured authority."""
     with open_configured_quarantine_directory(raw_path, cfg) as source:
@@ -383,10 +423,16 @@ def snapshot_configured_quarantine_directory(
             limits=limits,
             available_bytes_fn=available_bytes_fn,
             copy_fn=copy_fn,
+            cancellation_token=cancellation_token,
         )
 
 
-def _remove_preview_tree(path: str, cfg: CratediggerConfig) -> None:
+def _remove_preview_tree(
+    path: str,
+    cfg: CratediggerConfig,
+    *,
+    cancellation_token: CancellationToken | None = None,
+) -> None:
     """Remove only a direct, service-owned private snapshot directory."""
     name = os.path.basename(path)
     if name == path or not name.startswith("preview-"):
@@ -394,12 +440,26 @@ def _remove_preview_tree(path: str, cfg: CratediggerConfig) -> None:
     if os.path.dirname(path) != processing_preview_dir(cfg.processing_dir):
         raise FilesystemAuthorityError("preview snapshot is outside private root")
     with _preview_copy_lock(cfg) as preview_fd:
-        remove_relative_tree(preview_fd, name)
+        _checkpoint(cancellation_token)
+        _remove_relative_tree_cancellable(
+            preview_fd,
+            name,
+            cancellation_token,
+        )
 
 
-def remove_preview_snapshot(path: str, cfg: CratediggerConfig) -> None:
+def remove_preview_snapshot(
+    path: str,
+    cfg: CratediggerConfig,
+    *,
+    cancellation_token: CancellationToken | None = None,
+) -> None:
     """Public counterpart for callers that own a private preview snapshot."""
-    _remove_preview_tree(path, cfg)
+    _remove_preview_tree(
+        path,
+        cfg,
+        cancellation_token=cancellation_token,
+    )
 
 
 def retain_preview_snapshot_for_force_action(
@@ -407,6 +467,7 @@ def retain_preview_snapshot_for_force_action(
     cfg: CratediggerConfig,
     *,
     import_job_id: int,
+    cancellation_token: CancellationToken | None = None,
 ) -> str:
     """Promote one verified private snapshot to a force-import action copy.
 
@@ -427,7 +488,13 @@ def retain_preview_snapshot_for_force_action(
     ) as processing_fd, open_private_child_directory(processing_fd, "preview") as preview_fd, open_private_child_directory(processing_fd, "albums") as albums_fd, exclusive_relative_lock(
         albums_fd, f".force-action-{import_job_id}.lock",
     ):
-        remove_relative_tree(albums_fd, action_name)
+        _checkpoint(cancellation_token)
+        _remove_relative_tree_cancellable(
+            albums_fd,
+            action_name,
+            cancellation_token,
+        )
+        _checkpoint(cancellation_token)
         os.rename(
             name, action_name,
             src_dir_fd=preview_fd, dst_dir_fd=albums_fd,
@@ -435,7 +502,12 @@ def retain_preview_snapshot_for_force_action(
     return os.path.join(processing_albums_dir(cfg.processing_dir), action_name)
 
 
-def remove_force_action_copy(path: str, cfg: CratediggerConfig) -> None:
+def remove_force_action_copy(
+    path: str,
+    cfg: CratediggerConfig,
+    *,
+    cancellation_token: CancellationToken | None = None,
+) -> None:
     """Remove one unneeded retained force action copy after a terminal result."""
     name = os.path.basename(path)
     if name == path or not name.startswith("force-action-"):
@@ -445,7 +517,12 @@ def remove_force_action_copy(path: str, cfg: CratediggerConfig) -> None:
     with open_private_processing_root(
         cfg.processing_dir, cfg.slskd_download_dir,
     ) as processing_fd, open_private_child_directory(processing_fd, "albums") as albums_fd:
-        remove_relative_tree(albums_fd, name)
+        _checkpoint(cancellation_token)
+        _remove_relative_tree_cancellable(
+            albums_fd,
+            name,
+            cancellation_token,
+        )
 
 
 def cleanup_force_action_copy_for_job(
@@ -453,11 +530,16 @@ def cleanup_force_action_copy_for_job(
     cfg: CratediggerConfig,
     *,
     import_job_id: int,
+    cancellation_token: CancellationToken | None = None,
 ) -> None:
     """Remove only the deterministic force copy owned by this job."""
     if path != force_action_copy_path(cfg, import_job_id):
         raise FilesystemAuthorityError("force action copy does not belong to job")
-    remove_force_action_copy(path, cfg)
+    remove_force_action_copy(
+        path,
+        cfg,
+        cancellation_token=cancellation_token,
+    )
 
 
 def force_action_copy_path(cfg: CratediggerConfig, import_job_id: int) -> str:
@@ -526,6 +608,7 @@ def _write_preview_spectral_evidence_file(
     measurement: PreimportMeasurement,
     files: list[AlbumQualityEvidenceFile] | None,
     lossless_candidate: bool,
+    cancellation_token: CancellationToken | None = None,
 ) -> str | None:
     """Carry preview-measured lossless spectral facts into the dry-run harness.
 
@@ -556,7 +639,26 @@ def _write_preview_spectral_evidence_file(
             snapshot_status="matched",
         ),
     )
+    _checkpoint(cancellation_token)
     return write_quality_evidence_action_file(payload)
+
+
+def _cleanup_preview_artifacts(
+    *,
+    preview_spectral_file: str | None,
+    temp_root: str | None,
+    cfg: CratediggerConfig,
+    cancellation_token: CancellationToken | None,
+) -> None:
+    """Clean owned preview artifacts only while execution remains authorized."""
+    _checkpoint(cancellation_token)
+    remove_quality_evidence_action_file(preview_spectral_file)
+    if temp_root is not None:
+        _remove_preview_tree(
+            temp_root,
+            cfg,
+            cancellation_token=cancellation_token,
+        )
 
 
 @runtime_checkable
@@ -1829,6 +1931,7 @@ def measure_and_persist_candidate_evidence(
     current_evidence_loader: Callable[..., EvidenceBuildResult] | None = None,
     runtime_config: CratediggerConfig | None = None,
     repair_fn: HeaderRepairFn | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> ImportPreviewResult:
     """Measure a source folder and persist candidate evidence; never decide.
 
@@ -1953,9 +2056,19 @@ def measure_and_persist_candidate_evidence(
     # preview snapshot so evidence and the later importer both see the same
     # bytes.  Foreign paths still reach repair only after descriptor copying.
     if owns_path:
+        _checkpoint(cancellation_token)
         repair(path)
+        _checkpoint(cancellation_token)
     try:
-        temp_root = None if owns_path else _snapshot_authorized_directory(path, cfg)
+        temp_root = (
+            None
+            if owns_path
+            else _snapshot_authorized_directory(
+                path,
+                cfg,
+                cancellation_token=cancellation_token,
+            )
+        )
     except (FilesystemAuthorityError, OSError) as exc:
         return _measurement_failed_result(
             mode="path",
@@ -1975,7 +2088,9 @@ def measure_and_persist_candidate_evidence(
     try:
         preview_path = path if temp_root is None else temp_root
         if not owns_path:
+            _checkpoint(cancellation_token)
             repair(preview_path)
+            _checkpoint(cancellation_token)
         try:
             # Address evidence from precisely the immutable private bytes
             # being inspected and passed to the harness.  Never re-inventory
@@ -1995,6 +2110,7 @@ def measure_and_persist_candidate_evidence(
 
         # --- Run the pure measurement helper (no decision) ---
         try:
+            _checkpoint(cancellation_token)
             measurement = measure_preimport_state(
                 path=preview_path,
                 mb_release_id=mbid,
@@ -2014,6 +2130,7 @@ def measure_and_persist_candidate_evidence(
                 spectral_detail_analyzer=spectral_detail_analyzer,
                 existing_spectral_resolver=existing_spectral_resolver,
             )
+            _checkpoint(cancellation_token)
             spectral_result = persist_exact_current_spectral_from_attempt(
                 db,
                 request_id=request_id,
@@ -2023,6 +2140,8 @@ def measure_and_persist_candidate_evidence(
             )
             if spectral_result.evidence is not None:
                 current_evidence = spectral_result.evidence
+        except ExecutionCancelled:
+            raise
         except AudioValidationMeasurementError as exc:
             return _measurement_failed_result(
                 mode="path",
@@ -2081,6 +2200,7 @@ def measure_and_persist_candidate_evidence(
         audit_result = ImportResult(spectral=measurement.spectral_audit)
         if measurement_rejecting:
             try:
+                _checkpoint(cancellation_token)
                 evidence_result = (
                     persist_measurement_fn
                     or persist_candidate_evidence_from_measurement
@@ -2093,6 +2213,9 @@ def measure_and_persist_candidate_evidence(
                     import_job_id=import_job_id,
                     files=source_snapshot,
                 )
+                _checkpoint(cancellation_token)
+            except ExecutionCancelled:
+                raise
             except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                 return _measurement_failed_result(
                     mode="path",
@@ -2154,22 +2277,45 @@ def measure_and_persist_candidate_evidence(
                 measurement=measurement,
                 files=source_snapshot,
                 lossless_candidate=measurement.lossless_candidate,
+                cancellation_token=cancellation_token,
             )
-            run = (run_import_fn or run_import_one)(
-                path=preview_path,
-                mb_release_id=mbid,
-                request_id=None,
-                force=force,
-                preserve_source=True,
-                dry_run=True,
-                override_min_bitrate=override_min_bitrate,
-                target_format=req.get("target_format"),
-                verified_lossless_target=cfg.verified_lossless_target,
-                beets_harness_path=cfg.beets_harness_path,
-                quality_rank_config_json=cfg.quality_ranks.to_json(),
-                existing_v0_probe=existing_v0_probe,
-                quality_evidence_action_file=preview_spectral_file,
-            )
+            _checkpoint(cancellation_token)
+            if run_import_fn is None:
+                run = run_import_one(
+                    path=preview_path,
+                    mb_release_id=mbid,
+                    request_id=None,
+                    force=force,
+                    preserve_source=True,
+                    dry_run=True,
+                    override_min_bitrate=override_min_bitrate,
+                    target_format=req.get("target_format"),
+                    verified_lossless_target=cfg.verified_lossless_target,
+                    beets_harness_path=cfg.beets_harness_path,
+                    quality_rank_config_json=cfg.quality_ranks.to_json(),
+                    existing_v0_probe=existing_v0_probe,
+                    quality_evidence_action_file=preview_spectral_file,
+                    cancellation_token=cancellation_token,
+                )
+            else:
+                run = run_import_fn(
+                    path=preview_path,
+                    mb_release_id=mbid,
+                    request_id=None,
+                    force=force,
+                    preserve_source=True,
+                    dry_run=True,
+                    override_min_bitrate=override_min_bitrate,
+                    target_format=req.get("target_format"),
+                    verified_lossless_target=cfg.verified_lossless_target,
+                    beets_harness_path=cfg.beets_harness_path,
+                    quality_rank_config_json=cfg.quality_ranks.to_json(),
+                    existing_v0_probe=existing_v0_probe,
+                    quality_evidence_action_file=preview_spectral_file,
+                )
+            _checkpoint(cancellation_token)
+        except ExecutionCancelled:
+            raise
         except AudioValidationMeasurementError as exc:
             return _measurement_failed_result(
                 mode="path",
@@ -2260,6 +2406,7 @@ def measure_and_persist_candidate_evidence(
                     import_result=run.import_result,
                 )
             try:
+                _checkpoint(cancellation_token)
                 evidence_result = (
                     persist_measurement_fn
                     or persist_candidate_evidence_from_measurement
@@ -2272,6 +2419,9 @@ def measure_and_persist_candidate_evidence(
                     import_job_id=import_job_id,
                     files=source_snapshot,
                 )
+                _checkpoint(cancellation_token)
+            except ExecutionCancelled:
+                raise
             except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                 return _measurement_failed_result(
                     mode="path",
@@ -2353,6 +2503,7 @@ def measure_and_persist_candidate_evidence(
 
         # --- Persist candidate evidence ---
         try:
+            _checkpoint(cancellation_token)
             evidence_result = persist_candidate_evidence_from_import_result(
                 db,
                 mb_release_id=mbid,
@@ -2363,6 +2514,9 @@ def measure_and_persist_candidate_evidence(
                 files=source_snapshot,
                 measurement=measurement,
             )
+            _checkpoint(cancellation_token)
+        except ExecutionCancelled:
+            raise
         except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             return _measurement_failed_result(
                 mode="path",
@@ -2401,9 +2555,12 @@ def measure_and_persist_candidate_evidence(
             import_result=run.import_result,
         )
     finally:
-        remove_quality_evidence_action_file(preview_spectral_file)
-        if temp_root is not None:
-            _remove_preview_tree(temp_root, cfg)
+        _cleanup_preview_artifacts(
+            preview_spectral_file=preview_spectral_file,
+            temp_root=temp_root,
+            cfg=cfg,
+            cancellation_token=cancellation_token,
+        )
 
 
 def _measurement_decision_hint(measurement: Any) -> str:
@@ -2435,6 +2592,7 @@ def preview_import_from_path(
     import_job_id: int | None = None,
     persist_candidate_evidence: bool = False,
     _already_isolated: bool = False,
+    cancellation_token: CancellationToken | None = None,
 ) -> ImportPreviewResult:
     """Classify a real source folder without mutating source files or beets.
 
@@ -2538,8 +2696,14 @@ def preview_import_from_path(
     # unbounded ``copytree``.  No external tool receives a DB- or CLI-supplied
     # pathname before this boundary is complete.
     try:
-        temp_root = None if _already_isolated else _snapshot_authorized_directory(
-            path, cfg,
+        temp_root = (
+            None
+            if _already_isolated
+            else _snapshot_authorized_directory(
+                path,
+                cfg,
+                cancellation_token=cancellation_token,
+            )
         )
     except (FilesystemAuthorityError, OSError) as exc:
         return _preview_result(
@@ -2563,7 +2727,11 @@ def preview_import_from_path(
         # the source immutable while preserving the importer-facing order:
         # repair before inspection, measurement, and the dry-run harness.
         try:
+            _checkpoint(cancellation_token)
             repair_mp3_headers(preview_path)
+            _checkpoint(cancellation_token)
+        except ExecutionCancelled:
+            raise
         except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
             pass
 
@@ -2622,6 +2790,7 @@ def preview_import_from_path(
         # persisted ``AlbumQualityEvidence`` row that the importer reads —
         # preview is a pure measurement surface.
         try:
+            _checkpoint(cancellation_token)
             measurement = measure_preimport_state(
                 path=preview_path,
                 mb_release_id=mbid,
@@ -2638,6 +2807,7 @@ def preview_import_from_path(
                 preserve_existing_source_spectral=preserve_have_source,
                 precomputed_inspection=inspection,
             )
+            _checkpoint(cancellation_token)
             spectral_result = persist_exact_current_spectral_from_attempt(
                 db,
                 request_id=request_id,
@@ -2647,6 +2817,8 @@ def preview_import_from_path(
             )
             if spectral_result.evidence is not None:
                 current_evidence = spectral_result.evidence
+        except ExecutionCancelled:
+            raise
         except AudioValidationMeasurementError as exc:
             return _measurement_failed_result(
                 mode="path",
@@ -2753,7 +2925,9 @@ def preview_import_from_path(
             measurement=measurement,
             files=source_snapshot,
             lossless_candidate=measurement.lossless_candidate,
+            cancellation_token=cancellation_token,
         )
+        _checkpoint(cancellation_token)
         run = run_import_one(
             path=preview_path,
             mb_release_id=mbid,
@@ -2768,7 +2942,9 @@ def preview_import_from_path(
             quality_rank_config_json=cfg.quality_ranks.to_json(),
             existing_v0_probe=existing_v0_probe,
             quality_evidence_action_file=preview_spectral_file,
+            cancellation_token=cancellation_token,
         )
+        _checkpoint(cancellation_token)
         if run.import_result is not None:
             run.import_result.spectral = compose_attempt_spectral_audit(
                 measurement.spectral_audit,
@@ -2795,6 +2971,7 @@ def preview_import_from_path(
                     import_result=run.import_result,
                 )
             try:
+                _checkpoint(cancellation_token)
                 evidence = persist_candidate_evidence_from_import_result(
                     db,
                     mb_release_id=mbid,
@@ -2804,8 +2981,11 @@ def preview_import_from_path(
                     import_job_id=import_job_id,
                     files=source_snapshot,
                 )
+                _checkpoint(cancellation_token)
                 evidence_status = evidence.status
                 evidence_reason = evidence.reason
+            except ExecutionCancelled:
+                raise
             except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                 evidence_status = "failed"
                 evidence_reason = f"{type(exc).__name__}: {exc}"
@@ -2847,14 +3027,19 @@ def preview_import_from_path(
             cleanup_eligible=cleanup_eligible,
         )
     finally:
-        remove_quality_evidence_action_file(preview_spectral_file)
-        if temp_root is not None:
-            _remove_preview_tree(temp_root, cfg)
+        _cleanup_preview_artifacts(
+            preview_spectral_file=preview_spectral_file,
+            temp_root=temp_root,
+            cfg=cfg,
+            cancellation_token=cancellation_token,
+        )
 
 
 def preview_import_from_download_log(
     db: ImportPreviewDB,
     download_log_id: int,
+    *,
+    cancellation_token: CancellationToken | None = None,
 ) -> ImportPreviewResult:
     """Preview the failed source referenced by one download_log row.
 
@@ -2891,7 +3076,11 @@ def preview_import_from_download_log(
 
     cfg = read_runtime_config()
     try:
-        snapshot = snapshot_configured_quarantine_directory(raw_path, cfg)
+        snapshot = snapshot_configured_quarantine_directory(
+            raw_path,
+            cfg,
+            cancellation_token=cancellation_token,
+        )
     except (FilesystemAuthorityError, OSError) as exc:
         return _preview_result(
             mode="download_log",
@@ -2911,6 +3100,11 @@ def preview_import_from_download_log(
             force=True,
             download_log_id=download_log_id,
             _already_isolated=True,
+            cancellation_token=cancellation_token,
         )
     finally:
-        _remove_preview_tree(snapshot, cfg)
+        _remove_preview_tree(
+            snapshot,
+            cfg,
+            cancellation_token=cancellation_token,
+        )

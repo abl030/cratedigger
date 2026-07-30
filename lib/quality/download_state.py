@@ -44,8 +44,6 @@ class PollCycleDecision(enum.Enum):
     """One side effect (or deliberate wait) selected for a poll cycle."""
 
     reset_missing_state = "reset_missing_state"
-    wait_import_job = "wait_import_job"
-    wait_processing_recovery = "wait_processing_recovery"
     wait_fresh_vanished = "wait_fresh_vanished"
     timeout_vanished = "timeout_vanished"
     in_progress = "in_progress"
@@ -54,7 +52,6 @@ class PollCycleDecision(enum.Enum):
     timeout_remote_queue = "timeout_remote_queue"
     timeout_stalled = "timeout_stalled"
     timeout_all_errored = "timeout_all_errored"
-    processing = "processing"
 
 
 @dataclass(frozen=True)
@@ -64,8 +61,6 @@ class PollCycleVerdict:
     decision: PollCycleDecision
     files_to_retry: list[str] = field(default_factory=list[str])
     reason: str = ""
-    import_job_id: int | None = None
-    import_job_status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -83,11 +78,6 @@ class PollCycleSnapshot:
     """All impure observations supplied to the pure poll-cycle reducer."""
 
     files: list[PollFileSnapshot] = field(default_factory=list[PollFileSnapshot])
-    active_import_job_id: int | None = None
-    active_import_job_status: str | None = None
-    processing_current_path: str | None = None
-    processing_blocked_reason: str | None = None
-    completion_current_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -314,23 +304,14 @@ class ActiveDownloadState(msgspec.Struct, omit_defaults=True):
     (``msgspec.convert`` / ``msgspec.json.decode``) — which strict-validates
     field types, so int-vs-str drift raises ``msgspec.ValidationError``
     instead of being silently coerced (as the old ``int(d["size"])`` decoder
-    did). ``omit_defaults=True`` reproduces the old "absent key when None"
-    shape for the optional timestamp fields; ``current_path`` is now omitted
-    when ``None`` (the hand-rolled encoder emitted it as ``null``) — the
-    strict decoder restores ``None`` either way. See issue #467.
+    did). ``omit_defaults=True`` omits optional timestamps and paths when
+    absent. See issue #467.
     """
     filetype: str                         # "flac", "mp3 v0", etc.
     enqueued_at: str                      # ISO8601 UTC timestamp
     files: list[ActiveDownloadFileState]
     last_progress_at: str | None = None
     processing_started_at: str | None = None
-    # Set immediately before ``run_import_one(...)`` is invoked on the
-    # auto-import path. Distinguishes "files moved to staged path but
-    # subprocess never launched" (None — safe to retry) from "subprocess
-    # may already have written to beets" (set — manual recovery required).
-    # See ``docs/advisory-locks.md`` and the resume-block guards in
-    # ``lib/download_materialization.py::_log_post_move_resume_blocked``.
-    import_subprocess_started_at: str | None = None
     current_path: str | None = None
 
     def to_json(self) -> str:
@@ -447,7 +428,6 @@ def _copy_download_state(
             if processing_started_at is None
             else processing_started_at
         ),
-        import_subprocess_started_at=state.import_subprocess_started_at,
         current_path=state.current_path if current_path is None else current_path,
     )
 
@@ -471,38 +451,6 @@ def reduce_poll_cycle(
         return PollCycleResult(
             state=None,
             verdict=PollCycleVerdict(PollCycleDecision.reset_missing_state),
-        )
-
-    if snapshot.active_import_job_id is not None:
-        return PollCycleResult(
-            state=persisted_state,
-            verdict=PollCycleVerdict(
-                PollCycleDecision.wait_import_job,
-                import_job_id=snapshot.active_import_job_id,
-                import_job_status=snapshot.active_import_job_status,
-            ),
-        )
-
-    if persisted_state.processing_started_at is not None:
-        if snapshot.processing_blocked_reason is not None:
-            return PollCycleResult(
-                state=persisted_state,
-                verdict=PollCycleVerdict(
-                    PollCycleDecision.wait_processing_recovery,
-                    reason=snapshot.processing_blocked_reason,
-                ),
-            )
-        recovered_state = _copy_download_state(
-            persisted_state,
-            current_path=(
-                snapshot.processing_current_path
-                if snapshot.processing_current_path is not None
-                else persisted_state.current_path
-            ),
-        )
-        return PollCycleResult(
-            state=recovered_state,
-            verdict=PollCycleVerdict(PollCycleDecision.processing),
         )
 
     if len(snapshot.files) != len(persisted_state.files):
@@ -623,17 +571,6 @@ def reduce_poll_cycle(
                 for file in new_state.files
             ],
         )
-    elif decision == PollCycleDecision.complete:
-        new_state = _copy_download_state(
-            new_state,
-            processing_started_at=now.isoformat(),
-            current_path=(
-                snapshot.completion_current_path
-                if snapshot.completion_current_path is not None
-                else new_state.current_path
-            ),
-        )
-
     return PollCycleResult(
         state=new_state,
         verdict=PollCycleVerdict(

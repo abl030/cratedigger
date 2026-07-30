@@ -50,6 +50,8 @@ from lib.quality_evidence import (
 )
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import (
+    claim_next_import_preview_job,
+    handoff_automation_owner,
     hermetic_beets_config_defaults,
     make_album_quality_evidence,
     make_audio_corrupt_validation_report,
@@ -2191,13 +2193,27 @@ class TestImportPreviewPath(unittest.TestCase):
         """dl 37604: a corrupt FLAC candidate is completed integrity
         evidence, not an infrastructure-class spectral measurement failure.
         """
-        db = self._db()
-        job = db.enqueue_import_job(
-            "automation_import",
-            request_id=42,
-            dedupe_key="automation_import:request:42",
-            payload={},
+        from lib.import_execution import (
+            ExecutionLeaseSnapshot,
+            ProcessIdentity,
         )
+        from scripts.import_preview_worker import _AutomationPreviewDB
+
+        db = self._db()
+        self.assertTrue(
+            db.reset_to_wanted(42, expected_status="unsearchable")
+        )
+        job = handoff_automation_owner(db, 42)
+        lease = ExecutionLeaseSnapshot(
+            host_boot_id="test-boot",
+            invocation_id="badlands-preview",
+            systemd_unit="cratedigger-import-preview-worker.service",
+            worker=ProcessIdentity(pid=7001, start_ticks=70001),
+        )
+        claimed = claim_next_import_preview_job(db, worker_id="preview",
+        execution_lease=lease,)
+        assert claimed is not None and claimed.id == job.id
+        preview_db = _AutomationPreviewDB(db, lease)
         source = tempfile.mkdtemp()
         with open(os.path.join(source, "01.flac"), "wb") as handle:
             handle.write(b"truncated lossless bytes")
@@ -2250,7 +2266,7 @@ class TestImportPreviewPath(unittest.TestCase):
                 ),
             ), patch("lib.import_preview.run_import_one") as mock_run:
                 preview = measure_and_persist_candidate_evidence(
-                    db,
+                    preview_db,  # pyright: ignore[reportArgumentType]
                     request_id=42,
                     path=source,
                     import_job_id=job.id,

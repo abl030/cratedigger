@@ -20,6 +20,8 @@ import { toggleSearchPlanSummary, openSearchPlanDetail, closeSearchPlanDetail, s
 import { openReplacePicker } from './replace_picker.js';
 import { invalidateActiveRgs } from './active_rgs.js';
 import { toggleSection } from './render_primitives.js';
+import { handleProcessingLockedConflict } from './release_action_state.js';
+import { suppressProcessingAction } from './release_actions.js';
 import { toast } from './state.js';
 
 /**
@@ -36,6 +38,15 @@ async function openReplacePickerAndHandle(options) {
   const result = await openReplacePicker(options);
   if (result.outcome !== 'confirmed') return;
   const { status, body } = result.response || { status: 0, body: {} };
+  if (await handleProcessingLockedConflict({
+    httpStatus: status,
+    payload: body,
+    control: document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null,
+  })) {
+    return;
+  }
   if (status === 200) {
     const newId = body.new_request_id;
     toast(`Replaced — new request #${newId}.`, false);
@@ -243,5 +254,6 @@ Object.assign(window, {
   longTailSetIntent,
   longTailSetImported,
   longTailDeleteRequest,
+  suppressProcessingAction,
   toast,
 });

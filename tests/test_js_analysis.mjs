@@ -5,7 +5,11 @@
  */
 
 import {
-  analysisChipHtml, applyAnalysisChips, computeRecordingDots, renderRecordingsBlock,
+  analysisChipHtml,
+  applyAnalysisChips,
+  computeRecordingDots,
+  disambRemove,
+  renderRecordingsBlock,
 } from '../web/js/analysis.js';
 
 let passed = 0;
@@ -116,6 +120,105 @@ console.log('renderRecordingsBlock() — markers stay with titles');
   assertContains(html, '★</span> Everywhere', 'star adjacent to all-pressings title');
   assertContains(html, 'also on: Best Of', 'non-unique row keeps also-on note');
   assertEqual(renderRecordingsBlock({ tracks: [] }), '', 'no tracks -> empty');
+}
+
+console.log('disambRemove() — processing conflict locks and refreshes only the acted-on row');
+{
+  const oldConfirm = globalThis.confirm;
+  const oldDocument = globalThis.document;
+  const oldFetch = globalThis.fetch;
+  const oldWindow = globalThis.window;
+  const attributes = new Map([['data-pipeline-request-id', '903']]);
+  const inserted = [];
+  const btn = {
+    dataset: {},
+    disabled: false,
+    textContent: 'Remove request',
+    style: {},
+    isConnected: true,
+    setAttribute(name, value) { attributes.set(name, value); },
+    removeAttribute(name) { attributes.delete(name); },
+    getAttribute(name) { return attributes.get(name) || null; },
+    focus() {},
+    insertAdjacentElement(_position, element) {
+      element.isConnected = true;
+      inserted.push(element);
+    },
+  };
+  const live = { textContent: '', setAttribute() {} };
+  globalThis.confirm = () => true;
+  globalThis.document = {
+    activeElement: btn,
+    body: { appendChild() {} },
+    createElement() {
+      return {
+        children: [],
+        className: '',
+        id: '',
+        textContent: '',
+        isConnected: false,
+        setAttribute() {},
+        appendChild(child) { this.children.push(child); },
+        remove() { this.isConnected = false; },
+      };
+    },
+    getElementById(id) {
+      if (id === 'processing-lock-live-region') return live;
+      return inserted.find(element => element.id === id && element.isConnected) || null;
+    },
+    querySelectorAll() { return [btn]; },
+  };
+  globalThis.window = { scrollX: 5, scrollY: 9, scrollTo() {} };
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    if (url === '/api/pipeline/delete') {
+      return {
+        status: 409,
+        async json() {
+          return {
+            error: 'processing_locked',
+            request_id: 903,
+            processing_owner: {
+              job_id: 70,
+              status: 'queued',
+              preview_status: 'waiting',
+            },
+          };
+        },
+      };
+    }
+    if (url === '/api/pipeline/903') {
+      return {
+        ok: true,
+        async json() {
+          return {
+            request: {
+              id: 903,
+              status: 'processing',
+              mb_release_id: 'analysis-owner',
+              processing_owner: {
+                job_id: 70,
+                status: 'running',
+                preview_status: 'evidence_ready',
+              },
+            },
+          };
+        },
+      };
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  await disambRemove(903, btn);
+  assertEqual(calls.join(','), '/api/pipeline/delete,/api/pipeline/903',
+    'typed conflict refetches only the affected request');
+  assertEqual(attributes.get('aria-disabled'), 'true', 'remove control becomes aria-disabled');
+  assertEqual(btn.textContent, 'importing', 'authoritative owner status replaces stale action');
+  assertEqual(live.textContent.includes('job #70'), true, 'owner change is announced');
+  globalThis.confirm = oldConfirm;
+  globalThis.document = oldDocument;
+  globalThis.fetch = oldFetch;
+  globalThis.window = oldWindow;
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

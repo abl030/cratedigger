@@ -27,7 +27,11 @@ from web.classify import ClassifiedEntry, LogEntry, classify_log_entry
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from tests.fakes import FakeBeetsDB
-from tests.helpers import make_request_row
+from tests.helpers import (
+    claim_next_import_job,
+    handoff_automation_owner,
+    make_request_row,
+)
 from tests.web._harness import (
     _assert_required_fields,
     _FakeDbWebServerCase,
@@ -50,6 +54,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         "current_spectral_bitrate",
         "last_download_spectral_bitrate", "current_spectral_grade",
         "last_download_spectral_grade", "verified_lossless",
+        "processing_owner",
     }
     LOG_ENTRY_REQUIRED_FIELDS = {
         "id", "request_id", "outcome", "album_title", "artist_name",
@@ -1032,8 +1037,10 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         status, data = self._get("/api/pipeline/all")
 
         self.assertEqual(status, 200)
-        _assert_required_fields(self, data, {"counts", "wanted", "downloading", "imported", "unsearchable",
-                                             "imported_total", "imported_truncated"},
+        _assert_required_fields(self, data, {
+            "counts", "wanted", "downloading", "processing", "imported",
+            "unsearchable", "imported_total", "imported_truncated",
+        },
                                 "pipeline all response")
         _assert_required_fields(self, data["wanted"][0], self.PIPELINE_ITEM_REQUIRED_FIELDS,
                                 "pipeline all item")
@@ -1088,6 +1095,90 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         status, data = self._get("/api/pipeline/search")
         self.assertEqual(status, 200)
         self.assertEqual(data["items"], [])
+
+    def test_processing_owner_projects_on_all_search_and_detail(self):
+        request_id = 402
+        self.db.seed_request(make_request_row(
+            id=request_id,
+            status="wanted",
+            artist_name="Exact Owner Artist",
+            album_title="Exact Owner Album",
+            mb_release_id="exact-owner-release",
+        ))
+        job = handoff_automation_owner(self.db, request_id)
+        expected = {
+            "job_id": job.id,
+            "status": job.status,
+            "preview_status": job.preview_status,
+        }
+
+        status, all_data = self._get("/api/pipeline/all")
+        self.assertEqual(status, 200)
+        self.assertEqual(all_data["processing"][0]["processing_owner"], expected)
+
+        status, search_data = self._get(
+            "/api/pipeline/search?q=Exact%20Owner"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            search_data["items"][0]["processing_owner"],
+            expected,
+        )
+
+        status, detail_data = self._get(f"/api/pipeline/{request_id}")
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            detail_data["request"]["processing_owner"],
+            expected,
+        )
+
+    def test_acquisition_separates_processing_requests_and_youtube(self):
+        processing_id = 403
+        self.db.seed_request(make_request_row(
+            id=processing_id,
+            status="wanted",
+            artist_name="Processing Artist",
+            album_title="Processing Album",
+            mb_release_id="processing-release",
+        ))
+        job = handoff_automation_owner(self.db, processing_id)
+        self.db.insert_youtube_running(
+            request_id=processing_id,
+            browse_id="processing-youtube",
+            audio_playlist_id=None,
+            yt_url="https://music.youtube.com/playlist?list=processing",
+            expected_track_count=2,
+        )
+        downloading_id = 404
+        self.db.seed_request(make_request_row(
+            id=downloading_id,
+            status="downloading",
+            artist_name="Downloading Artist",
+            album_title="Downloading Album",
+            mb_release_id="downloading-release",
+        ))
+
+        status, data = self._get("/api/pipeline/acquisition")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(set(data), {"acquisition", "youtube_ingest"})
+        by_id = {row["id"]: row for row in data["acquisition"]}
+        self.assertEqual(set(by_id), {processing_id, downloading_id})
+        self.assertEqual(by_id[processing_id]["processing_owner"], {
+            "job_id": job.id,
+            "status": job.status,
+            "preview_status": job.preview_status,
+        })
+        self.assertIsNone(by_id[downloading_id]["processing_owner"])
+        self.assertEqual(len(data["youtube_ingest"]), 1)
+        self.assertEqual(
+            data["youtube_ingest"][0]["request_status"],
+            "processing",
+        )
+        self.assertIsNone(
+            data["youtube_ingest"][0]["processing_owner"],
+        )
+        self.assertEqual(self.db.query_counts["get_acquisition"], 1)
 
     DETAIL_RESPONSE_REQUIRED_FIELDS: ClassVar = {
         "request", "history", "tracks", "last_search", "current_library",
@@ -1719,6 +1810,166 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         _assert_required_fields(self, data["job"], self.IMPORT_JOB_REQUIRED_FIELDS,
                                 "import job detail")
 
+    def test_automation_recovery_detail_uses_shared_typed_projection(self):
+        request_id = 405
+        self.db.seed_request(make_request_row(
+            id=request_id,
+            status="wanted",
+            artist_name="Recovery Artist",
+            album_title="Recovery Album",
+            mb_release_id="75dbf62e-7dd2-4ddc-b57b-9bad1758b6b0",
+        ))
+        job = handoff_automation_owner(
+            self.db,
+            request_id,
+            canonical_path="/processing/recovery-album",
+        )
+        # The cleanup-journal fake lands with the terminal slice.  This
+        # instance seam pins the read adapter's real missing-journal mapping.
+        with patch.object(
+            self.db,
+            "get_processing_cleanup_journal",
+            lambda *, request_id, job_id: None,
+            create=True,
+        ):
+            status, data = self._get(
+                f"/api/import-jobs/{job.id}/recovery"
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["outcome"], "ok")
+        detail = data["detail"]
+        self.assertEqual(detail["owner_stage"]["job_id"], job.id)
+        self.assertTrue(detail["owner_stage"]["exact_active_owner"])
+        self.assertEqual(
+            detail["canonical_path"],
+            "/processing/recovery-album",
+        )
+        self.assertEqual(detail["execution_liveness"]["status"], "dead")
+        self.assertEqual(detail["completion"]["status"], "absent")
+        self.assertEqual(detail["exact_library"]["status"], "unavailable")
+        self.assertEqual(detail["cleanup_journal"]["status"], "missing")
+        self.assertTrue(detail["close_eligible"])
+        self.assertTrue(detail["evidence_revision"].startswith("sha256:"))
+
+    def test_automation_recovery_detail_not_found_is_typed(self):
+        status, data = self._get("/api/import-jobs/999999/recovery")
+
+        self.assertEqual(status, 404)
+        self.assertEqual(data["outcome"], "not_found")
+        self.assertIsNone(data["detail"])
+
+    def test_automation_recovery_action_not_found_is_typed(self):
+        status, data = self._post("/api/import-jobs/999999/recovery", {
+            "action": "retry",
+            "reason": "missing operation",
+        })
+
+        self.assertEqual(status, 404)
+        self.assertEqual(data["outcome"], "not_found")
+        self.assertIsNone(data["job"])
+        self.assertIsNone(data["retry_job"])
+
+    def test_automation_recovery_actions_require_revision_and_close_result(
+        self,
+    ):
+        request_id = 406
+        self.db.seed_request(make_request_row(
+            id=request_id,
+            status="wanted",
+            mb_release_id="75dbf62e-7dd2-4ddc-b57b-9bad1758b6b0",
+        ))
+        job = handoff_automation_owner(
+            self.db,
+            request_id,
+            canonical_path="/processing/recovery-action",
+        )
+
+        status, data = self._post(f"/api/import-jobs/{job.id}/recovery", {
+            "action": "retry",
+            "reason": "missing revision",
+        })
+        self.assertEqual(status, 400)
+        self.assertIn("evidence", data["error"])
+
+        status, data = self._post(f"/api/import-jobs/{job.id}/recovery", {
+            "action": "close",
+            "reason": "missing explicit result",
+            "evidence_revision": "sha256:stale",
+        })
+        self.assertEqual(status, 400)
+        self.assertIn("result_status", data["error"])
+
+        with patch.object(
+            self.db,
+            "get_processing_cleanup_journal",
+            lambda *, request_id, job_id: None,
+            create=True,
+        ):
+            status, data = self._post(
+                f"/api/import-jobs/{job.id}/recovery",
+                {
+                    "action": "close",
+                    "reason": "stale evidence",
+                    "evidence_revision": "sha256:stale",
+                    "result_status": "wanted",
+                },
+            )
+        self.assertEqual(status, 409)
+        self.assertEqual(data["outcome"], "evidence_changed")
+        self.assertIsNotNone(data["detail"])
+        self.assertEqual(
+            self.db.request(request_id)["active_automation_import_job_id"],
+            job.id,
+        )
+
+    def test_automation_retry_with_journal_returns_accepted_recovery_required(
+        self,
+    ):
+        from lib.pipeline_db.cleanup_journal import CleanupJournalIntent
+        from lib.processing_cleanup import cleanup_manifest_hash
+
+        request_id = 407
+        canonical_path = "/processing/api-retained-cleanup"
+        self.db.seed_request(make_request_row(
+            id=request_id,
+            status="wanted",
+            mb_release_id="75dbf62e-7dd2-4ddc-b57b-9bad1758b6b0",
+        ))
+        job = handoff_automation_owner(
+            self.db,
+            request_id,
+            canonical_path=canonical_path,
+        )
+        next(row for row in self.db._import_jobs if row["id"] == job.id)[
+            "status"
+        ] = "recovery_required"
+        self.db.create_processing_cleanup_journal(
+            request_id=request_id,
+            job_id=job.id,
+            intent=CleanupJournalIntent(
+                action="no_op",
+                source_path=canonical_path,
+                source_manifest=(),
+                source_manifest_hash=cleanup_manifest_hash(()),
+            ),
+        )
+        detail_status, detail_data = self._get(
+            f"/api/import-jobs/{job.id}/recovery"
+        )
+        self.assertEqual(detail_status, 200)
+
+        status, data = self._post(f"/api/import-jobs/{job.id}/recovery", {
+            "action": "retry",
+            "reason": "retain unresolved cleanup",
+            "evidence_revision": detail_data["detail"]["evidence_revision"],
+        })
+
+        self.assertEqual(status, 202)
+        self.assertEqual(data["outcome"], "retry_recovery_required")
+        self.assertEqual(data["job"]["status"], "failed")
+        self.assertEqual(data["retry_job"]["status"], "recovery_required")
+
     def test_import_jobs_timeline_contract(self):
         self._enqueue_force_job()
         status, data = self._get("/api/import-jobs/timeline")
@@ -1767,7 +2018,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self._mark_force_job_recovery(job_id)
 
         status, data = self._post(f"/api/import-jobs/{job_id}/recovery", {
-            "resolution": "close",
+            "action": "close",
             "reason": "Reconciled Beets and request state manually",
         })
 
@@ -1775,14 +2026,14 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(data["outcome"], "closed")
         self.assertEqual(data["job"]["status"], "failed")
         self.assertIsNone(data["retry_job"])
-        self.assertIsNone(self.db.claim_next_import_job(worker_id="replay"))
+        self.assertIsNone(claim_next_import_job(self.db, worker_id="replay"))
 
     def test_import_job_recovery_retry_mints_new_operation(self):
         job_id = self._enqueue_force_job()
         self._mark_force_job_recovery(job_id)
 
         status, data = self._post(f"/api/import-jobs/{job_id}/recovery", {
-            "resolution": "retry",
+            "action": "retry",
             "reason": "Confirmed Beets did not apply the operation",
         })
 
@@ -1796,7 +2047,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         job_id = self._enqueue_force_job()
 
         status, data = self._post(f"/api/import-jobs/{job_id}/recovery", {
-            "resolution": "retry",
+            "action": "retry",
             "reason": "Should not be accepted",
         })
 

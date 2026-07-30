@@ -65,11 +65,10 @@ class SupportsDestructivePipelineDB(transitions.TransitionsDB, Protocol):
     def get_request_by_release_id(
         self, release_id: object | None,
     ) -> AlbumRequestRow | None: ...
-    def get_active_import_job_for_request(self, request_id: int) -> object | None: ...
     def advisory_lock(
         self, namespace: int, key: int,
     ) -> AbstractContextManager[bool]: ...
-    def delete_request(self, request_id: int) -> None: ...
+    def delete_request(self, request_id: int) -> bool: ...
     def get_recent_successful_uploader(self, request_id: int) -> str | None: ...
     def add_bad_audio_hashes(
         self,
@@ -272,8 +271,17 @@ def _ban_source_locked(
             request.expected_release_id,
             current_identity.release_id if current_identity else None,
         )
-    if pipeline_db.get_active_import_job_for_request(request.request_id) is not None:
-        return BanSourceImporterBusy(request.request_id)
+    processing_locked = transitions.processing_locked_conflict(
+        current,
+        request.request_id,
+        "ban_source",
+        expected_status=str(current["status"]),
+    )
+    if processing_locked is not None:
+        return BanSourceTransitionConflict(
+            request.request_id,
+            processing_locked,
+        )
 
     current_beets = beets_db.resolve_current_release(identity)
     if isinstance(current_beets, CurrentBeetsAmbiguous):
@@ -448,6 +456,17 @@ def ban_source(
         row = pipeline_db.get_request(request.request_id)
         if row is None:
             return BanSourceRequestNotFound(request.request_id)
+        processing_locked = transitions.processing_locked_conflict(
+            row,
+            request.request_id,
+            "ban_source",
+            expected_status=str(row["status"]),
+        )
+        if processing_locked is not None:
+            return BanSourceTransitionConflict(
+                request.request_id,
+                processing_locked,
+            )
         identity = _request_identity(row)
         if not _identity_matches(request.expected_release_id, identity):
             return BanSourceReleaseMismatch(
@@ -581,6 +600,7 @@ type DeleteResult = (
     | DeleteImporterBusy
     | DeletePipelinePurgeFailure
     | DeleteIncomplete
+    | transitions.TransitionConflict
 )
 
 
@@ -710,10 +730,15 @@ def _delete_under_release_lock(
     if pipeline_row is not None and current_pipeline is not None:
         if int(pipeline_row["id"]) != int(current_pipeline["id"]):
             return _delete_mismatch(request, identity, current_pipeline)
-        if pipeline_db.get_active_import_job_for_request(
-            int(current_pipeline["id"]),
-        ) is not None:
-            return DeleteImporterBusy(request.album_id, int(current_pipeline["id"]))
+        request_id = int(current_pipeline["id"])
+        processing_locked = transitions.processing_locked_conflict(
+            current_pipeline,
+            request_id,
+            "library_delete",
+            expected_status=str(current_pipeline["status"]),
+        )
+        if processing_locked is not None:
+            return processing_locked
 
     # This joined exact-identity snapshot is the final Beets authority before
     # the pinned mutation. Missing is not an invitation to delete by the stale
@@ -791,7 +816,10 @@ def _delete_under_release_lock(
     if request.purge_pipeline and current_pipeline is not None:
         deleted_pipeline_id = int(current_pipeline["id"])
         try:
-            pipeline_db.delete_request(deleted_pipeline_id)
+            if not pipeline_db.delete_request(deleted_pipeline_id):
+                raise RuntimeError(
+                    "pipeline purge lost its owner-null delete predicate"
+                )
         except Exception:
             log.exception("Failed to purge pipeline request %s", deleted_pipeline_id)
             return DeletePipelinePurgeFailure(
@@ -914,6 +942,14 @@ def delete_release_from_library(
             )
         ):
             return _delete_mismatch(request, identity, current_pipeline)
+        processing_locked = transitions.processing_locked_conflict(
+            current_pipeline,
+            request_id,
+            "library_delete",
+            expected_status=str(current_pipeline["status"]),
+        )
+        if processing_locked is not None:
+            return processing_locked
         result = _delete_with_release_lock(
             pipeline_db=pipeline_db,
             beets_db=beets_db,

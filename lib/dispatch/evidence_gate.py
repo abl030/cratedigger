@@ -48,6 +48,7 @@ from lib.quality_evidence import (
 
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
+    from lib.import_execution import ExecutionLeaseSnapshot
     from lib.pipeline_db import PipelineDB
     from lib.quality import (
         AlbumQualityEvidence,
@@ -66,6 +67,7 @@ def _requeue_import_job_to_preview(
     *,
     import_job_id: int | None,
     reason: str,
+    expected_execution_lease: ExecutionLeaseSnapshot | None = None,
 ) -> DispatchOutcome:
     """Shared requeue helper for the two outer evidence-required branches.
 
@@ -103,7 +105,11 @@ def _requeue_import_job_to_preview(
             code=DISPATCH_CODE_REQUEUE_FAILED,
         )
     try:
-        updated = db.requeue_import_job_for_preview(import_job_id, reason=reason)
+        updated = db.requeue_import_job_for_preview(
+            import_job_id,
+            reason=reason,
+            expected_execution_lease=expected_execution_lease,
+        )
     except Exception as exc:
         logger.exception(
             "Failed to requeue import_job %s for preview", import_job_id

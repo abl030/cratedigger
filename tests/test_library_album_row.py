@@ -32,6 +32,7 @@ def _valid_row_dict(**overrides: object) -> dict[str, object]:
         "beets_album_id": 7,
         "pipeline_status": None,
         "pipeline_id": None,
+        "processing_owner": None,
         "upgrade_queued": False,
         "library_rank": "transparent",
     }
@@ -124,16 +125,24 @@ class TestLibraryAlbumRow(unittest.TestCase):
             },
             pipeline_row={
                 "id": 42,
-                "status": "wanted",
-                "search_filetype_override": "flac",
+                "status": "processing",
+                "processing_owner": {
+                    "job_id": 9,
+                    "status": "queued",
+                    "preview_status": "waiting",
+                },
+                "search_filetype_override": None,
                 "target_format": None,
             },
             rank_fn=lambda _fmt, _kbps: "transparent",
         )
 
-        self.assertEqual(row.pipeline_status, "wanted")
+        self.assertEqual(row.pipeline_status, "processing")
         self.assertEqual(row.pipeline_id, 42)
-        self.assertTrue(row.upgrade_queued)
+        owner = row.processing_owner
+        assert owner is not None
+        self.assertEqual(owner.job_id, 9)
+        self.assertFalse(row.upgrade_queued)
 
     def test_from_beets_album_normalizes_discogs_frontend_id(self) -> None:
         row = LibraryAlbumRow.from_beets_album(

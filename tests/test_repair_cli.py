@@ -126,50 +126,6 @@ class TestCollectIssues(unittest.TestCase):
         self.assertEqual(issues[0].detail, detail)
         self.assertEqual(issues[1].detail, "different detail")
 
-    def test_auto_import_in_progress_returns_true_when_lock_is_held(self) -> None:
-        db = FakePipelineDB()
-        cur = MagicMock()
-        cur.fetchone.return_value = {"held": True}
-        db.queue_execute_results(cur)
-
-        result = repair._auto_import_in_progress(cast(Any, db), 17, "test-mbid")
-
-        self.assertTrue(result)
-        self.assertEqual(len(db.execute_calls), 1)
-        sql, params = db.execute_calls[0]
-        self.assertIn("FROM pg_locks", sql)
-        self.assertIn("objsubid = 2", sql)
-        self.assertEqual(params[0], repair.ADVISORY_LOCK_NAMESPACE_RELEASE)
-
-    def test_auto_import_in_progress_returns_false_when_no_lock_is_held(self) -> None:
-        db = FakePipelineDB()
-        cur = MagicMock()
-        cur.fetchone.return_value = {"held": False}
-        db.queue_execute_results(cur)
-
-        result = repair._auto_import_in_progress(cast(Any, db), 17, "test-mbid")
-
-        self.assertFalse(result)
-
-    def test_auto_import_in_progress_returns_false_without_mbid(self) -> None:
-        db = FakePipelineDB()
-
-        result = repair._auto_import_in_progress(cast(Any, db), 17, None)
-
-        self.assertFalse(result)
-        self.assertEqual(db.execute_calls, [])
-
-    def test_auto_import_in_progress_reports_probe_failure(self) -> None:
-        db = FakePipelineDB()
-        db.queue_execute_results(RuntimeError("db boom"))
-
-        stdout = io.StringIO()
-        with redirect_stdout(stdout):
-            result = repair._auto_import_in_progress(cast(Any, db), 17, "test-mbid")
-
-        self.assertIsNone(result)
-        self.assertIn("could not probe auto-import lock for request 17", stdout.getvalue())
-
     @patch("scripts.repair._fetch_slskd_downloads", return_value=[])
     @patch("scripts.repair.read_runtime_config", side_effect=RuntimeError("cfg boom"))
     @patch("scripts.repair._get_all_rows", return_value=[])

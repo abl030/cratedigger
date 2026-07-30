@@ -1,6 +1,10 @@
 ---
 paths:
   - "lib/pipeline_db.py"
+  - "lib/pipeline_db/**/*.py"
+  - "lib/terminal_outcomes.py"
+  - "lib/import_job_recovery_service.py"
+  - "lib/processing_cleanup.py"
   - "scripts/pipeline_cli/**/*.py"
   - "lib/migrator.py"
   - "scripts/migrate_db.py"
@@ -11,12 +15,41 @@ paths:
 
 - Connection: `postgresql://cratedigger@10.20.0.11:5432/cratedigger`
 - **MUST use `autocommit=True`** in `PipelineDB` — prevents idle-in-transaction deadlocks
-- Active statuses: `wanted`, `downloading`, `imported`, `unsearchable`; terminal
-  audit status: `replaced`. `unsearchable` is the reversible operator-owned
-  search stop, not a source-cleanup state. `replaced` rows are frozen and have
-  no outgoing ordinary lifecycle transition; only `supersede_request_mbid` may
-  create that status.
+- Active statuses: `wanted`, `downloading`, `processing`, `imported`,
+  `unsearchable`; terminal audit status: `replaced`. `processing` exists iff
+  `active_automation_import_job_id` names the request's one active
+  `automation_import` job; a path, heartbeat, latest job, or execution lease
+  never substitutes for that pointer. `unsearchable` is the reversible
+  operator-owned search stop, not a source-cleanup state. `replaced` rows are
+  frozen and have no outgoing ordinary lifecycle transition; only
+  `supersede_request_mbid` may create that status.
 - JSONB columns: use for structured audit data (`import_result`, `validation_result`)
+
+## Processing-owner writes
+
+- The only initial owner transition is the atomic witnessed handoff:
+  acquire `IMPORT(request_id)`, lock the request, compare
+  `status='downloading'` and exact `active_download_state.enqueued_at`, insert
+  the automation job, attach its ID, preserve the immutable attempt manifest,
+  and enter `processing` in one transaction.
+- Every processing write compares the exact request/job pair and the
+  stage-specific job/preview state. A wrong or stale job ID is a zero-write
+  result, including heartbeat, evidence, path, cleanup, audit, policy, and
+  terminal fields.
+- When both advisory locks are required, one dedicated non-pooled
+  `PipelineDB` session acquires `IMPORT(request_id)` before
+  `RELEASE(release_id)` and stays pinned through filesystem/Beets work and the
+  terminal commit. Runtime context borrows that session and must not reconnect.
+- Row locks inside owner transactions follow request, then all request jobs in
+  ID order, then cleanup journals in job-ID order. Recovery retry is the sole
+  in-processing owner replacement: it fails the ambiguous job, inserts a new
+  one, retargets a byte-identical journal, and updates the request pointer last.
+- Processor cleanup is a durable exact-path/manifest journal, not
+  post-terminal best effort. Complete or typed no-op cleanup while the owner is
+  attached; the terminal bundle consumes its receipt and only then clears
+  owner/state and transitions `processing → wanted|imported`.
+- Never add `processing` to slskd event, transfer, ledger-retention, or reaper
+  status sets. It belongs to request presentation and unresolved backlog only.
 
 ## Schema migrations are versioned files, NOT runtime DDL
 

@@ -1,10 +1,16 @@
 """Rule A audit — every PipelineDB write method needs a real-PG round-trip test.
 
 Codifies ``.claude/rules/test-fidelity.md`` § "Rule A — Production-shape write
-contract" as an executable rule. When a new ``upsert_* / add_* / update_* /
-record_* / set_* / mark_*`` method ships without a corresponding round-trip
-test in ``tests/test_pipeline_db.py``, this audit fails and CI blocks the
-merge.
+contract" as an executable rule. When a new write method whose name starts with
+one of ``WRITE_METHOD_PREFIXES`` ships without a corresponding round-trip test
+in ``tests/test_pipeline_db.py``, this audit fails and CI blocks the merge.
+
+The prefix list is the gate's whole reach: a write verb missing from it is
+invisible to this audit. #898 review found exactly that hole — the new
+``create_``/``checkpoint_``/``complete_`` cleanup-journal writers were
+unaudited because only ``handoff_`` had been added alongside them — so the
+list now spans every write verb currently on ``PipelineDB``. Adding a new
+write verb means adding its prefix here too.
 
 Round 2 P0-1 motivated the rule: ``upsert_youtube_album_mapping`` silently
 dropped ``album_title`` because the INSERT column list didn't include it and
@@ -40,6 +46,15 @@ WRITE_METHOD_PREFIXES = (
     "record_",
     "set_",
     "mark_",
+    "handoff_",
+    "create_",
+    "checkpoint_",
+    "complete_",
+    "claim_",
+    "retry_",
+    "recover_",
+    "heartbeat_",
+    "authorize_",
 )
 
 
@@ -62,8 +77,6 @@ ALLOWLIST: dict[str, str] = {
         "status transition only",
     "mark_import_job_preview_importable":
         "status transition only",
-    "mark_import_subprocess_started":
-        "status transition only",
     "mark_imported_with_rescue":
         "status transition + rescue timestamp",
     "record_attempt":
@@ -80,10 +93,6 @@ ALLOWLIST: dict[str, str] = {
         "status transition only",
     "set_unfindable_category":
         "single-column write",
-    "update_download_state":
-        "single-column status update",
-    "update_download_state_current_path":
-        "single-column path update",
     "update_download_state_if_downloading":
         "real-PG whole-state round-trip and rejection parity in "
         "TestDownloadingStatus::"
@@ -146,6 +155,62 @@ ALLOWLIST: dict[str, str] = {
         "round-trip via raw SELECT on slskd_transfer_ledger; tested in "
         "TestTransferLedgerRoundTrip::"
         "test_record_transfer_enqueue_round_trip_preserves_every_field",
+    "record_import_job_beets_child":
+        "round-trip via get_import_job; tested in TestAutomationImportHandoff::"
+        "test_record_import_job_beets_child_round_trip_preserves_exact_execution_columns",
+    # Cleanup-journal writers (#898). Each has a real-PG round-trip asserting
+    # the persisted intent field-by-field, but it lives in
+    # tests/test_cleanup_journal.py and the auto-detector only parses
+    # tests/test_pipeline_db.py.
+    "create_processing_cleanup_journal":
+        "real-PG round-trip via get_processing_cleanup_journal in "
+        "TestCleanupJournalPersistence::"
+        "test_create_round_trips_exact_intent_and_same_replay_is_idempotent",
+    "checkpoint_processing_cleanup_journal":
+        "real-PG revision-CAS round-trip in TestCleanupJournalPersistence::"
+        "test_checkpoint_is_monotonic_revision_cas_and_replay_safe",
+    "complete_processing_cleanup_journal":
+        "real-PG typed-receipt round-trip in TestCleanupJournalPersistence::"
+        "test_complete_requires_exact_typed_receipt_and_is_idempotent",
+    # Claim / lease / recovery CAS methods. Rule A guards payload column
+    # drift — "every key in the input dict is readable back". These take no
+    # caller-supplied payload dict: they compare-and-set status or lease
+    # columns from scalar args and return the claimed row (or a bool), so
+    # there is no INSERT column list a field could be dropped from.
+    "claim_import_job_candidate":
+        "status CAS, returns claimed row; no dict payload",
+    "claim_import_preview_job_candidate":
+        "status CAS, returns claimed row; no dict payload",
+    "claim_automation_import_job_under_lock":
+        "owner-fenced status CAS; no dict payload",
+    "claim_automation_import_preview_job_under_lock":
+        "owner-fenced status CAS; no dict payload",
+    "claim_force_import_job_under_lock":
+        "owner-fenced status CAS; no dict payload",
+    "claim_force_import_preview_job_under_lock":
+        "owner-fenced status CAS; no dict payload",
+    "claim_current_v0_research_attempt":
+        "single-attempt CAS returning bool; no dict payload",
+    "claim_next_youtube_pending":
+        "status CAS over pending rows; no dict payload",
+    "heartbeat_import_job":
+        "lease timestamp CAS returning bool; no dict payload",
+    "heartbeat_import_job_preview":
+        "lease timestamp CAS returning bool; no dict payload",
+    "recover_running_import_jobs":
+        "status transition over dead-lease rows; no dict payload",
+    "recover_automation_import_job":
+        "exact-owner status transition; no dict payload",
+    "retry_automation_import_recovery":
+        "exact-owner status/revision CAS; no dict payload",
+    # Search-plan creators. Persisted plans are read back through
+    # get_search_plan / plan-item readers in tests/test_pipeline_db.py
+    # (TestPersistedSearchPlanCRUD), which the
+    # auto-detector's get_*-name heuristic does not match.
+    "create_successful_search_plan":
+        "real-PG round-trip via get_search_plan in TestPersistedSearchPlanCRUD",
+    "create_failed_search_plan":
+        "real-PG round-trip via get_search_plan in TestPersistedSearchPlanCRUD",
 }
 
 
@@ -202,6 +267,8 @@ def _find_round_trip_tests_for_method(method_name: str,
     elif method_name.startswith(("record_", "mark_")):
         suffix = method_name.split("_", 1)[1]
         read_candidates.update({f"get_{suffix}", f"list_{suffix}"})
+    elif method_name == "handoff_automation_import":
+        read_candidates.update({"get_request", "list_import_jobs"})
 
     hits: list[str] = []
     for node in ast.walk(tree):

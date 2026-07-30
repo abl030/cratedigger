@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import msgspec
 
@@ -71,6 +71,28 @@ IMPORT_JOB_PREVIEW_FAILURE_STATUSES = frozenset({
 IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES = frozenset({
     IMPORT_JOB_PREVIEW_EVIDENCE_READY,
 })
+
+AutomationHandoffOutcome = Literal[
+    "committed",
+    "lock_unavailable",
+    "request_missing",
+    "not_downloading",
+    "missing_state",
+    "witness_mismatch",
+    "owner_conflict",
+]
+
+
+@dataclass(frozen=True)
+class AutomationHandoffResult:
+    """Tagged result of the sole downloader-to-automation-owner transition."""
+
+    outcome: AutomationHandoffOutcome
+    job: ImportJob | None = None
+
+    @property
+    def committed(self) -> bool:
+        return self.outcome == "committed"
 
 
 _PositiveInt = Annotated[int, msgspec.Meta(gt=0)]
@@ -162,6 +184,13 @@ class ImportJob:
     beets_launch_source_path: str | None = None
     beets_launch_request_status: str | None = None
     beets_launch_snapshot_fingerprint: str | None = None
+    execution_invocation_id: str | None = None
+    execution_host_boot_id: str | None = None
+    execution_systemd_unit: str | None = None
+    execution_worker_pid: int | None = None
+    execution_worker_start_ticks: int | None = None
+    execution_beets_pid: int | None = None
+    execution_beets_start_ticks: int | None = None
     deduped: bool = False
 
     @classmethod
@@ -272,6 +301,41 @@ class ImportJob:
                 if row.get("beets_launch_snapshot_fingerprint") is not None
                 else None
             ),
+            execution_invocation_id=(
+                str(row["execution_invocation_id"])
+                if row.get("execution_invocation_id") is not None
+                else None
+            ),
+            execution_host_boot_id=(
+                str(row["execution_host_boot_id"])
+                if row.get("execution_host_boot_id") is not None
+                else None
+            ),
+            execution_systemd_unit=(
+                str(row["execution_systemd_unit"])
+                if row.get("execution_systemd_unit") is not None
+                else None
+            ),
+            execution_worker_pid=(
+                int(row["execution_worker_pid"])
+                if row.get("execution_worker_pid") is not None
+                else None
+            ),
+            execution_worker_start_ticks=(
+                int(row["execution_worker_start_ticks"])
+                if row.get("execution_worker_start_ticks") is not None
+                else None
+            ),
+            execution_beets_pid=(
+                int(row["execution_beets_pid"])
+                if row.get("execution_beets_pid") is not None
+                else None
+            ),
+            execution_beets_start_ticks=(
+                int(row["execution_beets_start_ticks"])
+                if row.get("execution_beets_start_ticks") is not None
+                else None
+            ),
             deduped=deduped,
         )
 
@@ -312,6 +376,13 @@ class ImportJob:
             "beets_launch_snapshot_fingerprint": (
                 self.beets_launch_snapshot_fingerprint
             ),
+            "execution_invocation_id": self.execution_invocation_id,
+            "execution_host_boot_id": self.execution_host_boot_id,
+            "execution_systemd_unit": self.execution_systemd_unit,
+            "execution_worker_pid": self.execution_worker_pid,
+            "execution_worker_start_ticks": self.execution_worker_start_ticks,
+            "execution_beets_pid": self.execution_beets_pid,
+            "execution_beets_start_ticks": self.execution_beets_start_ticks,
             "deduped": self.deduped,
         }
 

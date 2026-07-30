@@ -99,5 +99,23 @@ console.log('renderStatusBadges() renders no identity chip without pipeline iden
   assertExcludes(html, 'badge-provisional', 'plain install has no provisional chip');
 }
 
+console.log('renderStatusBadges() renders processing from the exact owner state');
+{
+  const html = renderStatusBadges({
+    id: 'request-processing',
+    in_library: false,
+    pipeline_status: 'processing',
+    processing_owner: {
+      job_id: 908,
+      status: 'queued',
+      preview_status: 'evidence_ready',
+    },
+  });
+  assertContains(html, 'badge-processing', 'processing uses its dedicated badge');
+  assertContains(html, '>waiting to import<', 'canonical owner presentation drives label');
+  assertContains(html, 'job #908', 'badge title names exact owner');
+  assertExcludes(html, 'downloading', 'processor ownership is not labelled as transfer ownership');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

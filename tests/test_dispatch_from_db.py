@@ -13,18 +13,23 @@ import msgspec
 
 from lib import transitions
 from lib.config import CratediggerConfig
+from lib.dispatch import entry_points as dispatch_entry_points_module
 from lib.dispatch.quality_gate import QualityGatePlan
+from lib.dispatch.types import DISPATCH_CODE_PROCESSING_LOCKED
 from lib.import_evidence import (
     ActionEvidenceProvenance,
     CandidateEvidenceActionResult,
 )
+from lib.import_execution import CancellationToken
 from lib.import_queue import IMPORT_JOB_FORCE
 from lib.quality import AudioQualityMeasurement, ImportResult
 from lib.quality_evidence import snapshot_audio_files
 from tests.fakes import FakePipelineDB
 from tests.helpers import (
     RecordingQualityGate,
+    claim_next_import_job,
     finalize_claimed_dispatch,
+    handoff_automation_owner,
     make_album_quality_evidence,
     make_import_result,
     make_request_row,
@@ -212,7 +217,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 container="mp3",
                 storage_format="MP3",
             )
-            claimed = db.claim_next_import_job(worker_id="dispatch-from-db-test")
+            claimed = claim_next_import_job(db, worker_id="dispatch-from-db-test")
             assert claimed is not None and claimed.id == job.id
             import_job_id = claimed.id
             # Seed current (on-disk) evidence so override-min-bitrate
@@ -463,7 +468,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 job.id,
                 preview_result={"ready": True},
             )
-            claimed = db.claim_next_import_job(worker_id="valid-evidence-test")
+            claimed = claim_next_import_job(db, worker_id="valid-evidence-test")
             assert claimed is not None and claimed.id == job.id
             _seed_current_for_request(
                 db, 42,
@@ -547,7 +552,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 preview_result={"verdict": "would_import"},
                 message="ready",
             )
-            claimed = db.claim_next_import_job(worker_id="importer")
+            claimed = claim_next_import_job(db, worker_id="importer")
             assert claimed is not None
             _seed_candidate_for_import_job(
                 db, job.id,
@@ -628,7 +633,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 preview_result={"verdict": "would_import"},
                 message="ready",
             )
-            claimed = db.claim_next_import_job(worker_id="importer")
+            claimed = claim_next_import_job(db, worker_id="importer")
             assert claimed is not None
             # No upsert_album_quality_evidence — candidate evidence is missing.
 
@@ -691,7 +696,7 @@ class TestDispatchFromDbOrchestration(unittest.TestCase):
                 preview_result={"verdict": "would_import"},
                 message="ready",
             )
-            claimed = db.claim_next_import_job(worker_id="importer")
+            claimed = claim_next_import_job(db, worker_id="importer")
             assert claimed is not None
 
             from typing import Any as _Any
@@ -949,6 +954,41 @@ class TestDispatchFromDbAdvisoryLock(unittest.TestCase):
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_locked_reread_rejects_a_processing_owner_before_any_effect(self):
+        from lib.dispatch import dispatch_import_from_db
+
+        db = self._seed_db()
+        db.request(42)["status"] = "wanted"
+        force_job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            payload={"download_log_id": 1, "failed_path": "/not-opened"},
+        )
+        owner = handoff_automation_owner(db, 42)
+        before = db.get_request(42)
+
+        with patch.object(
+            dispatch_entry_points_module,
+            "ensure_candidate_evidence_for_action",
+            side_effect=AssertionError("evidence lookup reached"),
+        ):
+            result = dispatch_import_from_db(
+                db,  # pyright: ignore[reportArgumentType]
+                request_id=42,
+                failed_path="/not-opened",
+                import_job_id=force_job.id,
+                cfg=CratediggerConfig(
+                    beets_harness_path="/nix/store/fake/harness",
+                    pipeline_db_enabled=True,
+                ),
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.code, DISPATCH_CODE_PROCESSING_LOCKED)
+        self.assertIn(f"automation import job {owner.id}", result.message)
+        self.assertEqual(db.get_request(42), before)
+        self.assertEqual(db.download_logs, [])
+
 
 class TestDispatchFromDbRuntimeConfigSeam(unittest.TestCase):
     def test_dispatch_import_from_db_uses_shared_runtime_config_reader(self):
@@ -1016,6 +1056,21 @@ class TestDispatchFromDbRuntimeConfigSeam(unittest.TestCase):
 
 
 class TestDispatchFromDbStorageAuthority(unittest.TestCase):
+    def test_partial_execution_authority_fails_before_any_db_or_config_effect(self):
+        from lib.dispatch import dispatch_import_from_db
+        from lib.pipeline_db import PipelineDB
+
+        db = create_autospec(PipelineDB, instance=True)
+        with self.assertRaisesRegex(ValueError, "must be paired"):
+            dispatch_import_from_db(
+                db,
+                request_id=42,
+                failed_path="/never-observed",
+                cancellation_token=CancellationToken(),
+            )
+
+        self.assertEqual(db.mock_calls, [])
+
     def test_partial_storage_override_fails_before_advisory_lock(self):
         from lib.dispatch import dispatch_import_from_db
         from lib.pipeline_db import PipelineDB

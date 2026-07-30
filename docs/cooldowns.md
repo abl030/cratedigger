@@ -56,7 +56,9 @@ CREATE TABLE user_cooldowns (
      `materialize_authority_failed`, `private_materialize_failed`.
    - Staged-path readiness: `staged_path_missing`,
      `staged_path_missing_tracked_files`, `empty_manifest`,
-     `duplicate_final_basename`, `abandoned_interrupted_auto_import`.
+     `duplicate_final_basename`. Historical audit rows may still carry
+     `abandoned_interrupted_auto_import` from the retired job-less recovery
+     path.
 
    The cooldown is applied identically whichever reason it was — the reason is
    evidence, never a lifecycle input. `lib/failure_presentation.py` turns each

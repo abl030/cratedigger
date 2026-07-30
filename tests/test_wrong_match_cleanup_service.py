@@ -22,6 +22,7 @@ from lib.import_preview import (
     PREVIEW_VERDICT_MEASUREMENT_FAILED,
     ImportPreviewResult,
 )
+from lib.import_queue import IMPORT_JOB_FORCE
 from lib.quality import (
     AlbumQualityEvidence,
     AlbumQualityEvidenceFile,
@@ -239,9 +240,13 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
         log_id = _log_wrong_match(self.db, 1, source)
 
         job = self.db.enqueue_import_job(
-            "automation_import",
+            IMPORT_JOB_FORCE,
             request_id=1,
-            payload={},
+            dedupe_key=f"force:wrong-match-cleanup:{log_id}",
+            payload={
+                "download_log_id": log_id,
+                "failed_path": source,
+            },
         )
         evidence_id = _store_evidence(
             self.db,

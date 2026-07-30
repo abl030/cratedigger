@@ -32,6 +32,7 @@ from lib.quality import (
 
 if TYPE_CHECKING:
     from lib.beets_db import CurrentBeetsUnique
+    from lib.import_execution import ExecutionLeaseSnapshot
     from lib.measurement import PreimportMeasurement
     from lib.pipeline_db.rows import AlbumRequestRow
 
@@ -63,8 +64,12 @@ class QualityEvidenceDB(Protocol):
     ) -> AlbumQualityEvidence | None: ...
 
     def set_import_job_candidate_evidence(
-        self, import_job_id: int, evidence_id: int | None,
-    ) -> None: ...
+        self,
+        import_job_id: int,
+        evidence_id: int | None,
+        *,
+        expected_execution_lease: ExecutionLeaseSnapshot | None = None,
+    ) -> bool: ...
 
     def set_download_log_candidate_evidence(
         self, download_log_id: int, evidence_id: int | None,

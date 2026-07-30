@@ -1,0 +1,27 @@
+{
+  "acquisition": [
+    {
+      "id": 203,
+      "status": "processing",
+      "created_at": "2026-07-29T01:00:00+00:00",
+      "updated_at": "2026-07-29T01:05:00+00:00",
+      "album_title": "Exact Owner",
+      "artist_name": "The Apartments",
+      "active_download_state": {
+        "processing_started_at": "2026-07-29T01:01:00+00:00",
+        "files": [
+          {
+            "username": "archive-peer",
+            "last_state": "Completed, Succeeded"
+          }
+        ]
+      },
+      "processing_owner": {
+        "job_id": 304,
+        "status": "queued",
+        "preview_status": "running"
+      }
+    }
+  ],
+  "youtube_ingest": []
+}

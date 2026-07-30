@@ -40,17 +40,22 @@ from web.index_document import (
 FALLBACK_FIXTURES: dict[str, dict[str, object]] = {
     "/api/pipeline/all": {
         "counts": {
-            "wanted": 0, "downloading": 0, "imported": 0,
+            "wanted": 0, "downloading": 0, "processing": 0, "imported": 0,
             "unsearchable": 0,
         },
         "wanted": [],
         "downloading": [],
+        "processing": [],
         "imported": [],
         "unsearchable": [],
     },
+    "/api/pipeline/acquisition": {
+        "acquisition": [],
+        "youtube_ingest": [],
+    },
     "/api/pipeline/status": {
         "counts": {
-            "wanted": 0, "downloading": 0, "imported": 0,
+            "wanted": 0, "downloading": 0, "processing": 0, "imported": 0,
             "unsearchable": 0,
         },
         "wanted": [],

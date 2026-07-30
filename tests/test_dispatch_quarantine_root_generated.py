@@ -37,6 +37,7 @@ class TestDispatchQuarantineRootGenerated(unittest.TestCase):
             candidate_kwargs={"audio_corrupt": True},
             beets_staging_dir=staging,
             slskd_download_dir=slskd,
+            finalize=False,
         )
         cleanup = world["result"].post_commit_cleanup
         assert cleanup is not None

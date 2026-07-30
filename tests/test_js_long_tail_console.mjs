@@ -16,7 +16,13 @@
  * Run with: node tests/test_js_long_tail_console.mjs
  */
 
-import { __test__ } from '../web/js/long_tail_console.js';
+import {
+  __test__,
+  longTailDeleteRequest,
+  longTailSetImported,
+  longTailSetIntent,
+} from '../web/js/long_tail_console.js';
+import { state } from '../web/js/state.js';
 
 const {
   consoleOpen,
@@ -255,6 +261,140 @@ console.log('consoleToken (resolver-settle) vs consoleIsStale (panel-paint)');
     'consoleToken: the current token has moved on from what was captured at fire time');
   assertEqual(consoleIsStale(map, 1, liveToken), false,
     'consoleIsStale: re-reading the CURRENT token (the resolver-settle pattern) is never stale');
+}
+
+console.log('long-tail mutation adapters map typed processing conflicts to one row refresh');
+for (const scenario of [
+  {
+    name: 'intent',
+    requestId: 911,
+    url: '/api/pipeline/set-intent',
+    invoke: (id, control) => longTailSetIntent(id, control),
+  },
+  {
+    name: 'imported status',
+    requestId: 912,
+    url: '/api/pipeline/update',
+    invoke: (id, control) => longTailSetImported(id, control),
+  },
+  {
+    name: 'delete',
+    requestId: 913,
+    url: '/api/pipeline/delete',
+    invoke: (id, control) => longTailDeleteRequest(id, control),
+  },
+]) {
+  const oldConfirm = globalThis.confirm;
+  const oldDocument = globalThis.document;
+  const oldFetch = globalThis.fetch;
+  const oldWindow = globalThis.window;
+  const attributes = new Map([['data-pipeline-request-id', String(scenario.requestId)]]);
+  const inserted = [];
+  const control = {
+    dataset: {},
+    disabled: false,
+    textContent: scenario.name,
+    style: {},
+    isConnected: true,
+    setAttribute(name, value) { attributes.set(name, value); },
+    removeAttribute(name) { attributes.delete(name); },
+    getAttribute(name) { return attributes.get(name) || null; },
+    focus() {},
+    insertAdjacentElement(_position, element) {
+      element.isConnected = true;
+      inserted.push(element);
+    },
+  };
+  const live = { textContent: '', setAttribute() {} };
+  state.longTail.rows = [{
+    id: scenario.requestId,
+    target_format: null,
+    source: 'request',
+  }];
+  globalThis.confirm = () => true;
+  globalThis.document = {
+    activeElement: control,
+    body: { appendChild() {} },
+    createElement() {
+      return {
+        children: [],
+        className: '',
+        id: '',
+        textContent: '',
+        isConnected: false,
+        setAttribute() {},
+        appendChild(child) { this.children.push(child); },
+        remove() { this.isConnected = false; },
+      };
+    },
+    getElementById(id) {
+      if (id === 'processing-lock-live-region') return live;
+      return inserted.find(element => element.id === id && element.isConnected) || null;
+    },
+    querySelectorAll() { return [control]; },
+  };
+  globalThis.window = { scrollX: 3, scrollY: 7, scrollTo() {} };
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    if (url === scenario.url) {
+      return {
+        status: 409,
+        async json() {
+          return {
+            error: 'processing_locked',
+            request_id: scenario.requestId,
+            processing_owner: {
+              job_id: scenario.requestId + 1000,
+              status: 'queued',
+              preview_status: 'waiting',
+            },
+          };
+        },
+      };
+    }
+    if (url === `/api/pipeline/${scenario.requestId}`) {
+      return {
+        ok: true,
+        async json() {
+          return {
+            request: {
+              id: scenario.requestId,
+              status: 'processing',
+              mb_release_id: `long-tail-${scenario.requestId}`,
+              processing_owner: {
+                job_id: scenario.requestId + 1000,
+                status: 'queued',
+                preview_status: 'running',
+              },
+            },
+          };
+        },
+      };
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  await scenario.invoke(scenario.requestId, control);
+  assertEqual(
+    calls.join(','),
+    `${scenario.url},/api/pipeline/${scenario.requestId}`,
+    `${scenario.name} conflict refetches only its request`,
+  );
+  assertEqual(
+    attributes.get('aria-disabled'),
+    'true',
+    `${scenario.name} control becomes aria-disabled`,
+  );
+  assertEqual(control.textContent, 'previewing', `${scenario.name} renders fresh owner status`);
+  assertEqual(
+    state.longTail.rows.some(row => row.id === scenario.requestId),
+    false,
+    `${scenario.name} removes non-wanted row from cached cohort`,
+  );
+  globalThis.confirm = oldConfirm;
+  globalThis.document = oldDocument;
+  globalThis.fetch = oldFetch;
+  globalThis.window = oldWindow;
 }
 
 // --- checkYoutube: no residual ConsoleState for a row with no identifier ---

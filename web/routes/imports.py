@@ -8,8 +8,13 @@ from typing import Any, Protocol, Self, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from lib import transitions
 from lib.config import read_runtime_config
-from lib.force_import_service import RESULT_QUEUED, enqueue_force_import
+from lib.force_import_service import (
+    RESULT_PROCESSING_LOCKED,
+    RESULT_QUEUED,
+    enqueue_force_import,
+)
 from lib.fs_authority import OpenedRegularFile
 from lib.import_preview import (
     ImportPreviewValues,
@@ -774,7 +779,21 @@ def post_wrong_match_converge(h: RouteHandler, body: dict[str, object]) -> None:
         lid = candidate["download_log_id"]
         result = enqueue_force_import(pdb, read_runtime_config(), lid)
         if result.outcome != RESULT_QUEUED:
-            skipped.append({"download_log_id": lid, "reason": result.outcome})
+            skipped_entry: dict[str, object] = {
+                "download_log_id": lid,
+                "reason": result.outcome,
+            }
+            if result.outcome == RESULT_PROCESSING_LOCKED:
+                owner = transitions.processing_owner_payload(
+                    result.processing_owner
+                )
+                if owner is None:
+                    raise RuntimeError(
+                        "processing-locked force import is missing its "
+                        "exact owner"
+                    )
+                skipped_entry["processing_owner"] = owner
+            skipped.append(skipped_entry)
             remaining += 1
             continue
         assert result.job is not None

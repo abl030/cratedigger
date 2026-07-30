@@ -7,6 +7,7 @@ from datetime import datetime
 
 import msgspec
 
+from lib.pipeline_db._shared import ProcessingOwnerProjection
 from lib.release_identity import (
     ReleaseIdentity,
     detect_release_source,
@@ -81,6 +82,7 @@ class LibraryAlbumRow(msgspec.Struct, frozen=True):
     beets_album_id: int | None
     pipeline_status: str | None
     pipeline_id: int | None
+    processing_owner: ProcessingOwnerProjection | None
     upgrade_queued: bool
     library_rank: str | None
 
@@ -129,6 +131,7 @@ class LibraryAlbumRow(msgspec.Struct, frozen=True):
                 "beets_album_id": album["id"],
                 "pipeline_status": None,
                 "pipeline_id": None,
+                "processing_owner": None,
                 "upgrade_queued": False,
                 "library_rank": rank_fn(formats, _bitrate_kbps(avg_bitrate)),
             },
@@ -181,6 +184,7 @@ class LibraryAlbumRow(msgspec.Struct, frozen=True):
                 "beets_album_id": None,
                 "pipeline_status": row.get("status"),
                 "pipeline_id": row["id"],
+                "processing_owner": row.get("processing_owner"),
                 "upgrade_queued": _pipeline_upgrade_queued(row),
                 "library_rank": None,
             },
@@ -196,5 +200,6 @@ class LibraryAlbumRow(msgspec.Struct, frozen=True):
         row = self.to_dict()
         row["pipeline_status"] = pipeline_row.get("status")
         row["pipeline_id"] = pipeline_row["id"]
+        row["processing_owner"] = pipeline_row.get("processing_owner")
         row["upgrade_queued"] = _pipeline_upgrade_queued(pipeline_row)
         return msgspec.convert(row, type=type(self))

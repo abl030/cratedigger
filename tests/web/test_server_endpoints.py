@@ -607,7 +607,9 @@ class TestServerEndpoints(_FakeDbWebServerCase):
         status, data = self._get("/api/pipeline/all")
         self.assertEqual(status, 200)
         self.assertIn("counts", data)
-        for key in ("wanted", "downloading", "imported", "unsearchable"):
+        for key in (
+            "wanted", "downloading", "processing", "imported", "unsearchable",
+        ):
             self.assertIn(key, data)
 
     def test_pipeline_status_includes_downloading(self):
@@ -662,7 +664,7 @@ class TestServerEndpoints(_FakeDbWebServerCase):
         self.assertEqual(row["last_outcome"], "rejected")
         self.assertEqual(row["last_username"], "peer")
 
-    def test_pipeline_downloading_includes_active_youtube_ingest(self):
+    def test_pipeline_acquisition_includes_active_youtube_ingest(self):
         self.db.seed_request(make_request_row(
             id=202, status="wanted", artist_name="YT Artist",
             album_title="YT Album", mb_release_id="yt-mbid",
@@ -675,19 +677,20 @@ class TestServerEndpoints(_FakeDbWebServerCase):
             expected_track_count=2,
         )
 
-        status, data = self._get("/api/pipeline/downloading")
+        status, data = self._get("/api/pipeline/acquisition")
 
         self.assertEqual(status, 200)
-        self.assertEqual(data["downloading"], [])
+        self.assertEqual(data["acquisition"], [])
         self.assertEqual(len(data["youtube_ingest"]), 1)
         rescue = data["youtube_ingest"][0]
         self.assertEqual(rescue["download_log_id"], log_id)
         self.assertEqual(rescue["album_title"], "YT Album")
         self.assertEqual(rescue["youtube_metadata"]["browse_id"], "yt-browse")
         self.assertEqual(rescue["request_status"], "wanted")
+        self.assertIsNone(rescue["processing_owner"])
 
-    def test_pipeline_downloading_caps_youtube_ingest_at_50(self):
-        """The route hardcodes limit=50 on list_active_youtube_rescues —
+    def test_pipeline_acquisition_caps_youtube_ingest_at_50(self):
+        """The route hardcodes limit=50 on the combined acquisition read —
         one running rescue per request (partial unique index), so 51
         requests with running ingests page down to 50."""
         for i in range(51):
@@ -699,9 +702,25 @@ class TestServerEndpoints(_FakeDbWebServerCase):
                 audio_playlist_id=None, yt_url=f"https://yt/{rid}",
                 expected_track_count=2,
             )
-        status, data = self._get("/api/pipeline/downloading")
+        status, data = self._get("/api/pipeline/acquisition")
         self.assertEqual(status, 200)
         self.assertEqual(len(data["youtube_ingest"]), 50)
+
+    def test_pipeline_downloading_does_not_mix_in_youtube_ingest(self):
+        self.db.seed_request(make_request_row(
+            id=402, status="wanted", mb_release_id="yt-separation"))
+        self.db.insert_youtube_running(
+            request_id=402,
+            browse_id="yt-separation",
+            audio_playlist_id=None,
+            yt_url="https://yt/separation",
+            expected_track_count=2,
+        )
+
+        status, data = self._get("/api/pipeline/downloading")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(set(data), {"counts", "downloading"})
 
     def test_pipeline_detail(self):
         status, data = self._get("/api/pipeline/100")

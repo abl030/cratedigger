@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -23,6 +23,7 @@ logger = logging.getLogger("cratedigger")
 
 _BAD_FILE_SCENARIOS = frozenset({"audio_corrupt", "spectral_reject"})
 _LEFTOVER_QUARANTINE_DIR = "untracked_audio"
+MutationCheckpoint = Callable[[], None]
 
 
 @dataclass(frozen=True)
@@ -54,11 +55,80 @@ def _safe_relpath(path: str) -> str | None:
     return rel
 
 
+def _makedirs(
+    path: str,
+    *,
+    exist_ok: bool,
+    before_mutation: MutationCheckpoint | None,
+) -> None:
+    """Create each missing directory as one cancellation-visible mutation."""
+    if before_mutation is None:
+        os.makedirs(path, exist_ok=exist_ok)
+        return
+    missing: list[str] = []
+    cursor = os.path.abspath(path)
+    while not os.path.exists(cursor):
+        missing.append(cursor)
+        parent = os.path.dirname(cursor)
+        if parent == cursor:
+            break
+        cursor = parent
+    if os.path.exists(cursor) and not os.path.isdir(cursor):
+        raise NotADirectoryError(cursor)
+    if not missing and not exist_ok:
+        raise FileExistsError(path)
+    for directory in reversed(missing):
+        before_mutation()
+        try:
+            os.mkdir(directory)
+        except FileExistsError:
+            if not exist_ok or not os.path.isdir(directory):
+                raise
+
+
+def _move(
+    source: str,
+    destination: str,
+    *,
+    before_mutation: MutationCheckpoint | None,
+) -> None:
+    """Use only an atomic rename while cancellation is being monitored."""
+    if before_mutation is None:
+        shutil.move(source, destination)
+        return
+    before_mutation()
+    os.rename(source, destination)
+
+
+def _remove_tree(
+    path: str,
+    *,
+    before_mutation: MutationCheckpoint,
+) -> None:
+    """Delete a private rollback tree one namespace mutation at a time."""
+    if not os.path.lexists(path):
+        return
+    if not os.path.isdir(path) or os.path.islink(path):
+        before_mutation()
+        os.unlink(path)
+        return
+    with os.scandir(path) as entries:
+        names = sorted(entry.name for entry in entries)
+    for name in names:
+        _remove_tree(
+            os.path.join(path, name),
+            before_mutation=before_mutation,
+        )
+    before_mutation()
+    os.rmdir(path)
+
+
 def _allocate_target(
     src_path: str,
     *,
     scenario: str | None,
     quarantine_root: str | None = None,
+    before_mutation: MutationCheckpoint | None = None,
 ) -> str:
     parent_dir = (
         os.path.abspath(quarantine_root)
@@ -73,7 +143,11 @@ def _allocate_target(
     quarantine_dir = os.path.join(parent_dir, quarantine_dir_name)
     if scenario in _BAD_FILE_SCENARIOS:
         quarantine_dir = os.path.join(quarantine_dir, "bad_files")
-    os.makedirs(quarantine_dir, exist_ok=True)
+    _makedirs(
+        quarantine_dir,
+        exist_ok=True,
+        before_mutation=before_mutation,
+    )
 
     folder_name = os.path.basename(os.path.abspath(src_path))
     target_path = os.path.join(quarantine_dir, folder_name)
@@ -88,6 +162,7 @@ def _allocate_leftover_target(
     src_path: str,
     *,
     quarantine_root: str | None = None,
+    before_mutation: MutationCheckpoint | None = None,
 ) -> str:
     parent_dir = (
         os.path.abspath(quarantine_root)
@@ -95,7 +170,7 @@ def _allocate_leftover_target(
         else os.path.dirname(os.path.abspath(src_path))
     )
     root = os.path.join(parent_dir, "failed_imports", _LEFTOVER_QUARANTINE_DIR)
-    os.makedirs(root, exist_ok=True)
+    _makedirs(root, exist_ok=True, before_mutation=before_mutation)
 
     folder_name = os.path.basename(os.path.abspath(src_path))
     target_path = os.path.join(root, folder_name)
@@ -197,6 +272,7 @@ def move_failed_import_curated(
     allowed_audio: Iterable[str],
     scenario: str | None = None,
     quarantine_root: str | None = None,
+    before_mutation: MutationCheckpoint | None = None,
 ) -> str | None:
     """Move curated files into their rejection-specific quarantine root.
 
@@ -214,35 +290,69 @@ def move_failed_import_curated(
         src_path,
         scenario=scenario,
         quarantine_root=quarantine_root,
+        before_mutation=before_mutation,
     )
-    os.makedirs(target_path, exist_ok=False)
+    _makedirs(
+        target_path,
+        exist_ok=False,
+        before_mutation=before_mutation,
+    )
 
     moved: list[tuple[str, str]] = []
     try:
         for dirpath, _dirnames, filenames in os.walk(src_path):
             rel_dir = os.path.relpath(dirpath, src_path)
-            for filename in filenames:
+            ordered_filenames = (
+                sorted(filenames)
+                if before_mutation is not None
+                else filenames
+            )
+            for filename in ordered_filenames:
                 full_src = os.path.join(dirpath, filename)
                 rel = filename if rel_dir == "." else os.path.join(rel_dir, filename)
                 rel = os.path.normpath(rel)
                 if _is_audio_path(rel) and rel not in allowed:
                     continue
                 full_dst = os.path.join(target_path, rel)
-                os.makedirs(os.path.dirname(full_dst), exist_ok=True)
-                shutil.move(full_src, full_dst)
+                _makedirs(
+                    os.path.dirname(full_dst),
+                    exist_ok=True,
+                    before_mutation=before_mutation,
+                )
+                _move(
+                    full_src,
+                    full_dst,
+                    before_mutation=before_mutation,
+                )
                 moved.append((full_dst, full_src))
     except Exception:
+        if before_mutation is not None:
+            before_mutation()
         for full_dst, full_src in reversed(moved):
             if os.path.exists(full_dst):
-                os.makedirs(os.path.dirname(full_src), exist_ok=True)
+                _makedirs(
+                    os.path.dirname(full_src),
+                    exist_ok=True,
+                    before_mutation=before_mutation,
+                )
                 try:
-                    shutil.move(full_dst, full_src)
+                    _move(
+                        full_dst,
+                        full_src,
+                        before_mutation=before_mutation,
+                    )
                 except Exception:
                     logger.exception(
                         "Failed to roll back curated failed-import move %s",
                         full_dst,
                     )
-        shutil.rmtree(target_path, ignore_errors=True)
+        if before_mutation is None:
+            shutil.rmtree(target_path, ignore_errors=True)
+        else:
+            _remove_tree(
+                target_path,
+                before_mutation=before_mutation,
+            )
         raise
 
     if os.path.exists(src_path):
@@ -252,15 +362,24 @@ def move_failed_import_curated(
             leftover_target = _allocate_leftover_target(
                 src_path,
                 quarantine_root=quarantine_root,
+                before_mutation=before_mutation,
             )
-            shutil.move(src_path, leftover_target)
+            _move(
+                src_path,
+                leftover_target,
+                before_mutation=before_mutation,
+            )
             logger.warning(
                 "Quarantined untracked import leftovers: %s -> %s",
                 src_path,
                 leftover_target,
             )
         else:
-            shutil.rmtree(src_path, ignore_errors=True)
+            if before_mutation is None:
+                shutil.rmtree(src_path, ignore_errors=True)
+            else:
+                before_mutation()
+                os.rmdir(src_path)
 
     logger.info("Curated rejected import moved to: %s", target_path)
     return target_path

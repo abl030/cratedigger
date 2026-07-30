@@ -1,6 +1,5 @@
 """download_log audit rows and wrong-match bookkeeping."""
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar, Literal, TypedDict, get_args
 
 import msgspec
@@ -8,10 +7,6 @@ import psycopg2
 import psycopg2.extras
 
 from lib.dispatch.types import PostCommitQuarantineAudit
-from lib.pipeline_db._shared import (
-    BACKOFF_BASE_MINUTES,
-    BACKOFF_MAX_MINUTES,
-)
 from lib.pipeline_db.rows import (
     DownloadLogWithEvidenceRow,
     DownloadLogWithOriginRow,
@@ -463,112 +458,6 @@ class _DownloadLogMixin(_PipelineDBBase):
         self.conn.commit()
         assert row is not None, "INSERT RETURNING should always return a row"
         return int(row["id"])
-
-
-    def abandon_auto_import_request(
-        self,
-        *,
-        request_id: int,
-        current_path: str,
-        soulseek_username: str | None,
-        filetype: str | None,
-        beets_detail: str,
-        outcome: str,
-        staged_path: str,
-        error_message: str,
-        validation_result: str | None,
-    ) -> int | None:
-        """Atomically audit and reset an owned interrupted auto-import row."""
-        if validation_result is None:
-            beets_distance, beets_scenario = derive_validation_log_columns(
-                validation_result,
-                beets_scenario="abandoned_auto_import",
-            )
-        else:
-            beets_distance, beets_scenario = derive_validation_log_columns(
-                validation_result,
-            )
-        with self._atomic():
-            now = datetime.now(UTC)
-            with self.conn.cursor(
-                cursor_factory=psycopg2.extras.RealDictCursor,
-            ) as cur:
-                cur.execute(
-                    """
-                    UPDATE album_requests
-                    SET status = 'wanted',
-                        active_download_state = NULL,
-                        updated_at = %s
-                    WHERE id = %s
-                      AND status = 'downloading'
-                      AND active_download_state IS NOT NULL
-                      AND active_download_state->>'current_path' = %s
-                      AND active_download_state->>'import_subprocess_started_at'
-                          IS NOT NULL
-                    RETURNING id
-                    """,
-                    (now, request_id, current_path),
-                )
-                if cur.fetchone() is None:
-                    self.conn.rollback()
-                    return None
-
-                cur.execute(
-                    """
-                    UPDATE album_requests
-                    SET download_attempts = COALESCE(download_attempts, 0) + 1,
-                        last_attempt_at = %s,
-                        updated_at = %s
-                    WHERE id = %s
-                      AND status = 'wanted'
-                    RETURNING download_attempts
-                    """,
-                    (now, now, request_id),
-                )
-                attempt_row = cur.fetchone()
-                assert attempt_row is not None, f"Request {request_id} not found"
-                new_count = int(attempt_row["download_attempts"])
-                backoff_minutes = min(
-                    BACKOFF_BASE_MINUTES * (2 ** (new_count - 1)),
-                    BACKOFF_MAX_MINUTES,
-                )
-                cur.execute(
-                    """
-                    UPDATE album_requests
-                    SET next_retry_after = %s
-                    WHERE id = %s
-                      AND status = 'wanted'
-                    """,
-                    (now + timedelta(minutes=backoff_minutes), request_id),
-                )
-
-                cur.execute(
-                    """
-                    INSERT INTO download_log (
-                        request_id, soulseek_username, filetype,
-                        beets_distance, beets_scenario, beets_detail, outcome,
-                        staged_path, error_message, validation_result
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    RETURNING id
-                    """,
-                    (
-                        request_id,
-                        soulseek_username,
-                        filetype,
-                        beets_distance,
-                        beets_scenario,
-                        beets_detail,
-                        outcome,
-                        staged_path,
-                        error_message,
-                        validation_result,
-                    ),
-                )
-                log_row = cur.fetchone()
-                assert log_row is not None, "INSERT RETURNING should return a row"
-                log_id = int(log_row["id"])
-            self.conn.commit()
-            return log_id
 
 
     # Evidence-overlay extension applied to every download_log read seam

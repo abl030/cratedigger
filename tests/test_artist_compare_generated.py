@@ -557,7 +557,12 @@ class TestArtistCompareGenerated(unittest.TestCase):
         )
         release.identity_kind = "release"
 
-        hit: _PipelineHit = {"status": "wanted", "id": 42, "_prio": 0}
+        hit: _PipelineHit = {
+            "status": "wanted",
+            "id": 42,
+            "processing_owner": None,
+            "_prio": 0,
+        }
         _apply_rg_pipeline_overlay(
             [work, release],
             {("discogs", target_kind, catalogue_id): hit},
@@ -580,7 +585,12 @@ class TestArtistCompareGenerated(unittest.TestCase):
         discogs = _discogs(
             year=1964, types=["Album"], appearance=False, id_=catalogue_id,
         )
-        hit: _PipelineHit = {"status": "wanted", "id": 42, "_prio": 0}
+        hit: _PipelineHit = {
+            "status": "wanted",
+            "id": 42,
+            "processing_owner": None,
+            "_prio": 0,
+        }
         _apply_rg_pipeline_overlay(
             [mb, discogs],
             {(target_source, "work", catalogue_id): hit},

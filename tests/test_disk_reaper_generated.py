@@ -80,6 +80,7 @@ from lib.slskd_transfers import (
 )
 from tests.fakes import FakePipelineDB
 from tests.helpers import (
+    handoff_automation_owner,
     make_ctx_with_fake_db,
     make_download_file,
     make_grab_list_entry,
@@ -497,6 +498,69 @@ class TestDiskReaperDeterministicPins(unittest.TestCase):
 
             self.assertFalse(os.path.exists(path))
             self.assertEqual(summary.removed, 1)
+
+    def test_processing_owner_does_not_gain_active_download_protection(self):
+        """A `processing` request's slskd source is reap-eligible by design.
+
+        The handoff commits `downloading -> processing` without touching the
+        filesystem, so between the handoff and materialization's
+        copy-then-`unlink_if_same` the slskd source is the only copy AND has
+        lost the never-delete protection it had while `downloading`
+        (`_protected_paths_for_downloading` reads only `get_downloading()`).
+        Past `ORPHAN_MIN_AGE_DAYS` the reaper deletes it, and a wedged
+        `recovery_required` owner can sit there that long.
+
+        That is accepted: these bytes are replaceable. Losing them costs a
+        re-download, not the request -- the row self-heals to `wanted` and the
+        never-stop-searching invariant re-acquires it. Protecting them would
+        mean widening a slskd status set for `processing`, which is exactly
+        what CLAUDE.md invariant 10 exists to prevent. The assertions below
+        are that decision, not an oversight.
+
+        Authority: "i think we can trest these bytes as replaceable in this
+        isntsnce." -- https://github.com/abl030/cratedigger/issues/898#issuecomment-5124557436
+        """
+        with tempfile.TemporaryDirectory() as root:
+            fake_db = FakePipelineDB()
+            request_id = 29
+            pair = ("peer", "peer\\Album\\01.flac")
+            path = os.path.join(root, "Processing Source", "01.flac")
+            downloading_row, _canonical = _downloading_row_and_canonical(
+                request_id=request_id,
+                artist="Processing Artist",
+                title="Processing Album",
+                year="2026",
+                file_pairs=[pair],
+                root=root,
+                local_paths={pair: path},
+            )
+            fake_db.seed_request(make_request_row(
+                id=request_id,
+                status="wanted",
+                artist_name="Processing Artist",
+                album_title="Processing Album",
+                year=2026,
+            ))
+            handoff_automation_owner(
+                fake_db,
+                request_id,
+                state=downloading_row["active_download_state"],
+            )
+            _ledger_seed(
+                fake_db,
+                request_id=request_id,
+                file_pairs=[pair],
+                local_paths={pair: path},
+                with_fingerprint=False,
+            )
+            _write_aged_file(path, age_days=_OLD_DAYS)
+
+            summary = reap_disk_orphans(_make_ctx(root, fake_db=fake_db))
+
+            self.assertEqual(fake_db.get_downloading(), [])
+            self.assertFalse(os.path.exists(path))
+            self.assertEqual(summary.removed, 1)
+            self.assertEqual(summary.protected, 0)
 
     def test_ledger_owned_file_survives_when_young(self):
         """Age gate still applies to owned files — R2 requires AGED,

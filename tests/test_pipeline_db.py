@@ -10,6 +10,7 @@ import dataclasses
 import json
 import os
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -28,6 +29,19 @@ import psycopg2.extras
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401 — sets TEST_DB_DSN env var
 
+from lib.dispatch import DispatchOutcome
+from lib.import_execution import (
+    CancellationToken,
+    ExecutionCancelled,
+    ExecutionLeaseSnapshot,
+    OwnerSessionIdentity,
+)
+from lib.import_queue import (
+    IMPORT_JOB_FORCE,
+    AutomationHandoffResult,
+    ImportJob,
+    force_import_payload,
+)
 from lib.json_narrow import json_dict
 from lib.pipeline_db import (
     JELLYFIN_PIN_STATUSES,
@@ -36,10 +50,12 @@ from lib.pipeline_db import (
     PersistedDistance,
     PersistedTrack,
     PersistedYoutubeRow,
+    SupersedeRaceError,
     TransferLedgerRow,
 )
 from lib.pipeline_db._shared import REQUEST_METADATA_RESERVED_FIELDS
 from lib.quality import (
+    ActiveDownloadState,
     AlbumQualityEvidenceFile,
     AudioQualityMeasurement,
     AudioToolDiagnostic,
@@ -47,7 +63,13 @@ from lib.quality import (
     legacy_unrecorded_audio_validation_report,
 )
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_album_quality_evidence, make_request_row
+from tests.helpers import (
+    claim_next_import_job,
+    claim_next_import_preview_job,
+    handoff_automation_owner,
+    make_album_quality_evidence,
+    make_request_row,
+)
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
 
@@ -71,6 +93,7 @@ def make_db():
         "peer_observations",
         "cycle_metrics",
         "bad_audio_hashes",
+        "processing_cleanup_journal",
         "import_jobs",
         "user_cooldowns",
         "source_denylist",
@@ -90,6 +113,12 @@ def make_db():
         db._execute(f"TRUNCATE {table} CASCADE")
     db.conn.commit()
     return db
+
+
+def _unavailable_execution_lease(
+    **_kwargs: object,
+) -> ExecutionLeaseSnapshot:
+    raise ValueError("test run is outside systemd")
 
 
 @requires_postgres
@@ -1088,6 +1117,68 @@ class TestImportJobQueueAPI(unittest.TestCase):
         )
         self.assertNotEqual(first.id, later.id)
 
+    def test_generic_automation_enqueue_is_rejected(self):
+        from lib.import_queue import (
+            IMPORT_JOB_AUTOMATION,
+            automation_import_dedupe_key,
+            automation_import_payload,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "handoff_automation_import",
+        ):
+            self.db.enqueue_import_job(
+                IMPORT_JOB_AUTOMATION,
+                request_id=self.req_id,
+                dedupe_key=automation_import_dedupe_key(self.req_id),
+                payload=automation_import_payload(),
+            )
+
+
+    def test_execution_lease_columns_round_trip_through_import_job(self):
+        from lib.import_queue import (
+            IMPORT_JOB_FORCE,
+            force_import_dedupe_key,
+            force_import_payload,
+        )
+
+        job = self.db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=self.req_id,
+            dedupe_key=force_import_dedupe_key(812),
+            payload=force_import_payload(
+                download_log_id=812,
+                failed_path="/tmp/lease-round-trip",
+                source_username="alice",
+            ),
+        )
+        self.db._execute("""
+            UPDATE import_jobs
+            SET execution_invocation_id = 'invocation-round-trip',
+                execution_host_boot_id = 'boot-round-trip',
+                execution_systemd_unit = 'cratedigger-importer.service',
+                execution_worker_pid = 1234,
+                execution_worker_start_ticks = 5678,
+                execution_beets_pid = 2345,
+                execution_beets_start_ticks = 6789
+            WHERE id = %s
+        """, (job.id,))
+        self.db.conn.commit()
+
+        stored = self.db.get_import_job(job.id)
+        assert stored is not None
+        self.assertEqual(stored.execution_invocation_id, "invocation-round-trip")
+        self.assertEqual(stored.execution_host_boot_id, "boot-round-trip")
+        self.assertEqual(
+            stored.execution_systemd_unit,
+            "cratedigger-importer.service",
+        )
+        self.assertEqual(stored.execution_worker_pid, 1234)
+        self.assertEqual(stored.execution_worker_start_ticks, 5678)
+        self.assertEqual(stored.execution_beets_pid, 2345)
+        self.assertEqual(stored.execution_beets_start_ticks, 6789)
+
     def test_malformed_force_payload_cannot_insert_or_poison_dedupe(self):
         from lib.import_queue import (
             IMPORT_JOB_FORCE,
@@ -1162,12 +1253,12 @@ class TestImportJobQueueAPI(unittest.TestCase):
             preview_result={"verdict": "would_import"},
             message="ready",
         )
-        claimed = self.db.claim_next_import_job(worker_id="test-worker")
+        claimed = claim_next_import_job(self.db, worker_id="test-worker")
         assert claimed is not None
         self.assertEqual(claimed.status, "running")
         self.assertEqual(claimed.worker_id, "test-worker")
         self.assertEqual(claimed.attempts, 1)
-        self.assertIsNone(self.db.claim_next_import_job(worker_id="other"))
+        self.assertIsNone(claim_next_import_job(self.db, worker_id="other"))
 
         completed = self.db.mark_import_job_completed(
             claimed.id,
@@ -1209,7 +1300,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
             job.id,
             preview_result={"ready": True},
         )
-        claimed = self.db.claim_next_import_job(worker_id="lost-worker")
+        claimed = claim_next_import_job(self.db, worker_id="lost-worker")
         assert claimed is not None
         launched = self.db.authorize_import_job_launch(
             claimed.id,
@@ -1245,11 +1336,11 @@ class TestImportJobQueueAPI(unittest.TestCase):
 
     def test_recovery_retry_resets_preview_only_for_force_job(self):
         """#853 Rule A: the retry insert keeps non-force preview authority."""
-        from lib.import_queue import IMPORT_JOB_AUTOMATION, IMPORT_JOB_FORCE
+        from lib.import_queue import IMPORT_JOB_FORCE, IMPORT_JOB_YOUTUBE
 
         for job_type, status, source_path in (
             (IMPORT_JOB_FORCE, "wanted", "/tmp/force-recovery"),
-            (IMPORT_JOB_AUTOMATION, "downloading", "/tmp/automation-recovery"),
+            (IMPORT_JOB_YOUTUBE, "wanted", "/tmp/youtube-recovery"),
         ):
             with self.subTest(job_type=job_type):
                 request_id = self.db.add_request(
@@ -1259,21 +1350,17 @@ class TestImportJobQueueAPI(unittest.TestCase):
                     source="request",
                     status=status,
                 )
-                if job_type == IMPORT_JOB_AUTOMATION:
-                    self.db._execute(
-                        "UPDATE album_requests SET active_download_state = %s::jsonb "
-                        "WHERE id = %s",
-                        (psycopg2.extras.Json({
-                            "current_path": source_path,
-                            "files": [],
-                        }), request_id),
-                    )
                 job = self.db.enqueue_import_job(
                     job_type,
                     request_id=request_id,
                     dedupe_key=f"recovery-preview:{job_type}",
                     payload={"download_log_id": 1, "failed_path": source_path}
-                    if job_type == IMPORT_JOB_FORCE else {},
+                    if job_type == IMPORT_JOB_FORCE else {
+                        "staged_path": source_path,
+                        "request_id": request_id,
+                        "browse_id": "youtube-recovery",
+                        "download_log_id": 1,
+                    },
                 )
                 evidence = make_album_quality_evidence(
                     mb_release_id=f"recovery-{job_type}", source_path=source_path,
@@ -1289,7 +1376,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
                 self.db.mark_import_job_preview_importable(
                     job.id, preview_result=preview_result,
                 )
-                claimed = self.db.claim_next_import_job(worker_id="recovery-worker")
+                claimed = claim_next_import_job(self.db, worker_id="recovery-worker")
                 assert claimed is not None
                 assert self.db.authorize_import_job_launch(
                     claimed.id,
@@ -1336,12 +1423,435 @@ class TestImportJobQueueAPI(unittest.TestCase):
         )
         other = pipeline_db.PipelineDB(TEST_DSN)
         try:
-            first = self.db.claim_next_import_job(worker_id="one")
-            second = other.claim_next_import_job(worker_id="two")
+            first = claim_next_import_job(self.db, worker_id="one")
+            second = claim_next_import_job(other, worker_id="two")
             self.assertIsNotNone(first)
             self.assertIsNone(second)
         finally:
             other.close()
+
+    def _seed_downloading_force_job(
+        self,
+        *,
+        suffix: str,
+        importable: bool,
+        source_path: str | None = None,
+    ) -> tuple[int, ImportJob, str]:
+        request_id = self.db.add_request(
+            mb_release_id=f"force-owner-{suffix}",
+            artist_name="Force Owner",
+            album_title=suffix,
+            source="request",
+        )
+        witness = f"2026-07-29T12:00:{request_id % 60:02d}+00:00"
+        exact_source_path = source_path or f"/tmp/force-owner-{suffix}"
+        state = ActiveDownloadState(
+            filetype="flac",
+            enqueued_at=witness,
+            current_path=exact_source_path,
+            files=[],
+        )
+        self.assertTrue(self.db.set_downloading(
+            request_id,
+            state.to_json(),
+            expected_status="wanted",
+        ))
+        job = self.db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=request_id,
+            dedupe_key=f"force-owner:{suffix}",
+            payload=force_import_payload(
+                download_log_id=request_id,
+                failed_path=exact_source_path,
+            ),
+        )
+        if importable:
+            ready = self.db.mark_import_job_preview_importable(
+                job.id,
+                preview_result={"verdict": "evidence_ready"},
+            )
+            assert ready is not None
+            job = ready
+        return request_id, job, witness
+
+    def test_force_workers_retain_import_lock_through_effects(self) -> None:
+        """Real sessions serialize handoff behind preview and import effects."""
+        from lib.pipeline_db import PipelineDB
+        from scripts import import_preview_worker, importer
+
+        for lane in ("preview", "import"):
+            with self.subTest(lane=lane):
+                request_id, _job, witness = (
+                    self._seed_downloading_force_job(
+                        suffix=f"retained-{lane}",
+                        importable=lane == "import",
+                    )
+                )
+                effect_started = threading.Event()
+                release_effect = threading.Event()
+                errors: list[BaseException] = []
+
+                def preview_effect(
+                    _stage_db: object,
+                    claimed: ImportJob,
+                    _effect_started: threading.Event = effect_started,
+                    _release_effect: threading.Event = release_effect,
+                    **_kwargs: object,
+                ) -> ImportJob:
+                    _effect_started.set()
+                    self.assertTrue(_release_effect.wait(timeout=5))
+                    return claimed
+
+                def import_effect(
+                    _stage_db: object,
+                    _claimed: ImportJob,
+                    *,
+                    ctx: object | None = None,
+                    cancellation_token: CancellationToken,
+                    owner_session_identity: OwnerSessionIdentity,
+                    _effect_started: threading.Event = effect_started,
+                    _release_effect: threading.Event = release_effect,
+                ) -> DispatchOutcome:
+                    del ctx, cancellation_token, owner_session_identity
+                    _effect_started.set()
+                    self.assertTrue(_release_effect.wait(timeout=5))
+                    return DispatchOutcome(False, "lock overlap proof")
+
+                def run_force(
+                    _lane: str = lane,
+                    _errors: list[BaseException] = errors,
+                ) -> None:
+                    try:
+                        if _lane == "preview":
+                            import_preview_worker.run_once(
+                                self.db,
+                                worker_id=f"real-force-{_lane}",
+                                execution_lease_factory=(
+                                    _unavailable_execution_lease
+                                ),
+                                process_fn=preview_effect,
+                            )
+                        else:
+                            importer.run_once(
+                                self.db,
+                                worker_id=f"real-force-{_lane}",
+                                execution_lease_factory=(
+                                    _unavailable_execution_lease
+                                ),
+                                execute_fn=import_effect,
+                            )
+                    except BaseException as exc:  # noqa: BLE001 - thread handoff
+                        _errors.append(exc)
+
+                worker = threading.Thread(target=run_force)
+                worker.start()
+                self.assertTrue(effect_started.wait(timeout=5))
+                contender = PipelineDB(TEST_DSN)
+                try:
+                    blocked = contender.handoff_automation_import(
+                        request_id=request_id,
+                        expected_enqueued_at=witness,
+                        canonical_path=f"/tmp/processing-{lane}",
+                        message="must wait for force owner",
+                    )
+                    self.assertEqual(blocked.outcome, "lock_unavailable")
+                    request = contender.get_request(request_id)
+                    assert request is not None
+                    self.assertEqual(request["status"], "downloading")
+
+                    release_effect.set()
+                    worker.join(timeout=5)
+                    self.assertFalse(worker.is_alive())
+                    self.assertEqual(errors, [])
+
+                    committed = contender.handoff_automation_import(
+                        request_id=request_id,
+                        expected_enqueued_at=witness,
+                        canonical_path=f"/tmp/processing-{lane}",
+                        message="force owner exited",
+                    )
+                    self.assertEqual(committed.outcome, "committed")
+                finally:
+                    release_effect.set()
+                    worker.join(timeout=5)
+                    contender.close()
+
+    def test_known_bad_force_owner_released_before_effect_is_detected(
+        self,
+    ) -> None:
+        """Qualify the lock-overlap proof against the historical mutant."""
+        from lib.pipeline_db import (
+            ADVISORY_LOCK_NAMESPACE_IMPORT,
+            PipelineDB,
+        )
+
+        for lane in ("preview", "import"):
+            with self.subTest(lane=lane):
+                request_id, candidate, witness = (
+                    self._seed_downloading_force_job(
+                        suffix=f"released-{lane}",
+                        importable=lane == "import",
+                    )
+                )
+                effect_started = threading.Event()
+                release_effect = threading.Event()
+
+                def released_owner_mutant(
+                    _lane: str = lane,
+                    _request_id: int = request_id,
+                    _candidate: ImportJob = candidate,
+                    _effect_started: threading.Event = effect_started,
+                    _release_effect: threading.Event = release_effect,
+                ) -> None:
+                    stage = PipelineDB(TEST_DSN)
+                    token = CancellationToken()
+                    try:
+                        with stage._pin_owner_session(
+                            token,
+                        ), stage.advisory_lock(
+                            ADVISORY_LOCK_NAMESPACE_IMPORT,
+                            _request_id,
+                        ) as acquired:
+                            self.assertTrue(acquired)
+                            if _lane == "preview":
+                                claimed = (
+                                    stage
+                                    .claim_force_import_preview_job_under_lock(
+                                        _candidate.id,
+                                        request_id=_request_id,
+                                        worker_id="known-bad-preview",
+                                    )
+                                )
+                            else:
+                                claimed = (
+                                    stage.claim_force_import_job_under_lock(
+                                        _candidate.id,
+                                        request_id=_request_id,
+                                        worker_id="known-bad-import",
+                                    )
+                                )
+                            self.assertIsNotNone(claimed)
+                        # Known-bad shape: effect begins after IMPORT exits.
+                        _effect_started.set()
+                        self.assertTrue(_release_effect.wait(timeout=5))
+                    finally:
+                        stage.close()
+
+                worker = threading.Thread(target=released_owner_mutant)
+                worker.start()
+                self.assertTrue(effect_started.wait(timeout=5))
+                contender = PipelineDB(TEST_DSN)
+                try:
+                    committed = contender.handoff_automation_import(
+                        request_id=request_id,
+                        expected_enqueued_at=witness,
+                        canonical_path=f"/tmp/mutant-processing-{lane}",
+                        message="known bad overlaps force effect",
+                    )
+                    self.assertEqual(committed.outcome, "committed")
+                    self.assertTrue(worker.is_alive())
+                finally:
+                    release_effect.set()
+                    worker.join(timeout=5)
+                    contender.close()
+
+    def test_force_backend_loss_terminates_real_child_group_before_recovery(
+        self,
+    ) -> None:
+        """The full force lane reaps real import_one.py before recovery."""
+        from beets import library as beets_library
+
+        from lib.config import CratediggerConfig
+        from lib.dispatch import dispatch_import_from_db
+        from lib.dispatch.subprocess_runner import run_import_one
+        from lib.pipeline_db import PipelineDB
+        from lib.quality_evidence import snapshot_audio_files
+        from scripts import importer
+
+        errors: list[BaseException] = []
+        backend_pid: list[int] = []
+        later_effects: list[str] = []
+        with tempfile.TemporaryDirectory() as root:
+            raw_source = Path(root, "operator-source")
+            raw_source.mkdir()
+            Path(raw_source, "01.mp3").write_bytes(b"owned source")
+            request_id, job, _witness = self._seed_downloading_force_job(
+                suffix="backend-kill",
+                importable=False,
+                source_path=str(raw_source),
+            )
+            self.db.set_tracks(request_id, [{
+                "disc_number": 1,
+                "track_number": 1,
+                "title": "Controlled child",
+                "length_seconds": 60,
+                "track_artist": "Force Owner",
+            }])
+
+            processing_dir = Path(root, "processing")
+            action_path = (
+                processing_dir / "albums" / f"force-action-{job.id}"
+            )
+            action_path.mkdir(parents=True)
+            Path(action_path, "01.mp3").write_bytes(b"owned source")
+            evidence = make_album_quality_evidence(
+                mb_release_id="force-owner-backend-kill",
+                source_path=str(action_path),
+                files=snapshot_audio_files(str(action_path)),
+            )
+            self.db.upsert_album_quality_evidence(evidence)
+            persisted = self.db.find_album_quality_evidence(
+                mb_release_id=evidence.mb_release_id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert persisted is not None and persisted.id is not None
+            self.db.set_import_job_candidate_evidence(job.id, persisted.id)
+            ready = self.db.mark_import_job_preview_importable(
+                job.id,
+                preview_result={
+                    "verdict": "evidence_ready",
+                    "action_path": str(action_path),
+                },
+            )
+            assert ready is not None
+            job = ready
+
+            library_root = Path(root, "library")
+            library_root.mkdir()
+            library_db = Path(root, "beets-library.db")
+            beets = beets_library.Library(
+                str(library_db),
+                str(library_root),
+            )
+            beets._close()
+            harness_dir = Path(root, "harness")
+            harness_dir.mkdir()
+            harness_path = Path(harness_dir, "run_beets_harness.sh")
+            harness_path.write_text("# controlled sibling lookup\n")
+            leader_file = Path(root, "leader.pid")
+            descendant_file = Path(root, "descendant.pid")
+            forbidden_effect = Path(root, "must-not-exist")
+            child_program = (
+                "import os,time,pathlib\n"
+                f"pathlib.Path({str(leader_file)!r}).write_text(str(os.getpid()))\n"
+                "child=os.fork()\n"
+                "if child == 0:\n"
+                "    time.sleep(60)\n"
+                "    raise SystemExit(0)\n"
+                f"pathlib.Path({str(descendant_file)!r}).write_text(str(child))\n"
+                "time.sleep(60)\n"
+            )
+            Path(harness_dir, "import_one.py").write_text(child_program)
+            cfg = CratediggerConfig(
+                processing_dir=str(processing_dir),
+                beets_harness_path=str(harness_path),
+                beets_library_db=str(library_db),
+                beets_directory=str(library_root),
+            )
+
+            def tracked_real_import_one(**kwargs: object):
+                result = run_import_one(**kwargs)  # pyright: ignore[reportArgumentType]
+                later_effects.append("after-child")
+                forbidden_effect.write_text("must not execute")
+                return result
+
+            def full_force_dispatch(
+                stage_db: PipelineDB,
+                **kwargs: object,
+            ) -> DispatchOutcome:
+                return dispatch_import_from_db(
+                    stage_db,
+                    run_import_fn=tracked_real_import_one,
+                    **kwargs,  # pyright: ignore[reportArgumentType]
+                )
+
+            def execute_through_production(
+                stage_db: PipelineDB,
+                claimed: ImportJob,
+                *,
+                ctx: object | None = None,
+                cancellation_token: CancellationToken,
+                owner_session_identity: OwnerSessionIdentity,
+            ) -> DispatchOutcome:
+                backend_pid.append(owner_session_identity.backend_pid)
+                return importer.execute_import_job(
+                    stage_db,
+                    claimed,
+                    ctx=ctx,
+                    cancellation_token=cancellation_token,
+                    owner_session_identity=owner_session_identity,
+                    force_dispatch_fn=full_force_dispatch,
+                    force_runtime_config=cfg,
+                )
+
+            def run_force() -> None:
+                try:
+                    importer.run_once(
+                        self.db,
+                        worker_id="force-backend-kill",
+                        execution_lease_factory=_unavailable_execution_lease,
+                        execute_fn=execute_through_production,
+                    )
+                except BaseException as exc:  # noqa: BLE001 - thread handoff
+                    errors.append(exc)
+
+            worker = threading.Thread(target=run_force)
+            worker.start()
+            deadline = time.monotonic() + 10
+            while (
+                (not leader_file.exists() or not descendant_file.exists())
+                and time.monotonic() < deadline
+            ):
+                threading.Event().wait(0.01)
+            self.assertTrue(leader_file.exists())
+            self.assertTrue(descendant_file.exists())
+            stage_pid_cur = PipelineDB(TEST_DSN)
+            try:
+                self.assertEqual(len(backend_pid), 1)
+                killed = stage_pid_cur._execute(
+                    "SELECT pg_terminate_backend(%s) AS killed",
+                    (backend_pid[0],),
+                ).fetchone()
+                self.assertTrue(killed["killed"])
+            finally:
+                stage_pid_cur.close()
+
+            worker.join(timeout=10)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(len(errors), 1)
+            self.assertIsInstance(errors[0], ExecutionCancelled)
+            self.assertEqual(later_effects, [])
+            self.assertFalse(forbidden_effect.exists())
+            leader_pid = int(leader_file.read_text())
+            with self.assertRaises(ProcessLookupError):
+                os.killpg(leader_pid, 0)
+            descendant_pid = int(descendant_file.read_text())
+            with self.assertRaises(ProcessLookupError):
+                os.kill(descendant_pid, 0)
+
+            running = self.db.get_import_job(job.id)
+            request = self.db.get_request(request_id)
+            assert running is not None and request is not None
+            self.assertEqual(running.status, "running")
+            self.assertEqual(request["status"], "downloading")
+            self.assertEqual(running.worker_id, "force-backend-kill")
+            self.assertEqual(running.request_id, request_id)
+            self.assertIsNotNone(running.beets_launch_authorized_at)
+            self.assertEqual(
+                running.beets_launch_release_id,
+                "force-owner-backend-kill",
+            )
+            self.assertEqual(
+                running.beets_launch_source_path,
+                str(raw_source),
+            )
+
+            recovered = self.db.recover_running_import_jobs(
+                requeue_message="child group proven absent",
+                recovery_message="backend and child group proven absent",
+            )
+            self.assertEqual([item.id for item in recovered], [job.id])
+            self.assertEqual(recovered[0].status, "recovery_required")
 
     def test_unlaunched_jobs_can_be_requeued_after_worker_restart(self):
         from lib.import_queue import IMPORT_JOB_FORCE
@@ -1357,7 +1867,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
             preview_result={"verdict": "would_import"},
             message="ready",
         )
-        claimed = self.db.claim_next_import_job(worker_id="old-worker")
+        claimed = claim_next_import_job(self.db, worker_id="old-worker")
         assert claimed is not None
 
         recovered = self.db.recover_running_import_jobs(
@@ -1371,7 +1881,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
         self.assertIsNone(recovered[0].heartbeat_at)
         self.assertEqual(recovered[0].attempts, 1)
 
-        retried = self.db.claim_next_import_job(worker_id="new-worker")
+        retried = claim_next_import_job(self.db, worker_id="new-worker")
         assert retried is not None
         self.assertEqual(retried.id, claimed.id)
         self.assertEqual(retried.attempts, 2)
@@ -1386,14 +1896,14 @@ class TestImportJobQueueAPI(unittest.TestCase):
             dedupe_key="manual:preview-gate",
             payload={"download_log_id": 1, "failed_path": "/tmp/manual"},
         )
-        self.assertIsNone(self.db.claim_next_import_job(worker_id="too-early"))
+        self.assertIsNone(claim_next_import_job(self.db, worker_id="too-early"))
 
         self.db.mark_import_job_preview_importable(
             job.id,
             preview_result={"verdict": "would_import"},
             message="ready",
         )
-        claimed = self.db.claim_next_import_job(worker_id="importer")
+        claimed = claim_next_import_job(self.db, worker_id="importer")
         assert claimed is not None
         self.assertEqual(claimed.id, job.id)
         self.assertEqual(claimed.status, "running")
@@ -1414,13 +1924,13 @@ class TestImportJobQueueAPI(unittest.TestCase):
             (job.id,),
         )
 
-        self.assertIsNone(self.db.claim_next_import_job(worker_id="importer"))
+        self.assertIsNone(claim_next_import_job(self.db, worker_id="importer"))
 
         self.db._execute(
             "UPDATE import_jobs SET preview_status = 'evidence_ready' WHERE id = %s",
             (job.id,),
         )
-        claimed = self.db.claim_next_import_job(worker_id="importer")
+        claimed = claim_next_import_job(self.db, worker_id="importer")
         assert claimed is not None
         self.assertEqual(claimed.id, job.id)
 
@@ -1503,9 +2013,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
         self.assertEqual(queued.preview_status, "waiting")
         self.assertEqual(queued.preview_attempts, 0)
 
-        claimed = self.db.claim_next_import_preview_job(
-            worker_id="preview-worker",
-        )
+        claimed = claim_next_import_preview_job(self.db, worker_id="preview-worker",)
         assert claimed is not None
         self.assertEqual(claimed.id, queued.id)
         self.assertEqual(claimed.status, "queued")
@@ -1513,7 +2021,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
         self.assertEqual(claimed.preview_attempts, 1)
         self.assertEqual(claimed.preview_worker_id, "preview-worker")
         self.assertIsNone(
-            self.db.claim_next_import_preview_job(worker_id="other-worker")
+            claim_next_import_preview_job(self.db, worker_id="other-worker")
         )
 
         marked = self.db.mark_import_job_preview_importable(
@@ -1579,12 +2087,1246 @@ class TestImportJobQueueAPI(unittest.TestCase):
         )
         other = pipeline_db.PipelineDB(TEST_DSN)
         try:
-            first = self.db.claim_next_import_preview_job(worker_id="one")
-            second = other.claim_next_import_preview_job(worker_id="two")
+            first = claim_next_import_preview_job(self.db, worker_id="one")
+            second = claim_next_import_preview_job(other, worker_id="two")
             self.assertIsNotNone(first)
             self.assertIsNone(second)
         finally:
             other.close()
+
+
+@requires_postgres
+class TestAutomationImportHandoff(unittest.TestCase):
+    """Authoritative real-PostgreSQL transcript for the U2 ownership edge."""
+
+    ENQUEUED_A = "2026-07-29T00:00:00+00:00"
+    ENQUEUED_B = "2026-07-29T00:01:00+00:00"
+
+    def setUp(self) -> None:
+        self.db = make_db()
+        self.request_id = self.db.add_request(
+            mb_release_id="automation-handoff-real",
+            artist_name="Exact",
+            album_title="Handoff",
+            source="request",
+        )
+        self._set_downloading(self.db, self.ENQUEUED_A)
+
+    def tearDown(self) -> None:
+        self.db.close()
+
+    @staticmethod
+    def _state(enqueued_at: str) -> str:
+        return json.dumps({
+            "filetype": "flac",
+            "enqueued_at": enqueued_at,
+            "last_progress_at": enqueued_at,
+            "files": [{
+                "username": "peer",
+                "filename": "Exact Handoff/01.flac",
+                "file_dir": "Exact Handoff",
+                "size": 123,
+                "retry_count": 0,
+                "bytes_transferred": 123,
+                "last_state": "Completed, Succeeded",
+            }],
+        })
+
+    def _set_downloading(self, db, enqueued_at: str) -> None:
+        self.assertTrue(db.set_downloading(
+            self.request_id,
+            self._state(enqueued_at),
+            expected_status="wanted",
+        ))
+
+    def _handoff(self, db, enqueued_at: str):
+        return db.handoff_automation_import(
+            request_id=self.request_id,
+            expected_enqueued_at=enqueued_at,
+            canonical_path="/processing/albums/exact-handoff",
+            message="exact handoff",
+        )
+
+    def test_handoff_round_trips_exact_owner_and_processing_state(self):
+        result = self.db.handoff_automation_import(
+            request_id=self.request_id,
+            expected_enqueued_at=self.ENQUEUED_A,
+            canonical_path="/processing/albums/exact-handoff",
+            message="exact handoff",
+        )
+
+        self.assertTrue(result.committed)
+        assert result.job is not None
+        self.assertEqual(result.job.expected_request_status, "processing")
+        request = self.db.get_request(self.request_id)
+        assert request is not None
+        self.assertEqual(request["status"], "processing")
+        self.assertEqual(
+            request["active_automation_import_job_id"],
+            result.job.id,
+        )
+        state = request["active_download_state"]
+        assert state is not None
+        self.assertEqual(state["enqueued_at"], self.ENQUEUED_A)
+        self.assertEqual(
+            state["current_path"],
+            "/processing/albums/exact-handoff",
+        )
+        self.assertTrue(state["processing_started_at"])
+        self.assertEqual(
+            [job.id for job in self.db.list_import_jobs(
+                request_id=self.request_id,
+            )],
+            [result.job.id],
+        )
+
+        before_rejected_writes = copy.deepcopy(request)
+        self.assertFalse(self.db.update_download_state_if_downloading(
+            self.request_id,
+            self._state(self.ENQUEUED_A),
+            expected_enqueued_at=self.ENQUEUED_A,
+        ))
+        self.assertFalse(self.db.reset_downloading_to_wanted(
+            self.request_id,
+            expected_status="downloading",
+        ))
+        self.assertEqual(
+            self.db.get_request(self.request_id),
+            before_rejected_writes,
+        )
+
+        repeated = self._handoff(self.db, self.ENQUEUED_A)
+        self.assertEqual(repeated.outcome, "not_downloading")
+        self.assertEqual(
+            len(self.db.list_import_jobs(request_id=self.request_id)),
+            1,
+        )
+
+    def test_force_jobs_queued_before_handoff_fail_fresh_claim_cas(self):
+        """Real PG rejects stale force preview/import after owner handoff."""
+        from lib.import_execution import (
+            ExecutionLeaseSnapshot,
+            ProcessIdentity,
+        )
+        from lib.import_queue import (
+            IMPORT_JOB_FORCE,
+            force_import_payload,
+        )
+        from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_IMPORT
+
+        preview_job = self.db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=self.request_id,
+            dedupe_key="force-before-handoff:preview",
+            payload=force_import_payload(
+                download_log_id=93301,
+                failed_path="/tmp/force-before-handoff-preview",
+            ),
+        )
+        import_job = self.db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=self.request_id,
+            dedupe_key="force-before-handoff:import",
+            payload=force_import_payload(
+                download_log_id=93302,
+                failed_path="/tmp/force-before-handoff-import",
+            ),
+        )
+        self.assertEqual(preview_job.expected_request_status, "downloading")
+        self.assertEqual(import_job.expected_request_status, "downloading")
+        self.assertIsNotNone(self.db.mark_import_job_preview_importable(
+            import_job.id,
+            preview_result={"verdict": "evidence_ready"},
+            message="ready before automation handoff",
+        ))
+        handoff = self._handoff(self.db, self.ENQUEUED_A)
+        self.assertTrue(handoff.committed)
+
+        before_preview = self.db.get_import_job(preview_job.id)
+        before_import = self.db.get_import_job(import_job.id)
+        self.assertIsNone(claim_next_import_preview_job(self.db, worker_id="stale-force-preview",))
+        self.assertIsNone(claim_next_import_job(self.db, worker_id="stale-force-import",))
+        assert handoff.job is not None
+        owner_preview = claim_next_import_preview_job(self.db, worker_id="automation-preview",
+        execution_lease=ExecutionLeaseSnapshot(
+            host_boot_id="boot-force-fence",
+            invocation_id="invocation-force-fence",
+            systemd_unit="cratedigger-import-preview-worker.service",
+            worker=ProcessIdentity(pid=933, start_ticks=9330),
+        ),)
+        self.assertIsNotNone(owner_preview)
+        assert owner_preview is not None
+        self.assertEqual(owner_preview.id, handoff.job.id)
+        with self.db.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_IMPORT,
+            self.request_id,
+        ) as acquired:
+            self.assertTrue(acquired)
+            self.assertIsNone(
+                self.db.claim_force_import_preview_job_under_lock(
+                    preview_job.id,
+                    request_id=self.request_id,
+                    worker_id="stale-force-preview-stage",
+                )
+            )
+            self.assertIsNone(self.db.claim_force_import_job_under_lock(
+                import_job.id,
+                request_id=self.request_id,
+                worker_id="stale-force-import-stage",
+            ))
+        self.assertEqual(self.db.get_import_job(preview_job.id), before_preview)
+        self.assertEqual(self.db.get_import_job(import_job.id), before_import)
+
+    def test_force_beets_launch_rechecks_absent_automation_owner(self):
+        """Final force launch fails if ownership changed after a raw claim."""
+        from lib.import_queue import IMPORT_JOB_FORCE, force_import_payload
+
+        source_path = "/tmp/force-before-owner-launch"
+        force_job = self.db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=self.request_id,
+            dedupe_key="force-before-handoff:launch",
+            payload=force_import_payload(
+                download_log_id=93303,
+                failed_path=source_path,
+            ),
+        )
+        evidence = make_album_quality_evidence(
+            mb_release_id="automation-handoff-real",
+            source_path=source_path,
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        persisted = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        self.assertTrue(self.db.set_import_job_candidate_evidence(
+            force_job.id,
+            persisted.id,
+        ))
+        self.assertIsNotNone(self.db.mark_import_job_preview_importable(
+            force_job.id,
+            preview_result={"verdict": "evidence_ready"},
+        ))
+        claimed = claim_next_import_job(self.db, worker_id="force-importer")
+        self.assertIsNotNone(claimed)
+
+        handoff = self._handoff(self.db, self.ENQUEUED_A)
+        self.assertTrue(handoff.committed)
+        self.assertIsNone(self.db.authorize_import_job_launch(
+            force_job.id,
+            request_id=self.request_id,
+            release_id="automation-handoff-real",
+            source_path=source_path,
+        ))
+
+    def test_exact_owner_preview_and_importer_commands_round_trip_leases(self):
+        from lib.import_execution import ExecutionLeaseSnapshot, ProcessIdentity
+
+        handoff = self._handoff(self.db, self.ENQUEUED_A)
+        assert handoff.job is not None
+        job = handoff.job
+        preview_lease = ExecutionLeaseSnapshot(
+            host_boot_id="boot-a",
+            invocation_id="preview-a",
+            systemd_unit="cratedigger-import-preview.service",
+            worker=ProcessIdentity(pid=101, start_ticks=1001),
+        )
+        stale_lease = dataclasses.replace(
+            preview_lease,
+            invocation_id="preview-stale",
+        )
+        self.assertIsNone(claim_next_import_preview_job(self.db, worker_id="missing-lease",))
+        claimed_preview = claim_next_import_preview_job(self.db, worker_id="preview",
+        execution_lease=preview_lease,)
+        assert claimed_preview is not None
+        self.assertEqual(
+            claimed_preview.execution_invocation_id,
+            preview_lease.invocation_id,
+        )
+        self.assertEqual(self.db.requeue_stale_import_preview_jobs(
+            older_than=timedelta(seconds=-1),
+            message="heartbeat age is not automation proof",
+        ), [])
+        self.assertEqual(self.db.requeue_running_import_preview_jobs(
+            message="process restart is not automation proof",
+        ), [])
+        self.assertFalse(self.db.heartbeat_import_job_preview(
+            job.id,
+            expected_execution_lease=stale_lease,
+        ))
+        self.assertTrue(self.db.heartbeat_import_job_preview(
+            job.id,
+            expected_execution_lease=preview_lease,
+        ))
+
+        evidence = make_album_quality_evidence(
+            mb_release_id="automation-handoff-real",
+            source_path="/processing/albums/exact-handoff",
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        persisted = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        self.assertFalse(self.db.set_import_job_candidate_evidence(
+            job.id,
+            persisted.id,
+            expected_execution_lease=stale_lease,
+        ))
+        self.assertTrue(self.db.set_import_job_candidate_evidence(
+            job.id,
+            persisted.id,
+            expected_execution_lease=preview_lease,
+        ))
+        ready = self.db.mark_import_job_preview_importable(
+            job.id,
+            preview_result={"verdict": "would_import"},
+            expected_execution_lease=preview_lease,
+        )
+        assert ready is not None
+        self.assertIsNone(ready.execution_invocation_id)
+
+        importer_lease = ExecutionLeaseSnapshot(
+            host_boot_id="boot-a",
+            invocation_id="importer-a",
+            systemd_unit="cratedigger-importer.service",
+            worker=ProcessIdentity(pid=201, start_ticks=2001),
+        )
+        claimed_import = claim_next_import_job(self.db, worker_id="importer",
+        execution_lease=importer_lease,)
+        assert claimed_import is not None
+        self.assertEqual(
+            claimed_import.execution_worker_pid,
+            importer_lease.worker.pid,
+        )
+        self.assertFalse(self.db.heartbeat_import_job(
+            job.id,
+            expected_execution_lease=preview_lease,
+        ))
+        self.assertTrue(self.db.heartbeat_import_job(
+            job.id,
+            expected_execution_lease=importer_lease,
+        ))
+
+    def test_preview_heartbeat_and_terminal_lock_order_do_not_deadlock(self):
+        """A heartbeat never queues an owner trigger behind its job lock."""
+        from lib import pipeline_db
+        from lib.import_execution import ExecutionLeaseSnapshot, ProcessIdentity
+
+        handoff = self._handoff(self.db, self.ENQUEUED_A)
+        assert handoff.job is not None
+        job = handoff.job
+        lease = ExecutionLeaseSnapshot(
+            host_boot_id="heartbeat-overlap-boot",
+            invocation_id="heartbeat-overlap-preview",
+            systemd_unit="cratedigger-import-preview-worker.service",
+            worker=ProcessIdentity(pid=501, start_ticks=5001),
+        )
+        assert claim_next_import_preview_job(self.db, worker_id="preview",
+        execution_lease=lease,) is not None
+
+        heartbeat = pipeline_db.PipelineDB(TEST_DSN)
+        terminal = pipeline_db.PipelineDB(TEST_DSN)
+        request_locked = threading.Event()
+        job_locked = threading.Event()
+        errors: list[psycopg2.Error] = []
+        heartbeat.conn.autocommit = False
+        terminal.conn.autocommit = False
+        try:
+            heartbeat._execute(
+                "SET LOCAL statement_timeout = '5s'"
+            )
+            terminal._execute(
+                "SET LOCAL statement_timeout = '5s'"
+            )
+            heartbeat._execute("""
+                UPDATE import_jobs
+                SET preview_heartbeat_at = NOW(), updated_at = NOW()
+                WHERE id = %s
+            """, (job.id,))
+
+            def lock_terminal_scope() -> None:
+                try:
+                    terminal._execute("""
+                        SELECT id
+                        FROM album_requests
+                        WHERE id = %s
+                        FOR UPDATE
+                    """, (self.request_id,))
+                    request_locked.set()
+                    terminal._execute("""
+                        SELECT id
+                        FROM import_jobs
+                        WHERE request_id = %s
+                        ORDER BY id
+                        FOR UPDATE
+                    """, (self.request_id,))
+                    job_locked.set()
+                    terminal.conn.rollback()
+                except psycopg2.Error as exc:
+                    errors.append(exc)
+
+            worker = threading.Thread(target=lock_terminal_scope)
+            worker.start()
+            self.assertTrue(request_locked.wait(timeout=5))
+            self.assertFalse(job_locked.is_set())
+
+            # Before the trigger was column-restricted this commit ran the
+            # deferred owner validator, requested the already-held request
+            # row, and deadlocked against terminal's request -> job order.
+            heartbeat.conn.commit()
+            worker.join(timeout=5)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(errors, [])
+            self.assertTrue(job_locked.is_set())
+        finally:
+            for db in (heartbeat, terminal):
+                try:
+                    db.conn.rollback()
+                except psycopg2.Error:
+                    pass
+                try:
+                    db.conn.autocommit = True
+                except psycopg2.Error:
+                    pass
+                db.close()
+
+    def test_record_import_job_beets_child_round_trip_preserves_exact_execution_columns(
+        self,
+    ):
+        from lib.import_execution import (
+            ExecutionLeaseSnapshot,
+            ExecutionLivenessDecision,
+            ExecutionLivenessEvidence,
+            ProcessIdentity,
+        )
+
+        handoff = self._handoff(self.db, self.ENQUEUED_A)
+        assert handoff.job is not None
+        job = handoff.job
+        preview_lease = ExecutionLeaseSnapshot(
+            host_boot_id="boot-old",
+            invocation_id="preview-old",
+            systemd_unit="cratedigger-import-preview-worker.service",
+            worker=ProcessIdentity(pid=301, start_ticks=3001),
+        )
+        assert claim_next_import_preview_job(self.db, worker_id="preview",
+        execution_lease=preview_lease,) is not None
+        evidence = make_album_quality_evidence(
+            mb_release_id="automation-handoff-real",
+            source_path="/processing/albums/exact-handoff",
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        persisted = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        self.assertTrue(self.db.set_import_job_candidate_evidence(
+            job.id,
+            persisted.id,
+            expected_execution_lease=preview_lease,
+        ))
+        assert self.db.mark_import_job_preview_importable(
+            job.id,
+            expected_execution_lease=preview_lease,
+        ) is not None
+        importer_lease = ExecutionLeaseSnapshot(
+            host_boot_id="boot-old",
+            invocation_id="importer-old",
+            systemd_unit="cratedigger-importer.service",
+            worker=ProcessIdentity(pid=401, start_ticks=4001),
+        )
+        assert claim_next_import_job(self.db, worker_id="importer",
+        execution_lease=importer_lease,) is not None
+        self.assertIsNotNone(self.db.authorize_import_job_launch(
+            job.id,
+            request_id=self.request_id,
+            release_id="automation-handoff-real",
+            source_path="/processing/albums/exact-handoff",
+            expected_execution_lease=importer_lease,
+        ))
+        child_row = self.db.record_import_job_beets_child(
+            job.id,
+            expected_execution_lease=importer_lease,
+            beets_pid=402,
+            beets_start_ticks=4002,
+        )
+        assert child_row is not None
+        reloaded = self.db.get_import_job(job.id)
+        assert reloaded is not None
+        self.assertEqual(
+            (
+                reloaded.execution_invocation_id,
+                reloaded.execution_host_boot_id,
+                reloaded.execution_systemd_unit,
+                reloaded.execution_worker_pid,
+                reloaded.execution_worker_start_ticks,
+                reloaded.execution_beets_pid,
+                reloaded.execution_beets_start_ticks,
+            ),
+            (
+                importer_lease.invocation_id,
+                importer_lease.host_boot_id,
+                importer_lease.systemd_unit,
+                importer_lease.worker.pid,
+                importer_lease.worker.start_ticks,
+                402,
+                4002,
+            ),
+        )
+        full_lease = dataclasses.replace(
+            importer_lease,
+            beets=ProcessIdentity(pid=402, start_ticks=4002),
+        )
+        dead_evidence = ExecutionLivenessEvidence(
+            lease=full_lease,
+            current_host_boot_id="boot-new",
+            boot_error=None,
+            worker=None,
+            beets=None,
+            invocation=None,
+            cgroup=None,
+        )
+        self.assertIsNone(self.db.recover_automation_import_job(
+            job.id,
+            expected_execution_lease=full_lease,
+            decision=ExecutionLivenessDecision(
+                status="unknown",
+                reason="probe incomplete",
+                evidence=dead_evidence,
+            ),
+            requeue_message="requeue",
+            recovery_message="importer restarted",
+        ))
+        recovered = self.db.recover_automation_import_job(
+            job.id,
+            expected_execution_lease=full_lease,
+            decision=ExecutionLivenessDecision(
+                status="dead",
+                reason="old boot ended",
+                evidence=dead_evidence,
+            ),
+            requeue_message="requeue",
+            recovery_message="importer restarted",
+        )
+        # A launched owner whose execution is proven dead is CLOSED, not parked
+        # (CLAUDE.md invariant 11): the persisted child identity above stays as
+        # audit evidence on the terminal row, and the request goes back into the
+        # search pool instead of waiting for an operator command.
+        assert recovered is not None
+        self.assertEqual(recovered.status, "failed")
+        self.assertEqual(recovered.execution_beets_pid, 402)
+        released = self.db.get_request(self.request_id)
+        assert released is not None
+        self.assertEqual(released["status"], "wanted")
+        self.assertIsNone(released["active_automation_import_job_id"])
+        # The ambiguous operation still never replays automatically.
+        self.assertIsNone(claim_next_import_job(self.db, worker_id="must-not-replay",
+        execution_lease=importer_lease,))
+
+    def test_stale_a_after_b_replacement_creates_nothing(self):
+        other = self.db.__class__(TEST_DSN)
+        try:
+            self.assertTrue(other.reset_downloading_to_wanted(
+                self.request_id,
+                expected_status="downloading",
+            ))
+            self._set_downloading(other, self.ENQUEUED_B)
+            before = copy.deepcopy(other.get_request(self.request_id))
+
+            stale = self._handoff(self.db, self.ENQUEUED_A)
+
+            self.assertEqual(stale.outcome, "witness_mismatch")
+            self.assertEqual(self.db.get_request(self.request_id), before)
+            self.assertEqual(
+                self.db.list_import_jobs(request_id=self.request_id),
+                [],
+            )
+        finally:
+            other.close()
+
+    def test_overlapping_b_replacement_defeats_blocked_a_handoff(self):
+        """A starts while B's replacement transaction owns the row lock."""
+        other = self.db.__class__(TEST_DSN)
+        started = threading.Event()
+        result_box: list[AutomationHandoffResult] = []
+        error_box: list[Exception] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = os.path.join(tmpdir, "source")
+            target = os.path.join(tmpdir, "processing", "albums", "target")
+            os.makedirs(source)
+            manifest = {
+                "01.flac": b"one",
+                "02.flac": b"two",
+            }
+            for name, payload in manifest.items():
+                Path(source, name).write_bytes(payload)
+
+            other.conn.autocommit = False
+            try:
+                with other.conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE album_requests
+                        SET active_download_state = %s
+                        WHERE id = %s
+                        """,
+                        (
+                            psycopg2.extras.Json(json.loads(
+                                self._state(self.ENQUEUED_B),
+                            )),
+                            self.request_id,
+                        ),
+                    )
+
+                def run_stale_handoff() -> None:
+                    try:
+                        with patch.object(
+                            self.db,
+                            "_automation_handoff_before_request_lock",
+                            side_effect=started.set,
+                        ):
+                            result_box.append(self._handoff(
+                                self.db,
+                                self.ENQUEUED_A,
+                            ))
+                    except (
+                        AssertionError,
+                        RuntimeError,
+                        ValueError,
+                        psycopg2.Error,
+                    ) as exc:
+                        error_box.append(exc)
+
+                worker = threading.Thread(target=run_stale_handoff)
+                worker.start()
+                self.assertTrue(started.wait(timeout=5))
+                self.assertTrue(worker.is_alive())
+                other.conn.commit()
+                worker.join(timeout=5)
+                self.assertFalse(worker.is_alive())
+            finally:
+                if not other.conn.autocommit:
+                    other.conn.rollback()
+                    other.conn.autocommit = True
+                other.close()
+
+            self.assertEqual(error_box, [])
+            self.assertEqual(len(result_box), 1)
+            self.assertEqual(result_box[0].outcome, "witness_mismatch")
+            request = self.db.get_request(self.request_id)
+            assert request is not None
+            self.assertEqual(request["status"], "downloading")
+            self.assertIsNone(request["active_automation_import_job_id"])
+            state = request["active_download_state"]
+            assert isinstance(state, dict)
+            self.assertEqual(state["enqueued_at"], self.ENQUEUED_B)
+            self.assertNotIn("current_path", state)
+            self.assertEqual(
+                self.db.list_import_jobs(request_id=self.request_id),
+                [],
+            )
+            self.assertEqual(self.db.get_log(limit=10), [])
+            self.assertFalse(os.path.exists(target))
+            self.assertEqual(
+                {
+                    path.name: path.read_bytes()
+                    for path in Path(source).iterdir()
+                },
+                manifest,
+            )
+
+    def test_malformed_state_tags_match_fake(self):
+        def real_snapshot(request_id: int) -> Mapping[str, object]:
+            row = self.db._execute(
+                """
+                SELECT status,
+                       active_download_state::text AS active_download_state,
+                       active_automation_import_job_id,
+                       updated_at
+                FROM album_requests
+                WHERE id = %s
+                """,
+                (request_id,),
+            ).fetchone()
+            assert row is not None
+            return dict(row)
+
+        cases: tuple[tuple[str, object, str], ...] = (
+            ("sql_null", None, "missing_state"),
+            ("json_null", None, "missing_state"),
+            ("array", [], "missing_state"),
+            ("scalar", 7, "missing_state"),
+            (
+                "missing_witness",
+                {"filetype": "flac", "files": []},
+                "witness_mismatch",
+            ),
+            (
+                "exact",
+                json.loads(self._state(self.ENQUEUED_A)),
+                "committed",
+            ),
+        )
+        for index, (name, raw_state, expected) in enumerate(cases, start=1):
+            with self.subTest(case=name):
+                real_id = self.db.add_request(
+                    mb_release_id=f"handoff-shape-real-{index}",
+                    artist_name="Shape",
+                    album_title=name,
+                    source="request",
+                )
+                fake = FakePipelineDB()
+                fake_id = fake.add_request(
+                    "Shape",
+                    name,
+                    "request",
+                    mb_release_id=f"handoff-shape-fake-{index}",
+                )
+                if name == "sql_null":
+                    self.db._execute(
+                        """
+                        UPDATE album_requests
+                        SET status = 'downloading',
+                            active_download_state = NULL
+                        WHERE id = %s
+                        """,
+                        (real_id,),
+                    )
+                else:
+                    self.db._execute(
+                        """
+                        UPDATE album_requests
+                        SET status = 'downloading',
+                            active_download_state = %s
+                        WHERE id = %s
+                        """,
+                        (psycopg2.extras.Json(raw_state), real_id),
+                    )
+                fake_row = fake.request(fake_id)
+                fake_row["status"] = "downloading"
+                fake_row["active_download_state"] = copy.deepcopy(raw_state)
+                real_before = copy.deepcopy(real_snapshot(real_id))
+                fake_before = copy.deepcopy(fake.get_request(fake_id))
+
+                real_result = self.db.handoff_automation_import(
+                    request_id=real_id,
+                    expected_enqueued_at=self.ENQUEUED_A,
+                    canonical_path="/processing/albums/shape",
+                    message="shape parity",
+                )
+                fake_result = fake.handoff_automation_import(
+                    request_id=fake_id,
+                    expected_enqueued_at=self.ENQUEUED_A,
+                    canonical_path="/processing/albums/shape",
+                    message="shape parity",
+                )
+
+                self.assertEqual(real_result.outcome, expected)
+                self.assertEqual(fake_result.outcome, expected)
+                if expected != "committed":
+                    self.assertEqual(real_snapshot(real_id), real_before)
+                    self.assertEqual(fake.get_request(fake_id), fake_before)
+                    self.assertEqual(
+                        self.db.list_import_jobs(request_id=real_id),
+                        [],
+                    )
+                    self.assertEqual(
+                        fake.list_import_jobs(request_id=fake_id),
+                        [],
+                    )
+
+    def test_real_witness_guard_mutant_is_killed(self):
+        other = self.db.__class__(TEST_DSN)
+        try:
+            self.assertTrue(other.reset_downloading_to_wanted(
+                self.request_id,
+                expected_status="downloading",
+            ))
+            self._set_downloading(other, self.ENQUEUED_B)
+            before = copy.deepcopy(other.get_request(self.request_id))
+            assert before is not None
+            with patch.object(
+                self.db,
+                "_automation_handoff_enforce_witness",
+                return_value=False,
+            ):
+                mutant = self._handoff(self.db, self.ENQUEUED_A)
+            after = self.db.get_request(self.request_id)
+            assert after is not None
+            with self.assertRaisesRegex(AssertionError, "stale handoff"):
+                from tests.test_download_incarnation_generated import (
+                    assert_handoff_contract,
+                )
+                assert_handoff_contract(
+                    exact=False,
+                    before=before,
+                    after=after,
+                    job_count=len(self.db.list_import_jobs(
+                        request_id=self.request_id,
+                    )),
+                )
+            self.assertTrue(mutant.committed)
+        finally:
+            other.close()
+
+    def test_faults_roll_back_but_sequence_ids_remain_burned(self):
+        def fail_at(boundary: int):
+            def fail(index: int, _label: str) -> None:
+                if index == boundary:
+                    raise RuntimeError("fault")
+            return fail
+
+        for boundary in (1, 2):
+            with self.subTest(boundary=boundary):
+                with patch.object(
+                    self.db,
+                    "_automation_handoff_write_boundary",
+                    side_effect=fail_at(boundary),
+                ), self.assertRaisesRegex(RuntimeError, "fault"):
+                    self._handoff(self.db, self.ENQUEUED_A)
+
+                request = self.db.get_request(self.request_id)
+                assert request is not None
+                self.assertEqual(request["status"], "downloading")
+                self.assertIsNone(
+                    request["active_automation_import_job_id"],
+                )
+                self.assertEqual(
+                    self.db.list_import_jobs(request_id=self.request_id),
+                    [],
+                )
+
+        committed = self._handoff(self.db, self.ENQUEUED_A)
+        assert committed.job is not None
+        self.assertGreater(committed.job.id, 2)
+
+
+@requires_postgres
+class TestProcessingOwnerGenericWriterGuards(unittest.TestCase):
+    """Generic request/job writers fail closed on the private owner edge."""
+
+    def setUp(self) -> None:
+        self.db = make_db()
+
+    def tearDown(self) -> None:
+        self.db.close()
+
+    def _owned_real(self, suffix: str):
+        request_id = self.db.add_request(
+            mb_release_id=f"processing-owner-real-{suffix}",
+            artist_name="Owned",
+            album_title=suffix,
+            source="request",
+        )
+        enqueued_at = "2026-07-29T00:00:00+00:00"
+        self.assertTrue(self.db.set_downloading(
+            request_id,
+            json.dumps({
+                "filetype": "flac",
+                "enqueued_at": enqueued_at,
+                "files": [],
+            }),
+            expected_status="wanted",
+        ))
+        result = self.db.handoff_automation_import(
+            request_id=request_id,
+            expected_enqueued_at=enqueued_at,
+            canonical_path="/processing",
+            message="owned writer-guard fixture",
+        )
+        self.assertTrue(result.committed)
+        assert result.job is not None
+        return request_id, result.job
+
+    @staticmethod
+    def _owned_fake(suffix: str):
+        db = FakePipelineDB()
+        request_id = db.add_request(
+            "Owned",
+            suffix,
+            "request",
+            mb_release_id=f"processing-owner-fake-{suffix}",
+        )
+        enqueued_at = "2026-07-29T00:00:00+00:00"
+        assert db.set_downloading(
+            request_id,
+            json.dumps({
+                "filetype": "flac",
+                "enqueued_at": enqueued_at,
+                "files": [],
+            }),
+            expected_status="wanted",
+        )
+        result = db.handoff_automation_import(
+            request_id=request_id,
+            expected_enqueued_at=enqueued_at,
+            canonical_path="/processing",
+            message="owned writer-guard fixture",
+        )
+        assert result.committed and result.job is not None
+        return db, request_id, result.job
+
+    def _detach_real(
+        self,
+        request_id: int,
+        job_id: int,
+        *,
+        job_status: str,
+    ) -> None:
+        with self.db._atomic():
+            self.db._execute(
+                "UPDATE import_jobs SET status = %s WHERE id = %s",
+                (job_status, job_id),
+            )
+            self.db._execute("""
+                UPDATE album_requests
+                SET status = 'wanted',
+                    active_automation_import_job_id = NULL
+                WHERE id = %s
+            """, (request_id,))
+            self.db.conn.commit()
+
+    @staticmethod
+    def _detach_fake(
+        db: FakePipelineDB,
+        request_id: int,
+        job_id: int,
+        *,
+        job_status: str,
+    ) -> None:
+        job = next(row for row in db._import_jobs if row["id"] == job_id)
+        job["status"] = job_status
+        request = db.request(request_id)
+        request["status"] = "wanted"
+        request["active_automation_import_job_id"] = None
+
+    def test_request_metadata_status_compare_and_delete_reject_owner(self):
+        request_id, _job = self._owned_real("request-guards")
+        fake, fake_request_id, _fake_job = self._owned_fake("request-guards")
+        real_before = self.db.get_request(request_id)
+        fake_before = copy.deepcopy(fake.get_request(fake_request_id))
+
+        self.assertFalse(
+            self.db.update_request_fields(request_id, reasoning="late")
+        )
+        self.assertFalse(
+            fake.update_request_fields(fake_request_id, reasoning="late")
+        )
+        self.assertFalse(
+            self.db.update_status(
+                request_id,
+                "wanted",
+                expected_status="processing",
+            )
+        )
+        self.assertFalse(
+            fake.update_status(
+                fake_request_id,
+                "wanted",
+                expected_status="processing",
+            )
+        )
+        self.assertFalse(
+            self.db.compare_request_status(
+                request_id,
+                expected_status="processing",
+            )
+        )
+        self.assertFalse(
+            fake.compare_request_status(
+                fake_request_id,
+                expected_status="processing",
+            )
+        )
+        self.assertFalse(self.db.delete_request(request_id))
+        self.assertFalse(fake.delete_request(fake_request_id))
+
+        self.assertEqual(self.db.get_request(request_id), real_before)
+        self.assertEqual(fake.get_request(fake_request_id), fake_before)
+
+    def test_supersede_rejects_owner_at_its_atomic_row_lock(self):
+        request_id, _job = self._owned_real("supersede-guard")
+        fake, fake_request_id, _fake_job = self._owned_fake(
+            "supersede-guard"
+        )
+        real_before = self.db.get_request(request_id)
+        fake_before = fake.get_request(fake_request_id)
+        with self.assertRaises(SupersedeRaceError):
+            self.db.supersede_request_mbid(
+                request_id,
+                new_mb_release_id="processing-owner-real-supersede-new",
+                new_mb_release_group_id=None,
+                new_mb_artist_id=None,
+                new_artist_name="New",
+                new_album_title="Pressing",
+                new_year=None,
+                new_country=None,
+                new_tracks=[],
+            )
+        with self.assertRaises(SupersedeRaceError):
+            fake.supersede_request_mbid(
+                fake_request_id,
+                new_mb_release_id="processing-owner-fake-supersede-new",
+                new_mb_release_group_id=None,
+                new_mb_artist_id=None,
+                new_artist_name="New",
+                new_album_title="Pressing",
+                new_year=None,
+                new_country=None,
+                new_tracks=[],
+            )
+
+        self.assertEqual(self.db.get_request(request_id), real_before)
+        self.assertEqual(fake.get_request(fake_request_id), fake_before)
+
+    def test_rescue_and_reset_reject_owner_with_real_fake_parity(self):
+        cases = (
+            (
+                "rescue",
+                lambda db, request_id: db.mark_imported_with_rescue(
+                    request_id,
+                    expected_status="processing",
+                    beets_distance=0.05,
+                ),
+            ),
+            (
+                "reset",
+                lambda db, request_id: db.reset_to_wanted(
+                    request_id,
+                    expected_status="processing",
+                    min_bitrate=320,
+                ),
+            ),
+        )
+        for suffix, writer in cases:
+            with self.subTest(writer=suffix):
+                request_id, _job = self._owned_real(suffix)
+                fake, fake_request_id, _fake_job = self._owned_fake(suffix)
+                real_before = self.db.get_request(request_id)
+                fake_before = copy.deepcopy(fake.get_request(fake_request_id))
+
+                self.assertFalse(writer(self.db, request_id))
+                self.assertFalse(writer(fake, fake_request_id))
+                self.assertEqual(self.db.get_request(request_id), real_before)
+                self.assertEqual(fake.get_request(fake_request_id), fake_before)
+
+    def test_generic_job_terminal_writers_reject_all_automation_rows(self):
+        cases = (
+            (
+                "completed",
+                lambda db, job_id: db.mark_import_job_completed(
+                    job_id,
+                    result={"unexpected": True},
+                ),
+            ),
+            (
+                "failed",
+                lambda db, job_id: db.mark_import_job_failed(
+                    job_id,
+                    error="unexpected",
+                ),
+            ),
+            (
+                "preview-failed",
+                lambda db, job_id: db.mark_import_job_preview_failed(
+                    job_id,
+                    preview_status="measurement_failed",
+                    error="unexpected",
+                ),
+            ),
+        )
+        for attachment in ("attached", "unattached"):
+            for suffix, writer in cases:
+                case = f"{attachment}-{suffix}"
+                with self.subTest(attachment=attachment, writer=suffix):
+                    request_id, job = self._owned_real(case)
+                    fake, fake_request_id, fake_job = self._owned_fake(case)
+                    if attachment == "unattached":
+                        self._detach_real(
+                            request_id,
+                            job.id,
+                            job_status="failed",
+                        )
+                        self._detach_fake(
+                            fake,
+                            fake_request_id,
+                            fake_job.id,
+                            job_status="failed",
+                        )
+                    real_before = self.db.get_import_job(job.id)
+                    fake_before = fake.get_import_job(fake_job.id)
+                    real_request_before = self.db.get_request(request_id)
+                    fake_request_before = copy.deepcopy(
+                        fake.get_request(fake_request_id)
+                    )
+
+                    self.assertIsNone(writer(self.db, job.id))
+                    self.assertIsNone(writer(fake, fake_job.id))
+
+                    self.assertEqual(self.db.get_import_job(job.id), real_before)
+                    self.assertEqual(
+                        fake.get_import_job(fake_job.id),
+                        fake_before,
+                    )
+                    self.assertEqual(
+                        self.db.get_request(request_id),
+                        real_request_before,
+                    )
+                    self.assertEqual(
+                        fake.get_request(fake_request_id),
+                        fake_request_before,
+                    )
+
+    def test_merge_result_rejects_nonterminal_and_attached_automation(self):
+        request_id, job = self._owned_real("merge-guard")
+        fake, fake_request_id, fake_job = self._owned_fake("merge-guard")
+
+        self.assertIsNone(
+            self.db.merge_import_job_result(job.id, {"unexpected": True})
+        )
+        self.assertIsNone(
+            fake.merge_import_job_result(fake_job.id, {"unexpected": True})
+        )
+
+        with self.db._atomic():
+            self.db._execute(
+                "UPDATE import_jobs SET status = 'completed' WHERE id = %s",
+                (job.id,),
+            )
+            real_before = self.db.get_import_job(job.id)
+            self.assertIsNone(
+                self.db.merge_import_job_result(job.id, {"unexpected": True})
+            )
+            self.assertEqual(self.db.get_import_job(job.id), real_before)
+            self.db.conn.rollback()
+
+        fake_row = next(
+            row for row in fake._import_jobs if row["id"] == fake_job.id
+        )
+        fake_row["status"] = "completed"
+        fake_before = fake.get_import_job(fake_job.id)
+        self.assertIsNone(
+            fake.merge_import_job_result(fake_job.id, {"unexpected": True})
+        )
+        self.assertEqual(fake.get_import_job(fake_job.id), fake_before)
+        fake_request = fake.get_request(fake_request_id)
+        real_request = self.db.get_request(request_id)
+        self.assertIsNotNone(fake_request)
+        self.assertIsNotNone(real_request)
+        assert fake_request is not None
+        assert real_request is not None
+        self.assertEqual(
+            fake_request["status"],
+            "processing",
+        )
+        self.assertEqual(real_request["status"], "processing")
+
+    def test_merge_result_allows_unattached_terminal_audit_enrichment(self):
+        request_id, job = self._owned_real("merge-audit")
+        fake, fake_request_id, fake_job = self._owned_fake("merge-audit")
+
+        self._detach_real(
+            request_id,
+            job.id,
+            job_status="completed",
+        )
+        self._detach_fake(
+            fake,
+            fake_request_id,
+            fake_job.id,
+            job_status="completed",
+        )
+
+        real_result = self.db.merge_import_job_result(
+            job.id,
+            {"scan": "confirmed"},
+        )
+        fake_result = fake.merge_import_job_result(
+            fake_job.id,
+            {"scan": "confirmed"},
+        )
+
+        self.assertIsNotNone(real_result)
+        self.assertIsNotNone(fake_result)
+        assert real_result is not None
+        assert fake_result is not None
+        self.assertEqual(real_result.result, {"scan": "confirmed"})
+        self.assertEqual(fake_result.result, {"scan": "confirmed"})
+
+    def test_generic_recovery_terminal_writer_rejects_attached_owner(self):
+        request_id, job = self._owned_real("recovery")
+        fake, fake_request_id, fake_job = self._owned_fake("recovery")
+        self.db._execute(
+            "UPDATE import_jobs SET status = 'recovery_required' WHERE id = %s",
+            (job.id,),
+        )
+        self.db.conn.commit()
+        fake_row = next(
+            row for row in fake._import_jobs if row["id"] == fake_job.id
+        )
+        fake_row["status"] = "recovery_required"
+        real_before = self.db.get_import_job(job.id)
+        fake_before = fake.get_import_job(fake_job.id)
+        real_request_before = self.db.get_request(request_id)
+        fake_request_before = copy.deepcopy(
+            fake.get_request(fake_request_id)
+        )
+
+        self.assertIsNone(
+            self.db.resolve_import_job_recovery(
+                job.id,
+                resolution="close",
+                reason="generic close must not consume an owner",
+            )
+        )
+        self.assertIsNone(
+            fake.resolve_import_job_recovery(
+                fake_job.id,
+                resolution="close",
+                reason="generic close must not consume an owner",
+            )
+        )
+
+        self.assertEqual(self.db.get_import_job(job.id), real_before)
+        self.assertEqual(fake.get_import_job(fake_job.id), fake_before)
+        self.assertEqual(self.db.get_request(request_id), real_request_before)
+        self.assertEqual(
+            fake.get_request(fake_request_id),
+            fake_request_before,
+        )
+
+    def test_generic_status_writer_cannot_enter_processing(self):
+        request_id = self.db.add_request(
+            mb_release_id="processing-owner-enter-real",
+            artist_name="Owned",
+            album_title="Enter",
+            source="request",
+        )
+        fake = FakePipelineDB()
+        fake_request_id = fake.add_request(
+            "Owned",
+            "Enter",
+            "request",
+            mb_release_id="processing-owner-enter-fake",
+        )
+
+        with self.assertRaises(ValueError):
+            self.db.update_status(request_id, "processing")
+        with self.assertRaises(ValueError):
+            fake.update_status(fake_request_id, "processing")
+        real_request = self.db.get_request(request_id)
+        fake_request = fake.get_request(fake_request_id)
+        self.assertIsNotNone(real_request)
+        self.assertIsNotNone(fake_request)
+        assert real_request is not None
+        assert fake_request is not None
+        self.assertEqual(real_request["status"], "wanted")
+        self.assertEqual(fake_request["status"], "wanted")
 
 
 @requires_postgres
@@ -1618,7 +3360,7 @@ class TestRequeueImportJobForPreview(unittest.TestCase):
             preview_result={"verdict": "would_import"},
             message="ready",
         )
-        claimed = self.db.claim_next_import_job(worker_id="importer-1")
+        claimed = claim_next_import_job(self.db, worker_id="importer-1")
         assert claimed is not None
         self.assertEqual(claimed.status, "running")
         return claimed
@@ -1663,7 +3405,7 @@ class TestRequeueImportJobForPreview(unittest.TestCase):
             reason="incomplete",
         )
 
-        preview = self.db.claim_next_import_preview_job(worker_id="preview-1")
+        preview = claim_next_import_preview_job(self.db, worker_id="preview-1")
         assert preview is not None
         self.assertEqual(preview.id, claimed.id)
         self.assertEqual(preview.preview_status, "running")
@@ -1749,7 +3491,7 @@ class TestRequeueRunningImportPreviewJobs(unittest.TestCase):
             dedupe_key="manual:requeue-running-preview",
             payload={"download_log_id": 1, "failed_path": "/tmp/manual"},
         )
-        claimed = self.db.claim_next_import_preview_job(worker_id="preview-old")
+        claimed = claim_next_import_preview_job(self.db, worker_id="preview-old")
         assert claimed is not None
         self.assertEqual(claimed.preview_status, "running")
         self.assertIsNotNone(claimed.preview_heartbeat_at)
@@ -1779,7 +3521,7 @@ class TestRequeueRunningImportPreviewJobs(unittest.TestCase):
         self.db.requeue_running_import_preview_jobs(
             message="restart",
         )
-        reclaim = self.db.claim_next_import_preview_job(worker_id="preview-new")
+        reclaim = claim_next_import_preview_job(self.db, worker_id="preview-new")
         assert reclaim is not None
         self.assertEqual(reclaim.id, job_id)
         self.assertEqual(reclaim.preview_status, "running")
@@ -2552,7 +4294,7 @@ class TestDownloadLog(unittest.TestCase):
             (log_id,),
         ).fetchone()
         assert row is not None
-        payload = json_dict(row["validation_result"])
+        payload = cast(dict, row["validation_result"])
         self.assertEqual(payload["failed_path"], target)
         quarantine = json_dict(payload["post_commit_quarantine"])
         self.assertEqual(quarantine["moved"], True)
@@ -4048,6 +5790,19 @@ class TestRetryLogic(unittest.TestCase):
         self.assertEqual(req["download_attempts"], 0)
         self.assertEqual(req["validation_attempts"], 0)
 
+    def test_record_attempt_rejects_processing_owner_even_when_status_matches(self):
+        handoff_automation_owner(self.db, self.req_id)
+        before = self.db.get_request(self.req_id)
+        assert before is not None
+
+        self.assertFalse(self.db.record_attempt(
+            self.req_id,
+            "download",
+            expected_status="processing",
+        ))
+
+        self.assertEqual(self.db.get_request(self.req_id), before)
+
     def test_exponential_backoff(self):
         self.db.record_attempt(self.req_id, "search", expected_status="wanted")
         req1 = self.db.get_request(self.req_id)
@@ -4179,96 +5934,6 @@ class TestResetToWanted(unittest.TestCase):
         req = self.db.get_request(req_id)
         assert req is not None
         self.assertEqual(req["priority_started_at"], priority_started_at)
-
-    def test_abandon_auto_import_request_audits_and_resets_atomically(self):
-        req_id = self.db.add_request(
-            mb_release_id="abandon-auto-import",
-            artist_name="A",
-            album_title="B",
-            source="request",
-        )
-        state = {
-            "current_path": "/tmp/staged",
-            "import_subprocess_started_at": "2026-05-06T00:00:00+00:00",
-        }
-        self.assertTrue(self.db.set_downloading(req_id, json.dumps(state)))
-
-        log_id = self.db.abandon_auto_import_request(
-            request_id=req_id,
-            current_path="/tmp/staged",
-            soulseek_username="alice",
-            filetype="flac",
-            beets_detail="abandoned",
-            outcome="failed",
-            staged_path="/tmp/staged",
-            error_message="abandoned",
-            validation_result=None,
-        )
-
-        self.assertIsInstance(log_id, int)
-        req = self.db.get_request(req_id)
-        assert req is not None
-        self.assertEqual(req["status"], "wanted")
-        self.assertIsNone(req["active_download_state"])
-        self.assertEqual(req["download_attempts"], 1)
-        history = self.db.get_download_history(req_id)
-        self.assertEqual(len(history), 1)
-        self.assertEqual(history[0]["beets_scenario"],
-                         "abandoned_auto_import")
-
-        second = self.db.abandon_auto_import_request(
-            request_id=req_id,
-            current_path="/tmp/staged",
-            soulseek_username="alice",
-            filetype="flac",
-            beets_detail="abandoned",
-            outcome="failed",
-            staged_path="/tmp/staged",
-            error_message="abandoned",
-            validation_result=None,
-        )
-        self.assertIsNone(second)
-        self.assertEqual(len(self.db.get_download_history(req_id)), 1)
-
-    def test_abandon_auto_import_request_derives_validation_projection(self):
-        """Rule A: the atomic wrapper preserves JSONB and its query columns."""
-        from lib.quality import ValidationResult
-
-        req_id = self.db.add_request(
-            mb_release_id="abandon-projection",
-            artist_name="A",
-            album_title="B",
-            source="request",
-        )
-        state = {
-            "current_path": "/tmp/projection-staged",
-            "import_subprocess_started_at": "2026-05-06T00:00:00+00:00",
-        }
-        self.assertTrue(self.db.set_downloading(req_id, json.dumps(state)))
-        validation_result = ValidationResult(
-            distance=0.12,
-            scenario="abandoned_auto_import",
-            failed_path="/tmp/failed",
-        ).to_json()
-
-        self.db.abandon_auto_import_request(
-            request_id=req_id,
-            current_path="/tmp/projection-staged",
-            soulseek_username="alice",
-            filetype="flac",
-            beets_detail="abandoned",
-            outcome="failed",
-            staged_path="/tmp/projection-staged",
-            error_message="abandoned",
-            validation_result=validation_result,
-        )
-
-        history = self.db.get_download_history(req_id)
-        self.assertEqual(history[0]["beets_distance"], 0.12)
-        self.assertEqual(history[0]["beets_scenario"],
-                         "abandoned_auto_import")
-        vr = cast(dict, history[0]["validation_result"])
-        self.assertEqual(vr["failed_path"], "/tmp/failed")
 
     def test_get_wanted_returns_attempted_and_untried_rows(self):
         attempted_id = self.db.add_request(
@@ -4468,6 +6133,27 @@ class TestClearOnDiskQualityFields(unittest.TestCase):
         self.assertFalse(req["verified_lossless"])
         self.assertIsNone(req["current_spectral_grade"])
         self.assertIsNone(req["current_spectral_bitrate"])
+
+    def test_processing_owner_rejects_on_disk_quality_clear(self):
+        req_id = self.db.add_request(
+            mb_release_id="clear-od-processing-owner-uuid",
+            artist_name="A",
+            album_title="B",
+            source="request",
+        )
+        self.db.update_request_fields(
+            req_id,
+            verified_lossless=True,
+            current_spectral_grade="genuine",
+            current_spectral_bitrate=245,
+        )
+        handoff_automation_owner(self.db, req_id)
+        before = self.db.get_request(req_id)
+        assert before is not None
+
+        self.db.clear_on_disk_quality_fields(req_id)
+
+        self.assertEqual(self.db.get_request(req_id), before)
 
 
 @requires_postgres
@@ -4687,18 +6373,11 @@ class TestApplyTransitionDB(unittest.TestCase):
         frozen = self.db.get_request(request_id)
         assert frozen is not None
 
-        self.assertFalse(self.db.update_download_state(
+        self.assertFalse(self.db.update_download_state_if_downloading(
             request_id,
-            '{"files": [], "filetype": "mp3"}',
-            expected_status="downloading",
-        ))
-        self.assertFalse(self.db.update_download_state_current_path(
-            request_id,
-            "/late",
-        ))
-        self.assertFalse(self.db.mark_import_subprocess_started(
-            request_id,
-            "2026-07-13T15:00:00+00:00",
+            '{"files": [], "filetype": "mp3", '
+            '"enqueued_at": "2026-07-13T15:00:00+00:00"}',
+            expected_enqueued_at="2026-07-13T15:00:00+00:00",
         ))
         self.assertFalse(self.db.set_request_current_evidence(
             request_id,
@@ -6465,34 +8144,6 @@ class TestDownloadingStatus(unittest.TestCase):
         assert req is not None
         self.assertEqual(req["status"], "unsearchable")
 
-    def test_update_download_state(self):
-        """update_download_state() rewrites JSONB without changing status."""
-        req_id = self.db.add_request(
-            mb_release_id="uds-uuid",
-            artist_name="A",
-            album_title="B",
-            source="request",
-        )
-        self.db.set_downloading(
-            req_id,
-            json.dumps({"filetype": "flac", "enqueued_at": "2026-04-03T12:00:00+00:00", "files": []}),
-        )
-        self.db.update_download_state(
-            req_id,
-            json.dumps({
-                "filetype": "flac",
-                "enqueued_at": "2026-04-03T12:00:00+00:00",
-                "processing_started_at": "2026-04-03T12:05:00+00:00",
-                "files": [],
-            }),
-        )
-        req = self.db.get_request(req_id)
-        assert req is not None
-        self.assertEqual(req["status"], "downloading")
-        ads = req["active_download_state"]
-        assert ads is not None
-        self.assertEqual(ads["processing_started_at"], "2026-04-03T12:05:00+00:00")
-
     def test_update_download_state_if_downloading_success_and_guard(self):
         req_id = self.db.add_request(
             mb_release_id="udsifd-ok",
@@ -6887,73 +8538,6 @@ class TestDownloadingStatus(unittest.TestCase):
                 )
             stale_handle.close()
 
-    def test_known_bad_split_read_check_write_loses_new_incarnation(self):
-        from lib.pipeline_db import PipelineDB
-
-        witness_a = "2026-04-03T12:00:00+00:00"
-        witness_b = "2026-04-03T12:01:00+00:00"
-
-        def state(enqueued_at: str, bytes_transferred: int) -> str:
-            return json.dumps({
-                "filetype": "flac",
-                "enqueued_at": enqueued_at,
-                "current_path": "/same/path",
-                "files": [{
-                    "username": "user",
-                    "filename": "Album\\01.flac",
-                    "file_dir": "Album",
-                    "size": 123,
-                    "bytes_transferred": bytes_transferred,
-                }],
-            })
-
-        req_id = self.db.add_request(
-            mb_release_id="udsifd-known-bad-split",
-            artist_name="A",
-            album_title="B",
-            source="request",
-        )
-        self.assertTrue(self.db.set_downloading(
-            req_id,
-            state(witness_a, 0),
-        ))
-        stale_handle = PipelineDB(TEST_DSN)
-        try:
-            checked = stale_handle.get_request(req_id)
-            assert checked is not None
-            checked_state = checked["active_download_state"]
-            assert checked_state is not None
-            self.assertEqual(
-                checked_state["enqueued_at"],
-                witness_a,
-            )
-
-            self.assertTrue(self.db.update_download_state(
-                req_id,
-                state(witness_b, 10),
-            ))
-            self.assertTrue(stale_handle.update_download_state(
-                req_id,
-                state(witness_a, 20),
-            ))
-
-            final = self.db.get_request(req_id)
-            assert final is not None
-            final_state = final["active_download_state"]
-            assert final_state is not None
-            files = final_state["files"]
-            assert isinstance(files, list)
-            self.assertEqual(
-                json_dict(files[0])["bytes_transferred"],
-                20,
-            )
-            self.assertNotEqual(
-                final_state["enqueued_at"],
-                witness_b,
-            )
-        finally:
-            stale_handle.close()
-
     def test_reset_downloading_to_wanted_success_and_guard(self):
         req_id = self.db.add_request(
             mb_release_id="rdtw-ok",
@@ -7019,88 +8603,6 @@ class TestDownloadingStatus(unittest.TestCase):
         self.assertEqual(req["status"], "wanted")
         self.assertEqual(req["min_bitrate"], 192)
         self.assertIsNone(req["prev_min_bitrate"])
-
-    def test_update_download_state_current_path(self):
-        """update_download_state_current_path() rewrites only the path field."""
-        req_id = self.db.add_request(
-            mb_release_id="udscp-uuid",
-            artist_name="A",
-            album_title="B",
-            source="request",
-        )
-        self.db.set_downloading(
-            req_id,
-            json.dumps({
-                "filetype": "flac",
-                "enqueued_at": "2026-04-03T12:00:00+00:00",
-                "files": [],
-            }),
-        )
-
-        self.db.update_download_state_current_path(req_id, "/tmp/staged")
-
-        req = self.db.get_request(req_id)
-        assert req is not None
-        self.assertEqual(req["status"], "downloading")
-        ads = req["active_download_state"]
-        assert ads is not None
-        self.assertEqual(ads["current_path"], "/tmp/staged")
-        self.assertEqual(ads["filetype"], "flac")
-
-    def test_update_download_state_current_path_noop_when_not_downloading(self):
-        """update_download_state_current_path() does not recreate cleared state."""
-        req_id = self.db.add_request(
-            mb_release_id="udscp-noop-uuid",
-            artist_name="A",
-            album_title="B",
-            source="request",
-        )
-        self.db.set_downloading(
-            req_id,
-            json.dumps({
-                "filetype": "flac",
-                "enqueued_at": "2026-04-03T12:00:00+00:00",
-                "files": [],
-            }),
-        )
-        self.db.update_status(req_id, "imported")
-
-        self.db.update_download_state_current_path(req_id, "/tmp/staged")
-
-        req = self.db.get_request(req_id)
-        assert req is not None
-        self.assertEqual(req["status"], "imported")
-        self.assertIsNone(req["active_download_state"])
-
-    def test_update_download_state_current_path_noop_when_state_missing(self):
-        """update_download_state_current_path() must not fabricate a partial state."""
-        req_id = self.db.add_request(
-            mb_release_id="udscp-null-state-uuid",
-            artist_name="A",
-            album_title="B",
-            source="request",
-        )
-        self.db.set_downloading(
-            req_id,
-            json.dumps({
-                "filetype": "flac",
-                "enqueued_at": "2026-04-03T12:00:00+00:00",
-                "files": [],
-            }),
-        )
-        self.db._execute(
-            "UPDATE album_requests SET active_download_state = NULL WHERE id = %s",
-            (req_id,),
-        )
-        self.db.conn.commit()
-
-        self.db.update_download_state_current_path(req_id, "/tmp/staged")
-
-        req = self.db.get_request(req_id)
-        assert req is not None
-        self.assertEqual(req["status"], "downloading")
-        self.assertIsNone(req["active_download_state"])
-
 
 @requires_postgres
 class TestUserCooldowns(unittest.TestCase):
@@ -8279,113 +9781,6 @@ class TestRecentSuccessfulUploader(unittest.TestCase):
             self.db.get_recent_successful_uploader(self.req_id), "alice")
         self.assertEqual(
             self.db.get_recent_successful_uploader(other), "bob")
-
-
-@requires_postgres
-class TestActiveImportJobForRequest(unittest.TestCase):
-    """Real-DB coverage for get_active_import_job_for_request (plan U2)."""
-
-    def setUp(self):
-        self.db = make_db()
-        self.req_id = self.db.add_request(
-            mb_release_id="aij-uuid",
-            artist_name="A",
-            album_title="B",
-            source="request",
-        )
-
-    def tearDown(self):
-        self.db.close()
-
-    def _enqueue(self, *, request_id: int, dedupe_key: str):
-        from lib.import_queue import IMPORT_JOB_FORCE
-        return self.db.enqueue_import_job(
-            IMPORT_JOB_FORCE,
-            request_id=request_id,
-            dedupe_key=dedupe_key,
-            payload={"download_log_id": 1, "failed_path": "/tmp/x"},
-        )
-
-    def test_returns_none_when_no_jobs(self):
-        self.assertIsNone(
-            self.db.get_active_import_job_for_request(self.req_id))
-
-    def test_returns_queued_job(self):
-        job = self._enqueue(
-            request_id=self.req_id, dedupe_key=f"manual:{self.req_id:d}")
-        result = self.db.get_active_import_job_for_request(self.req_id)
-        assert result is not None
-        self.assertEqual(result.id, job.id)
-        self.assertEqual(result.status, "queued")
-
-    def test_returns_running_job(self):
-        self._enqueue(
-            request_id=self.req_id, dedupe_key=f"manual:{self.req_id:d}")
-        # Mark evidence_ready → claim → running
-        self.db._execute("""
-            UPDATE import_jobs
-            SET preview_status = 'evidence_ready',
-                importable_at = NOW()
-            WHERE request_id = %s
-        """, (self.req_id,))
-        claimed = self.db.claim_next_import_job(worker_id="w")
-        assert claimed is not None
-        result = self.db.get_active_import_job_for_request(self.req_id)
-        assert result is not None
-        self.assertEqual(result.status, "running")
-        self.assertEqual(result.id, claimed.id)
-
-    def test_returns_none_for_completed_job(self):
-        job = self._enqueue(
-            request_id=self.req_id, dedupe_key=f"manual:{self.req_id:d}")
-        self.db._execute("""
-            UPDATE import_jobs
-            SET preview_status = 'evidence_ready',
-                importable_at = NOW()
-            WHERE id = %s
-        """, (job.id,))
-        claimed = self.db.claim_next_import_job(worker_id="w")
-        assert claimed is not None
-        self.db.mark_import_job_completed(claimed.id, result={"ok": True})
-        self.assertIsNone(
-            self.db.get_active_import_job_for_request(self.req_id))
-
-    def test_returns_none_for_failed_job(self):
-        job = self._enqueue(
-            request_id=self.req_id, dedupe_key=f"manual:{self.req_id:d}")
-        self.db._execute("""
-            UPDATE import_jobs
-            SET preview_status = 'evidence_ready',
-                importable_at = NOW()
-            WHERE id = %s
-        """, (job.id,))
-        claimed = self.db.claim_next_import_job(worker_id="w")
-        assert claimed is not None
-        self.db.mark_import_job_failed(claimed.id, error="boom")
-        self.assertIsNone(
-            self.db.get_active_import_job_for_request(self.req_id))
-
-    def test_filters_by_request_id(self):
-        other = self.db.add_request(
-            mb_release_id="aij-other",
-            artist_name="A",
-            album_title="C",
-            source="request",
-        )
-        self._enqueue(request_id=self.req_id, dedupe_key="manual:a")
-        self._enqueue(request_id=other, dedupe_key="manual:b")
-        r1 = self.db.get_active_import_job_for_request(self.req_id)
-        r2 = self.db.get_active_import_job_for_request(other)
-        assert r1 is not None and r2 is not None
-        self.assertEqual(r1.request_id, self.req_id)
-        self.assertEqual(r2.request_id, other)
-
-    def test_returns_most_recent_when_multiple_active(self):
-        first = self._enqueue(request_id=self.req_id, dedupe_key="manual:a")
-        second = self._enqueue(request_id=self.req_id, dedupe_key="manual:b")
-        result = self.db.get_active_import_job_for_request(self.req_id)
-        assert result is not None
-        self.assertEqual(result.id, max(first.id, second.id))
 
 
 @requires_postgres
@@ -11517,29 +12912,6 @@ class TestYoutubeIngestDownloadLog(unittest.TestCase):
             [second],
         )
 
-    def test_list_active_youtube_rescues_returns_request_context(self):
-        yt_id = self.db.insert_youtube_running(**self._yt_payload(
-            browse_id="MPREb_visible",
-            expected_track_count=2,
-        ))
-
-        rows = self.db.list_active_youtube_rescues(limit=10)
-
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["download_log_id"], yt_id)
-        self.assertEqual(rows[0]["request_id"], self.request_id)
-        self.assertEqual(rows[0]["source"], "youtube")
-        self.assertEqual(rows[0]["outcome"], "youtube_running")
-        self.assertEqual(rows[0]["artist_name"], "Test Artist")
-        self.assertEqual(rows[0]["album_title"], "Test Album")
-        self.assertEqual(
-            rows[0]["youtube_metadata"]["browse_id"], "MPREb_visible")
-
-        self.db.update_youtube_terminal(
-            yt_id, "youtube_failed", {"reason": "operator_cancelled"},
-        )
-        self.assertEqual(self.db.list_active_youtube_rescues(limit=10), [])
-
     def test_active_youtube_import_guard_is_request_scoped(self):
         from lib.import_queue import (
             IMPORT_JOB_YOUTUBE,
@@ -13177,36 +14549,6 @@ class TestReadProjectionParity(unittest.TestCase):
             "get_recent_search_log_for_requests parity would pass vacuously")
         self._assert_keyset_parity(
             self, real_rows, fake_rows, "get_recent_search_log_for_requests")
-
-    # --- list_active_youtube_rescues (#523) ----------------------------------
-
-    def test_list_active_youtube_rescues_keyset_parity(self):
-        for db in (self.db, self.fake):
-            rid = db.add_request(
-                "Rescue Artist", "Rescue Album", "request",
-                mb_release_id="rescue-parity-1")
-            db.insert_youtube_running(
-                request_id=rid, browse_id="MPREb_parity",
-                audio_playlist_id=None,
-                yt_url="https://example.invalid/parity",
-                expected_track_count=2)
-
-        real_rows = self.db.list_active_youtube_rescues()
-        fake_rows = self.fake.list_active_youtube_rescues()
-        self.assertTrue(
-            real_rows, "seeding produced no rows on real PG — "
-            "list_active_youtube_rescues parity would pass vacuously")
-        self.assertTrue(
-            fake_rows, "seeding produced no rows on FakePipelineDB — "
-            "list_active_youtube_rescues parity would pass vacuously")
-        self._assert_keyset_parity(
-            self, real_rows, fake_rows, "list_active_youtube_rescues")
-
-    def test_list_active_youtube_rescues_empty_branch_parity(self):
-        # Contract: no in-flight rescues -- both return []. This is the
-        # explicit empty contract, not the keyset check.
-        self.assertEqual(self.db.list_active_youtube_rescues(), [])
-        self.assertEqual(self.fake.list_active_youtube_rescues(), [])
 
     # --- get_youtube_album_mapping (#523, tri-state) -------------------------
 

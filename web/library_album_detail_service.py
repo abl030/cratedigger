@@ -18,6 +18,7 @@ from lib.destructive_release_service import (
     resolve_pipeline_request,
 )
 from lib.json_narrow import is_object_list as _is_object_list
+from lib.pipeline_db._shared import ProcessingOwnerProjection
 from lib.release_identity import (
     detect_release_source,
     frontend_release_id,
@@ -161,6 +162,7 @@ class LibraryAlbumDetail(msgspec.Struct, frozen=True):
     tracks: list[LibraryAlbumTrack]
     pipeline_id: int | None
     pipeline_status: str | None
+    processing_owner: ProcessingOwnerProjection | None
     pipeline_source: str | None
     pipeline_min_bitrate: int | None
     search_filetype_override: str | None
@@ -248,6 +250,11 @@ def build_library_album_detail(
             "pipeline_id": pipeline_request.get("id") if pipeline_request else None,
             "pipeline_status": (
                 pipeline_request.get("status") if pipeline_request else None
+            ),
+            "processing_owner": (
+                pipeline_request.get("processing_owner")
+                if pipeline_request
+                else None
             ),
             "pipeline_source": (
                 pipeline_request.get("source") if pipeline_request else None

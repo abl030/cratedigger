@@ -735,7 +735,7 @@ export function closeSearchPlanDetail() {
       state.pipelineView = 'dashboard';
     }
     if (tab === 'recents'
-      && (subView === 'history' || subView === 'downloading' || subView === 'imports')) {
+      && (subView === 'history' || subView === 'acquisition' || subView === 'imports')) {
       state.recentsSub = subView;
     }
   }

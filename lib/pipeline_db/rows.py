@@ -83,7 +83,7 @@ import msgspec
 
 
 class AlbumRequestRow(TypedDict):
-    """One ``SELECT * FROM album_requests`` row (53 columns as of schema 063)."""
+    """One ``SELECT * FROM album_requests`` row (54 columns as of schema 066)."""
 
     id: int
     mb_release_id: str | None
@@ -117,6 +117,7 @@ class AlbumRequestRow(TypedDict):
     current_spectral_grade: str | None
     current_spectral_bitrate: int | None
     active_download_state: dict[str, object] | None
+    active_automation_import_job_id: int | None
     final_format: str | None
     search_filetype_override: str | None
     target_format: str | None
@@ -138,6 +139,12 @@ class AlbumRequestRow(TypedDict):
     rescued_at: datetime | None
     prior_unfindable_category: str | None
     catalog_number: str | None
+
+
+class AlbumRequestPresentationRow(AlbumRequestRow):
+    """Request table row enriched with its exact joined processor owner."""
+
+    processing_owner: dict[str, object] | None
 
 
 def album_request_row(raw: Mapping[str, object]) -> AlbumRequestRow:

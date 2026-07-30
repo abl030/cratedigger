@@ -1,15 +1,38 @@
 """PipelineDB core primitives: connection, _execute, advisory_lock, _atomic."""
+import select
+import threading
+import time
 from collections.abc import Generator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
-from typing import Any, Protocol
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Protocol
 
 import psycopg2
 import psycopg2.extras
+from psycopg2.extensions import (
+    POLL_OK,
+    POLL_READ,
+    POLL_WRITE,
+    set_wait_callback,
+)
 
+from lib.import_execution import (
+    CancellationToken,
+    OwnerSessionIdentity,
+    OwnerSessionProbe,
+    OwnerSessionWatchdog,
+)
 from lib.pipeline_db._shared import (
     DEFAULT_DSN,
     logger,
 )
+
+if TYPE_CHECKING:
+    from lib.pipeline_db.cleanup_journal import (
+        ProcessingCleanupJournalRow,
+        _CleanupCursor,
+        _LockedCleanupScope,
+    )
 
 
 class ReadOnlyQueryCursor(Protocol):
@@ -21,6 +44,87 @@ class ReadOnlyQueryCursor(Protocol):
     def execute(self, sql: str) -> None: ...
     def fetchall(self) -> list[Mapping[str, object]]: ...
     def close(self) -> None: ...
+
+
+class _PollingConnection(Protocol):
+    """libpq surface used by the process-wide bounded wait callback."""
+
+    OperationalError: type[Exception]
+
+    def poll(self) -> int: ...
+    def fileno(self) -> int: ...
+    def cancel(self) -> None: ...
+
+
+class OwnerSessionLost(RuntimeError):
+    """The exact PostgreSQL session holding processor authority was lost."""
+
+
+@dataclass(frozen=True)
+class _PinnedOwnerSession:
+    connection: object
+    identity: OwnerSessionIdentity
+    token: CancellationToken
+    io_lock: AbstractContextManager[object]
+
+
+class _OwnerSessionProbeDeadline(TimeoutError):
+    """A libpq wait exceeded the current thread's owner-probe deadline."""
+
+
+_wait_state = threading.local()
+
+
+def _pipeline_wait_callback(connection: _PollingConnection) -> None:
+    """Drive synchronous libpq with an optional thread-local deadline."""
+    while True:
+        try:
+            state = connection.poll()
+            if state == POLL_OK:
+                return
+            deadline = getattr(_wait_state, "deadline", None)
+            timeout = None
+            if deadline is not None:
+                timeout = deadline - time.monotonic()
+                if timeout <= 0:
+                    raise _OwnerSessionProbeDeadline(
+                        "owner-session probe deadline exceeded"
+                    )
+            if state == POLL_READ:
+                ready = select.select(
+                    [connection.fileno()],
+                    [],
+                    [],
+                    timeout,
+                )
+            elif state == POLL_WRITE:
+                ready = select.select(
+                    [],
+                    [connection.fileno()],
+                    [],
+                    timeout,
+                )
+            else:
+                raise connection.OperationalError(
+                    f"bad libpq poll state: {state}"
+                )
+            if not any(ready):
+                raise _OwnerSessionProbeDeadline(
+                    "owner-session probe deadline exceeded"
+                )
+        except KeyboardInterrupt:
+            connection.cancel()
+            continue
+
+
+@contextmanager
+def _bounded_probe_wait(timeout_seconds: float) -> Generator[None]:
+    previous = getattr(_wait_state, "deadline", None)
+    _wait_state.deadline = time.monotonic() + timeout_seconds
+    try:
+        yield
+    finally:
+        _wait_state.deadline = previous
 
 
 
@@ -42,6 +146,44 @@ class _PipelineDBBase:
     def read_only_query_cursor(self) -> AbstractContextManager[ReadOnlyQueryCursor]: ...
     def _atomic(self) -> Any: ...
     def advisory_lock(self, namespace: int, key: int) -> Any: ...
+    def _pin_owner_session(
+        self,
+        token: CancellationToken,
+    ) -> AbstractContextManager[OwnerSessionIdentity]: ...
+    def _probe_owner_session(
+        self,
+        identity: OwnerSessionIdentity,
+    ) -> OwnerSessionProbe: ...
+    def _lock_processing_cleanup_scope(
+        self,
+        cur: "_CleanupCursor",
+        *,
+        request_id: int,
+    ) -> "_LockedCleanupScope": ...
+    @staticmethod
+    def _require_exact_processing_owner(
+        scope: "_LockedCleanupScope",
+        *,
+        request_id: int,
+        job_id: int,
+    ) -> None: ...
+    def _get_processing_cleanup_journal_locked(
+        self,
+        *,
+        request_id: int,
+        job_id: int,
+        scope: "_LockedCleanupScope",
+    ) -> "ProcessingCleanupJournalRow | None": ...
+    def _retarget_processing_cleanup_journal_locked(
+        self,
+        cur: "_CleanupCursor",
+        *,
+        request_id: int,
+        old_job_id: int,
+        new_job_id: int,
+        expected_revision: int,
+        scope: "_LockedCleanupScope",
+    ) -> "ProcessingCleanupJournalRow | None": ...
     # Cross-cluster calls: declared here so the calling mixin type-checks;
     # resolved to the owning sibling mixin at runtime via the composed MRO.
     # - dashboard metrics aggregator -> search-plan cluster readiness:
@@ -59,9 +201,13 @@ class _CoreMixin(_PipelineDBBase):
     def __init__(self, dsn: str | None = None) -> None:
         self.dsn = dsn or DEFAULT_DSN
         self.conn = self._connect()
+        self._owner_session_pin: _PinnedOwnerSession | None = None
 
 
     def _connect(self):
+        # One process-global callback preserves ordinary blocking behavior,
+        # while owner watchdog threads opt into a thread-local hard deadline.
+        set_wait_callback(_pipeline_wait_callback)
         conn = psycopg2.connect(
             self.dsn,
             connect_timeout=10,
@@ -76,15 +222,52 @@ class _CoreMixin(_PipelineDBBase):
 
     def _ensure_conn(self):
         """Reconnect if the connection is dead."""
+        pin = self._owner_session_pin
+        if pin is not None:
+            if pin.token.cancelled:
+                raise OwnerSessionLost("pinned owner execution is cancelled")
+            if self.conn is not pin.connection:
+                pin.token.cancel("owner_session_connection_replaced")
+                raise OwnerSessionLost(
+                    "pinned owner-session connection was replaced"
+                )
+            if self.conn.closed:
+                pin.token.cancel("owner_session_closed")
+                raise OwnerSessionLost("pinned owner session is closed")
+            return
         if self.conn.closed:
             self.conn = self._connect()
 
 
     def close(self) -> None:
+        if self._owner_session_pin is not None:
+            self._owner_session_pin.token.cancel("owner_session_closed")
         self.conn.close()
 
 
+    @contextmanager
+    def _owner_session_io(self) -> Generator[None]:
+        pin = self._owner_session_pin
+        if pin is None:
+            yield
+            return
+        with pin.io_lock:
+            yield
+
+
     def _execute(
+        self,
+        sql: str,
+        params: Sequence[object] | Mapping[str, object] = (),
+    ):
+        pin = self._owner_session_pin
+        if pin is None:
+            return self._execute_locked(sql, params)
+        with pin.io_lock:
+            return self._execute_locked(sql, params)
+
+
+    def _execute_locked(
         self,
         sql: str,
         params: Sequence[object] | Mapping[str, object] = (),
@@ -107,6 +290,13 @@ class _CoreMixin(_PipelineDBBase):
             # connection open — re-raise those so the caller sees them.
             if not self.conn.closed:
                 raise
+            if self._owner_session_pin is not None:
+                self._owner_session_pin.token.cancel(
+                    "owner_session_connection_lost"
+                )
+                raise OwnerSessionLost(
+                    "pinned owner session was lost; statement was not replayed"
+                )
             # The reconnect below returns a fresh ``autocommit=True``
             # connection (see ``_connect``). That heal is only safe OUTSIDE a
             # transaction. If we are mid-transaction (``autocommit=False`` —
@@ -125,6 +315,157 @@ class _CoreMixin(_PipelineDBBase):
             else:
                 cur.execute(sql)
             return cur
+
+
+    @contextmanager
+    def _pin_owner_session(
+        self,
+        token: CancellationToken,
+    ) -> Generator[OwnerSessionIdentity]:
+        """Pin one live session and disable reconnect/replay for its scope."""
+        if self._owner_session_pin is not None:
+            raise RuntimeError("owner session is already pinned")
+        token.raise_if_cancelled()
+        self._ensure_conn()
+        connection = self.conn
+        if not connection.autocommit:
+            raise RuntimeError(
+                "owner session must be pinned before entering a transaction"
+            )
+        try:
+            with _bounded_probe_wait(0.75), connection.cursor() as cur:
+                cur.execute("SELECT pg_backend_pid()")
+                row = cur.fetchone()
+        except _OwnerSessionProbeDeadline as exc:
+            token.cancel("owner_session_pin_deadline")
+            connection.close()
+            raise OwnerSessionLost(
+                "owner session pin exceeded its deadline"
+            ) from exc
+        except (psycopg2.OperationalError, psycopg2.InterfaceError) as exc:
+            token.cancel("owner_session_pin_failed")
+            raise OwnerSessionLost("could not pin owner session") from exc
+        if row is None:
+            token.cancel("owner_session_pin_failed")
+            raise OwnerSessionLost("owner session returned no backend identity")
+        identity = OwnerSessionIdentity(
+            connection_object_id=id(connection),
+            backend_pid=int(row[0]),
+        )
+        pin = _PinnedOwnerSession(
+            connection,
+            identity,
+            token,
+            threading.RLock(),
+        )
+        self._owner_session_pin = pin
+        watchdog = OwnerSessionWatchdog(
+            token,
+            lambda deadline: self._probe_owner_session(
+                identity,
+                deadline_seconds=deadline,
+            ).live,
+            probe_interval=0.75,
+        )
+        try:
+            watchdog.start()
+        except Exception as exc:
+            token.cancel("owner_session_watchdog_start_failed")
+            if self._owner_session_pin is pin:
+                self._owner_session_pin = None
+            connection.close()
+            raise OwnerSessionLost(
+                "owner-session watchdog could not start"
+            ) from exc
+        try:
+            yield identity
+        finally:
+            try:
+                watchdog.stop()
+            finally:
+                if self._owner_session_pin is pin:
+                    self._owner_session_pin = None
+
+
+    def _probe_owner_session(
+        self,
+        identity: OwnerSessionIdentity,
+        *,
+        deadline_seconds: float = 0.75,
+    ) -> OwnerSessionProbe:
+        """Probe the exact pinned backend without reconnecting or replaying."""
+        if not 0 < deadline_seconds <= 1.0:
+            raise ValueError(
+                "owner-session probe deadline must be in (0, 1.0]"
+            )
+        pin = self._owner_session_pin
+        if pin is None:
+            return OwnerSessionProbe(
+                False, "scope_not_pinned", identity, None
+            )
+        with pin.io_lock:
+            if pin.token.cancelled:
+                return OwnerSessionProbe(
+                    False, "execution_cancelled", identity, None
+                )
+            if pin.identity != identity:
+                return OwnerSessionProbe(
+                    False, "identity_mismatch", identity, None
+                )
+            if self.conn is not pin.connection:
+                pin.token.cancel("owner_session_connection_replaced")
+                return OwnerSessionProbe(
+                    False, "connection_replaced", identity, None
+                )
+            if self.conn.closed:
+                pin.token.cancel("owner_session_closed")
+                return OwnerSessionProbe(
+                    False, "connection_closed", identity, None
+                )
+            milliseconds = max(1, int(deadline_seconds * 1000))
+            sql = (
+                f"SET LOCAL statement_timeout = {milliseconds}; "
+                "SELECT pg_backend_pid()"
+            )
+            try:
+                with _bounded_probe_wait(
+                    deadline_seconds,
+                ), self.conn.cursor() as cur:
+                    cur.execute(sql)
+                    row = cur.fetchone()
+            except _OwnerSessionProbeDeadline:
+                pin.token.cancel("owner_session_probe_deadline")
+                # The query may still be executing server-side. Closing the
+                # exact session is the only safe way to abandon it without a
+                # probe thread retaining access or a later statement replay.
+                self.conn.close()
+                return OwnerSessionProbe(
+                    False, "probe_deadline", identity, None
+                )
+            except psycopg2.Error as exc:
+                pin.token.cancel(
+                    f"owner_session_probe_failed:{type(exc).__name__}"
+                )
+                return OwnerSessionProbe(
+                    False, "probe_failed", identity, None
+                )
+            if row is None:
+                pin.token.cancel("owner_session_probe_empty")
+                return OwnerSessionProbe(
+                    False, "probe_empty", identity, None
+                )
+            observed_backend_pid = int(row[0])
+            if observed_backend_pid != identity.backend_pid:
+                pin.token.cancel("owner_session_backend_changed")
+                return OwnerSessionProbe(
+                    False,
+                    "backend_changed",
+                    identity,
+                    observed_backend_pid,
+                )
+            return OwnerSessionProbe(
+                True, "exact_backend", identity, observed_backend_pid
+            )
 
 
     @contextmanager
@@ -190,10 +531,18 @@ class _CoreMixin(_PipelineDBBase):
         See ``docs/advisory-locks.md`` for namespaces, keys, ordering,
         and call-site index.
         """
-        self._ensure_conn()
-        with self.conn.cursor() as cur:
-            cur.execute("SELECT pg_try_advisory_lock(%s, %s)", (namespace, key))
-            row = cur.fetchone()
+        with self._owner_session_io():
+            # The cancellation check must happen after entering the pinned
+            # session's I/O critical section. Otherwise the watchdog can
+            # cancel while this caller is waiting for the lock and a new
+            # advisory-lock statement can still begin after cancellation.
+            self._ensure_conn()
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    "SELECT pg_try_advisory_lock(%s, %s)",
+                    (namespace, key),
+                )
+                row = cur.fetchone()
         acquired = bool(row and row[0])
         try:
             yield acquired
@@ -205,13 +554,20 @@ class _CoreMixin(_PipelineDBBase):
                 # so a transient cursor/connection failure here cannot
                 # leak the lock beyond the session.
                 try:
-                    with self.conn.cursor() as cur:
+                    with (
+                        self._owner_session_io(),
+                        self.conn.cursor() as cur,
+                    ):
                         cur.execute(
                             "SELECT pg_advisory_unlock(%s, %s)",
                             (namespace, key),
                         )
                         cur.fetchone()
                 except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
+                    if self._owner_session_pin is not None:
+                        self._owner_session_pin.token.cancel(
+                            "owner_session_unlock_failed"
+                        )
                     logger.debug(
                         "advisory_unlock(%s, %s) failed; lock will be "
                         "released at session end",
@@ -221,6 +577,13 @@ class _CoreMixin(_PipelineDBBase):
 
     @contextmanager
     def _atomic(self) -> Generator[Any]:
+        """Serialize a pinned transaction against its same-session probe."""
+        with self._owner_session_io(), self._atomic_locked() as connection:
+            yield connection
+
+
+    @contextmanager
+    def _atomic_locked(self) -> Generator[object]:
         """Run a multi-row write in one explicit transaction.
 
         ``PipelineDB`` runs ``autocommit=True`` — one statement per implicit
@@ -241,8 +604,7 @@ class _CoreMixin(_PipelineDBBase):
         autocommit is only ever restored with no transaction in flight —
         matching the original per-method ordering. A caller that needs to
         abort with no writes may ``rollback()`` and return early inside the
-        block (``abandon_auto_import_request`` does this); that path is
-        preserved unchanged.
+        block; that path is preserved unchanged.
 
         Dead-connection error paths (issue #395): if the connection died
         mid-transaction (or the caller's ``commit()`` raised), both the
@@ -262,6 +624,11 @@ class _CoreMixin(_PipelineDBBase):
         try:
             yield self.conn
         except Exception:
+            pin = self._owner_session_pin
+            if pin is not None and (
+                self.conn is not pin.connection or self.conn.closed
+            ):
+                pin.token.cancel("owner_session_transaction_lost")
             # The connection may have died mid-transaction (or the caller's
             # ``commit()`` itself raised). ``rollback()`` on a dead connection
             # raises a *secondary* ``InterfaceError`` that would replace the
@@ -283,6 +650,10 @@ class _CoreMixin(_PipelineDBBase):
             try:
                 self.conn.autocommit = old_autocommit  # restore one-stmt mode
             except Exception:  # noqa: BLE001 — never mask the original error
+                if self._owner_session_pin is not None:
+                    self._owner_session_pin.token.cancel(
+                        "owner_session_transaction_lost"
+                    )
                 logger.debug(
                     "autocommit restore failed during _atomic (connection "
                     "likely dead); a fresh connection will be established on "

@@ -210,16 +210,22 @@ class DatabaseSource:
         *,
         musicbrainz_ws2_base: str,
         discogs_api_base: str,
+        borrowed_db: PipelineDB | None = None,
     ) -> None:
         self.dsn = dsn
         self.musicbrainz_ws2_base = musicbrainz_ws2_base.rstrip("/")
         self.discogs_api_base = discogs_api_base.rstrip("/")
-        self._db: PipelineDB | None = None
+        self._db: PipelineDB | None = borrowed_db
+        self._owns_db = borrowed_db is None
+        self._closed = False
 
     def _get_db(self) -> PipelineDB:
+        if getattr(self, "_closed", False):
+            raise RuntimeError("DatabaseSource is closed")
         if self._db is None:
             from lib.pipeline_db import PipelineDB
             self._db = PipelineDB(self.dsn)
+            self._owns_db = True
         return self._db
 
     def get_wanted(self, limit: int | None = None) -> list[AlbumRecord]:
@@ -536,6 +542,7 @@ class DatabaseSource:
         return tracks
 
     def close(self) -> None:
-        if self._db:
+        if self._db and getattr(self, "_owns_db", True):
             self._db.close()
-            self._db = None
+        self._db = None
+        self._closed = True

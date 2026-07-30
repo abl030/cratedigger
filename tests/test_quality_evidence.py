@@ -1205,16 +1205,40 @@ class TestAudioSnapshotMatches(unittest.TestCase):
 
 
 if TYPE_CHECKING:
-    from typing import cast
-
+    from lib.import_execution import ExecutionLeaseSnapshot
     from lib.pipeline_db import PipelineDB
     from lib.quality_evidence import QualityEvidenceDB as _EvidenceDB
     from tests.fakes import FakePipelineDB as _FakeDB
 
     # Static parity proof (#409) — see the matching block in
     # tests/test_wrong_match_cleanup_service.py for the rationale.
-    _pipeline_db_satisfies_evidence_protocol: _EvidenceDB = cast("PipelineDB", None)
-    _fake_db_satisfies_evidence_protocol: _EvidenceDB = cast("_FakeDB", None)
+    def _assert_evidence_protocol_parity(
+        pipeline: PipelineDB,
+        fake: _FakeDB,
+        lease: ExecutionLeaseSnapshot,
+    ) -> None:
+        _pipeline_protocol: _EvidenceDB = pipeline
+        _fake_protocol: _EvidenceDB = fake
+        _pipeline_candidate_cas: bool = (
+            pipeline.set_import_job_candidate_evidence(
+                1,
+                2,
+                expected_execution_lease=lease,
+            )
+        )
+        _fake_candidate_cas: bool = (
+            fake.set_import_job_candidate_evidence(
+                1,
+                2,
+                expected_execution_lease=lease,
+            )
+        )
+        del (
+            _pipeline_protocol,
+            _fake_protocol,
+            _pipeline_candidate_cas,
+            _fake_candidate_cas,
+        )
 
 
 class TestEvidenceDBProtocolParity(unittest.TestCase):

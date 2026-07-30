@@ -17,7 +17,11 @@ from lib.import_manifest import (
 from lib.import_queue import IMPORT_JOB_FORCE
 from lib.quality_evidence import snapshot_audio_files
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_album_quality_evidence, make_request_row
+from tests.helpers import (
+    claim_next_import_job,
+    make_album_quality_evidence,
+    make_request_row,
+)
 
 
 class TestImportManifest(unittest.TestCase):
@@ -193,7 +197,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
             preview_result=preview_result or {},
         )
         assert ready is not None
-        claimed = db.claim_next_import_job(worker_id="manifest-guard")
+        claimed = claim_next_import_job(db, worker_id="manifest-guard")
         assert claimed is not None and claimed.id == job.id
         return job.id
 

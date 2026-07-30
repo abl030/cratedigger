@@ -19,6 +19,7 @@ import os
 import tempfile
 import unittest
 from collections.abc import Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from typing import Any, Literal, cast
 from unittest.mock import patch
@@ -30,6 +31,11 @@ from hypothesis import strategies as st
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.beets_db import AlbumInfo
 from lib.config import CratediggerConfig
+from lib.import_execution import (
+    CancellationToken,
+    ExecutionLeaseSnapshot,
+    ProcessIdentity,
+)
 from lib.import_preview import (
     ImportPreviewResult,
     enrich_incomplete_current_evidence_for_request,
@@ -55,7 +61,11 @@ from lib.quality import (
 from lib.quality_evidence import EvidenceBuildResult, snapshot_audio_files
 from scripts import import_preview_worker
 from tests.fakes import FakeBeetsDB, FakePipelineDB
-from tests.helpers import make_album_quality_evidence, make_request_row
+from tests.helpers import (
+    claim_next_import_preview_job,
+    make_album_quality_evidence,
+    make_request_row,
+)
 
 FailureMode = Literal[
     "returned",
@@ -141,14 +151,19 @@ def preview_failure_worlds(draw: st.DrawFn) -> PreviewFailureWorld:
     minimum = draw(st.integers(min_value=1, max_value=2_000))
     median = minimum + draw(st.integers(min_value=0, max_value=100))
     maximum = median + draw(st.integers(min_value=0, max_value=100))
+    job_type = draw(st.sampled_from((
+        IMPORT_JOB_AUTOMATION,
+        IMPORT_JOB_FORCE,
+        IMPORT_JOB_YOUTUBE,
+    )))
     return PreviewFailureWorld(
         stage=draw(st.sampled_from(FAILURE_STAGES)),
-        job_type=draw(st.sampled_from((
-            IMPORT_JOB_AUTOMATION,
-            IMPORT_JOB_FORCE,
-            IMPORT_JOB_YOUTUBE,
-        ))),
-        owner=draw(st.sampled_from(("exact", "missing_mbid", "orphan"))),
+        job_type=job_type,
+        owner=draw(st.sampled_from(
+            ("exact", "missing_mbid")
+            if job_type in (IMPORT_JOB_AUTOMATION, IMPORT_JOB_FORCE)
+            else ("exact", "missing_mbid", "orphan")
+        )),
         library=draw(st.sampled_from(("installed", "absent", "unreadable"))),
         current=draw(st.sampled_from((
             "none", "unlinked", "linked_partial", "linked_complete",
@@ -415,14 +430,22 @@ def _run_world(world: PreviewFailureWorld) -> PreviewFailureObservation:
     with tempfile.TemporaryDirectory(
         prefix="cratedigger-preview-failure-gen-",
     ) as root:
-        candidate_path = os.path.join(root, "candidate")
+        processing_dir = os.path.join(root, "processing")
+        candidate_path = (
+            os.path.join(processing_dir, "albums", f"request-{request_id}")
+            if world.job_type == IMPORT_JOB_AUTOMATION
+            else os.path.join(root, "candidate")
+        )
         installed_path = os.path.join(root, "installed")
         os.makedirs(candidate_path)
         os.makedirs(installed_path)
         authoritative_failure_path = candidate_path
         payload_failure_path: str | None = None
         force_preview_root: str | None = None
-        cfg = _config(installed_path)
+        cfg = _config(
+            installed_path,
+            processing_dir=processing_dir,
+        )
         if world.job_type == IMPORT_JOB_FORCE:
             download_root = os.path.join(root, "downloads")
             processing_dir = os.path.join(root, "processing")
@@ -547,19 +570,48 @@ def _run_world(world: PreviewFailureWorld) -> PreviewFailureObservation:
                     "failed_path": authoritative_failure_path,
                 },
             )
-        job = db.enqueue_import_job(
-            world.job_type,
-            request_id=job_request_id,
-            dedupe_key=f"generated:{world.job_type}:{world.stage.name}",
-            payload=_job_payload(
+        if world.job_type == IMPORT_JOB_AUTOMATION:
+            assert job_request_id is not None
+            handoff = db.handoff_automation_import(
+                request_id=job_request_id,
+                expected_enqueued_at="2026-07-23T00:00:00+00:00",
+                canonical_path=candidate_path,
+                message="generated preview-failure owner handoff",
+            )
+            assert handoff.committed and handoff.job is not None
+            job = handoff.job
+        else:
+            job = db.enqueue_import_job(
                 world.job_type,
-                request_id=request_id,
-                source_path=payload_failure_path or candidate_path,
-                force_download_log_id=force_download_log_id,
-            ),
+                request_id=job_request_id,
+                dedupe_key=f"generated:{world.job_type}:{world.stage.name}",
+                payload=_job_payload(
+                    world.job_type,
+                    request_id=request_id,
+                    source_path=payload_failure_path or candidate_path,
+                    force_download_log_id=force_download_log_id,
+                ),
+            )
+        preview_lease = ExecutionLeaseSnapshot(
+            host_boot_id="generated-preview-boot",
+            invocation_id="generated-preview-invocation",
+            systemd_unit="cratedigger-import-preview.service",
+            worker=ProcessIdentity(pid=764, start_ticks=1),
         )
-        claimed = db.claim_next_import_preview_job(worker_id="generated-preview")
+        claimed = claim_next_import_preview_job(db, worker_id="generated-preview",
+        execution_lease=preview_lease,)
         assert claimed is not None and claimed.id == job.id
+        automation_authority = (
+            import_preview_worker._AutomationPreviewAuthority(
+                request=db.request(request_id),
+                state=ActiveDownloadState.from_raw(
+                    db.request(request_id)["active_download_state"]
+                ),
+                canonical_path=candidate_path,
+            )
+            if world.job_type == IMPORT_JOB_AUTOMATION
+            else None
+        )
 
         force_snapshot_path: str | None = None
         force_snapshot_bytes: bytes | None = None
@@ -616,6 +668,16 @@ def _run_world(world: PreviewFailureWorld) -> PreviewFailureObservation:
                 ),
             )
 
+        cancellation_token = (
+            CancellationToken()
+            if world.job_type == IMPORT_JOB_AUTOMATION
+            else None
+        )
+        owner_session_scope = (
+            db._pin_owner_session(cancellation_token)
+            if cancellation_token is not None
+            else nullcontext(None)
+        )
         with patch(
             "lib.beets_db.BeetsDB",
             lambda **_kwargs: fake_beets,
@@ -625,7 +687,7 @@ def _run_world(world: PreviewFailureWorld) -> PreviewFailureObservation:
             "scripts.import_preview_worker.logger.warning",
         ), patch(
             "lib.import_preview.logger.warning",
-        ):
+        ), owner_session_scope as owner_session_identity:
             updated = import_preview_worker.process_claimed_preview_job(
                 cast(Any, db),
                 claimed,
@@ -637,6 +699,14 @@ def _run_world(world: PreviewFailureWorld) -> PreviewFailureObservation:
                 prepare_failure_have_fn=prepare_have,
                 enrich_failure_have_fn=enrich_have,
                 runtime_config=cfg,
+                execution_lease=(
+                    preview_lease
+                    if world.job_type == IMPORT_JOB_AUTOMATION
+                    else None
+                ),
+                automation_authority=automation_authority,
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
             )
 
         assert updated is not None

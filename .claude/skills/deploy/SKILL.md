@@ -176,8 +176,11 @@ test "$DEPLOYED_REV" = "$EXPECTED_NIXOSCONFIG_REV"
 
 5. Verify migration state and the services affected by the change. The migrate
 oneshot uses `RemainAfterExit`, so it must report `ActiveState=active`,
-`SubState=exited`, and `Result=success`; verify long-running workers
-individually rather than assuming a successful switch made them healthy:
+`SubState=exited`, and `Result=success`. For an ordinary deployment, verify
+long-running workers individually rather than assuming a successful switch
+made them healthy. For a strict held deployment, do not run the ordinary
+active-service check below: `verify-held` deliberately drains those services,
+and the held workflow proves their state at each release boundary instead.
 ```bash
 set -euo pipefail
 migration_state=$(env -u SSH_AUTH_SOCK ssh doc2 'systemctl show cratedigger-db-migrate.service \
@@ -202,14 +205,153 @@ SQL
 )
 test -n "$migration_rows"
 printf '%s\n' "$migration_rows"
-service_states=$(env -u SSH_AUTH_SOCK ssh doc2 'set -euo pipefail
-  for unit in cratedigger-web.service cratedigger-importer.service \
-    cratedigger-import-preview-worker.service cratedigger-youtube-ingest.service; do
-    state=$(systemctl is-active "$unit")
-    test "$state" = active
-    printf "%s=%s\n" "$unit" "$state"
-  done')
-printf '%s\n' "$service_states"
+processing_owner_audit=$(env -u SSH_AUTH_SOCK ssh doc2 'set -euo pipefail; \
+  export PGPASSWORD=$(sudo cat /run/secrets/cratedigger-pgpass \
+    | grep "^PGPASSWORD=" | cut -d= -f2); \
+  test -n "$PGPASSWORD"; pipeline-cli query --json -' <<'SQL'
+WITH owner_rows AS (
+  SELECT request.id AS request_id,
+         request.status,
+         request.active_automation_import_job_id,
+         job.id AS job_id,
+         job.request_id AS job_request_id,
+         job.job_type,
+         job.status AS job_status
+  FROM album_requests AS request
+  LEFT JOIN import_jobs AS job
+    ON job.id = request.active_automation_import_job_id
+)
+SELECT EXISTS (
+         SELECT 1
+         FROM schema_migrations
+         WHERE version = 66
+           AND name = 'processing_automation_owner'
+       ) AS migration_066_applied,
+       (
+         SELECT count(*) = 1
+         FROM pg_index AS index_state
+         JOIN pg_class AS index_class
+           ON index_class.oid = index_state.indexrelid
+         JOIN pg_class AS indexed_table
+           ON indexed_table.oid = index_state.indrelid
+         JOIN pg_namespace AS indexed_namespace
+           ON indexed_namespace.oid = indexed_table.relnamespace
+         WHERE index_class.relname
+                 = 'one_active_automation_import_per_request'
+           AND indexed_table.relname = 'import_jobs'
+           AND indexed_namespace.nspname = current_schema()
+           AND index_state.indisunique
+           AND index_state.indisvalid
+           AND index_state.indisready
+           AND index_state.indpred IS NOT NULL
+       ) AS active_owner_index_ready,
+       (
+         SELECT count(*) = 3
+         FROM pg_constraint
+         WHERE conname IN (
+           'album_requests_active_automation_owner_unique',
+           'album_requests_active_automation_owner_fk',
+           'processing_cleanup_journal_job_request_fk'
+         )
+           AND convalidated
+           AND condeferrable
+           AND condeferred
+       ) AS owner_constraints_validated,
+       (
+         SELECT count(*) = 3
+         FROM pg_trigger
+         WHERE tgname IN (
+           'album_requests_complete_processing_owner',
+           'import_jobs_complete_processing_owner',
+           'processing_cleanup_journal_exact_owner'
+         )
+           AND NOT tgisinternal
+           AND tgenabled = 'O'
+           AND tgdeferrable
+           AND tginitdeferred
+       ) AS owner_triggers_enabled,
+       (
+         SELECT count(*)
+         FROM owner_rows
+         WHERE (status = 'processing') IS DISTINCT FROM
+               (active_automation_import_job_id IS NOT NULL)
+       ) AS status_pointer_violations,
+       (
+         SELECT count(*)
+         FROM owner_rows
+         WHERE active_automation_import_job_id IS NOT NULL
+           AND (
+             job_id IS NULL
+             OR job_request_id IS DISTINCT FROM request_id
+             OR job_type IS DISTINCT FROM 'automation_import'
+             OR job_status NOT IN ('queued', 'running', 'recovery_required')
+           )
+       ) AS bad_request_owner_violations,
+       (
+         SELECT count(*)
+         FROM import_jobs AS job
+         LEFT JOIN album_requests AS request
+           ON request.id = job.request_id
+          AND request.status = 'processing'
+          AND request.active_automation_import_job_id = job.id
+         WHERE job.job_type = 'automation_import'
+           AND job.status IN ('queued', 'running', 'recovery_required')
+           AND request.id IS NULL
+       ) AS orphan_active_job_violations,
+       (
+         SELECT count(*)
+         FROM processing_cleanup_journal AS journal
+         LEFT JOIN album_requests AS request
+           ON request.id = journal.request_id
+         LEFT JOIN import_jobs AS job
+           ON job.id = journal.job_id
+          AND job.request_id = journal.request_id
+         WHERE request.id IS NULL
+            OR request.status IS DISTINCT FROM 'processing'
+            OR request.active_automation_import_job_id
+                 IS DISTINCT FROM journal.job_id
+            OR job.id IS NULL
+            OR job.job_type IS DISTINCT FROM 'automation_import'
+            OR job.status NOT IN ('queued', 'running', 'recovery_required')
+       ) AS bad_cleanup_journal_violations;
+SQL
+)
+printf '%s\n' "$processing_owner_audit"
+CRATEDIGGER_PROCESSING_OWNER_AUDIT="$processing_owner_audit" python3 - <<'PY'
+import json
+import os
+
+rows = json.loads(os.environ["CRATEDIGGER_PROCESSING_OWNER_AUDIT"])
+expected = {
+    "migration_066_applied": True,
+    "active_owner_index_ready": True,
+    "owner_constraints_validated": True,
+    "owner_triggers_enabled": True,
+    "status_pointer_violations": 0,
+    "bad_request_owner_violations": 0,
+    "orphan_active_job_violations": 0,
+    "bad_cleanup_journal_violations": 0,
+}
+if rows != [expected]:
+    raise SystemExit(f"processing owner audit failed: {rows!r}")
+PY
+# Ordinary deployments only. Strict held deployments prove the deliberately
+# inactive boundary after `verify-held`, then the staged active boundaries
+# after `prepare-controlled` and `finish-release`.
+if env -u SSH_AUTH_SOCK ssh doc2 \
+  'sudo test -f /run/cratedigger-deploy-hold/receipt'; then
+  printf '%s\n' \
+    'strict deploy hold present: active-service check deferred to held release'
+else
+  service_states=$(env -u SSH_AUTH_SOCK ssh doc2 'set -euo pipefail
+    for unit in cratedigger-web.service cratedigger-importer.service \
+      cratedigger-import-preview-worker.service cratedigger-youtube-ingest.service; do
+      state=$(systemctl is-active "$unit")
+      test "$state" = active
+      printf "%s=%s\n" "$unit" "$state"
+    done')
+  printf '%s\n' "$service_states"
+fi
 ```
 
 6. Derive the active wrapper from the service's `ExecStart`, then derive its
@@ -270,8 +412,9 @@ masks under `/run/systemd/system`, and a timer mask does not cancel service
 starts that systemd already queued. Strict holds therefore use the tracked
 helper; never substitute `systemctl mask --runtime`, a service mask, or manual
 link cleanup. The helper fixes the authority surface to the main, unfindable,
-and metadata-gate-watchdog timer/service pairs and records only links and the
-manual metadata hold it created.
+and metadata-gate-watchdog timers plus every metadata-gate-guarded service. It
+records only the control links, manual hold, and main/YouTube start inhibitors
+it created.
 
 Run the reviewed helper on doc2 through Python stdin so the pre-switch host does
 not need this revision deployed already:
@@ -282,7 +425,11 @@ CRATEDIGGER_REPO=$(git rev-parse --show-toplevel)
 DEPLOY_HOLD="$CRATEDIGGER_REPO/scripts/cratedigger_deploy_hold.py"
 CYCLE_VERIFY="$CRATEDIGGER_REPO/scripts/verify_cratedigger_cycle.sh"
 
-# Before fleet-deploy: acquire authoritative masks and stable quiescence.
+# Before fleet-deploy: prove the independently deployed main/YouTube
+# controlled-start prerequisite, acquire authoritative masks and stable
+# quiescence, query the old live schema, and abort under the hold unless
+# automation jobs/recovery rows/staged downloading rows/malformed enqueued_at
+# witnesses are all zero.
 env -u SSH_AUTH_SOCK ssh doc2 'sudo python3 - acquire' < "$DEPLOY_HOLD"
 ```
 
@@ -291,6 +438,57 @@ receipt-owned boundary before any strict one-shot or state rewrite:
 
 ```bash
 env -u SSH_AUTH_SOCK ssh doc2 'sudo python3 - verify-held' < "$DEPLOY_HOLD"
+held_service_states=$(env -u SSH_AUTH_SOCK ssh doc2 'set -euo pipefail
+  for unit in cratedigger.service cratedigger-unfindable.service \
+    cratedigger-metadata-gate-watchdog.service \
+    cratedigger-youtube-ingest.service cratedigger-web.service \
+    cratedigger-importer.service cratedigger-import-preview-worker.service; do
+    active=$(systemctl show "$unit" --property=ActiveState --value)
+    sub=$(systemctl show "$unit" --property=SubState --value)
+    job=$(systemctl show "$unit" --property=Job --value)
+    test "$active" = inactive
+    test "$sub" = dead
+    test -z "$job" || test "$job" = 0
+    printf "%s active=%s sub=%s job=%s\n" "$unit" "$active" "$sub" "${job:-none}"
+  done')
+printf '%s\n' "$held_service_states"
+held_processing_boundary=$(env -u SSH_AUTH_SOCK ssh doc2 'set -euo pipefail; \
+  export PGPASSWORD=$(sudo cat /run/secrets/cratedigger-pgpass \
+    | grep "^PGPASSWORD=" | cut -d= -f2); \
+  test -n "$PGPASSWORD"; pipeline-cli query --json -' <<'SQL'
+SELECT count(*) FILTER (WHERE status = 'processing')
+         AS processing_requests,
+       count(*) FILTER (
+         WHERE active_automation_import_job_id IS NOT NULL
+       ) AS owner_pointers,
+       (
+         SELECT count(*)
+         FROM import_jobs
+         WHERE job_type = 'automation_import'
+           AND status IN ('queued', 'running', 'recovery_required')
+       ) AS active_automation_jobs,
+       (
+         SELECT count(*)
+         FROM processing_cleanup_journal
+       ) AS cleanup_journals
+FROM album_requests;
+SQL
+)
+printf '%s\n' "$held_processing_boundary"
+CRATEDIGGER_HELD_PROCESSING_BOUNDARY="$held_processing_boundary" python3 - <<'PY'
+import json
+import os
+
+rows = json.loads(os.environ["CRATEDIGGER_HELD_PROCESSING_BOUNDARY"])
+expected = [{
+    "processing_requests": 0,
+    "owner_pointers": 0,
+    "active_automation_jobs": 0,
+    "cleanup_journals": 0,
+}]
+if rows != expected:
+    raise SystemExit(f"held processing boundary is dirty: {rows!r}")
+PY
 # Run and reconcile the reviewed maintenance operation here.
 ```
 
@@ -298,9 +496,30 @@ Release in four evidence-gated phases. Derive `CRATEDIGGER_SOURCE` from the
 active wrapper as in step 6 before capturing either cycle:
 
 ```bash
-# All three timers remain masked for one controlled main cycle.
+# All three timers remain masked. prepare-controlled creates separate
+# receipt-owned main/YouTube inhibitors, releases the manual metadata hold,
+# explicitly starts and proves the web, preview, and importer services,
+# exercises an overlapping
+# resume-if-clear while both producers remain inactive, then removes only the
+# main inhibitor and starts one controlled main cycle. YouTube stays inhibited.
 CONTROLLED_CURSOR=$("$CYCLE_VERIFY" capture-cursor)
 env -u SSH_AUTH_SOCK ssh doc2 'sudo python3 - prepare-controlled' < "$DEPLOY_HOLD"
+controlled_service_states=$(env -u SSH_AUTH_SOCK ssh doc2 'set -euo pipefail
+  for unit in cratedigger-web.service cratedigger-importer.service \
+    cratedigger-import-preview-worker.service; do
+    state=$(systemctl is-active "$unit")
+    test "$state" = active
+    printf "%s=%s\n" "$unit" "$state"
+  done
+  youtube_active=$(systemctl show cratedigger-youtube-ingest.service \
+    --property=ActiveState --value)
+  youtube_sub=$(systemctl show cratedigger-youtube-ingest.service \
+    --property=SubState --value)
+  test "$youtube_active" = inactive
+  test "$youtube_sub" = dead
+  printf "cratedigger-youtube-ingest.service active=%s sub=%s\n" \
+    "$youtube_active" "$youtube_sub"')
+printf '%s\n' "$controlled_service_states"
 CONTROLLED_ID=$(
   "$CYCLE_VERIFY" capture-target "$CONTROLLED_CURSOR" "$CRATEDIGGER_SOURCE"
 )
@@ -314,15 +533,45 @@ ORDINARY_ID=$(
   "$CYCLE_VERIFY" capture-target "$ORDINARY_CURSOR" "$CRATEDIGGER_SOURCE"
 )
 env -u SSH_AUTH_SOCK ssh doc2 sudo python3 - finish-release "$ORDINARY_ID" < "$DEPLOY_HOLD"
+worker_release_states=$(env -u SSH_AUTH_SOCK ssh doc2 'set -euo pipefail
+  for attempt in $(seq 1 60); do
+    all_active=1
+    states=""
+    for unit in cratedigger-web.service cratedigger-importer.service \
+      cratedigger-import-preview-worker.service \
+      cratedigger-youtube-ingest.service; do
+      state=$(systemctl is-active "$unit" || true)
+      states="${states}${unit}=${state}\n"
+      if test "$state" != active; then
+        all_active=0
+      fi
+    done
+    if test "$all_active" = 1; then
+      printf "%b" "$states"
+      exit 0
+    fi
+    sleep 1
+  done
+  for unit in cratedigger-web.service cratedigger-importer.service \
+    cratedigger-import-preview-worker.service \
+    cratedigger-youtube-ingest.service; do
+    systemctl show "$unit" \
+      --property=ActiveState --property=SubState --property=Result
+  done
+  exit 1')
+printf '%s\n' "$worker_release_states"
 "$CYCLE_VERIFY" verify-exact "$ORDINARY_ID" "$CRATEDIGGER_SOURCE"
 env -u SSH_AUTH_SOCK ssh doc2 sudo python3 - complete "$ORDINARY_ID" < "$DEPLOY_HOLD"
 ```
 
-Every helper phase fails closed on an unexpected phase, pre-existing unowned
-hold/link, changed owned link, surviving job, or wrong invocation ID. On
-failure, leave the receipt and remaining masks in place and inspect the exact
-reported boundary. Rerun an interrupted `acquire`; after a failed release
-phase, return safely to the strict boundary with
+`finish-release` removes the owned YouTube inhibitor immediately before the
+final metadata-gate resume, then restores watchdog/unfindable timers. Every
+helper phase fails closed on an unexpected phase, stale downstream
+controlled-start contract, dirty old lifecycle, pre-existing unowned
+hold/link/inhibitor, changed owned object, surviving job, or wrong invocation
+ID. On failure, leave the receipt and remaining masks/inhibitors in place and
+inspect the exact reported boundary. Rerun an interrupted `acquire`; after a
+failed release phase, return safely to the strict boundary with
 `env -u SSH_AUTH_SOCK ssh doc2 'sudo python3 - recover-held' < "$DEPLOY_HOLD"` before restarting
 release. Rerun an interrupted `complete` to finish its atomic retired-receipt
 cleanup. Do not remove `/run/cratedigger-deploy-hold` or its

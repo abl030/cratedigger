@@ -55,7 +55,7 @@ from lib.release_identity import ReleaseIdentity
 from lib.wrong_match_delete_service import WrongMatchDeleteSummary
 from tests.beets_world import BeetsWorld, BeetsWorldRelease
 from tests.fakes import FakeBeetsDB, FakePipelineDB, FakeSlskdAPI
-from tests.helpers import make_request_row
+from tests.helpers import handoff_automation_owner, make_request_row
 from web.discogs import DiscogsMirrorNotConfigured
 
 # NOTE: must be a valid MB release id per ``detect_release_source``
@@ -333,6 +333,47 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         result = svc.replace_request_mbid(99, target_mb_release_id=NEW_MBID)
         self.assertEqual(result.outcome, RESULT_NOT_FOUND)
         self.assertIsNone(result.new_request_id)
+
+    def test_processing_owner_wins_between_preflight_and_locked_reread(self):
+        db = FakePipelineDB()
+        self._seed_old(db)
+        fired = False
+
+        def acquire(namespace: int, _key: int) -> bool:
+            nonlocal fired
+            if not fired:
+                fired = True
+                handoff_automation_owner(db, 42)
+            return True
+
+        db.set_advisory_lock_result(acquire)
+        beets_factory = MagicMock(
+            side_effect=AssertionError("Beets authority reached"),
+        )
+        search_plan = MagicMock()
+        svc = self._make_service(
+            db,
+            beets_db_factory=beets_factory,
+            search_plan_service=search_plan,
+        )
+
+        result = svc.replace_request_mbid(
+            42,
+            target_mb_release_id=NEW_MBID,
+        )
+
+        self.assertEqual(result.outcome, RESULT_WRONG_STATE)
+        self.assertEqual(result.reason, "processing_locked")
+        self.assertIsNotNone(result.processing_owner)
+        owner = result.processing_owner
+        assert owner is not None
+        self.assertEqual(
+            owner.job_id,
+            db.request(42)["active_automation_import_job_id"],
+        )
+        beets_factory.assert_not_called()
+        search_plan.generate_for_request.assert_not_called()
+        self.assertEqual(db.request(42)["status"], "processing")
 
     def test_ambiguous_current_beets_authority_is_zero_mutation(self):
         db = FakePipelineDB()

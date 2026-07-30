@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from tests.helpers import make_request_row
+from tests.helpers import handoff_automation_owner, make_request_row
 from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
 
 
@@ -111,10 +111,11 @@ class TestPipelineReplaceContract(_FakeDbWebServerCase):
     REPLACE_REQUIRED_FIELDS: ClassVar = {
         "outcome", "request_id", "new_request_id", "current_status",
         "descendant_request_id", "error_message", "reason", "warnings",
+        "processing_owner",
     }
     REQUESTS_BY_RG_FIELDS: ClassVar = {
         "id", "mb_release_id", "mb_release_group_id", "status",
-        "artist_name", "album_title",
+        "artist_name", "album_title", "processing_owner",
     }
 
     def setUp(self) -> None:
@@ -180,6 +181,35 @@ class TestPipelineReplaceContract(_FakeDbWebServerCase):
             )
         self.assertEqual(status, 409)
         self.assertIsNone(data["descendant_request_id"])
+
+    def test_replace_processing_returns_exact_owner_conflict(self):
+        from lib.pipeline_db._shared import ProcessingOwnerProjection
+
+        owner = ProcessingOwnerProjection(
+            job_id=77,
+            status="running",
+            preview_status="evidence_ready",
+        )
+        with self._patch_service(
+            outcome="wrong_state",
+            request_id=100,
+            error_message="request 100 is owned by automation job 77",
+            reason="processing_locked",
+            processing_owner=owner,
+        ):
+            status, data = self._post(
+                "/api/pipeline/100/replace",
+                {"target_mb_release_id": "new-uuid"},
+            )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(data["error"], "processing_locked")
+        self.assertEqual(data["reason"], "processing_locked")
+        self.assertEqual(data["processing_owner"], {
+            "job_id": 77,
+            "status": "running",
+            "preview_status": "evidence_ready",
+        })
 
     def test_replace_wrong_state_source_already_replaced_carries_descendant(self):
         with self._patch_service(
@@ -505,6 +535,31 @@ class TestPipelineResolveRgContract(_FakeDbWebServerCase):
         row = self.db.request(42)
         self.assertEqual(row["status"], "replaced")
         self.assertIsNone(row["mb_release_group_id"])
+
+    def test_resolve_rg_processing_returns_exact_owner_conflict(self):
+        self._seed(None)
+        owner = handoff_automation_owner(self.db, 42)
+
+        with patch(
+            "web.mb.get_release",
+            return_value={"release_group_id": "rrrr-rrrr-rrrr"},
+        ):
+            status, data = self._post(
+                "/api/pipeline/42/resolve-rg",
+                {},
+            )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(data["error"], "transition_conflict")
+        self.assertEqual(data["reason"], "processing_locked")
+        self.assertEqual(data["request_id"], 42)
+        self.assertEqual(data["status"], "conflict")
+        self.assertEqual(data["processing_owner"], {
+            "job_id": owner.id,
+            "status": owner.status,
+            "preview_status": owner.preview_status,
+        })
+        self.assertIsNone(self.db.request(42)["mb_release_group_id"])
 
     def test_resolve_rg_not_found_returns_404(self):
         with patch("web.mb.get_release") as mock_mb:

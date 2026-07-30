@@ -468,10 +468,21 @@ console.log('ownership credit variants preserve the established contract');
     'foreign credit lands in Other releases');
 }
 
-console.log('in-flight lens includes only downloading requests');
+console.log('in-flight lens includes transfer and exact processor ownership');
 {
   const albums = [
     library({ id: 1, album: 'DL', pipeline_status: 'downloading', pipeline_id: 11 }),
+    library({
+      id: 7,
+      album: 'Processing',
+      pipeline_status: 'processing',
+      pipeline_id: 17,
+      processing_owner: {
+        job_id: 117,
+        status: 'queued',
+        preview_status: 'running',
+      },
+    }),
     library({ id: 2, album: 'Stopped', pipeline_status: 'unsearchable', pipeline_id: 12 }),
     library({ id: 3, album: 'Wanted', pipeline_status: 'wanted', pipeline_id: 13 }),
     library({ id: 4, album: 'Imported', pipeline_status: 'imported', pipeline_id: 14 }),
@@ -482,8 +493,14 @@ console.log('in-flight lens includes only downloading requests');
     }),
   ];
   assertEqual(classify([], albums).inFlight.map(row => row.album).join(','),
-    'DL,Pipeline-only DL',
-    'downloading is visible regardless of library ownership');
+    'DL,Processing,Pipeline-only DL',
+    'downloading and processing stay visible regardless of library ownership');
+  const html = renderArtistSections(classify([], albums), {
+    artistId: ARTIST_ID,
+    artistName: ARTIST_NAME,
+  });
+  assertContains(html, 'previewing', 'artist row consumes exact processing owner presentation');
+  assertContains(html, '/api/import-jobs/117/recovery', 'artist row links exact recovery detail');
 }
 
 console.log('empty and orphan-only artist worlds remain renderable');

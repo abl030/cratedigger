@@ -365,6 +365,16 @@ def cmd_show(
     print(f"  Artist:       {req['artist_name']}")
     print(f"  Album:        {req['album_title']}")
     print(f"  Status:       {req['status']}")
+    owner = req.get("processing_owner")
+    if owner:
+        print(
+            f"  Owner:        job {owner['job_id']} "
+            f"({owner['status']}/{owner['preview_status']})"
+        )
+        print(
+            "  Owner Detail: "
+            f"pipeline-cli import-job-recovery show {owner['job_id']}"
+        )
     print(f"  Source:       {req['source']}")
     print(f"  MB Release:   {req['mb_release_id']}")
     print(f"  MB RG:        {req['mb_release_group_id']}")

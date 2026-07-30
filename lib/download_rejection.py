@@ -11,6 +11,7 @@ from lib.dispatch import (
     _record_rejection_and_maybe_requeue,
 )
 from lib.grab_list import GrabListEntry
+from lib.import_execution import CancellationToken, ExecutionCancelled
 from lib.import_manifest import (
     move_failed_import_curated,
     tracked_audio_paths_for_downloads,
@@ -30,12 +31,39 @@ if TYPE_CHECKING:
 logger = logging.getLogger("cratedigger")
 
 
+def _checkpoint(cancellation_token: CancellationToken | None) -> None:
+    if cancellation_token is not None:
+        cancellation_token.raise_if_cancelled()
+
+
+def _move_failed_import_curated_cancellable(
+    path: str,
+    *,
+    allowed_audio: list[str],
+    scenario: str | None,
+    cancellation_token: CancellationToken | None,
+) -> str | None:
+    if cancellation_token is None:
+        return move_failed_import_curated(
+            path,
+            allowed_audio=allowed_audio,
+            scenario=scenario,
+        )
+    return move_failed_import_curated(
+        path,
+        allowed_audio=allowed_audio,
+        scenario=scenario,
+        before_mutation=cancellation_token.raise_if_cancelled,
+    )
+
+
 def _run_post_rejection_wrong_match_cleanup(
     ctx: CratediggerContext,
     download_log_id: object,
     *,
     scenario: str | None,
     import_job_id: int | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> Any:
     """Evaluate newly-created Wrong Matches rows through importer cleanup."""
     if not isinstance(download_log_id, int) or isinstance(download_log_id, bool):
@@ -45,6 +73,7 @@ def _run_post_rejection_wrong_match_cleanup(
     try:
         from lib.wrong_match_cleanup_service import cleanup_wrong_match
 
+        _checkpoint(cancellation_token)
         db = ctx.pipeline_db_source._get_db()
         if import_job_id is not None:
             evidence_id = db.get_import_job_candidate_evidence_id(import_job_id)
@@ -63,6 +92,8 @@ def _run_post_rejection_wrong_match_cleanup(
             getattr(result, "reason", None),
         )
         return result
+    except ExecutionCancelled:
+        raise
     except Exception:
         logger.exception(
             "WRONG-MATCH CLEANUP FAILED: download_log_id=%s",
@@ -119,6 +150,7 @@ def _reject_request_auto_import(
     scenario: str | None,
     error: str,
     import_job_id: int | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> DispatchOutcome:
     """Reject a request auto-import when ownership can be proven safely."""
     db, request_id = _resolved_request_rejection_id(album_data, ctx)
@@ -143,11 +175,14 @@ def _reject_request_auto_import(
         error=error,
     )
     failed_result.source_dirs = source_dirs_for_album(album_data)
-    failed_result.failed_path = move_failed_import_curated(
+    _checkpoint(cancellation_token)
+    failed_result.failed_path = _move_failed_import_curated_cancellable(
         staged_album.current_path,
         allowed_audio=tracked_audio_paths_for_downloads(album_data.files),
         scenario=failed_result.scenario,
+        cancellation_token=cancellation_token,
     )
+    _checkpoint(cancellation_token)
     logger.error(
         "AUTO-IMPORT REJECTED: %s - %s — %s",
         album_data.artist,
@@ -168,6 +203,7 @@ def _reject_request_auto_import(
         if import_job_id is not None and db.get_import_job(import_job_id) is not None
         else None
     )
+    _checkpoint(cancellation_token)
     persisted = _record_rejection_and_maybe_requeue(
         db,
         request_id,
@@ -189,6 +225,7 @@ def _reject_request_auto_import(
         ctx,
         persisted,
         scenario=failed_result.scenario,
+        cancellation_token=cancellation_token,
     )
     return DispatchOutcome(success=False, message=detail)
 
@@ -200,14 +237,18 @@ def _handle_rejected_result(
     ctx: CratediggerContext,
     *,
     import_job_id: int | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> DispatchOutcome:
     """Handle a rejected beets validation result."""
     bv_result.source_dirs = source_dirs_for_album(album_data)
-    bv_result.failed_path = move_failed_import_curated(
+    _checkpoint(cancellation_token)
+    bv_result.failed_path = _move_failed_import_curated_cancellable(
         staged_album.current_path,
         allowed_audio=tracked_audio_paths_for_downloads(album_data.files),
         scenario=bv_result.scenario,
+        cancellation_token=cancellation_token,
     )
+    _checkpoint(cancellation_token)
     log_validation_result(album_data, bv_result, ctx.cfg)
     usernames = {file.username for file in album_data.files}
     bv_result.denylisted_users = sorted(usernames)
@@ -226,6 +267,7 @@ def _handle_rejected_result(
         if import_job_id is not None and db.get_import_job(import_job_id) is not None
         else None
     )
+    _checkpoint(cancellation_token)
     persisted = ctx.pipeline_db_source.reject_and_requeue(
         album_data,
         bv_result,
@@ -244,6 +286,7 @@ def _handle_rejected_result(
             persisted,
             scenario=bv_result.scenario,
             import_job_id=import_job_id,
+            cancellation_token=cancellation_token,
         )
     logger.warning(
         "REJECTED: %s - %s (scenario=%s, distance=%s, detail=%s) "

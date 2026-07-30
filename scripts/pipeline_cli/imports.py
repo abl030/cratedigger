@@ -11,21 +11,27 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 import msgspec
 
+from lib import transitions
+from lib.beets_db import BeetsDB, open_beets_db
 from lib.force_import_service import (
     FORCE_IMPORT_EXIT_CODE,
+    RESULT_PROCESSING_LOCKED,
     RESULT_QUEUED,
     enqueue_force_import,
 )
 from lib.import_preview import ImportPreviewValues
 from lib.import_queue import ImportJob
+from lib.json_narrow import is_str_object_dict
 from scripts.pipeline_cli.quality import _load_runtime_rank_config
 
 if TYPE_CHECKING:
-    from lib.import_job_recovery_service import ImportRecoveryDB
+    from lib.import_job_recovery_service import (
+        AutomationRecoveryMutationDB,
+    )
     from lib.import_preview import ImportPreviewDB, ImportPreviewResult
     from lib.pipeline_db.rows import AlbumRequestRow, DownloadLogWithEvidenceRow
 
@@ -61,6 +67,13 @@ class _ImportJobsDB(Protocol):
     ) -> list[ImportJob]: ...
 
 
+def _open_recovery_beets(
+    path: str | None,
+    library_root: str | None,
+) -> BeetsDB:
+    return open_beets_db(db_path=path, library_root=library_root)
+
+
 def cmd_force_import(
     db: _ForceImportDB, args: argparse.Namespace,
 ) -> int:
@@ -70,6 +83,20 @@ def cmd_force_import(
     from lib.config import read_runtime_config
 
     result = enqueue_force_import(db, read_runtime_config(), log_id)
+    if result.outcome == RESULT_PROCESSING_LOCKED:
+        owner = transitions.processing_owner_payload(result.processing_owner)
+        if owner is None:
+            raise RuntimeError(
+                "processing-locked force import is missing its exact owner"
+            )
+        print(json.dumps({
+            "error": RESULT_PROCESSING_LOCKED,
+            "reason": RESULT_PROCESSING_LOCKED,
+            "request_id": result.request_id,
+            "processing_owner": owner,
+            "detail": result.detail,
+        }, sort_keys=True))
+        return FORCE_IMPORT_EXIT_CODE[result.outcome]
     if result.outcome != RESULT_QUEUED:
         print(f"  Force import rejected: {result.detail or result.outcome}.")
         return FORCE_IMPORT_EXIT_CODE[result.outcome]
@@ -104,27 +131,123 @@ def cmd_import_jobs(db: _ImportJobsDB, args: argparse.Namespace) -> None:
 
 
 def cmd_import_job_recovery(
-    db: ImportRecoveryDB, args: argparse.Namespace,
+    db: AutomationRecoveryMutationDB, args: argparse.Namespace,
 ) -> int:
-    """Resolve one ambiguous Beets operation by explicit operator choice."""
-    from lib.import_job_recovery_service import resolve_import_job_recovery
+    """Show or resolve one ambiguous Beets operation."""
+    from lib.import_job_recovery_service import (
+        apply_import_job_recovery,
+        get_automation_recovery_detail,
+    )
 
+    action = (
+        getattr(args, "recovery_action", None)
+        or getattr(args, "resolution", None)
+    )
+    if action == "show":
+        beets: BeetsDB | None = None
+        try:
+            beets = _open_recovery_beets(
+                getattr(args, "beets_db", None),
+                getattr(args, "beets_directory", None),
+            )
+        except Exception:  # noqa: BLE001 - unavailable is a typed observation
+            beets = None
+        if beets is None:
+            detail_result = get_automation_recovery_detail(
+                db,
+                None,
+                args.job_id,
+            )
+        else:
+            with beets:
+                detail_result = get_automation_recovery_detail(
+                    db,
+                    beets,
+                    args.job_id,
+                )
+        print(json.dumps(detail_result.to_dict(), indent=2, sort_keys=True))
+        return 0 if detail_result.outcome == "ok" else 2
+    if action not in {"retry", "close"}:
+        print("  recovery action must be retry or close", file=sys.stderr)
+        return 2
+    if action == "retry":
+        typed_action: Literal["retry", "close"] = "retry"
+    else:
+        typed_action = "close"
+
+    current = db.get_import_job(args.job_id)
+    beets = None
+    if current is not None and current.job_type == "automation_import":
+        try:
+            beets = _open_recovery_beets(
+                getattr(args, "beets_db", None),
+                getattr(args, "beets_directory", None),
+            )
+        except Exception:  # noqa: BLE001 - typed unavailable observation
+            beets = None
     try:
-        result = resolve_import_job_recovery(
-            db,
-            args.job_id,
-            resolution=args.resolution,
-            reason=args.reason,
-        )
+        if beets is None:
+            result = apply_import_job_recovery(
+                db,
+                None,
+                args.job_id,
+                action=typed_action,
+                reason=args.reason,
+                evidence_revision=getattr(args, "evidence_revision", None),
+                result_status=getattr(args, "result_status", None),
+            )
+        else:
+            with beets:
+                result = apply_import_job_recovery(
+                    db,
+                    beets,
+                    args.job_id,
+                    action=typed_action,
+                    reason=args.reason,
+                    evidence_revision=getattr(
+                        args,
+                        "evidence_revision",
+                        None,
+                    ),
+                    result_status=getattr(args, "result_status", None),
+                )
     except ValueError as exc:
         print(f"  {exc}", file=sys.stderr)
-        return 2
+        return 3
+    if current is not None and current.job_type == "automation_import":
+        if result.outcome in {
+            "retry_queued",
+            "retry_recovery_required",
+            "closed",
+        }:
+            exit_code = 0
+        elif result.outcome == "not_found":
+            exit_code = 2
+        elif result.outcome in {"lock_unavailable", "cleanup_failed"}:
+            exit_code = 5
+        else:
+            exit_code = 4
+        print(
+            json.dumps(result.to_dict(), indent=2, sort_keys=True),
+            file=sys.stdout if exit_code == 0 else sys.stderr,
+        )
+        return exit_code
     if result.outcome == "not_found":
         print(f"  {result.message}", file=sys.stderr)
-        return 3
-    if result.outcome in ("wrong_state", "authority_changed"):
+        return 2
+    if result.outcome in {
+        "wrong_state",
+        "ineligible",
+        "execution_live",
+        "execution_unknown",
+        "evidence_changed",
+        "cleanup_uninspectable",
+    }:
         print(f"  {result.message}", file=sys.stderr)
         return 4
+    if result.outcome in {"lock_unavailable", "cleanup_failed"}:
+        print(f"  {result.message}", file=sys.stderr)
+        return 5
     print(f"  [OK] {result.message}")
     return 0
 
@@ -133,9 +256,9 @@ def _preview_values_from_args(args: argparse.Namespace) -> ImportPreviewValues:
     raw: dict[str, object] = {}
     if args.values_json:
         parsed: object = json.loads(args.values_json)
-        if not isinstance(parsed, dict):
+        if not is_str_object_dict(parsed):
             raise ValueError("--values-json must be a JSON object")
-        raw.update(msgspec.convert(parsed, type=dict[str, object]))
+        raw.update(parsed)
 
     for attr in (
         "is_flac",
@@ -270,23 +393,70 @@ def add_imports_subparsers(
 
     p_recovery = sub.add_parser(
         "import-job-recovery",
-        help="Resolve a recovery-required Beets import operation",
+        help="Inspect or resolve a recovery-required Beets import operation",
     )
-    p_recovery.add_argument("job_id", type=int, help="Recovery import job ID")
-    p_recovery.add_argument(
-        "--resolution",
+    recovery_actions = p_recovery.add_subparsers(
+        dest="recovery_action",
         required=True,
-        choices=["retry", "close"],
-        help=(
-            "retry only after confirming Beets did not apply; close after "
-            "manual reconciliation without replay"
-        ),
     )
-    p_recovery.add_argument(
-        "--reason",
-        required=True,
-        help="Operator audit reason for the resolution",
+    p_recovery_show = recovery_actions.add_parser(
+        "show",
+        help="Show revisioned automation recovery evidence",
     )
+    p_recovery_show.add_argument(
+        "job_id",
+        type=int,
+        help="Recovery import job ID",
+    )
+    p_recovery_show.add_argument(
+        "--beets-db",
+        default=None,
+        help="Explicit Beets SQLite override; requires --beets-directory",
+    )
+    p_recovery_show.add_argument(
+        "--beets-directory",
+        default=None,
+        help="Library root paired with --beets-db",
+    )
+    for recovery_action in ("retry", "close"):
+        p_recovery_action = recovery_actions.add_parser(
+            recovery_action,
+            help=(
+                "Queue a fresh operation after confirming no Beets mutation"
+                if recovery_action == "retry"
+                else "Close after manual reconciliation without replay"
+            ),
+        )
+        p_recovery_action.add_argument(
+            "job_id",
+            type=int,
+            help="Recovery import job ID",
+        )
+        p_recovery_action.add_argument(
+            "--reason",
+            required=True,
+            help="Operator audit reason for the resolution",
+        )
+        p_recovery_action.add_argument(
+            "--evidence-revision",
+            help="Opaque revision printed by import-job-recovery show",
+        )
+        p_recovery_action.add_argument(
+            "--beets-db",
+            default=None,
+            help="Explicit Beets SQLite override; requires --beets-directory",
+        )
+        p_recovery_action.add_argument(
+            "--beets-directory",
+            default=None,
+            help="Library root paired with --beets-db",
+        )
+        if recovery_action == "close":
+            p_recovery_action.add_argument(
+                "--result-status",
+                choices=["wanted", "imported"],
+                help="Explicit reconciled lifecycle result for automation",
+            )
 
     # import-preview
     p_preview = sub.add_parser("import-preview", help="Preview whether an import would pass")

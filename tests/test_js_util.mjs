@@ -1773,13 +1773,14 @@ console.log('long_tail_console.js __test__ (U6 secondary actions)');
     'renderActionsBar: MB row wires the accept-sibling handler');
   assert(!/lt-act-accept[^>]*disabled/.test(mbBar),
     'renderActionsBar: MB row accept-sibling is enabled');
-  assert(mbBar.includes('window.longTailSetIntent(12)'),
-    'renderActionsBar wires the set-intent toggle');
+  assert(mbBar.includes('window.longTailSetIntent(12, this)')
+    && mbBar.includes('data-pipeline-request-id="12"'),
+    'renderActionsBar wires the set-intent toggle with request/control identity');
   // Triage buttons wired to the existing update / delete endpoints.
-  assert(mbBar.includes('window.longTailSetImported(12)') && mbBar.includes('Set imported'),
-    'renderActionsBar wires the Set imported button');
-  assert(mbBar.includes('window.longTailDeleteRequest(12)') && mbBar.includes('Delete request'),
-    'renderActionsBar wires the Delete request button');
+  assert(mbBar.includes('window.longTailSetImported(12, this)') && mbBar.includes('Set imported'),
+    'renderActionsBar wires the Set imported button with its initiating control');
+  assert(mbBar.includes('window.longTailDeleteRequest(12, this)') && mbBar.includes('Delete request'),
+    'renderActionsBar wires the Delete request button with its initiating control');
   // The re-search button is gone.
   assert(!mbBar.includes('longTailReSearch') && !mbBar.includes('lt-act-research'),
     'renderActionsBar no longer renders the re-search button');

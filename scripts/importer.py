@@ -8,8 +8,10 @@ import os
 import socket
 import sys
 import time
-from collections.abc import Callable
-from typing import Any, Protocol, assert_never
+from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager
+from dataclasses import dataclass, replace
+from typing import Any, Literal, Protocol, assert_never, runtime_checkable
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
@@ -17,6 +19,8 @@ if REPO_ROOT not in sys.path:
 
 import msgspec
 
+from lib import transitions
+from lib.config import CratediggerConfig
 from lib.dispatch import (
     DISPATCH_CODE_REQUEUE_FAILED,
     DISPATCH_CODE_REQUEUED_FOR_PREVIEW,
@@ -35,22 +39,57 @@ from lib.download_processing import (
     CompletionResult,
     ProcessAlbumFn,
 )
+from lib.import_execution import (
+    AutomationOwnerCheckpointDB,
+    AutomationOwnerFailStop,
+    CancellationToken,
+    ExecutionCancelled,
+    ExecutionLeaseSnapshot,
+    ExecutionLivenessDecision,
+    ExecutionLivenessProbe,
+    OwnerSessionIdentity,
+    ProcessIdentity,
+    capture_execution_lease,
+    checkpoint_automation_owner,
+    probe_execution_liveness,
+)
 from lib.import_manifest import audio_relative_paths
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
+    IMPORT_JOB_RECOVERY_REQUIRED,
     IMPORT_JOB_YOUTUBE,
     ForceImportPayload,
     ImportJob,
     YoutubeImportPayload,
 )
 from lib.pipeline_db import (
+    ADVISORY_LOCK_NAMESPACE_IMPORT,
     ADVISORY_LOCK_NAMESPACE_IMPORTER,
     DEFAULT_DSN,
+    CleanupJournalIntent,
+    CleanupJournalReceipt,
     PipelineDB,
 )
+from lib.pipeline_db._core import OwnerSessionLost
+from lib.pipeline_db.import_jobs import (
+    AUTOMATION_WORLD_FAILURE_AUDIT_PREFIX,
+    automation_completion_receipt,
+)
+from lib.pipeline_db.rows import AlbumRequestRow
+from lib.processing_cleanup import (
+    PROCESSING_CLEANUP_NO_OP,
+    PROCESSING_CLEANUP_QUARANTINE_SOURCE,
+    OwnerProcessingCleanupDB,
+    canonical_source_cleanup_intent,
+    complete_owner_processing_cleanup,
+)
 from lib.quality import ActiveDownloadFileState, ActiveDownloadState
-from lib.terminal_outcomes import ImportJobTerminal
+from lib.terminal_outcomes import (
+    AutomationTerminalAuthority,
+    ImportJobTerminal,
+    PendingImportTerminalOutcome,
+)
 from lib.youtube_ingest_service import (
     YOUTUBE_IMPORT_ALLOWED_REQUEST_STATUSES,
 )
@@ -58,8 +97,31 @@ from lib.youtube_ingest_service import (
 logger = logging.getLogger("cratedigger-importer")
 RESTART_REQUEUE_MESSAGE = "Importer restarted while job was running; retry queued"
 RESTART_RECOVERY_MESSAGE = (
-    "Recovery required: importer restarted after Beets launch authorization"
+    "Importer restarted after Beets launch authorization"
 )
+# One label for every automation world failure, whichever path surfaces it, so
+# a single Recents read tells the operator the request self-healed rather than
+# stopped. Owned by the recovery cluster; aliased here for this module's users.
+_WORLD_FAILURE_AUDIT_PREFIX = AUTOMATION_WORLD_FAILURE_AUDIT_PREFIX
+IMPORT_CANDIDATE_SCAN_LIMIT = 32
+IMPORTER_SYSTEMD_UNIT = "cratedigger-importer.service"
+# A dead owner must not wait for the next process restart to be noticed. The
+# startup sweep cannot see a transient procfs failure coming, so the same exact
+# death proof is re-run on this cadence for as long as the worker lives.
+AUTOMATION_RECOVERY_REPROBE_INTERVAL_SECONDS = 300.0
+
+
+@dataclass
+class _ClaimState:
+    claimed: bool = False
+
+    def mark(self) -> None:
+        self.claimed = True
+
+
+@dataclass
+class _CandidateScanCursor:
+    offset: int = 0
 
 
 def _job_result(outcome: DispatchOutcome) -> dict[str, Any]:
@@ -79,6 +141,34 @@ class _PostCommitCleanupDB(Protocol):
         log_id: int,
         audit: PostCommitQuarantineAudit,
     ) -> bool: ...
+
+
+class _AutomationCleanupDB(
+    AutomationOwnerCheckpointDB,
+    OwnerProcessingCleanupDB,
+    Protocol,
+):
+    """Exact persistence surface for owned processor cleanup."""
+
+    def get_request(self, request_id: int) -> AlbumRequestRow | None: ...
+
+
+class _AutomationRecoveryDB(Protocol):
+    """Persistence surface the re-runnable automation recovery sweep needs."""
+
+    def list_automation_import_jobs_for_startup_recovery(
+        self,
+    ) -> list[ImportJob]: ...
+
+    def recover_automation_import_job(
+        self,
+        job_id: int,
+        *,
+        expected_execution_lease: ExecutionLeaseSnapshot | None,
+        decision: ExecutionLivenessDecision,
+        requeue_message: str,
+        recovery_message: str,
+    ) -> ImportJob | None: ...
 
 
 def _run_post_commit_cleanup(
@@ -175,6 +265,157 @@ def _run_post_commit_cleanup(
             }
 
     return details or None
+
+
+def _select_missing_destination(path: str, *, separator: str) -> str:
+    candidate = os.path.abspath(path)
+    index = 1 if separator == "_" else 2
+    while os.path.lexists(candidate):
+        candidate = f"{os.path.abspath(path)}{separator}{index}"
+        index += 1
+    return candidate
+
+
+def _automation_cleanup_intent(
+    *,
+    source_path: str,
+    plan: PostCommitCleanup | None,
+) -> CleanupJournalIntent:
+    # One inspection, shared with every proven owner: the plan-free canonical
+    # intent is the base, and a plan may only retarget WHERE the already
+    # measured manifest goes, never re-measure it.
+    canonical = canonical_source_cleanup_intent(source_path)
+    if canonical.action == PROCESSING_CLEANUP_NO_OP:
+        return canonical
+    manifest = canonical.source_manifest
+    manifest_hash = canonical.source_manifest_hash
+
+    if (
+        plan is not None
+        and plan.audio_quarantine_source_path is not None
+    ):
+        if os.path.abspath(plan.audio_quarantine_source_path) != source_path:
+            raise RuntimeError(
+                "audio quarantine plan does not name the canonical owner path"
+            )
+        # Same precondition as the canonical producer
+        # (``quarantine_corrupt_audio_source``), which refuses a blank or
+        # absent root rather than moving anything. Here the intent is
+        # journaled as an immutable, unamendable plan, so an unusable root
+        # must be refused BEFORE it is written: resolving "" would silently
+        # name a destination under the importer's working directory.
+        configured_root = plan.audio_quarantine_root or ""
+        quarantine_root = (
+            os.path.abspath(configured_root) if configured_root else ""
+        )
+        if not quarantine_root or not os.path.isdir(quarantine_root):
+            raise RuntimeError(
+                "configured audio quarantine root is missing or not a "
+                "directory"
+            )
+        base = os.path.join(
+            quarantine_root,
+            "failed_imports",
+            "bad_files",
+            os.path.basename(source_path),
+        )
+        destination = _select_missing_destination(base, separator="_")
+        return CleanupJournalIntent(
+            action=PROCESSING_CLEANUP_QUARANTINE_SOURCE,
+            source_path=source_path,
+            source_manifest=manifest,
+            source_manifest_hash=manifest_hash,
+            destination_path=destination,
+            destination_manifest=manifest,
+            destination_manifest_hash=manifest_hash,
+            selected_destination_path=destination,
+        )
+
+    if (
+        plan is not None
+        and plan.duplicate_guard_source_path is not None
+    ):
+        if os.path.abspath(plan.duplicate_guard_source_path) != source_path:
+            raise RuntimeError(
+                "duplicate guard plan does not name the canonical owner path"
+            )
+        from lib.processing_paths import duplicate_remove_guard_path
+
+        base = duplicate_remove_guard_path(
+            staging_dir=plan.duplicate_guard_staging_dir or "",
+            source_path=source_path,
+            request_id=plan.duplicate_guard_request_id,
+        )
+        destination = _select_missing_destination(base, separator="-")
+        return CleanupJournalIntent(
+            action=PROCESSING_CLEANUP_QUARANTINE_SOURCE,
+            source_path=source_path,
+            source_manifest=manifest,
+            source_manifest_hash=manifest_hash,
+            destination_path=destination,
+            destination_manifest=manifest,
+            destination_manifest_hash=manifest_hash,
+            selected_destination_path=destination,
+        )
+
+    if (
+        plan is not None
+        and plan.staged_path is not None
+        and os.path.abspath(plan.staged_path) != source_path
+    ):
+        raise RuntimeError(
+            "staged cleanup plan does not name the canonical owner path"
+        )
+    return canonical
+
+
+def _complete_automation_processing_cleanup(
+    db: _AutomationCleanupDB,
+    job: ImportJob,
+    outcome: DispatchOutcome,
+    *,
+    execution_lease: ExecutionLeaseSnapshot,
+    cancellation_token: CancellationToken,
+    owner_session_identity: OwnerSessionIdentity,
+) -> CleanupJournalReceipt:
+    if job.request_id is None:
+        raise RuntimeError("automation cleanup job has no request")
+    request = db.get_request(job.request_id)
+    if request is None or request.get("status") != "processing":
+        raise RuntimeError("automation cleanup request is no longer processing")
+    raw_state = request.get("active_download_state")
+    if raw_state is None:
+        raise RuntimeError("automation cleanup request lost active state")
+    state = ActiveDownloadState.from_raw(raw_state)
+    if state.current_path is None:
+        raise RuntimeError("automation cleanup request has no canonical path")
+    source_path = os.path.abspath(state.current_path)
+
+    def checkpoint() -> None:
+        checkpoint_automation_owner(
+            db,
+            import_job_id=job.id,
+            execution_lease=execution_lease,
+            cancellation_token=cancellation_token,
+            owner_session_identity=owner_session_identity,
+        )
+
+    def intent_factory(path: str) -> CleanupJournalIntent:
+        return _automation_cleanup_intent(
+            source_path=path,
+            plan=outcome.post_commit_cleanup,
+        )
+
+    return complete_owner_processing_cleanup(
+        db,
+        request_id=job.request_id,
+        job_id=job.id,
+        source_path=source_path,
+        owner_checkpoint=checkpoint,
+        intent_factory=intent_factory,
+    )
+
+
 
 
 def _force_job_wrong_match_payload(job: ImportJob) -> tuple[int, str | None] | None:
@@ -320,6 +561,11 @@ def execute_import_job(
     job: ImportJob,
     *,
     ctx: Any = None,
+    execution_lease: ExecutionLeaseSnapshot | None = None,
+    cancellation_token: CancellationToken | None = None,
+    owner_session_identity: OwnerSessionIdentity | None = None,
+    force_dispatch_fn: Callable[..., DispatchOutcome] | None = None,
+    force_runtime_config: CratediggerConfig | None = None,
 ) -> DispatchOutcome:
     """Execute one claimed import job without mutating job status."""
     if job.request_id is None:
@@ -336,6 +582,7 @@ def execute_import_job(
         # function's docstring (issue #510) for why this isn't unified
         # further.
         from lib.dispatch import dispatch_import_from_db
+        force_dispatch = force_dispatch_fn or dispatch_import_from_db
 
         if not isinstance(job.payload, ForceImportPayload):
             raise AssertionError("force_import payload type mismatch")
@@ -343,8 +590,15 @@ def execute_import_job(
         from lib.config import read_runtime_config
         from lib.import_preview import force_action_copy_path
 
+        if (cancellation_token is None) != (owner_session_identity is None):
+            raise ValueError(
+                "force job cancellation and pinned session must be paired"
+            )
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
+        runtime_config = force_runtime_config or read_runtime_config()
         action_path = _force_action_path(job)
-        expected_action_path = force_action_copy_path(read_runtime_config(), job.id)
+        expected_action_path = force_action_copy_path(runtime_config, job.id)
         if (
             action_path is None
             or action_path != expected_action_path
@@ -355,22 +609,46 @@ def execute_import_job(
                 import_job_id=job.id,
                 reason="force action copy unavailable; preview must rebuild it",
             )
-        return dispatch_import_from_db(
+        source_dirs = (
+            [source_dir for source_dir in payload.source_dirs if source_dir]
+            or None
+        )
+        if cancellation_token is None:
+            return force_dispatch(
+                db,
+                request_id=job.request_id,
+                failed_path=action_path,
+                source_reference_path=payload.failed_path,
+                source_username=payload.source_username,
+                source_dirs=source_dirs,
+                import_job_id=job.id,
+                download_log_id=payload.download_log_id,
+                cfg=runtime_config,
+            )
+        assert owner_session_identity is not None
+        return force_dispatch(
             db,
             request_id=job.request_id,
             failed_path=action_path,
             source_reference_path=payload.failed_path,
             source_username=payload.source_username,
-            source_dirs=(
-                [source_dir for source_dir in payload.source_dirs if source_dir]
-                or None
-            ),
+            source_dirs=source_dirs,
             import_job_id=job.id,
             download_log_id=payload.download_log_id,
+            cancellation_token=cancellation_token,
+            owner_session_identity=owner_session_identity,
+            cfg=runtime_config,
         )
 
     if job.job_type == IMPORT_JOB_AUTOMATION:
-        return execute_automation_import_job(db, job, ctx=ctx)
+        return execute_automation_import_job(
+            db,
+            job,
+            ctx=ctx,
+            execution_lease=execution_lease,
+            cancellation_token=cancellation_token,
+            owner_session_identity=owner_session_identity,
+        )
 
     if job.job_type == IMPORT_JOB_YOUTUBE:
         return execute_youtube_import_job(db, job, ctx=ctx)
@@ -381,7 +659,11 @@ def execute_import_job(
     )
 
 
-def _build_runtime_context(db: PipelineDB):
+def _build_runtime_context(
+    db: PipelineDB,
+    *,
+    borrow_session: bool = False,
+):
     """Build the minimal CratediggerContext needed by download processing."""
     from album_source import DatabaseSource
     from lib.config import read_runtime_config
@@ -393,6 +675,7 @@ def _build_runtime_context(db: PipelineDB):
         db.dsn,
         musicbrainz_ws2_base=mb_ws2_base(cfg.musicbrainz_api_base),
         discogs_api_base=cfg.discogs_api_base,
+        borrowed_db=db if borrow_session else None,
     )
     return CratediggerContext(cfg=cfg, slskd=None, pipeline_db_source=source)
 
@@ -403,6 +686,7 @@ def _dispatch_outcome_from_completion(
     deferred_message: str,
     completed_message: str,
     failed_message: str,
+    fallback_terminal_outcome: PendingImportTerminalOutcome | None = None,
 ) -> DispatchOutcome:
     """Map the completion-processing tag to the queue's DispatchOutcome.
 
@@ -441,6 +725,7 @@ def _dispatch_outcome_from_completion(
             success=False,
             message=message,
             deferred=True,
+            terminal_outcome=fallback_terminal_outcome,
         )
     if isinstance(result, CompletionDispatched):
         return result.outcome
@@ -448,7 +733,9 @@ def _dispatch_outcome_from_completion(
         return DispatchOutcome(
             success=True,
             message=completed_message,
-            terminal_outcome=result.terminal_outcome,
+            terminal_outcome=(
+                result.terminal_outcome or fallback_terminal_outcome
+            ),
         )
     match result:
         case CompletionFailed():
@@ -458,7 +745,9 @@ def _dispatch_outcome_from_completion(
                     f"{failed_message}: {result.reason}"
                     if result.reason else failed_message
                 ),
-                terminal_outcome=result.terminal_outcome,
+                terminal_outcome=(
+                    result.terminal_outcome or fallback_terminal_outcome
+                ),
             )
     assert_never(result)
 
@@ -469,15 +758,32 @@ def execute_automation_import_job(
     *,
     ctx: Any = None,
     process_album_fn: ProcessAlbumFn | None = None,
+    completed_processing_fn: Callable[..., CompletionResult] | None = None,
+    execution_lease: ExecutionLeaseSnapshot | None = None,
+    cancellation_token: CancellationToken | None = None,
+    owner_session_identity: OwnerSessionIdentity | None = None,
 ) -> DispatchOutcome:
     """Run completed-download processing from an automation queue job."""
-    from lib.download import _run_completed_processing
+    from lib.download import (
+        _local_completion_terminal_outcome,
+        _run_completed_processing,
+    )
     from lib.download_reconstruction import reconstruct_grab_list_entry
 
     request_id = job.request_id
     if request_id is None:
         return DispatchOutcome(False, "Automation import job has no request_id")
 
+    if (
+        execution_lease is None
+        or cancellation_token is None
+        or owner_session_identity is None
+    ):
+        raise ValueError(
+            "automation execution requires lease, cancellation token, "
+            "and pinned owner session"
+        )
+    cancellation_token.raise_if_cancelled()
     row = db.get_request(request_id)
     if not row:
         return DispatchOutcome(False, f"Album request {request_id} not found")
@@ -491,21 +797,84 @@ def execute_automation_import_job(
     state = ActiveDownloadState.from_raw(raw_state)
     entry = reconstruct_grab_list_entry(row, state)
     created_ctx = ctx is None
-    runtime_ctx = ctx or _build_runtime_context(db)
+    runtime_ctx = ctx or _build_runtime_context(db, borrow_session=True)
     try:
-        result = _run_completed_processing(
+        process_completed = completed_processing_fn or _run_completed_processing
+        result = process_completed(
             entry,
-            request_id,
             state,
-            db,
             runtime_ctx,
             import_job_id=job.id,
             process_album_fn=process_album_fn,
-            bundle_terminal_outcome=True,
+            cancellation_token=cancellation_token,
+            execution_lease=execution_lease,
+            owner_session_identity=owner_session_identity,
         )
     finally:
         if created_ctx:
             runtime_ctx.pipeline_db_source.close()
+    fallback_terminal: PendingImportTerminalOutcome | None = None
+    if isinstance(result, Completed) and result.terminal_outcome is None:
+        fallback_terminal = _local_completion_terminal_outcome(
+            entry,
+            state,
+            request_id=request_id,
+            import_job_id=job.id,
+            transition=transitions.RequestTransition.to_imported(
+                from_status="processing",
+            ),
+            outcome="success",
+            detail="Local automation import processing completed",
+        )
+    elif isinstance(result, (CompletionDeferred, CompletionFailed)):
+        detail = (
+            result.detail
+            if isinstance(result, CompletionDeferred)
+            else result.reason
+        )
+        fallback_terminal = _local_completion_terminal_outcome(
+            entry,
+            state,
+            request_id=request_id,
+            import_job_id=job.id,
+            transition=transitions.RequestTransition.to_wanted(
+                from_status="processing",
+                attempt_type="download",
+            ),
+            outcome="failed",
+            detail=detail or "local automation processing failed",
+            error_message=detail or "local automation processing failed",
+        )
+    elif (
+        isinstance(result, CompletionDispatched)
+        and result.outcome.terminal_outcome is None
+        and result.outcome.code != DISPATCH_CODE_REQUEUED_FOR_PREVIEW
+    ):
+        fallback_terminal = _local_completion_terminal_outcome(
+            entry,
+            state,
+            request_id=request_id,
+            import_job_id=job.id,
+            transition=(
+                transitions.RequestTransition.to_imported(
+                    from_status="processing",
+                )
+                if result.outcome.success
+                else transitions.RequestTransition.to_wanted(
+                    from_status="processing",
+                    attempt_type="validation",
+                )
+            ),
+            outcome="success" if result.outcome.success else "failed",
+            detail=result.outcome.message,
+            error_message=(
+                None if result.outcome.success else result.outcome.message
+            ),
+        )
+        result = CompletionDispatched(outcome=replace(
+            result.outcome,
+            terminal_outcome=fallback_terminal,
+        ))
     return _dispatch_outcome_from_completion(
         result,
         deferred_message=(
@@ -513,6 +882,7 @@ def execute_automation_import_job(
         ),
         completed_message="Automation import processing completed",
         failed_message="Automation import processing failed",
+        fallback_terminal_outcome=fallback_terminal,
     )
 
 
@@ -580,10 +950,7 @@ def execute_youtube_import_job(
     # reconstruct_grab_list_entry. Files are a manifest bridge for the
     # already-staged yt-dlp audio; current_path = the payload's staged
     # path. This struct is never persisted: KTD1 keeps
-    # active_download_state untouched on the row, and the downstream
-    # update_download_state_current_path call inside
-    # _materialize_processing_dir is gated by status='downloading' so
-    # it no-ops for wanted/unsearchable rows.
+    # active_download_state untouched on the row.
     state = ActiveDownloadState(
         filetype=row.get("target_format") or "opus",
         enqueued_at="",
@@ -682,12 +1049,410 @@ def _cleanup_committed_wrong_match_rejection(
         )
 
 
+def _execution_lease_from_job(
+    job: ImportJob | None,
+) -> ExecutionLeaseSnapshot | None:
+    if job is None:
+        return None
+    values = (
+        job.execution_invocation_id,
+        job.execution_host_boot_id,
+        job.execution_systemd_unit,
+        job.execution_worker_pid,
+        job.execution_worker_start_ticks,
+    )
+    if any(value is None for value in values):
+        return None
+    assert job.execution_invocation_id is not None
+    assert job.execution_host_boot_id is not None
+    assert job.execution_systemd_unit is not None
+    assert job.execution_worker_pid is not None
+    assert job.execution_worker_start_ticks is not None
+    child = (
+        ProcessIdentity(
+            job.execution_beets_pid,
+            job.execution_beets_start_ticks,
+        )
+        if (
+            job.execution_beets_pid is not None
+            and job.execution_beets_start_ticks is not None
+        )
+        else None
+    )
+    return ExecutionLeaseSnapshot(
+        host_boot_id=job.execution_host_boot_id,
+        invocation_id=job.execution_invocation_id,
+        systemd_unit=job.execution_systemd_unit,
+        worker=ProcessIdentity(
+            job.execution_worker_pid,
+            job.execution_worker_start_ticks,
+        ),
+        beets=child,
+    )
+
+
+@runtime_checkable
+class _AutomationOwnerDB(Protocol):
+    def get_import_job(self, job_id: int) -> ImportJob | None: ...
+
+    def get_request(
+        self,
+        request_id: int,
+    ) -> Mapping[str, object] | None: ...
+
+
+@runtime_checkable
+class _AutomationStageDB(_AutomationOwnerDB, Protocol):
+    def _pin_owner_session(
+        self,
+        cancellation_token: CancellationToken,
+    ) -> AbstractContextManager[OwnerSessionIdentity]: ...
+
+    def advisory_lock(
+        self,
+        namespace: int,
+        key: int,
+    ) -> AbstractContextManager[bool]: ...
+
+    def claim_automation_import_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+        execution_lease: ExecutionLeaseSnapshot,
+    ) -> ImportJob | None: ...
+
+    def close(self) -> None: ...
+
+
+@runtime_checkable
+class _ForceStageDB(Protocol):
+    def _pin_owner_session(
+        self,
+        cancellation_token: CancellationToken,
+    ) -> AbstractContextManager[OwnerSessionIdentity]: ...
+
+    def advisory_lock(
+        self,
+        namespace: int,
+        key: int,
+    ) -> AbstractContextManager[bool]: ...
+
+    def claim_force_import_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+    ) -> ImportJob | None: ...
+
+    def close(self) -> None: ...
+
+
+def _self_heal_automation_world_failure(
+    db: PipelineDB,
+    job: ImportJob,
+    *,
+    execution_lease: ExecutionLeaseSnapshot,
+    cancellation_token: CancellationToken,
+    owner_session_identity: OwnerSessionIdentity,
+    reason: str,
+    result: dict[str, object],
+) -> ImportJob | None:
+    """Surface one world failure as audit evidence and re-open the search.
+
+    The automation importer never parks a request for human adjudication. A
+    fault that leaves the world in an unexpected state is surfaced as a
+    ``download_log`` row — so it reads in Recents — and the request goes
+    straight back to ``wanted``: the request is the source of truth and the
+    next cycle rebuilds everything derived from it, including the
+    "did Beets already mutate the library?" ambiguity (album present ->
+    upgrade/no-op, absent -> re-import). Parking instead left
+    ``status='processing'`` behind an inactive job, which ``get_wanted()``
+    never selects again — the album silently stopped being acquired, forever,
+    with nothing telling the operator the world needed fixing.
+
+    The ``processing -> wanted`` edge retains retry counters and records an
+    attempt, so a permanently broken world backs off instead of hot-looping.
+
+    ``job`` must be the freshly re-read owner row: its launch fence, preview
+    stage and captured completion receipt are the exact authority the terminal
+    compare-and-set compares against.
+
+    Raises :class:`AutomationOwnerFailStop` when this execution cannot author
+    an owner-atomic terminal write. The row stays ``running`` under its
+    persisted lease, but the exception ends this daemon so systemd restart and
+    lease-proven recovery can converge it automatically. Never return to the
+    daemon loop with that same lease still live, and never fabricate a write
+    the owner authority refuses.
+    """
+    from lib.download import _local_completion_terminal_outcome
+    from lib.download_reconstruction import reconstruct_grab_list_entry
+
+    request_id = job.request_id
+    if request_id is None:
+        raise AutomationOwnerFailStop(
+            f"automation job {job.id} lost its request before self-heal"
+        )
+    detail = f"{_WORLD_FAILURE_AUDIT_PREFIX}: {reason}"
+    try:
+        row = db.get_request(request_id)
+        raw_state = None if row is None else row.get("active_download_state")
+        if row is None or raw_state is None:
+            raise AutomationOwnerFailStop(
+                f"automation job {job.id} has no owned download state "
+                f"to self-heal ({reason})"
+            )
+        state = ActiveDownloadState.from_raw(raw_state)
+        pending = _local_completion_terminal_outcome(
+            reconstruct_grab_list_entry(row, state),
+            state,
+            request_id=request_id,
+            import_job_id=job.id,
+            transition=transitions.RequestTransition.to_wanted(
+                from_status="processing",
+                attempt_type="validation",
+            ),
+            outcome="failed",
+            detail=detail,
+            error_message=detail,
+        )
+        # Cleanup runs first and while the job is still the running owner: its
+        # checkpoint heartbeats a 'running' row, and the terminal bundle
+        # consumes the receipt it produces.
+        cleanup_receipt = _complete_automation_processing_cleanup(
+            db,
+            job,
+            DispatchOutcome(success=False, message=detail),
+            execution_lease=execution_lease,
+            cancellation_token=cancellation_token,
+            owner_session_identity=owner_session_identity,
+        )
+        completion_receipt = automation_completion_receipt(job)
+        expected_job_status: Literal["running", "recovery_required"] = "running"
+        if (
+            job.beets_launch_authorized_at is not None
+            and completion_receipt is None
+        ):
+            # The owner authority refuses a ``running`` terminal write for a
+            # launched job that never captured its completion receipt — and
+            # that missing receipt IS the ambiguity this self-heal exists for.
+            # ``recovery_required`` is the one stage that CAS accepts without
+            # the receipt, so the ambiguity transits it and is closed in this
+            # same frame. The job never RESTS there: no request is left
+            # outside the search pool waiting for a human.
+            staged = db.mark_import_job_recovery_required(
+                job.id,
+                reason=reason,
+                expected_execution_lease=execution_lease,
+            )
+            if staged is None:
+                raise AutomationOwnerFailStop(
+                    f"automation job {job.id} could not stage its ambiguous "
+                    f"self-heal ({reason})"
+                )
+            expected_job_status = "recovery_required"
+        terminal = db.persist_import_terminal_outcome(
+            replace(
+                pending,
+                automation=AutomationTerminalAuthority(
+                    expected_job_status=expected_job_status,
+                    expected_preview_status=job.preview_status,
+                    expected_execution_lease=execution_lease,
+                    cleanup_receipt=cleanup_receipt,
+                    completion_receipt=completion_receipt,
+                ),
+            ).with_job(ImportJobTerminal(
+                status="failed",
+                error=detail,
+                result=result,
+                message=detail,
+            ))
+        )
+    except (ExecutionCancelled, OwnerSessionLost):
+        # Fail-stop: this execution's authority is gone, so no further write on
+        # this session is trustworthy — including this self-heal, which would
+        # raise again. Startup recovery owns the row once its lease is proven
+        # dead.
+        raise
+    except AutomationOwnerFailStop:
+        raise
+    except Exception as exc:
+        logger.exception(
+            "Self-heal terminal write failed for import job %s (%s); "
+            "fail-stopping this worker for lease-proven recovery",
+            job.id,
+            reason,
+        )
+        raise AutomationOwnerFailStop(
+            f"automation job {job.id} self-heal failed: {reason}"
+        ) from exc
+    logger.warning(
+        "Import job %s returned request %s to the search pool after a world "
+        "failure: %s",
+        job.id,
+        request_id,
+        reason,
+    )
+    return terminal.job
+
+
+def _automation_claim_is_current(
+    db: _AutomationOwnerDB,
+    job: ImportJob,
+    execution_lease: ExecutionLeaseSnapshot,
+) -> bool:
+    if job.request_id is None:
+        return False
+    current = db.get_import_job(job.id)
+    try:
+        request = db.get_request(job.request_id)
+    except RuntimeError:
+        # The joined processing-owner projection deliberately rejects a
+        # dangling/mismatched owner pointer. At this boundary that is stale
+        # authority, not permission to continue or an importer crash.
+        return False
+    return bool(
+        current is not None
+        and request is not None
+        and current.id == job.id
+        and current.request_id == job.request_id
+        and current.job_type == IMPORT_JOB_AUTOMATION
+        and current.status == "running"
+        and current.preview_status == "evidence_ready"
+        and current.beets_launch_authorized_at is None
+        and _execution_lease_from_job(current) == execution_lease
+        and request.get("status") == "processing"
+        and request.get("active_automation_import_job_id") == job.id
+        and request.get("active_download_state") is not None
+    )
+
+
+def _process_automation_claim(
+    candidate: ImportJob,
+    *,
+    dsn: str,
+    worker_id: str,
+    execution_lease: ExecutionLeaseSnapshot,
+    ctx: object | None,
+    stage_db_factory: Callable[[str], object],
+    execute_fn: Callable[..., DispatchOutcome] = execute_import_job,
+    claim_callback: Callable[[], None] | None = None,
+) -> ImportJob | None:
+    """Claim and run one automation job on the pinned IMPORT session."""
+    if candidate.request_id is None:
+        return None
+    stage_db = stage_db_factory(dsn)
+    if not isinstance(stage_db, _AutomationStageDB):
+        raise TypeError("automation stage DB is missing its owner-session protocol")
+    token = CancellationToken()
+    try:
+        # Pin first. Acquiring IMPORT before pinning could reconnect between
+        # scopes and leave the pinned backend without the authority lock.
+        with stage_db._pin_owner_session(token) as owner_session_identity:
+            token.raise_if_cancelled()
+            with stage_db.advisory_lock(
+                ADVISORY_LOCK_NAMESPACE_IMPORT,
+                candidate.request_id,
+            ) as acquired:
+                token.raise_if_cancelled()
+                if not acquired:
+                    # The queue connection only selected this candidate.
+                    # Preserve queued claimability for the next poll.
+                    return None
+                job = stage_db.claim_automation_import_job_under_lock(
+                    candidate.id,
+                    request_id=candidate.request_id,
+                    worker_id=worker_id,
+                    execution_lease=execution_lease,
+                )
+                if job is None:
+                    return None
+                logger.info(
+                    "Claimed import job %s (%s)",
+                    job.id,
+                    job.job_type,
+                )
+                if claim_callback is not None:
+                    claim_callback()
+                if not _automation_claim_is_current(
+                    stage_db,
+                    job,
+                    execution_lease,
+                ):
+                    return None
+                return process_claimed_job(
+                    stage_db,  # pyright: ignore[reportArgumentType]
+                    job,
+                    ctx=ctx,
+                    execute_fn=execute_fn,
+                    execution_lease=execution_lease,
+                    cancellation_token=token,
+                    owner_session_identity=owner_session_identity,
+                )
+    finally:
+        stage_db.close()
+
+
+def _process_force_claim(
+    candidate: ImportJob,
+    *,
+    dsn: str,
+    worker_id: str,
+    ctx: object | None,
+    stage_db_factory: Callable[[str], object],
+    execute_fn: Callable[..., DispatchOutcome] = execute_import_job,
+    claim_callback: Callable[[], None] | None = None,
+) -> ImportJob | None:
+    """Claim and run force effects on one pinned IMPORT session."""
+    if candidate.request_id is None:
+        return None
+    stage_db = stage_db_factory(dsn)
+    if not isinstance(stage_db, _ForceStageDB):
+        raise TypeError("force stage DB is missing its owner-session protocol")
+    token = CancellationToken()
+    try:
+        with stage_db._pin_owner_session(token) as owner_session_identity:
+            token.raise_if_cancelled()
+            with stage_db.advisory_lock(
+                ADVISORY_LOCK_NAMESPACE_IMPORT,
+                candidate.request_id,
+            ) as acquired:
+                token.raise_if_cancelled()
+                if not acquired:
+                    return None
+                job = stage_db.claim_force_import_job_under_lock(
+                    candidate.id,
+                    request_id=candidate.request_id,
+                    worker_id=worker_id,
+                )
+                if job is None:
+                    return None
+                if claim_callback is not None:
+                    claim_callback()
+                logger.info("Claimed import job %s (%s)", job.id, job.job_type)
+                return process_claimed_job(
+                    stage_db,  # pyright: ignore[reportArgumentType]
+                    job,
+                    ctx=ctx,
+                    execute_fn=execute_fn,
+                    cancellation_token=token,
+                    owner_session_identity=owner_session_identity,
+                )
+    finally:
+        stage_db.close()
+
+
 def process_claimed_job(
     db: PipelineDB,
     job: ImportJob,
     *,
     ctx: Any = None,
     execute_fn: Callable[..., DispatchOutcome] = execute_import_job,
+    execution_lease: ExecutionLeaseSnapshot | None = None,
+    cancellation_token: CancellationToken | None = None,
+    owner_session_identity: OwnerSessionIdentity | None = None,
 ) -> ImportJob | None:
     """Execute a claimed job and persist its terminal queue status.
 
@@ -699,16 +1464,81 @@ def process_claimed_job(
     completion-result -> DispatchOutcome conversion is instead scoped to
     just automation + youtube, issue #510).
     """
+    is_automation = job.job_type == IMPORT_JOB_AUTOMATION
+    is_force = job.job_type == IMPORT_JOB_FORCE
+    if is_automation and execution_lease is None:
+        raise ValueError(
+            "automation job processing requires exact execution authority"
+        )
+    if is_automation and (
+        cancellation_token is None
+        or owner_session_identity is None
+    ):
+        raise ValueError(
+            f"{job.job_type} processing requires pinned session authority"
+        )
+    if is_force and (
+        (cancellation_token is None) != (owner_session_identity is None)
+    ):
+        raise ValueError(
+            "force job cancellation and pinned session must be paired"
+        )
     try:
-        outcome = execute_fn(db, job, ctx=ctx)
+        if is_force and cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
+        if is_automation:
+            outcome = execute_fn(
+                db,
+                job,
+                ctx=ctx,
+                execution_lease=execution_lease,
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
+            )
+        elif is_force and cancellation_token is not None:
+            outcome = execute_fn(
+                db,
+                job,
+                ctx=ctx,
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
+            )
+        else:
+            outcome = execute_fn(db, job, ctx=ctx)
+    except ExecutionCancelled:
+        raise
     except Exception as exc:
         logger.exception("Import job %s crashed", job.id)
-        recovery = db.mark_import_job_recovery_required(
-            job.id,
-            reason=f"{type(exc).__name__}: {exc}",
-        )
-        if recovery is not None:
-            return recovery
+        if is_automation:
+            current = db.get_import_job(job.id)
+            current_lease = (
+                _execution_lease_from_job(current)
+                if current is not None else None
+            )
+            if current_lease is None:
+                return None
+            assert current is not None
+            assert cancellation_token is not None
+            assert owner_session_identity is not None
+            crash = f"{type(exc).__name__}: {exc}"
+            if current.beets_launch_authorized_at is not None:
+                return _self_heal_automation_world_failure(
+                    db,
+                    current,
+                    execution_lease=current_lease,
+                    cancellation_token=cancellation_token,
+                    owner_session_identity=owner_session_identity,
+                    reason=crash,
+                    result={"success": False, "message": crash},
+                )
+            return db.requeue_import_job_for_preview(
+                job.id,
+                reason=crash,
+                expected_execution_lease=current_lease,
+            )
+        # Force and YouTube jobs do not own their request's ``processing``
+        # status, so a crashed one has nothing to self-heal: the terminal
+        # failed status IS the surface, and it never stops the request.
         failed = db.mark_import_job_failed(
             job.id,
             error=type(exc).__name__,
@@ -718,6 +1548,148 @@ def process_claimed_job(
         return _record_terminal_force_action_cleanup(db, job, failed)
 
     result = _job_result(outcome)
+    if is_force and cancellation_token is not None:
+        cancellation_token.raise_if_cancelled()
+    if is_automation:
+        assert execution_lease is not None
+        assert cancellation_token is not None
+        assert owner_session_identity is not None
+        cancellation_token.raise_if_cancelled()
+        if outcome.code == DISPATCH_CODE_REQUEUED_FOR_PREVIEW:
+            return None
+        current = db.get_import_job(job.id)
+        current_lease = (
+            _execution_lease_from_job(current)
+            if current is not None else None
+        )
+        if current is None or current_lease is None:
+            return None
+        if (
+            current.beets_launch_authorized_at is None
+            and outcome.terminal_outcome is None
+            and (
+                outcome.deferred
+                or outcome.code == DISPATCH_CODE_REQUEUE_FAILED
+            )
+        ):
+            if outcome.code == DISPATCH_CODE_REQUEUE_FAILED:
+                return _self_heal_automation_world_failure(
+                    db,
+                    current,
+                    execution_lease=current_lease,
+                    cancellation_token=cancellation_token,
+                    owner_session_identity=owner_session_identity,
+                    reason=outcome.message,
+                    result=result,
+                )
+            db.requeue_import_job_for_preview(
+                job.id,
+                reason=outcome.message,
+                expected_execution_lease=current_lease,
+            )
+            return None
+        if (
+            current.beets_launch_authorized_at is not None
+            and (
+                outcome.code == "beets_acknowledgement_ambiguous"
+                or outcome.terminal_outcome is None
+            )
+        ):
+            # Beets was launched and did not acknowledge. Whether it mutated
+            # the library is unknowable from here and needs no adjudication:
+            # the next cycle re-reads the library from the request.
+            return _self_heal_automation_world_failure(
+                db,
+                current,
+                execution_lease=current_lease,
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
+                reason=outcome.message,
+                result=result,
+            )
+        if outcome.terminal_outcome is None:
+            return _self_heal_automation_world_failure(
+                db,
+                current,
+                execution_lease=current_lease,
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
+                reason=(
+                    "Automation processor returned no owner-atomic terminal "
+                    "outcome"
+                ),
+                result=result,
+            )
+        # The owned-processor cleanup and the terminal persist are the last
+        # stage of a Beets-mutating execution, and both raise: seven owner
+        # RuntimeErrors plus ProcessingCleanupError/CleanupJournalConflict
+        # from the cleanup, ImportJobTerminalConflict from the terminal CAS.
+        # An escape here kills the whole importer process — the shared,
+        # serial lane for every request — where the identical class of crash
+        # escaping ``execute_fn`` self-heals the request. Route it the same way.
+        try:
+            cleanup_receipt = _complete_automation_processing_cleanup(
+                db,
+                current,
+                outcome,
+                execution_lease=current_lease,
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
+            )
+            completion_receipt = automation_completion_receipt(current)
+            if (
+                current.beets_launch_authorized_at is not None
+                and completion_receipt is None
+            ):
+                return _self_heal_automation_world_failure(
+                    db,
+                    current,
+                    execution_lease=current_lease,
+                    cancellation_token=cancellation_token,
+                    owner_session_identity=owner_session_identity,
+                    reason=(
+                        "Automation completion receipt is missing or invalid"
+                    ),
+                    result=result,
+                )
+            pending = replace(
+                outcome.terminal_outcome,
+                automation=AutomationTerminalAuthority(
+                    expected_job_status="running",
+                    expected_preview_status=current.preview_status,
+                    expected_execution_lease=current_lease,
+                    cleanup_receipt=cleanup_receipt,
+                    completion_receipt=completion_receipt,
+                ),
+            )
+            terminal = db.persist_import_terminal_outcome(
+                pending.with_job(ImportJobTerminal(
+                    status="completed" if outcome.success else "failed",
+                    error=None if outcome.success else outcome.message,
+                    result=result,
+                    message=outcome.message,
+                ))
+            )
+        except (ExecutionCancelled, OwnerSessionLost):
+            # Fail-stop: this execution's authority is gone, so no further
+            # write on this session is trustworthy — including the self-heal
+            # write below, which would raise again. Startup recovery owns
+            # the row once its lease is proven dead.
+            raise
+        except Exception as exc:
+            logger.exception(
+                "Automation terminal stage failed for import job %s", job.id,
+            )
+            return _self_heal_automation_world_failure(
+                db,
+                current,
+                execution_lease=current_lease,
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
+                reason=f"{type(exc).__name__}: {exc}",
+                result=result,
+            )
+        return terminal.job
     if outcome.success:
         if outcome.terminal_outcome is not None:
             terminal = db.persist_import_terminal_outcome(
@@ -756,12 +1728,9 @@ def process_claimed_job(
                 if merged is not None:
                     terminal_job = merged
             return _record_terminal_force_action_cleanup(db, job, terminal_job)
-        recovery = db.mark_import_job_recovery_required(
-            job.id,
-            reason="Beets returned without a terminal acknowledgement bundle",
-        )
-        if recovery is not None:
-            return recovery
+        # A force/YouTube success without a bundle is recorded, not parked: the
+        # job never owned the request's ``processing`` status, so the terminal
+        # completed status is the whole surface this outcome needs.
         completed = db.mark_import_job_completed(
             job.id,
             result=result,
@@ -804,12 +1773,6 @@ def process_claimed_job(
             job.request_id,
             outcome.message,
         )
-        recovery = db.mark_import_job_recovery_required(
-            job.id,
-            reason=f"requeue-to-preview failed after launch: {outcome.message}",
-        )
-        if recovery is not None:
-            return recovery
         failed = db.mark_import_job_failed(
             job.id,
             error=outcome.message,
@@ -852,12 +1815,8 @@ def process_claimed_job(
                 outcome,
             )
         return _record_terminal_force_action_cleanup(db, job, terminal_job)
-    recovery = db.mark_import_job_recovery_required(
-        job.id,
-        reason="Beets returned without a terminal acknowledgement bundle",
-    )
-    if recovery is not None:
-        return recovery
+    # Same as the success branch above: a bundle-less force/YouTube failure is
+    # recorded terminally rather than parked. No request is stopped by it.
     failed = db.mark_import_job_failed(
         job.id,
         error=outcome.message,
@@ -889,16 +1848,152 @@ def run_once(
     *,
     worker_id: str,
     ctx: Any = None,
+    stage_db_factory: Callable[[str], object] | None = None,
+    execution_lease_factory: Callable[..., ExecutionLeaseSnapshot] | None = None,
+    execute_fn: Callable[..., DispatchOutcome] = execute_import_job,
+    scan_cursor: _CandidateScanCursor | None = None,
 ) -> ImportJob | None:
-    job = db.claim_next_import_job(worker_id=worker_id)
-    if job is None:
-        return None
-    logger.info("Claimed import job %s (%s)", job.id, job.job_type)
-    return process_claimed_job(db, job, ctx=ctx)
+    cursor = scan_cursor or _CandidateScanCursor()
+    capture = execution_lease_factory or capture_execution_lease
+    try:
+        execution_lease = capture(systemd_unit=IMPORTER_SYSTEMD_UNIT)
+    except ValueError:
+        # Non-systemd development runs may still process Force/YouTube jobs.
+        # Automation stays invisible without a complete invocation lease.
+        execution_lease = None
+    candidates = db.peek_import_job_candidates(
+        execution_lease=execution_lease,
+        limit=IMPORT_CANDIDATE_SCAN_LIMIT,
+        offset=cursor.offset,
+    )
+    if not candidates and cursor.offset:
+        cursor.offset = 0
+        candidates = db.peek_import_job_candidates(
+            execution_lease=execution_lease,
+            limit=IMPORT_CANDIDATE_SCAN_LIMIT,
+            offset=0,
+        )
+    for candidate in candidates:
+        claim_state = _ClaimState()
+
+        if candidate.job_type == IMPORT_JOB_AUTOMATION:
+            if execution_lease is None:
+                continue
+            dsn = getattr(db, "dsn", None)
+            if not dsn:
+                continue
+            result = _process_automation_claim(
+                candidate,
+                dsn=str(dsn),
+                worker_id=worker_id,
+                execution_lease=execution_lease,
+                ctx=ctx,
+                stage_db_factory=stage_db_factory or PipelineDB,
+                execute_fn=execute_fn,
+                claim_callback=claim_state.mark,
+            )
+        elif candidate.job_type == IMPORT_JOB_FORCE:
+            dsn = getattr(db, "dsn", None)
+            if not dsn:
+                continue
+            result = _process_force_claim(
+                candidate,
+                dsn=str(dsn),
+                worker_id=worker_id,
+                ctx=ctx,
+                stage_db_factory=stage_db_factory or PipelineDB,
+                execute_fn=execute_fn,
+                claim_callback=claim_state.mark,
+            )
+        else:
+            job = db.claim_import_job_candidate(
+                candidate.id,
+                worker_id=worker_id,
+            )
+            if job is None:
+                continue
+            claim_state.mark()
+            logger.info("Claimed import job %s (%s)", job.id, job.job_type)
+            result = process_claimed_job(
+                db,
+                job,
+                ctx=ctx,
+                execute_fn=execute_fn,
+            )
+
+        if not claim_state.claimed:
+            continue
+        # The only successful-claim exit for every job type. Any success is
+        # a bounded revisit point for older rows that may now be claimable.
+        cursor.offset = 0
+        return result
+    cursor.offset += len(candidates)
+    return None
 
 
-def recover_abandoned_running_jobs(db: PipelineDB) -> list[ImportJob]:
-    """Retry only unlaunched jobs; stop ambiguous Beets work for recovery."""
+def recover_abandoned_automation_owners(
+    db: _AutomationRecoveryDB,
+    *,
+    liveness_probe: ExecutionLivenessProbe | None = None,
+) -> list[ImportJob]:
+    """Re-probe every attached automation owner and recover the proven dead.
+
+    Safe to run repeatedly against a live fleet, which is the point: a
+    transient probe failure must not cost a request its acquisition until the
+    next process restart. Every recovery still needs an exact death proof, so a
+    live preview or import execution — including this worker's own in-flight
+    job — is observed alive and left completely alone. The sweep is deliberately
+    lane-agnostic: a dead owner is equally stuck whichever lane abandoned it,
+    and the recovery write is owner-atomic under ``IMPORT(request_id)``.
+    """
+    recovered: list[ImportJob] = []
+    for job in db.list_automation_import_jobs_for_startup_recovery():
+        lease = _execution_lease_from_job(job)
+        if lease is None and job.status != IMPORT_JOB_RECOVERY_REQUIRED:
+            # A leaseless owner in a live lane is simply waiting to be claimed
+            # — normal, not abandoned. Only a leaseless owner stopped at
+            # ``recovery_required`` (the replacement an operator retry mints
+            # for an unresolved cleanup journal) is a park needing closure, and
+            # ``never_claimed`` is its exact death proof.
+            continue
+        decision = probe_execution_liveness(
+            lease,
+            probe=liveness_probe,
+        )
+        try:
+            recovered_job = db.recover_automation_import_job(
+                job.id,
+                expected_execution_lease=lease,
+                decision=decision,
+                requeue_message=RESTART_REQUEUE_MESSAGE,
+                recovery_message=RESTART_RECOVERY_MESSAGE,
+            )
+        except Exception:
+            # One unrecoverable owner must not abort the sweep or the worker's
+            # startup — the other stuck requests still need their pass. The row
+            # is left exactly as it was and retried on the next re-probe.
+            logger.exception(
+                "Recovery pass failed for automation owner %s; continuing",
+                job.id,
+            )
+            continue
+        if recovered_job is not None:
+            recovered.append(recovered_job)
+    return recovered
+
+
+def recover_abandoned_running_jobs(
+    db: PipelineDB,
+    *,
+    liveness_probe: ExecutionLivenessProbe | None = None,
+) -> list[ImportJob]:
+    """Recover only executions whose exact persisted lease is proven dead.
+
+    Startup only: ``recover_running_import_jobs`` requeues every non-automation
+    ``running`` row without a liveness probe, which is sound exactly once,
+    before this singleton worker has claimed anything. The automation half is
+    the re-runnable sweep and is also called periodically from ``main``.
+    """
     recovered: list[ImportJob] = []
     batch_size = 50
     while True:
@@ -909,7 +2004,12 @@ def recover_abandoned_running_jobs(db: PipelineDB) -> list[ImportJob]:
         )
         recovered.extend(batch)
         if len(batch) < batch_size:
-            return recovered
+            break
+    recovered.extend(recover_abandoned_automation_owners(
+        db,
+        liveness_probe=liveness_probe,
+    ))
+    return recovered
 
 
 def main() -> int:
@@ -943,8 +2043,29 @@ def main() -> int:
                     len(recovered),
                 )
 
+            scan_cursor = _CandidateScanCursor()
+            next_reprobe_at = (
+                time.monotonic()
+                + AUTOMATION_RECOVERY_REPROBE_INTERVAL_SECONDS
+            )
             while True:
-                job = run_once(db, worker_id=worker_id)
+                if time.monotonic() >= next_reprobe_at:
+                    next_reprobe_at = (
+                        time.monotonic()
+                        + AUTOMATION_RECOVERY_REPROBE_INTERVAL_SECONDS
+                    )
+                    reprobed = recover_abandoned_automation_owners(db)
+                    if reprobed:
+                        logger.warning(
+                            "Liveness re-probe recovered %s abandoned "
+                            "automation owner(s) a restart would have stranded",
+                            len(reprobed),
+                        )
+                job = run_once(
+                    db,
+                    worker_id=worker_id,
+                    scan_cursor=scan_cursor,
+                )
                 if args.once:
                     return 0
                 if job is None:

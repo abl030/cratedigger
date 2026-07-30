@@ -11,17 +11,29 @@ import json
 import os
 import tempfile
 import types
-from collections.abc import Callable, Generator
-from contextlib import contextmanager
+from collections.abc import Callable, Generator, Mapping
+from contextlib import AbstractContextManager, contextmanager
 from copy import deepcopy
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Protocol
 from unittest.mock import MagicMock, patch
 
 import msgspec
 import requests
 
 from lib.grab_list import DownloadFile, GrabListEntry
+from lib.import_execution import (
+    CancellationToken,
+    ExecutionLeaseSnapshot,
+    OwnerSessionIdentity,
+)
+from lib.import_queue import (
+    IMPORT_JOB_AUTOMATION,
+    IMPORT_JOB_FORCE,
+    AutomationHandoffResult,
+    ImportJob,
+)
+from lib.pipeline_db._shared import ADVISORY_LOCK_NAMESPACE_IMPORT
 from lib.quality import (
     EVIDENCE_PROVENANCE_MEASURED,
     EVIDENCE_SUBJECT_INSTALLED,
@@ -198,6 +210,8 @@ def make_request_row(**overrides: Any) -> dict[str, Any]:
         "current_lossless_source_v0_probe_avg_bitrate": None,
         "current_lossless_source_v0_probe_median_bitrate": None,
         "active_download_state": None,
+        # Migration 066 — exact active automation processor owner.
+        "active_automation_import_job_id": None,
         # U1 persisted-search-plans cursor fields (migration 014).
         "active_plan_id": None,
         "next_plan_ordinal": 0,
@@ -363,14 +377,245 @@ def make_audio_corrupt_validation_report(
     )
 
 
+@contextmanager
+def pinned_dispatch_authority(
+    db: _PinnedDispatchDB,
+    execution_lease: ExecutionLeaseSnapshot | None,
+    *,
+    cancellation_token: CancellationToken | None = None,
+) -> Generator[
+    tuple[CancellationToken | None, OwnerSessionIdentity | None],
+]:
+    """Pin the real fake-DB owner session for one automation dispatch scope."""
+    if execution_lease is None:
+        if cancellation_token is not None:
+            raise AssertionError(
+                "non-automation dispatch cannot carry a cancellation token"
+            )
+        yield None, None
+        return
+
+    existing_pin = getattr(db, "_owner_session_pin", None)
+    if existing_pin is not None:
+        identity, pinned_token = existing_pin
+        if (
+            cancellation_token is not None
+            and cancellation_token is not pinned_token
+        ):
+            raise AssertionError(
+                "nested dispatch authority must reuse the pinned token"
+            )
+        yield pinned_token, identity
+        return
+
+    token = cancellation_token or CancellationToken()
+    with db._pin_owner_session(token) as identity:
+        yield token, identity
+
+
 def finalize_claimed_dispatch(db: Any, job: Any, outcome: Any) -> Any:
     """Apply a direct dispatch result through the production queue owner."""
-    from scripts.importer import process_claimed_job
+    from lib.import_queue import IMPORT_JOB_AUTOMATION
+    from scripts.importer import _execution_lease_from_job, process_claimed_job
 
+    if job.job_type == IMPORT_JOB_AUTOMATION:
+        execution_lease = _execution_lease_from_job(job)
+        assert execution_lease is not None, (
+            "automation fixture must claim with an importer execution lease"
+        )
+        with pinned_dispatch_authority(
+            db,
+            execution_lease,
+        ) as (cancellation_token, owner_session_identity):
+            assert cancellation_token is not None
+            assert owner_session_identity is not None
+            return process_claimed_job(
+                db,
+                job,
+                execute_fn=lambda *_args, **_kwargs: outcome,
+                execution_lease=execution_lease,
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
+            )
     return process_claimed_job(
         db,
         job,
         execute_fn=lambda *_args, **_kwargs: outcome,
+    )
+
+
+class ImportJobClaimDB(Protocol):
+    def peek_import_job_candidates(
+        self,
+        *,
+        execution_lease: ExecutionLeaseSnapshot | None = None,
+        limit: int,
+        offset: int = 0,
+    ) -> list[ImportJob]: ...
+
+    def peek_import_preview_job_candidates(
+        self,
+        *,
+        execution_lease: ExecutionLeaseSnapshot | None = None,
+        limit: int,
+        offset: int = 0,
+    ) -> list[ImportJob]: ...
+
+    def advisory_lock(
+        self,
+        namespace: int,
+        key: int,
+    ) -> AbstractContextManager[bool]: ...
+
+    def claim_import_job_candidate(
+        self,
+        job_id: int,
+        *,
+        worker_id: str | None = None,
+    ) -> ImportJob | None: ...
+
+    def claim_import_preview_job_candidate(
+        self,
+        job_id: int,
+        *,
+        worker_id: str | None = None,
+    ) -> ImportJob | None: ...
+
+    def claim_automation_import_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+        execution_lease: ExecutionLeaseSnapshot,
+    ) -> ImportJob | None: ...
+
+    def claim_automation_import_preview_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+        execution_lease: ExecutionLeaseSnapshot,
+    ) -> ImportJob | None: ...
+
+    def claim_force_import_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+    ) -> ImportJob | None: ...
+
+    def claim_force_import_preview_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+    ) -> ImportJob | None: ...
+
+
+def claim_next_import_job(
+    db: ImportJobClaimDB,
+    *,
+    worker_id: str | None = None,
+    execution_lease: ExecutionLeaseSnapshot | None = None,
+) -> ImportJob | None:
+    """Claim the first import candidate for direct test setup.
+
+    Production workers scan bounded candidate pages and claim exact rows. Tests
+    that need a claimed fixture retain the old one-shot convenience here
+    without preserving a production API that no runtime caller uses.
+    """
+    candidates = db.peek_import_job_candidates(
+        execution_lease=execution_lease,
+        limit=1,
+    )
+    if not candidates:
+        return None
+    candidate = candidates[0]
+    if candidate.job_type == IMPORT_JOB_AUTOMATION:
+        if execution_lease is None or candidate.request_id is None:
+            return None
+        with db.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_IMPORT,
+            candidate.request_id,
+        ) as acquired:
+            if not acquired:
+                return None
+            return db.claim_automation_import_job_under_lock(
+                candidate.id,
+                request_id=candidate.request_id,
+                worker_id=worker_id,
+                execution_lease=execution_lease,
+            )
+    if candidate.job_type == IMPORT_JOB_FORCE:
+        if candidate.request_id is None:
+            return None
+        with db.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_IMPORT,
+            candidate.request_id,
+        ) as acquired:
+            if not acquired:
+                return None
+            return db.claim_force_import_job_under_lock(
+                candidate.id,
+                request_id=candidate.request_id,
+                worker_id=worker_id,
+            )
+    return db.claim_import_job_candidate(
+        candidate.id,
+        worker_id=worker_id,
+    )
+
+
+def claim_next_import_preview_job(
+    db: ImportJobClaimDB,
+    *,
+    worker_id: str | None = None,
+    execution_lease: ExecutionLeaseSnapshot | None = None,
+) -> ImportJob | None:
+    """Claim the first preview candidate for direct test setup."""
+    candidates = db.peek_import_preview_job_candidates(
+        execution_lease=execution_lease,
+        limit=1,
+    )
+    if not candidates:
+        return None
+    candidate = candidates[0]
+    if candidate.job_type == IMPORT_JOB_AUTOMATION:
+        if execution_lease is None or candidate.request_id is None:
+            return None
+        with db.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_IMPORT,
+            candidate.request_id,
+        ) as acquired:
+            if not acquired:
+                return None
+            return db.claim_automation_import_preview_job_under_lock(
+                candidate.id,
+                request_id=candidate.request_id,
+                worker_id=worker_id,
+                execution_lease=execution_lease,
+            )
+    if candidate.job_type == IMPORT_JOB_FORCE:
+        if candidate.request_id is None:
+            return None
+        with db.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_IMPORT,
+            candidate.request_id,
+        ) as acquired:
+            if not acquired:
+                return None
+            return db.claim_force_import_preview_job_under_lock(
+                candidate.id,
+                request_id=candidate.request_id,
+                worker_id=worker_id,
+            )
+    return db.claim_import_preview_job_candidate(
+        candidate.id,
+        worker_id=worker_id,
     )
 
 
@@ -652,6 +897,56 @@ def make_active_download_state_json(
         enqueued_at="2026-07-01T00:00:00+00:00",
         files=files,
     ).to_json()
+
+
+def handoff_automation_owner(
+    db: _AutomationHandoffDB,
+    request_id: int,
+    *,
+    state: ActiveDownloadState | Mapping[str, object] | str | None = None,
+    canonical_path: str | None = None,
+    message: str = "test automation owner handoff",
+) -> ImportJob:
+    """Create a production-representable automation owner for tests.
+
+    Tests must never bypass the sole lifecycle edge by inserting an
+    ``automation_import`` job or assigning the owner pointer directly. This
+    helper performs the real ``wanted -> downloading -> processing`` transcript
+    through ``set_downloading`` and ``handoff_automation_import``.
+    """
+    active_state = (
+        ActiveDownloadState(
+            filetype="flac",
+            enqueued_at="2026-07-01T00:00:00+00:00",
+            files=[],
+        )
+        if state is None
+        else ActiveDownloadState.from_raw(state)
+    )
+    path = (
+        canonical_path
+        or active_state.current_path
+        or f"/processing/albums/request-{request_id}"
+    )
+    if not db.set_downloading(
+        request_id,
+        active_state.to_json(),
+        expected_status="wanted",
+    ):
+        raise AssertionError(
+            f"request {request_id} could not enter downloading for handoff"
+        )
+    result = db.handoff_automation_import(
+        request_id=request_id,
+        expected_enqueued_at=active_state.enqueued_at,
+        canonical_path=path,
+        message=message,
+    )
+    if not result.committed or result.job is None:
+        raise AssertionError(
+            f"request {request_id} handoff failed: {result.outcome}"
+        )
+    return result.job
 
 
 def make_evidence(
@@ -1033,3 +1328,29 @@ def patch_dispatch_externals():
         yield types.SimpleNamespace(
             run=run, cleanup=cleanup, plex=plex,
             jellyfin=jellyfin)
+class _PinnedDispatchDB(Protocol):
+    _owner_session_pin: tuple[OwnerSessionIdentity, CancellationToken] | None
+
+    def _pin_owner_session(
+        self,
+        token: CancellationToken,
+    ) -> AbstractContextManager[OwnerSessionIdentity]: ...
+
+
+class _AutomationHandoffDB(Protocol):
+    def set_downloading(
+        self,
+        request_id: int,
+        state_json: str,
+        *,
+        expected_status: str = "wanted",
+    ) -> bool: ...
+
+    def handoff_automation_import(
+        self,
+        *,
+        request_id: int,
+        expected_enqueued_at: str,
+        canonical_path: str,
+        message: str,
+    ) -> AutomationHandoffResult: ...

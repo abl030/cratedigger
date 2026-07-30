@@ -66,10 +66,6 @@ class ProcessingPathLocation:
         return "external"
 
     @property
-    def blocks_post_move_retry(self) -> bool:
-        return self.kind == "request_scoped_auto_import_staged"
-
-    @property
     def blocks_auto_import_dispatch(self) -> bool:
         # ``legacy_shared_staged`` should be unreachable in the normal
         # recovery flow, but keep the dispatch guard as defense-in-depth
@@ -440,7 +436,6 @@ def find_blocked_processing_path_issues(
     staging_dir: str,
     canonical_root: str,
     has_entries: Callable[[str], bool],
-    auto_import_in_progress: Callable[[int, str | None], bool | None] | None = None,
 ) -> list[BlockedRecoveryIssue]:
     """Find persisted processing paths that block automatic resume."""
     issues: list[BlockedRecoveryIssue] = []
@@ -509,92 +504,6 @@ def find_blocked_processing_path_issues(
         assert recovery_decision.selected_location is not None
         location = recovery_decision.selected_location
         if location.path != current_path:
-            continue
-        if location.kind == "request_scoped_auto_import_staged":
-            state = row.get("active_download_state")
-            subprocess_started = (
-                _is_str_object_dict(state)
-                and state.get("import_subprocess_started_at") is not None
-            )
-            if not subprocess_started:
-                continue
-            has_path_entries = has_entries(current_path)
-            mb_release_id = row.get("mb_release_id")
-            normalized_mbid = (
-                str(mb_release_id)
-                if isinstance(mb_release_id, str) and mb_release_id
-                else None
-            )
-            in_progress: bool | None = False
-            if normalized_mbid is None:
-                if not has_path_entries:
-                    issues.append(BlockedRecoveryIssue(
-                        request_id=request_id,
-                        detail=(
-                            "persisted processing path missing after local "
-                            f"processing: {current_path}"
-                        ),
-                    ))
-                    continue
-                issues.append(BlockedRecoveryIssue(
-                    request_id=request_id,
-                    detail=(
-                        "persisted request-scoped auto-import staged path is "
-                        "still populated, but this request has no "
-                        f"mb_release_id so auto-import cannot resume: {location.path}"
-                    ),
-                ))
-                continue
-            if auto_import_in_progress is not None:
-                # ``album_requests.mb_release_id`` is UNIQUE and
-                # ``request_scoped_auto_import_staged`` only matches when
-                # the request suffix in ``current_path`` belongs to this row,
-                # so a held RELEASE lock for ``normalized_mbid`` is the best
-                # read-only liveness hint that this staged path still belongs
-                # to an in-flight auto-import for this exact row.
-                in_progress = auto_import_in_progress(request_id, normalized_mbid)
-                if in_progress is True:
-                    continue
-            if not has_path_entries:
-                if in_progress is None:
-                    issues.append(BlockedRecoveryIssue(
-                        request_id=request_id,
-                        detail=(
-                            "persisted request-scoped auto-import staged "
-                            "path is missing, but the repair scan could "
-                            "not determine whether auto-import is still "
-                            f"running: {location.path}"
-                        ),
-                    ))
-                    continue
-                issues.append(BlockedRecoveryIssue(
-                    request_id=request_id,
-                    detail=(
-                        "auto-abandonable request-scoped auto-import "
-                        "staged path is missing after interrupted import; "
-                        f"runtime recovery will reset and redownload: {current_path}"
-                    ),
-                ))
-                continue
-            if auto_import_in_progress is not None and in_progress is None:
-                issues.append(BlockedRecoveryIssue(
-                    request_id=request_id,
-                    detail=(
-                        "persisted request-scoped auto-import staged "
-                        "path is still populated, but the repair scan "
-                        "could not determine whether auto-import is "
-                        f"still running: {location.path}"
-                    ),
-                ))
-                continue
-            issues.append(BlockedRecoveryIssue(
-                request_id=request_id,
-                detail=(
-                    "auto-abandonable request-scoped auto-import staged "
-                    "path is still populated after interrupted import; "
-                    f"runtime recovery will quarantine and redownload: {location.path}"
-                ),
-            ))
             continue
         if not has_entries(current_path):
             issues.append(BlockedRecoveryIssue(

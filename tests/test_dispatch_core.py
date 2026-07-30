@@ -17,7 +17,13 @@ import msgspec
 from lib.beets_db import AlbumInfo
 from lib.config import CratediggerConfig
 from lib.dispatch.types import DispatchOutcome, EvidenceImportGate, ImportOneRun
-from lib.import_queue import IMPORT_JOB_AUTOMATION, IMPORT_JOB_FORCE
+from lib.import_execution import (
+    CancellationToken,
+    ExecutionLeaseSnapshot,
+    OwnerSessionIdentity,
+    ProcessIdentity,
+)
+from lib.import_queue import IMPORT_JOB_FORCE
 from lib.pipeline_db import DownloadLogOutcome
 from lib.quality import (
     AlbumQualityV0Metric,
@@ -31,11 +37,16 @@ from lib.quality_evidence import snapshot_audio_files
 from lib.terminal_outcomes import ImportJobTerminal
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import (
+    claim_next_import_job,
+    claim_next_import_preview_job,
+    finalize_claimed_dispatch,
+    handoff_automation_owner,
     make_album_quality_evidence,
     make_import_result,
     make_request_row,
     noop_quality_gate,
     patch_dispatch_externals,
+    pinned_dispatch_authority,
 )
 
 
@@ -56,6 +67,7 @@ def _seed_candidate_for_download_log(db, log_id: int, *, mb_release_id: str,
 
 
 def _seed_candidate_for_import_job(db, job_id: int, *, mb_release_id: str,
+                                   expected_execution_lease=None,
                                    **kwargs):
     evidence = make_album_quality_evidence(mb_release_id=mb_release_id, **kwargs)
     db.upsert_album_quality_evidence(evidence)
@@ -64,7 +76,14 @@ def _seed_candidate_for_import_job(db, job_id: int, *, mb_release_id: str,
         snapshot_fingerprint=evidence.snapshot_fingerprint,
     )
     assert persisted is not None and persisted.id is not None
-    db.set_import_job_candidate_evidence(job_id, persisted.id)
+    if expected_execution_lease is None:
+        db.set_import_job_candidate_evidence(job_id, persisted.id)
+    else:
+        db.set_import_job_candidate_evidence(
+            job_id,
+            persisted.id,
+            expected_execution_lease=expected_execution_lease,
+        )
     return persisted
 
 
@@ -82,6 +101,44 @@ def _seed_current_for_request(db, request_id: int, *, mb_release_id: str,
 
 
 _HARNESS = "/nix/store/fake/harness/run_beets_harness.sh"
+
+
+class TestDispatchExecutionAuthority(unittest.TestCase):
+    def test_partial_force_authority_cannot_hide_behind_no_lease_fast_path(self):
+        from lib.dispatch.core import _validate_automation_dispatch_authority
+
+        db = FakePipelineDB()
+        partials = (
+            (CancellationToken(), None),
+            (None, OwnerSessionIdentity(connection_object_id=1, backend_pid=2)),
+        )
+        for token, identity in partials:
+            with self.subTest(
+                token=token is not None,
+                identity=identity is not None,
+            ), self.assertRaisesRegex(ValueError, "must be paired"):
+                _validate_automation_dispatch_authority(
+                    db,  # pyright: ignore[reportArgumentType]
+                    force=True,
+                    import_job_id=7,
+                    execution_lease=None,
+                    cancellation_token=token,
+                    owner_session_identity=identity,
+                )
+
+
+def _owned_test_runner(**kwargs):
+    """Persist synthetic child proof before exercising the patched run seam."""
+    from lib.dispatch.subprocess_runner import run_import_one
+
+    on_spawn = kwargs.pop("on_spawn", None)
+    cancellation_token = kwargs.pop("cancellation_token", None)
+    kwargs.pop("owner_session_probe", None)
+    if on_spawn is not None:
+        on_spawn(os.getpid())
+    if cancellation_token is not None:
+        cancellation_token.raise_if_cancelled()
+    return run_import_one(**kwargs)
 
 
 class _DispatchWorld(TypedDict):
@@ -128,10 +185,15 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                   path_parent: str | None = None,
                   post_dispatch_fn: Callable[
                       [DispatchOutcome, FakePipelineDB, str], None,
-                  ] | None = None) -> _DispatchWorld:
+                  ] | None = None,
+                  finalize: bool = True) -> _DispatchWorld:
         from lib.dispatch import dispatch_import_core
         if ir is None:
             ir = make_import_result(decision="import", new_min_bitrate=245)
+
+        # Automation must resolve its processing owner to wanted/imported.
+        # Retained-current-status outcomes are operator-owned force imports.
+        force = force or not requeue_on_failure
 
         cfg = CratediggerConfig(
             beets_harness_path=_HARNESS,
@@ -146,36 +208,82 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         try:
             db = FakePipelineDB()
             req = make_request_row(
-                id=42, status="downloading", mb_release_id="mbid-123",
+                id=42, status="downloading" if force else "wanted",
+                mb_release_id="mbid-123",
                 min_bitrate=180, current_spectral_bitrate=128,
                 active_download_state={
                     "files": [],
                     "filetype": "flac",
                     "current_path": tmpdir,
-                },
+                } if force else None,
                 **(request_overrides or {}),
             )
             db.seed_request(req)
-            job = db.enqueue_import_job(
-                IMPORT_JOB_FORCE if force else IMPORT_JOB_AUTOMATION,
-                request_id=42,
-                payload={"download_log_id": 1, "failed_path": tmpdir} if force else {},
-            )
+            preview_lease: ExecutionLeaseSnapshot | None = None
+            if force:
+                job = db.enqueue_import_job(
+                    IMPORT_JOB_FORCE,
+                    request_id=42,
+                    payload={"download_log_id": 1, "failed_path": tmpdir},
+                )
+            else:
+                state = {
+                    "files": [],
+                    "filetype": "flac",
+                    "enqueued_at": "2026-07-29T00:00:00+00:00",
+                    "current_path": tmpdir,
+                }
+                job = handoff_automation_owner(
+                    db,
+                    42,
+                    state=state,
+                    canonical_path=tmpdir,
+                )
+                preview_lease = ExecutionLeaseSnapshot(
+                    host_boot_id="dispatch-core-boot",
+                    invocation_id=f"dispatch-core-preview-{job.id}",
+                    systemd_unit="cratedigger-import-preview-worker.service",
+                    worker=ProcessIdentity(8201, 82001),
+                )
+                claimed_preview = claim_next_import_preview_job(db, worker_id="dispatch-core-preview",
+                execution_lease=preview_lease,)
+                assert claimed_preview is not None
             candidate = _seed_candidate_for_import_job(
                 db,
                 job.id,
                 mb_release_id="mbid-123",
                 source_path=tmpdir,
+                expected_execution_lease=preview_lease,
                 **(candidate_kwargs or {}),
             )
             db.mark_import_job_preview_importable(
                 job.id,
                 preview_result={"ready": True},
+                expected_execution_lease=preview_lease,
             )
-            claimed = db.claim_next_import_job(worker_id="dispatch-core-test")
+            execution_lease = (
+                None
+                if force
+                else ExecutionLeaseSnapshot(
+                    host_boot_id="dispatch-core-boot",
+                    invocation_id=f"dispatch-core-importer-{job.id}",
+                    systemd_unit="cratedigger-importer.service",
+                    worker=ProcessIdentity(8202, 82002),
+                )
+            )
+            claimed = claim_next_import_job(db, worker_id="dispatch-core-test",
+            execution_lease=execution_lease,)
             assert claimed is not None
+            cancellation_token = (
+                CancellationToken() if execution_lease is not None else None
+            )
             with patch_dispatch_externals() as ext, \
-                 patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir):
+                 patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir), \
+                 pinned_dispatch_authority(
+                     db,
+                     execution_lease,
+                     cancellation_token=cancellation_token,
+                 ) as (cancellation_token, owner_session_identity):
                 result = dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="mbid-123",
@@ -200,8 +308,19 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                     evidence_gate_fn=lambda *_args, **_kwargs: EvidenceImportGate(
                         candidate=candidate,
                     ),
+                    execution_lease=execution_lease,
+                    cancellation_token=cancellation_token,
+                    owner_session_identity=owner_session_identity,
+                    run_import_fn=(
+                        _owned_test_runner
+                        if execution_lease is not None else None
+                    ),
                 )
-                if result.terminal_outcome is not None:
+                if post_dispatch_fn is not None:
+                    post_dispatch_fn(result, db, tmpdir)
+                if not finalize:
+                    pass
+                elif force and result.terminal_outcome is not None:
                     db.persist_import_terminal_outcome(
                         result.terminal_outcome.with_job(ImportJobTerminal(
                             status="completed" if result.success else "failed",
@@ -210,8 +329,8 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                             error=None if result.success else result.message,
                         ))
                     )
-                if post_dispatch_fn is not None:
-                    post_dispatch_fn(result, db, tmpdir)
+                elif not force:
+                    finalize_claimed_dispatch(db, claimed, result)
                 cmd = ext.run.call_args[0][0] if ext.run.call_args else []
         finally:
             import shutil
@@ -237,6 +356,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             candidate_kwargs={"audio_corrupt": True},
             beets_staging_dir="/configured/staging",
             slskd_download_dir="/configured/slskd",
+            finalize=False,
         )
         cleanup = r["result"].post_commit_cleanup
         assert cleanup is not None
@@ -244,12 +364,12 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         self.assertNotEqual(cleanup.audio_quarantine_root, "/configured/slskd")
 
     def test_audio_corrupt_dispatch_composes_atomic_staging_quarantine(self):
-        from scripts.importer import _run_post_commit_cleanup
         with tempfile.TemporaryDirectory() as root:
             incoming = os.path.join(root, "Incoming")
             auto_import = os.path.join(incoming, "auto-import")
             slskd = os.path.join(root, "slskd")
             os.makedirs(auto_import)
+            os.makedirs(os.path.join(incoming, "failed_imports"))
             os.makedirs(slskd)
             observed: dict[str, object] = {}
             def post_dispatch(
@@ -262,28 +382,30 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                     f.write(b"bad")
                 with open(os.path.join(source, "cover.jpg"), "wb") as f:
                     f.write(b"cover")
-                log_id = db.download_logs[-1].id
                 observed["source"] = source
-                observed["audit"] = _run_post_commit_cleanup(db, result, download_log_id=log_id)
-            self._dispatch(
+            dispatched = self._dispatch(
                 candidate_kwargs={"audio_corrupt": True}, path_parent=auto_import,
                 beets_staging_dir=incoming, slskd_download_dir=slskd,
                 post_dispatch_fn=post_dispatch,
             )
             source = observed["source"]
-            audit = observed["audit"]
-            assert isinstance(source, str) and isinstance(audit, dict)
-            quarantine = audit["audio_quarantine"]
-            assert isinstance(quarantine, dict)
-            target = quarantine["quarantine_path"]
+            assert isinstance(source, str)
+            completed_job = dispatched["db"].get_import_job(1)
+            assert completed_job is not None
+            receipt = (completed_job.result or {})["processing_cleanup"]
+            assert isinstance(receipt, dict)
+            target = receipt["selected_destination_path"]
             assert isinstance(target, str)
             self.assertFalse(os.path.exists(source))
             self.assertTrue(target.startswith(os.path.join(incoming, "failed_imports", "bad_files")))
             self.assertFalse(target.startswith(slskd))
             self.assertTrue(os.path.exists(os.path.join(target, "Disc 1", "01.flac")))
             self.assertTrue(os.path.exists(os.path.join(target, "cover.jpg")))
-            self.assertTrue(quarantine["moved"])
-            self.assertTrue(quarantine["audit_persisted"])
+            self.assertEqual(receipt["outcome"], "completed")
+            audit = msgspec.json.decode(
+                dispatched["db"].download_logs[-1].validation_result or "{}",
+            )
+            self.assertEqual(audit["processing_cleanup"], receipt)
 
     def test_successful_import_creates_one_log_row(self):
         r = self._dispatch()
@@ -302,12 +424,8 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         from lib.dispatch import dispatch_import_core
 
         class StaleDB(FakePipelineDB):
-            def mark_import_subprocess_started(
-                self,
-                request_id: int,
-                timestamp: str,
-            ) -> bool:
-                return False
+            def authorize_import_job_launch(self, *args, **kwargs):
+                return None
 
         db = StaleDB()
         db.seed_request(make_request_row(
@@ -324,31 +442,56 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             db.seed_request(make_request_row(
                 id=42,
-                status="downloading",
+                status="wanted",
                 mb_release_id="mbid-123",
-                active_download_state={
+            ))
+            state = {
                     "files": [],
                     "filetype": "flac",
+                    "enqueued_at": "2026-07-29T00:00:00+00:00",
                     "current_path": tmpdir,
-                },
-            ))
-            job = db.enqueue_import_job(
-                IMPORT_JOB_AUTOMATION,
-                request_id=42,
-                payload={},
+            }
+            job = handoff_automation_owner(
+                db,
+                42,
+                state=state,
+                canonical_path=tmpdir,
             )
+            preview_lease = ExecutionLeaseSnapshot(
+                host_boot_id="stale-test-boot",
+                invocation_id="stale-preview",
+                systemd_unit="cratedigger-import-preview-worker.service",
+                worker=ProcessIdentity(8301, 83001),
+            )
+            assert claim_next_import_preview_job(db, worker_id="stale-preview",
+            execution_lease=preview_lease,) is not None
             candidate = _seed_candidate_for_import_job(
                 db,
                 job.id,
                 mb_release_id="mbid-123",
                 source_path=tmpdir,
+                expected_execution_lease=preview_lease,
             )
             db.mark_import_job_preview_importable(
                 job.id,
                 preview_result={"ready": True},
+                expected_execution_lease=preview_lease,
             )
-            assert db.claim_next_import_job(worker_id="stale-test") is not None
-            with patch_dispatch_externals() as ext:
+            execution_lease = ExecutionLeaseSnapshot(
+                host_boot_id="stale-test-boot",
+                invocation_id="stale-importer",
+                systemd_unit="cratedigger-importer.service",
+                worker=ProcessIdentity(8302, 83002),
+            )
+            assert claim_next_import_job(db, worker_id="stale-test",
+            execution_lease=execution_lease,) is not None
+            cancellation_token = CancellationToken()
+            with patch_dispatch_externals() as ext, \
+                 pinned_dispatch_authority(
+                     db,
+                     execution_lease,
+                     cancellation_token=cancellation_token,
+                 ) as (cancellation_token, owner_session_identity):
                 outcome = dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="mbid-123",
@@ -370,16 +513,16 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                     evidence_gate_fn=lambda *_args, **_kwargs: EvidenceImportGate(
                         candidate=candidate,
                     ),
+                    execution_lease=execution_lease,
+                    cancellation_token=cancellation_token,
+                    owner_session_identity=owner_session_identity,
+                    run_import_fn=_owned_test_runner,
                 )
 
         self.assertFalse(outcome.success)
-        self.assertTrue(outcome.deferred)
-        self.assertEqual(
-            outcome.message,
-            "Request state changed before import launch",
-        )
+        self.assertEqual(outcome.code, "launch_authority_conflict")
         ext.run.assert_not_called()
-        self.assertEqual(db.request(42)["status"], "downloading")
+        self.assertEqual(db.request(42)["status"], "processing")
         self.assertEqual(db.download_logs, [])
 
     def test_force_job_status_change_after_enqueue_stops_before_beets(self):
@@ -411,7 +554,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 job.id,
                 preview_result={"ready": True},
             )
-            claimed = db.claim_next_import_job(worker_id="stale-force-test")
+            claimed = claim_next_import_job(db, worker_id="stale-force-test")
             assert claimed is not None
             self.assertEqual(claimed.expected_request_status, "wanted")
 
@@ -655,7 +798,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 job.id,
                 preview_result={"ready": True},
             )
-            assert db.claim_next_import_job(worker_id="dispatch-test") is not None
+            assert claim_next_import_job(db, worker_id="dispatch-test") is not None
             _seed_current_for_request(
                 db, 42,
                 mb_release_id="mbid-123-current",
@@ -819,7 +962,7 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
                 job.id,
                 preview_result={"ready": True},
             )
-            assert db.claim_next_import_job(worker_id="dispatch-test") is not None
+            assert claim_next_import_job(db, worker_id="dispatch-test") is not None
             cfg = CratediggerConfig(
                 beets_harness_path=_HARNESS,
                 pipeline_db_enabled=True,
@@ -1188,37 +1331,82 @@ class TestDispatchCoreSeams(unittest.TestCase):
         tmpdir = tempfile.mkdtemp()
         try:
             db = FakePipelineDB()
+            force = bool(kwargs.get("force", False))
             db.seed_request(make_request_row(
                 id=42,
-                status="downloading",
+                status="downloading" if force else "wanted",
                 mb_release_id="mbid-123",
                 active_download_state={
                     "files": [],
                     "filetype": "flac",
                     "current_path": tmpdir,
-                },
+                } if force else None,
             ))
-            force = bool(kwargs.get("force", False))
-            job = db.enqueue_import_job(
-                IMPORT_JOB_FORCE if force else IMPORT_JOB_AUTOMATION,
-                request_id=42,
-                payload={"download_log_id": 1, "failed_path": tmpdir} if force else {},
-            )
+            preview_lease: ExecutionLeaseSnapshot | None = None
+            if force:
+                job = db.enqueue_import_job(
+                    IMPORT_JOB_FORCE,
+                    request_id=42,
+                    payload={"download_log_id": 1, "failed_path": tmpdir},
+                )
+            else:
+                job = handoff_automation_owner(
+                    db,
+                    42,
+                    state={
+                        "files": [],
+                        "filetype": "flac",
+                        "enqueued_at": "2026-07-29T00:00:00+00:00",
+                        "current_path": tmpdir,
+                    },
+                    canonical_path=tmpdir,
+                )
+                preview_lease = ExecutionLeaseSnapshot(
+                    host_boot_id="seam-test-boot",
+                    invocation_id=f"seam-preview-{job.id}",
+                    systemd_unit="cratedigger-import-preview-worker.service",
+                    worker=ProcessIdentity(8401, 84001),
+                )
+                assert claim_next_import_preview_job(db, worker_id="seam-preview",
+                execution_lease=preview_lease,) is not None
             candidate = _seed_candidate_for_import_job(
                 db,
                 job.id,
                 mb_release_id="mbid-123",
                 source_path=tmpdir,
+                expected_execution_lease=preview_lease,
             )
             db.mark_import_job_preview_importable(
                 job.id,
                 preview_result={"ready": True},
+                expected_execution_lease=preview_lease,
             )
-            assert db.claim_next_import_job(worker_id="seam-test") is not None
+            execution_lease = (
+                None
+                if force
+                else ExecutionLeaseSnapshot(
+                    host_boot_id="seam-test-boot",
+                    invocation_id=f"seam-importer-{job.id}",
+                    systemd_unit="cratedigger-importer.service",
+                    worker=ProcessIdentity(8402, 84002),
+                )
+            )
+            assert claim_next_import_job(db, worker_id="seam-test",
+            execution_lease=execution_lease,) is not None
+            cancellation_token = (
+                CancellationToken() if execution_lease is not None else None
+            )
             with patch_dispatch_externals() as ext, \
-                 patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir):
+                 patch("lib.dispatch.subprocess_runner.parse_import_result", return_value=ir), \
+                 pinned_dispatch_authority(
+                     db,
+                     execution_lease,
+                     cancellation_token=cancellation_token,
+                 ) as (cancellation_token, owner_session_identity):
                 if runner_hook is not None:
                     kwargs["run_import_fn"] = runner_hook
+                elif execution_lease is not None:
+                    kwargs["run_import_fn"] = _owned_test_runner
                 dispatch_import_core(
                     path=tmpdir,
                     mb_release_id="mbid-123",
@@ -1233,6 +1421,9 @@ class TestDispatchCoreSeams(unittest.TestCase):
                     evidence_gate_fn=lambda *_args, **_kwargs: EvidenceImportGate(
                         candidate=candidate,
                     ),
+                    execution_lease=execution_lease,
+                    cancellation_token=cancellation_token,
+                    owner_session_identity=owner_session_identity,
                     **kwargs,
                 )
                 return ext.run.call_args[0][0] if ext.run.call_args else []

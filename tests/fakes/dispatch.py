@@ -9,6 +9,11 @@ from lib.config import CratediggerConfig
 from lib.dispatch import DispatchCoreFn, DispatchOutcome, QualityGateFn
 from lib.dispatch.quality_gate import _check_quality_gate_core
 from lib.import_evidence import CandidateEvidenceActionResult
+from lib.import_execution import (
+    CancellationToken,
+    ExecutionLeaseSnapshot,
+    OwnerSessionIdentity,
+)
 from lib.pipeline_db import DownloadLogOutcome, PipelineDB
 from lib.quality import DownloadInfo
 
@@ -38,6 +43,9 @@ class DispatchCoreCall:
     candidate_download_log_id: int | None
     prevalidated_candidate_result: CandidateEvidenceActionResult | None
     quality_gate_fn: QualityGateFn
+    execution_lease: ExecutionLeaseSnapshot | None
+    cancellation_token: CancellationToken | None
+    owner_session_identity: OwnerSessionIdentity | None
 
 
 @dataclass
@@ -76,6 +84,9 @@ class RecordingDispatchCore:
         candidate_download_log_id: int | None = None,
         prevalidated_candidate_result: CandidateEvidenceActionResult | None = None,
         quality_gate_fn: QualityGateFn = _check_quality_gate_core,
+        execution_lease: ExecutionLeaseSnapshot | None = None,
+        cancellation_token: CancellationToken | None = None,
+        owner_session_identity: OwnerSessionIdentity | None = None,
     ) -> DispatchOutcome:
         self.calls.append(DispatchCoreCall(
             path=path,
@@ -101,6 +112,9 @@ class RecordingDispatchCore:
             candidate_download_log_id=candidate_download_log_id,
             prevalidated_candidate_result=prevalidated_candidate_result,
             quality_gate_fn=quality_gate_fn,
+            execution_lease=execution_lease,
+            cancellation_token=cancellation_token,
+            owner_session_identity=owner_session_identity,
         ))
         return self.outcome
 

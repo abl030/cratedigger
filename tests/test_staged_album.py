@@ -1,13 +1,10 @@
 """Tests for ``lib/staged_album.py``."""
 import os
-import shutil
 import tempfile
 import unittest
 from typing import ClassVar
-from unittest.mock import patch
 
-from tests.fakes import FakePipelineDB
-from tests.helpers import make_download_file, make_request_row
+from tests.helpers import make_download_file
 
 
 class TestStageToAiPath(unittest.TestCase):
@@ -59,15 +56,8 @@ class TestStagedFilename(unittest.TestCase):
 
 class TestStagedAlbum(unittest.TestCase):
 
-    def test_move_to_moves_contents_and_updates_db(self):
+    def test_move_to_moves_contents_without_lifecycle_persistence(self):
         from lib.staged_album import StagedAlbum
-
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=42,
-            status="downloading",
-            active_download_state={"filetype": "mp3", "files": []},
-        ))
 
         with tempfile.TemporaryDirectory() as tmpdir:
             source = os.path.join(tmpdir, "source")
@@ -78,26 +68,15 @@ class TestStagedAlbum(unittest.TestCase):
             dest = os.path.join(tmpdir, "staging", "Artist", "Album")
             staged_album = StagedAlbum(current_path=source, request_id=42)
 
-            result = staged_album.move_to(dest, db)
+            result = staged_album.move_to(dest)
 
             self.assertEqual(result, dest)
             self.assertEqual(staged_album.current_path, dest)
             self.assertTrue(os.path.exists(os.path.join(dest, "track.mp3")))
             self.assertFalse(os.path.exists(source))
-            self.assertEqual(
-                db.request(42)["active_download_state"]["current_path"],
-                dest,
-            )
 
     def test_move_to_idempotent_when_source_equals_target(self):
         from lib.staged_album import StagedAlbum
-
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=42,
-            status="downloading",
-            active_download_state={"filetype": "mp3", "files": []},
-        ))
 
         with tempfile.TemporaryDirectory() as tmpdir:
             target = os.path.join(tmpdir, "staging")
@@ -107,144 +86,10 @@ class TestStagedAlbum(unittest.TestCase):
 
             staged_album = StagedAlbum(current_path=target, request_id=42)
 
-            result = staged_album.move_to(target, db)
+            result = staged_album.move_to(target)
 
             self.assertEqual(result, target)
             self.assertTrue(os.path.exists(os.path.join(target, "track.mp3")))
-            self.assertEqual(
-                db.request(42)["active_download_state"]["current_path"],
-                target,
-            )
-
-    def test_move_to_rolls_back_when_db_persist_fails(self):
-        from lib.staged_album import StagedAlbum
-
-        class ExplodingDB:
-            def update_download_state_current_path(
-                self,
-                request_id: int,
-                current_path: str | None,
-            ) -> bool:
-                raise RuntimeError("db boom")
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            source = os.path.join(tmpdir, "source")
-            os.makedirs(source)
-            source_file = os.path.join(source, "track.mp3")
-            with open(source_file, "w") as fp:
-                fp.write("audio")
-
-            dest = os.path.join(tmpdir, "staging", "Artist", "Album")
-            staged_album = StagedAlbum(current_path=source, request_id=42)
-
-            with self.assertRaisesRegex(RuntimeError, "db boom"):
-                staged_album.move_to(dest, ExplodingDB())
-
-            self.assertEqual(staged_album.current_path, source)
-            self.assertTrue(os.path.exists(source_file))
-            self.assertFalse(os.path.exists(os.path.join(dest, "track.mp3")))
-
-    def test_move_to_rolls_back_when_request_loses_download_ownership(self):
-        from lib.staged_album import StagedAlbum
-
-        class StaleDB:
-            def update_download_state_current_path(
-                self,
-                request_id: int,
-                current_path: str | None,
-            ) -> bool:
-                return False
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            source = os.path.join(tmpdir, "source")
-            os.makedirs(source)
-            source_file = os.path.join(source, "track.mp3")
-            with open(source_file, "w") as fp:
-                fp.write("audio")
-
-            dest = os.path.join(tmpdir, "staging", "Artist", "Album")
-            staged_album = StagedAlbum(current_path=source, request_id=42)
-
-            with self.assertRaisesRegex(
-                RuntimeError,
-                "no longer owns downloading state",
-            ):
-                staged_album.move_to(dest, StaleDB())
-
-            self.assertEqual(staged_album.current_path, source)
-            self.assertTrue(os.path.exists(source_file))
-            self.assertFalse(os.path.exists(os.path.join(dest, "track.mp3")))
-
-    def test_move_to_raises_explicit_error_when_rollback_move_fails(self):
-        from lib.staged_album import StagedAlbum
-
-        class ExplodingDB:
-            def update_download_state_current_path(
-                self,
-                request_id: int,
-                current_path: str | None,
-            ) -> bool:
-                raise RuntimeError("db boom")
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            source = os.path.join(tmpdir, "source")
-            os.makedirs(source)
-            source_file = os.path.join(source, "track.mp3")
-            with open(source_file, "w") as fp:
-                fp.write("audio")
-
-            dest = os.path.join(tmpdir, "staging", "Artist", "Album")
-            dest_file = os.path.join(dest, "track.mp3")
-            real_move = shutil.move
-
-            def move_with_rollback_failure(src: str, dst: str) -> str:
-                if src == dest_file and dst == source_file:
-                    raise OSError("rollback boom")
-                return real_move(src, dst)
-
-            staged_album = StagedAlbum(current_path=source, request_id=42)
-
-            with patch(
-                "lib.staged_album.shutil.move",
-                side_effect=move_with_rollback_failure,
-            ), self.assertRaisesRegex(
-                RuntimeError,
-                "Failed to roll back staged move cleanly",
-            ):
-                staged_album.move_to(dest, ExplodingDB())
-
-            self.assertTrue(os.path.exists(dest_file))
-            self.assertFalse(os.path.exists(source_file))
-
-    def test_move_to_persists_before_removing_source(self):
-        from lib.staged_album import StagedAlbum
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            source = os.path.join(tmpdir, "source")
-            os.makedirs(source)
-            with open(os.path.join(source, "track.mp3"), "w") as fp:
-                fp.write("audio")
-
-            dest = os.path.join(tmpdir, "staging", "Artist", "Album")
-            saw_source_during_persist = False
-
-            class InspectingDB:
-                def update_download_state_current_path(
-                    self,
-                    request_id: int,
-                    current_path: str | None,
-                ) -> bool:
-                    nonlocal saw_source_during_persist
-                    saw_source_during_persist = os.path.isdir(source)
-                    return True
-
-            staged_album = StagedAlbum(current_path=source, request_id=42)
-
-            result = staged_album.move_to(dest, InspectingDB())
-
-            self.assertEqual(result, dest)
-            self.assertTrue(saw_source_during_persist)
-            self.assertFalse(os.path.exists(source))
 
     def test_move_to_cleans_empty_target_on_early_failure(self):
         from lib.staged_album import StagedAlbum
@@ -257,32 +102,6 @@ class TestStagedAlbum(unittest.TestCase):
                 StagedAlbum(current_path=source).move_to(dest)
 
             self.assertFalse(os.path.exists(dest))
-
-    def test_persist_current_path_noop_without_request_id(self):
-        from lib.staged_album import StagedAlbum
-
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=42,
-            status="downloading",
-            active_download_state={"filetype": "mp3", "files": []},
-        ))
-
-        StagedAlbum(current_path="/tmp/staged").persist_current_path(db)
-
-        self.assertNotIn(
-            "current_path",
-            db.request(42)["active_download_state"],
-        )
-
-    def test_persist_current_path_noop_without_db(self):
-        from lib.staged_album import StagedAlbum
-
-        staged_album = StagedAlbum(current_path="/tmp/staged", request_id=42)
-
-        staged_album.persist_current_path(None)
-
-        self.assertEqual(staged_album.current_path, "/tmp/staged")
 
     def test_bind_import_paths_updates_multi_disc_names(self):
         from lib.staged_album import StagedAlbum

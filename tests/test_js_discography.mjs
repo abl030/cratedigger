@@ -4,6 +4,7 @@
  */
 
 import {
+  addRelease,
   catalogueDomId,
   releaseGroupRequestPath,
   renderPressingRow,
@@ -75,9 +76,11 @@ console.log('synthesizeMasterlessRow() — overlay fields survive the synthesis'
     beets_album_id: null,
     pipeline_status: 'wanted',
     pipeline_id: 8838,
+    processing_owner: null,
   });
   assertEqual(row.pipeline_status, 'wanted', 'pipeline_status forwarded');
   assertEqual(row.pipeline_id, 8838, 'pipeline_id forwarded');
+  assertEqual(row.processing_owner, null, 'non-processing owner null forwarded');
   assertEqual(row.in_library, false, 'in_library forwarded');
   assertEqual(row.beets_album_id, null, 'beets_album_id forwarded');
   assertEqual(row.id, '8317023', 'id kept');
@@ -85,6 +88,157 @@ console.log('synthesizeMasterlessRow() — overlay fields survive the synthesis'
   assertEqual(row.format, 'CD', 'formats joined');
   assertEqual(row.track_count, 10, 'track count derived');
   assertEqual(row.status, 'Official', 'status kept');
+}
+
+console.log('synthesizeMasterlessRow() — exact processing owner survives synthesis');
+{
+  const owner = {
+    job_id: 8839,
+    status: 'queued',
+    preview_status: 'running',
+  };
+  const row = synthesizeMasterlessRow({
+    id: '8317024',
+    title: 'Processing pressing',
+    tracks: [],
+    formats: [],
+    in_library: false,
+    pipeline_status: 'processing',
+    pipeline_id: 8840,
+    processing_owner: owner,
+  });
+  assertEqual(row.processing_owner, owner, 'processing_owner object is forwarded unchanged');
+  const html = renderPressingRow(row, {
+    artistName: 'Deloris',
+    parentRgId: null,
+    canReplace: true,
+  });
+  assertContains(html, 'previewing', 'pressing action consumes canonical owner label');
+  assertContains(html, '/api/import-jobs/8839/recovery', 'pressing links exact owner recovery detail');
+  assertExcludes(html, 'window.disambRemove', 'processing pressing cannot remove request');
+}
+
+console.log('addRelease() — processing exists response exposes exact owner recovery');
+{
+  const oldDocument = globalThis.document;
+  const oldFetch = globalThis.fetch;
+  const oldWindow = globalThis.window;
+  const created = [];
+  const mounted = [];
+  function element(tag = '') {
+    const attributes = new Map();
+    const node = {
+      attributes,
+      children: [],
+      className: '',
+      dataset: {},
+      disabled: false,
+      focused: 0,
+      id: '',
+      isConnected: tag === 'button',
+      style: {},
+      tag,
+      textContent: '',
+      setAttribute(name, value) { attributes.set(name, value); },
+      removeAttribute(name) { attributes.delete(name); },
+      getAttribute(name) { return attributes.get(name) || null; },
+      appendChild(child) {
+        child.isConnected = true;
+        this.children.push(child);
+      },
+      insertAdjacentElement(_position, child) {
+        child.isConnected = true;
+        mounted.push(child);
+      },
+      focus() { this.focused++; },
+      remove() { this.isConnected = false; },
+    };
+    created.push(node);
+    return node;
+  }
+  const button = element('button');
+  button.textContent = 'Add request';
+  const body = element('body');
+  body.isConnected = true;
+  const documentElement = element('html');
+  documentElement.isConnected = true;
+  globalThis.document = {
+    activeElement: button,
+    body,
+    documentElement,
+    createElement(tag) { return element(tag); },
+    getElementById(id) {
+      return created.find(node => node.id === id && node.isConnected) || null;
+    },
+    querySelectorAll(selector) {
+      return selector === '[data-pipeline-request-id="321"]'
+        ? [button]
+        : [];
+    },
+  };
+  globalThis.window = {
+    scrollX: 0,
+    scrollY: 0,
+    scrollTo() {},
+  };
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    if (url === '/api/pipeline/add') {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            status: 'exists',
+            id: 321,
+            current_status: 'processing',
+            processing_owner: {
+              job_id: 654,
+              status: 'queued',
+              preview_status: 'running',
+            },
+          };
+        },
+      };
+    }
+    return {
+      ok: false,
+      status: 503,
+      async json() { return {}; },
+    };
+  };
+
+  await addRelease(
+    'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    button,
+  );
+
+  assertEqual(
+    button.textContent,
+    'previewing',
+    'Add exists lock label comes from the exact processing owner',
+  );
+  assertEqual(
+    button.attributes.get('data-pipeline-request-id'),
+    '321',
+    'Add exists lock binds the authoritative request id',
+  );
+  assertEqual(
+    created.some(
+      node => node.href === '/api/import-jobs/654/recovery',
+    ),
+    true,
+    'Add exists lock links exact owner recovery detail',
+  );
+  assertEqual(
+    calls.join(','),
+    '/api/pipeline/add,/api/pipeline/321',
+    'Add conflict refreshes only the affected request',
+  );
+  globalThis.document = oldDocument;
+  globalThis.fetch = oldFetch;
+  globalThis.window = oldWindow;
 }
 
 console.log('synthesizeMasterlessRow() — in-library payload keeps quality fields');

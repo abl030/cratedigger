@@ -1,28 +1,45 @@
 """album_requests CRUD, status state machine, and Replace/rescue."""
 import dataclasses
+from collections.abc import Mapping
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypedDict
 
+import msgspec
 import psycopg2
 import psycopg2.extras
 
 if TYPE_CHECKING:
     from lib.unfindable_detection_service import UnfindableSearchLogSignal
 
+from lib.json_narrow import is_object_list, is_str_object_dict
 from lib.pipeline_db._core import _PipelineDBBase
 from lib.pipeline_db._shared import (
+    ACQUISITION_REQUEST_STATUSES,
     BACKOFF_BASE_MINUTES,
     BACKOFF_MAX_MINUTES,
+    REQUEST_PRESENTATION_FROM,
+    REQUEST_PRESENTATION_SELECT,
+    REQUEST_STATUS_PROCESSING,
     AddRequestInput,
     MbidCollisionError,
     RequestSpectralStateUpdate,
     SupersedeRaceError,
     _escape_like_pattern,
     _msgspec_json_dumps,
+    processing_owner_payload,
     validate_request_metadata_fields,
 )
-from lib.pipeline_db.rows import AlbumRequestRow, album_request_row
+from lib.pipeline_db.rows import (
+    AlbumRequestPresentationRow,
+    AlbumRequestRow,
+    album_request_row,
+)
 from lib.release_identity import ReleaseIdentity, normalize_release_id
+
+
+class AcquisitionPayload(TypedDict):
+    acquisition: list[AlbumRequestPresentationRow]
+    youtube_ingest: list[dict[str, object]]
 
 
 class _RequestsMixin(_PipelineDBBase):
@@ -30,6 +47,20 @@ class _RequestsMixin(_PipelineDBBase):
 
 
     # --- album_requests CRUD ---
+
+    @staticmethod
+    def _request_presentation_row(
+        raw: Mapping[str, object],
+    ) -> AlbumRequestPresentationRow:
+        """Validate a request row and attach its exact owner projection."""
+        row = album_request_row(raw)
+        return msgspec.convert(
+            {
+                **row,
+                "processing_owner": processing_owner_payload(raw),
+            },
+            type=AlbumRequestPresentationRow,
+        )
 
     def add_request(
         self,
@@ -61,6 +92,9 @@ class _RequestsMixin(_PipelineDBBase):
         ``updated_at`` are stamped here; ``is_va_compilation`` (migration 028)
         defaults FALSE and is never re-resolved by automated paths.
         """
+        if status == REQUEST_STATUS_PROCESSING:
+            raise ValueError(
+                "processing requests require an exact automation owner")
         request = AddRequestInput(
             artist_name=artist_name, album_title=album_title, source=source,
             mb_release_id=mb_release_id, mb_release_group_id=mb_release_group_id,
@@ -88,10 +122,15 @@ class _RequestsMixin(_PipelineDBBase):
 
     def get_request(self, request_id: int) -> AlbumRequestRow | None:
         cur = self._execute(
-            "SELECT * FROM album_requests WHERE id = %s", (request_id,)
+            f"""
+            SELECT {REQUEST_PRESENTATION_SELECT}
+            {REQUEST_PRESENTATION_FROM}
+            WHERE request_row.id = %s
+            """,
+            (request_id,),
         )
         row = cur.fetchone()
-        return album_request_row(row) if row else None
+        return self._request_presentation_row(row) if row else None
 
 
     def get_pipeline_overlay(
@@ -111,14 +150,20 @@ class _RequestsMixin(_PipelineDBBase):
         placeholders = ",".join(["%s"] * len(mbids))
         cur = self._execute(
             f"SELECT r.id, r.mb_release_id, r.status, "
+            f"r.active_automation_import_job_id, "
             f"r.search_filetype_override, r.target_format, r.min_bitrate, "
             f"COALESCE(e.verified_lossless, FALSE) AS verified_lossless, "
             f"(COALESCE(e.v0_subject, '') = 'source' "
             f" AND NOT COALESCE(e.verified_lossless, FALSE)) "
-            f"AS provisional_lossless "
+            f"AS provisional_lossless, "
+            f"owner.id AS _processing_owner_job_id, "
+            f"owner.status AS _processing_owner_status, "
+            f"owner.preview_status AS _processing_owner_preview_status "
             f"FROM album_requests r "
             f"LEFT JOIN album_quality_evidence e "
             f"ON e.id = r.current_evidence_id "
+            f"LEFT JOIN import_jobs owner "
+            f"ON owner.id = r.active_automation_import_job_id "
             f"WHERE r.mb_release_id IN ({placeholders})",
             tuple(mbids),
         )
@@ -131,24 +176,35 @@ class _RequestsMixin(_PipelineDBBase):
                 "min_bitrate": r["min_bitrate"],
                 "verified_lossless": r["verified_lossless"],
                 "provisional_lossless": r["provisional_lossless"],
+                "processing_owner": processing_owner_payload(r),
             }
             for r in cur.fetchall()
         }
 
     def get_request_by_mb_release_id(self, mb_release_id: str) -> AlbumRequestRow | None:
         cur = self._execute(
-            "SELECT * FROM album_requests WHERE mb_release_id = %s", (mb_release_id,)
+            f"""
+            SELECT {REQUEST_PRESENTATION_SELECT}
+            {REQUEST_PRESENTATION_FROM}
+            WHERE request_row.mb_release_id = %s
+            """,
+            (mb_release_id,),
         )
         row = cur.fetchone()
-        return album_request_row(row) if row else None
+        return self._request_presentation_row(row) if row else None
 
 
     def get_request_by_discogs_release_id(self, discogs_release_id: str) -> AlbumRequestRow | None:
         cur = self._execute(
-            "SELECT * FROM album_requests WHERE discogs_release_id = %s", (discogs_release_id,)
+            f"""
+            SELECT {REQUEST_PRESENTATION_SELECT}
+            {REQUEST_PRESENTATION_FROM}
+            WHERE request_row.discogs_release_id = %s
+            """,
+            (discogs_release_id,),
         )
         row = cur.fetchone()
-        return album_request_row(row) if row else None
+        return self._request_presentation_row(row) if row else None
 
 
     def get_request_by_release_id(self, release_id: object | None) -> AlbumRequestRow | None:
@@ -189,12 +245,16 @@ class _RequestsMixin(_PipelineDBBase):
         (migration 023) backs this lookup.
         """
         cur = self._execute(
-            "SELECT * FROM album_requests "
-            "WHERE replaces_request_id = %s LIMIT 1",
+            f"""
+            SELECT {REQUEST_PRESENTATION_SELECT}
+            {REQUEST_PRESENTATION_FROM}
+            WHERE request_row.replaces_request_id = %s
+            LIMIT 1
+            """,
             (replaced_id,),
         )
         row = cur.fetchone()
-        return album_request_row(row) if row else None
+        return self._request_presentation_row(row) if row else None
 
 
     def get_oldest_request_chain_created_at(
@@ -243,20 +303,21 @@ class _RequestsMixin(_PipelineDBBase):
 
         Ordered by ``id DESC`` (newest first).
         """
-        conditions = ["mb_release_group_id = %s"]
+        conditions = ["request_row.mb_release_group_id = %s"]
         params: list[object] = [rg_id]
         if exclude_replaced:
-            conditions.append("status != 'replaced'")
+            conditions.append("request_row.status != 'replaced'")
         if exclude_request_id is not None:
-            conditions.append("id != %s")
+            conditions.append("request_row.id != %s")
             params.append(exclude_request_id)
-        sql = (
-            "SELECT * FROM album_requests "
-            f"WHERE {' AND '.join(conditions)} "
-            "ORDER BY id DESC"
-        )
+        sql = f"""
+            SELECT {REQUEST_PRESENTATION_SELECT}
+            {REQUEST_PRESENTATION_FROM}
+            WHERE {" AND ".join(conditions)}
+            ORDER BY request_row.id DESC
+        """
         cur = self._execute(sql, tuple(params))
-        return [album_request_row(r) for r in cur.fetchall()]
+        return [self._request_presentation_row(r) for r in cur.fetchall()]
 
 
     def list_active_release_group_ids(self) -> set[str]:
@@ -278,12 +339,13 @@ class _RequestsMixin(_PipelineDBBase):
 
     def list_non_replaced_requests(self) -> list[AlbumRequestRow]:
         """Return active pipeline rows for disk-coverage reconciliation."""
-        cur = self._execute(
-            "SELECT * FROM album_requests "
-            "WHERE status != 'replaced' "
-            "ORDER BY id ASC"
-        )
-        return [album_request_row(r) for r in cur.fetchall()]
+        cur = self._execute(f"""
+            SELECT {REQUEST_PRESENTATION_SELECT}
+            {REQUEST_PRESENTATION_FROM}
+            WHERE request_row.status != 'replaced'
+            ORDER BY request_row.id ASC
+        """)
+        return [self._request_presentation_row(r) for r in cur.fetchall()]
 
 
     @staticmethod
@@ -298,6 +360,7 @@ class _RequestsMixin(_PipelineDBBase):
             "UPDATE album_requests "
             "SET status = 'replaced', updated_at = %s "
             "WHERE id = %s AND status = %s "
+            "AND active_automation_import_job_id IS NULL "
             "RETURNING id",
             (now, request_id, expected_status),
         )
@@ -349,7 +412,9 @@ class _RequestsMixin(_PipelineDBBase):
             ) as cur:
                 # 1. Row lock on the old row.
                 cur.execute(
-                    "SELECT id, source, status FROM album_requests "
+                    "SELECT id, source, status, "
+                    "active_automation_import_job_id "
+                    "FROM album_requests "
                     "WHERE id = %s FOR UPDATE",
                     (old_request_id,),
                 )
@@ -363,6 +428,11 @@ class _RequestsMixin(_PipelineDBBase):
                 if str(old_row["status"]) == "replaced":
                     raise SupersedeRaceError(
                         f"old request {old_request_id} was already replaced"
+                    )
+                if old_row["active_automation_import_job_id"] is not None:
+                    raise SupersedeRaceError(
+                        f"old request {old_request_id} gained a processing "
+                        "owner before supersede"
                     )
 
                 # 2. Flip the old row's status.
@@ -440,14 +510,19 @@ class _RequestsMixin(_PipelineDBBase):
             return new_id
 
 
-    def delete_request(self, request_id: int) -> None:
+    def delete_request(self, request_id: int) -> bool:
         # Evidence rows are content-addressed after migration 021 — they are
         # NOT deleted when the request is deleted. Addressing FKs on
         # ``album_requests`` / ``import_jobs`` / ``download_log`` are
         # ``ON DELETE SET NULL`` so the evidence survives. The mantra:
         # "evidence is never deleted unless files change."
-        self._execute("DELETE FROM album_requests WHERE id = %s", (request_id,))
+        cur = self._execute(
+            "DELETE FROM album_requests "
+            "WHERE id = %s AND active_automation_import_job_id IS NULL",
+            (request_id,),
+        )
         self.conn.commit()
+        return cur.rowcount > 0
 
 
     def _update_request_metadata_cas(
@@ -472,7 +547,8 @@ class _RequestsMixin(_PipelineDBBase):
                 "FROM jsonb_populate_record("
                 "NULL::album_requests, %s::jsonb) AS populated "
                 "WHERE ar.id = %s AND ar.status != 'replaced' "
-                "AND ar.status = %s",
+                "AND ar.status = %s "
+                "AND ar.active_automation_import_job_id IS NULL",
                 (
                     now,
                     psycopg2.extras.Json(
@@ -489,7 +565,8 @@ class _RequestsMixin(_PipelineDBBase):
                 f"SET updated_at = %s, {assignments} "
                 "FROM jsonb_populate_record("
                 "NULL::album_requests, %s::jsonb) AS populated "
-                "WHERE ar.id = %s AND ar.status != 'replaced'",
+                "WHERE ar.id = %s AND ar.status != 'replaced' "
+                "AND ar.active_automation_import_job_id IS NULL",
                 (
                     now,
                     psycopg2.extras.Json(
@@ -535,13 +612,15 @@ class _RequestsMixin(_PipelineDBBase):
             if expected_status is not None:
                 cur = self._execute(
                     "SELECT 1 FROM album_requests "
-                    "WHERE id = %s AND status != 'replaced' AND status = %s",
+                    "WHERE id = %s AND status != 'replaced' AND status = %s "
+                    "AND active_automation_import_job_id IS NULL",
                     (request_id, expected_status),
                 )
             else:
                 cur = self._execute(
                     "SELECT 1 FROM album_requests "
-                    "WHERE id = %s AND status != 'replaced'",
+                    "WHERE id = %s AND status != 'replaced' "
+                    "AND active_automation_import_job_id IS NULL",
                     (request_id,),
                 )
             return cur.fetchone() is not None
@@ -776,7 +855,8 @@ class _RequestsMixin(_PipelineDBBase):
             return False
         cur = self._execute(
             "UPDATE album_requests SET status = status "
-            "WHERE id = %s AND status = %s AND status != 'replaced'",
+            "WHERE id = %s AND status = %s AND status != 'replaced' "
+            "AND active_automation_import_job_id IS NULL",
             (request_id, expected_status),
         )
         self.conn.commit()
@@ -794,6 +874,9 @@ class _RequestsMixin(_PipelineDBBase):
         if status == "replaced":
             raise ValueError(
                 "status='replaced' is owned by supersede_request_mbid")
+        if status == REQUEST_STATUS_PROCESSING:
+            raise ValueError(
+                "status='processing' is owned by automation handoff")
         validate_request_metadata_fields(dict(extra))
         if expected_status is None:
             observed_status = self._status_for_cas(request_id, None)
@@ -814,7 +897,8 @@ class _RequestsMixin(_PipelineDBBase):
                 "SET status = %s, active_download_state = NULL, "
                 "updated_at = %s "
                 "WHERE id = %s AND status = %s "
-                "AND status != 'replaced'",
+                "AND status != 'replaced' "
+                "AND active_automation_import_job_id IS NULL",
                 (status, now, request_id, expected_status),
             )
             if cur.rowcount <= 0:
@@ -926,7 +1010,8 @@ class _RequestsMixin(_PipelineDBBase):
                 "  ELSE ar.unfindable_categorised_at END, "
                 "unfindable_category = NULL "
                 "WHERE ar.id = %s AND ar.status = %s "
-                "AND ar.status != 'replaced'",
+                "AND ar.status != 'replaced' "
+                "AND ar.active_automation_import_job_id IS NULL",
                 (now, now, now, request_id, expected_status),
             )
             if cur.rowcount <= 0:
@@ -985,7 +1070,9 @@ class _RequestsMixin(_PipelineDBBase):
                    current_lossless_source_v0_probe_median_bitrate = NULL,
                    current_evidence_id = NULL,
                    updated_at = %s
-               WHERE id = %s AND status != 'replaced'""",
+               WHERE id = %s
+                 AND status != 'replaced'
+                 AND active_automation_import_job_id IS NULL""",
             (now, request_id),
         )
         self.conn.commit()
@@ -1059,7 +1146,8 @@ class _RequestsMixin(_PipelineDBBase):
             "ELSE search_filetype_override END, "
             "priority_started_at = CASE WHEN %s THEN %s "
             "ELSE priority_started_at END "
-            "WHERE id = %s AND status = %s AND status != 'replaced'",
+            "WHERE id = %s AND status = %s AND status != 'replaced' "
+            "AND active_automation_import_job_id IS NULL",
             (
                 now,
                 clear_retry_counters,
@@ -1215,27 +1303,6 @@ class _RequestsMixin(_PipelineDBBase):
         return cur.rowcount > 0
 
 
-    def update_download_state(
-        self,
-        request_id: int,
-        state_json: str,
-        *,
-        expected_status: str = "downloading",
-    ) -> bool:
-        """CAS active download state while the worker still owns the row."""
-        now = datetime.now(UTC)
-        cur = self._execute("""
-            UPDATE album_requests
-            SET active_download_state = %s::jsonb,
-                updated_at = %s
-            WHERE id = %s
-              AND status = %s
-              AND status != 'replaced'
-        """, (state_json, now, request_id, expected_status))
-        self.conn.commit()
-        return cur.rowcount > 0
-
-
     def update_download_state_if_downloading(
         self,
         request_id: int,
@@ -1270,64 +1337,6 @@ class _RequestsMixin(_PipelineDBBase):
         return cur.rowcount > 0
 
 
-    def update_download_state_current_path(
-        self,
-        request_id: int,
-        current_path: str | None,
-    ) -> bool:
-        """Rewrite only ``active_download_state.current_path`` on downloading rows."""
-        now = datetime.now(UTC)
-        cur = self._execute("""
-            UPDATE album_requests
-            SET active_download_state = jsonb_set(
-                    COALESCE(active_download_state, '{}'::jsonb),
-                    '{current_path}',
-                    to_jsonb(%s::text),
-                    true
-                ),
-                updated_at = %s
-            WHERE id = %s
-              AND status = 'downloading'
-              AND active_download_state IS NOT NULL
-        """, (current_path, now, request_id))
-        self.conn.commit()
-        return cur.rowcount > 0
-
-
-    def mark_import_subprocess_started(
-        self,
-        request_id: int,
-        timestamp: str,
-    ) -> bool:
-        """Stamp ``active_download_state.import_subprocess_started_at``.
-
-        Called immediately before launching ``import_one.py`` on the
-        auto-import path so the resume guard can later distinguish
-        "subprocess never launched" (safe to retry) from "subprocess
-        may have written to beets" (manual recovery required). No-op
-        when ``active_download_state`` is NULL — force-import paths
-        operate on a different ownership boundary
-        (``failed_imports/...``) and don't carry this state.
-        See ``docs/advisory-locks.md``.
-        """
-        now = datetime.now(UTC)
-        cur = self._execute("""
-            UPDATE album_requests
-            SET active_download_state = jsonb_set(
-                    active_download_state,
-                    '{import_subprocess_started_at}',
-                    to_jsonb(%s::text),
-                    true
-                ),
-                updated_at = %s
-            WHERE id = %s
-              AND status = 'downloading'
-              AND active_download_state IS NOT NULL
-        """, (timestamp, now, request_id))
-        self.conn.commit()
-        return cur.rowcount > 0
-
-
     def get_downloading(self) -> list[AlbumRequestRow]:
         """Get all albums currently being downloaded."""
         cur = self._execute(
@@ -1335,6 +1344,91 @@ class _RequestsMixin(_PipelineDBBase):
             "ORDER BY updated_at ASC"
         )
         return [album_request_row(r) for r in cur.fetchall()]
+
+    def get_acquisition(
+        self,
+        *,
+        youtube_limit: int = 50,
+    ) -> AcquisitionPayload:
+        """Return active request acquisition plus YouTube ingest in one read.
+
+        The request side is deliberately ``downloading|processing`` while the
+        YouTube side remains its existing ``download_log`` feed. YouTube rows
+        always carry a null processing owner: a rescue does not enter the
+        automation ownership lifecycle even when it targets the same request.
+        """
+        cur = self._execute(
+            """
+            WITH active_requests AS (
+                SELECT *
+                FROM album_requests
+                WHERE status = ANY(%s)
+            ),
+            youtube_rows AS (
+                SELECT
+                    dl.id AS download_log_id,
+                    dl.request_id,
+                    dl.source,
+                    dl.outcome,
+                    dl.youtube_metadata,
+                    dl.created_at,
+                    request.artist_name,
+                    request.album_title,
+                    request.mb_release_id,
+                    request.status AS request_status,
+                    NULL::jsonb AS processing_owner
+                FROM download_log dl
+                JOIN album_requests request ON request.id = dl.request_id
+                WHERE dl.source = 'youtube'
+                  AND dl.outcome = 'youtube_running'
+                ORDER BY dl.created_at ASC, dl.id ASC
+                LIMIT %s
+            ),
+            youtube AS (
+                SELECT COALESCE(
+                    jsonb_agg(to_jsonb(youtube_rows)),
+                    '[]'::jsonb
+                ) AS youtube_ingest
+                FROM youtube_rows
+            )
+            SELECT
+                request_row.*,
+                processing_owner_job.id AS _processing_owner_job_id,
+                processing_owner_job.status AS _processing_owner_status,
+                processing_owner_job.preview_status
+                    AS _processing_owner_preview_status,
+                youtube.youtube_ingest
+            FROM active_requests request_row
+            RIGHT JOIN youtube ON TRUE
+            LEFT JOIN import_jobs processing_owner_job
+              ON processing_owner_job.id =
+                 request_row.active_automation_import_job_id
+            ORDER BY request_row.updated_at ASC NULLS LAST,
+                     request_row.id ASC NULLS LAST
+            """,
+            (
+                list(ACQUISITION_REQUEST_STATUSES),
+                max(1, int(youtube_limit)),
+            ),
+        )
+        raw_rows: list[Mapping[str, object]] = list(cur.fetchall())
+        youtube_raw: object = (
+            raw_rows[0].get("youtube_ingest") if raw_rows else []
+        )
+        youtube_ingest = (
+            [dict(item) for item in youtube_raw if is_str_object_dict(item)]
+            if is_object_list(youtube_raw)
+            else []
+        )
+        acquisition = [
+            self._request_presentation_row(row)
+            for row in raw_rows
+            if row.get("id") is not None
+        ]
+        return {
+            "acquisition": acquisition,
+            "youtube_ingest": youtube_ingest,
+        }
 
 
     # --- Query methods ---
@@ -1364,14 +1458,23 @@ class _RequestsMixin(_PipelineDBBase):
         DESC (recency window for the imported list, #426); ``limit``
         caps the result. Defaults preserve the original full-list shape.
         """
-        order = "updated_at DESC" if newest_first else "created_at ASC"
-        sql = f"SELECT * FROM album_requests WHERE status = %s ORDER BY {order}"
+        order = (
+            "request_row.updated_at DESC"
+            if newest_first
+            else "request_row.created_at ASC"
+        )
+        sql = f"""
+            SELECT {REQUEST_PRESENTATION_SELECT}
+            {REQUEST_PRESENTATION_FROM}
+            WHERE request_row.status = %s
+            ORDER BY {order}
+        """
         params: list[object] = [status]
         if limit is not None:
             sql += " LIMIT %s"
             params.append(int(limit))
         cur = self._execute(sql, tuple(params))
-        return [album_request_row(r) for r in cur.fetchall()]
+        return [self._request_presentation_row(r) for r in cur.fetchall()]
 
 
     def search_requests(
@@ -1396,19 +1499,21 @@ class _RequestsMixin(_PipelineDBBase):
         status_clause = ""
         params: list[object] = [pattern, pattern]
         if status is not None:
-            status_clause = " AND status = %s"
+            status_clause = " AND request_row.status = %s"
             params.append(status)
         params.append(max(1, min(int(limit), 500)))
         cur = self._execute(
-            "SELECT * FROM album_requests"
-            " WHERE (artist_name ILIKE %s ESCAPE '\\'"
-            "    OR album_title ILIKE %s ESCAPE '\\')"
+            f"SELECT {REQUEST_PRESENTATION_SELECT}"
+            f" {REQUEST_PRESENTATION_FROM}"
+            " WHERE (request_row.artist_name ILIKE %s ESCAPE '\\'"
+            "    OR request_row.album_title ILIKE %s ESCAPE '\\')"
             f"{status_clause}"
-            " ORDER BY artist_name, year NULLS LAST, id"
+            " ORDER BY request_row.artist_name,"
+            " request_row.year NULLS LAST, request_row.id"
             " LIMIT %s",
             tuple(params),
         )
-        return [album_request_row(r) for r in cur.fetchall()]
+        return [self._request_presentation_row(r) for r in cur.fetchall()]
 
 
     def count_by_status(self):
@@ -1513,30 +1618,31 @@ class _RequestsMixin(_PipelineDBBase):
         name_pattern = f"%{_escape_like_pattern(artist_name.strip())}%"
         if mb_artist_id:
             cur = self._execute(
-                """
-                SELECT *
-                FROM album_requests
-                WHERE mb_artist_id = %s
-                   OR (artist_name ILIKE %s ESCAPE '\\'
+                f"""
+                SELECT {REQUEST_PRESENTATION_SELECT}
+                {REQUEST_PRESENTATION_FROM}
+                WHERE request_row.mb_artist_id = %s
+                   OR (request_row.artist_name ILIKE %s ESCAPE '\\'
                        -- Hyphen-free ids (e.g. legacy numerics / Discogs ids)
                        -- deliberately fall back to the artist-name match.
-                       AND (mb_artist_id IS NULL OR mb_artist_id = ''
-                            OR mb_artist_id NOT LIKE '%%-%%'))
-                ORDER BY year, album_title
+                       AND (request_row.mb_artist_id IS NULL
+                            OR request_row.mb_artist_id = ''
+                            OR request_row.mb_artist_id NOT LIKE '%%-%%'))
+                ORDER BY request_row.year, request_row.album_title
                 """,
                 (mb_artist_id, name_pattern),
             )
         else:
             cur = self._execute(
-                """
-                SELECT *
-                FROM album_requests
-                WHERE artist_name ILIKE %s ESCAPE '\\'
-                ORDER BY year, album_title
+                f"""
+                SELECT {REQUEST_PRESENTATION_SELECT}
+                {REQUEST_PRESENTATION_FROM}
+                WHERE request_row.artist_name ILIKE %s ESCAPE '\\'
+                ORDER BY request_row.year, request_row.album_title
                 """,
                 (name_pattern,),
             )
-        return [album_request_row(r) for r in cur.fetchall()]
+        return [self._request_presentation_row(r) for r in cur.fetchall()]
 
 
     # --- Retry logic ---
@@ -1569,6 +1675,7 @@ class _RequestsMixin(_PipelineDBBase):
             WHERE id = %s
               AND status = %s
               AND status != 'replaced'
+              AND active_automation_import_job_id IS NULL
             RETURNING {col}
         """, (
             now,

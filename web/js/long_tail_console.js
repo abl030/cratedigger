@@ -146,6 +146,10 @@ import {
   spectralGradeClass,
   spectralGradeLabel,
 } from './quality_palette.js';
+import {
+  handleProcessingLockedConflict,
+  refetchProcessingRequest,
+} from './release_action_state.js';
 
 // --- Action console (U4) --------------------------------------------
 //
@@ -939,7 +943,7 @@ function renderActionsBar(row) {
   // Discogs / no-rg disable reason (KTD7 — no MB↔Discogs adapter).
   const acceptReason = acceptDisabledReason(row, rg);
   const acceptBtn = canAcceptSibling(row, rg)
-    ? `<button class="lt-act-btn lt-act-accept" type="button" onclick="event.stopPropagation(); window.longTailAcceptSibling(${id})">Accept a sibling pressing…</button>`
+    ? `<button class="lt-act-btn lt-act-accept" type="button" data-pipeline-request-id="${id}" onclick="event.stopPropagation(); window.longTailAcceptSibling(${id})">Accept a sibling pressing…</button>`
     : `<button class="lt-act-btn lt-act-accept" type="button" disabled title="${esc(acceptReason)}">Accept a sibling pressing…</button>
        <span class="lt-act-note">${esc(acceptReason)}</span>`;
 
@@ -951,7 +955,7 @@ function renderActionsBar(row) {
   const intentCtl = `<div class="lt-act-intent">
       <span class="lt-act-label">intent:</span>
       <span class="badge lt-intent-badge lt-intent-${esc(intentLabel)}">${esc(intentLabel)}</span>
-      <button class="lt-act-btn lt-act-intent-toggle" type="button" onclick="event.stopPropagation(); window.longTailSetIntent(${id})">${esc(toggleLabel)}</button>
+      <button class="lt-act-btn lt-act-intent-toggle" type="button" data-pipeline-request-id="${id}" onclick="event.stopPropagation(); window.longTailSetIntent(${id}, this)">${esc(toggleLabel)}</button>
     </div>`;
 
   // Triage actions, wired to EXISTING endpoints (no new backend):
@@ -960,8 +964,8 @@ function renderActionsBar(row) {
   //   * Delete request → POST /api/pipeline/delete — remove it entirely.
   // Both leave the wanted cohort on success; the handlers drop just that
   // row from the DOM (no full re-render — keeps scroll position).
-  const importBtn = `<button class="lt-act-btn lt-act-import" type="button" onclick="event.stopPropagation(); window.longTailSetImported(${id})">Set imported</button>`;
-  const deleteBtn = `<button class="lt-act-btn lt-act-delete" type="button" onclick="event.stopPropagation(); window.longTailDeleteRequest(${id})">Delete request</button>`;
+  const importBtn = `<button class="lt-act-btn lt-act-import" type="button" data-pipeline-request-id="${id}" onclick="event.stopPropagation(); window.longTailSetImported(${id}, this)">Set imported</button>`;
+  const deleteBtn = `<button class="lt-act-btn lt-act-delete" type="button" data-pipeline-request-id="${id}" onclick="event.stopPropagation(); window.longTailDeleteRequest(${id}, this)">Delete request</button>`;
 
   return `<div class="lt-actions" id="lt-actions-${id}">
     <div class="lt-act-group">${importBtn}</div>
@@ -1793,9 +1797,10 @@ function closeConsole(id) {
  * row's current `target_format` (`intentToggleTarget`).
  *
  * @param {number} id  album_requests.id
+ * @param {HTMLElement|null} [control]
  * @returns {Promise<void>}
  */
-export async function longTailSetIntent(id) {
+export async function longTailSetIntent(id, control = null) {
   const row = consoleRow(id);
   if (!row) return;
   if (!consoleCanStart(consoleStates, id, 'intent')) return;  // double-fire guard.
@@ -1809,6 +1814,14 @@ export async function longTailSetIntent(id) {
         body: JSON.stringify({ id, intent }),
       });
       data = await r.json();
+      if (await handleProcessingLockedConflict({
+        httpStatus: r.status,
+        payload: data,
+        control,
+        refetch: refetchLongTailProcessingRow,
+      })) {
+        return;
+      }
     } catch (_e) {
       if (typeof toast === 'function') toast('Failed to set intent', true);
       return;
@@ -1839,9 +1852,10 @@ export async function longTailSetIntent(id) {
  * and other open consoles). Double-fire-guarded.
  *
  * @param {number} id  album_requests.id
+ * @param {HTMLElement|null} [control]
  * @returns {Promise<void>}
  */
-export async function longTailSetImported(id) {
+export async function longTailSetImported(id, control = null) {
   if (!consoleCanStart(consoleStates, id, 'import')) return;  // double-fire guard.
   try {
     let data;
@@ -1852,6 +1866,14 @@ export async function longTailSetImported(id) {
         body: JSON.stringify({ id, status: 'imported' }),
       });
       data = await r.json();
+      if (await handleProcessingLockedConflict({
+        httpStatus: r.status,
+        payload: data,
+        control,
+        refetch: refetchLongTailProcessingRow,
+      })) {
+        return;
+      }
     } catch (_e) {
       if (typeof toast === 'function') toast('Failed to set imported', true);
       return;
@@ -1879,9 +1901,10 @@ export async function longTailSetImported(id) {
  * so the operator deletes those first. Double-fire-guarded.
  *
  * @param {number} id  album_requests.id
+ * @param {HTMLElement|null} [control]
  * @returns {Promise<void>}
  */
-export async function longTailDeleteRequest(id) {
+export async function longTailDeleteRequest(id, control = null) {
   if (typeof confirm === 'function'
       && !confirm(`Delete request #${id}? This removes the wanted request entirely.`)) {
     return;
@@ -1898,6 +1921,14 @@ export async function longTailDeleteRequest(id) {
       });
       status = r.status;
       data = await r.json();
+      if (await handleProcessingLockedConflict({
+        httpStatus: status,
+        payload: data,
+        control,
+        refetch: refetchLongTailProcessingRow,
+      })) {
+        return;
+      }
     } catch (_e) {
       if (typeof toast === 'function') toast('Failed to delete request', true);
       return;
@@ -1921,6 +1952,29 @@ export async function longTailDeleteRequest(id) {
   } finally {
     consoleSettle(consoleStates, id, 'delete');
   }
+}
+
+/**
+ * Refresh the exact request after a long-tail action loses the processing
+ * ownership race. The shared refresher repaints the mounted controls; remove
+ * a row that left `wanted` from the cached cohort so a later list render
+ * cannot resurrect its stale actions.
+ *
+ * @param {number} requestId
+ * @param {number} refreshGeneration
+ * @returns {Promise<{requestId: number, releaseId: string, status: string, owner: Object|null}|null>}
+ */
+async function refetchLongTailProcessingRow(requestId, refreshGeneration) {
+  const projection = await refetchProcessingRequest(
+    requestId,
+    '',
+    refreshGeneration,
+  );
+  if (!projection) return null;
+  if (projection.status !== 'wanted') {
+    removeRowFromCohort(requestId);
+  }
+  return projection;
 }
 
 export const __test__ = {

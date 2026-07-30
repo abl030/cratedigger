@@ -18,6 +18,10 @@ import { state, API, toast, updatePipelineStatus } from './state.js';
 import { esc } from './util.js';
 import { invalidateBrowseArtist } from './browse.js';
 import { catalogueDomId, cssEscape } from './discography.js';
+import {
+  handleProcessingLockedConflict,
+  refetchProcessingRequest,
+} from './release_action_state.js';
 
 /** @type {string[]} */
 export const _PRESSING_COLORS = ['#6af','#fa6','#6d6','#f6a','#af6','#6ff','#ff6','#a6f'];
@@ -205,6 +209,18 @@ export async function disambRemove(pipelineId, btn) {
       body: JSON.stringify({id: pipelineId}),
     });
     const data = await r.json();
+    if (await handleProcessingLockedConflict({
+      httpStatus: r.status,
+      payload: data,
+      control: btn,
+      refetch: (requestId, generation) => refetchProcessingRequest(
+        requestId,
+        '',
+        generation,
+      ),
+    })) {
+      return;
+    }
     if (data.status === 'ok') {
       btn.textContent = 'Removed';
       btn.style.background = '#333';

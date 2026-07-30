@@ -3,7 +3,10 @@
  * Run with: node tests/test_js_wrong_matches.mjs
  */
 
-import { __test__ } from '../web/js/wrong-matches.js';
+import {
+  __test__,
+  forceImportWrongMatch,
+} from '../web/js/wrong-matches.js';
 import { esc } from '../web/js/util.js';
 
 let passed = 0;
@@ -155,6 +158,105 @@ console.log('_pollImportJob() stops visibly when operator recovery is required')
   assertEqual(dom.toast.className, 'toast error', 'recovery stop is prominent');
 }
 
+console.log('forceImportWrongMatch() maps processing conflict to the shared locked row state');
+{
+  const oldConfirm = globalThis.confirm;
+  const oldDocument = globalThis.document;
+  const oldFetch = globalThis.fetch;
+  const oldWindow = globalThis.window;
+  const attributes = new Map();
+  const inserted = [];
+  const btn = {
+    dataset: {},
+    disabled: false,
+    textContent: 'Force Import',
+    style: {},
+    isConnected: true,
+    setAttribute(name, value) { attributes.set(name, value); },
+    removeAttribute(name) { attributes.delete(name); },
+    getAttribute(name) { return attributes.get(name) || null; },
+    focus() {},
+    insertAdjacentElement(_position, element) {
+      element.isConnected = true;
+      inserted.push(element);
+    },
+  };
+  const live = { textContent: '', setAttribute() {} };
+  globalThis.confirm = () => true;
+  globalThis.document = {
+    activeElement: btn,
+    body: { appendChild() {} },
+    createElement() {
+      return {
+        children: [],
+        className: '',
+        id: '',
+        textContent: '',
+        isConnected: false,
+        setAttribute() {},
+        appendChild(child) { this.children.push(child); },
+        remove() { this.isConnected = false; },
+      };
+    },
+    getElementById(id) {
+      if (id === 'processing-lock-live-region') return live;
+      return inserted.find(element => element.id === id && element.isConnected) || null;
+    },
+    querySelectorAll() { return [btn]; },
+  };
+  globalThis.window = { scrollX: 0, scrollY: 0, scrollTo() {} };
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    if (url === '/api/pipeline/force-import') {
+      return {
+        status: 409,
+        async json() {
+          return {
+            error: 'processing_locked',
+            request_id: 42,
+            processing_owner: {
+              job_id: 71,
+              status: 'queued',
+              preview_status: 'running',
+            },
+          };
+        },
+      };
+    }
+    if (url === '/api/pipeline/42') {
+      return {
+        ok: true,
+        async json() {
+          return {
+            request: {
+              id: 42,
+              status: 'processing',
+              mb_release_id: 'wrong-match-owner',
+              processing_owner: {
+                job_id: 71,
+                status: 'queued',
+                preview_status: 'evidence_ready',
+              },
+            },
+          };
+        },
+      };
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  await forceImportWrongMatch(100, btn);
+  assertEqual(calls.join(','), '/api/pipeline/force-import,/api/pipeline/42',
+    'force import refetches only the owner request');
+  assertEqual(attributes.get('aria-disabled'), 'true', 'force-import control locks');
+  assertEqual(btn.textContent, 'waiting to import', 'fresh owner state is rendered');
+  assert(live.textContent.includes('job #71'), 'exact owner is announced');
+  globalThis.confirm = oldConfirm;
+  globalThis.document = oldDocument;
+  globalThis.fetch = oldFetch;
+  globalThis.window = oldWindow;
+}
+
 console.log('converge helpers classify green candidates');
 {
   installStorage();
@@ -184,6 +286,11 @@ console.log('renderWrongMatches() shows threshold controls and green state');
   assert(dom.wrongMatches.innerHTML.includes('Cleanup Wrong Matches (3)'), 'renders full-queue cleanup action');
   assert(dom.wrongMatches.innerHTML.includes('Delete All (3)'), 'renders per-group delete-all action');
   assert(dom.wrongMatches.innerHTML.includes('deleteWrongMatch(100'), 'renders per-entry delete action');
+  assert(
+    dom.wrongMatches.innerHTML.includes('data-pipeline-request-id="42"')
+      && dom.wrongMatches.innerHTML.includes('forceImportWrongMatch(100, this)'),
+    'force-import controls carry exact request identity and initiating control',
+  );
 
   __test__.setWrongMatchConvergeThreshold(42, 230);
   assert(dom.wrongMatches.innerHTML.includes('3 green'), 'threshold edit updates green count');

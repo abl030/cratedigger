@@ -24,6 +24,7 @@ from lib.force_import_service import (
     FORCE_IMPORT_HTTP_STATUS,
     RESULT_DOWNLOAD_LOG_MISSING,
     RESULT_FAILED_PATH_MISSING,
+    RESULT_PROCESSING_LOCKED,
     RESULT_QUEUED,
     RESULT_REQUEST_MBID_MISSING,
     RESULT_REQUEST_MISSING,
@@ -31,7 +32,7 @@ from lib.force_import_service import (
 )
 from lib.transitions import TransitionConflict, TransitionConflictKind
 from tests.fakes import FakeBeetsDB, FakePipelineDB
-from tests.helpers import make_request_row
+from tests.helpers import handoff_automation_owner, make_request_row
 from tests.web._harness import (
     _assert_required_fields,
     _FakeDbWebServerCase,
@@ -78,7 +79,7 @@ class _RacingDeleteDB(FakePipelineDB):
     """delete_request races: a superseding descendant lands concurrently,
     then the FK violation fires — the post-FK walk must see it."""
 
-    def delete_request(self, request_id: int) -> None:
+    def delete_request(self, request_id: int) -> bool:
         import psycopg2.errors
         self.seed_request(make_request_row(
             id=250, status="wanted", mb_release_id="race-250",
@@ -124,7 +125,9 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
     """Contract tests for frontend-consumed pipeline mutation routes."""
 
     ADD_REQUIRED_FIELDS: ClassVar = {"status", "id", "artist", "album", "tracks"}
-    EXISTS_REQUIRED_FIELDS: ClassVar = {"status", "id", "current_status"}
+    EXISTS_REQUIRED_FIELDS: ClassVar = {
+        "status", "id", "current_status", "processing_owner",
+    }
     UPDATE_REQUIRED_FIELDS: ClassVar = {"status", "id", "new_status"}
     UPGRADE_REQUIRED_FIELDS: ClassVar = {
         "status", "id", "min_bitrate", "search_filetype_override",
@@ -141,6 +144,14 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         "status", "request_id", "artist", "album", "message",
     }
     DELETE_REQUIRED_FIELDS: ClassVar = {"status", "id"}
+
+    def test_release_tracks_gracefully_narrows_decoded_mirror_json(self):
+        from web.routes.pipeline_mutations import _release_tracks
+
+        tracks = [{"title": "Track", "position": 1}]
+        self.assertIs(_release_tracks({"tracks": tracks})[0], tracks[0])
+        self.assertEqual(_release_tracks({"tracks": ["malformed"]}), [])
+        self.assertEqual(_release_tracks({"tracks": {"title": "wrong"}}), [])
 
     def setUp(self) -> None:
         super().setUp()
@@ -232,6 +243,29 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, self.EXISTS_REQUIRED_FIELDS,
                                 "pipeline add exists response")
+        self.assertIsNone(data["processing_owner"])
+
+    def test_pipeline_add_processing_exists_exposes_exact_recovery_owner(self):
+        self.db.seed_request(make_request_row(
+            id=504,
+            status="wanted",
+            mb_release_id="processing-add-exists",
+        ))
+        owner = handoff_automation_owner(self.db, 504)
+
+        status, data = self._post(
+            "/api/pipeline/add",
+            {"mb_release_id": "processing-add-exists"},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["status"], "exists")
+        self.assertEqual(data["current_status"], "processing")
+        self.assertEqual(data["processing_owner"], {
+            "job_id": owner.id,
+            "status": owner.status,
+            "preview_status": owner.preview_status,
+        })
 
     @patch("web.routes.pipeline_mutations.mb_api.get_release")
     def test_pipeline_add_mb_preflight_race_reports_authoritative_exists(
@@ -814,6 +848,31 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(data["error"], "transition_conflict")
         self.assertEqual(self.db.request(604)["status"], "imported")
 
+    def test_pipeline_update_processing_returns_exact_owner_conflict(self):
+        self.db.seed_request(make_request_row(
+            id=605,
+            status="wanted",
+            mb_release_id="processing-update",
+        ))
+        owner = handoff_automation_owner(self.db, 605)
+
+        status, data = self._post(
+            "/api/pipeline/update",
+            {"id": 605, "status": "wanted"},
+        )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(data["error"], "transition_conflict")
+        self.assertEqual(data["reason"], RESULT_PROCESSING_LOCKED)
+        self.assertEqual(data["request_id"], 605)
+        self.assertEqual(data["actual_status"], "processing")
+        self.assertEqual(data["processing_owner"], {
+            "job_id": owner.id,
+            "status": owner.status,
+            "preview_status": owner.preview_status,
+        })
+        self.assertEqual(self.db.request(605)["status"], "processing")
+
     @patch("web.routes.pipeline_mutations.finalize_request")
     def test_pipeline_update_maps_stale_transition_to_409_without_success(
         self, mock_transition,
@@ -986,6 +1045,31 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         assert row is not None
         self.assertIsNone(row["target_format"])
 
+    def test_pipeline_set_intent_processing_returns_exact_owner_conflict(self):
+        self.db.seed_request(make_request_row(
+            id=1712,
+            status="wanted",
+            mb_release_id="processing-intent",
+            target_format=None,
+        ))
+        owner = handoff_automation_owner(self.db, 1712)
+
+        status, data = self._post(
+            "/api/pipeline/set-intent",
+            {"id": 1712, "intent": "lossless"},
+        )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(data["error"], "transition_conflict")
+        self.assertEqual(data["reason"], RESULT_PROCESSING_LOCKED)
+        self.assertEqual(data["request_id"], 1712)
+        self.assertEqual(data["processing_owner"], {
+            "job_id": owner.id,
+            "status": owner.status,
+            "preview_status": owner.preview_status,
+        })
+        self.assertIsNone(self.db.request(1712)["target_format"])
+
     def test_pipeline_set_quality_reports_replace_race(self):
         import web.server as srv
 
@@ -1008,6 +1092,34 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         row = racing_db.get_request(1711)
         assert row is not None
         self.assertEqual(row["min_bitrate"], 192)
+
+    def test_pipeline_set_quality_processing_returns_exact_owner_conflict(self):
+        self.db.seed_request(make_request_row(
+            id=1713,
+            status="wanted",
+            mb_release_id="processing-quality",
+            min_bitrate=192,
+        ))
+        owner = handoff_automation_owner(self.db, 1713)
+
+        status, data = self._post(
+            "/api/pipeline/set-quality",
+            {
+                "mb_release_id": "processing-quality",
+                "min_bitrate": 320,
+            },
+        )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(data["error"], "transition_conflict")
+        self.assertEqual(data["reason"], RESULT_PROCESSING_LOCKED)
+        self.assertEqual(data["request_id"], 1713)
+        self.assertEqual(data["processing_owner"], {
+            "job_id": owner.id,
+            "status": owner.status,
+            "preview_status": owner.preview_status,
+        })
+        self.assertEqual(self.db.request(1713)["min_bitrate"], 192)
 
     @patch("web.routes.pipeline_mutations.finalize_request")
     def test_pipeline_ban_source_contract(self, _mock_transition):
@@ -1065,6 +1177,41 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
 
         self.assertEqual(status, 400)
         self.assertIn("confirm", data["error"])
+
+    def test_pipeline_ban_source_processing_returns_exact_owner_conflict(self):
+        import web.server as srv
+
+        release_id = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+        self.db.seed_request(make_request_row(
+            id=103,
+            status="wanted",
+            mb_release_id=release_id,
+        ))
+        owner = handoff_automation_owner(self.db, 103)
+        old_beets = srv._beets
+        srv._beets = FakeBeetsDB()
+        try:
+            status, data = self._post(
+                "/api/pipeline/ban-source",
+                {
+                    "request_id": 103,
+                    "confirm": "BAN",
+                    "mb_release_id": release_id,
+                },
+            )
+        finally:
+            srv._beets = old_beets
+
+        self.assertEqual(status, 409)
+        self.assertEqual(data["error"], "transition_conflict")
+        self.assertEqual(data["reason"], RESULT_PROCESSING_LOCKED)
+        self.assertEqual(data["request_id"], 103)
+        self.assertEqual(data["processing_owner"], {
+            "job_id": owner.id,
+            "status": owner.status,
+            "preview_status": owner.preview_status,
+        })
+        self.assertEqual(self.db.denylist, [])
 
     def test_pipeline_force_import_contract(self):
         with tempfile.TemporaryDirectory() as root:
@@ -1149,6 +1296,46 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         _assert_required_fields(self, data, self.FORCE_IMPORT_REQUIRED_FIELDS,
                                 "pipeline force-import queued response")
 
+    def test_pipeline_force_import_processing_returns_exact_owner(self):
+        with tempfile.TemporaryDirectory() as root:
+            staging = os.path.join(root, "Incoming")
+            slskd = os.path.join(root, "slskd")
+            processing = os.path.join(root, "processing")
+            album = os.path.join(staging, "failed_imports", "Owned")
+            os.makedirs(album)
+            os.makedirs(slskd)
+            os.makedirs(processing)
+            self.db.seed_request(make_request_row(
+                id=104,
+                status="wanted",
+                mb_release_id="processing-force",
+            ))
+            log_id = self.db.log_download(
+                104,
+                outcome="rejected",
+                validation_result={"failed_path": album},
+            )
+            owner = handoff_automation_owner(self.db, 104)
+            with _force_import_runtime_config(
+                staging_dir=staging,
+                slskd_dir=slskd,
+                processing_dir=processing,
+            ):
+                status, data = self._post(
+                    "/api/pipeline/force-import",
+                    {"download_log_id": log_id},
+                )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(data["error"], RESULT_PROCESSING_LOCKED)
+        self.assertEqual(data["reason"], RESULT_PROCESSING_LOCKED)
+        self.assertEqual(data["processing_owner"], {
+            "job_id": owner.id,
+            "status": owner.status,
+            "preview_status": owner.preview_status,
+        })
+        self.assertEqual(len(self.db.list_import_jobs()), 1)
+
     def test_pipeline_delete_contract(self):
         # No descendant — delete succeeds and the row is gone.
         status, data = self._post("/api/pipeline/delete", {"id": 100})
@@ -1181,6 +1368,36 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         # The descendant block fired before any delete — the row
         # survives.
         self.assertIsNotNone(self.db.get_request(100))
+
+    def test_pipeline_delete_processing_returns_exact_owner_conflict(self):
+        self.db.seed_request(make_request_row(
+            id=105,
+            status="wanted",
+            mb_release_id="processing-delete",
+        ))
+        owner = handoff_automation_owner(self.db, 105)
+
+        status, data = self._post(
+            "/api/pipeline/delete",
+            {"id": 105},
+        )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(data["error"], "transition_conflict")
+        self.assertEqual(data["reason"], RESULT_PROCESSING_LOCKED)
+        self.assertEqual(data["request_id"], 105)
+        self.assertEqual(data["processing_owner"], {
+            "job_id": owner.id,
+            "status": owner.status,
+            "preview_status": owner.preview_status,
+        })
+        self.assertIsNotNone(self.db.get_request(105))
+        current_owner = self.db.get_import_job(owner.id)
+        assert current_owner is not None
+        self.assertEqual(
+            current_owner.request_id,
+            105,
+        )
 
     def test_pipeline_delete_fk_violation_returns_409(self):
         """Defensive race-window guard: a descendant lands between the
@@ -1863,20 +2080,16 @@ class TestBanSourceBadRipExtensions(_FakeDbWebServerCase):
         # No hashes persisted (empty list short-circuit).
         self.assertEqual(self.db.bad_audio_hashes, [])
 
-    # E1.3 — importer race: 409 before any work.
-    def test_importer_busy_returns_409_no_writes(self):
-        """``import_jobs`` row exists with status running → 409, body
-        ``{error: "importer_busy", retry_after_seconds: 30}``. No
-        denylist, no hashes, no beets_db calls.
-        """
-        # An active (queued) import job for the request — the fake's
-        # get_active_import_job_for_request treats queued and running
-        # alike, mirroring the production active-set.
-        self.db.enqueue_import_job(
-            "force_import", request_id=1704,
-            dedupe_key="force_import:download_log:99",
-            payload={"download_log_id": 1, "failed_path": "/tmp/Busy Album"},
-        )
+    # E1.3 — exact processing-owner race: 409 before any work.
+    def test_processing_owner_returns_409_no_writes(self):
+        """Only the durable automation owner blocks destructive work."""
+        self.db.seed_request(make_request_row(
+            id=1704,
+            status="wanted",
+            mb_release_id=self.RELEASE_ID,
+            min_bitrate=320,
+        ))
+        owner = handoff_automation_owner(self.db, 1704)
 
         status, data = self._post(
             "/api/pipeline/ban-source",
@@ -1885,24 +2098,19 @@ class TestBanSourceBadRipExtensions(_FakeDbWebServerCase):
         )
 
         self.assertEqual(status, 409)
-        self.assertEqual(data["error"], "importer_busy")
-        self.assertEqual(data["retry_after_seconds"], 30)
+        self.assertEqual(data["error"], "transition_conflict")
+        self.assertEqual(data["reason"], "processing_locked")
+        self.assertEqual(data["request_id"], 1704)
+        self.assertEqual(data["processing_owner"], {
+            "job_id": owner.id,
+            "status": owner.status,
+            "preview_status": owner.preview_status,
+        })
         # No mutation of any kind.
         self.assertEqual(self.db.denylist, [])
         self.assertEqual(self.db.bad_audio_hashes, [])
         self.assertEqual(self.beets_db.get_item_paths_calls, [])
         self.assertEqual(self.beets_db.locate_calls, [])
-
-        # The active set is queued OR running — flip the job to the
-        # state the importer worker would hold and re-assert the 409.
-        self.db._import_jobs[0]["status"] = "running"
-        status, data = self._post(
-            "/api/pipeline/ban-source",
-            {"request_id": 1704, "confirm": "BAN", "mb_release_id": self.RELEASE_ID,
-             "username": "anyone"},
-        )
-        self.assertEqual(status, 409)
-        self.assertEqual(data["error"], "importer_busy")
 
     # E1.6 — idempotency: second click is a no-op insert.
     @patch("lib.destructive_release_service.hash_audio_content")

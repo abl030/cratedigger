@@ -20,7 +20,7 @@ from unittest.mock import patch
 from scripts.pipeline_cli import api_mutations
 from scripts.pipeline_cli.routes_meta import _build_parser
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_request_row
+from tests.helpers import handoff_automation_owner, make_request_row
 from tests.web._harness import _FakeDbWebServerCase
 
 
@@ -54,6 +54,9 @@ class _RedirectingApiHandler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def do_POST(self) -> None:
+        content_length = int(self.headers.get("Content-Length", "0"))
+        if content_length:
+            self.rfile.read(content_length)
         if self.path == "/initial":
             self.initial_methods.append("POST")
             self._json(self.redirect_status, b'{"error":"redirect"}',
@@ -176,6 +179,36 @@ class TestApiMutationCli(unittest.TestCase):
                 )
             self.assertEqual(code, expected)
             self.assertEqual(json.loads(output), {"error": "route"})
+
+    def test_pipeline_delete_relays_exact_processing_owner_at_exit_4(self) -> None:
+        conflict = {
+            "error": "transition_conflict",
+            "reason": "processing_locked",
+            "request_id": 42,
+            "expected_status": "processing",
+            "actual_status": "processing",
+            "target_status": "deleted",
+            "processing_owner": {
+                "job_id": 81,
+                "status": "running",
+                "preview_status": "evidence_ready",
+            },
+        }
+        with patch(
+            "scripts.pipeline_cli.api_mutations.urllib.request."
+            "OpenerDirector.open",
+            return_value=_Response(409, json.dumps(conflict).encode()),
+        ):
+            code, output, error = self._run(
+                "pipeline-delete",
+                api_endpoint=api_mutations.TcpApiEndpoint("http://api"),
+                request_id=42,
+                confirm="DELETE",
+            )
+
+        self.assertEqual(code, 4)
+        self.assertEqual(json.loads(output), conflict)
+        self.assertEqual(error, "")
 
     def test_http_error_transport_and_malformed_responses_are_fail_closed(self) -> None:
         error = urllib.error.HTTPError("http://api", 404, "missing", Message(),
@@ -527,6 +560,26 @@ class TestApiMutationRealRouteRoundTrips(_FakeDbWebServerCase):
         self.db.update_request_fields(105, mb_release_group_id="rg-already-set")
         code, body = self._call(api_mutations.cmd_resolve_rg, request_id=105)
         self.assertEqual((code, body["status"]), (0, "resolved"))
+
+    def test_pipeline_delete_round_trip_preserves_processing_owner(self) -> None:
+        self._seed(106, "a0000000-0000-0000-0000-000000000006")
+        owner = handoff_automation_owner(self.db, 106)
+
+        code, body = self._call(
+            api_mutations.cmd_pipeline_delete,
+            request_id=106,
+            confirm="DELETE",
+        )
+
+        self.assertEqual(code, 4)
+        self.assertEqual(body["reason"], "processing_locked")
+        self.assertEqual(body["request_id"], 106)
+        self.assertEqual(body["processing_owner"], {
+            "job_id": owner.id,
+            "status": owner.status,
+            "preview_status": owner.preview_status,
+        })
+        self.assertIsNotNone(self.db.get_request(106))
 
 
 class TestApiMutationUnixRealRouteRoundTrips(unittest.TestCase):

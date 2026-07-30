@@ -43,6 +43,7 @@ from urllib.error import URLError
 import msgspec
 
 if TYPE_CHECKING:
+    from lib.pipeline_db._shared import ProcessingOwnerProjection
     from lib.pipeline_db.rows import AlbumRequestRow
 
 
@@ -58,6 +59,7 @@ _TRANSIENT_LOOKUP_EXCEPTIONS: tuple[type[BaseException], ...] = (
     json.JSONDecodeError,
 )
 
+from lib import transitions
 from lib.beets_db import (
     CurrentBeetsAmbiguous,
     CurrentBeetsResolution,
@@ -186,6 +188,36 @@ class ReplaceResult(msgspec.Struct, frozen=True):
     error_message: str | None = None
     reason: str | None = None
     warnings: tuple[str, ...] = ()
+    processing_owner: ProcessingOwnerProjection | None = None
+
+
+def _processing_locked_replace(
+    row: Mapping[str, object],
+    request_id: int,
+) -> ReplaceResult | None:
+    conflict = transitions.processing_locked_conflict(
+        row,
+        request_id,
+        "replaced",
+        expected_status=str(row["status"]),
+    )
+    if conflict is None:
+        return None
+    owner = conflict.processing_owner
+    if owner is None:
+        raise RuntimeError(
+            "processing conflict is missing its exact owner"
+        )
+    return ReplaceResult(
+        outcome=RESULT_WRONG_STATE,
+        request_id=request_id,
+        reason=transitions.TransitionConflictKind.processing_locked.value,
+        error_message=(
+            f"request {request_id} is owned by automation import job "
+            f"{owner.job_id}"
+        ),
+        processing_owner=owner,
+    )
 
 
 # Type aliases for the injectable dependencies.
@@ -325,6 +357,9 @@ class MbidReplaceService:
                 request_id=request_id,
                 error_message=f"request {request_id} not found",
             )
+        processing_locked = _processing_locked_replace(source, request_id)
+        if processing_locked is not None:
+            return processing_locked
 
         # Step 1a — double-click / already-replaced source. The frozen
         # audit row is not a valid source for another Replace.
@@ -829,6 +864,12 @@ class MbidReplaceService:
                         "advisory lock acquisition"
                     ),
                 )
+            processing_locked = _processing_locked_replace(
+                source_locked,
+                request_id,
+            )
+            if processing_locked is not None:
+                return processing_locked
             # Re-check the double-click guard under the lock — if the
             # importer flipped status to ``replaced`` (it doesn't, but
             # defensively) or a concurrent Replace landed first, bail.

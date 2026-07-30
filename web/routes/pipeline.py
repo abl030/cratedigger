@@ -118,6 +118,7 @@ def get_pipeline_status(h: RouteHandler, params: dict[str, list[str]]) -> None:
                 "mb_release_id": w["mb_release_id"],
                 "source": w["source"],
                 "created_at": str(w["created_at"]),
+                "processing_owner": None,
             }
             for w in wanted
         ],
@@ -157,7 +158,7 @@ def get_pipeline_all(h: RouteHandler, params: dict[str, list[str]]) -> None:
     status_items: dict[str, list[dict[str, object]]] = {}
     all_ids: list[int] = []
     statuses: tuple[str, ...] = (
-        "wanted", "downloading", "imported", "unsearchable")
+        "wanted", "downloading", "processing", "imported", "unsearchable")
     # ``?include_replaced=true`` opt-in surfaces the frozen audit rows
     # for operators reviewing past Replace actions (R30). Default off so
     # the standard view stays focused on active work.
@@ -208,14 +209,35 @@ def get_pipeline_downloading(h: RouteHandler, params: dict[str, list[str]]) -> N
     rows = [s._serialize_row(r) for r in s._db().get_by_status("downloading")]
     ids = [int(str(r["id"])) for r in rows]
     summaries = s._db().get_latest_download_summaries(ids)
-    youtube_ingest = [
-        s._serialize_row(r)
-        for r in s._db().list_active_youtube_rescues(limit=50)
-    ]
     h._json({
         "counts": counts,
         "downloading": _attach_latest_download_summaries(rows, summaries),
-        "youtube_ingest": youtube_ingest,
+    })
+
+
+def get_pipeline_acquisition(
+    h: RouteHandler,
+    params: dict[str, list[str]],
+) -> None:
+    """Return active downloader/processor requests plus YouTube ingest."""
+    del params
+    s = _server()
+    payload = s._db().get_acquisition(youtube_limit=50)
+    acquisition = [
+        s._serialize_row(row)
+        for row in payload["acquisition"]
+    ]
+    ids = [int(str(row["id"])) for row in acquisition]
+    summaries = s._db().get_latest_download_summaries(ids)
+    h._json({
+        "acquisition": _attach_latest_download_summaries(
+            acquisition,
+            summaries,
+        ),
+        "youtube_ingest": [
+            s._serialize_row(row)
+            for row in payload["youtube_ingest"]
+        ],
     })
 
 
@@ -335,6 +357,9 @@ def get_pipeline_requests_by_rg(h: RouteHandler, params: dict[str, list[str]], r
             "status": r.get("status"),
             "artist_name": r.get("artist_name"),
             "album_title": r.get("album_title"),
+            "processing_owner": _server()._serialize_row(r).get(
+                "processing_owner"
+            ),
         }
         for r in rows
     ]
@@ -421,9 +446,33 @@ def get_import_job(h: RouteHandler, params: dict[str, list[str]], job_id_str: st
     h._json({"job": _serialize_import_job(job)})
 
 
+def get_import_job_recovery(
+    h: RouteHandler,
+    params: dict[str, list[str]],
+    job_id_str: str,
+) -> None:
+    """Return the shared revisioned automation recovery observation."""
+    from lib.import_job_recovery_service import (
+        get_automation_recovery_detail,
+    )
+
+    server = _server()
+    result = get_automation_recovery_detail(
+        server._db(),
+        server._beets_db(),
+        int(job_id_str),
+    )
+    h._json(
+        result.to_dict(),
+        status=200 if result.outcome == "ok" else 404,
+    )
+
+
 class ImportJobRecoveryRequest(BaseModel):
-    resolution: Literal["retry", "close"]
+    action: Literal["retry", "close"]
     reason: str = Field(min_length=1, max_length=500)
+    evidence_revision: str | None = Field(default=None, min_length=1)
+    result_status: Literal["wanted", "imported"] | None = None
 
 
 def post_import_job_recovery(
@@ -432,42 +481,55 @@ def post_import_job_recovery(
     job_id_str: str,
 ) -> None:
     """Apply an explicit operator decision to ambiguous Beets work."""
-    from lib.import_job_recovery_service import resolve_import_job_recovery
+    from lib.import_job_recovery_service import apply_import_job_recovery
 
     req_body = parse_body(h, body or {}, ImportJobRecoveryRequest)
     if req_body is None:
         return
     try:
         job_id = int(job_id_str)
-        result = resolve_import_job_recovery(
-            _server()._db(),
+        server = _server()
+        result = apply_import_job_recovery(
+            server._db(),
+            server._beets_db(),
             job_id,
-            resolution=req_body.resolution,
+            action=req_body.action,
             reason=req_body.reason,
+            evidence_revision=req_body.evidence_revision,
+            result_status=req_body.result_status,
         )
     except ValueError as exc:
         h._error(str(exc), 400)
         return
 
-    payload: dict[str, object] = {
-        "outcome": result.outcome,
-        "message": result.message,
-        "job": (
-            _serialize_import_job(result.job)
-            if result.job is not None else None
-        ),
-        "retry_job": (
-            _serialize_import_job(result.retry_job)
-            if result.retry_job is not None else None
-        ),
-    }
+    payload = result.to_dict()
     if result.outcome == "not_found":
         h._json(payload, status=404)
         return
-    if result.outcome in ("wrong_state", "authority_changed"):
+    if result.outcome in {
+        "wrong_state",
+        "ineligible",
+        "execution_live",
+        "execution_unknown",
+        "evidence_changed",
+        "cleanup_uninspectable",
+    }:
         h._json(payload, status=409)
         return
-    h._json(payload, status=202 if result.outcome == "retry_queued" else 200)
+    if result.outcome in {"lock_unavailable", "cleanup_failed"}:
+        h._json(payload, status=503)
+        return
+    h._json(
+        payload,
+        status=(
+            202
+            if result.outcome in {
+                "retry_queued",
+                "retry_recovery_required",
+            }
+            else 200
+        ),
+    )
 
 
 # ── Route tables ─────────────────────────────────────────────────
@@ -502,8 +564,13 @@ ROUTES: list[RouteRegistration] = [
     ),
     route(
         "GET", "/api/pipeline/downloading", get_pipeline_downloading,
-        "Pipeline requests currently in the downloading status, plus "
-        "active YouTube rescue ingests.",
+        "Transfer-owned pipeline requests currently in downloading status.",
+        classified=True,
+    ),
+    route(
+        "GET", "/api/pipeline/acquisition", get_pipeline_acquisition,
+        "Active acquisition view: downloading and processing request rows "
+        "with exact processing owners, plus active YouTube rescue ingests.",
         classified=True,
     ),
     route(
@@ -542,10 +609,17 @@ ROUTES: list[RouteRegistration] = [
         classified=True,
     ),
     pattern_route(
+        "GET", r"^/api/import-jobs/(\d+)/recovery$",
+        get_import_job_recovery,
+        "Revisioned recovery evidence for one exact automation owner.",
+        classified=True,
+    ),
+    pattern_route(
         "POST", r"^/api/import-jobs/(\d+)/recovery$",
         post_import_job_recovery,
-        "Resolve a recovery-required Beets operation by explicitly retrying "
-        "or closing it without replay.",
+        "Apply revisioned retry or explicit wanted/imported close recovery "
+        "to one exact automation owner; legacy force/YouTube behavior is "
+        "unchanged.",
         classified=True,
     ),
 ]

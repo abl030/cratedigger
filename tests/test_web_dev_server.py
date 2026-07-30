@@ -265,6 +265,14 @@ class WebDevServerTest(unittest.TestCase):
         self.assertEqual(payload["peers"]["totals"]["known_peers"], 316)
         self.assertEqual(payload["peers"]["days"][0]["new_peers"], 316)
 
+    def test_acquisition_fallback_matches_runtime_contract(self):
+        payload = self.get_json("/api/pipeline/acquisition")
+
+        self.assertEqual(
+            payload,
+            {"acquisition": [], "youtube_ingest": []},
+        )
+
     def test_unknown_fixture_route_is_a_404_json(self):
         with self.assertRaises(HTTPError) as raised:
             urlopen(f"{self.base}/api/not-real")

@@ -1,19 +1,23 @@
 """Tests for scripts/cleanup_ghost_imported.py."""
 
 import io
+import json
 import os
 import sqlite3
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from lib.beets_db import BeetsDB
+from lib.pipeline_db.rows import AlbumRequestRow, album_request_row
 from scripts import cleanup_ghost_imported
 from scripts.cleanup_ghost_imported import classify_imported_rows
+from tests.fakes import FakePipelineDB
+from tests.helpers import handoff_automation_owner, make_request_row
 
 
 def _make_beets_db(path: str) -> None:
@@ -40,6 +44,36 @@ def _make_beets_db(path: str) -> None:
     """)
     conn.commit()
     conn.close()
+
+
+class _RejectingDeleteFake(FakePipelineDB):
+    """Typed conditional-delete loser used by the ghost cleanup tests."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.delete_calls: list[int] = []
+
+    def delete_request(self, request_id: int) -> bool:
+        self.delete_calls.append(request_id)
+        return False
+
+
+class _ProcessingRaceDeleteFake(_RejectingDeleteFake):
+    """Return a stale imported scan while exposing the current exact owner."""
+
+    def __init__(self, stale_imported: AlbumRequestRow) -> None:
+        super().__init__()
+        self._stale_imported = stale_imported
+
+    def get_by_status(
+        self,
+        status: str,
+        *,
+        limit: int | None = None,
+        newest_first: bool = False,
+    ) -> list[AlbumRequestRow]:
+        del limit, newest_first
+        return [self._stale_imported] if status == "imported" else []
 
 
 class TestCleanupGhostImported(unittest.TestCase):
@@ -176,6 +210,62 @@ class TestCleanupGhostImported(unittest.TestCase):
 
         self.assertEqual(ghosts, [])
         self.assertEqual([row["id"] for row in manual_review], [8])
+
+    def test_apply_reports_conditional_delete_rejection(self) -> None:
+        row = make_request_row(
+            id=12,
+            status="imported",
+            mb_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            discogs_release_id=None,
+            artist_name="Owned",
+            album_title="Preserved",
+        )
+        db = _RejectingDeleteFake()
+        db.seed_request(row)
+        stdout = io.StringIO()
+
+        with BeetsDB(self.db_path) as beets, redirect_stdout(stdout):
+            result = cleanup_ghost_imported.cmd_apply(
+                db,  # pyright: ignore[reportArgumentType]
+                beets,
+            )
+
+        self.assertEqual(result, 4)
+        self.assertEqual(db.delete_calls, [12])
+        self.assertIn("preserved 12", stdout.getvalue())
+        self.assertIn("deleted 0 ghost imported rows", stdout.getvalue())
+
+    def test_apply_reports_exact_processing_owner_rejection(self) -> None:
+        row = album_request_row(make_request_row(
+            id=13,
+            status="imported",
+            mb_release_id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            discogs_release_id=None,
+            artist_name="Owned",
+            album_title="Processing",
+        ))
+        db = _ProcessingRaceDeleteFake(row)
+        db.seed_request(make_request_row(
+            **{**row, "status": "wanted"},
+        ))
+        owner = handoff_automation_owner(db, 13)
+        stdout = io.StringIO()
+
+        with BeetsDB(self.db_path) as beets, redirect_stdout(stdout):
+            result = cleanup_ghost_imported.cmd_apply(
+                db,  # pyright: ignore[reportArgumentType]
+                beets,
+            )
+
+        self.assertEqual(result, 4)
+        payload = json.loads(stdout.getvalue().splitlines()[0])
+        self.assertEqual(payload["reason"], "processing_locked")
+        self.assertEqual(payload["processing_owner"], {
+            "job_id": owner.id,
+            "status": owner.status,
+            "preview_status": owner.preview_status,
+        })
+        self.assertIn("deleted 0 ghost imported rows", stdout.getvalue())
 
 
 class TestDefaultDsnFailsLoud(unittest.TestCase):

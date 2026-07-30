@@ -297,6 +297,35 @@ class TestDatabaseSource(unittest.TestCase):
         source._db = db
         return source, db
 
+    def test_borrowed_db_is_exact_and_close_is_non_owning(self):
+        borrowed = MagicMock()
+        source = DatabaseSource(
+            "unused-dsn",
+            musicbrainz_ws2_base=TEST_MB_WS2_BASE,
+            discogs_api_base=TEST_DISCOGS_BASE,
+            borrowed_db=borrowed,
+        )
+
+        self.assertIs(source._get_db(), borrowed)
+        source.close()
+
+        borrowed.close.assert_not_called()
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            source._get_db()
+
+    def test_lazily_created_db_is_owned_and_closed(self):
+        owned = MagicMock()
+        with patch("lib.pipeline_db.PipelineDB", return_value=owned):
+            source = DatabaseSource(
+                "owned-dsn",
+                musicbrainz_ws2_base=TEST_MB_WS2_BASE,
+                discogs_api_base=TEST_DISCOGS_BASE,
+            )
+            self.assertIs(source._get_db(), owned)
+            source.close()
+
+        owned.close.assert_called_once_with()
+
     def test_get_wanted_returns_albumrecord_shaped_records(self):
         source, db = self._make_source()
         req_id = db.add_request(

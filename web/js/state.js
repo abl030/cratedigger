@@ -40,7 +40,7 @@ import { invalidateActiveRgs } from './active_rgs.js';
  * @property {string} query             Current search-box substring filter.
  */
 
-/** @type {{ browseSource: string, browseSearchType: string, browseArtist: {id:string, name:string}|null, browseLabel: {id:string, name:string}|null, labelFilters: {yearMin:number|null, yearMax:number|null, format:string, hideHeld:boolean}, labelPage: number, browseCache: Object, pipelineDashboardData: Object|null, pipelineView: string, pipelineMatchGraphOpen: boolean, pipelineHourlyMatchGraphOpen: boolean, pipelineDailyMatchGraphOpen: boolean, longTail: LongTailState, recentsCounts: {all:number, imported:number, rejected:number, matches_24h:number, matches_6h:number, matches_per_hour_24h:number, matches_per_hour_6h:number}, recentsFilter: string, recentsSub: 'history'|'downloading'|'imports', dsConstants: Object|null, disambData: Object|null, searchTimer: number|null, searchTargetId: string|null, searchTargetExpandId: string|null, searchTargetSource: string|null, searchTargetIdentityKind: 'work'|'release'|null, searchPlanDetailContext: SearchPlanDetailContext|null }} */
+/** @type {{ browseSource: string, browseSearchType: string, browseArtist: {id:string, name:string}|null, browseLabel: {id:string, name:string}|null, labelFilters: {yearMin:number|null, yearMax:number|null, format:string, hideHeld:boolean}, labelPage: number, browseCache: Object, pipelineDashboardData: Object|null, pipelineView: string, pipelineMatchGraphOpen: boolean, pipelineHourlyMatchGraphOpen: boolean, pipelineDailyMatchGraphOpen: boolean, longTail: LongTailState, recentsCounts: {all:number, imported:number, rejected:number, matches_24h:number, matches_6h:number, matches_per_hour_24h:number, matches_per_hour_6h:number}, recentsFilter: string, recentsSub: 'history'|'acquisition'|'imports', dsConstants: Object|null, disambData: Object|null, searchTimer: number|null, searchTargetId: string|null, searchTargetExpandId: string|null, searchTargetSource: string|null, searchTargetIdentityKind: 'work'|'release'|null, searchPlanDetailContext: SearchPlanDetailContext|null }} */
 export const state = {
   browseSource: 'mb',
   browseSearchType: 'artist',
@@ -91,10 +91,18 @@ export const state = {
 export const API = '';
 
 /**
- * Central pipeline status store. Maps normalized release ID → {status, id}.
+ * @typedef {Object} ProcessingOwnerProjection
+ * @property {number} job_id
+ * @property {string} status
+ * @property {string|null} preview_status
+ */
+
+/**
+ * Central pipeline status store. Maps normalized release ID to the exact
+ * request projection, including the recorded processor owner when applicable.
  * Updated by any mutation (add, remove, upgrade, delete).
  * All rendering code should check this before using stale API data.
- * @type {Map<string, {status: string|null, id: number|null}>}
+ * @type {Map<string, {status: string|null, id: number|null, processing_owner: ProcessingOwnerProjection|null}>}
  */
 export const pipelineStore = new Map();
 
@@ -113,13 +121,23 @@ export function pipelineStoreKey(releaseId) {
  * @param {string} mbid - MB UUID or numeric Discogs release ID
  * @param {string|null} status - New status ('wanted', 'imported', null for removed)
  * @param {number|null} pipelineId - Pipeline request ID (null if removed)
+ * @param {ProcessingOwnerProjection|null} [processingOwner]
  */
-export function updatePipelineStatus(mbid, status, pipelineId) {
+export function updatePipelineStatus(
+  mbid,
+  status,
+  pipelineId,
+  processingOwner = null,
+) {
   const key = pipelineStoreKey(mbid);
   if (!key) return;
   // Update central store
   if (status) {
-    pipelineStore.set(key, { status, id: pipelineId });
+    pipelineStore.set(key, {
+      status,
+      id: pipelineId,
+      processing_owner: status === 'processing' ? processingOwner : null,
+    });
   } else {
     pipelineStore.delete(key);
   }
@@ -135,6 +153,7 @@ export function updatePipelineStatus(mbid, status, pipelineId) {
         if (pipelineStoreKey(p.release_id) === key) {
           p.pipeline_status = status;
           p.pipeline_id = pipelineId;
+          p.processing_owner = status === 'processing' ? processingOwner : null;
         }
       }
       // Update RG-level status if this was the tracked pressing
@@ -143,9 +162,11 @@ export function updatePipelineStatus(mbid, status, pipelineId) {
         if (status) {
           rg.pipeline_status = status;
           rg.pipeline_id = pipelineId;
+          rg.processing_owner = status === 'processing' ? processingOwner : null;
         } else if (rg.pipeline_id === pipelineId) {
           rg.pipeline_status = null;
           rg.pipeline_id = null;
+          rg.processing_owner = null;
         }
       }
     }

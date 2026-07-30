@@ -43,7 +43,6 @@ from lib.destructive_release_service import (
     ban_source,
     delete_release_from_library,
 )
-from lib.import_queue import IMPORT_JOB_AUTOMATION
 from lib.mbid_replace_service import (
     REPLACE_REASON_CURRENT_BEETS_AMBIGUOUS,
     REPLACE_REASON_SOURCE_IDENTITY_INVALID,
@@ -58,7 +57,7 @@ from lib.pipeline_db import (
 )
 from lib.release_identity import ReleaseIdentity
 from tests.fakes import DenylistEntry, FakeBeetsDB, FakePipelineDB
-from tests.helpers import make_request_row
+from tests.helpers import handoff_automation_owner, make_request_row
 
 
 def assert_fresh_destructive_authority(
@@ -330,27 +329,17 @@ def _configure_lock_world(
     lock_failure: str,
     job_race: bool,
 ) -> None:
-    job_inserted = False
+    if request_id is not None and job_race:
+        db.request(request_id)["status"] = "wanted"
+        handoff_automation_owner(db, request_id)
 
     def acquire(namespace: int, _key: int) -> bool:
-        nonlocal job_inserted
         if lock_failure == "import" and namespace == ADVISORY_LOCK_NAMESPACE_IMPORT:
             return False
-        if lock_failure == "release" and namespace == ADVISORY_LOCK_NAMESPACE_RELEASE:
-            return False
-        if (
-            request_id is not None
-            and job_race
-            and not job_inserted
+        return not (
+            lock_failure == "release"
             and namespace == ADVISORY_LOCK_NAMESPACE_RELEASE
-        ):
-            job_inserted = True
-            db.enqueue_import_job(
-                IMPORT_JOB_AUTOMATION,
-                request_id=request_id,
-                dedupe_key=f"automation_import:request:{request_id}",
-            )
-        return True
+        )
 
     db.set_advisory_lock_result(acquire)
 

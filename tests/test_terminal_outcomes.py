@@ -2,28 +2,56 @@
 
 from __future__ import annotations
 
+import json
+import tempfile
 import threading
 import unittest
-from datetime import UTC
+from collections.abc import Mapping
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
+
+import msgspec
 
 from lib import transitions
 from lib.dispatch import DispatchOutcome
+from lib.dispatch.types import PostCommitCleanup
 from lib.download_processing import Completed, CompletionFailed, CompletionResult
-from lib.import_queue import IMPORT_JOB_AUTOMATION, ImportJob
-from lib.pipeline_db import PipelineDB
+from lib.import_execution import (
+    AutomationOwnerFailStop,
+    CancellationToken,
+    ExecutionLeaseSnapshot,
+    OwnerSessionIdentity,
+    ProcessIdentity,
+)
+from lib.import_queue import IMPORT_JOB_FORCE, ImportJob
+from lib.pipeline_db import (
+    ADVISORY_LOCK_NAMESPACE_IMPORT,
+    BACKOFF_BASE_MINUTES,
+    PipelineDB,
+)
+from lib.pipeline_db.cleanup_journal import (
+    _CleanupCursor,
+    _LockedCleanupScope,
+)
 from lib.quality import ActiveDownloadState
+from lib.quality_evidence import snapshot_audio_files
 from lib.terminal_outcomes import (
+    AutomationTerminalAuthority,
     ImportJobTerminal,
     ImportTerminalOutcome,
     PreviewTerminalOutcome,
     TerminalCooldown,
     TerminalDenylist,
     TerminalDownloadAudit,
+    automation_recovery_close_outcome,
 )
 from tests.fakes import FakePipelineDB
 from tests.fakes.download import RecordingProcessAlbum
 from tests.helpers import (
+    claim_next_import_job,
+    claim_next_import_preview_job,
+    handoff_automation_owner,
     make_album_quality_evidence,
     make_ctx_with_fake_db,
     make_request_row,
@@ -69,6 +97,46 @@ class PausingTerminalPipelineDB(PipelineDB):
         if not self.release.wait(timeout=10):
             raise TimeoutError("terminal row-lock test was not released")
         return status
+
+
+class PausingAutomationTerminalPipelineDB(PipelineDB):
+    """Pause after request lock, before terminalization locks request jobs."""
+
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        request_locked: threading.Event,
+        release: threading.Event,
+    ) -> None:
+        super().__init__(dsn)
+        self.request_locked = request_locked
+        self.release = release
+
+    def _lock_processing_cleanup_scope(
+        self,
+        cur: _CleanupCursor,
+        *,
+        request_id: int,
+    ) -> _LockedCleanupScope:
+        cur.execute(
+            """
+            SELECT status, active_automation_import_job_id
+            FROM album_requests
+            WHERE id = %s
+            FOR UPDATE
+            """,
+            (request_id,),
+        )
+        if cur.fetchone() is None:
+            raise AssertionError("terminal request disappeared")
+        self.request_locked.set()
+        if not self.release.wait(timeout=10):
+            raise TimeoutError("automation terminal overlap was not released")
+        return super()._lock_processing_cleanup_scope(
+            cur,
+            request_id=request_id,
+        )
 
 
 class ObservedOperatorPipelineDB(PipelineDB):
@@ -128,6 +196,7 @@ def _snapshot(db: PipelineDB, request_id: int, job_id: int) -> dict[str, object]
         """
         SELECT status, active_download_state, download_attempts,
                validation_attempts,
+               active_automation_import_job_id,
                search_filetype_override, beets_distance, beets_scenario,
                min_bitrate, prev_min_bitrate,
                verified_lossless, rescued_at, prior_unfindable_category,
@@ -141,7 +210,11 @@ def _snapshot(db: PipelineDB, request_id: int, job_id: int) -> dict[str, object]
         """
         SELECT status, result, message, error, completed_at,
                preview_status, preview_result, preview_message,
-               preview_error, preview_completed_at
+               preview_error, preview_completed_at,
+               execution_invocation_id, execution_host_boot_id,
+               execution_systemd_unit, execution_worker_pid,
+               execution_worker_start_ticks, execution_beets_pid,
+               execution_beets_start_ticks
         FROM import_jobs WHERE id = %s
         """,
         (job_id,),
@@ -152,9 +225,11 @@ def _snapshot(db: PipelineDB, request_id: int, job_id: int) -> dict[str, object]
         SELECT
           (SELECT COUNT(*)::int FROM download_log WHERE request_id = %s) AS logs,
           (SELECT COUNT(*)::int FROM source_denylist WHERE request_id = %s) AS denied,
-          (SELECT COUNT(*)::int FROM user_cooldowns) AS cooldowns
+          (SELECT COUNT(*)::int FROM user_cooldowns) AS cooldowns,
+          (SELECT COUNT(*)::int FROM processing_cleanup_journal
+           WHERE request_id = %s AND job_id = %s) AS cleanup_journals
         """,
-        (request_id, request_id),
+        (request_id, request_id, request_id, job_id),
     )
     counts = counts_cur.fetchone()
     assert request is not None and job is not None and counts is not None
@@ -163,6 +238,76 @@ def _snapshot(db: PipelineDB, request_id: int, job_id: int) -> dict[str, object]
         "job": dict(job),
         "counts": dict(counts),
     }
+
+
+SEEDED_BACKOFF_MINUTES = 7
+"""A deliberately unproducible prior backoff — real ones are 30 * 2**n."""
+
+_SEEDED_LAST_ATTEMPT_AT = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+
+
+def _seed_terminal_retry_state(
+    db: PipelineDB,
+    request_id: int,
+    *,
+    search_attempts: int,
+    download_attempts: int,
+    validation_attempts: int,
+) -> None:
+    """Give the locked row real prior automatic-retry history to preserve."""
+    db._execute(
+        """
+        UPDATE album_requests
+        SET search_attempts = %s,
+            download_attempts = %s,
+            validation_attempts = %s,
+            last_attempt_at = %s,
+            next_retry_after = %s
+        WHERE id = %s
+        """,
+        (
+            search_attempts,
+            download_attempts,
+            validation_attempts,
+            _SEEDED_LAST_ATTEMPT_AT,
+            _SEEDED_LAST_ATTEMPT_AT + timedelta(
+                minutes=SEEDED_BACKOFF_MINUTES,
+            ),
+            request_id,
+        ),
+    )
+
+
+def read_terminal_retry_state(
+    db: PipelineDB,
+    request_id: int,
+) -> dict[str, object]:
+    """Read exactly the retry-accounting columns a terminal edge rewrites."""
+    cur = db._execute(
+        """
+        SELECT search_attempts, download_attempts, validation_attempts,
+               last_attempt_at, next_retry_after
+        FROM album_requests
+        WHERE id = %s
+        """,
+        (request_id,),
+    )
+    row = cur.fetchone()
+    assert row is not None
+    return dict(row)
+
+
+def terminal_backoff_minutes(state: Mapping[str, object]) -> int | None:
+    """Return the automatic backoff window the row currently carries."""
+    last_attempt_at = state["last_attempt_at"]
+    next_retry_after = state["next_retry_after"]
+    if last_attempt_at is None or next_retry_after is None:
+        return None
+    assert isinstance(last_attempt_at, datetime)
+    assert isinstance(next_retry_after, datetime)
+    return round(
+        (next_retry_after - last_attempt_at).total_seconds() / 60
+    )
 
 
 def _seed_running_import(
@@ -186,22 +331,6 @@ def _seed_running_import(
             category="artist_absent",
             categorised_at=datetime(2026, 7, 1, tzinfo=UTC),
         )
-    active_state = (
-        ActiveDownloadState(
-            filetype="flac",
-            enqueued_at="2026-07-14T00:00:00+00:00",
-            files=[],
-            processing_started_at="2026-07-14T00:01:00+00:00",
-            current_path="/tmp/atomic-processing",
-        ).to_json()
-        if automation_state
-        else "{}"
-    )
-    db._execute(
-        "UPDATE album_requests SET status = 'downloading', "
-        "active_download_state = %s::jsonb WHERE id = %s",
-        (active_state, request_id),
-    )
     if cooldown_username is not None:
         for _ in range(5):
             db.log_download(
@@ -210,14 +339,87 @@ def _seed_running_import(
                 outcome="failed",
                 error_message="prior source failure",
             )
-    job = db.enqueue_import_job(
-        IMPORT_JOB_AUTOMATION,
-        request_id=request_id,
-        dedupe_key=f"atomic:{request_id}",
-        payload={},
-    )
-    db.mark_import_job_preview_importable(job.id, preview_result={"ready": True})
-    claimed = db.claim_next_import_job(worker_id="atomic-test")
+    if automation_state:
+        processing_path = tempfile.mkdtemp(prefix="atomic-processing-")
+        with open(
+            f"{processing_path}/01.flac",
+            "wb",
+        ) as fixture:
+            fixture.write(b"terminal fixture")
+        state = ActiveDownloadState(
+            filetype="flac",
+            enqueued_at="2026-07-14T00:00:00+00:00",
+            files=[],
+            processing_started_at="2026-07-14T00:01:00+00:00",
+            current_path=processing_path,
+        )
+        job = handoff_automation_owner(
+            db,
+            request_id,
+            state=state.to_json(),
+            canonical_path=processing_path,
+        )
+        preview_lease = ExecutionLeaseSnapshot(
+            host_boot_id="terminal-boot",
+            invocation_id=f"terminal-preview-{job.id}",
+            systemd_unit="cratedigger-import-preview-worker.service",
+            worker=ProcessIdentity(7101, 71001),
+        )
+        assert claim_next_import_preview_job(db, worker_id="terminal-preview",
+        execution_lease=preview_lease,) is not None
+        files = snapshot_audio_files(processing_path)
+        evidence = make_album_quality_evidence(
+            mb_release_id="terminal-outcome",
+            source_path=processing_path,
+            files=files,
+        )
+        db.upsert_album_quality_evidence(evidence)
+        persisted_evidence = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert (
+            persisted_evidence is not None
+            and persisted_evidence.id is not None
+        )
+        db.set_import_job_candidate_evidence(
+            job.id,
+            persisted_evidence.id,
+            expected_execution_lease=preview_lease,
+        )
+        db.mark_import_job_preview_importable(
+            job.id,
+            preview_result={"ready": True},
+            expected_execution_lease=preview_lease,
+        )
+        execution_lease = ExecutionLeaseSnapshot(
+            host_boot_id="terminal-boot",
+            invocation_id=f"terminal-importer-{job.id}",
+            systemd_unit="cratedigger-importer.service",
+            worker=ProcessIdentity(7102, 71002),
+        )
+    else:
+        db._execute(
+            "UPDATE album_requests SET status = 'downloading', "
+            "active_download_state = %s::jsonb WHERE id = %s",
+            ("{}", request_id),
+        )
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=request_id,
+            dedupe_key=f"atomic:{request_id}",
+            payload={
+                "download_log_id": 1,
+                "failed_path": "/tmp/atomic-force",
+            },
+        )
+        db.mark_import_job_preview_importable(
+            job.id,
+            preview_result={"ready": True},
+        )
+        execution_lease = None
+    claimed = claim_next_import_job(db, worker_id="atomic-test",
+    execution_lease=execution_lease,)
     assert claimed is not None
     return db, request_id, claimed.id
 
@@ -236,12 +438,49 @@ def _seed_running_preview() -> tuple[PipelineDB, int, int]:
         (request_id,),
     )
     db.enqueue_import_job(
-        IMPORT_JOB_AUTOMATION,
+        IMPORT_JOB_FORCE,
         request_id=request_id,
         dedupe_key=f"preview:{request_id}",
-        payload={},
+        payload={
+            "download_log_id": 1,
+            "failed_path": "/tmp/atomic-preview",
+        },
     )
-    claimed = db.claim_next_import_preview_job(worker_id="preview-test")
+    claimed = claim_next_import_preview_job(db, worker_id="preview-test")
+    assert claimed is not None
+    return db, request_id, claimed.id
+
+
+def _seed_running_automation_preview() -> tuple[PipelineDB, int, int]:
+    db = make_db()
+    request_id = db.add_request(
+        mb_release_id="terminal-automation-preview",
+        artist_name="Atomic",
+        album_title="Automation Preview",
+        source="request",
+    )
+    processing_path = tempfile.mkdtemp(prefix="atomic-preview-processing-")
+    with open(f"{processing_path}/01.flac", "wb") as fixture:
+        fixture.write(b"terminal preview fixture")
+    job = handoff_automation_owner(
+        db,
+        request_id,
+        state=ActiveDownloadState(
+            filetype="flac",
+            enqueued_at="2026-07-14T00:00:00+00:00",
+            files=[],
+            current_path=processing_path,
+        ).to_json(),
+        canonical_path=processing_path,
+    )
+    preview_lease = ExecutionLeaseSnapshot(
+        host_boot_id="terminal-boot",
+        invocation_id=f"terminal-preview-{job.id}",
+        systemd_unit="cratedigger-import-preview-worker.service",
+        worker=ProcessIdentity(7201, 72001),
+    )
+    claimed = claim_next_import_preview_job(db, worker_id="terminal-preview",
+    execution_lease=preview_lease,)
     assert claimed is not None
     return db, request_id, claimed.id
 
@@ -268,6 +507,157 @@ def _searching_import_outcome(
             status="completed",
             result={"success": True},
             message="Import successful",
+        ),
+    )
+
+
+def _prepare_automation_terminal_command(
+    db: PipelineDB,
+    request_id: int,
+    job_id: int,
+) -> ImportTerminalOutcome:
+    """Complete cleanup, then build the exact owner-atomic terminal command."""
+    from scripts import importer
+
+    job = db.get_import_job(job_id)
+    request = db.get_request(request_id)
+    assert job is not None and request is not None
+    lease = importer._execution_lease_from_job(job)
+    assert lease is not None
+    state = ActiveDownloadState.from_raw(request["active_download_state"])
+    assert state.current_path is not None
+    token = CancellationToken()
+    with db._pin_owner_session(token) as owner_session_identity:
+        cleanup_receipt = importer._complete_automation_processing_cleanup(
+            db,
+            job,
+            DispatchOutcome(
+                success=True,
+                message="automation terminal fixture",
+                post_commit_cleanup=PostCommitCleanup(
+                    staged_path=state.current_path,
+                ),
+            ),
+            execution_lease=lease,
+            cancellation_token=token,
+            owner_session_identity=owner_session_identity,
+        )
+    return ImportTerminalOutcome(
+        request_id=request_id,
+        import_job_id=job_id,
+        initial_transition=transitions.RequestTransition.to_imported(
+            from_status="processing",
+            verified_lossless=True,
+        ),
+        audit=TerminalDownloadAudit(
+            outcome="success",
+            soulseek_username="automation-peer",
+            validation_result=(
+                '{"valid":true,"scenario":"automation_terminal"}'
+            ),
+        ),
+        denylists=(
+            TerminalDenylist(
+                "cooldown-peer",
+                "automation terminal",
+                apply_cooldown=True,
+            ),
+        ),
+        job=ImportJobTerminal(
+            status="completed",
+            result={"success": True},
+            message="automation imported",
+        ),
+        successful_terminal_acceptance=True,
+        automation=AutomationTerminalAuthority(
+            expected_job_status="running",
+            expected_preview_status=job.preview_status,
+            expected_execution_lease=lease,
+            cleanup_receipt=cleanup_receipt,
+        ),
+    )
+
+
+def automation_requeue_command(
+    prepared: ImportTerminalOutcome,
+    *,
+    attempt_type: str | None,
+) -> ImportTerminalOutcome:
+    """Rebuild a prepared owner command as a processing -> wanted rejection."""
+    return replace(
+        prepared,
+        initial_transition=transitions.RequestTransition.to_wanted(
+            from_status="processing",
+            attempt_type=attempt_type,
+        ),
+        audit=TerminalDownloadAudit(
+            outcome="rejected",
+            soulseek_username="automation-peer",
+            validation_result='{"valid":false,"scenario":"automation_reject"}',
+        ),
+        job=ImportJobTerminal(
+            status="failed",
+            result={"success": False},
+            message="automation rejected",
+            error="automation rejected",
+        ),
+        successful_terminal_acceptance=False,
+    )
+
+
+def _prepare_automation_preview_terminal_command(
+    db: PipelineDB,
+    request_id: int,
+    job_id: int,
+) -> PreviewTerminalOutcome:
+    from scripts import importer
+
+    job = db.get_import_job(job_id)
+    request = db.get_request(request_id)
+    assert job is not None and request is not None
+    lease = importer._execution_lease_from_job(job)
+    assert lease is not None
+    state = ActiveDownloadState.from_raw(request["active_download_state"])
+    assert state.current_path is not None
+    token = CancellationToken()
+    with db._pin_owner_session(token) as owner_session_identity:
+        cleanup_receipt = importer._complete_automation_processing_cleanup(
+            db,
+            job,
+            DispatchOutcome(
+                success=False,
+                message="automation preview terminal fixture",
+                post_commit_cleanup=PostCommitCleanup(
+                    staged_path=state.current_path,
+                ),
+            ),
+            execution_lease=lease,
+            cancellation_token=token,
+            owner_session_identity=owner_session_identity,
+        )
+    return PreviewTerminalOutcome(
+        request_id=request_id,
+        import_job_id=job_id,
+        request_transition=transitions.RequestTransition.to_wanted(
+            from_status="processing",
+            attempt_type="validation",
+        ),
+        audit=TerminalDownloadAudit(
+            outcome="measurement_failed",
+            validation_result=(
+                '{"reason":"snapshot_stale",'
+                '"scenario":"measurement_failed"}'
+            ),
+        ),
+        preview_status="measurement_failed",
+        preview_result={"reason": "snapshot_stale"},
+        message="Preview measurement failed",
+        error="snapshot_stale",
+        automation=AutomationTerminalAuthority(
+            expected_job_status="queued",
+            expected_preview_status=job.preview_status,
+            expected_execution_lease=lease,
+            cleanup_receipt=cleanup_receipt,
         ),
     )
 
@@ -313,6 +703,937 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
                     )
                 finally:
                     observer.close()
+
+    def test_recovery_serializes_before_automation_terminal_request_jobs(
+        self,
+    ) -> None:
+        """IMPORT prevents recovery job->request deadlock at terminalization."""
+        assert TEST_DSN is not None
+        seed, request_id, automation_job_id = _seed_running_import(
+            automation_state=True,
+        )
+        command = _prepare_automation_terminal_command(
+            seed,
+            request_id,
+            automation_job_id,
+        )
+        recovery = seed.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=request_id,
+            dedupe_key="force:terminal-recovery-overlap",
+            payload={
+                "download_log_id": request_id,
+                "failed_path": "/tmp/terminal-recovery-overlap",
+            },
+        )
+        seed._execute(
+            """
+            UPDATE import_jobs
+            SET status = 'recovery_required'
+            WHERE id = %s
+            """,
+            (recovery.id,),
+        )
+        seed.close()
+
+        request_locked = threading.Event()
+        release = threading.Event()
+        terminal = PausingAutomationTerminalPipelineDB(
+            TEST_DSN,
+            request_locked=request_locked,
+            release=release,
+        )
+        resolver = PipelineDB(TEST_DSN)
+        self.addCleanup(terminal.close)
+        self.addCleanup(resolver.close)
+        terminal_errors: list[BaseException] = []
+
+        def persist_terminal() -> None:
+            try:
+                with terminal.advisory_lock(
+                    ADVISORY_LOCK_NAMESPACE_IMPORT,
+                    request_id,
+                ) as acquired:
+                    self.assertTrue(acquired)
+                    terminal.persist_import_terminal_outcome(command)
+            except BaseException as exc:  # noqa: BLE001 - thread handoff
+                terminal_errors.append(exc)
+
+        worker = threading.Thread(target=persist_terminal)
+        worker.start()
+        self.assertTrue(request_locked.wait(timeout=10))
+        self.assertIsNone(
+            resolver.resolve_import_job_recovery(
+                recovery.id,
+                resolution="close",
+                reason="must serialize behind terminal owner",
+            )
+        )
+        release.set()
+        worker.join(timeout=10)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(terminal_errors, [])
+
+        resolved = resolver.resolve_import_job_recovery(
+            recovery.id,
+            resolution="close",
+            reason="terminal owner exited",
+        )
+        self.assertIsNotNone(resolved)
+        assert resolved is not None
+        closed, retry = resolved
+        self.assertEqual(closed.status, "failed")
+        self.assertIsNone(retry)
+
+    def test_automation_terminal_bundle_is_all_or_none_at_every_boundary(
+        self,
+    ) -> None:
+        assert TEST_DSN is not None
+        expected_boundaries = (
+            "download_log",
+            "denylist",
+            "cooldown",
+            "import_job.completed",
+            "processing_cleanup.consumed",
+            "request.processing_metadata",
+            "request.processing_to_imported",
+        )
+        for fail_after, expected_label in enumerate(
+            expected_boundaries,
+            start=1,
+        ):
+            with self.subTest(boundary=expected_label):
+                seed, request_id, job_id = _seed_running_import(
+                    automation_state=True,
+                    cooldown_username="cooldown-peer",
+                )
+                command = _prepare_automation_terminal_command(
+                    seed,
+                    request_id,
+                    job_id,
+                )
+                before = _snapshot(seed, request_id, job_id)
+                seed.close()
+                writer = FaultInjectingPipelineDB(
+                    TEST_DSN,
+                    fail_after_write=fail_after,
+                )
+                try:
+                    with self.assertRaises(InjectedTerminalWriteFailure):
+                        writer.persist_import_terminal_outcome(command)
+                    self.assertEqual(
+                        writer.write_boundaries[-1],
+                        expected_label,
+                    )
+                finally:
+                    writer.close()
+
+                observer = PipelineDB(TEST_DSN)
+                try:
+                    self.assertEqual(
+                        _snapshot(observer, request_id, job_id),
+                        before,
+                        "owner-atomic terminal bundle leaked a partial write",
+                    )
+                finally:
+                    observer.close()
+
+    def test_automation_terminal_bundle_consumes_exact_cleanup_last_owner(
+        self,
+    ) -> None:
+        db, request_id, job_id = _seed_running_import(
+            automation_state=True,
+        )
+        self.addCleanup(db.close)
+        command = _prepare_automation_terminal_command(
+            db,
+            request_id,
+            job_id,
+        )
+
+        result = db.persist_import_terminal_outcome(command)
+
+        request = db.get_request(request_id)
+        assert request is not None
+        self.assertEqual(request["status"], "imported")
+        self.assertIsNone(request["active_automation_import_job_id"])
+        self.assertIsNone(request["active_download_state"])
+        self.assertEqual(result.job.status, "completed")
+        assert result.job.result is not None
+        authority = command.automation
+        assert authority is not None
+        expected_cleanup = msgspec.to_builtins(
+            authority.cleanup_receipt
+        )
+        self.assertEqual(
+            result.job.result["processing_cleanup"],
+            expected_cleanup,
+        )
+        history = db.get_download_history(request_id)
+        self.assertEqual(len(history), 1)
+        validation = history[0]["validation_result"]
+        assert isinstance(validation, dict)
+        self.assertEqual(
+            validation["processing_cleanup"],
+            result.job.result["processing_cleanup"],
+        )
+        counts = _snapshot(db, request_id, job_id)["counts"]
+        assert isinstance(counts, dict)
+        self.assertEqual(
+            counts["cleanup_journals"],
+            0,
+        )
+
+    def test_automation_terminal_preserves_decoded_json_shapes(self) -> None:
+        db, request_id, job_id = _seed_running_import(
+            automation_state=True,
+        )
+        self.addCleanup(db.close)
+        command = _prepare_automation_terminal_command(
+            db,
+            request_id,
+            job_id,
+        )
+        current_job = db.get_import_job(job_id)
+        assert current_job is not None
+        existing_result = dict(current_job.result or {})
+        existing_json = {
+            "nested": {
+                "items": [1, 1.25, True, None, {"label": "existing"}],
+            },
+            "empty_object": {},
+            "empty_list": [],
+        }
+        existing_result["existing_json"] = existing_json
+        db._execute(
+            "UPDATE import_jobs SET result = %s::jsonb WHERE id = %s",
+            (json.dumps(existing_result), job_id),
+        )
+        terminal_json = {
+            "success": True,
+            "terminal_json": {
+                "items": [0, -4.5, False, None, {"label": "terminal"}],
+                "empty_object": {},
+                "empty_list": [],
+            },
+        }
+        audit_json = {
+            "valid": True,
+            "audit_json": {
+                "items": [2, 9.75, False, None, {"label": "audit"}],
+                "empty_object": {},
+                "empty_list": [],
+            },
+        }
+        command = replace(
+            command,
+            audit=replace(
+                command.audit,
+                validation_result=json.dumps(audit_json),
+            ),
+            job=replace(command.job, result=terminal_json),
+        )
+
+        result = db.persist_import_terminal_outcome(command)
+
+        assert result.job.result is not None
+        self.assertEqual(
+            result.job.result["existing_json"],
+            existing_json,
+        )
+        self.assertEqual(
+            result.job.result["terminal_json"],
+            terminal_json["terminal_json"],
+        )
+        validation = db.get_download_history(request_id)[0][
+            "validation_result"
+        ]
+        assert isinstance(validation, dict)
+        self.assertEqual(validation["audit_json"], audit_json["audit_json"])
+
+    def test_automation_preview_terminal_bundle_is_all_or_none(
+        self,
+    ) -> None:
+        assert TEST_DSN is not None
+        expected_boundaries = (
+            "download_log",
+            "import_job.preview_failed",
+            "processing_cleanup.consumed",
+            "request.processing_to_wanted",
+        )
+        for fail_after, expected_label in enumerate(
+            expected_boundaries,
+            start=1,
+        ):
+            with self.subTest(boundary=expected_label):
+                seed, request_id, job_id = (
+                    _seed_running_automation_preview()
+                )
+                command = _prepare_automation_preview_terminal_command(
+                    seed,
+                    request_id,
+                    job_id,
+                )
+                before = _snapshot(seed, request_id, job_id)
+                seed.close()
+                writer = FaultInjectingPipelineDB(
+                    TEST_DSN,
+                    fail_after_write=fail_after,
+                )
+                try:
+                    with self.assertRaises(InjectedTerminalWriteFailure):
+                        writer.persist_preview_terminal_outcome(command)
+                    self.assertEqual(
+                        writer.write_boundaries[-1],
+                        expected_label,
+                    )
+                finally:
+                    writer.close()
+                observer = PipelineDB(TEST_DSN)
+                try:
+                    self.assertEqual(
+                        _snapshot(observer, request_id, job_id),
+                        before,
+                    )
+                finally:
+                    observer.close()
+
+    def test_automation_preview_terminal_consumes_cleanup_and_owner(
+        self,
+    ) -> None:
+        db, request_id, job_id = _seed_running_automation_preview()
+        self.addCleanup(db.close)
+        command = _prepare_automation_preview_terminal_command(
+            db,
+            request_id,
+            job_id,
+        )
+
+        result = db.persist_preview_terminal_outcome(command)
+
+        request = db.get_request(request_id)
+        assert request is not None and result.job.result is not None
+        self.assertEqual(request["status"], "wanted")
+        self.assertIsNone(request["active_automation_import_job_id"])
+        self.assertIsNone(request["active_download_state"])
+        self.assertEqual(result.job.status, "failed")
+        self.assertEqual(result.job.preview_status, "measurement_failed")
+        cleanup = result.job.result["processing_cleanup"]
+        history = db.get_download_history(request_id)
+        validation = history[0]["validation_result"]
+        assert isinstance(validation, dict)
+        self.assertEqual(
+            validation["processing_cleanup"],
+            cleanup,
+        )
+        counts = _snapshot(db, request_id, job_id)["counts"]
+        assert isinstance(counts, dict)
+        self.assertEqual(
+            counts["cleanup_journals"],
+            0,
+        )
+
+    def test_fake_matches_real_automation_preview_terminal_bundle(
+        self,
+    ) -> None:
+        from scripts import importer
+
+        real, request_id, job_id = _seed_running_automation_preview()
+        self.addCleanup(real.close)
+        real_command = _prepare_automation_preview_terminal_command(
+            real,
+            request_id,
+            job_id,
+        )
+
+        class RecordingFakePipelineDB(FakePipelineDB):
+            def __init__(self) -> None:
+                super().__init__()
+                self.boundaries: list[str] = []
+
+            def _terminal_outcome_write_boundary(
+                self,
+                index: int,
+                label: str,
+            ) -> None:
+                del index
+                self.boundaries.append(label)
+
+        fake = RecordingFakePipelineDB()
+        fake.seed_request(make_request_row(
+            id=42,
+            status="wanted",
+            mb_release_id="terminal-automation-preview",
+        ))
+        processing_path = tempfile.mkdtemp(prefix="fake-preview-terminal-")
+        with open(f"{processing_path}/01.flac", "wb") as fixture:
+            fixture.write(b"terminal preview fixture")
+        fake_job = handoff_automation_owner(
+            fake,
+            42,
+            state=ActiveDownloadState(
+                filetype="flac",
+                enqueued_at="2026-07-14T00:00:00+00:00",
+                files=[],
+                current_path=processing_path,
+            ).to_json(),
+            canonical_path=processing_path,
+        )
+        lease = ExecutionLeaseSnapshot(
+            host_boot_id="terminal-boot",
+            invocation_id=f"terminal-preview-{fake_job.id}",
+            systemd_unit="cratedigger-import-preview-worker.service",
+            worker=ProcessIdentity(7201, 72001),
+        )
+        claimed = claim_next_import_preview_job(fake, worker_id="terminal-preview",
+        execution_lease=lease,)
+        assert claimed is not None
+        token = CancellationToken()
+        with fake._pin_owner_session(token) as owner_session_identity:
+            receipt = importer._complete_automation_processing_cleanup(
+                fake,
+                claimed,
+                DispatchOutcome(
+                    success=False,
+                    message="fake preview parity",
+                    post_commit_cleanup=PostCommitCleanup(
+                        staged_path=processing_path,
+                    ),
+                ),
+                execution_lease=lease,
+                cancellation_token=token,
+                owner_session_identity=owner_session_identity,
+            )
+        fake_command = replace(
+            real_command,
+            request_id=42,
+            import_job_id=claimed.id,
+            automation=AutomationTerminalAuthority(
+                expected_job_status="queued",
+                expected_preview_status=claimed.preview_status,
+                expected_execution_lease=lease,
+                cleanup_receipt=receipt,
+            ),
+        )
+
+        assert TEST_DSN is not None
+        recording_real = FaultInjectingPipelineDB(
+            TEST_DSN,
+            fail_after_write=999,
+        )
+        self.addCleanup(recording_real.close)
+        real_result = recording_real.persist_preview_terminal_outcome(
+            real_command
+        )
+        fake_result = fake.persist_preview_terminal_outcome(fake_command)
+        real_request = recording_real.get_request(request_id)
+        assert (
+            real_request is not None
+            and real_result.job.result is not None
+            and fake_result.job.result is not None
+        )
+        fake_request = fake.request(42)
+        self.assertEqual(
+            (
+                real_request["status"],
+                real_request["active_automation_import_job_id"],
+                real_result.job.status,
+                real_result.job.preview_status,
+                real_result.job.result["processing_cleanup"]["action"],
+            ),
+            (
+                fake_request["status"],
+                fake_request["active_automation_import_job_id"],
+                fake_result.job.status,
+                fake_result.job.preview_status,
+                fake_result.job.result["processing_cleanup"]["action"],
+            ),
+        )
+        expected_boundaries = [
+            "download_log",
+            "import_job.preview_failed",
+            "processing_cleanup.consumed",
+            "request.processing_to_wanted",
+        ]
+        self.assertEqual(recording_real.write_boundaries, expected_boundaries)
+        self.assertEqual(fake.boundaries, expected_boundaries)
+
+    def test_automation_completion_capture_is_exact_and_idempotent(
+        self,
+    ) -> None:
+        from lib.import_execution import read_process_start_ticks
+        from lib.import_job_recovery_service import (
+            AutomationCompletionReceipt,
+        )
+
+        db, request_id, job_id = _seed_running_import(
+            automation_state=True,
+        )
+        self.addCleanup(db.close)
+        job = db.get_import_job(job_id)
+        request = db.get_request(request_id)
+        assert job is not None and request is not None
+        lease = ExecutionLeaseSnapshot(
+            host_boot_id=job.execution_host_boot_id or "",
+            invocation_id=job.execution_invocation_id or "",
+            systemd_unit=job.execution_systemd_unit or "",
+            worker=ProcessIdentity(
+                job.execution_worker_pid or 0,
+                job.execution_worker_start_ticks or 0,
+            ),
+        )
+        state = ActiveDownloadState.from_raw(
+            request["active_download_state"]
+        )
+        assert state.current_path is not None
+        authorized = db.authorize_import_job_launch(
+            job_id,
+            request_id=request_id,
+            release_id="terminal-outcome",
+            source_path=state.current_path,
+            expected_execution_lease=lease,
+        )
+        assert authorized is not None
+        beets = ProcessIdentity(
+            pid=1,
+            start_ticks=read_process_start_ticks(1),
+        )
+        child = db.record_import_job_beets_child(
+            job_id,
+            expected_execution_lease=lease,
+            beets_pid=beets.pid,
+            beets_start_ticks=beets.start_ticks,
+        )
+        assert child is not None
+        child_lease = replace(lease, beets=beets)
+        receipt = AutomationCompletionReceipt(
+            job_id=job_id,
+            request_id=request_id,
+            release_id="terminal-outcome",
+            canonical_path=state.current_path,
+            returncode=0,
+            captured_at="2026-07-29T04:00:00+00:00",
+        )
+
+        first = db.capture_automation_import_completion(
+            job_id,
+            expected_execution_lease=child_lease,
+            receipt=receipt,
+        )
+        replay = db.capture_automation_import_completion(
+            job_id,
+            expected_execution_lease=child_lease,
+            receipt=receipt,
+        )
+        conflict = db.capture_automation_import_completion(
+            job_id,
+            expected_execution_lease=child_lease,
+            receipt=msgspec.structs.replace(receipt, returncode=1),
+        )
+
+        assert (
+            first is not None
+            and replay is not None
+            and first.result is not None
+            and replay.result is not None
+        )
+        self.assertEqual(first.result, replay.result)
+        self.assertEqual(
+            first.result["automation_completion"],
+            msgspec.to_builtins(receipt),
+        )
+        self.assertIsNone(conflict)
+        persisted = db.get_import_job(job_id)
+        assert persisted is not None
+        self.assertEqual(persisted.result, first.result)
+
+    def test_automation_completion_capture_rejects_stale_fences(
+        self,
+    ) -> None:
+        from lib.import_execution import read_process_start_ticks
+        from lib.import_job_recovery_service import (
+            AutomationCompletionReceipt,
+        )
+
+        db, request_id, job_id = _seed_running_import(
+            automation_state=True,
+        )
+        self.addCleanup(db.close)
+        job = db.get_import_job(job_id)
+        request = db.get_request(request_id)
+        assert job is not None and request is not None
+        lease = ExecutionLeaseSnapshot(
+            host_boot_id=job.execution_host_boot_id or "",
+            invocation_id=job.execution_invocation_id or "",
+            systemd_unit=job.execution_systemd_unit or "",
+            worker=ProcessIdentity(
+                job.execution_worker_pid or 0,
+                job.execution_worker_start_ticks or 0,
+            ),
+        )
+        state = ActiveDownloadState.from_raw(
+            request["active_download_state"]
+        )
+        assert state.current_path is not None
+        assert db.authorize_import_job_launch(
+            job_id,
+            request_id=request_id,
+            release_id="terminal-outcome",
+            source_path=state.current_path,
+            expected_execution_lease=lease,
+        ) is not None
+        beets = ProcessIdentity(1, read_process_start_ticks(1))
+        assert db.record_import_job_beets_child(
+            job_id,
+            expected_execution_lease=lease,
+            beets_pid=beets.pid,
+            beets_start_ticks=beets.start_ticks,
+        ) is not None
+        child_lease = replace(lease, beets=beets)
+        receipt = AutomationCompletionReceipt(
+            job_id=job_id,
+            request_id=request_id,
+            release_id="terminal-outcome",
+            canonical_path=state.current_path,
+            returncode=0,
+            captured_at="2026-07-29T04:00:00+00:00",
+        )
+        stale_receipts = (
+            msgspec.structs.replace(receipt, job_id=job_id + 1),
+            msgspec.structs.replace(receipt, request_id=request_id + 1),
+            msgspec.structs.replace(receipt, release_id="wrong-release"),
+            msgspec.structs.replace(receipt, canonical_path="/wrong/path"),
+        )
+        for stale in stale_receipts:
+            with self.subTest(stale=stale):
+                self.assertIsNone(db.capture_automation_import_completion(
+                    job_id,
+                    expected_execution_lease=child_lease,
+                    receipt=stale,
+                ))
+        self.assertIsNone(db.capture_automation_import_completion(
+            job_id,
+            expected_execution_lease=replace(
+                child_lease,
+                invocation_id="wrong-invocation",
+            ),
+            receipt=receipt,
+        ))
+        persisted = db.get_import_job(job_id)
+        assert persisted is not None
+        self.assertTrue(
+            persisted.result is None
+            or "automation_completion" not in persisted.result
+        )
+
+    def test_fake_matches_real_automation_terminal_owner_bundle(self) -> None:
+        from scripts import importer
+
+        real, request_id, job_id = _seed_running_import(
+            automation_state=True,
+        )
+        self.addCleanup(real.close)
+        real_command = _prepare_automation_terminal_command(
+            real,
+            request_id,
+            job_id,
+        )
+
+        class RecordingFakePipelineDB(FakePipelineDB):
+            def __init__(self) -> None:
+                super().__init__()
+                self.boundaries: list[str] = []
+
+            def _terminal_outcome_write_boundary(
+                self,
+                index: int,
+                label: str,
+            ) -> None:
+                del index
+                self.boundaries.append(label)
+
+        fake = RecordingFakePipelineDB()
+        fake.seed_request(make_request_row(
+            id=42,
+            status="wanted",
+            mb_release_id="terminal-outcome",
+        ))
+        processing_path = tempfile.mkdtemp(prefix="fake-terminal-")
+        with open(f"{processing_path}/01.flac", "wb") as fixture:
+            fixture.write(b"terminal fixture")
+        fake_job = handoff_automation_owner(
+            fake,
+            42,
+            state=ActiveDownloadState(
+                filetype="flac",
+                enqueued_at="2026-07-14T00:00:00+00:00",
+                files=[],
+                current_path=processing_path,
+            ).to_json(),
+            canonical_path=processing_path,
+        )
+        preview_lease = ExecutionLeaseSnapshot(
+            host_boot_id="terminal-boot",
+            invocation_id=f"terminal-preview-{fake_job.id}",
+            systemd_unit="cratedigger-import-preview-worker.service",
+            worker=ProcessIdentity(7101, 71001),
+        )
+        assert claim_next_import_preview_job(fake, worker_id="terminal-preview",
+        execution_lease=preview_lease,) is not None
+        fake.mark_import_job_preview_importable(
+            fake_job.id,
+            preview_result={"ready": True},
+            expected_execution_lease=preview_lease,
+        )
+        importer_lease = ExecutionLeaseSnapshot(
+            host_boot_id="terminal-boot",
+            invocation_id=f"terminal-importer-{fake_job.id}",
+            systemd_unit="cratedigger-importer.service",
+            worker=ProcessIdentity(7102, 71002),
+        )
+        claimed = claim_next_import_job(fake, worker_id="terminal-importer",
+        execution_lease=importer_lease,)
+        assert claimed is not None
+        token = CancellationToken()
+        with fake._pin_owner_session(token) as owner_session_identity:
+            receipt = importer._complete_automation_processing_cleanup(
+                fake,
+                claimed,
+                DispatchOutcome(
+                    success=True,
+                    message="fake parity",
+                    post_commit_cleanup=PostCommitCleanup(
+                        staged_path=processing_path,
+                    ),
+                ),
+                execution_lease=importer_lease,
+                cancellation_token=token,
+                owner_session_identity=owner_session_identity,
+            )
+        fake_command = replace(
+            real_command,
+            request_id=42,
+            import_job_id=claimed.id,
+            automation=AutomationTerminalAuthority(
+                expected_job_status="running",
+                expected_preview_status=claimed.preview_status,
+                expected_execution_lease=importer_lease,
+                cleanup_receipt=receipt,
+            ),
+        )
+
+        assert TEST_DSN is not None
+        recording_real = FaultInjectingPipelineDB(
+            TEST_DSN,
+            fail_after_write=999,
+        )
+        self.addCleanup(recording_real.close)
+        real_result = recording_real.persist_import_terminal_outcome(
+            real_command
+        )
+        fake_result = fake.persist_import_terminal_outcome(fake_command)
+
+        real_request = recording_real.get_request(request_id)
+        assert (
+            real_request is not None
+            and real_result.job.result is not None
+            and fake_result.job.result is not None
+        )
+        fake_request = fake.request(42)
+        real_audit = recording_real.get_download_history(request_id)[0]
+        fake_audit = fake.download_logs[0]
+        real_cleanup = real_result.job.result["processing_cleanup"]
+        fake_cleanup = fake_result.job.result["processing_cleanup"]
+        assert isinstance(fake_audit.validation_result, str)
+        fake_audit_cleanup = json.loads(fake_audit.validation_result)[
+            "processing_cleanup"
+        ]
+        self.assertEqual(
+            (
+                real_request["status"],
+                real_request["active_automation_import_job_id"],
+                real_request["active_download_state"],
+                real_result.job.status,
+                real_cleanup["outcome"],
+                real_cleanup["action"],
+            ),
+            (
+                fake_request["status"],
+                fake_request["active_automation_import_job_id"],
+                fake_request["active_download_state"],
+                fake_result.job.status,
+                fake_cleanup["outcome"],
+                fake_cleanup["action"],
+            ),
+        )
+        real_validation = real_audit["validation_result"]
+        assert isinstance(real_validation, dict)
+        self.assertEqual(real_validation["processing_cleanup"], real_cleanup)
+        self.assertEqual(fake_audit_cleanup, fake_cleanup)
+        expected_boundaries = [
+            "download_log",
+            "denylist",
+            "import_job.completed",
+            "processing_cleanup.consumed",
+            "request.processing_metadata",
+            "request.processing_to_imported",
+        ]
+        self.assertEqual(recording_real.write_boundaries, expected_boundaries)
+        self.assertEqual(fake.boundaries, expected_boundaries)
+
+    def test_automation_terminal_rejects_stale_authority_before_first_write(
+        self,
+    ) -> None:
+        assert TEST_DSN is not None
+        cases = ("job", "status", "preview", "lease", "cleanup")
+        for mutation in cases:
+            with self.subTest(mutation=mutation):
+                db, request_id, job_id = _seed_running_import(
+                    automation_state=True,
+                )
+                command = _prepare_automation_terminal_command(
+                    db,
+                    request_id,
+                    job_id,
+                )
+                authority = command.automation
+                assert authority is not None
+                if mutation == "job":
+                    command = replace(command, import_job_id=job_id + 1000)
+                elif mutation == "status":
+                    command = replace(
+                        command,
+                        automation=replace(
+                            authority,
+                            expected_job_status="queued",
+                        ),
+                    )
+                elif mutation == "preview":
+                    command = replace(
+                        command,
+                        automation=replace(
+                            authority,
+                            expected_preview_status="waiting",
+                        ),
+                    )
+                elif mutation == "lease":
+                    lease = authority.expected_execution_lease
+                    assert lease is not None
+                    command = replace(
+                        command,
+                        automation=replace(
+                            authority,
+                            expected_execution_lease=replace(
+                                lease,
+                                invocation_id="stale-invocation",
+                            ),
+                        ),
+                    )
+                else:
+                    cleanup_receipt = authority.cleanup_receipt
+                    assert cleanup_receipt is not None
+                    command = replace(
+                        command,
+                        automation=replace(
+                            authority,
+                            cleanup_receipt=msgspec.structs.replace(
+                                cleanup_receipt,
+                                details={"mutant": True},
+                            ),
+                        ),
+                    )
+                before = _snapshot(db, request_id, job_id)
+                db.close()
+                writer = FaultInjectingPipelineDB(
+                    TEST_DSN,
+                    fail_after_write=999,
+                )
+                try:
+                    with self.assertRaises(RuntimeError):
+                        writer.persist_import_terminal_outcome(command)
+                    self.assertEqual(writer.write_boundaries, [])
+                finally:
+                    writer.close()
+                observer = PipelineDB(TEST_DSN)
+                try:
+                    self.assertEqual(
+                        _snapshot(observer, request_id, job_id),
+                        before,
+                    )
+                finally:
+                    observer.close()
+
+    def test_recovery_close_rejects_declared_transition_mismatch_before_write(
+        self,
+    ) -> None:
+        assert TEST_DSN is not None
+        db, request_id, job_id = _seed_running_import(
+            automation_state=True,
+        )
+        prepared = _prepare_automation_terminal_command(
+            db,
+            request_id,
+            job_id,
+        )
+        authority = prepared.automation
+        assert authority is not None
+        cleanup_receipt = authority.cleanup_receipt
+        assert cleanup_receipt is not None
+        reason = "operator declared wanted"
+        evidence_revision = "evidence-declared-wanted"
+        db._execute(
+            """
+            UPDATE processing_cleanup_journal
+            SET declared_result_status = 'wanted',
+                declared_reason = %s,
+                evidence_revision = %s
+            WHERE request_id = %s AND job_id = %s
+            """,
+            (reason, evidence_revision, request_id, job_id),
+        )
+        command = automation_recovery_close_outcome(
+            request_id=request_id,
+            import_job_id=job_id,
+            result_status="wanted",
+            reason=reason,
+            evidence_revision=evidence_revision,
+            expected_job_status=authority.expected_job_status,
+            expected_preview_status=authority.expected_preview_status,
+            expected_execution_lease=authority.expected_execution_lease,
+            cleanup_receipt=cleanup_receipt,
+            completion_receipt=authority.completion_receipt,
+        )
+        malformed = replace(
+            command,
+            initial_transition=transitions.RequestTransition.to_imported(
+                from_status="processing",
+            ),
+        )
+        before = _snapshot(db, request_id, job_id)
+        db.close()
+
+        writer = FaultInjectingPipelineDB(
+            TEST_DSN,
+            fail_after_write=999,
+        )
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "transition contradicts declared result",
+            ):
+                writer.persist_import_terminal_outcome(malformed)
+            self.assertEqual(writer.write_boundaries, [])
+        finally:
+            writer.close()
+
+        observer = PipelineDB(TEST_DSN)
+        try:
+            self.assertEqual(
+                _snapshot(observer, request_id, job_id),
+                before,
+            )
+        finally:
+            observer.close()
 
     def test_import_success_with_quality_requeue_is_all_or_none(self):
         def command(request_id: int, job_id: int) -> ImportTerminalOutcome:
@@ -1007,7 +2328,10 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
 
         job = db.get_import_job(job_id)
         assert job is not None
+        execution_lease = importer._execution_lease_from_job(job)
+        assert execution_lease is not None
         process_album = RecordingProcessAlbum(outcome=completion)
+
         ctx = make_ctx_with_fake_db(db)
 
         def execute(
@@ -1015,20 +2339,31 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
             claimed: ImportJob,
             *,
             ctx: Any = None,
+            execution_lease: ExecutionLeaseSnapshot,
+            cancellation_token: CancellationToken,
+            owner_session_identity: OwnerSessionIdentity,
         ) -> DispatchOutcome:
             return importer.execute_automation_import_job(
                 owner,
                 claimed,
                 ctx=ctx,
+                execution_lease=execution_lease,
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
                 process_album_fn=process_album,
             )
 
-        return importer.process_claimed_job(
-            db,
-            job,
-            ctx=ctx,
-            execute_fn=execute,
-        )
+        token = CancellationToken()
+        with db._pin_owner_session(token) as owner_session_identity:
+            return importer.process_claimed_job(
+                db,
+                job,
+                ctx=ctx,
+                execute_fn=execute,
+                execution_lease=execution_lease,
+                cancellation_token=token,
+                owner_session_identity=owner_session_identity,
+            )
 
     def test_job_backed_completed_commits_request_audit_and_job_once(self):
         db, request_id, job_id = _seed_running_import(automation_state=True)
@@ -1070,6 +2405,90 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
         self.assertEqual(history[0]["outcome"], "failed")
         self.assertEqual(history[0]["error_message"], "staged_path_missing")
 
+    def test_automation_requeue_preserves_prior_retry_counters(self):
+        """processing -> wanted retains counters so backoff keeps growing.
+
+        The private owner edge stands in for ``("downloading", "wanted")``,
+        whose canonical ``TransitionSideEffects`` does NOT clear retry
+        counters. Zeroing them here would pin every repeatedly-failing
+        automation request at the base retry interval forever.
+        """
+        db, request_id, job_id = _seed_running_import(automation_state=True)
+        self.addCleanup(db.close)
+        _seed_terminal_retry_state(
+            db,
+            request_id,
+            search_attempts=5,
+            download_attempts=2,
+            validation_attempts=1,
+        )
+        prepared = _prepare_automation_terminal_command(db, request_id, job_id)
+
+        db.persist_import_terminal_outcome(automation_requeue_command(
+            prepared,
+            attempt_type="validation",
+        ))
+
+        request = db.get_request(request_id)
+        assert request is not None
+        self.assertEqual(request["status"], "wanted")
+        state = read_terminal_retry_state(db, request_id)
+        self.assertEqual(
+            (
+                state["search_attempts"],
+                state["download_attempts"],
+                state["validation_attempts"],
+            ),
+            (5, 2, 2),
+        )
+        # prior validation_attempts=1 grows the window to 30 * 2**1 minutes.
+        self.assertEqual(terminal_backoff_minutes(state), 60)
+        self.assertNotEqual(
+            terminal_backoff_minutes(state),
+            BACKOFF_BASE_MINUTES,
+        )
+
+    def test_automation_upgrade_requeue_still_clears_retry_counters(self):
+        """imported -> wanted keeps the canonical clean-slate re-queue."""
+        db, request_id, job_id = _seed_running_import(automation_state=True)
+        self.addCleanup(db.close)
+        _seed_terminal_retry_state(
+            db,
+            request_id,
+            search_attempts=5,
+            download_attempts=2,
+            validation_attempts=1,
+        )
+        prepared = _prepare_automation_terminal_command(db, request_id, job_id)
+
+        db.persist_import_terminal_outcome(replace(
+            prepared,
+            post_audit_transitions=(
+                transitions.RequestTransition.to_wanted(
+                    from_status="imported",
+                    search_filetype_override="lossless",
+                    min_bitrate=320,
+                ),
+            ),
+            successful_terminal_acceptance=False,
+        ))
+
+        request = db.get_request(request_id)
+        assert request is not None
+        self.assertEqual(request["status"], "wanted")
+        self.assertEqual(request["search_filetype_override"], "lossless")
+        state = read_terminal_retry_state(db, request_id)
+        self.assertEqual(
+            (
+                state["search_attempts"],
+                state["download_attempts"],
+                state["validation_attempts"],
+            ),
+            (0, 0, 0),
+        )
+        self.assertIsNone(state["last_attempt_at"])
+        self.assertIsNone(state["next_retry_after"])
+
     def test_job_backed_local_outcomes_roll_back_when_job_write_faults(self):
         assert TEST_DSN is not None
         cases = (
@@ -1088,7 +2507,13 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
                     fail_after_write=job_write_boundary,
                 )
                 try:
-                    with self.assertRaises(InjectedTerminalWriteFailure):
+                    # The owner-atomic transaction contains every write, then
+                    # fail-stops the still-owning worker so lease-proven
+                    # recovery can reopen the request automatically. A fault
+                    # that failed to fire would leave a completed terminal, so
+                    # `after == before` still proves the write actually
+                    # faulted.
+                    with self.assertRaises(AutomationOwnerFailStop):
                         self._run_job_backed_automation_result(
                             failing,
                             job_id,
@@ -1099,8 +2524,15 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
 
                 observer = PipelineDB(TEST_DSN)
                 try:
+                    after = _snapshot(observer, request_id, job_id)
+                    raw_counts = after["counts"]
+                    assert isinstance(raw_counts, dict)
+                    after_counts = dict(raw_counts)
+                    self.assertEqual(after_counts["cleanup_journals"], 1)
+                    after_counts["cleanup_journals"] = 0
+                    after["counts"] = after_counts
                     self.assertEqual(
-                        _snapshot(observer, request_id, job_id),
+                        after,
                         before,
                     )
                 finally:
@@ -1146,12 +2578,15 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
             active_download_state={"files": []},
         ))
         fake_job = fake.enqueue_import_job(
-            IMPORT_JOB_AUTOMATION,
+            IMPORT_JOB_FORCE,
             request_id=42,
-            payload={},
+            payload={
+                "download_log_id": 1,
+                "failed_path": "/tmp/parity-force",
+            },
         )
         fake.mark_import_job_preview_importable(fake_job.id, preview_result={})
-        fake_claimed = fake.claim_next_import_job(worker_id="parity")
+        fake_claimed = claim_next_import_job(fake, worker_id="parity")
         assert fake_claimed is not None
 
         def command(owner: int, owned_job: int) -> ImportTerminalOutcome:
@@ -1236,12 +2671,15 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
             active_download_state={"files": []},
         ))
         fake_job = fake.enqueue_import_job(
-            IMPORT_JOB_AUTOMATION,
+            IMPORT_JOB_FORCE,
             request_id=42,
-            payload={},
+            payload={
+                "download_log_id": 1,
+                "failed_path": "/tmp/parity-boundaries",
+            },
         )
         fake.mark_import_job_preview_importable(fake_job.id, preview_result={})
-        fake_claimed = fake.claim_next_import_job(worker_id="parity-boundaries")
+        fake_claimed = claim_next_import_job(fake, worker_id="parity-boundaries")
         assert fake_claimed is not None
         for _ in range(5):
             fake.log_download(
@@ -1312,12 +2750,15 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
             active_download_state={"files": []},
         ))
         fake_job = fake.enqueue_import_job(
-            IMPORT_JOB_AUTOMATION,
+            IMPORT_JOB_FORCE,
             request_id=42,
-            payload={},
+            payload={
+                "download_log_id": 1,
+                "failed_path": "/tmp/analysis-parity",
+            },
         )
         fake.mark_import_job_preview_importable(fake_job.id, preview_result={})
-        fake_claimed = fake.claim_next_import_job(worker_id="analysis-parity")
+        fake_claimed = claim_next_import_job(fake, worker_id="analysis-parity")
         assert fake_claimed is not None
         for _ in range(4):
             fake.log_download(

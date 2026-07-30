@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Self
@@ -34,6 +35,12 @@ from lib.import_evidence import (
     CurrentEvidenceActionResult,
     load_current_evidence_for_action,
 )
+from lib.import_execution import (
+    CancellationToken,
+    ExecutionLeaseSnapshot,
+    OwnerSessionIdentity,
+    ProcessIdentity,
+)
 from lib.import_preview import (
     ImportPreviewResult,
     enrich_incomplete_current_evidence_for_request,
@@ -43,8 +50,6 @@ from lib.import_preview import (
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
-    automation_import_dedupe_key,
-    automation_import_payload,
     force_import_dedupe_key,
     force_import_payload,
 )
@@ -55,6 +60,7 @@ from lib.mbid_replace_service import (
     MbidReplaceService,
 )
 from lib.measurement import ExistingSpectralAuditLookup
+from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_IMPORT
 from lib.pipeline_db.rows import AlbumRequestRow
 from lib.quality import (
     EVIDENCE_PROVENANCE_MEASURED,
@@ -69,8 +75,10 @@ from lib.quality import (
     VerifiedLosslessProof,
     resolve_user_requeue_override,
 )
+from lib.quality.download_state import ActiveDownloadState
 from lib.quality_evidence import (
     EvidenceBuildResult,
+    load_candidate_evidence_for_source,
     snapshot_audio_files,
     snapshot_fingerprint,
 )
@@ -103,13 +111,16 @@ from lib.wrong_match_delete_service import (
     delete_wrong_match as delete_wrong_match_source,
 )
 from scripts.import_preview_worker import (
+    _AutomationPreviewAuthority,
     _prepare_force_action_path,
     process_claimed_preview_job,
 )
 from tests.beets_world import BeetsWorld, BeetsWorldRelease
 from tests.helpers import (
+    claim_next_import_job,
+    claim_next_import_preview_job,
     finalize_claimed_dispatch,
-    make_active_download_state_json,
+    handoff_automation_owner,
     make_album_quality_evidence,
     make_import_result,
 )
@@ -129,6 +140,30 @@ from tests.world_model.census_seeds import (
     WorldCensusSeed,
     assert_missing_current_evidence_seed_anonymized,
 )
+
+
+def _world_execution_lease(
+    job_id: int,
+    *,
+    lane: str,
+) -> ExecutionLeaseSnapshot:
+    if lane == "preview":
+        lane_offset = 1
+        systemd_unit = "cratedigger-import-preview-worker.service"
+    elif lane == "importer":
+        lane_offset = 2
+        systemd_unit = "cratedigger-importer.service"
+    else:
+        raise ValueError(f"unknown world execution lane: {lane!r}")
+    return ExecutionLeaseSnapshot(
+        host_boot_id="world-model-boot",
+        invocation_id=f"world-model-{lane}-{job_id}",
+        systemd_unit=systemd_unit,
+        worker=ProcessIdentity(
+            pid=10_000 + job_id * 2 + lane_offset,
+            start_ticks=100_000 + job_id * 2 + lane_offset,
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -714,6 +749,7 @@ class LifecycleWorld:
         request_id: int,
         release: BeetsWorldRelease,
         source_path: str,
+        candidate_evidence_id: int,
         measurement: AudioQualityMeasurement,
         codec: str,
         download_log_id: int | None,
@@ -751,9 +787,56 @@ class LifecycleWorld:
                 changed_file.read_bytes() + b"snapshot-drift"
             )
 
-        claimed = self.db.claim_next_import_preview_job(worker_id="world-preview")
+        pending = self.db.get_import_job(import_job_id)
+        if pending is None:
+            raise AssertionError("world preview job disappeared before claim")
+        execution_lease = (
+            _world_execution_lease(import_job_id, lane="preview")
+            if pending.job_type == IMPORT_JOB_AUTOMATION
+            else None
+        )
+        claimed = claim_next_import_preview_job(self.db, worker_id="world-preview",
+        execution_lease=execution_lease,)
         if claimed is None or claimed.id != import_job_id:
             raise AssertionError("world preview job was not claimable")
+        evidence_bound = self.db.set_import_job_candidate_evidence(
+            claimed.id,
+            candidate_evidence_id,
+            expected_execution_lease=execution_lease,
+        )
+        if not evidence_bound:
+            raise AssertionError(
+                "world preview could not bind candidate evidence under "
+                "its exact execution lease",
+            )
+        automation_authority: _AutomationPreviewAuthority | None = None
+        cancellation_token: CancellationToken | None = None
+        owner_session_identity: OwnerSessionIdentity | None = None
+        if claimed.job_type == IMPORT_JOB_AUTOMATION:
+            assert execution_lease is not None
+            request = self._require_request(request_id)
+            automation_authority = _AutomationPreviewAuthority(
+                request=dict(request),
+                state=ActiveDownloadState.from_raw(
+                    request["active_download_state"],
+                ),
+                canonical_path=source_path,
+            )
+            cancellation_token = CancellationToken()
+            front_gate_probe = load_candidate_evidence_for_source(
+                self.db,
+                source_path=source_path,
+                import_job_id=claimed.id,
+            )
+            expected_front_gate_status = (
+                "stale" if snapshot_changed else "ready"
+            )
+            if front_gate_probe.status != expected_front_gate_status:
+                raise AssertionError(
+                    "world automation reuse precondition failed: "
+                    f"expected {expected_front_gate_status!r}, got "
+                    f"{front_gate_probe.status!r}: {front_gate_probe.reason}",
+                )
         full_preview_calls = 0
         analyzer_paths: list[str] = []
 
@@ -781,7 +864,7 @@ class LifecycleWorld:
                     codec=codec,
                     verified_lossless_proof=verified_lossless_proof,
                 )
-                self.db.set_import_job_candidate_evidence(import_job_id, fresh.id)
+                _db.set_import_job_candidate_evidence(import_job_id, fresh.id)
                 if download_log_id is not None:
                     self.db.set_download_log_candidate_evidence(
                         download_log_id,
@@ -859,10 +942,23 @@ class LifecycleWorld:
         # ``from lib.config import read_runtime_config`` for the automation
         # front gate, so patch that binding too — the world never touches the
         # deployed runtime config.
-        with patch(
-            "lib.config.read_runtime_config",
-            return_value=cfg,
-        ):
+        with ExitStack() as stack:
+            stack.enter_context(patch(
+                "lib.config.read_runtime_config",
+                return_value=cfg,
+            ))
+            if cancellation_token is not None:
+                owner_session_identity = stack.enter_context(
+                    self.db._pin_owner_session(cancellation_token),
+                )
+                acquired = stack.enter_context(self.db.advisory_lock(
+                    ADVISORY_LOCK_NAMESPACE_IMPORT,
+                    request_id,
+                ))
+                if not acquired:
+                    raise AssertionError(
+                        "world preview could not acquire IMPORT authority",
+                    )
             updated = process_claimed_preview_job(
                 self.db,
                 claimed,
@@ -880,6 +976,10 @@ class LifecycleWorld:
                     )
                 ),
                 runtime_config=cfg,
+                execution_lease=execution_lease,
+                automation_authority=automation_authority,
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
             )
         if updated is None:
             raise AssertionError("preview boundary lost its claimed job")
@@ -948,23 +1048,16 @@ class LifecycleWorld:
             measurement=measurement,
             codec=codec,
         )
+        candidate_evidence_id = persisted.id
+        if candidate_evidence_id is None:
+            raise AssertionError("world candidate evidence lost its persisted id")
 
         download_log_id: int | None = None
         if job_mode == "automation":
-            require_transition_applied(finalize_request(
+            import_job = handoff_automation_owner(
                 self.db,
                 request_id,
-                RequestTransition.to_downloading(
-                    from_status="wanted",
-                    state_json=make_active_download_state_json([]),
-                ),
-            ))
-            self.db.update_download_state_current_path(request_id, str(source))
-            import_job = self.db.enqueue_import_job(
-                IMPORT_JOB_AUTOMATION,
-                request_id=request_id,
-                dedupe_key=automation_import_dedupe_key(request_id),
-                payload=automation_import_payload(),
+                canonical_path=str(source),
                 message="World-model preview boundary",
             )
         else:
@@ -979,7 +1072,7 @@ class LifecycleWorld:
             )
             self.db.set_download_log_candidate_evidence(
                 download_log_id,
-                persisted.id,
+                candidate_evidence_id,
             )
             import_job = self.db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
@@ -992,13 +1085,12 @@ class LifecycleWorld:
                 ),
                 message="World-model preview boundary",
             )
-        self.db.set_import_job_candidate_evidence(import_job.id, persisted.id)
-
         return self._run_preview_worker(
             import_job_id=import_job.id,
             request_id=request_id,
             release=release,
             source_path=str(source),
+            candidate_evidence_id=candidate_evidence_id,
             measurement=measurement,
             codec=codec,
             download_log_id=download_log_id,
@@ -1036,14 +1128,6 @@ class LifecycleWorld:
                 f"request {request_id} cannot import from {status!r}"
             )
 
-        require_transition_applied(finalize_request(
-            self.db,
-            request_id,
-            RequestTransition.to_downloading(
-                from_status="wanted",
-                state_json=make_active_download_state_json([]),
-            ),
-        ))
         self._dispatch_counter += 1
         staged_path = (
             self.beets.incoming_root
@@ -1078,6 +1162,9 @@ class LifecycleWorld:
             codec=attempt.codec,
             verified_lossless_proof=proof,
         )
+        candidate_evidence_id = persisted_candidate.id
+        if candidate_evidence_id is None:
+            raise AssertionError("world candidate evidence lost its persisted id")
         origin_download_log_id = self.db.log_download(
             request_id,
             outcome="rejected",
@@ -1085,36 +1172,34 @@ class LifecycleWorld:
         )
         self.db.set_download_log_candidate_evidence(
             origin_download_log_id,
-            persisted_candidate.id,
+            candidate_evidence_id,
         )
-        self.db.update_download_state_current_path(
+        import_job = handoff_automation_owner(
+            self.db,
             request_id,
-            str(staged_path),
-        )
-        import_job = self.db.enqueue_import_job(
-            IMPORT_JOB_AUTOMATION,
-            request_id=request_id,
-            dedupe_key=automation_import_dedupe_key(request_id),
-            payload=automation_import_payload(),
+            canonical_path=str(staged_path),
             message="World-model automation import",
-        )
-        self.db.set_import_job_candidate_evidence(
-            import_job.id,
-            persisted_candidate.id,
         )
         self._run_preview_worker(
             import_job_id=import_job.id,
             request_id=request_id,
             release=attempt,
             source_path=str(staged_path),
+            candidate_evidence_id=candidate_evidence_id,
             measurement=measurement,
             codec=attempt.codec,
             download_log_id=origin_download_log_id,
             verified_lossless_proof=proof,
         )
-        claimed_job = self.db.claim_next_import_job(worker_id="world-model")
+        importer_lease = _world_execution_lease(
+            import_job.id,
+            lane="importer",
+        )
+        claimed_job = claim_next_import_job(self.db, worker_id="world-model",
+        execution_lease=importer_lease,)
         if claimed_job is None or claimed_job.id != import_job.id:
             raise AssertionError("world automation import job was not claimable")
+        cancellation_token = CancellationToken()
         current_before = load_current_evidence_for_action(
             self.db,
             request_id=request_id,
@@ -1129,6 +1214,9 @@ class LifecycleWorld:
             )
 
         def run_real_beets_import(**kwargs: Any) -> ImportOneRun:
+            on_spawn = kwargs.get("on_spawn")
+            if callable(on_spawn):
+                on_spawn(os.getpid())
             album = self.beets.import_staged_release(
                 attempt,
                 str(kwargs["path"]),
@@ -1154,32 +1242,54 @@ class LifecycleWorld:
                 import_result=result,
             )
 
-        outcome = dispatch_import_core(
-            path=str(staged_path),
-            mb_release_id=release.release_id,
-            request_id=request_id,
-            label=f"{release.artist} - {release.album}",
-            beets_harness_path=(
-                self._beets_harness_path
-                if self._import_engine == "mirror-harness"
-                else "in-process-beets-world"
-            ),
-            db=self.db,
-            dl_info=DownloadInfo(filetype=attempt.codec),
-            scenario="auto_import",
-            force=False,
-            run_import_fn=(
-                self._run_beets_subprocess
-                if self._import_engine == "mirror-harness"
-                else run_real_beets_import
-            ),
-            candidate_import_job_id=claimed_job.id,
-            candidate_download_log_id=origin_download_log_id,
-            requeue_on_failure=True,
-            beets_library_db_path=str(self.beets.library_db),
-            beets_library_root=str(self.beets.library_root),
-        )
-        finalize_claimed_dispatch(self.db, claimed_job, outcome)
+        with self.db._pin_owner_session(
+            cancellation_token,
+        ) as owner_session_identity, self.db.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_IMPORT,
+            request_id,
+        ) as acquired:
+            if not acquired:
+                raise AssertionError(
+                    "world importer could not acquire IMPORT authority",
+                )
+            outcome = dispatch_import_core(
+                path=str(staged_path),
+                mb_release_id=release.release_id,
+                request_id=request_id,
+                label=f"{release.artist} - {release.album}",
+                beets_harness_path=(
+                    self._beets_harness_path
+                    if self._import_engine == "mirror-harness"
+                    else "in-process-beets-world"
+                ),
+                db=self.db,
+                dl_info=DownloadInfo(filetype=attempt.codec),
+                scenario="auto_import",
+                force=False,
+                run_import_fn=(
+                    self._run_beets_subprocess
+                    if self._import_engine == "mirror-harness"
+                    else run_real_beets_import
+                ),
+                candidate_import_job_id=claimed_job.id,
+                candidate_download_log_id=origin_download_log_id,
+                requeue_on_failure=True,
+                beets_library_db_path=str(self.beets.library_db),
+                beets_library_root=str(self.beets.library_root),
+                execution_lease=importer_lease,
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
+            )
+            from scripts.importer import process_claimed_job
+
+            process_claimed_job(
+                self.db,
+                claimed_job,
+                execute_fn=lambda *_args, **_kwargs: outcome,
+                execution_lease=importer_lease,
+                cancellation_token=cancellation_token,
+                owner_session_identity=owner_session_identity,
+            )
         after_row = self._require_request(request_id)
         after_album = self._album_for_release(release.release_id)
         self._transitions.append(LifecycleTransitionSnapshot(
@@ -1273,6 +1383,9 @@ class LifecycleWorld:
             codec=attempt.codec,
             verified_lossless_proof=proof,
         )
+        candidate_evidence_id = persisted.id
+        if candidate_evidence_id is None:
+            raise AssertionError("world candidate evidence lost its persisted id")
         source.parent.mkdir(parents=True, exist_ok=True)
         origin.rename(source)
         download_log_id = self.db.log_download(
@@ -1286,7 +1399,7 @@ class LifecycleWorld:
         )
         self.db.set_download_log_candidate_evidence(
             download_log_id,
-            persisted.id,
+            candidate_evidence_id,
         )
         import_job = self.db.enqueue_import_job(
             IMPORT_JOB_FORCE,
@@ -1299,18 +1412,18 @@ class LifecycleWorld:
             ),
             message="World-model force import",
         )
-        self.db.set_import_job_candidate_evidence(import_job.id, persisted.id)
         self._run_preview_worker(
             import_job_id=import_job.id,
             request_id=request_id,
             release=attempt,
             source_path=str(source),
+            candidate_evidence_id=candidate_evidence_id,
             measurement=measurement,
             codec=attempt.codec,
             download_log_id=download_log_id,
             verified_lossless_proof=proof,
         )
-        claimed_job = self.db.claim_next_import_job(worker_id="world-model")
+        claimed_job = claim_next_import_job(self.db, worker_id="world-model")
         if claimed_job is None or claimed_job.id != import_job.id:
             raise AssertionError("world force-import job was not claimable")
         raw_previous_min_bitrate = row.get("min_bitrate")

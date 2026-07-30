@@ -17,6 +17,7 @@ from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads active profile)
 from tests.beets_world import BeetsWorld
+from tests.helpers import claim_next_import_job, claim_next_import_preview_job
 
 
 @contextmanager
@@ -270,7 +271,7 @@ def _run_have_boundary_through_both_adapters(
         )
         assert stored_candidate is not None and stored_candidate.id is not None
         db.set_import_job_candidate_evidence(job.id, stored_candidate.id)
-        claimed = db.claim_next_import_preview_job(worker_id="generated")
+        claimed = claim_next_import_preview_job(db, worker_id="generated")
         assert claimed is not None and claimed.id == job.id
         with _silence_logs(), patch(
             "lib.beets_db.BeetsDB",
@@ -343,21 +344,26 @@ def _run_candidate_snapshot_reuse_world(
     track_count: int,
 ) -> tuple[int, list[str], str | None, str | None]:
     from lib.config import CratediggerConfig
+    from lib.import_execution import (
+        CancellationToken,
+        ExecutionLeaseSnapshot,
+        ProcessIdentity,
+    )
     from lib.import_preview import ImportPreviewResult
     from lib.import_queue import (
-        IMPORT_JOB_AUTOMATION,
         IMPORT_JOB_FORCE,
-        automation_import_dedupe_key,
         force_import_dedupe_key,
         force_import_payload,
     )
     from lib.measurement import ExistingSpectralAuditLookup
     from lib.quality import (
+        ActiveDownloadState,
         AudioQualityMeasurement,
         ImportResult,
         SpectralAnalysisDetail,
     )
     from lib.quality_evidence import EvidenceBuildResult, snapshot_audio_files
+    from scripts import import_preview_worker
     from scripts.import_preview_worker import process_claimed_preview_job
     from tests.fakes import FakePipelineDB
     from tests.helpers import make_album_quality_evidence, make_request_row
@@ -461,17 +467,17 @@ def _run_candidate_snapshot_reuse_world(
                 ),
             )
         else:
-            job = db.enqueue_import_job(
-                IMPORT_JOB_AUTOMATION,
+            handoff = db.handoff_automation_import(
                 request_id=request_id,
-                dedupe_key=automation_import_dedupe_key(request_id),
-                payload={},
+                expected_enqueued_at=str(active_state["enqueued_at"]),
+                canonical_path=candidate,
+                message="generated candidate-reuse owner handoff",
             )
+            assert handoff.committed and handoff.job is not None
+            job = handoff.job
 
         action_path = candidate
         if job_mode == "force":
-            from scripts import import_preview_worker
-
             action_path = import_preview_worker._prepare_force_action_path(
                 db,
                 job,
@@ -498,7 +504,25 @@ def _run_candidate_snapshot_reuse_world(
             snapshot_fingerprint=candidate_evidence.snapshot_fingerprint,
         )
         assert stored_candidate is not None and stored_candidate.id is not None
-        db.set_import_job_candidate_evidence(job.id, stored_candidate.id)
+
+        preview_lease = (
+            ExecutionLeaseSnapshot(
+                host_boot_id="generated-candidate-reuse-boot",
+                invocation_id=f"generated-candidate-reuse-preview-{job.id}",
+                systemd_unit="cratedigger-import-preview.service",
+                worker=ProcessIdentity(pid=764, start_ticks=1),
+            )
+            if job_mode == "automation"
+            else None
+        )
+        claimed = claim_next_import_preview_job(db, worker_id="generated",
+        execution_lease=preview_lease,)
+        assert claimed is not None and claimed.id == job.id
+        assert db.set_import_job_candidate_evidence(
+            job.id,
+            stored_candidate.id,
+            expected_execution_lease=preview_lease,
+        )
 
         if snapshot_changed:
             changed_path = candidate if job_mode == "force" else action_path
@@ -506,8 +530,20 @@ def _run_candidate_snapshot_reuse_world(
                 b"changed-candidate-snapshot"
             )
 
-        claimed = db.claim_next_import_preview_job(worker_id="generated")
-        assert claimed is not None and claimed.id == job.id
+        automation_authority = (
+            import_preview_worker._AutomationPreviewAuthority(
+                request=db.request(request_id),
+                state=ActiveDownloadState.from_raw(
+                    db.request(request_id)["active_download_state"]
+                ),
+                canonical_path=action_path,
+            )
+            if job_mode == "automation"
+            else None
+        )
+        cancellation_token = (
+            CancellationToken() if job_mode == "automation" else None
+        )
         full_preview_calls = 0
         analyzer_roles: list[str] = []
 
@@ -574,6 +610,9 @@ def _run_candidate_snapshot_reuse_world(
             preview_fn=full_preview,
             current_evidence_loader=load_current,
             runtime_config=cfg,
+            execution_lease=preview_lease,
+            automation_authority=automation_authority,
+            cancellation_token=cancellation_token,
         )
         assert updated is not None
         preview_result = updated.preview_result or {}
@@ -646,6 +685,11 @@ def _run_dispatch_finalization_world(
     from lib.config import CratediggerConfig
     from lib.dispatch import dispatch_import_core
     from lib.dispatch.types import ImportOneRun
+    from lib.import_execution import (
+        CancellationToken,
+        ExecutionLeaseSnapshot,
+        ProcessIdentity,
+    )
     from lib.quality import DownloadInfo, ImportResult, QualityComparisonBasis
     from tests.fakes import FakePipelineDB
     from tests.helpers import (
@@ -655,6 +699,7 @@ def _run_dispatch_finalization_world(
         make_request_row,
         noop_quality_gate,
         patch_dispatch_externals,
+        pinned_dispatch_authority,
     )
 
     db = FakePipelineDB()
@@ -663,7 +708,11 @@ def _run_dispatch_finalization_world(
         mb_release_id="generated-mbid",
         status="downloading",
         search_filetype_override="mp3",
-        active_download_state={"files": [], "filetype": "mp3"},
+        active_download_state={
+            "files": [],
+            "filetype": "mp3",
+            "enqueued_at": "2026-07-21T00:00:00+00:00",
+        },
     ))
     cfg = CratediggerConfig(
         beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
@@ -695,7 +744,15 @@ def _run_dispatch_finalization_world(
         return result
 
     def run_import(*args: Any, **kwargs: Any) -> ImportOneRun:
-        del args, kwargs
+        del args
+        on_spawn = kwargs.pop("on_spawn", None)
+        cancellation_token = kwargs.pop("cancellation_token", None)
+        kwargs.pop("owner_session_probe", None)
+        del kwargs
+        if on_spawn is not None:
+            on_spawn(os.getpid())
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
         if mode == "timeout":
             raise sp.TimeoutExpired("import_one", 300)
         if mode == "pre_result_exception":
@@ -746,7 +803,7 @@ def _run_dispatch_finalization_world(
                 job.id,
                 preview_result=preview_result,
             )
-            claimed = db.claim_next_import_job(worker_id="generated-importer")
+            claimed = claim_next_import_job(db, worker_id="generated-importer")
             assert claimed is not None and claimed.id == job.id
             with _silence_logs():
                 outcome = dispatch_import_from_db(
@@ -760,18 +817,29 @@ def _run_dispatch_finalization_world(
                 )
                 finalize_claimed_dispatch(db, claimed, outcome)
     else:
-        from lib.import_queue import IMPORT_JOB_AUTOMATION
         from lib.quality_evidence import snapshot_audio_files
 
         with tempfile.TemporaryDirectory() as source:
             with open(os.path.join(source, "01.mp3"), "wb") as handle:
                 handle.write(b"audio")
             db.request(42)["active_download_state"]["current_path"] = source
-            job = db.enqueue_import_job(
-                IMPORT_JOB_AUTOMATION,
+            handoff = db.handoff_automation_import(
                 request_id=42,
-                payload={},
+                expected_enqueued_at="2026-07-21T00:00:00+00:00",
+                canonical_path=source,
+                message="generated dispatch-finalization owner handoff",
             )
+            assert handoff.committed and handoff.job is not None
+            job = handoff.job
+            preview_lease = ExecutionLeaseSnapshot(
+                host_boot_id="generated-dispatch-finalization-boot",
+                invocation_id=f"generated-dispatch-preview-{job.id}",
+                systemd_unit="cratedigger-import-preview.service",
+                worker=ProcessIdentity(pid=9101, start_ticks=91001),
+            )
+            claimed_preview = claim_next_import_preview_job(db, worker_id="generated-preview",
+            execution_lease=preview_lease,)
+            assert claimed_preview is not None and claimed_preview.id == job.id
             evidence = make_album_quality_evidence(
                 mb_release_id="generated-mbid",
                 source_path=source,
@@ -783,14 +851,32 @@ def _run_dispatch_finalization_world(
                 snapshot_fingerprint=evidence.snapshot_fingerprint,
             )
             assert persisted is not None and persisted.id is not None
-            db.set_import_job_candidate_evidence(job.id, persisted.id)
-            db.mark_import_job_preview_importable(
+            assert db.set_import_job_candidate_evidence(
+                job.id,
+                persisted.id,
+                expected_execution_lease=preview_lease,
+            )
+            assert db.mark_import_job_preview_importable(
                 job.id,
                 preview_result={"ready": True},
+                expected_execution_lease=preview_lease,
             )
-            claimed = db.claim_next_import_job(worker_id="generated-importer")
+            importer_lease = ExecutionLeaseSnapshot(
+                host_boot_id="generated-dispatch-finalization-boot",
+                invocation_id=f"generated-dispatch-importer-{job.id}",
+                systemd_unit="cratedigger-importer.service",
+                worker=ProcessIdentity(pid=9102, start_ticks=91002),
+            )
+            claimed = claim_next_import_job(db, worker_id="generated-importer",
+            execution_lease=importer_lease,)
             assert claimed is not None and claimed.id == job.id
-            with patch_dispatch_externals(), _silence_logs():
+            cancellation_token = CancellationToken()
+            with patch_dispatch_externals(), _silence_logs(), \
+                 pinned_dispatch_authority(
+                     db,
+                     importer_lease,
+                     cancellation_token=cancellation_token,
+                 ) as (cancellation_token, owner_session_identity):
                 outcome = dispatch_import_core(
                     path=source,
                     mb_release_id="generated-mbid",
@@ -808,8 +894,11 @@ def _run_dispatch_finalization_world(
                     candidate_import_job_id=claimed.id,
                     beets_library_db_path=str(beets.library_db),
                     beets_library_root=str(beets.library_root),
+                    execution_lease=importer_lease,
+                    cancellation_token=cancellation_token,
+                    owner_session_identity=owner_session_identity,
                 )
-                finalize_claimed_dispatch(db, claimed, outcome)
+            finalize_claimed_dispatch(db, claimed, outcome)
 
     final_job = db.get_import_job(job.id)
     assert final_job is not None
@@ -820,9 +909,57 @@ def _run_dispatch_finalization_world(
         ),
         "outcomes": [row.outcome for row in db.download_logs],
         "status": db.request(42)["status"],
+        "active_automation_import_job_id": (
+            db.request(42)["active_automation_import_job_id"]
+        ),
+        "validation_attempts": db.request(42)["validation_attempts"],
+        "error_message": (
+            last_log.error_message if last_log is not None else None
+        ),
         "job_status": final_job.status,
         "denylist": [(row.username, row.reason) for row in db.denylist],
     }
+
+
+def assert_automation_world_failure_self_heals(
+    outcome: dict[str, object],
+) -> None:
+    """A launched automation ambiguity self-heals; it must never park.
+
+    ``recovery_required`` behind ``processing`` is the removed policy: it left
+    the request outside ``get_wanted``'s selection forever, with no terminal
+    write for an operator to read. The current policy (#933, "nothing is ever
+    parked") instead converts every ambiguous world into exactly one
+    ``download_log`` audit row (so it reads in Recents), clears the exact
+    processing owner, records a validation attempt so backoff keeps growing
+    instead of resetting, and returns the request to ``wanted`` so the next
+    cycle re-derives the truth.
+    """
+    from scripts import importer
+
+    if outcome["job_status"] != "failed":
+        raise AssertionError(
+            "ambiguous automation completion parked at "
+            f"{outcome['job_status']!r} instead of self-healing"
+        )
+    if outcome["status"] != "wanted":
+        raise AssertionError(
+            f"self-healed job left the request {outcome['status']!r} "
+            "instead of wanted"
+        )
+    if outcome["active_automation_import_job_id"] is not None:
+        raise AssertionError("self-heal left the automation owner attached")
+    if outcome["validation_attempts"] != 1:
+        raise AssertionError(
+            "self-heal did not retain/record a validation attempt "
+            f"(got {outcome['validation_attempts']!r})"
+        )
+    error_message = outcome["error_message"]
+    message = error_message if isinstance(error_message, str) else ""
+    if importer._WORLD_FAILURE_AUDIT_PREFIX not in message:
+        raise AssertionError(
+            "no download_log audit row recorded the world failure"
+        )
 
 
 class TestAttemptAuditCheckerQualification(unittest.TestCase):
@@ -895,6 +1032,41 @@ class TestAttemptAuditCheckerQualification(unittest.TestCase):
                 persisted_candidate_grade="genuine",
                 expected_candidate_grade="genuine",
             )
+
+    def test_world_failure_checker_rejects_planted_parked_outcome(self):
+        """Known-bad: reviving the removed ``recovery_required`` park trips it."""
+        with self.assertRaises(AssertionError):
+            assert_automation_world_failure_self_heals({
+                "job_status": "recovery_required",
+                "status": "processing",
+                "active_automation_import_job_id": 7,
+                "validation_attempts": 0,
+                "error_message": None,
+            })
+
+    def test_world_failure_checker_rejects_zeroed_retry_counters(self):
+        """Known-bad: self-heal must retain/record the attempt, not reset it."""
+        from scripts import importer
+
+        with self.assertRaises(AssertionError):
+            assert_automation_world_failure_self_heals({
+                "job_status": "failed",
+                "status": "wanted",
+                "active_automation_import_job_id": None,
+                "validation_attempts": 0,
+                "error_message": f"{importer._WORLD_FAILURE_AUDIT_PREFIX}: boom",
+            })
+
+    def test_world_failure_checker_rejects_missing_audit_row(self):
+        """Known-bad: a silent self-heal with no Recents-visible trace trips it."""
+        with self.assertRaises(AssertionError):
+            assert_automation_world_failure_self_heals({
+                "job_status": "failed",
+                "status": "wanted",
+                "active_automation_import_job_id": None,
+                "validation_attempts": 1,
+                "error_message": "some unrelated failure",
+            })
 
 
 class TestAttemptAuditGenerated(unittest.TestCase):
@@ -1218,10 +1390,14 @@ class TestAttemptAuditGenerated(unittest.TestCase):
             "post_result_exception",
         }
         if mode in ambiguous_modes:
+            # #933: ambiguous automation completions no longer park as
+            # ``recovery_required`` behind a stuck ``processing`` request.
+            # They self-heal in the same frame the crash/timeout/no-JSON
+            # ambiguity is discovered.
             self.assertIsNone(audited["import_result"])
             self.assertIsNone(unaudited["import_result"])
-            self.assertEqual(audited["job_status"], "recovery_required")
-            self.assertEqual(unaudited["job_status"], "recovery_required")
+            assert_automation_world_failure_self_heals(audited)
+            assert_automation_world_failure_self_heals(unaudited)
         else:
             self.assertTrue(_persisted_attempt_has_exact_audit(
                 audited["import_result"], audit))

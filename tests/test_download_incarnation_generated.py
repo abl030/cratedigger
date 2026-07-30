@@ -39,6 +39,12 @@ from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 
 PayloadFamily = Literal["enqueue", "event", "harvest", "poll"]
+HandoffRejectionKind = Literal[
+    "missing_state",
+    "non_downloading",
+    "active_conflict",
+    "lock_unavailable",
+]
 AdmissionKind = Literal[
     "unchanged",
     "unchanged_alt",
@@ -90,6 +96,24 @@ class AdmissionWorld:
     witness_b: str
     refreshed_order: tuple[AdmissionKind, ...]
     replacement_is_new_id: bool
+
+
+@dataclass(frozen=True)
+class HandoffWorld:
+    """One exact or stale downloader-to-processor handoff attempt."""
+
+    current_witness: str
+    attempted_witness: str
+    canonical_path: str
+
+
+@dataclass(frozen=True)
+class HandoffRejectionWorld:
+    """One non-admissible downloader-to-processor transcript."""
+
+    kind: HandoffRejectionKind
+    witness: str
+    canonical_path: str
 
 
 def _render_witness(
@@ -158,6 +182,38 @@ def admission_worlds(draw) -> AdmissionWorld:
         witness_b=witness_b,
         refreshed_order=tuple(draw(st.permutations(_ADMISSION_KINDS))),
         replacement_is_new_id=draw(st.booleans()),
+    )
+
+
+@st.composite
+def handoff_worlds(draw) -> HandoffWorld:
+    witness_a, witness_b = draw(_distinct_witnesses())
+    exact = draw(st.booleans())
+    return HandoffWorld(
+        current_witness=witness_b,
+        attempted_witness=witness_b if exact else witness_a,
+        canonical_path=draw(st.sampled_from((
+            "/processing/albums/exact",
+            "/processing/albums/Ártist - 音 [pressing]",
+        ))),
+    )
+
+
+@st.composite
+def handoff_rejection_worlds(draw) -> HandoffRejectionWorld:
+    witness_a, _witness_b = draw(_distinct_witnesses())
+    return HandoffRejectionWorld(
+        kind=draw(st.sampled_from((
+            "missing_state",
+            "non_downloading",
+            "active_conflict",
+            "lock_unavailable",
+        ))),
+        witness=witness_a,
+        canonical_path=draw(st.sampled_from((
+            "/processing/albums/rejected",
+            "/processing/albums/Ártist - 音 [rejected]",
+        ))),
     )
 
 
@@ -480,6 +536,169 @@ def _build_admission_inputs(
     return pre_snapshot, refreshed_rows, expected
 
 
+def assert_handoff_contract(
+    *,
+    exact: bool,
+    before: Mapping[str, object],
+    after: Mapping[str, object],
+    job_count: int,
+) -> None:
+    """Independent oracle for the exact-witness ownership publication."""
+    if not exact:
+        if dict(after) != dict(before) or job_count != 0:
+            raise AssertionError("stale handoff produced an observable change")
+        return
+    owner = after.get("active_automation_import_job_id")
+    state = after.get("active_download_state")
+    if (
+        after.get("status") != "processing"
+        or not isinstance(owner, int)
+        or owner <= 0
+        or not isinstance(state, dict)
+        or state.get("processing_started_at") is None
+        or job_count != 1
+    ):
+        raise AssertionError("exact handoff did not publish one processor owner")
+
+
+def _exercise_handoff(world: HandoffWorld) -> None:
+    db = FakePipelineDB()
+    request_id = db.add_request(
+        "Artist",
+        "Album",
+        "request",
+        mb_release_id="handoff-generated",
+    )
+    state = ActiveDownloadState(
+        filetype="flac",
+        enqueued_at=world.current_witness,
+        last_progress_at=world.current_witness,
+        files=[ActiveDownloadFileState(
+            username="peer",
+            filename="Artist/Album/01.flac",
+            file_dir="Artist/Album",
+            size=10,
+            last_state="Completed, Succeeded",
+            bytes_transferred=10,
+        )],
+    )
+    if not db.set_downloading(
+        request_id,
+        state.to_json(),
+        expected_status="wanted",
+    ):
+        raise AssertionError("generated fixture failed to enter downloading")
+    before = copy.deepcopy(db.get_request(request_id))
+    assert before is not None
+
+    result = db.handoff_automation_import(
+        request_id=request_id,
+        expected_enqueued_at=world.attempted_witness,
+        canonical_path=world.canonical_path,
+        message="generated handoff",
+    )
+
+    after = db.get_request(request_id)
+    assert after is not None
+    exact = world.attempted_witness == world.current_witness
+    if result.committed != exact:
+        raise AssertionError(
+            f"handoff outcome {result.outcome!r} disagreed with exact={exact}"
+        )
+    jobs = db.list_import_jobs(request_id=request_id)
+    assert_handoff_contract(
+        exact=exact,
+        before=before,
+        after=after,
+        job_count=len(jobs),
+    )
+    if exact:
+        assert result.job is not None
+        active_state = after["active_download_state"]
+        if (
+            after["active_automation_import_job_id"] != result.job.id
+            or result.job.expected_request_status != "processing"
+            or not isinstance(active_state, dict)
+            or active_state["current_path"] != world.canonical_path
+        ):
+            raise AssertionError("handoff owner, job, and canonical path diverged")
+        before_rejected_writes = copy.deepcopy(after)
+        if db.update_download_state_if_downloading(
+            request_id,
+            state.to_json(),
+            expected_enqueued_at=world.current_witness,
+        ):
+            raise AssertionError("poll/event writer crossed the handoff")
+        if db.reset_downloading_to_wanted(
+            request_id,
+            expected_status="downloading",
+        ):
+            raise AssertionError("reset writer crossed the handoff")
+        if db.get_request(request_id) != before_rejected_writes:
+            raise AssertionError("rejected post-handoff writer changed metadata")
+
+
+def _exercise_rejected_handoff(world: HandoffRejectionWorld) -> None:
+    db = FakePipelineDB()
+    request_id = db.add_request(
+        "Artist",
+        "Album",
+        "request",
+        mb_release_id=f"handoff-rejected-{world.kind}",
+    )
+    state = _admission_state(world.witness)
+    if (
+        world.kind != "non_downloading"
+        and not db.set_downloading(
+            request_id,
+            state.to_json(),
+            expected_status="wanted",
+        )
+    ):
+        raise AssertionError("rejection fixture failed to enter downloading")
+    if world.kind == "missing_state":
+        db.request(request_id)["active_download_state"] = None
+    elif world.kind == "active_conflict":
+        owner = db.handoff_automation_import(
+            request_id=request_id,
+            expected_enqueued_at=world.witness,
+            canonical_path=world.canonical_path,
+            message="seed conflict",
+        )
+        if not owner.committed:
+            raise AssertionError("conflict fixture failed to create active job")
+        row = db.request(request_id)
+        row["status"] = "downloading"
+        row["active_automation_import_job_id"] = None
+    elif world.kind == "lock_unavailable":
+        db.set_advisory_lock_result(False)
+
+    expected = {
+        "missing_state": "missing_state",
+        "non_downloading": "not_downloading",
+        "active_conflict": "owner_conflict",
+        "lock_unavailable": "lock_unavailable",
+    }[world.kind]
+    before = copy.deepcopy(db.get_request(request_id))
+    before_jobs = db.list_import_jobs(request_id=request_id)
+    result = db.handoff_automation_import(
+        request_id=request_id,
+        expected_enqueued_at=world.witness,
+        canonical_path=world.canonical_path,
+        message="must reject",
+    )
+    after = db.get_request(request_id)
+    after_jobs = db.list_import_jobs(request_id=request_id)
+    if result.outcome != expected:
+        raise AssertionError(
+            f"{world.kind} returned {result.outcome}, expected {expected}"
+        )
+    if after != before:
+        raise AssertionError(f"{world.kind} changed request metadata")
+    if after_jobs != before_jobs:
+        raise AssertionError(f"{world.kind} created or changed a job")
+
+
 class TestDeterministicDownloadIncarnationContract(unittest.TestCase):
     """Named pin paired with the whole-state generated transcript."""
 
@@ -522,6 +741,79 @@ class TestDeterministicDownloadIncarnationContract(unittest.TestCase):
             for row, state in admitted
         )
         assert_exact_admission(expected, actual)
+
+    def test_exact_handoff_commits_and_stale_handoff_is_inert(self) -> None:
+        _exercise_handoff(HandoffWorld(
+            current_witness="2026-07-29T08:00:00+08:00",
+            attempted_witness="2026-07-29T08:00:00+08:00",
+            canonical_path=_DETERMINISTIC_PATH,
+        ))
+        _exercise_handoff(HandoffWorld(
+            current_witness="2026-07-29T08:00:01+08:00",
+            attempted_witness="2026-07-29T00:00:00Z",
+            canonical_path=_DETERMINISTIC_PATH,
+        ))
+
+    def test_all_non_admissible_handoffs_are_inert(self) -> None:
+        for kind in (
+            "missing_state",
+            "non_downloading",
+            "active_conflict",
+            "lock_unavailable",
+        ):
+            with self.subTest(kind=kind):
+                _exercise_rejected_handoff(HandoffRejectionWorld(
+                    kind=kind,
+                    witness="2026-07-29T00:00:00Z",
+                    canonical_path=_DETERMINISTIC_PATH,
+                ))
+
+    def test_fake_handoff_fault_boundaries_roll_back_and_burn_job_ids(
+        self,
+    ) -> None:
+        db = FakePipelineDB()
+        request_id = db.add_request("Artist", "Album", "request")
+        state = _admission_state("2026-07-29T00:00:00Z")
+        self.assertTrue(db.set_downloading(
+            request_id,
+            state.to_json(),
+            expected_status="wanted",
+        ))
+        before = copy.deepcopy(db.get_request(request_id))
+
+        for boundary in (1, 2):
+            def fail_at(
+                index: int,
+                label: str,
+                expected_boundary: int = boundary,
+            ) -> None:
+                del label
+                if index == expected_boundary:
+                    raise RuntimeError("fault")
+
+            db._automation_handoff_write_boundary = fail_at
+            with self.assertRaisesRegex(RuntimeError, "fault"):
+                db.handoff_automation_import(
+                    request_id=request_id,
+                    expected_enqueued_at=state.enqueued_at,
+                    canonical_path=_DETERMINISTIC_PATH,
+                    message="faulted",
+                )
+            self.assertEqual(db.get_request(request_id), before)
+            self.assertEqual(db.list_import_jobs(request_id=request_id), [])
+
+        def no_fault(index: int, label: str) -> None:
+            del index, label
+
+        db._automation_handoff_write_boundary = no_fault
+        committed = db.handoff_automation_import(
+            request_id=request_id,
+            expected_enqueued_at=state.enqueued_at,
+            canonical_path=_DETERMINISTIC_PATH,
+            message="retry",
+        )
+        assert committed.job is not None
+        self.assertEqual(committed.job.id, 3)
 
 
 class TestGeneratedDownloadIncarnationContract(unittest.TestCase):
@@ -582,6 +874,30 @@ class TestGeneratedDownloadIncarnationContract(unittest.TestCase):
             "exact incarnation oracle",
         ):
             assert_exact_admission(expected, request_id_only_mutant)
+
+    @given(world=handoff_worlds())
+    @example(world=HandoffWorld(
+        current_witness="2026-07-29T08:00:00+08:00",
+        attempted_witness="2026-07-29T00:00:00Z",
+        canonical_path=_DETERMINISTIC_PATH,
+    ))
+    def test_handoff_requires_exact_textual_witness(
+        self,
+        world: HandoffWorld,
+    ) -> None:
+        _exercise_handoff(world)
+
+    @given(world=handoff_rejection_worlds())
+    @example(world=HandoffRejectionWorld(
+        kind="lock_unavailable",
+        witness="2026-07-29T00:00:00Z",
+        canonical_path=_DETERMINISTIC_PATH,
+    ))
+    def test_non_admissible_handoffs_preserve_all_state(
+        self,
+        world: HandoffRejectionWorld,
+    ) -> None:
+        _exercise_rejected_handoff(world)
 
 
 class TestIncarnationInvariantCheckersTripOnKnownBad(unittest.TestCase):
@@ -650,3 +966,25 @@ class TestIncarnationInvariantCheckersTripOnKnownBad(unittest.TestCase):
             "exact incarnation oracle",
         ):
             assert_exact_admission(expected, request_id_only)
+
+    def test_checker_kills_stale_handoff_mutant(self) -> None:
+        before = make_request_row(
+            status="downloading",
+            active_download_state={"enqueued_at": "B"},
+        )
+        after = copy.deepcopy(before)
+        after["status"] = "processing"
+        after["active_automation_import_job_id"] = 1
+        active_state = after["active_download_state"]
+        assert isinstance(active_state, dict)
+        active_state["processing_started_at"] = "now"
+        with self.assertRaisesRegex(
+            AssertionError,
+            "stale handoff",
+        ):
+            assert_handoff_contract(
+                exact=False,
+                before=before,
+                after=after,
+                job_count=1,
+            )

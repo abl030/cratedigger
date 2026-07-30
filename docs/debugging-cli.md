@@ -90,9 +90,15 @@ success 0, not found 2, input/semantic violation 3, conflict 4, transient 5.
   cannot disagree. The line is derived, not stored: `error_message` and
   `transfer_detail` in the DB and the journal stay raw, so query them
   directly when you need the untruncated text.
-- `import-job-recovery --resolution close` records an explicitly reconciled
-  operation without replay. Use `--resolution retry` only after proving Beets
-  did not apply the prior operation; both require an audit reason.
+- `import-job-recovery show` prints the current revisioned recovery evidence.
+  For an automation-owned processing album, pass that opaque revision back to
+  `retry` or `close`; a concurrent ownership, launch, lease, or cleanup change
+  is rejected instead of applying a decision to stale evidence.
+- `import-job-recovery retry` queues a fresh automation job only when the
+  recorded execution is proven dead and exact evidence is unchanged.
+  `import-job-recovery close` records an explicitly reconciled lifecycle result
+  without replay. Both require an audit reason; automation close additionally
+  requires `--result-status wanted|imported`.
 - `ban-source`, `library-delete`, and Wrong Matches deletion commands are
   irreversible operator actions. Their confirmation tokens are intent checks,
   not authorization; inspect the exact release first.
@@ -156,7 +162,9 @@ inside socket authorization, never credentials.
 - `pipeline-cli beets-distance` — Measure a rejected download against an exact release.
 - `pipeline-cli disk-coverage` — Compare active pipeline rows with Beets library coverage.
 - `pipeline-cli force-import` — Queue a rejected download for the importer lane.
-- `pipeline-cli import-job-recovery` — Close or retry an explicitly reconciled ambiguous Beets operation.
+- `pipeline-cli import-job-recovery close` — Close an explicitly reconciled ambiguous Beets operation without replay.
+- `pipeline-cli import-job-recovery retry` — Queue a fresh operation after exact evidence proves the prior execution dead.
+- `pipeline-cli import-job-recovery show` — Show revisioned evidence for one recovery-required import job.
 - `pipeline-cli import-jobs` — List import queue jobs.
 - `pipeline-cli import-preview` — Inspect an import preview and its evidence inputs.
 - `pipeline-cli library-delete` — Delete one exact server-owned Beets album.

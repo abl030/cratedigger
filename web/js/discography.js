@@ -1,7 +1,10 @@
 // @ts-check
 import { API, state, toast, updatePipelineStatus } from './state.js';
 import { esc, externalReleaseUrl, sourceLabel, detectSource, jsArg, normalizeReleaseId } from './util.js';
-import { buildReleaseActionState } from './release_action_state.js';
+import {
+  buildReleaseActionState,
+  handleProcessingLockedConflict,
+} from './release_action_state.js';
 import { renderActionToolbar, renderAcquireActionButton, renderRemoveFromBeetsButton, renderReplaceButton } from './release_actions.js';
 import { renderStatusBadges } from './badges.js';
 import { invalidateBrowseArtist } from './browse.js';
@@ -238,6 +241,7 @@ export function synthesizeMasterlessRow(data) {
     beets_album_id: data.beets_album_id ?? null,
     pipeline_status: data.pipeline_status ?? null,
     pipeline_id: data.pipeline_id ?? null,
+    processing_owner: data.processing_owner ?? null,
     library_format: data.library_format,
     library_min_bitrate: data.library_min_bitrate,
     library_avg_bitrate: data.library_avg_bitrate,
@@ -332,7 +336,19 @@ export function renderPressingRow(rel, ctx) {
   const rgForReplace = rel.release_group_id || ctx.parentRgId || null;
   const isCurrent = actionState.acquireKind === 'remove_request';
   let replaceBtn = '';
-  if (isCurrent) {
+  if (actionState.processingLocked) {
+    replaceBtn = renderReplaceButton({
+      mode: 'standard',
+      sourceRequestId: actionState.pipelineId || undefined,
+      releaseGroupId: rgForReplace,
+      sourceLabel: `${ctx.artistName} — ${rel.title || ''}`,
+      processingState: actionState,
+    }, {
+      className: 'btn',
+      style: 'padding:2px 8px;font-size:0.7em;white-space:nowrap;',
+      stopPropagation: true,
+    });
+  } else if (isCurrent) {
     if (actionState.pipelineId) {
       replaceBtn = renderReplaceButton({
         mode: 'standard',
@@ -505,6 +521,14 @@ export async function addRelease(mbid, btn) {
       body: JSON.stringify({[idField]: requestId}),
     });
     const data = await r.json();
+    if (await handleProcessingLockedConflict({
+      httpStatus: r.status,
+      payload: data,
+      control: btn,
+      releaseId: requestId,
+    })) {
+      return;
+    }
     if (data.status === 'added') {
       btn.textContent = 'Added';
       invalidateBrowseArtist();
@@ -516,6 +540,22 @@ export async function addRelease(mbid, btn) {
       updatePipelineStatus(requestId, 'wanted', data.id);
       toast(`Added: ${data.artist} - ${data.album} (${data.tracks} tracks)`);
     } else if (data.status === 'exists') {
+      if (
+        data.current_status === 'processing'
+        && data.id
+        && await handleProcessingLockedConflict({
+          httpStatus: 409,
+          payload: {
+            error: 'processing_locked',
+            request_id: data.id,
+            processing_owner: data.processing_owner,
+          },
+          control: btn,
+          releaseId: requestId,
+        })
+      ) {
+        return;
+      }
       if (data.current_status === 'wanted' && data.id) {
         btn.textContent = 'Remove';
         btn.disabled = false;
@@ -604,6 +644,7 @@ export function renderReleaseDetail(targetEl, releaseId, data, opts = {}) {
     beets_album_id: data.beets_album_id,
     pipeline_status: data.pipeline_status,
     pipeline_id: data.pipeline_id,
+    processing_owner: data.processing_owner ?? null,
     artist: opts.artist || data.artist_name || state.browseArtist?.name || '',
     album: data.title || '',
     track_count: tracks.length,

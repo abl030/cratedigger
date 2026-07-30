@@ -47,7 +47,7 @@ console.log('renderPipelineNav() refreshes the dashboard subtab');
 console.log('pipeline status controls disable invalid unsearchable transitions');
 {
   const imported = __test__.renderPipelineStatusButtons(42, 'imported');
-  assertContains(imported, "class=\"p-btn active-status\" onclick=\"event.stopPropagation(); window.updateStatus(42, 'imported')\">imported</button>", 'imported remains visibly current');
+  assertContains(imported, "class=\"p-btn active-status\" data-pipeline-request-id=\"42\" onclick=\"event.stopPropagation(); window.updateStatus(42, 'imported')\">imported</button>", 'imported remains visibly current and conflict-addressable');
   assertExcludes(imported, "window.updateStatus(42, 'unsearchable')", 'imported cannot invoke unsearchable');
   assertContains(imported, 'disabled aria-disabled="true">unsearchable</button>', 'invalid imported stop is disabled');
 
@@ -55,6 +55,18 @@ console.log('pipeline status controls disable invalid unsearchable transitions')
   assertContains(downloading, 'disabled aria-disabled="true">downloading</button>', 'downloading remains visibly current');
   assertExcludes(downloading, "window.updateStatus(42, 'unsearchable')", 'downloading cannot invoke unsearchable');
   assertContains(downloading, 'disabled aria-disabled="true">unsearchable</button>', 'invalid downloading stop is disabled');
+
+  const processing = __test__.renderPipelineStatusButtons(42, 'processing', {
+    job_id: 420,
+    status: 'recovery_required',
+    preview_status: 'running',
+  });
+  assertContains(processing, 'aria-disabled="true"', 'processing controls expose disabled semantics');
+  assertContains(processing, 'aria-describedby=', 'processing controls name visible explanation');
+  assertContains(processing, 'job #420 needs recovery', 'processing explanation names exact owner');
+  assertContains(processing, '/api/import-jobs/420/recovery', 'processing links exact recovery detail');
+  assertExcludes(processing, ' disabled', 'processing controls remain focusable');
+  assertExcludes(processing, 'window.updateStatus', 'processing controls cannot mutate lifecycle');
 
   const wanted = __test__.renderPipelineStatusButtons(42, 'wanted');
   assertContains(wanted, "window.updateStatus(42, 'unsearchable')", 'wanted may become unsearchable');

@@ -19,6 +19,11 @@ from lib import download_materialization
 from lib import download_validation
 from lib.dispatch import DispatchCoreFn, DispatchOutcome
 from lib.grab_list import GrabListEntry
+from lib.import_execution import (
+    CancellationToken,
+    ExecutionLeaseSnapshot,
+    OwnerSessionIdentity,
+)
 from lib.processing_paths import canonical_folder_for_row, processing_albums_dir
 from lib.staged_album import StagedAlbum
 
@@ -76,6 +81,9 @@ class ProcessAlbumFn(Protocol):
         dispatch_fn: DispatchCoreFn | None = None,
         materialize_before_file_copy: Callable[[], None] | None = None,
         materialize_fn: Callable[..., download_materialization.MaterializeResult] | None = None,
+        cancellation_token: CancellationToken | None = None,
+        execution_lease: ExecutionLeaseSnapshot | None = None,
+        owner_session_identity: OwnerSessionIdentity | None = None,
     ) -> CompletionResult: ...
 
 
@@ -89,6 +97,9 @@ def process_completed_album(
     dispatch_fn: DispatchCoreFn | None = None,
     materialize_before_file_copy: Callable[[], None] | None = None,
     materialize_fn: Callable[..., download_materialization.MaterializeResult] | None = None,
+    cancellation_token: CancellationToken | None = None,
+    execution_lease: ExecutionLeaseSnapshot | None = None,
+    owner_session_identity: OwnerSessionIdentity | None = None,
 ) -> CompletionResult:
     """Materialize, validate, and dispatch one fully downloaded album."""
     staged_album = StagedAlbum.from_entry(
@@ -99,12 +110,21 @@ def process_completed_album(
         ),
     )
     materialize = materialize_fn or download_materialization._materialize_processing_dir
-    materialized = materialize(
-        album_data,
-        staged_album,
-        ctx,
-        before_file_copy=materialize_before_file_copy,
-    )
+    if cancellation_token is None:
+        materialized = materialize(
+            album_data,
+            staged_album,
+            ctx,
+            before_file_copy=materialize_before_file_copy,
+        )
+    else:
+        materialized = materialize(
+            album_data,
+            staged_album,
+            ctx,
+            before_file_copy=materialize_before_file_copy,
+            cancellation_token=cancellation_token,
+        )
     if isinstance(materialized, download_materialization.MaterializeFailed):
         return CompletionFailed(reason=materialized.reason)
     if isinstance(materialized, download_materialization.MaterializeGuarded):
@@ -122,14 +142,29 @@ def process_completed_album(
             if validate_fn is not None
             else download_validation._process_beets_validation
         )
-        outcome = resolved_validate(
-            album_data,
-            staged_album,
-            ctx,
-            import_job_id=import_job_id,
-            handle_valid_fn=handle_valid_fn,
-            dispatch_fn=dispatch_fn,
-        )
+        if cancellation_token is None:
+            outcome = resolved_validate(
+                album_data,
+                staged_album,
+                ctx,
+                import_job_id=import_job_id,
+                handle_valid_fn=handle_valid_fn,
+                dispatch_fn=dispatch_fn,
+                execution_lease=execution_lease,
+                owner_session_identity=owner_session_identity,
+            )
+        else:
+            outcome = resolved_validate(
+                album_data,
+                staged_album,
+                ctx,
+                import_job_id=import_job_id,
+                handle_valid_fn=handle_valid_fn,
+                dispatch_fn=dispatch_fn,
+                cancellation_token=cancellation_token,
+                execution_lease=execution_lease,
+                owner_session_identity=owner_session_identity,
+            )
         if outcome is not None:
             if outcome.deferred:
                 return CompletionDeferred(detail=outcome.message)
